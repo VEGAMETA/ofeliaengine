@@ -317,3 +317,122 @@ fn drags_report_travel_from_the_press_and_their_release() {
     assert!(!r.released);
     assert!(ui.hovers(r.id) == ui.rect_of(r.id).unwrap().contains([150.0, 200.0]));
 }
+
+fn field_frame(ui: &mut Ui, input: &UiInput, text: &str) -> TextFieldResponse {
+    let mut r = TextFieldResponse::default();
+    frame(ui, input, |ui| {
+        ui.column("root", Style::fill().padding(10.0), |ui| {
+            r = ui.text_field(
+                "name",
+                text,
+                &TextField {
+                    style: Style::default().size(Size::Fixed(200.0), Size::Fixed(20.0)),
+                    size: 14.0,
+                    color: [1.0; 4],
+                    hint: "Name",
+                    hint_color: [0.5; 4],
+                    autofocus: false,
+                },
+            );
+        });
+    });
+    r
+}
+
+fn typing(text: &str) -> UiInput {
+    UiInput {
+        text: String::from(text),
+        ..UiInput::default()
+    }
+}
+
+fn keys(keys: &[UiKey]) -> UiInput {
+    UiInput {
+        keys: keys.to_vec(),
+        ..UiInput::default()
+    }
+}
+
+#[test]
+fn text_fields_edit_commit_and_cancel() {
+    let mut ui = Ui::new(Theme::default());
+    field_frame(&mut ui, &UiInput::default(), "Door");
+    // A click starts the edit, the caret where the click is (7 px a character): after "Do".
+    let press = UiInput {
+        mouse_down: true,
+        mouse_pressed: true,
+        ..at(10.0 + 14.0, 15.0)
+    };
+    let r = field_frame(&mut ui, &press, "Door");
+    assert!(r.started && r.editing);
+    field_frame(
+        &mut ui,
+        &UiInput {
+            mouse_released: true,
+            ..at(24.0, 15.0)
+        },
+        "Door",
+    );
+    let r = field_frame(&mut ui, &typing("o"), "Door");
+    assert!(r.changed);
+    assert_eq!(ui.edited_text(), "Dooor");
+    // Shift+End selects to the end, Backspace removes it, typing goes on.
+    field_frame(
+        &mut ui,
+        &UiInput {
+            shift: true,
+            ..keys(&[UiKey::End])
+        },
+        "Door",
+    );
+    field_frame(&mut ui, &keys(&[UiKey::Backspace]), "Door");
+    assert_eq!(ui.edited_text(), "Doo");
+    field_frame(&mut ui, &typing("r 1"), "Door");
+    // Ctrl+Backspace takes the word before the caret, Ctrl+A and Ctrl+C copy it all.
+    field_frame(
+        &mut ui,
+        &UiInput {
+            ctrl: true,
+            ..keys(&[UiKey::Backspace])
+        },
+        "Door",
+    );
+    assert_eq!(ui.edited_text(), "Door ");
+    field_frame(&mut ui, &keys(&[UiKey::SelectAll, UiKey::Copy]), "Door");
+    assert_eq!(ui.take_copied().as_deref(), Some("Door "));
+    // Paste replaces the selection; Enter commits.
+    field_frame(
+        &mut ui,
+        &UiInput {
+            paste: String::from(
+                "Gate
+2",
+            ),
+            ..keys(&[UiKey::Paste])
+        },
+        "Door",
+    );
+    let r = field_frame(&mut ui, &keys(&[UiKey::Enter]), "Door");
+    assert!(r.committed && !r.editing);
+    assert_eq!(ui.edited_text(), "Gate 2");
+    let r = field_frame(&mut ui, &UiInput::default(), "Gate 2");
+    assert!(!r.editing && !r.committed && ui.editing().is_none());
+
+    // Escape cancels; a click elsewhere commits.
+    ui.edit_field(r.id);
+    let r = field_frame(&mut ui, &typing("x"), "Gate 2");
+    assert!(r.started && r.editing);
+    assert_eq!(ui.edited_text(), "x", "started with everything selected");
+    let r = field_frame(&mut ui, &keys(&[UiKey::Escape]), "Gate 2");
+    assert!(r.cancelled && !r.committed);
+    ui.edit_field(r.id);
+    field_frame(&mut ui, &typing("y"), "Gate 2");
+    let away = UiInput {
+        mouse_down: true,
+        mouse_pressed: true,
+        ..at(390.0, 290.0)
+    };
+    let r = field_frame(&mut ui, &away, "Gate 2");
+    assert!(r.committed);
+    assert_eq!(ui.edited_text(), "y");
+}

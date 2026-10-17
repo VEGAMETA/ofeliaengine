@@ -21,11 +21,14 @@
 //! - **The viewport:** middle drag orbits, Shift + middle drag pans, right drag looks
 //!   around, the wheel zooms (`docs/research/ux/viewport-navigation.md`).
 //! - **The scene tree** shows the scene's entities (those with a `SceneId`) in their
-//!   hierarchy and order; a click selects, a click on the selected row opens or closes it.
-//!   Its `+` button adds an entity (a model, a light, a camera) where the camera looks.
+//!   hierarchy and order; a click selects, the arrow opens or closes a row, F2 or a
+//!   double click renames in place, the filter box narrows it to matching names. Its `+`
+//!   button adds an entity (a model, a light, a camera) where the camera looks.
 //! - **The inspector** edits the selected entity's components ([`crate::inspector`]):
 //!   numbers are dragged sideways ([`crate::Snapping`]: Shift inverts the default, Ctrl
-//!   rounds to the grid), checkboxes and enums are clicked.
+//!   rounds to the grid) or clicked and typed (expressions, [`crate::expr`]); checkboxes
+//!   and enums are clicked; strings are typed. Its filter box narrows it to matching
+//!   fields.
 //! - **Every edit is undoable** ([`History`]). Commands and their shortcuts: Ctrl+Z undo,
 //!   Ctrl+Y or Ctrl+Shift+Z redo, Ctrl+S save, Delete, Ctrl+D duplicate, Ctrl+A add, Y
 //!   snapping by default.
@@ -217,6 +220,7 @@ struct CommandIds {
     duplicate: CommandId,
     add: CommandId,
     snap: CommandId,
+    rename: CommandId,
 }
 
 /// The editor's commands and their default shortcuts.
@@ -230,6 +234,7 @@ fn commands() -> (Commands, Keymap, CommandIds) {
         duplicate: c.register("scene.duplicate", "Scene", "Duplicate Selection"),
         add: c.register("scene.add", "Scene", "Add Entity"),
         snap: c.register("edit.snap", "Edit", "Snap by Default"),
+        rename: c.register("scene.rename", "Scene", "Rename Selection"),
     };
     let mut keymap = Keymap::new();
     for (chord, id) in [
@@ -241,6 +246,7 @@ fn commands() -> (Commands, Keymap, CommandIds) {
         ("Ctrl+D", ids.duplicate),
         ("Ctrl+A", ids.add),
         ("Y", ids.snap),
+        ("F2", ids.rename),
     ] {
         if let Some(chord) = Chord::parse(chord) {
             let _ = keymap.bind(chord, KeyContext::Global, id);
@@ -277,6 +283,8 @@ struct Drag {
     name: String,
     /// Escape took the drag back: the rest of the gesture changes nothing.
     cancelled: bool,
+    /// The pointer moved: a press and release without moving types the value instead.
+    moved: bool,
 }
 
 /// What the editor keeps between frames, shared by its game and its overlay.
@@ -317,6 +325,19 @@ struct Editor {
     snapping: Snapping,
     inspector: Inspector,
     drag: Option<Drag>,
+    /// The number being typed (a click without a drag): its component, offset and part.
+    typing: Option<(ComponentId, usize, u8)>,
+    /// The entity being renamed in the tree.
+    renaming: Option<Entity>,
+    /// The last click on a tree row, for double clicks.
+    last_click: Option<(Entity, Instant)>,
+    /// What the tree and the inspector are filtered by.
+    tree_filter: String,
+    inspector_filter: String,
+    /// The inspector's shown properties (indices into its properties) and the shown
+    /// sections' ranges in them: what a field event's section and field point at.
+    shown: Vec<usize>,
+    shown_sections: Vec<(usize, usize)>,
     /// The enum whose list is open: its component and offset.
     open_choice: Option<(ComponentId, usize)>,
     /// The add menu is open.
@@ -458,6 +479,13 @@ impl Editor {
             snapping: Snapping::default(),
             inspector: Inspector::new(),
             drag: None,
+            typing: None,
+            renaming: None,
+            last_click: None,
+            tree_filter: String::new(),
+            inspector_filter: String::new(),
+            shown: Vec::new(),
+            shown_sections: Vec::new(),
             open_choice: None,
             add_open: false,
             gestures: 0,
@@ -507,6 +535,7 @@ impl Editor {
                 pressed,
                 ..
             } => input.key(virtual_key, scancode, extended, pressed),
+            WindowEventKind::Char(c) => input.char(c),
             _ => {}
         }
     }
@@ -527,11 +556,46 @@ impl Editor {
         // Spawn order: the scene file's order.
         roots.sort_unstable_by_key(|e| e.index());
         self.rows.clear();
+        // Filtered: the matching rows and their ancestors, open whatever was collapsed.
+        let filter = self.tree_filter.trim().to_lowercase();
+        let mut keep: HashSet<Entity> = HashSet::new();
+        if !filter.is_empty() {
+            let mut matches: Vec<Entity> = Vec::new();
+            let mut stack: Vec<Entity> = roots.clone();
+            while let Some(e) = stack.pop() {
+                let name = world.get::<Name>(e).map_or_else(
+                    || kind_of(world, e).1.to_lowercase(),
+                    |n| n.as_str().to_lowercase(),
+                );
+                if name.contains(&filter) {
+                    matches.push(e);
+                }
+                stack.extend(
+                    world
+                        .children(e)
+                        .filter(|&c| world.get::<SceneId>(c).is_some()),
+                );
+            }
+            for e in matches {
+                let mut at = Some(e);
+                while let Some(x) = at {
+                    if !keep.insert(x) {
+                        break;
+                    }
+                    at = world
+                        .parent(x)
+                        .filter(|&p| world.get::<SceneId>(p).is_some());
+                }
+            }
+            roots.retain(|e| keep.contains(e));
+        }
         let mut stack: Vec<(Entity, u16)> = roots.iter().rev().map(|&e| (e, 0)).collect();
         while let Some((e, depth)) = stack.pop() {
+            let filtered = !filter.is_empty();
             let mut children = world
                 .children(e)
                 .filter(|&c| world.get::<SceneId>(c).is_some())
+                .filter(|c| !filtered || keep.contains(c))
                 .peekable();
             let has_children = children.peek().is_some();
             self.rows.push(Row {
@@ -539,7 +603,7 @@ impl Editor {
                 depth,
                 children: has_children,
             });
-            if has_children && !self.collapsed.contains(&e) {
+            if has_children && (filtered || !self.collapsed.contains(&e)) {
                 let kids: Vec<Entity> = children.collect();
                 stack.extend(kids.into_iter().rev().map(|c| (c, depth + 1)));
             }
@@ -612,10 +676,31 @@ impl Editor {
             })
             .map(|p| inspector::variants(p).collect())
             .unwrap_or_default();
-        let fields: Vec<Field<'_>> = properties
+        // The filter keeps the fields whose name matches, and every field of a component
+        // whose name does.
+        let filter = self.inspector_filter.trim().to_lowercase();
+        self.shown.clear();
+        self.shown_sections.clear();
+        for section in self.inspector.sections() {
+            let start = self.shown.len();
+            let title_matches = section.title.to_lowercase().contains(&filter);
+            for i in section.properties.clone() {
+                let name = self.inspector.name(&properties[i]);
+                if filter.is_empty() || title_matches || name.to_lowercase().contains(&filter) {
+                    self.shown.push(i);
+                }
+            }
+            if self.shown.len() > start {
+                self.shown_sections.push((start, self.shown.len()));
+            }
+        }
+        let typing = self.typing;
+        let fields: Vec<Field<'_>> = self
+            .shown
             .iter()
-            .zip(&spans)
-            .map(|(p, &(a, b))| {
+            .map(|&i| {
+                let p = &properties[i];
+                let (a, b) = spans[i];
                 let shown = &values[a..b];
                 let first = shown.first().copied().unwrap_or("");
                 let widget = match p.kind {
@@ -626,12 +711,18 @@ impl Editor {
                         } else {
                             &[]
                         },
+                        typing: typing
+                            .filter(|&(c, o, _)| c == p.component && o == p.offset)
+                            .map(|(_, _, part)| part),
                     },
                     Kind::Bool => Widget::Check(first == "true"),
                     Kind::Choice => Widget::Choice {
                         current: first,
                         open: (open == Some((p.component, p.offset))).then_some(options.as_slice()),
                     },
+                    Kind::Text if matches!(p.ty.kind, engine_reflect::TypeKind::String) => {
+                        Widget::Edit(first)
+                    }
                     Kind::Text => Widget::Text(first),
                 };
                 Field {
@@ -640,13 +731,19 @@ impl Editor {
                 }
             })
             .collect();
+        let section_list = self.inspector.sections();
         let sections: Vec<Section<'_>> = self
-            .inspector
-            .sections()
+            .shown_sections
             .iter()
-            .map(|s| Section {
-                title: s.title,
-                fields: &fields[s.properties.clone()],
+            .map(|&(a, b)| {
+                let title = section_list
+                    .iter()
+                    .find(|s| s.properties.contains(&self.shown[a]))
+                    .map_or("", |s| s.title);
+                Section {
+                    title,
+                    fields: &fields[a..b],
+                }
             })
             .collect();
 
@@ -663,6 +760,7 @@ impl Editor {
                     kind,
                     expanded: row.children.then(|| !self.collapsed.contains(&row.entity)),
                     selected: Some(row.entity) == self.selected,
+                    renaming: Some(row.entity) == self.renaming,
                 }
             })
             .collect();
@@ -719,6 +817,8 @@ impl Editor {
             status: &self.status,
             snap: self.snapping.on,
             add_menu: self.add_open.then_some(&ADD[..]),
+            tree_filter: &self.tree_filter,
+            inspector_filter: &self.inspector_filter,
         };
         let scale = self.scale.max(0.5);
         let logical = [self.size[0] as f32 / scale, self.size[1] as f32 / scale];
@@ -742,18 +842,56 @@ impl Editor {
         if let Some(i) = response.add_item {
             self.add(world, i);
         }
+        // What was copied goes to Windows' clipboard.
+        if let Some(text) = self.ui.take_copied() {
+            #[cfg(windows)]
+            engine_platform::clipboard::set_text(&text);
+            #[cfg(not(windows))]
+            let _ = text;
+        }
+        if let Some(row) = response.tree_toggle.and_then(|i| self.rows.get(i).copied())
+            && !self.collapsed.remove(&row.entity)
+        {
+            self.collapsed.insert(row.entity);
+        }
         if let Some(row) = response.tree_row.and_then(|i| self.rows.get(i).copied()) {
-            // A click on the selected row opens or closes it.
-            if self.selected == Some(row.entity)
-                && row.children
-                && !self.collapsed.remove(&row.entity)
-            {
-                self.collapsed.insert(row.entity);
-            }
+            // A second click on the same row soon after renames it.
+            let now = Instant::now();
+            let double = self.last_click.is_some_and(|(e, at)| {
+                e == row.entity && now.duration_since(at).as_secs_f32() < 0.45
+            });
+            self.last_click = (!double).then_some((row.entity, now));
             if self.selected != Some(row.entity) {
                 self.open_choice = None;
+                self.typing = None;
             }
             self.selected = Some(row.entity);
+            if double {
+                self.renaming = Some(row.entity);
+            }
+        }
+        if let Some(commit) = response.rename {
+            if commit && let Some(e) = self.renaming {
+                let name = self.ui.edited_text().trim().to_owned();
+                self.rename(world, e, &name);
+            }
+            self.renaming = None;
+        }
+        if let Some(r) = response.tree_filter {
+            if r.cancelled {
+                self.tree_filter.clear();
+            } else if r.started || r.changed {
+                self.tree_filter.clear();
+                self.tree_filter.push_str(self.ui.edited_text());
+            }
+        }
+        if let Some(r) = response.inspector_filter {
+            if r.cancelled {
+                self.inspector_filter.clear();
+            } else if r.started || r.changed {
+                self.inspector_filter.clear();
+                self.inspector_filter.push_str(self.ui.edited_text());
+            }
         }
         if let Some(event) = response.field {
             self.edit(world, event);
@@ -767,10 +905,13 @@ impl Editor {
             let merge = drag.merge;
             self.history.revert(world, merge);
         }
-        // The shortcuts.
+        // The shortcuts; while a field is typed in, only saving (the keys are the field's).
+        let typing_text = self.ui.editing().is_some();
         for i in 0..self.input.chords().len() {
             let chord = self.input.chords()[i];
-            if let Some(id) = self.keymap.lookup(chord, &[]) {
+            if let Some(id) = self.keymap.lookup(chord, &[])
+                && (!typing_text || id == self.ids.save)
+            {
                 self.run(world, id);
             }
         }
@@ -829,17 +970,29 @@ impl Editor {
         let Some(e) = self.selected else {
             return;
         };
-        let Some(section) = self.inspector.sections().get(event.section) else {
+        let Some(&(start, end)) = self.shown_sections.get(event.section) else {
             return;
         };
-        let Some(&p) = self
-            .inspector
-            .properties()
-            .get(section.properties.start + event.field)
+        let Some(&index) = self
+            .shown
+            .get(start + event.field)
+            .filter(|_| start + event.field < end)
         else {
             return;
         };
-        let title = format!("{}.{}", section.title, self.inspector.name(&p));
+        let Some(&p) = self.inspector.properties().get(index) else {
+            return;
+        };
+        let Some(section) = self
+            .inspector
+            .sections()
+            .iter()
+            .find(|s| s.properties.contains(&index))
+        else {
+            return;
+        };
+        let component = section.title;
+        let title = format!("{component}.{}", self.inspector.name(&p));
         match event.action {
             FieldAction::Drag {
                 part,
@@ -860,8 +1013,15 @@ impl Editor {
                         merge: self.gestures,
                         name: format!("Edit {title}"),
                         cancelled: false,
+                        moved: false,
                     });
+                    self.typing = None;
                     return;
+                }
+                if travel != 0.0
+                    && let Some(drag) = self.drag.as_mut()
+                {
+                    drag.moved = true;
                 }
                 let Some(drag) = self.drag.as_ref().filter(|d| !d.cancelled) else {
                     return;
@@ -888,7 +1048,59 @@ impl Editor {
                 }
                 self.history.commit(world);
             }
-            FieldAction::Release => self.drag = None,
+            FieldAction::Release => {
+                // A press and release without moving: type the value instead.
+                if let Some(drag) = self.drag.take()
+                    && !drag.moved
+                    && !drag.cancelled
+                {
+                    self.typing = Some((
+                        drag.property.component,
+                        drag.property.offset,
+                        drag.part as u8,
+                    ));
+                }
+            }
+            FieldAction::Typed { part, commit } => {
+                self.typing = None;
+                if !commit {
+                    return;
+                }
+                let text = self.ui.edited_text().to_owned();
+                let Some(ptr) = world.get_raw(e, p.component) else {
+                    return;
+                };
+                // SAFETY: the entity's live value of the property's component.
+                let mut values = unsafe { inspector::read_numbers(&p, ptr.as_ptr()) };
+                let part = usize::from(part).min(3);
+                match crate::expr::evaluate(&text, values[part]) {
+                    Ok(value) => {
+                        values[part] = value;
+                        self.history.begin(&format!("Set {title}"), None);
+                        self.history.touch(world, e);
+                        if let Some(ptr) = world.get_raw_mut(e, p.component) {
+                            // SAFETY: the entity's live value of the property's component.
+                            unsafe { inspector::write_numbers(&p, ptr.as_ptr(), values) };
+                        }
+                        self.history.commit(world);
+                    }
+                    Err(reason) => self.say(format!("{title}: {reason}")),
+                }
+            }
+            FieldAction::Text { commit } => {
+                if !commit {
+                    return;
+                }
+                let text = engine_scene::text::quote(self.ui.edited_text());
+                let path = if p.whole {
+                    component.to_owned()
+                } else {
+                    format!("{component}.{}", self.inspector.name(&p))
+                };
+                if let Err(reason) = self.set(world, e, &path, &text) {
+                    self.say(format!("{title}: {reason}"));
+                }
+            }
             FieldAction::Toggle => {
                 self.history.begin(&format!("Toggle {title}"), None);
                 self.history.touch(world, e);
@@ -963,6 +1175,8 @@ impl Editor {
                 self.history.commit(world);
                 self.selected = copy.or(self.selected);
             }
+        } else if id == ids.rename {
+            self.renaming = self.selected;
         } else if id == ids.add {
             self.add_open = !self.add_open;
         } else if id == ids.snap {
@@ -1026,6 +1240,18 @@ impl Editor {
                 Err(e)
             }
         }
+    }
+
+    /// Renames `e` (its `Name`, added if it has none) as one undoable step; nothing for an
+    /// empty or unchanged name.
+    fn rename(&mut self, world: &mut World, e: Entity, name: &str) {
+        if name.is_empty() || world.get::<Name>(e).is_some_and(|n| n.as_str() == name) {
+            return;
+        }
+        self.history.begin("Rename", None);
+        self.history.touch(world, e);
+        world.insert(e, Name::new(name));
+        self.history.commit(world);
     }
 
     /// Selects the entity with scene id `id` again (undo and redo may have made it anew).
@@ -1601,5 +1827,175 @@ mod tests {
         assert!(text.contains("Model.mesh = asset("), "{text}");
         assert_eq!(untitled(&dir), PathBuf::from("untitled-2.scene"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn chars(ed: &mut Editor, text: &str) {
+        for c in text.chars() {
+            event(ed, WindowEventKind::Char(c));
+        }
+    }
+
+    /// Two entities, the first selected, after two frames (the layout known).
+    fn two_entities() -> (World, Editor, Entity, Entity) {
+        let mut world = World::new();
+        let cube = world.spawn((
+            SceneId::new(),
+            Name::new("Cube"),
+            Transform::from_xyz(0.25, 0.0, 0.0),
+            GlobalTransform::default(),
+        ));
+        let lamp = world.spawn((
+            SceneId::new(),
+            Name::new("Lamp"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        let mut ed = Editor::new(
+            [1280, 720],
+            std::env::temp_dir(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.selected = Some(cube);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        (world, ed, cube, lamp)
+    }
+
+    #[test]
+    fn f2_renames_in_place_and_shortcuts_wait_while_typing() {
+        let (mut world, mut ed, cube, _) = two_entities();
+        key(&mut ed, 0x71, 0x3C, true); // F2
+        ed.update(&mut world);
+        key(&mut ed, 0x71, 0x3C, false);
+        ed.update(&mut world);
+        assert!(
+            ed.ui.editing().is_some(),
+            "the row's name is a field, editing"
+        );
+        // Everything selected: typing replaces it. Y and Delete are the field's keys now.
+        chars(&mut ed, "Gatey");
+        key(&mut ed, 0x59, 0x15, true); // Y: not "snap by default"
+        ed.update(&mut world);
+        key(&mut ed, 0x08, 0x0E, true); // Backspace
+        key(&mut ed, 0x2E, 0x53, true); // Delete: not "delete the selection"
+        ed.update(&mut world);
+        assert_eq!(ed.ui.edited_text(), "Gate");
+        key(&mut ed, 0x0D, 0x1C, true); // Enter
+        ed.update(&mut world);
+        assert_eq!(world.get::<Name>(cube).map(Name::as_str), Some("Gate"));
+        assert!(world.contains(cube), "Delete went to the field");
+        assert!(!ed.snapping.on, "Y went to the field");
+        assert!(ed.renaming.is_none());
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(world.get::<Name>(cube).map(Name::as_str), Some("Cube"));
+    }
+
+    #[test]
+    fn a_double_click_renames_and_escape_keeps_the_name() {
+        let (mut world, mut ed, _, lamp) = two_entities();
+        let row = texts(&ed, "Lamp")[0];
+        let at = [row.pos[0] + 4.0, row.pos[1] + row.size[1] / 2.0];
+        click(&mut ed, &mut world, at);
+        assert_eq!(ed.selected, Some(lamp));
+        click(&mut ed, &mut world, at);
+        assert_eq!(ed.renaming, Some(lamp));
+        ed.update(&mut world);
+        chars(&mut ed, "Torch");
+        ed.update(&mut world);
+        key(&mut ed, 0x1B, 0x01, true); // Escape
+        ed.update(&mut world);
+        assert!(ed.renaming.is_none());
+        assert_eq!(world.get::<Name>(lamp).map(Name::as_str), Some("Lamp"));
+    }
+
+    #[test]
+    fn numbers_take_typed_expressions() {
+        let (mut world, mut ed, cube, _) = two_entities();
+        let x = |world: &World| world.get::<Transform>(cube).unwrap().translation.x;
+        // A click without a drag turns the number into a field, everything selected.
+        let at = on_row(&ed, "translation", "x");
+        click(&mut ed, &mut world, at);
+        assert!(ed.typing.is_some());
+        ed.update(&mut world);
+        assert!(ed.ui.editing().is_some());
+        chars(&mut ed, "2*pi");
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, true);
+        ed.update(&mut world);
+        assert!(
+            (x(&world) - core::f32::consts::TAU).abs() < 1e-5,
+            "{}",
+            x(&world)
+        );
+        assert!(ed.typing.is_none());
+        // Relative to the value; a bad expression changes nothing and says why.
+        for (text, want) in [
+            ("+=1", core::f32::consts::TAU + 1.0),
+            ("abc", core::f32::consts::TAU + 1.0),
+        ] {
+            ed.update(&mut world);
+            let at = on_row(&ed, "translation", "x");
+            click(&mut ed, &mut world, at);
+            ed.update(&mut world);
+            chars(&mut ed, text);
+            ed.update(&mut world);
+            key(&mut ed, 0x0D, 0x1C, true);
+            ed.update(&mut world);
+            assert!((x(&world) - want).abs() < 1e-4, "{text}: {}", x(&world));
+        }
+        assert!(
+            ed.message
+                .as_ref()
+                .is_some_and(|(m, _)| m.contains("translation")),
+            "the bad expression is reported"
+        );
+        assert_eq!(ed.history.steps().count(), 2, "one step per typed value");
+    }
+
+    #[test]
+    fn strings_are_typed_and_filters_narrow_the_panels() {
+        let (mut world, mut ed, cube, _) = two_entities();
+        // The name's field in the inspector: click, Ctrl+A, type, Enter.
+        let at = on_row(&ed, "value", "Cube");
+        click(&mut ed, &mut world, at);
+        key(&mut ed, 0x11, 0x1D, true);
+        key(&mut ed, 0x41, 0x1E, true); // Ctrl+A
+        key(&mut ed, 0x11, 0x1D, false);
+        ed.update(&mut world);
+        chars(&mut ed, "Door \"1\"");
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, true);
+        ed.update(&mut world);
+        assert_eq!(
+            world.get::<Name>(cube).map(Name::as_str),
+            Some("Door \"1\"")
+        );
+
+        // The tree's filter keeps the matching rows; Escape clears it.
+        ed.update(&mut world);
+        assert_eq!(ed.rows.len(), 2);
+        let hint = texts(&ed, "Filter nodes")[0];
+        click(&mut ed, &mut world, [hint.pos[0] + 4.0, hint.pos[1] + 4.0]);
+        chars(&mut ed, "lam");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(ed.rows.len(), 1, "only the lamp");
+        key(&mut ed, 0x1B, 0x01, true);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(ed.rows.len(), 2);
+
+        // The inspector's filter keeps the matching fields.
+        let hint = texts(&ed, "Filter properties")[0];
+        click(&mut ed, &mut world, [hint.pos[0] + 4.0, hint.pos[1] + 4.0]);
+        chars(&mut ed, "scale");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(ed.shown.len(), 1, "only Transform.scale");
+        assert!(texts(&ed, "translation").is_empty());
+        assert!(!texts(&ed, "scale").is_empty());
     }
 }

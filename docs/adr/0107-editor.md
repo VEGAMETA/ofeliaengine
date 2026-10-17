@@ -338,6 +338,29 @@ The editor edits the world.
   command palette, multi-selection and multi-editing, the inspector's filter, reset to
   default. The order of a scene's roots (files sort them by id) is still to settle.
 
+## As built (E1-4b-1, 2026-10-17)
+
+Text fields.
+
+- **`engine_ui::Ui::text_field`:** one field edited at a time, its buffer, caret and
+  selection kept in the `Ui`. The layout measures the caret, the selection and a press's
+  character, and scrolls the text to keep the caret in view. Typing, Backspace and
+  Delete, the arrows (Ctrl: by word), Home, End, Shift to select, Ctrl+A, C, X and V;
+  Enter, Tab and a click elsewhere commit, Escape cancels. `edit_field` starts one from
+  code, `autofocus` as soon as it is built.
+- **`engine_platform::clipboard`:** Windows' clipboard text.
+- **The tree:** F2 and a double click rename in place; the arrow opens and closes a row
+  (a click on a row only selects it); the filter keeps matching names and their parents.
+- **The inspector:** a number clicked without a drag becomes a field; typed values are
+  expressions, absolute or relative (`engine_editor::expr`); strings are typed; the filter
+  keeps matching fields.
+- **Shortcuts wait while a field is typed in** (only Ctrl+S saves).
+- **Measured:** the editor's frame with a tree of 200 entities and a selection, 84 µs on
+  ref-1's CPU (81 before the fields).
+- **Tested** without a GPU through the editor's frames: F2 and typing with Y and Delete
+  going to the field, a double click and Escape, expressions (`2*pi`, `+=1`, a refused one),
+  a string, both filters; the text field alone in `engine_ui`.
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and

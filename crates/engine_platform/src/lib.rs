@@ -17,6 +17,8 @@
 //! (ADR 0004).
 
 #[cfg(windows)]
+pub mod clipboard;
+#[cfg(windows)]
 pub mod cpu;
 #[cfg(windows)]
 pub mod display;
