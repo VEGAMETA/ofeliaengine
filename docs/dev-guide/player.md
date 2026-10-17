@@ -204,6 +204,35 @@ let rgba = player.capture(&mut game)?.expect("a frame");
 The golden tests render `sponza_day` this way and hold it to the image the test bed
 draws by hand (`docs/dev-guide/testing.md`).
 
+`player.assume_display(info)` draws an offscreen player's frames for a display of your
+choosing, HDR included (see below): captures then come back in the output's own format.
+
+## HDR
+
+While Windows runs the window's display in HDR ("Use HDR" in the display settings), the
+player presents in HDR by itself, and follows the display as it changes: HDR turned on or
+off (Win+Alt+B), the "SDR content brightness" slider, the window moved to another monitor.
+
+- **Light brighter than white stays brighter:** the tone mapper rolls off towards the
+  display's peak instead of SDR white (ADR 0038).
+- **The UI is drawn at Windows' SDR white level**, as the desktop's own windows are.
+- **`PlayerSettings::hdr`** (or `player.set_hdr`, for a settings menu) picks the output:
+  - `OutputColor::ScRgb`, the default: linear half floats; the cheapest;
+  - `OutputColor::Hdr10`: PQ in 10 bits; one more full-screen pass;
+  - `OutputColor::Sdr` to stay in SDR.
+- **With frame generation:** FSR's presents scRGB or SDR; DLSS's presents SDR until it is
+  verified in HDR.
+- `player.levels()` tells what the output is now (its color, reference white and peak in
+  nits). An overlay (the editor's panels) learns of every change through
+  `Overlay::output_changed`.
+
+| What HDR costs the GPU, 1920 × 1080 | RTX 4060 Ti | Radeon iGPU (2 CU) |
+|---|---|---|
+| scRGB | +11 µs (the tone mapper) | +37 µs |
+| HDR10 | +39 µs (the tone mapper, the encode pass) | +590 µs |
+
+Captured offscreen (`hdr_output_cost`), so without Windows' composition of the window.
+
 ## Sound
 
 Sound is components too ([audio.md](audio.md), section 0):
@@ -251,6 +280,7 @@ game is running.
 | `window` | `FullScreen`, `Windowed { width, height }`, `Exclusive` |
 | `monitor` | which monitor (`engine_platform::display::monitors()`) |
 | `vsync` | wait for the display's refresh |
+| `hdr` | the output while the display runs in HDR: `ScRgb` (default), `Hdr10`, `Sdr` |
 | `low_latency` | `Off`, `On`, `Boost` (NVIDIA: clocks kept up) |
 | `fps_limit` | a frame cap (a few frames under the refresh rate with G-Sync/FreeSync) |
 | `frame_generation` | `Off`, `Fsr`, `Dlss` |

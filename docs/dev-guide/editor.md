@@ -108,8 +108,10 @@ The whole plan is ADR 0107 §7.
 
 ## HDR
 
-The editor presents in SDR for now: it draws through the player, which presents in SDR.
-HDR output comes back with the player's own HDR output, which games get too.
+While Windows runs the display in HDR, the editor presents in HDR, as games do
+([player.md](player.md#hdr)): the viewport's light rolls off towards the display's peak,
+the panels stay at Windows' SDR white level. `--hdr scrgb|hdr10|off` picks the output
+(scRGB by default).
 
 ## What it costs (ref-1, release, 1600×900)
 

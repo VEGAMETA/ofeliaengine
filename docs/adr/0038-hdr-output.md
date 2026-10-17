@@ -129,3 +129,35 @@ engine (`DisplayQuery::set_hdr`).
 - `VK_EXT_swapchain_maintenance1` present fences would let recreation wait for exactly
   the old swapchain's presents instead of the whole device; recreation is rare enough
   for now.
+
+## In the player (2026-10-17)
+
+The player (ADR 0099) took over presenting from the editor's own set-up in ADR 0107's
+E1-3, without HDR. It now does what the editor did, for games and the editor alike:
+
+- **`PlayerSettings::hdr`** (scRGB by default, HDR10, or SDR) is the output while the
+  window's display runs in HDR; `Player::set_hdr` changes it at run time.
+- **The display at start** (`DisplayQuery`) picks the swapchain's color, so an HDR display
+  gets HDR from the first frame; afterwards each `WindowEventKind::Display` makes the
+  output follow it: the swapchain made again when HDR turns on or off, the levels applied
+  either way, the metadata stated.
+- **What follows the output:**
+  - `FrameRenderer::set_output_format` remakes the tone mapper and the filters after it;
+  - the views' encoding and peak;
+  - the UI's white;
+  - `Overlay::output_changed`: the editor's panels.
+- **HDR10 is drawn linear** in an `HDR_FORMAT` intermediate and encoded into the swapchain
+  at the end ("encode hdr10"): the UI and overlays blend in linear light, as in the
+  editor before.
+- **With frame generation:** FSR's interpolates scRGB (or SDR); DLSS's stays SDR until it
+  is verified in HDR. A surface without scRGB falls back to SDR, not HDR10, when frames
+  are generated.
+- **Offscreen players** take a display with `Player::assume_display`, and capture in the
+  output's format (half floats for scRGB, `A2B10G10R10` for HDR10): the test of the whole
+  path (`engine_app` `hdr_output`) runs without switching Windows' HDR.
+- **Measured** at 1920 × 1080 offscreen (`hdr_output_cost`): scRGB adds 11 µs on the RTX
+  4060 Ti and 37 µs on the Radeon iGPU (the tone mapper writing half floats); HDR10 adds
+  39 µs and 590 µs (its encode pass). scRGB stays the default.
+- **Not verified on a display yet:** ref-1's monitor runs in SDR, and Windows' HDR
+  setting is the owner's to switch.
+
