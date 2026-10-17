@@ -8,6 +8,22 @@ Last updated: 2026-10-17.
 
 ## 0. Now (2026-10-17)
 
+- **In progress: the editor** (queue item 9). Designed with the owner on 2026-10-17
+  (#250: ADR 0107, ADR 0108; research `docs/research/editor-architecture.md`, UX notes in
+  `docs/research/ux/`). The owner's choices:
+  - the whole §12 list, not a first wave only;
+  - the editor linked into the game's build behind an `editor` feature; a separate process
+    later; the 2.5 s rebuild accepted for now, hot patching later;
+  - prefabs in the first version;
+  - tools in the order materials, sound, animation, 2D, then the rest; "главное чтобы для
+    разработчика было удобно";
+  - a built-in code editor at Godot's or Roblox Studio's level, VS Code beside it;
+  - asset ids: ids inside our own files, a `.meta` beside foreign ones, references by id
+    and path, the local database only a cache.
+  - **Open:** any scene as a prefab (recommended) or a separate prefab type.
+  - **Next:** phase E1 (ADR 0107 §7): the editor linked into a game, the player split so
+    the editor drives it, scene format 2, the tree and the inspector, commands, sessions.
+
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
     scene; an index of the guides;
@@ -319,7 +335,18 @@ water and impostors stay in §6):
      ticks. Later: hole punching and relays through a game's rendezvous, dedicated servers.
    - ~~The dev guide's quick start~~ (done 2026-10-17, #249): `quick-start.md`,
      `ofeliaengine new`, `engine_app::prelude`, the quick start's game tested offscreen.
-5. **9:** editor tools, Luau bindings and debugger, other tooling.
+5. **9:** editor tools, Luau bindings and debugger, other tooling. **Designed 2026-10-17**
+   (ADR 0107, ADR 0108; the owner's choices are in §0). The phases (ADR 0107 §7):
+   - **E1:** foundation: the editor linked into a game, the player split so the editor
+     drives it, scene format 2, the tree and the inspector, commands, sessions, rebuild
+     and restart;
+   - **E2:** viewport tools; **E3:** Play on a copy of the world; **E4:** assets (ids,
+     cache, import, browser); **E5:** prefabs; **E6:** output, errors, history;
+   - **E7:** Luau in the game (bindings, `.d.luau`, script components; the public API to
+     the owner); **E8:** the code editor; **E9:** the debugger (core, DAP, panel);
+   - **E10:** materials; **E11:** sound; **E12:** animation; **E13:** 2D; **E14:** the rest
+     the engine has (navigation, physics, lighting, video, localization, saves,
+     networking, input, profiler, the one-button build).
 5a. **A layer for Claude Code** (the owner, 2026-10-16: "a convenient layer so that Claude
     Code can be connected as simply as possible and make games by itself, without
     difficulties or crutches"). Design it with 9; the likely parts:
