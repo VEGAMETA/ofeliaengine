@@ -36,7 +36,7 @@ Last updated: 2026-10-17.
     - `.material` files.
   - **The owner added blockout** (CSG brushes as in Godot) as phase E2b, after the
     viewport tools.
-  - **E1-3, the editor on the player** (ADR 0107 as built):
+  - **E1-3, the editor on the player** (#253, ADR 0107 as built):
     - the player draws the scene into the viewport panel (`set_view_rect`), and the
       editor paints its shell over the frame (`Overlay`);
     - the tree and the inspector read the real world;
