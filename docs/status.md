@@ -8,7 +8,7 @@ Last updated: 2026-10-17.
 
 ## 0. Now (2026-10-17)
 
-- **Done: networking in the player** (queue item 4, ADR 0106, `feat/player-net`).
+- **Done: networking in the player** (queue item 4, ADR 0106, #248).
   - **The player runs the session;** the game talks to it through the world's `Network`
     resource:
     - `host`, `invite` (text: a connect token), `join`, `leave`;
@@ -302,7 +302,7 @@ water and impostors stay in §6):
      components, saved; occlusion and the room's reverb from the physics world; zones.
      Then (the owner's choices, #247): `AudioSource` and `AudioSource3D`, the sounds folder
      kept live, sound packs.
-   - ~~Networking in the player~~ (done 2026-10-17, ADR 0106): the player runs the session
+   - ~~Networking in the player~~ (done 2026-10-17, #248, ADR 0106): the player runs the session
      the game asks for through the world's `Network` resource; the client runs the frame's
      ticks. Later: hole punching and relays through a game's rendezvous, dedicated servers.
    - Next: the dev guide's quick start.
