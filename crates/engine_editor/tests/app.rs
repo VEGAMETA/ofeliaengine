@@ -1,12 +1,14 @@
 //! The editor around a game, offscreen (ADR 0107): a scene file opened, the shell painted
-//! over the frame, the scene drawn into the viewport panel from the editor's camera.
-//! `ENGINE_EDITOR_PNG=<file>` writes the frame.
+//! over the frame, the scene drawn into the viewport panel from the editor's camera; then
+//! edited on the player (duplicate, move, undo) and saved back. `ENGINE_EDITOR_PNG=<file>`
+//! writes the first frame, `ENGINE_EDITOR_PNG2` the edited one.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
 use engine_app::{Assets, Game, MaterialFile, Model, Player, PlayerSettings, Window, builtin};
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Transform, World};
+use engine_editor::{EditorGame, EditorOverlay};
 use engine_runtime::Sun;
 use engine_scene::{AssetId, AssetRef, Name, SaveOptions, SceneId, SceneRegistry, save_with};
 
@@ -114,27 +116,31 @@ fn the_editor_draws_its_scene_in_the_viewport() {
         w > width / 3 && h > height / 3 && x + w <= width && y + h <= height,
         "the viewport panel {x} {y} {w} {h}"
     );
-    let pixel = |px: u32, py: u32| {
+    let pixel = |rgba: &[u8], px: u32, py: u32| {
         let i = ((py * width + px) * 4) as usize;
         [rgba[i], rgba[i + 1], rgba[i + 2]].map(f32::from)
     };
-    // The red cube is in the viewport, drawn by the editor's camera.
-    let mut red = 0;
-    for py in (y..y + h).step_by(4) {
-        for px in (x..x + w).step_by(4) {
-            let [r, g, b] = pixel(px, py);
-            if r > 1.6 * g && r > 1.6 * b && r > 40.0 {
-                red += 1;
+    let red_in_viewport = |rgba: &[u8]| {
+        let mut red = 0;
+        for py in (y..y + h).step_by(4) {
+            for px in (x..x + w).step_by(4) {
+                let [r, g, b] = pixel(rgba, px, py);
+                if r > 1.6 * g && r > 1.6 * b && r > 40.0 {
+                    red += 1;
+                }
             }
         }
-    }
+        red
+    };
+    // The red cube is in the viewport, drawn by the editor's camera.
+    let red = red_in_viewport(&rgba);
     assert!(red > 50, "red pixels in the viewport: {red}");
     // Outside the viewport the shell's panels: none of the scene's red.
     let mut red_outside = 0;
     for py in (0..height).step_by(8) {
         for px in (0..width).step_by(8) {
             let inside = px >= x && px < x + w && py >= y && py < y + h;
-            let [r, g, b] = pixel(px, py);
+            let [r, g, b] = pixel(&rgba, px, py);
             if !inside && r > 1.6 * g && r > 1.6 * b && r > 40.0 {
                 red_outside += 1;
             }
@@ -145,7 +151,8 @@ fn the_editor_draws_its_scene_in_the_viewport() {
         "red pixels outside the viewport: {red_outside}"
     );
 
-    // Selecting the cube: the inspector lists its components (`ENGINE_EDITOR_PNG2`).
+    // Editing on the player: select the cube, duplicate it (Ctrl+D's command) and move
+    // the copy beside it; the inspector shows the copy (`ENGINE_EDITOR_PNG2`).
     let world = player.world_mut();
     let mut names = engine_ecs::QueryState::<(engine_ecs::Entity, &Name)>::new(world);
     let cube = names
@@ -154,13 +161,14 @@ fn the_editor_draws_its_scene_in_the_viewport() {
         .map(|(e, _)| e)
         .unwrap();
     game.select(Some(cube));
-    player
-        .frame_overlaid(&mut game, Some(&mut overlay))
+    assert!(!game.unsaved());
+    assert!(game.run_command(world, "scene.duplicate"));
+    let copy = game.selected().unwrap();
+    assert_ne!(copy, cube);
+    game.set(world, copy, "Transform.translation", "(2.6, 0, 0)")
         .unwrap();
-    let rgba = player
-        .capture_overlaid(&mut game, Some(&mut overlay))
-        .unwrap()
-        .unwrap();
+    assert!(game.unsaved());
+    let rgba = frames(&mut player, &mut game, &mut overlay);
     if let Ok(path) = std::env::var("ENGINE_EDITOR_PNG2") {
         let png = engine_render::png::encode_png(
             width,
@@ -171,7 +179,49 @@ fn the_editor_draws_its_scene_in_the_viewport() {
         .unwrap();
         std::fs::write(path, png).unwrap();
     }
-    assert_eq!(game.selected(), Some(cube));
+    let two = red_in_viewport(&rgba);
+    assert!(
+        two > red * 3 / 2,
+        "the copy beside the cube: {two} red pixels, {red} before"
+    );
+    // Undo both steps: the copy is gone, and the scene is as it was saved.
+    let world = player.world_mut();
+    assert!(game.run_command(world, "edit.undo"));
+    assert!(game.run_command(world, "edit.undo"));
+    assert!(!game.unsaved());
+    let rgba = frames(&mut player, &mut game, &mut overlay);
+    let one = red_in_viewport(&rgba);
+    assert!(
+        one * 10 < red * 12 && one * 12 > red * 10,
+        "undone: {one} red pixels, {red} at first"
+    );
+    // Redo the duplicate and save: the file holds both cubes under the scene's id.
+    let world = player.world_mut();
+    assert!(game.run_command(world, "edit.redo"));
+    assert!(game.run_command(world, "file.save"));
+    assert!(!game.unsaved());
+    let saved = std::fs::read_to_string(dir.join("main.scene")).unwrap();
+    assert!(
+        saved.starts_with(&text[..text.find('\n').unwrap()]),
+        "the same header"
+    );
+    assert_eq!(saved.matches("Name = \"Cube\"").count(), 2, "{saved}");
+    assert!(saved.contains("asset(\"red.material\""), "{saved}");
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A few frames for the edits to reach the screen, then the frame's pixels.
+fn frames(
+    player: &mut Player,
+    game: &mut EditorGame<NoGame>,
+    overlay: &mut EditorOverlay,
+) -> Vec<u8> {
+    for _ in 0..4 {
+        player.frame_overlaid(game, Some(&mut *overlay)).unwrap();
+    }
+    player
+        .capture_overlaid(game, Some(&mut *overlay))
+        .unwrap()
+        .unwrap()
 }

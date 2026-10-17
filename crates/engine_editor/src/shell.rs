@@ -44,6 +44,8 @@ pub struct Palette {
     pub header: Color,
     /// Input and value boxes.
     pub field: Color,
+    /// A value box under the mouse or being dragged.
+    pub field_hover: Color,
     /// Selected rows and the active tool.
     pub selection: Color,
     /// Main text.
@@ -63,6 +65,7 @@ impl Default for Palette {
             dock: srgb(33, 34, 40),
             header: srgb(26, 27, 32),
             field: srgb(45, 47, 55),
+            field_hover: srgb(60, 63, 74),
             selection: srgb(52, 78, 120),
             text: srgb(222, 224, 230),
             text_dim: srgb(140, 144, 156),
@@ -89,13 +92,70 @@ pub struct TreeItem<'a> {
     pub selected: bool,
 }
 
+/// How a property is shown in the inspector.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Widget<'a> {
+    /// Text that cannot be edited here.
+    Text(&'a str),
+    /// Numbers dragged sideways: one, or a vector's parts with their labels (`x y z`).
+    Numbers {
+        /// The shown values.
+        values: &'a [&'a str],
+        /// A label per value (none for a single number).
+        labels: &'a [&'a str],
+    },
+    /// A checkbox.
+    Check(bool),
+    /// One of several names; `open` lists them all while the list is open.
+    Choice {
+        /// The current one.
+        current: &'a str,
+        /// Every one, while open.
+        open: Option<&'a [&'a str]>,
+    },
+}
+
 /// One property in the inspector.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Field<'a> {
     /// Name.
     pub name: &'a str,
-    /// Value as text.
-    pub value: &'a str,
+    /// How it is shown.
+    pub widget: Widget<'a>,
+}
+
+/// What the user did to an inspector field.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FieldAction {
+    /// Number `part` of the field is dragged: the pointer's horizontal travel since the
+    /// press, in logical pixels; `start` on the frame of the press.
+    Drag {
+        /// Which number of a vector.
+        part: u8,
+        /// Travel since the press.
+        travel: f32,
+        /// The press happened this frame.
+        start: bool,
+    },
+    /// The drag ended.
+    Release,
+    /// The checkbox was clicked.
+    Toggle,
+    /// The choice was clicked: its list opens or closes.
+    Open,
+    /// Option `i` of the open list was picked.
+    Choose(usize),
+}
+
+/// An inspector field's action, with where the field is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FieldEvent {
+    /// The section (component).
+    pub section: usize,
+    /// The field in it.
+    pub field: usize,
+    /// What happened.
+    pub action: FieldAction,
 }
 
 /// A group of properties (a component).
@@ -166,10 +226,14 @@ pub struct ShellModel<'a> {
     pub playing: bool,
     /// Right end of the bottom bar.
     pub status: &'a str,
+    /// Dragged values snap by default (the tool bar's grid button).
+    pub snap: bool,
+    /// The scene dock's add menu, while open: what it offers.
+    pub add_menu: Option<&'a [&'a str]>,
 }
 
 /// What happened in the shell this frame.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ShellResponse {
     /// Id of the viewport area; its rectangle after layout comes from [`Ui::rect_of`].
     pub viewport: u64,
@@ -191,6 +255,17 @@ pub struct ShellResponse {
     pub pause: bool,
     /// Stop (F8).
     pub stop: bool,
+    /// An inspector field was used.
+    pub field: Option<FieldEvent>,
+    /// The scene dock's add button.
+    pub add: bool,
+    /// An item of the open add menu.
+    pub add_item: Option<usize>,
+    /// The tool bar's snapping button.
+    pub snap: bool,
+    /// The popup open this frame (the add menu, a choice's list) and its opener, for
+    /// [`dismissed`].
+    pub popup: Option<(u64, u64)>,
 }
 
 /// UI text size in pixels.
@@ -222,6 +297,7 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
         gap: 1.0,
         ..Style::fill()
     };
+    let mut popups = Popups::default();
     ui.container("shell", root, |ui| {
         ui.row(
             "main",
@@ -231,13 +307,29 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
             },
             |ui| {
                 center(ui, model, p, &mut out);
-                scene_dock(ui, model, p, &mut out);
-                inspector_dock(ui, model, p);
+                scene_dock(ui, model, p, &mut out, &mut popups);
+                inspector_dock(ui, model, p, &mut out, &mut popups);
             },
         );
         bottom_bar(ui, model, p, &mut out);
     });
+    out.popup = popups.open;
     out
+}
+
+/// Whether the mouse went down this frame outside the open popup and its opener: the
+/// popup closes. Call after `Ui::end_frame`, when the popup has its place in this frame's
+/// layout.
+pub fn dismissed(ui: &Ui, response: &ShellResponse) -> bool {
+    response.popup.is_some_and(|(popup, opener)| {
+        ui.input().mouse_pressed && !ui.hovers(popup) && !ui.hovers(opener)
+    })
+}
+
+/// The popup open this frame, if any: its id and its opener's.
+#[derive(Default)]
+struct Popups {
+    open: Option<(u64, u64)>,
 }
 
 /// Scene tabs with the play controls, tool bar, viewport and file browser.
@@ -275,6 +367,25 @@ fn center(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellRespo
                     out.tool = Some(i);
                 }
                 ui.pop_id();
+            }
+            // Snapping by default: the grid button (Shift inverts it while dragging, Ctrl
+            // rounds to the grid).
+            let id = ui.container(
+                "snap",
+                Style {
+                    padding: [8.0, 4.0, 8.0, 4.0],
+                    radius: 3.0,
+                    background: model.snap.then_some(p.selection),
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    let color = if model.snap { p.text } else { p.text_dim };
+                    text(ui, "icon", icons::SNAP, ICON, color);
+                },
+            );
+            if ui.sense(id, false).clicked {
+                out.snap = true;
             }
         });
         let edge = model.playing.then_some((p.playing, 2.0));
@@ -536,11 +647,42 @@ fn tree_rows(ui: &mut Ui, rows: &[TreeItem<'_>], p: &Palette) -> Option<usize> {
     clicked
 }
 
-/// Scene tree dock: tabs, filter, tree.
-fn scene_dock(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellResponse) {
+/// Scene tree dock: tabs and the add button, filter, tree.
+fn scene_dock(
+    ui: &mut Ui,
+    model: &ShellModel<'_>,
+    p: &Palette,
+    out: &mut ShellResponse,
+    popups: &mut Popups,
+) {
     dock_column(ui, "scene dock", Size::Fixed(SCENE_WIDTH), p, |ui| {
         ui.row("tabs", bar(p, 30.0), |ui| {
             tabs(ui, &["Scene", "History"], Some(0), p);
+            ui.spacer("fill");
+            let opener = ui.container(
+                "add",
+                Style {
+                    size: [Size::Fixed(24.0), Size::Fixed(22.0)],
+                    radius: 3.0,
+                    background: model.add_menu.is_some().then_some(p.selection),
+                    align_main: Align::Center,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    text(ui, "icon", icons::PLUS, ICON, p.text);
+                    if let Some(items) = model.add_menu {
+                        let popup = menu(ui, items, p, [-150.0, 24.0], &mut out.add_item);
+                        popups.open = Some((popup, ui.id("add")));
+                    }
+                },
+            );
+            if let Some((popup, _)) = popups.open {
+                popups.open = Some((popup, opener));
+            }
+            if ui.sense(opener, false).clicked {
+                out.add = true;
+            }
         });
         filter(ui, "Filter nodes", p);
         ui.scroll_column("tree", |ui| {
@@ -549,8 +691,194 @@ fn scene_dock(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellR
     });
 }
 
+/// A floating list of items under its opener, `at` from the opener's corner; reports
+/// the clicked item. Returns the list's id.
+fn menu(
+    ui: &mut Ui,
+    items: &[&str],
+    p: &Palette,
+    at: [f32; 2],
+    clicked: &mut Option<usize>,
+) -> u64 {
+    ui.column(
+        "menu",
+        Style {
+            floating: Some(at),
+            size: [Size::Fixed(174.0), Size::Fit],
+            padding: [0.0, 4.0, 0.0, 4.0],
+            radius: 4.0,
+            background: Some(p.header),
+            border: Some((p.field_hover, 1.0)),
+            ..Style::default()
+        },
+        |ui| {
+            for (i, item) in items.iter().enumerate() {
+                ui.push_id(i as u64);
+                let id = ui.id("item");
+                let hovered = ui.is_hovered(id);
+                ui.row(
+                    "item",
+                    Style {
+                        size: [Size::Grow(1.0), Size::Fixed(24.0)],
+                        padding: [10.0, 0.0, 10.0, 0.0],
+                        align_cross: Align::Center,
+                        background: hovered.then_some(p.selection),
+                        ..Style::default()
+                    },
+                    |ui| {
+                        text(ui, "label", item, TEXT, p.text);
+                    },
+                );
+                if ui.sense(id, false).clicked {
+                    *clicked = Some(i);
+                }
+                ui.pop_id();
+            }
+        },
+    )
+}
+
+/// A field's numbers, dragged sideways; reports the drag.
+fn numbers(
+    ui: &mut Ui,
+    values: &[&str],
+    labels: &[&str],
+    p: &Palette,
+    action: &mut Option<FieldAction>,
+) {
+    const AXES: [(u8, u8, u8); 4] = [
+        (230, 96, 96),
+        (130, 200, 96),
+        (96, 150, 240),
+        (170, 170, 180),
+    ];
+    ui.row(
+        "numbers",
+        Style {
+            size: [Size::Grow(1.0), Size::Fixed(20.0)],
+            gap: 3.0,
+            ..Style::default()
+        },
+        |ui| {
+            for (i, value) in values.iter().enumerate() {
+                ui.push_id(i as u64);
+                let id = ui.id("number");
+                let lit = ui.is_hovered(id) || ui.drag_delta(id).is_some();
+                ui.row(
+                    "number",
+                    Style {
+                        size: [Size::Grow(1.0), Size::Fixed(20.0)],
+                        padding: [5.0, 0.0, 5.0, 0.0],
+                        gap: 4.0,
+                        radius: 3.0,
+                        background: Some(if lit { p.field_hover } else { p.field }),
+                        align_cross: Align::Center,
+                        clip: true,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        if let Some(label) = labels.get(i) {
+                            let (r, g, b) = AXES[i.min(3)];
+                            text(ui, "axis", label, SMALL, srgb(r, g, b));
+                        }
+                        text(ui, "value", value, TEXT, p.text);
+                    },
+                );
+                let r = ui.sense(id, false);
+                let part = i as u8;
+                if r.pressed {
+                    *action = Some(FieldAction::Drag {
+                        part,
+                        travel: 0.0,
+                        start: true,
+                    });
+                } else if let Some([dx, _]) = ui.drag_delta(id) {
+                    *action = Some(FieldAction::Drag {
+                        part,
+                        travel: dx,
+                        start: false,
+                    });
+                } else if r.released {
+                    *action = Some(FieldAction::Release);
+                }
+                ui.pop_id();
+            }
+        },
+    );
+}
+
+/// A checkbox; reports a click.
+fn checkbox(ui: &mut Ui, on: bool, p: &Palette, action: &mut Option<FieldAction>) {
+    let id = ui.container(
+        "check",
+        Style {
+            size: [Size::Fixed(16.0), Size::Fixed(16.0)],
+            radius: 3.0,
+            background: Some(if on { p.accent } else { p.field }),
+            border: (!on).then_some((p.text_dim, 1.0)),
+            align_main: Align::Center,
+            align_cross: Align::Center,
+            ..Style::default()
+        },
+        |ui| {
+            if on {
+                text(ui, "mark", icons::CHECK, 13.0, p.text);
+            }
+        },
+    );
+    if ui.sense(id, false).clicked {
+        *action = Some(FieldAction::Toggle);
+    }
+}
+
+/// An enum's variant with its list while open; reports a click or a pick.
+fn choice(
+    ui: &mut Ui,
+    current: &str,
+    open: Option<&[&str]>,
+    p: &Palette,
+    action: &mut Option<FieldAction>,
+    popups: &mut Popups,
+) {
+    let id = ui.id("choice");
+    let lit = ui.is_hovered(id) || open.is_some();
+    ui.row(
+        "choice",
+        Style {
+            size: [Size::Grow(1.0), Size::Fixed(20.0)],
+            padding: [6.0, 0.0, 4.0, 0.0],
+            radius: 3.0,
+            background: Some(if lit { p.field_hover } else { p.field }),
+            align_cross: Align::Center,
+            ..Style::default()
+        },
+        |ui| {
+            text(ui, "value", current, TEXT, p.text);
+            ui.spacer("fill");
+            text(ui, "arrow", icons::MENU_DOWN, ICON, p.text_dim);
+            if let Some(options) = open {
+                let mut picked = None;
+                let popup = menu(ui, options, p, [0.0, 22.0], &mut picked);
+                popups.open = Some((popup, id));
+                if let Some(i) = picked {
+                    *action = Some(FieldAction::Choose(i));
+                }
+            }
+        },
+    );
+    if ui.sense(id, false).clicked && action.is_none() {
+        *action = Some(FieldAction::Open);
+    }
+}
+
 /// Inspector dock: tabs, the selection, filter, sections of fields.
-fn inspector_dock(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) {
+fn inspector_dock(
+    ui: &mut Ui,
+    model: &ShellModel<'_>,
+    p: &Palette,
+    out: &mut ShellResponse,
+    popups: &mut Popups,
+) {
     dock_column(
         ui,
         "inspector dock",
@@ -593,6 +921,7 @@ fn inspector_dock(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) {
                     );
                     for (f, field) in section.fields.iter().enumerate() {
                         ui.push_id(f as u64);
+                        let mut action = None;
                         ui.row(
                             "field",
                             Style {
@@ -613,22 +942,41 @@ fn inspector_dock(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) {
                                         text(ui, "text", field.name, TEXT, p.text_dim);
                                     },
                                 );
-                                ui.row(
-                                    "value",
-                                    Style {
-                                        size: [Size::Grow(1.0), Size::Fixed(20.0)],
-                                        padding: [6.0, 0.0, 6.0, 0.0],
-                                        radius: 3.0,
-                                        background: Some(p.field),
-                                        align_cross: Align::Center,
-                                        ..Style::default()
-                                    },
-                                    |ui| {
-                                        text(ui, "text", field.value, TEXT, p.text);
-                                    },
-                                );
+                                match field.widget {
+                                    Widget::Text(value) => {
+                                        ui.row(
+                                            "value",
+                                            Style {
+                                                size: [Size::Grow(1.0), Size::Fixed(20.0)],
+                                                padding: [6.0, 0.0, 6.0, 0.0],
+                                                radius: 3.0,
+                                                background: Some(p.header),
+                                                align_cross: Align::Center,
+                                                clip: true,
+                                                ..Style::default()
+                                            },
+                                            |ui| {
+                                                text(ui, "text", value, TEXT, p.text_dim);
+                                            },
+                                        );
+                                    }
+                                    Widget::Numbers { values, labels } => {
+                                        numbers(ui, values, labels, p, &mut action);
+                                    }
+                                    Widget::Check(on) => checkbox(ui, on, p, &mut action),
+                                    Widget::Choice { current, open } => {
+                                        choice(ui, current, open, p, &mut action, popups);
+                                    }
+                                }
                             },
                         );
+                        if let Some(action) = action {
+                            out.field = Some(FieldEvent {
+                                section: s,
+                                field: f,
+                                action,
+                            });
+                        }
                         ui.pop_id();
                     }
                     ui.pop_id();

@@ -1,10 +1,12 @@
 //! Window input for the editor: platform events gathered over a frame into the UI's
-//! [`UiInput`] (in logical pixels) plus what the 3D viewport's camera needs (drags and the
-//! wheel, in physical pixels and notches).
+//! [`UiInput`] (in logical pixels), the shortcuts' key chords, and what the 3D viewport's
+//! camera needs (drags and the wheel, in physical pixels and notches).
 //!
 //! The collector knows nothing about windows: the application forwards
 //! `engine_platform` events to it, which keeps it testable anywhere.
 
+use crate::Chord;
+use engine_input::Key;
 use engine_ui::{UiInput, UiKey};
 
 /// Wheel movement in logical pixels per notch, for scrolling panels.
@@ -26,10 +28,18 @@ mod vk {
     pub(super) const TAB: u16 = 0x09;
     pub(super) const RETURN: u16 = 0x0D;
     pub(super) const SHIFT: u16 = 0x10;
+    pub(super) const CONTROL: u16 = 0x11;
+    pub(super) const MENU: u16 = 0x12;
     pub(super) const ESCAPE: u16 = 0x1B;
     pub(super) const SPACE: u16 = 0x20;
+    pub(super) const LWIN: u16 = 0x5B;
+    pub(super) const RWIN: u16 = 0x5C;
     pub(super) const LSHIFT: u16 = 0xA0;
     pub(super) const RSHIFT: u16 = 0xA1;
+    pub(super) const LCONTROL: u16 = 0xA2;
+    pub(super) const RCONTROL: u16 = 0xA3;
+    pub(super) const LMENU: u16 = 0xA4;
+    pub(super) const RMENU: u16 = 0xA5;
 }
 
 /// A frame's input, gathered from window events.
@@ -49,6 +59,10 @@ pub struct InputCollector {
     /// Wheel notches (positive: away from the user).
     wheel: f32,
     shift: bool,
+    ctrl: bool,
+    alt: bool,
+    /// Keys pressed this frame with the modifiers held then, for shortcuts.
+    chords: Vec<Chord>,
 }
 
 impl InputCollector {
@@ -90,16 +104,37 @@ impl InputCollector {
         self.wheel += notches;
     }
 
-    /// A key changed state (Win32 virtual-key code).
-    pub fn key(&mut self, virtual_key: u16, pressed: bool) {
+    /// A key changed state: its Win32 virtual-key code, and its scan code and extended
+    /// flag (the physical key shortcuts name, ADR 0021). Held keys repeat.
+    pub fn key(&mut self, virtual_key: u16, scancode: u16, extended: bool, pressed: bool) {
         match virtual_key {
-            vk::SHIFT | vk::LSHIFT | vk::RSHIFT => self.shift = pressed,
-            _ if !pressed => {}
+            vk::SHIFT | vk::LSHIFT | vk::RSHIFT => {
+                self.shift = pressed;
+                return;
+            }
+            vk::CONTROL | vk::LCONTROL | vk::RCONTROL => {
+                self.ctrl = pressed;
+                return;
+            }
+            vk::MENU | vk::LMENU | vk::RMENU => {
+                self.alt = pressed;
+                return;
+            }
+            vk::LWIN | vk::RWIN => return,
+            _ if !pressed => return,
             vk::TAB => self.ui.keys.push(UiKey::Tab),
             vk::RETURN => self.ui.keys.push(UiKey::Enter),
             vk::SPACE => self.ui.keys.push(UiKey::Space),
             vk::ESCAPE => self.ui.keys.push(UiKey::Escape),
             _ => {}
+        }
+        if let Some(key) = Key::from_scancode(scancode, extended) {
+            self.chords.push(Chord {
+                ctrl: self.ctrl,
+                shift: self.shift,
+                alt: self.alt,
+                key,
+            });
         }
     }
 
@@ -113,6 +148,8 @@ impl InputCollector {
             self.held[i] = false;
         }
         self.shift = false;
+        self.ctrl = false;
+        self.alt = false;
     }
 
     /// This frame's UI input, in logical pixels (`scale` physical pixels per logical one).
@@ -124,7 +161,18 @@ impl InputCollector {
         self.ui.mouse_released = self.released[left];
         self.ui.wheel = self.wheel * WHEEL_PIXELS;
         self.ui.shift = self.shift;
+        self.ui.ctrl = self.ctrl;
         &self.ui
+    }
+
+    /// The keys pressed this frame, with their modifiers: for the keymap.
+    pub fn chords(&self) -> &[Chord] {
+        &self.chords
+    }
+
+    /// Whether Control is held.
+    pub fn ctrl(&self) -> bool {
+        self.ctrl
     }
 
     /// Cursor position in physical pixels.
@@ -166,6 +214,7 @@ impl InputCollector {
         self.drag = [0.0; 2];
         self.wheel = 0.0;
         self.ui.keys.clear();
+        self.chords.clear();
     }
 }
 
@@ -208,11 +257,11 @@ mod tests {
     #[test]
     fn keys_wheel_and_focus_loss() {
         let mut input = InputCollector::new();
-        input.key(0x10, true);
-        input.key(0x09, true);
-        input.key(0x41, true);
-        input.key(0x1B, true);
-        input.key(0x09, false);
+        input.key(0x10, 0x2A, false, true);
+        input.key(0x09, 0x0F, false, true);
+        input.key(0x41, 0x1E, false, true);
+        input.key(0x1B, 0x01, false, true);
+        input.key(0x09, 0x0F, false, false);
         input.wheel(1.0);
         input.wheel(0.5);
         let ui = input.ui_input(1.0);
@@ -229,5 +278,26 @@ mod tests {
             ui.mouse_released && !ui.mouse_down,
             "a held button is released"
         );
+    }
+
+    #[test]
+    fn shortcuts_are_physical_keys_with_their_modifiers() {
+        let mut input = InputCollector::new();
+        input.key(0x11, 0x1D, false, true); // Ctrl
+        input.key(0x5A, 0x2C, false, true); // Z
+        input.key(0x10, 0x2A, false, true); // Shift
+        input.key(0x5A, 0x2C, false, true); // Z again (held keys repeat)
+        input.key(0x11, 0x1D, false, false);
+        input.key(0x10, 0x2A, false, false);
+        input.key(0x2E, 0x53, true, true); // Delete
+        let want = ["Ctrl+Z", "Ctrl+Shift+Z", "Delete"].map(|c| Chord::parse(c).unwrap());
+        assert_eq!(input.chords(), want);
+        assert!(!input.ui_input(1.0).ctrl);
+        input.next_frame();
+        assert!(input.chords().is_empty());
+        input.key(0x11, 0x1D, false, true);
+        assert!(input.ui_input(1.0).ctrl && input.ctrl());
+        input.focus_lost();
+        assert!(!input.ctrl(), "modifiers released elsewhere are dropped");
     }
 }

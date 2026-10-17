@@ -63,3 +63,9 @@ pub const TOOL_SCALE: &str = "\u{F0A68}";
 pub const SNAP: &str = "\u{F02C1}";
 /// Filter / search box (`md-magnify`).
 pub const SEARCH: &str = "\u{F0349}";
+/// Add (`md-plus`).
+pub const PLUS: &str = "\u{F0415}";
+/// A checked box's mark (`md-check`).
+pub const CHECK: &str = "\u{F012C}";
+/// A list that opens (`md-menu_down`).
+pub const MENU_DOWN: &str = "\u{F035D}";

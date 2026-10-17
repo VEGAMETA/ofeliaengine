@@ -11,7 +11,7 @@ use engine_core::math::{Mat4, Quat, Vec2, Vec3, look_at};
 use engine_editor::icons;
 use engine_editor::paint::{UiText, paint};
 use engine_editor::shell::{
-    Field, FileItem, FileKind, Palette, Section, ShellModel, TreeItem, build,
+    Field, FileItem, FileKind, Palette, Section, ShellModel, TreeItem, Widget, build,
 };
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, ViewFeatures,
@@ -227,56 +227,68 @@ fn main() {
             false,
         ),
     ];
+    let xyz = ["x", "y", "z"];
+    let numbers = |values| Widget::Numbers {
+        values,
+        labels: &xyz,
+    };
+    let one = |values| Widget::Numbers {
+        values,
+        labels: &[],
+    };
     let transform = [
         Field {
             name: "Position",
-            value: "0.50   0.90   2.00",
+            widget: numbers(&["0.5", "0.9", "2"]),
         },
         Field {
             name: "Rotation",
-            value: "0°   45°   0°",
+            widget: numbers(&["0", "45", "0"]),
         },
         Field {
             name: "Scale",
-            value: "1   1   1",
+            widget: numbers(&["1", "1", "1"]),
         },
     ];
     let body = [
         Field {
             name: "Speed",
-            value: "6.5 m/s",
+            widget: one(&["6.5"]),
         },
         Field {
             name: "Jump height",
-            value: "1.4 m",
+            widget: one(&["1.4"]),
         },
         Field {
             name: "Mass",
-            value: "72 kg",
+            widget: one(&["72"]),
         },
         Field {
             name: "Gravity",
-            value: "World",
+            widget: Widget::Choice {
+                current: "World",
+                open: None,
+            },
         },
     ];
     let script = [
         Field {
             name: "Source",
-            value: "player.luau",
+            widget: Widget::Text("player.luau"),
         },
         Field {
             name: "Hot reload",
-            value: "On",
+            widget: Widget::Check(true),
         },
     ];
     let physics = [
         Field {
             name: "Layer",
-            value: "Characters",
+            widget: Widget::Text("Characters"),
         },
         Field {
             name: "Collides with",
-            value: "World, Enemies",
+            widget: Widget::Text("World, Enemies"),
         },
     ];
     let inspector = [
@@ -350,6 +362,8 @@ fn main() {
         active_bottom: None,
         playing,
         status: &status,
+        snap: false,
+        add_menu: None,
     };
 
     // Lay the UI out: the viewport's rectangle sizes the 3D view.
