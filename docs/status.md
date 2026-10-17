@@ -21,7 +21,7 @@ Last updated: 2026-10-17.
   - asset ids: ids inside our own files, a `.meta` beside foreign ones, references by id
     and path, the local database only a cache;
   - any scene can be a prefab.
-  - **E1-1, scene format 2** (ADR 0108 as built):
+  - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
     - `Name`, and structs of one field written as that field;
