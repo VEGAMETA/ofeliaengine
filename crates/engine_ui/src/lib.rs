@@ -218,6 +218,8 @@ pub(crate) struct Node {
     pub(crate) text: Option<TextSpan>,
     pub(crate) interactive: bool,
     pub(crate) focusable: bool,
+    /// A hover region ([`Ui::mark_region`]): found under the mouse whatever lies above.
+    pub(crate) region: bool,
     /// Size of the text (or other content) itself.
     pub(crate) content: [f32; 2],
     /// Content size plus padding.
@@ -481,6 +483,8 @@ pub struct Ui {
     press_rect: Rect,
     /// For `emit`: the edited text node, its scroll, caret and selection.
     edit_draw: Option<(u64, f32, f32, [f32; 2])>,
+    /// Hover regions under the mouse (the last layout's).
+    regions: Vec<u64>,
     /// Reused by `emit`: clip rectangles and (subtree end, clip depth) of open clips.
     clips: Vec<Rect>,
     open_clips: Vec<(u32, usize)>,
@@ -514,6 +518,7 @@ impl Ui {
             copied: None,
             press_rect: Rect::default(),
             edit_draw: None,
+            regions: Vec::new(),
             clips: Vec::new(),
             open_clips: Vec::new(),
             last: NONE,
@@ -523,6 +528,11 @@ impl Ui {
     /// The theme.
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// The frame's size in pixels ([`Ui::begin_frame`]): for placing floating panels.
+    pub fn viewport(&self) -> [f32; 2] {
+        self.viewport
     }
 
     /// Starts a frame: takes the input and the viewport size, and opens the root node.
@@ -629,6 +639,7 @@ impl Ui {
             text,
             interactive: false,
             focusable: false,
+            region: false,
             content: [0.0; 2],
             fit: [0.0; 2],
             rect: Rect::default(),
@@ -788,6 +799,20 @@ impl Ui {
             .is_some_and(|m| self.rect_of(id).is_some_and(|r| r.contains(m)))
     }
 
+    /// Makes node `id` (built in this frame) a hover region: [`Ui::in_region`] tells next
+    /// frame whether the mouse is inside it, whatever widget it is over (an inspector row:
+    /// its name, its value, its buttons).
+    pub fn mark_region(&mut self, id: u64) {
+        if let Some(n) = self.nodes.iter_mut().rev().find(|n| n.id == id) {
+            n.region = true;
+        }
+    }
+
+    /// Whether the mouse is inside hover region `id` (as the last layout placed it).
+    pub fn in_region(&self, id: u64) -> bool {
+        self.regions.contains(&id)
+    }
+
     /// The draw commands of the frame ended last (valid until the next
     /// [`Ui::begin_frame`]): for painting after querying the layout ([`Ui::rect_of`]).
     pub fn last_frame(&self) -> Frame<'_> {
@@ -930,9 +955,15 @@ impl Ui {
     /// the wheel to the innermost scroll container under the mouse.
     fn hit_test(&mut self) {
         self.hovered = 0;
+        self.regions.clear();
         let Some(mouse) = self.input.mouse else {
             return;
         };
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].region && self.visible_at(i, mouse) {
+                self.regions.push(self.nodes[i].id);
+            }
+        }
         let mut best: Option<(bool, usize)> = None;
         let mut scroll_target: Option<(bool, usize)> = None;
         for i in 0..self.nodes.len() {

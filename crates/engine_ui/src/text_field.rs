@@ -143,6 +143,10 @@ pub struct TextField<'a> {
     /// Start editing as soon as it is built, everything selected (renaming in place, a
     /// number turned into a field).
     pub autofocus: bool,
+    /// A search box over a list (the command palette): Up and Down are left to the list,
+    /// and an edit started by `autofocus` or from code keeps the text with the caret at its
+    /// end (a prefix such as `@` stays).
+    pub search: bool,
 }
 
 /// What a text field reports.
@@ -213,8 +217,9 @@ impl Ui {
                 self.ending = Some(old);
             }
             let len = text.len();
-            let select_all = !pressed;
-            // A click puts the caret where it landed; the other starts select it all.
+            let select_all = !pressed && !field.search;
+            // A click puts the caret where it landed; the other starts select it all (a
+            // search box keeps the caret at the end).
             let pointer = if pressed {
                 self.input.mouse.map(|m| {
                     (
@@ -296,6 +301,7 @@ impl Ui {
                             };
                             edit.go(to, shift);
                         }
+                        UiKey::Up | UiKey::Down if field.search => {}
                         UiKey::Home | UiKey::Up => edit.go(0, shift),
                         UiKey::End | UiKey::Down => edit.go(edit.text.len(), shift),
                         UiKey::Backspace => {

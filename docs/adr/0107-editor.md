@@ -213,11 +213,11 @@ Each phase starts with its UX note (§12), then code, tests, measurements and a 
 
 | Phase | What |
 |---|---|
-| **E1. Foundation** | the editor linked into a game; the player split so the editor drives it; scene documents in format 2 (names, strings, asset references); the scene tree and the inspector on reflection (multi-editing, filter, reset, scrubbing, expressions); selection; every action a command; autosave and the session; rebuild and restart; one-line text fields |
+| **E1. Foundation** | the editor linked into a game; the player split so the editor drives it; scene documents in format 2 (names, strings, asset references); the scene tree and the inspector on reflection (multi-editing, filter, reset, scrubbing, expressions); selection; every action a command; autosave and the session; rebuild and restart; one-line text fields; icons by kind, the same in the add menu, the tree and the palette, a model's from its mesh (team decision, 2026-10-17) |
 | **E2. Viewport tools** | picking from an id buffer, outlines, gizmos, snapping, keyboard transforms, placement on surfaces by drag and drop, duplicate, frame, bookmarks; overlays through debug draw channels (lights, cameras, sound ranges, colliders, the navigation mesh) |
 | **E2b. Blockout** (the owner, 2026-10-17) | brushes for greyboxing a level, like Godot's CSG: box, wedge and ramp, stairs, cylinder, sphere; add, subtract, intersect; face editing (extrude a face, move an edge); colliders and the navigation mesh made from them, so Play runs on the greybox at once; a grid material in world space; bake to a mesh. Our own Rust implementation over convex brushes held as planes (the Quake, Hammer and TrenchBroom way), not Godot's C++ library |
 | **E3. Play** | the play world, the game's window (embedded as an option), live edits, "Keep changes", pause and step, play from here, restart; entering ≤ 1 s, measured |
-| **E4. Assets** | ids and the local cache (ADR 0108), background import, the file browser with rendered thumbnails, drag and drop, find references, import settings in the inspector |
+| **E4. Assets** | ids and the local cache (ADR 0108), background import, the file browser with rendered thumbnails, drag and drop, find references, import settings in the inspector; asset fields in the inspector as in Godot (team decision, 2026-10-17): a square preview the engine renders with the asset's own materials and shaders, a model's mesh picked from the built-ins or the project or dropped from the file browser, its material slots the same way |
 | **E5. Prefabs** | instances, overrides shown in the inspector, revert and apply, nesting, variants, make and unpack (ADR 0108) |
 | **E6. Output** | the console with log filters, errors linked to their causes, the task panel, the history panel, the profiler's first panel |
 | **E7. Luau in the game** | bindings generated from reflection, `.d.luau`, a script component and its hooks, hot reload in the editor. The public scripting API goes to the owner (CLAUDE.md §3) |
@@ -360,6 +360,42 @@ Text fields.
 - **Tested** without a GPU through the editor's frames: F2 and typing with Y and Delete
   going to the field, a double click and Escape, expressions (`2*pi`, `+=1`, a refused one),
   a string, both filters; the text field alone in `engine_ui`.
+
+## As built (E1-4b-2, 2026-10-17)
+
+The command palette, reset to default, copying values
+(`docs/research/ux/command-palette.md`, `docs/research/ux/inspector.md` §6).
+
+- **The palette** (Ctrl+Shift+P): a floating box over the shell with the best twelve
+  matches, the list scrolling with the highlight. Commands show as "Category: Title",
+  the matched letters in the accent and the shortcut beside each. The add menu's kinds
+  are commands (`scene.add.cube`…). Up and Down move the highlight (the query box leaves
+  them to the list: `TextField::search`), Enter or a click runs it, Escape or a click
+  elsewhere closes it.
+- **`@` finds the scene's objects** (Ctrl+P opens the palette with it): every entity with
+  a scene id in tree order, ranked by `engine_editor::Fuzzy`, the commands' matcher made
+  usable for any text; the one picked is selected and its parents' rows opened. `>` is
+  the commands' prefix; `#` assets and `:` settings come with their panels.
+- **Reset:** each component type's `Default` value is made once per session
+  (`inspector::Defaults`). A field differing from it is marked changed and gets ↺ in a
+  place every row keeps, so fields stay aligned and none moves when it starts to differ.
+  Backspace over a hovered field resets it too, as one undo step. A `Name` has no reset.
+- **Copy and paste** over a hovered field (`Ui::mark_region`, a row's hover whatever
+  widget is under the mouse): Ctrl+C writes the value's scene text (a string as it is),
+  Ctrl+V sets it through the scene-path setter, checked against the field's type. The
+  editor's `Clipboard` is Windows' or, in tests, its own.
+- **Measured** on ref-1's CPU: the frame with 200 entities and a selection 82.5 µs (83.5
+  before), 88 µs with the palette open; the `@` search over 10,000 objects 0.62–0.73 ms
+  per keystroke, mostly the walk of the tree and the names (the research note's target:
+  under 1 ms). The shell's zero-allocation test now runs with the palette open and reset
+  buttons shown.
+- **Tested** without a GPU through the editor's frames: a command found and run with
+  Enter, objects found with `@` and picked with Down and Enter, Escape, a click outside,
+  a row clicked; ↺, Backspace, Ctrl+C and Ctrl+V between fields, a refused paste, a name
+  copied to another entity. `engine_ui`: the search box and hover regions.
+- **Not done:** the tree does not scroll to an object picked in the palette; copying a
+  vector's single part (Blender's Ctrl+C on a part); component headers' copy, paste and
+  reset (`inspector.md` §7).
 
 ## Consequences
 

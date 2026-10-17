@@ -12,6 +12,45 @@ use engine_ui::{UiInput, UiKey};
 /// Wheel movement in logical pixels per notch, for scrolling panels.
 pub const WHEEL_PIXELS: f32 = 48.0;
 
+/// Where the editor's copied text goes and pasted text comes from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Clipboard {
+    /// Windows' clipboard.
+    #[default]
+    System,
+    /// Text of the editor's own, shared with nothing (tests leave the user's clipboard
+    /// alone).
+    Local(String),
+}
+
+impl Clipboard {
+    /// The text on it, if any.
+    pub fn text(&self) -> Option<String> {
+        match self {
+            #[cfg(windows)]
+            Self::System => engine_platform::clipboard::text(),
+            #[cfg(not(windows))]
+            Self::System => None,
+            Self::Local(text) => Some(text.clone()),
+        }
+    }
+
+    /// Puts `text` on it; false when Windows' clipboard is busy.
+    pub fn set_text(&mut self, text: &str) -> bool {
+        match self {
+            #[cfg(windows)]
+            Self::System => engine_platform::clipboard::set_text(text),
+            #[cfg(not(windows))]
+            Self::System => false,
+            Self::Local(own) => {
+                own.clear();
+                own.push_str(text);
+                true
+            }
+        }
+    }
+}
+
 /// Mouse buttons the editor tells apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
@@ -75,6 +114,8 @@ pub struct InputCollector {
     alt: bool,
     /// Keys pressed this frame with the modifiers held then, for shortcuts.
     chords: Vec<Chord>,
+    /// What Ctrl+V pastes from (and the editor copies to).
+    pub clipboard: Clipboard,
 }
 
 impl InputCollector {
@@ -151,10 +192,7 @@ impl InputCollector {
             vk::X if self.ctrl => self.ui.keys.push(UiKey::Cut),
             vk::V if self.ctrl => {
                 // The text field being edited pastes it this frame.
-                #[cfg(windows)]
-                {
-                    self.ui.paste = engine_platform::clipboard::text().unwrap_or_default();
-                }
+                self.ui.paste = self.clipboard.text().unwrap_or_default();
                 self.ui.keys.push(UiKey::Paste);
             }
             _ => {}

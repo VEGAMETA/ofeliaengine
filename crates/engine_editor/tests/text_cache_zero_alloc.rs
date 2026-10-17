@@ -7,7 +7,8 @@
 use engine_editor::icons;
 use engine_editor::paint::UiText;
 use engine_editor::shell::{
-    Field, FileItem, FileKind, Palette, Section, ShellModel, TreeItem, Widget, build,
+    Field, FileItem, FileKind, Palette, PaletteRow, PaletteView, Section, ShellModel, TreeItem,
+    Widget, build,
 };
 use engine_ui::{TextMeasure, Theme, Ui, UiInput};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -100,6 +101,7 @@ fn a_steady_shell_frame_does_not_allocate() {
                 labels: &["x", "y", "z"],
                 typing: None,
             },
+            changed: true,
         },
         Field {
             name: "Rotation",
@@ -108,10 +110,12 @@ fn a_steady_shell_frame_does_not_allocate() {
                 labels: &["x", "y", "z"],
                 typing: None,
             },
+            changed: true,
         },
         Field {
             name: "Visible",
             widget: Widget::Check(true),
+            changed: false,
         },
         Field {
             name: "Mode",
@@ -119,6 +123,7 @@ fn a_steady_shell_frame_does_not_allocate() {
                 current: "Opaque",
                 open: Some(&["Opaque", "Mask", "Blend"]),
             },
+            changed: false,
         },
     ];
     let sections = [Section {
@@ -137,6 +142,21 @@ fn a_steady_shell_frame_does_not_allocate() {
         FileItem {
             name: "player.luau",
             kind: FileKind::Script,
+        },
+    ];
+    // The command palette open over it all, a query typed.
+    let rows = [
+        PaletteRow {
+            label: "Scene: Add Cube",
+            matched: &[7, 11],
+            category: 7,
+            detail: "",
+        },
+        PaletteRow {
+            label: "Scene: Duplicate Selection",
+            matched: &[],
+            category: 7,
+            detail: "Ctrl+D",
         },
     ];
     let model = ShellModel {
@@ -158,6 +178,12 @@ fn a_steady_shell_frame_does_not_allocate() {
         add_menu: Some(&["Empty", "Cube"]),
         tree_filter: "",
         inspector_filter: "",
+        palette: Some(PaletteView {
+            query: "ac",
+            hint: "Type a command",
+            rows: &rows,
+            selected: 1,
+        }),
     };
     let palette = Palette::default();
     let mut ui = Ui::new(Theme::default());

@@ -46,7 +46,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     (E4);
   - the filter box keeps the fields whose names match (and every field of a component
     whose name does);
-  - **Escape** during a drag puts the value back.
+  - **Escape** during a drag puts the value back;
+  - **a changed field** (one that differs from its type's default) has a reset button
+    (↺) at the end of its row; **Backspace** with the mouse over a field resets it too.
+    A name has no reset;
+  - **Ctrl+C and Ctrl+V** with the mouse over a field copy and paste its value (see
+    copying values below).
+- **The command palette** (Ctrl+Shift+P) finds and runs every command; Ctrl+P finds the
+  scene's objects (see below).
 - **Everything is undoable**, one step per action (a whole drag is one step). The scene's
   tab shows `*` while there are unsaved changes; undoing back to the saved state clears it.
 - **Saving** writes the scene file under the scene's own id, asset references by path.
@@ -66,6 +73,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Add an entity | Ctrl+A |
 | Snap by default, or not | Y |
 | Rename the selection | F2 |
+| The command palette | Ctrl+Shift+P |
+| Go to a scene object (the palette with `@`) | Ctrl+P |
+
+With the mouse over an inspector field that is not being typed in:
+
+| Keys | What they do |
+|---|---|
+| Backspace | reset the field to its default |
+| Ctrl+C | copy its value |
+| Ctrl+V | paste a value into it |
 
 While a field is typed in, the keys are the field's: Delete, Y or Ctrl+A edit the text,
 and only Ctrl+S still saves. Text fields work as Windows' own: Shift and Ctrl with the
@@ -88,6 +105,32 @@ keymap file and scripts use; `EditorGame::run_command` runs one by name.
 - The grid button in the tool bar (or Y) makes snapping the default; Shift then drags
   freely.
 - The viewport's gizmos (phase E2) follow the same rules.
+
+## The command palette
+
+Ctrl+Shift+P opens a box at the top of the window: type part of what you want and Enter
+runs the highlighted result.
+
+- **Commands** are listed as "Category: Title" ("Scene: Duplicate Selection"), each with
+  its shortcut beside it, so the palette also teaches the keys. The add menu's kinds are
+  commands too: "Add Cube", "Add Point Light".
+- **Matching:** the letters typed must appear in order; matches at word starts and runs
+  of letters rank first, so "dup sel" finds "Duplicate Selection" and "apl" finds "Add
+  Point Light". Matched letters are highlighted. Recently run commands rank higher among
+  equals; with nothing typed they come first.
+- **`@` finds the scene's objects** by name (Ctrl+P opens the palette with it typed); the
+  one picked is selected, and the tree opens its parents' rows. `>` before a query looks
+  for commands, as without it.
+- Up and Down move the highlight, Enter or a click runs it; Escape or a click elsewhere
+  closes the palette.
+
+## Copying values
+
+Ctrl+C over a field copies its value as a scene file writes it: `(0.25, 0, 0)` for a
+vector, `true`, `Run` for an enum, `@<scene id>` for an entity reference; a string as it
+is. Ctrl+V over a field reads the clipboard the same way, as one undoable step. Text that
+is not a value of the field's type changes nothing; the status bar says why. A vector is
+copied whole.
 
 ## Typing values
 
@@ -123,7 +166,7 @@ right button + WASD and focusing the selection come later.
 
 | Phase | What |
 |---|---|
-| E1-4b | the command palette (Ctrl+Shift+P), multi-selection and multi-editing, reset to default, copying values |
+| E1-4b-3 | multi-selection and multi-editing (differing values read "—", relative edits per entity) |
 | E1-5 | sessions, autosave, rebuild and restart after a code change |
 | E2 | selection in the viewport, gizmos, placement by drag and drop |
 | E3 | Play on a copy of the world |
@@ -142,4 +185,5 @@ the panels stay at Windows' SDR white level. `--hdr scrgb|hdr10|off` picks the o
 | | |
 |---|---|
 | Start and 60 frames | 0.51–0.69 s (budget for the start alone: 2 s) |
-| The editor's frame on the CPU (shell, tree of 200 entities, inspector) | 74 µs, 84 µs with a selection |
+| The editor's frame on the CPU (shell, tree of 200 entities, inspector) | 74 µs, 83 µs with a selection, 88 µs with the command palette open |
+| The palette's `@` search over 10,000 objects, per keystroke | 0.62–0.73 ms |

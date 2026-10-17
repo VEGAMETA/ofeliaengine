@@ -19,6 +19,8 @@ mod snap;
 mod undo;
 
 pub use app::{EditorGame, EditorOverlay, Start, editor, run, run_frames};
-pub use palette::{Chord, CommandId, CommandInfo, Commands, Conflict, KeyContext, Keymap, Match};
+pub use palette::{
+    Chord, CommandId, CommandInfo, Commands, Conflict, Fuzzy, KeyContext, Keymap, Match,
+};
 pub use snap::{Quantity, Snapping};
 pub use undo::{History, Transaction};

@@ -28,22 +28,26 @@
 //!   numbers are dragged sideways ([`crate::Snapping`]: Shift inverts the default, Ctrl
 //!   rounds to the grid) or clicked and typed (expressions, [`crate::expr`]); checkboxes
 //!   and enums are clicked; strings are typed. Its filter box narrows it to matching
-//!   fields.
+//!   fields. A changed field has a reset button (↺); over a field, Backspace resets it,
+//!   and Ctrl+C and Ctrl+V copy and paste its value as scene text.
+//! - **The command palette** (Ctrl+Shift+P) finds and runs every command, the add menu's
+//!   kinds among them ("Add Cube"); after `@` (Ctrl+P) it finds the scene's objects by
+//!   name and selects the one picked.
 //! - **Every edit is undoable** ([`History`]). Commands and their shortcuts: Ctrl+Z undo,
 //!   Ctrl+Y or Ctrl+Shift+Z redo, Ctrl+S save, Delete, Ctrl+D duplicate, Ctrl+A add, Y
-//!   snapping by default.
+//!   snapping by default, F2 rename.
 
 use crate::camera::OrbitCamera;
 use crate::icons;
 use crate::input::{Button, InputCollector};
-use crate::inspector::{self, Inspector, Kind, Property};
+use crate::inspector::{self, Defaults, Inspector, Kind, Property};
 use crate::paint::{UiText, paint};
 use crate::shell::{
-    Field, FieldAction, FieldEvent, Palette, Section, ShellModel, TreeItem, Widget, build,
-    dismissed,
+    Field, FieldAction, FieldEvent, Palette, PaletteAction, PaletteRow, PaletteView, Section,
+    ShellModel, TreeItem, Widget, build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
-use crate::{Chord, CommandId, Commands, History, KeyContext, Keymap};
+use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
 use engine_app::{
     AppError, Game, Model, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup,
     Window, builtin,
@@ -51,6 +55,7 @@ use engine_app::{
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
 use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind};
+use engine_reflect::TypeKind;
 use engine_render2d::{Canvas, GlyphTexture, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, PointLight, SpotLight, Sun, look_rotation};
 use engine_scene::{AssetId, AssetPaths, Name, SaveOptions, SceneId, SceneRegistry};
@@ -83,6 +88,10 @@ const ADD: [&str; 9] = [
 
 /// How long a message stays in the status bar, in seconds.
 const MESSAGE_SECONDS: f32 = 4.0;
+
+/// How many results the command palette shows at once (the list scrolls with the
+/// highlight).
+const PALETTE_ROWS: usize = 12;
 
 /// Runs the editor around a game until its window closes. `settings` are the game's; its
 /// scene (`PlayerSettings::scene`) is what the editor opens. A full-screen window becomes
@@ -221,10 +230,15 @@ struct CommandIds {
     add: CommandId,
     snap: CommandId,
     rename: CommandId,
+    palette: CommandId,
+    find: CommandId,
+    /// "Add Cube" and the rest: the add menu's kinds, in its order.
+    add_kinds: [CommandId; ADD.len()],
 }
 
-/// The editor's commands and their default shortcuts.
-fn commands() -> (Commands, Keymap, CommandIds) {
+/// The editor's commands, their default shortcuts, and the shortcut the palette shows
+/// beside each command (its first).
+fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
     let mut c = Commands::new();
     let ids = CommandIds {
         undo: c.register("edit.undo", "Edit", "Undo"),
@@ -235,8 +249,15 @@ fn commands() -> (Commands, Keymap, CommandIds) {
         add: c.register("scene.add", "Scene", "Add Entity"),
         snap: c.register("edit.snap", "Edit", "Snap by Default"),
         rename: c.register("scene.rename", "Scene", "Rename Selection"),
+        palette: c.register("editor.palette", "Editor", "Command Palette"),
+        find: c.register("scene.find", "Scene", "Go to Object"),
+        add_kinds: ADD.map(|kind| {
+            let name = format!("scene.add.{}", kind.to_lowercase().replace(' ', "_"));
+            c.register(&name, "Scene", &format!("Add {kind}"))
+        }),
     };
     let mut keymap = Keymap::new();
+    let mut shortcuts = HashMap::new();
     for (chord, id) in [
         ("Ctrl+Z", ids.undo),
         ("Ctrl+Y", ids.redo),
@@ -247,12 +268,15 @@ fn commands() -> (Commands, Keymap, CommandIds) {
         ("Ctrl+A", ids.add),
         ("Y", ids.snap),
         ("F2", ids.rename),
+        ("Ctrl+Shift+P", ids.palette),
+        ("Ctrl+P", ids.find),
     ] {
         if let Some(chord) = Chord::parse(chord) {
             let _ = keymap.bind(chord, KeyContext::Global, id);
+            shortcuts.entry(id).or_insert_with(|| chord.to_string());
         }
     }
-    (c, keymap, ids)
+    (c, keymap, ids, shortcuts)
 }
 
 /// Entity references read from text: by scene id, through an index of the world.
@@ -285,6 +309,94 @@ struct Drag {
     cancelled: bool,
     /// The pointer moved: a press and release without moving types the value instead.
     moved: bool,
+}
+
+/// An object the command palette found.
+#[derive(Debug, Clone, Copy)]
+struct Found {
+    entity: Entity,
+    score: i32,
+    /// Its place in tree order: equal scores keep it.
+    order: u32,
+    /// Its matched characters: a range of the palette's `highlights`.
+    matched: (u32, u32),
+}
+
+/// The command palette while it is open: one box for every command and, after `@`, the
+/// scene's objects (`docs/research/ux/command-palette.md`).
+#[derive(Debug, Default)]
+struct CommandPalette {
+    /// What is typed.
+    query: String,
+    /// The highlighted result.
+    selected: usize,
+    /// The first result shown: the list scrolls to keep the highlight in view.
+    first: usize,
+    /// The commands matching the query, best first.
+    commands: Vec<Match>,
+    /// After `@`: the objects matching the query, best first.
+    objects: Vec<Found>,
+    highlights: Vec<u16>,
+    fuzzy: Fuzzy,
+    /// The scene's entities in tree order, and a stack for walking it (kept: searching
+    /// allocates nothing once they have grown).
+    order: Vec<Entity>,
+    stack: Vec<Entity>,
+}
+
+impl CommandPalette {
+    /// Whether the query looks for the scene's objects (`@`) rather than commands.
+    fn finds_objects(&self) -> bool {
+        self.query.trim_start().starts_with('@')
+    }
+
+    /// How many results there are.
+    fn len(&self) -> usize {
+        if self.finds_objects() {
+            self.objects.len()
+        } else {
+            self.commands.len()
+        }
+    }
+
+    /// Highlights result `i`, scrolling the list to show it.
+    fn select(&mut self, i: usize) {
+        self.selected = i;
+        if i < self.first {
+            self.first = i;
+        } else if i >= self.first + PALETTE_ROWS {
+            self.first = i + 1 - PALETTE_ROWS;
+        }
+    }
+}
+
+/// The scene's entities (those with a scene id) in tree order, under closed rows too:
+/// roots in spawn order (the scene file's), each followed by its children.
+fn tree_order(
+    world: &World,
+    ids: &mut QueryState<(Entity, &'static SceneId)>,
+    stack: &mut Vec<Entity>,
+    out: &mut Vec<Entity>,
+) {
+    out.clear();
+    stack.clear();
+    stack.extend(ids.iter_readonly(world).map(|(e, _)| e).filter(|&e| {
+        world
+            .parent(e)
+            .is_none_or(|p| world.get::<SceneId>(p).is_none())
+    }));
+    // The first root on top.
+    stack.sort_unstable_by_key(|e| core::cmp::Reverse(e.index()));
+    while let Some(e) = stack.pop() {
+        out.push(e);
+        let at = stack.len();
+        stack.extend(
+            world
+                .children(e)
+                .filter(|&c| world.get::<SceneId>(c).is_some()),
+        );
+        stack[at..].reverse();
+    }
 }
 
 /// What the editor keeps between frames, shared by its game and its overlay.
@@ -322,8 +434,14 @@ struct Editor {
     commands: Commands,
     keymap: Keymap,
     ids: CommandIds,
+    /// The shortcut shown beside each command in the palette.
+    shortcuts: HashMap<CommandId, String>,
+    /// The command palette, while open.
+    command_palette: Option<CommandPalette>,
     snapping: Snapping,
     inspector: Inspector,
+    /// Each component type's default value (changed fields, reset).
+    defaults: Defaults,
     drag: Option<Drag>,
     /// The number being typed (a click without a drag): its component, offset and part.
     typing: Option<(ComponentId, usize, u8)>,
@@ -448,7 +566,7 @@ impl Editor {
             panel: palette.dock,
             ..Theme::default()
         });
-        let (commands, keymap, ids) = commands();
+        let (commands, keymap, ids, shortcuts) = commands();
         Ok(Self {
             ui,
             text: UiText::new()?,
@@ -476,8 +594,11 @@ impl Editor {
             commands,
             keymap,
             ids,
+            shortcuts,
+            command_palette: None,
             snapping: Snapping::default(),
             inspector: Inspector::new(),
+            defaults: Defaults::new(),
             drag: None,
             typing: None,
             renaming: None,
@@ -652,7 +773,9 @@ impl Editor {
             self.selected = None;
         }
         match self.selected {
-            Some(e) => self.inspector.build(world, e, &self.assets),
+            Some(e) => self
+                .inspector
+                .build(world, e, &self.assets, &mut self.defaults),
             None => {
                 self.inspector.clear();
                 self.drag = None;
@@ -728,6 +851,7 @@ impl Editor {
                 Field {
                     name: self.inspector.name(p),
                     widget,
+                    changed: p.changed,
                 }
             })
             .collect();
@@ -791,6 +915,43 @@ impl Editor {
         if self.history.head() != self.saved_head {
             self.scene_label.push('*');
         }
+        // The command palette's results in view.
+        let mut palette_rows: Vec<PaletteRow<'_>> = Vec::new();
+        if let Some(cp) = &self.command_palette {
+            let end = (cp.first + PALETTE_ROWS).min(cp.len());
+            for i in cp.first..end {
+                palette_rows.push(if cp.finds_objects() {
+                    let found = cp.objects[i];
+                    let kind = kind_of(world, found.entity).1;
+                    PaletteRow {
+                        label: world.get::<Name>(found.entity).map_or(kind, Name::as_str),
+                        matched: &cp.highlights[found.matched.0 as usize..found.matched.1 as usize],
+                        category: 0,
+                        detail: kind,
+                    }
+                } else {
+                    let m = &cp.commands[i];
+                    let info = self.commands.info(m.id);
+                    PaletteRow {
+                        label: info.label(),
+                        matched: self.commands.highlights(m),
+                        // "Scene: " is dimmed.
+                        category: if info.category.is_empty() {
+                            0
+                        } else {
+                            info.category.chars().count() + 2
+                        },
+                        detail: self.shortcuts.get(&m.id).map_or("", String::as_str),
+                    }
+                });
+            }
+        }
+        let palette = self.command_palette.as_ref().map(|cp| PaletteView {
+            query: &cp.query,
+            hint: "Type a command, or @ and an object's name",
+            rows: &palette_rows,
+            selected: cp.selected.saturating_sub(cp.first),
+        });
         let scenes = [self.scene_label.as_str()];
         let tools = self.tools.each_ref().map(String::as_str);
         let model = ShellModel {
@@ -819,6 +980,7 @@ impl Editor {
             add_menu: self.add_open.then_some(&ADD[..]),
             tree_filter: &self.tree_filter,
             inspector_filter: &self.inspector_filter,
+            palette,
         };
         let scale = self.scale.max(0.5);
         let logical = [self.size[0] as f32 / scale, self.size[1] as f32 / scale];
@@ -835,6 +997,7 @@ impl Editor {
         if dismissed(&self.ui, &response) {
             self.add_open = false;
             self.open_choice = None;
+            self.command_palette = None;
         }
         if response.add {
             self.add_open = !self.add_open;
@@ -842,12 +1005,9 @@ impl Editor {
         if let Some(i) = response.add_item {
             self.add(world, i);
         }
-        // What was copied goes to Windows' clipboard.
+        // What was copied goes to the clipboard.
         if let Some(text) = self.ui.take_copied() {
-            #[cfg(windows)]
-            engine_platform::clipboard::set_text(&text);
-            #[cfg(not(windows))]
-            let _ = text;
+            self.input.clipboard.set_text(&text);
         }
         if let Some(row) = response.tree_toggle.and_then(|i| self.rows.get(i).copied())
             && !self.collapsed.remove(&row.entity)
@@ -895,6 +1055,41 @@ impl Editor {
         }
         if let Some(event) = response.field {
             self.edit(world, event);
+        }
+        // Over a field that is not being typed in: Backspace resets it, Ctrl+C and Ctrl+V
+        // copy and paste its value (Blender).
+        if let Some((section, field)) = response.hovered_field
+            && self.ui.editing().is_none()
+            && response.popup.is_none()
+            && self.drag.is_none()
+        {
+            let keys = &self.ui.input().keys;
+            let (reset, copy, paste) = (
+                keys.contains(&UiKey::Backspace),
+                keys.contains(&UiKey::Copy),
+                keys.contains(&UiKey::Paste),
+            );
+            if reset {
+                let action = FieldAction::Reset;
+                self.edit(
+                    world,
+                    FieldEvent {
+                        section,
+                        field,
+                        action,
+                    },
+                );
+            }
+            if copy {
+                self.copy_value(world, section, field);
+            }
+            if paste {
+                let text = self.ui.input().paste.clone();
+                self.paste_value(world, section, field, &text);
+            }
+        }
+        if let Some(action) = response.palette {
+            self.palette_action(world, action);
         }
         // Escape during a drag puts the value back as it was.
         if self.ui.input().keys.contains(&UiKey::Escape)
@@ -965,33 +1160,42 @@ impl Editor {
         }
     }
 
+    /// The property shown as field `field` of shown section `section` (what a field event
+    /// points at), with its component's name.
+    fn shown_property(&self, section: usize, field: usize) -> Option<(Property, &'static str)> {
+        let &(start, end) = self.shown_sections.get(section)?;
+        let &index = self
+            .shown
+            .get(start + field)
+            .filter(|_| start + field < end)?;
+        let p = *self.inspector.properties().get(index)?;
+        let component = self
+            .inspector
+            .sections()
+            .iter()
+            .find(|s| s.properties.contains(&index))?
+            .title;
+        Some((p, component))
+    }
+
+    /// A property's scene path: `Transform.translation`, or the component's name alone
+    /// for one written whole (`Name`).
+    fn path_of(&self, p: &Property, component: &str) -> String {
+        if p.whole {
+            component.to_owned()
+        } else {
+            format!("{component}.{}", self.inspector.name(p))
+        }
+    }
+
     /// Applies an inspector field's action to the selected entity, as an undoable step.
     fn edit(&mut self, world: &mut World, event: FieldEvent) {
         let Some(e) = self.selected else {
             return;
         };
-        let Some(&(start, end)) = self.shown_sections.get(event.section) else {
+        let Some((p, component)) = self.shown_property(event.section, event.field) else {
             return;
         };
-        let Some(&index) = self
-            .shown
-            .get(start + event.field)
-            .filter(|_| start + event.field < end)
-        else {
-            return;
-        };
-        let Some(&p) = self.inspector.properties().get(index) else {
-            return;
-        };
-        let Some(section) = self
-            .inspector
-            .sections()
-            .iter()
-            .find(|s| s.properties.contains(&index))
-        else {
-            return;
-        };
-        let component = section.title;
         let title = format!("{component}.{}", self.inspector.name(&p));
         match event.action {
             FieldAction::Drag {
@@ -1092,11 +1296,7 @@ impl Editor {
                     return;
                 }
                 let text = engine_scene::text::quote(self.ui.edited_text());
-                let path = if p.whole {
-                    component.to_owned()
-                } else {
-                    format!("{component}.{}", self.inspector.name(&p))
-                };
+                let path = self.path_of(&p, component);
                 if let Err(reason) = self.set(world, e, &path, &text) {
                     self.say(format!("{title}: {reason}"));
                 }
@@ -1124,6 +1324,189 @@ impl Editor {
                 }
                 self.history.commit(world);
             }
+            FieldAction::Reset => {
+                let Some(default) = self.defaults.of(world, p.component).filter(|_| p.changed)
+                else {
+                    return;
+                };
+                self.history.begin(&format!("Reset {title}"), None);
+                self.history.touch(world, e);
+                if let Some(ptr) = world.get_raw_mut(e, p.component) {
+                    // SAFETY: the entity's live value of the property's component, and the
+                    // component type's default value.
+                    unsafe { inspector::reset(&p, ptr.as_ptr(), default.as_ptr()) };
+                }
+                self.history.commit(world);
+            }
+        }
+    }
+
+    /// Puts a field's value on the clipboard: its scene text (`(0, 1.5, 0)`, `true`,
+    /// `Run`), a string as it is.
+    fn copy_value(&mut self, world: &World, section: usize, field: usize) {
+        let Some(e) = self.selected else {
+            return;
+        };
+        let Some((p, component)) = self.shown_property(section, field) else {
+            return;
+        };
+        let Some(ptr) = world.get_raw(e, p.component) else {
+            return;
+        };
+        let title = format!("{component}.{}", self.inspector.name(&p));
+        let mut text = String::new();
+        // SAFETY: the property's value, inside the entity's live component.
+        unsafe {
+            let at = ptr.as_ptr().cast_const().add(p.offset);
+            if matches!(p.ty.kind, TypeKind::String) {
+                text.push_str(engine_reflect::read_str(at));
+            } else {
+                // A single value is written ` = <text>`, with no path of its own.
+                let ids = |x: Entity| world.get::<SceneId>(x).copied();
+                let mut lines = String::new();
+                engine_scene::write_lines_with(p.ty, at, &ids, Some(&self.assets), &mut lines);
+                match lines.trim_end().strip_prefix(" = ") {
+                    Some(value) if !value.contains('\n') => text.push_str(value),
+                    _ => {
+                        self.say(format!("{title}: not a single value, nothing copied"));
+                        return;
+                    }
+                }
+            }
+        }
+        if self.input.clipboard.set_text(&text) {
+            self.say(format!("Copied {title}"));
+        } else {
+            self.say(String::from("The clipboard is busy: nothing copied"));
+        }
+    }
+
+    /// Sets a field from pasted text, read as its copy is written (scene text, a string as
+    /// it is), as one undoable step.
+    fn paste_value(&mut self, world: &mut World, section: usize, field: usize, text: &str) {
+        let Some(e) = self.selected else {
+            return;
+        };
+        let Some((p, component)) = self.shown_property(section, field) else {
+            return;
+        };
+        let title = format!("{component}.{}", self.inspector.name(&p));
+        let value = if matches!(p.ty.kind, TypeKind::String) {
+            // One line, as a text field pastes it.
+            let line: String = text
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            engine_scene::text::quote(&line)
+        } else {
+            text.trim().to_owned()
+        };
+        let path = self.path_of(&p, component);
+        match self.set(world, e, &path, &value) {
+            Ok(()) => self.say(format!("Pasted {title}")),
+            Err(reason) => self.say(format!("{title}: {reason}")),
+        }
+    }
+
+    /// Opens the command palette with `query` typed (`@` finds the scene's objects).
+    fn open_palette(&mut self, world: &mut World, query: &str) {
+        self.add_open = false;
+        self.open_choice = None;
+        let cp = self
+            .command_palette
+            .get_or_insert_with(CommandPalette::default);
+        cp.query.clear();
+        cp.query.push_str(query);
+        self.search_palette(world);
+    }
+
+    /// Finds what the palette's query names: commands, or after `@` the scene's objects,
+    /// best first (in tree order among equals); the first highlighted.
+    fn search_palette(&mut self, world: &mut World) {
+        let Some(cp) = self.command_palette.as_mut() else {
+            return;
+        };
+        cp.selected = 0;
+        cp.first = 0;
+        cp.objects.clear();
+        cp.highlights.clear();
+        let query = cp.query.trim_start();
+        if let Some(name) = query.strip_prefix('@') {
+            cp.commands.clear();
+            let ids = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
+            let world = &*world;
+            tree_order(world, ids, &mut cp.stack, &mut cp.order);
+            cp.fuzzy.set_query(name);
+            for (order, &e) in cp.order.iter().enumerate() {
+                let label = world
+                    .get::<Name>(e)
+                    .map_or_else(|| kind_of(world, e).1, Name::as_str);
+                if let Some(score) = cp.fuzzy.score(label) {
+                    let start = cp.highlights.len() as u32;
+                    cp.highlights.extend_from_slice(cp.fuzzy.positions());
+                    cp.objects.push(Found {
+                        entity: e,
+                        score,
+                        order: order as u32,
+                        matched: (start, cp.highlights.len() as u32),
+                    });
+                }
+            }
+            cp.objects
+                .sort_unstable_by_key(|f| (core::cmp::Reverse(f.score), f.order));
+        } else {
+            let query = query.strip_prefix('>').unwrap_or(query);
+            self.commands.search(query, &mut cp.commands);
+        }
+    }
+
+    /// Applies what the user did in the command palette.
+    fn palette_action(&mut self, world: &mut World, action: PaletteAction) {
+        match action {
+            PaletteAction::Query => {
+                if let Some(cp) = &mut self.command_palette {
+                    cp.query.clear();
+                    cp.query.push_str(self.ui.edited_text());
+                }
+                self.search_palette(world);
+            }
+            PaletteAction::Move(by) => {
+                if let Some(cp) = &mut self.command_palette {
+                    let n = cp.len() as i64;
+                    if n > 0 {
+                        let i = (cp.selected as i64 + i64::from(by)).rem_euclid(n);
+                        cp.select(i as usize);
+                    }
+                }
+            }
+            PaletteAction::Run(row) => {
+                let Some(cp) = self.command_palette.take() else {
+                    return;
+                };
+                let i = cp.first + row;
+                if cp.finds_objects() {
+                    if let Some(found) = cp.objects.get(i) {
+                        self.show(world, found.entity);
+                    }
+                } else if let Some(m) = cp.commands.get(i) {
+                    self.run(world, m.id);
+                }
+            }
+            PaletteAction::Close => self.command_palette = None,
+        }
+    }
+
+    /// Selects `e` and opens its parents' rows, so the tree shows it.
+    fn show(&mut self, world: &World, e: Entity) {
+        if self.selected != Some(e) {
+            self.open_choice = None;
+            self.typing = None;
+        }
+        self.selected = Some(e);
+        let mut at = world.parent(e);
+        while let Some(p) = at {
+            self.collapsed.remove(&p);
+            at = world.parent(p);
         }
     }
 
@@ -1187,6 +1570,12 @@ impl Editor {
                 "free by default (Shift: snapping)"
             };
             self.say(format!("Dragged values: {mode}"));
+        } else if id == ids.palette {
+            self.open_palette(world, "");
+        } else if id == ids.find {
+            self.open_palette(world, "@");
+        } else if let Some(kind) = ids.add_kinds.iter().position(|&k| k == id) {
+            self.add(world, kind);
         }
     }
 
@@ -1339,8 +1728,9 @@ impl<G> EditorGame<G> {
     }
 
     /// Runs an editor command by its stable name (`edit.undo`, `edit.redo`, `file.save`,
-    /// `scene.delete`, `scene.duplicate`, `scene.add`, `edit.snap`), as its shortcut does.
-    /// False if there is no such command.
+    /// `scene.delete`, `scene.duplicate`, `scene.add`, `scene.add.cube` and the add menu's
+    /// other kinds, `scene.rename`, `scene.find`, `editor.palette`, `edit.snap`), as its
+    /// shortcut does. False if there is no such command.
     pub fn run_command(&mut self, world: &mut World, name: &str) -> bool {
         let mut shared = self.shared.borrow_mut();
         let Some(id) = shared.commands.find(name) else {
@@ -1496,6 +1886,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::float_cmp)]
 
     use super::*;
+    use crate::input::Clipboard;
     use engine_ecs::reflect_component;
     use engine_platform::window::WindowId;
     use engine_reflect::Reflect;
@@ -1997,5 +2388,174 @@ mod tests {
         assert_eq!(ed.shown.len(), 1, "only Transform.scale");
         assert!(texts(&ed, "translation").is_empty());
         assert!(!texts(&ed, "scale").is_empty());
+    }
+
+    /// Presses a chord (modifiers then the key, by their virtual-key codes and scan codes)
+    /// for one frame, then releases it.
+    fn chord(ed: &mut Editor, world: &mut World, keys: &[(u16, u16)]) {
+        for &(vk, sc) in keys {
+            key(ed, vk, sc, true);
+        }
+        ed.update(world);
+        for &(vk, sc) in keys.iter().rev() {
+            key(ed, vk, sc, false);
+        }
+    }
+
+    const CTRL: (u16, u16) = (0x11, 0x1D);
+    const SHIFT: (u16, u16) = (0x10, 0x2A);
+    const P: (u16, u16) = (0x50, 0x19);
+    const ENTER: (u16, u16) = (0x0D, 0x1C);
+    const DOWN: (u16, u16) = (0x28, 0x50);
+    const ESCAPE: (u16, u16) = (0x1B, 0x01);
+    const BACKSPACE: (u16, u16) = (0x08, 0x0E);
+    const C: (u16, u16) = (0x43, 0x2E);
+    const V: (u16, u16) = (0x56, 0x2F);
+
+    /// The names of the scene's entities.
+    fn names(world: &mut World) -> Vec<String> {
+        let mut q = QueryState::<(Entity, &Name)>::new(world);
+        let mut names: Vec<String> = q
+            .iter_readonly(world)
+            .map(|(_, n)| n.as_str().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn the_palette_runs_commands_and_finds_objects() {
+        let (mut world, mut ed, cube, lamp) = two_entities();
+        // Ctrl+Shift+P opens it; the box takes the keys from the next frame.
+        chord(&mut ed, &mut world, &[CTRL, SHIFT, P]);
+        assert!(ed.command_palette.is_some());
+        ed.update(&mut world);
+        assert!(ed.ui.editing().is_some(), "the query box is being typed in");
+        // Every command is listed, its shortcut beside it.
+        assert!(!texts(&ed, "Ctrl+Shift+P").is_empty());
+        // "add cyl" finds "Scene: Add Cylinder" first; Enter runs it.
+        chars(&mut ed, "add cyl");
+        ed.update(&mut world);
+        let cp = ed.command_palette.as_ref().unwrap();
+        assert_eq!(cp.commands[0].id, ed.ids.add_kinds[4]);
+        // Drawn from the next frame on: the matched letters apart.
+        ed.update(&mut world);
+        assert!(!texts(&ed, " Cyl").is_empty(), "{:?}", texts(&ed, "Add"));
+        chord(&mut ed, &mut world, &[ENTER]);
+        assert!(ed.command_palette.is_none());
+        assert_eq!(names(&mut world), ["Cube", "Cylinder", "Lamp"]);
+        let cylinder = ed.selected.unwrap();
+        assert_eq!(ed.history.steps().count(), 1);
+
+        // Ctrl+P: the scene's objects. "c" finds the cube and the cylinder, best first
+        // (the shorter name), in tree order among equals; Down, Enter selects the second.
+        chord(&mut ed, &mut world, &[CTRL, P]);
+        ed.update(&mut world);
+        chars(&mut ed, "c");
+        ed.update(&mut world);
+        let cp = ed.command_palette.as_ref().unwrap();
+        assert_eq!(cp.query, "@c", "typing goes after the `@`");
+        let found: Vec<Entity> = cp.objects.iter().map(|f| f.entity).collect();
+        assert_eq!(found, [cube, cylinder]);
+        chord(&mut ed, &mut world, &[DOWN]);
+        assert_eq!(ed.command_palette.as_ref().unwrap().selected, 1);
+        chord(&mut ed, &mut world, &[ENTER]);
+        assert_eq!(ed.selected, Some(cylinder));
+        // "@lam" and Enter: the lamp.
+        chord(&mut ed, &mut world, &[CTRL, P]);
+        ed.update(&mut world);
+        chars(&mut ed, "lam");
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[ENTER]);
+        assert_eq!(ed.selected, Some(lamp));
+
+        // Escape closes it, and so does a click elsewhere; nothing runs.
+        chord(&mut ed, &mut world, &[CTRL, SHIFT, P]);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert!(ed.command_palette.is_none());
+        chord(&mut ed, &mut world, &[CTRL, SHIFT, P]);
+        ed.update(&mut world);
+        click(&mut ed, &mut world, [10.0, 700.0]);
+        assert!(ed.command_palette.is_none());
+        assert_eq!(ed.history.steps().count(), 1);
+
+        // A click on a row runs it: "dup" and a click on "Duplicate Selection".
+        chord(&mut ed, &mut world, &[CTRL, SHIFT, P]);
+        ed.update(&mut world);
+        chars(&mut ed, "dup");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let row = texts(&ed, "licate Selection")[0];
+        click(
+            &mut ed,
+            &mut world,
+            [row.pos[0] + 4.0, row.pos[1] + row.size[1] / 2.0],
+        );
+        assert!(ed.command_palette.is_none());
+        assert_eq!(names(&mut world), ["Cube", "Cylinder", "Lamp", "Lamp"]);
+    }
+
+    #[test]
+    fn fields_reset_copy_and_paste() {
+        let (mut world, mut ed, cube, lamp) = two_entities();
+        ed.input.clipboard = Clipboard::Local(String::new());
+        let translation = |world: &World| world.get::<Transform>(cube).unwrap().translation;
+        // Only the changed field has a reset button: the cube's translation (the name has
+        // none).
+        assert_eq!(texts(&ed, icons::RESET).len(), 1);
+        let reset = on_row(&ed, "translation", icons::RESET);
+        click(&mut ed, &mut world, reset);
+        assert_eq!(translation(&world), Vec3::ZERO);
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(translation(&world).x, 0.25);
+
+        // Backspace over the field resets it too.
+        ed.update(&mut world);
+        let name = texts(&ed, "translation")[0];
+        mouse(&mut ed, [name.pos[0] + 4.0, name.pos[1] + 4.0], None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[BACKSPACE]);
+        assert_eq!(translation(&world), Vec3::ZERO);
+        ed.run(&mut world, ed.ids.undo);
+
+        // Ctrl+C over the translation, Ctrl+V over the scale: the value as scene text.
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[CTRL, C]);
+        assert_eq!(ed.input.clipboard.text().as_deref(), Some("(0.25, 0, 0)"));
+        let scale = texts(&ed, "scale")[0];
+        mouse(&mut ed, [scale.pos[0] + 4.0, scale.pos[1] + 4.0], None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[CTRL, V]);
+        assert_eq!(
+            world.get::<Transform>(cube).unwrap().scale,
+            Vec3::new(0.25, 0.0, 0.0)
+        );
+        // Text that is not a vector changes nothing and says why.
+        let steps = ed.history.steps().count();
+        ed.input.clipboard.set_text("tall");
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[CTRL, V]);
+        assert_eq!(ed.history.steps().count(), steps);
+        assert!(
+            ed.message
+                .as_ref()
+                .is_some_and(|(m, _)| m.starts_with("Transform.scale")),
+            "{:?}",
+            ed.message
+        );
+
+        // A name is copied as it is, and pasted onto another entity's name.
+        ed.update(&mut world);
+        let value = on_row(&ed, "value", "Cube");
+        mouse(&mut ed, [value[0] - 60.0, value[1]], None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[CTRL, C]);
+        assert_eq!(ed.input.clipboard.text().as_deref(), Some("Cube"));
+        ed.selected = Some(lamp);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[CTRL, V]);
+        assert_eq!(world.get::<Name>(lamp).map(Name::as_str), Some("Cube"));
     }
 }

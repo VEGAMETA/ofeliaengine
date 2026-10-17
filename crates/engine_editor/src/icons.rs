@@ -69,3 +69,5 @@ pub const PLUS: &str = "\u{F0415}";
 pub const CHECK: &str = "\u{F012C}";
 /// A list that opens (`md-menu_down`).
 pub const MENU_DOWN: &str = "\u{F035D}";
+/// Back to the default value (`md-undo`).
+pub const RESET: &str = "\u{F054C}";

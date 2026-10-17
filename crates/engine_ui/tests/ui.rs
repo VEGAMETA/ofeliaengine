@@ -319,7 +319,14 @@ fn drags_report_travel_from_the_press_and_their_release() {
 }
 
 fn field_frame(ui: &mut Ui, input: &UiInput, text: &str) -> TextFieldResponse {
+    look_frame(ui, input, text, false).0
+}
+
+/// A frame with one text field (a search box, autofocused, when `search`) above a row
+/// marked as a hover region: the field's response, and whether the mouse is in the row.
+fn look_frame(ui: &mut Ui, input: &UiInput, text: &str, search: bool) -> (TextFieldResponse, bool) {
     let mut r = TextFieldResponse::default();
+    let mut in_row = false;
     frame(ui, input, |ui| {
         ui.column("root", Style::fill().padding(10.0), |ui| {
             r = ui.text_field(
@@ -331,12 +338,28 @@ fn field_frame(ui: &mut Ui, input: &UiInput, text: &str) -> TextFieldResponse {
                     color: [1.0; 4],
                     hint: "Name",
                     hint_color: [0.5; 4],
-                    autofocus: false,
+                    autofocus: search,
+                    search,
                 },
             );
+            let row = ui.container(
+                "row",
+                Style::default().size(Size::Fixed(200.0), Size::Fixed(20.0)),
+                |ui| {
+                    ui.container(
+                        "button",
+                        Style::default().size(Size::Fixed(20.0), Size::Fixed(20.0)),
+                        |_| {},
+                    );
+                    let button = ui.id("button");
+                    ui.sense(button, false);
+                },
+            );
+            ui.mark_region(row);
+            in_row = ui.in_region(row);
         });
     });
-    r
+    (r, in_row)
 }
 
 fn typing(text: &str) -> UiInput {
@@ -435,4 +458,39 @@ fn text_fields_edit_commit_and_cancel() {
     let r = field_frame(&mut ui, &away, "Gate 2");
     assert!(r.committed);
     assert_eq!(ui.edited_text(), "y");
+}
+
+#[test]
+fn search_boxes_keep_their_prefix_and_leave_up_and_down_to_the_list() {
+    let mut ui = Ui::new(Theme::default());
+    // Autofocused with the caret at the end: typing goes after the prefix.
+    let (r, _) = look_frame(&mut ui, &UiInput::default(), "@", true);
+    assert!(r.started && r.editing);
+    look_frame(&mut ui, &typing("cu"), "@", true);
+    assert_eq!(ui.edited_text(), "@cu");
+    // Up and Down do not move the caret (the list under the box takes them).
+    look_frame(
+        &mut ui,
+        &keys(&[UiKey::Up, UiKey::Down, UiKey::Up]),
+        "@",
+        true,
+    );
+    look_frame(&mut ui, &typing("b"), "@", true);
+    assert_eq!(ui.edited_text(), "@cub");
+    // Home still goes to the start.
+    look_frame(&mut ui, &keys(&[UiKey::Home]), "@", true);
+    look_frame(&mut ui, &typing(">"), "@", true);
+    assert_eq!(ui.edited_text(), ">@cub");
+}
+
+#[test]
+fn hover_regions_see_the_mouse_over_any_child() {
+    let mut ui = Ui::new(Theme::default());
+    // The row lies under the field (10 px padding, then the field's 20 px): over its
+    // button, which takes the hover, the row still has the mouse.
+    look_frame(&mut ui, &at(15.0, 40.0), "Door", false);
+    let (_, in_row) = look_frame(&mut ui, &at(15.0, 40.0), "Door", false);
+    assert!(in_row);
+    let (_, in_row) = look_frame(&mut ui, &at(15.0, 20.0), "Door", false);
+    assert!(!in_row, "over the field, not the row");
 }
