@@ -3,7 +3,8 @@
 //! 3D scene from the forward renderer in the viewport (an `engine_render` viewport drawn
 //! under the UI). Works on any Vulkan 1.3 device, including lavapipe.
 //!
-//! `cargo run -p engine_editor --release --example shell_png -- [out.png] [--playing]`
+//! `cargo run -p engine_editor --release --example shell_png -- [out.png] [--playing]
+//! [--palette]`: `--palette` shows the command palette open, "add" typed.
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -11,7 +12,8 @@ use engine_core::math::{Mat4, Quat, Vec2, Vec3, look_at};
 use engine_editor::icons;
 use engine_editor::paint::{UiText, paint};
 use engine_editor::shell::{
-    Field, FileItem, FileKind, Palette, Section, ShellModel, TreeItem, Widget, build,
+    Field, FileItem, FileKind, Palette, PaletteRow, PaletteView, Section, ShellModel, TreeItem,
+    Widget, build,
 };
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, ViewFeatures,
@@ -56,6 +58,7 @@ fn tree_item<'a>(
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let playing = args.iter().any(|a| a == "--playing");
+    let show_palette = args.iter().any(|a| a == "--palette");
     let out_path = args
         .iter()
         .find(|a| !a.starts_with("--"))
@@ -243,28 +246,34 @@ fn main() {
         Field {
             name: "Position",
             widget: numbers(&["0.5", "0.9", "2"]),
+            changed: true,
         },
         Field {
             name: "Rotation",
             widget: numbers(&["0", "45", "0"]),
+            changed: true,
         },
         Field {
             name: "Scale",
             widget: numbers(&["1", "1", "1"]),
+            changed: false,
         },
     ];
     let body = [
         Field {
             name: "Speed",
             widget: one(&["6.5"]),
+            changed: true,
         },
         Field {
             name: "Jump height",
             widget: one(&["1.4"]),
+            changed: false,
         },
         Field {
             name: "Mass",
             widget: one(&["72"]),
+            changed: false,
         },
         Field {
             name: "Gravity",
@@ -272,26 +281,31 @@ fn main() {
                 current: "World",
                 open: None,
             },
+            changed: false,
         },
     ];
     let script = [
         Field {
             name: "Source",
             widget: Widget::Text("player.luau"),
+            changed: false,
         },
         Field {
             name: "Hot reload",
             widget: Widget::Check(true),
+            changed: true,
         },
     ];
     let physics = [
         Field {
             name: "Layer",
             widget: Widget::Text("Characters"),
+            changed: false,
         },
         Field {
             name: "Collides with",
             widget: Widget::Text("World, Enemies"),
+            changed: false,
         },
     ];
     let inspector = [
@@ -343,6 +357,22 @@ fn main() {
     .map(|(icon, name)| format!("{icon} {name}"));
     let tools = tools.each_ref().map(String::as_str);
     let status = format!("engine 0.0.0  ·  Vulkan  ·  {adapter_name}");
+    // "add" against "Scene: Add …": the title's first three letters.
+    let row = |label, detail| PaletteRow {
+        label,
+        matched: &[7, 8, 9],
+        category: 7,
+        detail,
+    };
+    let palette_rows = [
+        row("Scene: Add Entity", "Ctrl+A"),
+        row("Scene: Add Cube", ""),
+        row("Scene: Add Camera", ""),
+        row("Scene: Add Cylinder", ""),
+        row("Scene: Add Empty", ""),
+        row("Scene: Add Plane", ""),
+        row("Scene: Add Point Light", ""),
+    ];
     let model = ShellModel {
         scenes: &["main.scene", "level_01.scene*", "меню.scene"],
         active_scene: 1,
@@ -369,6 +399,12 @@ fn main() {
         add_menu: None,
         tree_filter: "",
         inspector_filter: "",
+        palette: show_palette.then_some(PaletteView {
+            query: "add",
+            hint: "Type a command, or @ and an object's name",
+            rows: &palette_rows,
+            selected: 1,
+        }),
     };
 
     // Lay the UI out: the viewport's rectangle sizes the 3D view.

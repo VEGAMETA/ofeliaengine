@@ -18,7 +18,7 @@
 //! game plays, a thin colored edge around it shows the state instead of big buttons.
 
 use crate::icons;
-use engine_ui::{Align, Color, Direction, Size, Style, TextField, TextFieldResponse, Ui};
+use engine_ui::{Align, Color, Direction, Size, Style, TextField, TextFieldResponse, Ui, UiKey};
 
 /// A color from sRGB bytes, as the linear value the renderer blends in.
 pub fn srgb(r: u8, g: u8, b: u8) -> Color {
@@ -128,6 +128,47 @@ pub struct Field<'a> {
     pub name: &'a str,
     /// How it is shown.
     pub widget: Widget<'a>,
+    /// It differs from its type's default: a reset button (↺) follows it.
+    pub changed: bool,
+}
+
+/// A row of the command palette.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PaletteRow<'a> {
+    /// "Category: Title", or an object's name.
+    pub label: &'a str,
+    /// The label's characters (indices) the query matched: highlighted.
+    pub matched: &'a [u16],
+    /// The first characters that are the category: dimmed.
+    pub category: usize,
+    /// At the right end: the shortcut, or what the object is.
+    pub detail: &'a str,
+}
+
+/// The command palette while it is open.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PaletteView<'a> {
+    /// What is typed.
+    pub query: &'a str,
+    /// The hint while nothing is typed.
+    pub hint: &'a str,
+    /// The best matches, best first.
+    pub rows: &'a [PaletteRow<'a>],
+    /// The highlighted row (Enter runs it).
+    pub selected: usize,
+}
+
+/// What the user did in the command palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteAction {
+    /// The query changed (`Ui::edited_text`).
+    Query,
+    /// Up or Down moved the highlight by this many rows.
+    Move(i32),
+    /// Run row `i` (Enter on the highlighted one, or a click).
+    Run(usize),
+    /// Close it (Escape, a click elsewhere).
+    Close,
 }
 
 /// What the user did to an inspector field.
@@ -158,6 +199,8 @@ pub enum FieldAction {
         /// Kept, not cancelled.
         commit: bool,
     },
+    /// The reset button (↺): back to the type's default.
+    Reset,
     /// The checkbox was clicked.
     Toggle,
     /// The choice was clicked: its list opens or closes.
@@ -253,6 +296,8 @@ pub struct ShellModel<'a> {
     pub tree_filter: &'a str,
     /// What the inspector is filtered by.
     pub inspector_filter: &'a str,
+    /// The command palette, while open.
+    pub palette: Option<PaletteView<'a>>,
 }
 
 /// What happened in the shell this frame.
@@ -274,6 +319,11 @@ pub struct ShellResponse {
     pub tree_filter: Option<TextFieldResponse>,
     /// The inspector's filter field was used.
     pub inspector_filter: Option<TextFieldResponse>,
+    /// The inspector field under the mouse (section, field): Backspace resets it, Ctrl+C
+    /// and Ctrl+V copy and paste its value.
+    pub hovered_field: Option<(usize, usize)>,
+    /// The command palette was used.
+    pub palette: Option<PaletteAction>,
     /// A folder was clicked.
     pub folder: Option<usize>,
     /// A file was clicked.
@@ -343,6 +393,9 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
             },
         );
         bottom_bar(ui, model, p, &mut out);
+        if let Some(view) = &model.palette {
+            palette(ui, view, p, &mut out, &mut popups);
+        }
     });
     out.popup = popups.open;
     out
@@ -607,6 +660,7 @@ fn field_look<'a>(p: &Palette, style: Style, hint: &'a str, autofocus: bool) -> 
         hint,
         hint_color: p.text_dim,
         autofocus,
+        search: false,
     }
 }
 
@@ -774,6 +828,161 @@ fn scene_dock(
             out.rename = rows.rename;
         });
     });
+}
+
+/// The command palette: a floating box at the top of the window, its query field and the
+/// best matches, the matched characters highlighted and each command's shortcut beside it.
+fn palette(
+    ui: &mut Ui,
+    view: &PaletteView<'_>,
+    p: &Palette,
+    out: &mut ShellResponse,
+    popups: &mut Popups,
+) {
+    const WIDTH: f32 = 560.0;
+    let x = ((ui.viewport()[0] - WIDTH) / 2.0).max(8.0);
+    let mut action = None;
+    let panel = ui.column(
+        "palette",
+        Style {
+            floating: Some([x, 38.0]),
+            size: [Size::Fixed(WIDTH), Size::Fit],
+            padding: [6.0; 4],
+            gap: 4.0,
+            radius: 6.0,
+            background: Some(p.header),
+            border: Some((p.accent, 1.0)),
+            ..Style::default()
+        },
+        |ui| {
+            let style = Style {
+                size: [Size::Grow(1.0), Size::Fixed(26.0)],
+                padding: [8.0, 0.0, 8.0, 0.0],
+                radius: 4.0,
+                background: Some(p.field),
+                align_cross: Align::Center,
+                ..Style::default()
+            };
+            let look = TextField {
+                search: true,
+                ..field_look(p, style, view.hint, true)
+            };
+            let r = ui.text_field("query", view.query, &look);
+            if r.changed {
+                action = Some(PaletteAction::Query);
+            }
+            // Enter runs the highlighted row. A click elsewhere also ends the edit: on a
+            // row, the row runs when the click ends; outside, the palette is dismissed
+            // like any popup ([`dismissed`]). Meanwhile the box takes the focus again.
+            if r.committed && ui.input().keys.contains(&UiKey::Enter) {
+                action = Some(PaletteAction::Run(view.selected));
+            }
+            if r.cancelled {
+                action = Some(PaletteAction::Close);
+            }
+            if r.editing && action.is_none() {
+                for key in &ui.input().keys {
+                    match key {
+                        UiKey::Up => action = Some(PaletteAction::Move(-1)),
+                        UiKey::Down => action = Some(PaletteAction::Move(1)),
+                        _ => {}
+                    }
+                }
+            }
+            if view.rows.is_empty() && !view.query.trim().is_empty() {
+                ui.row(
+                    "none",
+                    Style {
+                        size: [Size::Grow(1.0), Size::Fixed(24.0)],
+                        padding: [8.0, 0.0, 8.0, 0.0],
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        text(ui, "text", "No matches", TEXT, p.text_dim);
+                    },
+                );
+            }
+            for (i, row) in view.rows.iter().enumerate() {
+                ui.push_id(i as u64);
+                let id = ui.id("row");
+                let background = if i == view.selected {
+                    Some(p.selection)
+                } else {
+                    ui.is_hovered(id).then_some(p.field_hover)
+                };
+                ui.row(
+                    "row",
+                    Style {
+                        size: [Size::Grow(1.0), Size::Fixed(24.0)],
+                        padding: [8.0, 0.0, 8.0, 0.0],
+                        radius: 3.0,
+                        background,
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        label_runs(ui, row, p);
+                        ui.spacer("fill");
+                        text(ui, "detail", row.detail, SMALL, p.text_dim);
+                    },
+                );
+                if ui.sense(id, false).clicked {
+                    action = Some(PaletteAction::Run(i));
+                }
+                ui.pop_id();
+            }
+        },
+    );
+    popups.open = Some((panel, panel));
+    out.palette = action;
+}
+
+/// A palette row's label as runs: the category dimmed, matched characters in the accent.
+fn label_runs(ui: &mut Ui, row: &PaletteRow<'_>, p: &Palette) {
+    let label = row.label;
+    let mut start = 0;
+    let mut run = 0;
+    let class = |i: usize| {
+        if row.matched.contains(&(i as u16)) {
+            2
+        } else if i < row.category {
+            0
+        } else {
+            1
+        }
+    };
+    let mut current = None;
+    for (i, (at, _)) in label.char_indices().enumerate() {
+        let c = class(i);
+        if current != Some(c) {
+            if let Some(prev) = current {
+                // Spaces ending a run start the next one: a text's trailing spaces take no
+                // width, its leading ones do.
+                let end = start + label[start..at].trim_end().len();
+                if end > start {
+                    run_text(ui, run, &label[start..end], prev, p);
+                    run += 1;
+                    start = end;
+                }
+            }
+            current = Some(c);
+        }
+    }
+    if let Some(prev) = current {
+        run_text(ui, run, &label[start..], prev, p);
+    }
+}
+
+fn run_text(ui: &mut Ui, run: u64, s: &str, class: u8, p: &Palette) {
+    let color = match class {
+        0 => p.text_dim,
+        2 => p.accent,
+        _ => p.text,
+    };
+    ui.push_id(run);
+    text(ui, "run", s, TEXT, color);
+    ui.pop_id();
 }
 
 /// A floating list of items under its opener, `at` from the opener's corner; reports
@@ -979,6 +1188,7 @@ fn choice(
 }
 
 /// Inspector dock: tabs, the selection, filter, sections of fields.
+#[allow(clippy::too_many_lines)]
 fn inspector_dock(
     ui: &mut Ui,
     model: &ShellModel<'_>,
@@ -1029,7 +1239,7 @@ fn inspector_dock(
                     for (f, field) in section.fields.iter().enumerate() {
                         ui.push_id(f as u64);
                         let mut action = None;
-                        ui.row(
+                        let row = ui.row(
                             "field",
                             Style {
                                 size: [Size::Grow(1.0), Size::Fixed(26.0)],
@@ -1099,8 +1309,34 @@ fn inspector_dock(
                                         choice(ui, current, open, p, &mut action, popups);
                                     }
                                 }
+                                // Every row keeps the reset button's place, so fields line
+                                // up and none moves when its value starts to differ.
+                                let hovered = field.changed && ui.is_hovered(ui.id("reset"));
+                                let id = ui.container(
+                                    "reset",
+                                    Style {
+                                        size: [Size::Fixed(18.0), Size::Fixed(18.0)],
+                                        radius: 3.0,
+                                        background: hovered.then_some(p.field_hover),
+                                        align_main: Align::Center,
+                                        align_cross: Align::Center,
+                                        ..Style::default()
+                                    },
+                                    |ui| {
+                                        if field.changed {
+                                            text(ui, "icon", icons::RESET, 13.0, p.text_dim);
+                                        }
+                                    },
+                                );
+                                if field.changed && ui.sense(id, false).clicked {
+                                    action = Some(FieldAction::Reset);
+                                }
                             },
                         );
+                        ui.mark_region(row);
+                        if ui.in_region(row) {
+                            out.hovered_field = Some((s, f));
+                        }
                         if let Some(action) = action {
                             out.field = Some(FieldEvent {
                                 section: s,

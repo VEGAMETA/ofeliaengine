@@ -9,6 +9,7 @@
 //!   score higher, gaps lower, matches in the category less than in the title, and
 //!   recently run commands rank higher among similar scores. Searching allocates nothing
 //!   once the result buffers have grown.
+//! - [`Fuzzy`] ranks any other texts the same way (the palette's `@` scene objects).
 //! - [`Keymap`] maps key chords to commands per [`KeyContext`]. Binding a chord that
 //!   another command already uses in the same context is refused with the other command,
 //!   so the settings UI can show the conflict; [`Keymap::conflicts`] lists all of them
@@ -184,7 +185,13 @@ impl Commands {
                 });
                 continue;
             }
-            if let Some(score) = score(&self.query, info, &mut self.scratch) {
+            if let Some(score) = score(
+                &self.query,
+                &info.lower,
+                &info.starts,
+                info.title_char,
+                &mut self.scratch,
+            ) {
                 let start = self.highlights.len() as u32;
                 self.highlights.extend_from_slice(&self.scratch);
                 out.push(Match {
@@ -220,16 +227,95 @@ impl Commands {
     }
 }
 
+/// Fuzzy matching of a query against texts that are not commands (the scene's objects;
+/// later assets and settings), ranked as [`Commands::search`] ranks commands: the query a
+/// subsequence of the text, bonuses for word starts and runs, penalties for gaps. Its
+/// buffers are kept, so matching allocates nothing once they have grown.
+///
+/// ```
+/// use engine_editor::Fuzzy;
+///
+/// let mut fuzzy = Fuzzy::new();
+/// fuzzy.set_query("pl");
+/// assert!(fuzzy.score("Point Light").is_some());
+/// assert_eq!(fuzzy.positions(), &[0, 6]);
+/// assert!(fuzzy.score("Camera").is_none());
+/// ```
+#[derive(Debug, Default)]
+pub struct Fuzzy {
+    query: Vec<char>,
+    lower: Vec<char>,
+    starts: Vec<bool>,
+    positions: Vec<u16>,
+}
+
+impl Fuzzy {
+    /// An empty query.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the query; case and whitespace do not matter.
+    pub fn set_query(&mut self, query: &str) {
+        self.query.clear();
+        self.query.extend(
+            query
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .flat_map(char::to_lowercase),
+        );
+    }
+
+    /// `text`'s score for the query (higher is better; 0 for every text while the query is
+    /// empty), or `None` when the query is not a subsequence of it. [`Fuzzy::positions`]
+    /// then has the matched characters.
+    pub fn score(&mut self, text: &str) -> Option<i32> {
+        self.positions.clear();
+        if self.query.is_empty() {
+            return Some(0);
+        }
+        self.lower.clear();
+        self.starts.clear();
+        let mut prev: Option<char> = None;
+        for c in text.chars() {
+            self.lower.push(c.to_lowercase().next().unwrap_or(c));
+            self.starts.push(
+                prev.is_none_or(|p| is_separator(p) || (p.is_lowercase() && c.is_uppercase())),
+            );
+            prev = Some(c);
+        }
+        score(
+            &self.query,
+            &self.lower,
+            &self.starts,
+            0,
+            &mut self.positions,
+        )
+    }
+
+    /// The characters (indices) the last [`Fuzzy::score`] matched, for highlighting.
+    pub fn positions(&self) -> &[u16] {
+        &self.positions
+    }
+}
+
 fn is_separator(c: char) -> bool {
     matches!(c, ' ' | '_' | '-' | '.' | ':' | '/' | '\\' | '(' | ')')
 }
 
-/// Scores `query` (lowercase, no whitespace) against a command's label; writes the
-/// matched char indices to `positions`. `None` if the query is not a subsequence.
-fn score(query: &[char], info: &CommandInfo, positions: &mut Vec<u16>) -> Option<i32> {
+/// Scores `query` (lowercase, no whitespace) against a label: its characters in
+/// lowercase, whether each starts a word, and where its title starts (after a category,
+/// which matches for less). Writes the matched char indices to `positions`. `None` if the
+/// query is not a subsequence.
+fn score(
+    query: &[char],
+    lower: &[char],
+    starts: &[bool],
+    title_char: usize,
+    positions: &mut Vec<u16>,
+) -> Option<i32> {
     positions.clear();
-    let lower = &info.lower;
-    let word_start = |i: usize| info.starts[i];
+    let word_start = |i: usize| starts[i];
     let mut qi = 0;
     let mut i = 0;
     while qi < query.len() && i < lower.len() {
@@ -260,7 +346,7 @@ fn score(query: &[char], info: &CommandInfo, positions: &mut Vec<u16>) -> Option
     if qi < query.len() {
         return None;
     }
-    let title_start_char = info.title_char;
+    let title_start_char = title_char;
     let mut total = 0i32;
     let mut prev: Option<usize> = None;
     for &p in positions.iter() {

@@ -6,8 +6,9 @@
 //! - **A rotation** (a quaternion) shows as Euler angles in degrees, applied in the order
 //!   Y, X, Z (yaw, pitch, roll), so a step of 45° means what it says.
 //! - **Booleans** are checkboxes; **enums** pick a variant from a list.
-//! - **Strings, references and containers** are shown as text; editing them comes with
-//!   the text field (phase E1-4b).
+//! - **Strings** are typed; references and containers are shown as text.
+//! - **A changed field** (one that differs from its type's `Default`) can be reset
+//!   ([`Defaults`], [`reset`]).
 
 use crate::snap::Quantity;
 use engine_core::math::{EulerRot, Quat};
@@ -15,8 +16,52 @@ use engine_ecs::{ComponentId, Entity, World};
 use engine_reflect::{Attrs, Hint, Primitive, TypeInfo, TypeKind, Value};
 use engine_scene::text::{is_asset_ref, is_entity, newtype_field, vector_fields};
 use engine_scene::{AssetPaths, AssetRef, Name};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::ops::Range;
+use std::ptr::NonNull;
+
+/// Each component type's `Default` value, made the first time it is asked for and kept
+/// for the session (one value per type): what tells a changed field and what reset puts
+/// back.
+#[derive(Debug, Default)]
+pub struct Defaults {
+    values: HashMap<ComponentId, Option<NonNull<u8>>>,
+}
+
+impl Defaults {
+    /// No values yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Component `id`'s default value; none for a type without reflection or `Default`.
+    pub fn of(&mut self, world: &World, id: ComponentId) -> Option<NonNull<u8>> {
+        *self.values.entry(id).or_insert_with(|| {
+            let reg = world.components();
+            let info = reg.type_info(id)?;
+            let layout = reg.layout(id)?;
+            let engine_ecs::ReflectedKind::Component { default, .. } =
+                &engine_ecs::find_reflected(info.name)?.kind
+            else {
+                return None;
+            };
+            let write = default()?;
+            let layout =
+                std::alloc::Layout::from_size_align(layout.size().max(1), layout.align()).ok()?;
+            // SAFETY: a non-zero size. The value is written by the type's default writer
+            // and kept for the session: never freed, so never dropped.
+            unsafe {
+                let ptr = std::alloc::alloc(layout);
+                if ptr.is_null() {
+                    return None;
+                }
+                write(ptr);
+                NonNull::new(ptr)
+            }
+        })
+    }
+}
 
 /// How a property is shown and edited.
 #[derive(Debug, Clone, Copy)]
@@ -60,6 +105,8 @@ pub struct Property {
     /// The component is written whole (`Name = "Door"`): its scene path is the component's
     /// name alone.
     pub whole: bool,
+    /// It differs from its type's default and can be reset ([`reset`]).
+    pub changed: bool,
     /// Its name in [`Inspector::text`].
     name: (u32, u32),
     /// Its values' texts in [`Inspector::text`].
@@ -102,8 +149,15 @@ impl Inspector {
     }
 
     /// The entity's components and their properties, sorted by component name: those
-    /// scenes show (not `hidden`, not `skip`).
-    pub fn build(&mut self, world: &World, entity: Entity, assets: &AssetPaths) {
+    /// scenes show (not `hidden`, not `skip`); each property marked changed when it differs
+    /// from its type's default.
+    pub fn build(
+        &mut self,
+        world: &World,
+        entity: Entity,
+        assets: &AssetPaths,
+        defaults: &mut Defaults,
+    ) {
         self.clear();
         let Some(ids) = world.component_ids_of(entity) else {
             return;
@@ -132,6 +186,18 @@ impl Inspector {
                     0,
                     &mut path,
                 );
+            }
+            // A name is what the entity is called, not a value away from a default: it
+            // has no reset.
+            if info.name != "Name"
+                && let Some(default) = defaults.of(world, id)
+            {
+                for p in &mut self.properties[first..] {
+                    // SAFETY: both point to live values of the component.
+                    p.changed = unsafe {
+                        differs(p, ptr.as_ptr().cast_const(), default.as_ptr().cast_const())
+                    };
+                }
             }
             // A transform reads position, rotation, scale (Godot, Unity), whatever the
             // order of its fields.
@@ -302,6 +368,7 @@ impl Inspector {
                 attrs,
                 kind,
                 whole,
+                changed: false,
                 name,
                 values,
                 count,
@@ -595,6 +662,59 @@ pub unsafe fn toggle(p: &Property, component: *mut u8) {
     }
 }
 
+/// Whether a property can be reset: plain values (numbers, vectors, rotations,
+/// booleans, enums) and strings.
+pub fn resettable(p: &Property) -> bool {
+    match p.kind {
+        Kind::Numbers { .. } | Kind::Rotation | Kind::Bool | Kind::Choice => true,
+        Kind::Text => matches!(p.ty.kind, TypeKind::String),
+    }
+}
+
+/// Whether the property differs between two values of its component.
+///
+/// # Safety
+///
+/// Both point to live values of the property's component.
+unsafe fn differs(p: &Property, a: *const u8, b: *const u8) -> bool {
+    if !resettable(p) {
+        return false;
+    }
+    // SAFETY: the property's offset and size stay inside both values.
+    unsafe {
+        let (a, b) = (a.add(p.offset), b.add(p.offset));
+        if matches!(p.ty.kind, TypeKind::String) {
+            return engine_reflect::read_str(a) != engine_reflect::read_str(b);
+        }
+        core::slice::from_raw_parts(a, p.ty.size) != core::slice::from_raw_parts(b, p.ty.size)
+    }
+}
+
+/// Puts a property back to its value in `default` (a value of its component): plain values
+/// by their bytes, strings by their text. False for a property that cannot be reset.
+///
+/// # Safety
+///
+/// `component` points to a live, writable value of the property's component, `default` to
+/// a live value of it.
+pub unsafe fn reset(p: &Property, component: *mut u8, default: *const u8) -> bool {
+    if !resettable(p) {
+        return false;
+    }
+    // SAFETY: the property's offset and size stay inside both values; plain values are
+    // valid as any copy of a valid value, strings are replaced through their setter.
+    unsafe {
+        let (to, from) = (component.add(p.offset), default.add(p.offset));
+        if matches!(p.ty.kind, TypeKind::String) {
+            let text = engine_reflect::read_str(from).to_owned();
+            engine_reflect::write_str(to, &text);
+        } else {
+            core::ptr::copy_nonoverlapping(from, to, p.ty.size);
+        }
+    }
+    true
+}
+
 /// The variants' names of a [`Kind::Choice`] property, in order.
 pub fn variants(p: &Property) -> impl Iterator<Item = &'static str> {
     let variants = match p.ty.kind {
@@ -642,7 +762,8 @@ mod tests {
                 .with_scale(Vec3::splat(2.0)),
         ));
         let mut inspector = Inspector::new();
-        inspector.build(&world, e, &AssetPaths::new());
+        let mut defaults = Defaults::new();
+        inspector.build(&world, e, &AssetPaths::new(), &mut defaults);
         let titles: Vec<&str> = inspector.sections().iter().map(|s| s.title).collect();
         assert_eq!(titles, ["Name", "Transform"]);
         let props = inspector.properties();
@@ -687,6 +808,23 @@ mod tests {
                 .angle_between(Quat::from_rotation_y(45f32.to_radians()))
                 < 1e-5
         );
+
+        // All three transform fields differ from the default; reset puts the scale back
+        // to 1.
+        inspector.build(&world, e, &AssetPaths::new(), &mut defaults);
+        let props = inspector.properties();
+        assert!(props[1..].iter().all(|p| p.changed));
+        let scale = props[3];
+        assert_eq!(inspector.name(&scale), "scale");
+        let default = defaults.of(&world, id).unwrap();
+        let ptr = world.get_raw_mut(e, id).unwrap().as_ptr();
+        // SAFETY: the entity's live `Transform` and the default one.
+        assert!(unsafe { reset(&scale, ptr, default.as_ptr()) });
+        assert_eq!(world.get::<Transform>(e).unwrap().scale, Vec3::ONE);
+        inspector.build(&world, e, &AssetPaths::new(), &mut defaults);
+        assert!(!inspector.properties()[3].changed);
+        // The name differs from the empty default, but has no reset.
+        assert!(!inspector.properties()[0].changed);
     }
 
     #[test]
