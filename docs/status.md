@@ -28,7 +28,7 @@ Last updated: 2026-10-17.
     - `AssetRef` written by path and id, and the scene's id in the header;
     - format 1 still loads;
     - saving 11 % faster, loading unchanged.
-  - **E1-2, scenes in the player** (ADR 0108 as built):
+  - **E1-2, scenes in the player** (#252, ADR 0108 as built):
     - `PlayerSettings::scene` and `project`, `Player::load_scene`;
     - every reflected component of the program loads without registration;
     - `Model` names a mesh and a material by asset, and the player draws it;
