@@ -361,6 +361,42 @@ Text fields.
   going to the field, a double click and Escape, expressions (`2*pi`, `+=1`, a refused one),
   a string, both filters; the text field alone in `engine_ui`.
 
+## As built (E1-4b-2, 2026-10-17)
+
+The command palette, reset to default, copying values
+(`docs/research/ux/command-palette.md`, `docs/research/ux/inspector.md` §6).
+
+- **The palette** (Ctrl+Shift+P): a floating box over the shell with the best twelve
+  matches, the list scrolling with the highlight. Commands show as "Category: Title",
+  the matched letters in the accent and the shortcut beside each. The add menu's kinds
+  are commands (`scene.add.cube`…). Up and Down move the highlight (the query box leaves
+  them to the list: `TextField::search`), Enter or a click runs it, Escape or a click
+  elsewhere closes it.
+- **`@` finds the scene's objects** (Ctrl+P opens the palette with it): every entity with
+  a scene id in tree order, ranked by `engine_editor::Fuzzy`, the commands' matcher made
+  usable for any text; the one picked is selected and its parents' rows opened. `>` is
+  the commands' prefix; `#` assets and `:` settings come with their panels.
+- **Reset:** each component type's `Default` value is made once per session
+  (`inspector::Defaults`). A field differing from it is marked changed and gets ↺ in a
+  place every row keeps, so fields stay aligned and none moves when it starts to differ.
+  Backspace over a hovered field resets it too, as one undo step. A `Name` has no reset.
+- **Copy and paste** over a hovered field (`Ui::mark_region`, a row's hover whatever
+  widget is under the mouse): Ctrl+C writes the value's scene text (a string as it is),
+  Ctrl+V sets it through the scene-path setter, checked against the field's type. The
+  editor's `Clipboard` is Windows' or, in tests, its own.
+- **Measured** on ref-1's CPU: the frame with 200 entities and a selection 82.5 µs (83.5
+  before), 88 µs with the palette open; the `@` search over 10,000 objects 0.62–0.73 ms
+  per keystroke, mostly the walk of the tree and the names (the research note's target:
+  under 1 ms). The shell's zero-allocation test now runs with the palette open and reset
+  buttons shown.
+- **Tested** without a GPU through the editor's frames: a command found and run with
+  Enter, objects found with `@` and picked with Down and Enter, Escape, a click outside,
+  a row clicked; ↺, Backspace, Ctrl+C and Ctrl+V between fields, a refused paste, a name
+  copied to another entity. `engine_ui`: the search box and hover regions.
+- **Not done:** the tree does not scroll to an object picked in the palette; copying a
+  vector's single part (Blender's Ctrl+C on a part); component headers' copy, paste and
+  reset (`inspector.md` §7).
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and
