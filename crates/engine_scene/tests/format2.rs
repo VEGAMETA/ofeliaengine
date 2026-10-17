@@ -322,3 +322,126 @@ layers = [\"base\"]
     );
     assert_eq!(warned.unwrap().warnings.len(), 1);
 }
+
+/// Undo's text form of a component that is not plain data (`write_lines_with`,
+/// `read_lines`): every container, entity references by scene id, asset references
+/// without paths.
+#[test]
+fn a_components_lines_round_trip_with_entity_ids() {
+    use engine_scene::text::ReadRefs;
+    use engine_scene::{read_lines, write_lines_with};
+
+    let mut world = World::new();
+    let (a, b) = (world.spawn(()), world.spawn(()));
+    let (id_a, id_b) = (SceneId::new(), SceneId::new());
+    let ids = |e: Entity| {
+        if e == a {
+            Some(id_a)
+        } else if e == b {
+            Some(id_b)
+        } else {
+            None
+        }
+    };
+    struct Back {
+        a: (SceneId, Entity),
+        b: (SceneId, Entity),
+    }
+    impl ReadRefs for Back {
+        fn entity(&mut self, label: &str) -> Result<Entity, String> {
+            let id = SceneId::parse(label).ok_or_else(|| label.to_owned())?;
+            Ok([self.a, self.b]
+                .into_iter()
+                .find(|&(i, _)| i == id)
+                .map_or(Entity::NULL, |(_, e)| e))
+        }
+    }
+    let mut refs = Back {
+        a: (id_a, a),
+        b: (id_b, b),
+    };
+    fn lines<T: Reflect>(value: &T, ids: &dyn Fn(Entity) -> Option<SceneId>) -> String {
+        let mut out = String::new();
+        // SAFETY: a live `T`, described by its type.
+        unsafe {
+            write_lines_with(
+                T::TYPE_INFO,
+                (value as *const T).cast(),
+                ids,
+                None,
+                &mut out,
+            );
+        }
+        out
+    }
+
+    let links = Links {
+        targets: vec![b, Entity::NULL, a],
+    };
+    let text = lines(&links, &ids);
+    assert_eq!(text, format!("targets = [@{id_b}, @none, @{id_a}]\n"));
+    let mut back = Links::default();
+    // SAFETY: a live `Links`.
+    let warnings =
+        unsafe { read_lines(Links::TYPE_INFO, (&raw mut back).cast(), &text, &mut refs) }.unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(back, links);
+
+    let inventory = crate_inventory();
+    let text = lines(&inventory, &ids);
+    let mut back = Inventory::default();
+    // SAFETY: a live `Inventory`.
+    unsafe {
+        read_lines(
+            Inventory::TYPE_INFO,
+            (&raw mut back).cast(),
+            &text,
+            &mut refs,
+        )
+    }
+    .unwrap();
+    assert_eq!(back, inventory, "{text}");
+
+    let look = Look {
+        mesh: AssetRef::part(CRATE_FILE, "Lid"),
+        material: AssetRef::file(CRATE_FILE),
+        sound: AssetRef::NONE,
+    };
+    let text = lines(&look, &ids);
+    let mut back = Look::default();
+    // SAFETY: a live `Look`.
+    unsafe { read_lines(Look::TYPE_INFO, (&raw mut back).cast(), &text, &mut refs) }.unwrap();
+    assert_eq!(back, look, "{text}");
+
+    // A value written whole, a field gone, a bad value with its line.
+    let name = Name::new("Door \"A\"");
+    let text = lines(&name, &ids);
+    assert_eq!(text, " = \"Door \\\"A\\\"\"\n");
+    let mut back = Name::default();
+    // SAFETY: a live `Name`.
+    unsafe { read_lines(Name::TYPE_INFO, (&raw mut back).cast(), &text, &mut refs) }.unwrap();
+    assert_eq!(back, name);
+    let mut back = Look::default();
+    // SAFETY: a live `Look`.
+    let warnings = unsafe {
+        read_lines(
+            Look::TYPE_INFO,
+            (&raw mut back).cast(),
+            "glow = 3\n",
+            &mut refs,
+        )
+    }
+    .unwrap();
+    assert_eq!(warnings.len(), 1);
+    // SAFETY: a live `Look`.
+    let e = unsafe {
+        read_lines(
+            Look::TYPE_INFO,
+            (&raw mut back).cast(),
+            "sound = none\nmesh = 7\n",
+            &mut refs,
+        )
+    }
+    .unwrap_err();
+    assert_eq!(e.line, 2, "{e}");
+}

@@ -75,6 +75,14 @@ use text::{ReadRefs, Seg, is_asset_ref, is_entity, is_single, newtype_field, vec
 /// Current format version, written in the header.
 pub const VERSION: u32 = 2;
 
+/// How written entity references find their scene ids.
+type Ids<'a> = &'a dyn Fn(Entity) -> Option<SceneId>;
+
+/// No entity has a scene id: references are written `@none`.
+fn no_ids(_: Entity) -> Option<SceneId> {
+    None
+}
+
 /// 128 random bits: the OS-seeded hasher, a process-wide counter and the time.
 pub(crate) fn random_u128() -> u128 {
     use std::hash::{BuildHasher, Hasher};
@@ -483,17 +491,19 @@ pub fn save_with(
             Access::Listed { id, .. } => Getter::Id(id(world)),
         })
         .collect();
+    let lookup = |e: Entity| ids.get(&e).copied();
     let mut writer = Writer {
         out,
         path: String::new(),
-        ids: &ids,
+        ids: &lookup,
         assets: options.assets,
     };
     let mut count = 0;
     let mut stack: Vec<Entity> = roots.iter().rev().map(|&(_, e)| e).collect();
     let mut children: Vec<Entity> = Vec::new();
     while let Some(e) = stack.pop() {
-        writer.entity(world, registry, &getters, e);
+        let parent = world.parent(e).and_then(|p| ids.get(&p).copied());
+        writer.entity(world, registry, &getters, e, ids[&e], parent);
         count += 1;
         children.clear();
         children.extend(world.children(e).filter(|c| ids.contains_key(c)));
@@ -514,14 +524,22 @@ struct Writer<'a> {
     out: &'a mut String,
     /// The path of the value being written, `Component.field…`.
     path: String,
-    ids: &'a HashMap<Entity, SceneId>,
+    ids: Ids<'a>,
     assets: Option<&'a AssetPaths>,
 }
 
 impl Writer<'_> {
-    fn entity(&mut self, world: &World, registry: &SceneRegistry, getters: &[Getter], e: Entity) {
-        let _ = writeln!(self.out, "\n[entity {}]", self.ids[&e]);
-        if let Some(p) = world.parent(e).and_then(|p| self.ids.get(&p)) {
+    fn entity(
+        &mut self,
+        world: &World,
+        registry: &SceneRegistry,
+        getters: &[Getter],
+        e: Entity,
+        id: SceneId,
+        parent: Option<SceneId>,
+    ) {
+        let _ = writeln!(self.out, "\n[entity {id}]");
+        if let Some(p) = parent {
             let _ = writeln!(self.out, "parent = {p}");
         }
         for (entry, getter) in registry.entries.iter().zip(getters) {
@@ -686,14 +704,14 @@ unsafe fn single(
     out: &mut String,
     ty: &'static TypeInfo,
     ptr: *const u8,
-    ids: &HashMap<Entity, SceneId>,
+    ids: Ids<'_>,
     assets: Option<&AssetPaths>,
 ) {
     // SAFETY: for the block, as the caller guarantees.
     unsafe {
         if is_entity(ty) {
             let e = ptr.cast::<Entity>().read_unaligned();
-            match ids.get(&e) {
+            match ids(e) {
                 Some(id) => {
                     let _ = write!(out, "@{id}");
                 }
@@ -833,6 +851,26 @@ fn header(
         ));
     }
     Ok((version, id))
+}
+
+/// A scene file's version and own id, from its header, without loading it: what an
+/// editor keeps to save the scene back under the same id.
+///
+/// # Errors
+///
+/// When the first line that is not empty or a comment is not a scene header.
+pub fn scene_header(text: &str) -> Result<(u32, Option<AssetId>), LoadError> {
+    for (i, raw) in text.lines().enumerate() {
+        let s = raw.trim();
+        if s.is_empty() || s.starts_with('#') {
+            continue;
+        }
+        return header("scene", VERSION, i + 1, s);
+    }
+    Err(err(
+        0,
+        format!("empty file: expected the header `[scene version={VERSION}]`"),
+    ))
 }
 
 fn parse(text: &str) -> Result<Parsed<'_>, LoadError> {
@@ -1097,11 +1135,10 @@ pub fn write_value<T: Reflect>(
         }
     }
     out.push('\n');
-    let ids = HashMap::new();
     let mut writer = Writer {
         out,
         path: String::new(),
-        ids: &ids,
+        ids: &no_ids,
         assets,
     };
     // SAFETY: `value` is a live `T`, which its description lays out.
@@ -1200,13 +1237,72 @@ pub unsafe fn write_lines(
     assets: Option<&AssetPaths>,
     out: &mut String,
 ) {
-    let ids = HashMap::new();
+    // SAFETY: as the caller guarantees.
+    unsafe { write_lines_with(info, ptr, &no_ids, assets, out) };
+}
+
+/// [`write_lines`] with entity references written by the scene ids `ids` gives them
+/// (`@<id>`, or `@none`): what undo keeps of a component that is not plain data, read back
+/// by [`read_lines`].
+///
+/// # Safety
+///
+/// `ptr` points to a valid value of `info`.
+pub unsafe fn write_lines_with(
+    info: &'static TypeInfo,
+    ptr: *const u8,
+    ids: &dyn Fn(Entity) -> Option<SceneId>,
+    assets: Option<&AssetPaths>,
+    out: &mut String,
+) {
     let mut writer = Writer {
         out,
         path: String::new(),
-        ids: &ids,
+        ids,
         assets,
     };
     // SAFETY: as the caller guarantees.
     unsafe { writer.value(info, ptr) };
+}
+
+/// Reads lines [`write_lines`] or [`write_lines_with`] wrote into the value at `ptr` (type
+/// `info`); entity references go through `refs`. Fields the lines leave out keep theirs.
+/// Lines naming fields the type no longer has are skipped and returned as warnings, with
+/// their line numbers (1-based).
+///
+/// # Errors
+///
+/// A bad line or value, with its line. The value stays valid, read up to that line.
+///
+/// # Safety
+///
+/// `ptr` points to a valid, writable value of `info`.
+pub unsafe fn read_lines(
+    info: &'static TypeInfo,
+    ptr: *mut u8,
+    text: &str,
+    refs: &mut dyn ReadRefs,
+) -> Result<Vec<(usize, String)>, LoadError> {
+    let mut warnings = Vec::new();
+    let mut segs: Vec<Seg<'_>> = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = i + 1;
+        let s = raw.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let (path, value) =
+            text::split_assignment(s).ok_or_else(|| err(line, "expected `field = value`"))?;
+        text::segments_into(path, &mut segs).map_err(|m| err(line, m))?;
+        // SAFETY: `ptr` is the caller's valid value of `info`.
+        let target = unsafe { text::resolve(&segs, info, ptr, refs) }.map_err(|m| err(line, m))?;
+        match target {
+            None => warnings.push((line, format!("`{}` has no field `{path}`", info.name))),
+            Some((ty, attrs, at)) => {
+                // SAFETY: `at` is a valid, writable value of `ty`.
+                unsafe { text::set_text(ty, &attrs, at, value, refs) }.map_err(|m| err(line, m))?;
+            }
+        }
+    }
+    Ok(warnings)
 }
