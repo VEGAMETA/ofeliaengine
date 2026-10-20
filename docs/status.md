@@ -259,7 +259,14 @@ decisions). In short:
 - **After a merge.**
   - Remove the worktree (look for links first: never junction the main checkout's
     folders, give scenes via `ENGINE_TEST_ASSETS`) and its target dir.
-  - `tools/clean.ps1` frees stale build outputs.
+  - `tools/clean.ps1` frees stale build outputs. A few days of work leave most of the
+    garbage within its default window of 3 days, so run it with `-Days 1`. It does not
+    go into the nested tracy and loom build directories: give each one alone
+    (`-Targets C:\cargo-target\ofeliaengine	racy`; several in one `-File` argument do
+    not parse). On 2026-10-18 that took `C:/cargo-target/ofeliaengine` from 168 to
+    37 GB: incremental caches 94 GB, superseded crate copies, the tracy directory 22 GB.
+    What it keeps (each crate's newest build, anything written in the last day) rebuilds
+    nothing.
 - **Backups.** Everything is pushed: agents push after every commit. When the usage limit
   stops agents, the coordinator snapshots their uncommitted work to `backup/wip*`
   branches, then resumes them by message.
