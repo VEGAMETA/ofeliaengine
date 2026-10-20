@@ -4,9 +4,9 @@ Where the engine stands and how work on it is run. A new session (coordinator or
 reads this after `CLAUDE.md` and `docs/agent-rules.md`. Keep it current: whoever merges a
 PR that changes the picture updates this file in the same PR.
 
-Last updated: 2026-10-17.
+Last updated: 2026-10-20.
 
-## 0. Now (2026-10-17)
+## 0. Now (2026-10-20)
 
 - **In progress: the editor** (queue item 9). Designed with the owner on 2026-10-17
   (#250: ADR 0107, ADR 0108; research `docs/research/editor-architecture.md`, UX notes in
@@ -224,6 +224,8 @@ Last updated: 2026-10-17.
   - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
     step 3), the player's follow-ups (8a), the iGPU's expensive passes (6b), memory (7a).
   - Candidates beyond the queue: §6.
+- **After the base** (team decision, 2026-10-20: quality of life for now): terrain,
+  water, foliage, HLOD and impostors, VST3 hosting. Queue item 10.
 - **Done since 2026-10-12:**
   - custom materials (3c) and meshlets (4);
   - cached shadow cascades (5, steps 1–2);
@@ -307,9 +309,20 @@ decisions). In short:
 
 ## 3. What is done (merged to main)
 
-Estimate of 2026-10-17 (after networking in the player): the technical core about
-**92 %** done, the whole engine (editor, Luau and tooling included) about **61 %**
-(2026-10-11: 74 % and 50 %). Done since 2026-10-11:
+Estimate of 2026-10-20 (after E1-5a): the technical core about **93 %** done, the whole
+engine (editor, Luau and tooling included) about **66 %** (2026-10-17: 92 % and 61 %;
+2026-10-11: 74 % and 50 %). What comes after the base (queue item 10: terrain, water,
+foliage, HLOD and impostors, VST3 hosting) is not counted.
+
+Done since 2026-10-17:
+- the quick start;
+- HDR output in the player;
+- the editor's foundation (E1) but for autosave, the session and the restart after a
+  rebuild: scene formats 2 and 3, scenes in the player, the editor on the player,
+  editing with undo, text fields, the command palette, the selection, multi-editing,
+  the game's `main`.
+
+Done from 2026-10-11 to 2026-10-17:
 - custom materials, meshlets, cached and virtual shadows, post effects;
 - the player crate, video, colliders made from meshes, localization;
 - the third review's P0 and its device memory and Reflex items, the colliders' rules
@@ -353,7 +366,8 @@ Left in the core: recording on the job system.
 | **Sound in the player**: `AudioSource`, `AudioSource3D`, `AudioListener` and `ReverbZone` components, positions saved; walls muffling and the room's reverb from rays through the physics world; one mixer for sources and videos; sounds from a live folder while developing, a sound pack in a release | done | ADR 0105 |
 | Audio, text, 2D, basic UI | solid / basic | §11, ADR 0015 |
 | Tests: golden images (FLIP, per vendor), per-pass perf gate, determinism, zero-allocation tests | solid | ADR 0062 |
-| Editor, Luau | skeleton only, by plan | §10, §12 |
+| Editor | E1, the foundation, done but for autosave, the session and the restart (E1-5b, E1-5c); E2–E14 ahead | ADR 0107 |
+| Luau | skeleton only, by plan (E7–E9) | §10 |
 
 ## 4. In flight
 
@@ -1198,6 +1212,19 @@ grown, divide and conquer); the old labels stay in parentheses.
    To research first: Machado et al. 2009, Brettel, Viénot and Mollon 1997, daltonization,
    Unreal's `r.Color.Deficiency`, what shipped games offer.
 9. Then: editor tools, Luau bindings and debugger, other tooling.
+10. **After the base** (team decision, 2026-10-20: quality of life for now). They come
+    after the queue above: the editor's phases, Luau and the layer for Claude Code. This
+    replaces 2026-10-16's "terrain, foliage, water and impostors stay in §6 until a game
+    asks". Each starts with its research note:
+    - **terrain:** height fields with levels of detail, layered materials, Jolt's height
+      field colliders and the navigation mesh made from them, large worlds streamed;
+      sculpting and painting in the editor;
+    - **water:** rivers, lakes and the sea, their shading, and buoyancy;
+    - **foliage:** grass and trees scattered over a surface, instanced and culled on the
+      GPU;
+    - **HLOD and impostors** for distant objects in open worlds;
+    - **VST3 hosting** (CLAUDE.md §11): scanning in a separate process, isolation, delay
+      compensation, the plugins' state and windows, an effect baked in the editor.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
