@@ -97,7 +97,7 @@ fn exact_text_of_containers_names_and_assets() {
     let mut out = String::new();
     save_with(&mut w, &registry(), &options, &mut out).unwrap();
     let expected = "\
-[scene version=2 id=00000000000000000000000000000009]
+[scene version=3 id=00000000000000000000000000000009]
 
 [entity 00000000000000000000000000000001]
 Health = 80
@@ -123,7 +123,7 @@ Name = \"Crate\"
     let mut w2 = World::new();
     let report = load(&mut w2, &registry(), &out).unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
-    assert_eq!(report.version, 2);
+    assert_eq!(report.version, 3);
     assert_eq!(report.id, Some(AssetId::from_u128(9)));
     let e = report.entities[0];
     assert_eq!(w2.get::<Inventory>(e), Some(&crate_inventory()));

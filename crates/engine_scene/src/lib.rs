@@ -1,10 +1,11 @@
-//! Text scenes (ADR 0029; format 2: ADR 0108): a line-oriented format for entities and
-//! their reflected components, built to diff and merge well in version control.
+//! Text scenes (ADR 0029; formats 2 and 3: ADR 0108): a line-oriented format for entities
+//! and their reflected components, built to diff and merge well in version control.
 //!
 //! ```text
-//! [scene version=2 id=9b41d07c2e8a4f6b8d3c1a5e7f902b64]
+//! [scene version=3 id=9b41d07c2e8a4f6b8d3c1a5e7f902b64]
 //!
 //! [entity 6c1f0a3e9d2b47c88e51f0d4a7b3c912]
+//! order = 1024
 //! Name = "Car"
 //! Transform.rotation = (0, 0, 0, 1)
 //! Transform.translation = (10, 0, 0)
@@ -23,6 +24,9 @@
 //! - One block per entity, headed by its stable [`SceneId`] (128-bit, hex).
 //! - `parent = <id>` links the hierarchy. Children are written after their parent, in
 //!   the parent's child order, so the order survives a save and load.
+//! - `order = <n>` places a root among the roots ([`RootOrder`], format 3): the editor's
+//!   tree shows them by it. Root blocks stay in id order, so moving a root changes its
+//!   `order` line only.
 //! - One line per value: `Component.path = value` ([`text`] has the grammar, shared with
 //!   saves).
 //!   - Components are sorted by name; fields keep declaration order.
@@ -36,8 +40,8 @@
 //! - fields missing from the file keep the component's `Default`;
 //! - fields the type no longer has are reported as warnings, not errors.
 //!
-//! Unknown components are errors, reported with their line number. Files of format 1 load
-//! as they are.
+//! Unknown components are errors, reported with their line number. Files of formats 1 and
+//! 2 load as they are (their roots have no order).
 //!
 //! ```
 //! use engine_ecs::{GlobalTransform, Transform, World};
@@ -73,7 +77,7 @@ use std::fmt::Write as _;
 use text::{ReadRefs, Seg, is_asset_ref, is_entity, is_single, newtype_field, vector_fields};
 
 /// Current format version, written in the header.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// How written entity references find their scene ids.
 type Ids<'a> = &'a dyn Fn(Entity) -> Option<SceneId>;
@@ -163,6 +167,25 @@ impl Default for SceneId {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Where a root entity comes among a scene's roots, as the editor's tree shows them (team
+/// decision 2026-10-20): written `order = <n>` in the root's block, read back on load.
+/// Values are spaced by [`RootOrder::STEP`], so a root placed between two others takes a
+/// value in the gap and only its own line changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+#[repr(transparent)]
+pub struct RootOrder(pub u32);
+
+// SAFETY: one `u32`; every bit pattern is valid.
+unsafe impl bytemuck::Zeroable for RootOrder {}
+// SAFETY: as above; `Copy` and `repr(transparent)`.
+unsafe impl bytemuck::Pod for RootOrder {}
+engine_ecs::pod_component!(RootOrder);
+
+impl RootOrder {
+    /// The gap between two roots placed one after the other.
+    pub const STEP: u32 = 1024;
 }
 
 impl core::fmt::Display for SceneId {
@@ -539,8 +562,15 @@ impl Writer<'_> {
         parent: Option<SceneId>,
     ) {
         let _ = writeln!(self.out, "\n[entity {id}]");
-        if let Some(p) = parent {
-            let _ = writeln!(self.out, "parent = {p}");
+        match parent {
+            Some(p) => {
+                let _ = writeln!(self.out, "parent = {p}");
+            }
+            None => {
+                if let Some(order) = world.get::<RootOrder>(e) {
+                    let _ = writeln!(self.out, "order = {}", order.0);
+                }
+            }
         }
         for (entry, getter) in registry.entries.iter().zip(getters) {
             let ptr = match *getter {
@@ -794,6 +824,8 @@ struct Block<'a> {
     line: usize,
     id: SceneId,
     parent: Option<(usize, SceneId)>,
+    /// `order = <n>`: the root's place among the roots.
+    order: Option<(usize, u32)>,
     /// (line, component, path after the component, value)
     fields: Vec<(usize, &'a str, &'a str, &'a str)>,
 }
@@ -895,6 +927,7 @@ fn parse(text: &str) -> Result<Parsed<'_>, LoadError> {
                 line,
                 id,
                 parent: None,
+                order: None,
                 fields: Vec::new(),
             });
             continue;
@@ -907,6 +940,13 @@ fn parse(text: &str) -> Result<Parsed<'_>, LoadError> {
         if key == "parent" {
             let id = SceneId::parse(value).ok_or_else(|| err(line, "expected a scene id"))?;
             block.parent = Some((line, id));
+            continue;
+        }
+        if key == "order" {
+            let n = value
+                .parse::<u32>()
+                .map_err(|_| err(line, "expected a whole number from 0 to 4294967295"))?;
+            block.order = Some((line, n));
             continue;
         }
         let (component, path) = text::component_of(key);
@@ -1091,6 +1131,19 @@ pub fn load(
                 }
                 return Err(err(line, e.to_string()));
             }
+        }
+    }
+    // The roots' order; a child's is meaningless.
+    for (bi, b) in blocks.iter().enumerate() {
+        match (b.order, b.parent) {
+            (Some((_, n)), None) => {
+                world.insert(entities[bi], RootOrder(n));
+            }
+            (Some((line, _)), Some(_)) => warnings.push((
+                line,
+                String::from("`order` places roots; this entity has a parent"),
+            )),
+            (None, _) => {}
         }
     }
     Ok(LoadReport {

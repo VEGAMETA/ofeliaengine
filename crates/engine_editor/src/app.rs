@@ -65,7 +65,7 @@ use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind};
 use engine_reflect::TypeKind;
 use engine_render2d::{Canvas, GlyphTexture, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, PointLight, SpotLight, Sun, look_rotation};
-use engine_scene::{AssetId, AssetPaths, Name, SaveOptions, SceneId, SceneRegistry};
+use engine_scene::{AssetId, AssetPaths, Name, RootOrder, SaveOptions, SceneId, SceneRegistry};
 use engine_ui::{Theme, Ui, UiKey};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -440,7 +440,7 @@ fn tree_order(
             .is_none_or(|p| world.get::<SceneId>(p).is_none())
     }));
     // The first root on top.
-    stack.sort_unstable_by_key(|e| core::cmp::Reverse(e.index()));
+    stack.sort_unstable_by_key(|&e| core::cmp::Reverse(root_key(world, e)));
     while let Some(e) = stack.pop() {
         out.push(e);
         let at = stack.len();
@@ -553,6 +553,14 @@ fn kind_of(world: &World, e: Entity) -> (&'static str, &'static str) {
     } else {
         (icons::NODE_3D, "Entity")
     }
+}
+
+/// Where a root comes in the tree: by its order, those without one last in spawn order.
+fn root_key(world: &World, e: Entity) -> (u32, u32) {
+    (
+        world.get::<RootOrder>(e).map_or(u32::MAX, |o| o.0),
+        e.index(),
+    )
 }
 
 /// A model's icon: its built-in shape's, or a model's.
@@ -756,19 +764,29 @@ impl Editor {
 
     /// The scene's entities in tree order, under open rows only.
     fn collect_rows(&mut self, world: &mut World) {
-        let ids = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
+        // The roots by their order ([`RootOrder`]); those without one (a scene of format
+        // 2, roots made by code) get one after the rest in spawn order, what the tree
+        // showed, kept by the next save.
+        let mut roots = self.roots(world, None);
+        if roots
+            .last()
+            .is_some_and(|&e| world.get::<RootOrder>(e).is_none())
+        {
+            let mut next = roots
+                .iter()
+                .filter_map(|&e| world.get::<RootOrder>(e))
+                .map(|o| o.0)
+                .max()
+                .unwrap_or(0);
+            for &e in &roots {
+                if world.get::<RootOrder>(e).is_none() {
+                    next = next.saturating_add(RootOrder::STEP);
+                    world.insert(e, RootOrder(next));
+                }
+            }
+            roots = self.roots(world, None);
+        }
         let world = &*world;
-        let mut roots: Vec<Entity> = ids
-            .iter_readonly(world)
-            .map(|(e, _)| e)
-            .filter(|&e| {
-                world
-                    .parent(e)
-                    .is_none_or(|p| world.get::<SceneId>(p).is_none())
-            })
-            .collect();
-        // Spawn order: the scene file's order.
-        roots.sort_unstable_by_key(|e| e.index());
         self.rows.clear();
         // Filtered: the matching rows and their ancestors, open whatever was collapsed.
         let filter = self.tree_filter.trim().to_lowercase();
@@ -1807,6 +1825,62 @@ impl Editor {
             .collect()
     }
 
+    /// The scene's roots (entities with a scene id under none), as the tree shows them:
+    /// by their order, those without one last in spawn order; `except` left out.
+    fn roots(&mut self, world: &mut World, except: Option<Entity>) -> Vec<Entity> {
+        let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
+        let world = &*world;
+        let mut roots: Vec<Entity> = q
+            .iter_readonly(world)
+            .map(|(e, _)| e)
+            .filter(|&e| {
+                Some(e) != except
+                    && world
+                        .parent(e)
+                        .is_none_or(|p| world.get::<SceneId>(p).is_none())
+            })
+            .collect();
+        roots.sort_unstable_by_key(|&e| root_key(world, e));
+        roots
+    }
+
+    /// An order for a new root after every other.
+    fn last_root_order(&mut self, world: &mut World) -> u32 {
+        let last = self
+            .roots(world, None)
+            .iter()
+            .filter_map(|&e| world.get::<RootOrder>(e))
+            .map(|o| o.0)
+            .max()
+            .unwrap_or(0);
+        last.saturating_add(RootOrder::STEP)
+    }
+
+    /// An order for root `copy` placed right after root `after`: the middle of the gap to
+    /// the next root, or, when there is none left, after numbering every root by steps
+    /// again (each touched, inside the open history step).
+    fn order_after(&mut self, world: &mut World, after: Entity, copy: Entity) -> u32 {
+        let roots = self.roots(world, Some(copy));
+        let order = |e: Entity| world.get::<RootOrder>(e).map_or(u32::MAX, |o| o.0);
+        let Some(i) = roots.iter().position(|&r| r == after) else {
+            return self.last_root_order(world);
+        };
+        let at = order(roots[i]);
+        match roots.get(i + 1).map(|&n| order(n)) {
+            None => at.saturating_add(RootOrder::STEP),
+            Some(next) if next.saturating_sub(at) >= 2 => at + (next - at) / 2,
+            Some(_) => {
+                for (k, &r) in roots.iter().enumerate() {
+                    self.history.touch(world, r);
+                    world.insert(r, RootOrder((k as u32 + 1).saturating_mul(RootOrder::STEP)));
+                }
+                (i as u32 + 1)
+                    .saturating_mul(RootOrder::STEP)
+                    .saturating_add(RootOrder::STEP / 2)
+            }
+        }
+    }
+
     /// A name for an entity under `parent` (a root for none), numbered when a sibling other
     /// than `except` has it.
     fn sibling_name(
@@ -1818,18 +1892,7 @@ impl Editor {
     ) -> String {
         let siblings: Vec<Entity> = match parent {
             Some(p) => world.children(p).collect(),
-            None => {
-                let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
-                let world = &*world;
-                q.iter_readonly(world)
-                    .map(|(e, _)| e)
-                    .filter(|&e| {
-                        world
-                            .parent(e)
-                            .is_none_or(|p| world.get::<SceneId>(p).is_none())
-                    })
-                    .collect()
-            }
+            None => self.roots(world, None),
         };
         let taken: HashSet<&str> = siblings
             .iter()
@@ -1856,8 +1919,10 @@ impl Editor {
         let step = self.snapping.position as f32;
         let at = (self.orbit.target / step).round() * step;
         let name = self.sibling_name(world, None, ADD[what], None);
+        let order = self.last_root_order(world);
         self.history.begin(&format!("Add {}", ADD[what]), None);
         let e = spawn(world, what, &name, at);
+        world.insert(e, RootOrder(order));
         self.history.touch_new(world, e);
         self.history.commit(world);
         self.select_only(e);
@@ -1911,6 +1976,10 @@ impl Editor {
                         continue;
                     };
                     let parent = world.parent(copy);
+                    if parent.is_none_or(|p| world.get::<SceneId>(p).is_none()) {
+                        let order = self.order_after(world, e, copy);
+                        world.insert(copy, RootOrder(order));
+                    }
                     let base = world.get::<Name>(copy).map(|n| n.as_str().to_owned());
                     if let Some(base) = base {
                         let name = self.sibling_name(world, parent, &base, Some(copy));
@@ -2513,7 +2582,10 @@ mod tests {
         assert!(!ed.scene_label.ends_with('*'), "{}", ed.scene_label);
         let text = std::fs::read_to_string(dir.join("main.scene")).unwrap();
         assert!(
-            text.starts_with(&format!("[scene version=2 id={id}]")),
+            text.starts_with(&format!(
+                "[scene version={} id={id}]",
+                engine_scene::VERSION
+            )),
             "{text}"
         );
         assert!(text.contains("Name = \"Cube\""), "{text}");
@@ -3419,5 +3491,74 @@ mod tests {
             );
         }
         assert_eq!(ed.history.steps().count(), steps + 1);
+    }
+
+    /// The tree's rows' names, in order.
+    fn row_names(ed: &Editor, world: &World) -> Vec<String> {
+        ed.rows
+            .iter()
+            .map(|r| world.get::<Name>(r.entity).unwrap().as_str().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn roots_keep_their_order_through_add_duplicate_save_and_load() {
+        let dir = folder("order");
+        let mut world = World::new();
+        let a = world.spawn((SceneId::new(), Name::new("A"), Transform::IDENTITY));
+        world.spawn((SceneId::new(), Name::new("B"), Transform::IDENTITY));
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            Some(PathBuf::from("main.scene")),
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        // Roots without an order are numbered in the order shown.
+        ed.update(&mut world);
+        assert_eq!(world.get::<RootOrder>(a), Some(&RootOrder(1024)));
+        // A new entity goes last; a copy right after its original.
+        ed.add(&mut world, 1);
+        ed.select_only(a);
+        ed.run(&mut world, ed.ids.duplicate);
+        ed.update(&mut world);
+        assert_eq!(row_names(&ed, &world), ["A", "A 2", "B", "Cube"]);
+
+        // Saved and loaded: the blocks come in id order, the tree in the same order.
+        ed.run(&mut world, ed.ids.save);
+        let text = std::fs::read_to_string(dir.join("main.scene")).unwrap();
+        assert_eq!(text.matches("\norder = ").count(), 4, "{text}");
+        let mut loaded = World::new();
+        engine_scene::load(&mut loaded, &SceneRegistry::from_program(), &text).unwrap();
+        let mut ed2 = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed2.update(&mut loaded);
+        assert_eq!(row_names(&ed2, &loaded), ["A", "A 2", "B", "Cube"]);
+
+        // No gap left between A and A 2: the roots are numbered again, in the same step.
+        ed.select_only(a);
+        for _ in 0..10 {
+            ed.run(&mut world, ed.ids.duplicate);
+            ed.select_only(a);
+        }
+        ed.update(&mut world);
+        let names = row_names(&ed, &world);
+        assert_eq!(names.first().map(String::as_str), Some("A"));
+        assert_eq!(names.last().map(String::as_str), Some("Cube"));
+        assert_eq!(names.len(), 14);
+        // Undo takes the copies back one by one, the order as it was.
+        for _ in 0..10 {
+            ed.run(&mut world, ed.ids.undo);
+        }
+        ed.update(&mut world);
+        assert_eq!(row_names(&ed, &world), ["A", "A 2", "B", "Cube"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
