@@ -11,6 +11,7 @@
 //!   changed on disk since.
 
 use engine_platform::time::HighResTimer;
+use engine_platform::window::WindowPlacement;
 use engine_scene::text::{quote_into, split_assignment, split_items, unquote};
 use engine_scene::{AssetId, SceneId};
 use std::fmt::Write as _;
@@ -230,6 +231,8 @@ pub(crate) struct EditorState {
     pub(crate) recent: Vec<String>,
     /// What a new build of the game's code does (`background`, `always`, `ask`).
     pub(crate) restart: Option<String>,
+    /// Where the editor's window was.
+    pub(crate) window: Option<WindowPlacement>,
 }
 
 /// `.ofelia/session`: what the editor brings back at its next start.
@@ -267,6 +270,13 @@ impl SessionFile {
             out.push_str("restart = ");
             quote_into(&mut out, restart);
             out.push('\n');
+        }
+        if let Some(w) = self.editor.window {
+            let _ = writeln!(
+                out,
+                "window = ({}, {}, {}, {}, {})",
+                w.left, w.top, w.right, w.bottom, w.maximized
+            );
         }
         for d in &self.documents {
             out.push_str("\n[document]\n");
@@ -387,6 +397,19 @@ impl SessionFile {
                             .map_err(at)?;
                     }
                     "restart" => file.editor.restart = Some(unquote(value).map_err(at)?),
+                    "window" => {
+                        let parts = items(value, '(', ')').map_err(at)?;
+                        let [left, top, right, bottom, maximized] = parts[..] else {
+                            return Err(at(format!("`{value}` is not a window's place")));
+                        };
+                        file.editor.window = Some(WindowPlacement {
+                            left: parse_number(left).map_err(at)?,
+                            top: parse_number(top).map_err(at)?,
+                            right: parse_number(right).map_err(at)?,
+                            bottom: parse_number(bottom).map_err(at)?,
+                            maximized: maximized == "true",
+                        });
+                    }
                     _ => {}
                 },
                 Section::Document => {
@@ -459,6 +482,13 @@ fn write_ids(out: &mut String, key: &str, ids: &[SceneId]) {
         let _ = write!(out, "@{id}");
     }
     out.push_str("]\n");
+}
+
+/// Where the editor's window was, from the session in `dir` (`.ofelia/`): what a start
+/// opens its window at, before anything else of the session is read.
+pub(crate) fn peek_window(dir: &Path) -> Option<WindowPlacement> {
+    let text = std::fs::read_to_string(dir.join("session")).ok()?;
+    SessionFile::parse(&text).ok()?.editor.window
 }
 
 /// The items of `value` written between `open` and `close`: `(a, b)` or `[a, b]`.
@@ -781,6 +811,13 @@ mod tests {
                 snapping: Some((true, [0.1, 0.25, 45.0, 0.1])),
                 recent: vec![String::from("edit.undo"), String::from("scene.duplicate")],
                 restart: Some(String::from("ask")),
+                window: Some(WindowPlacement {
+                    left: -7,
+                    top: 0,
+                    right: 1601,
+                    bottom: 908,
+                    maximized: true,
+                }),
             },
         };
         let text = file.to_text();
