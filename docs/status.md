@@ -88,9 +88,17 @@ Last updated: 2026-10-20.
   - **E1-5b-2, the view in the session** (#267, ADR 0107 as built): the camera, the
     selection, the tree's closed rows, the filters, the tool, snapping and recent commands
     come back at start; "Restore Unsaved Changes…" brings back an older autosave.
-  - **Next:** the rest of E1 (ADR 0107 §7):
-    - E1-5c: rebuild and restart after a code change (under 1 s; dev measured against
-      release; research done, `docs/research/rebuild-restart.md` comes with it).
+  - **E1-5c-1, rebuild and restart** (#PR, ADR 0107 as built; team decisions
+    2026-10-20, profile В and restart Б):
+    - a code change builds the game in the background, its errors are shown by line, and
+      the new build restarts the editor (by itself in the background, Ctrl+R in front)
+      with the session back;
+    - a change rebuilds in about 1.5–1.6 s and the restart takes 0.36–0.37 s;
+    - `ofeliaengine new` writes the editor's dev profile, and `ofeliaengine edit` is the
+      launcher.
+  - **Next:** E1-5c-2, the restart without a gap (the new window cloaked until its first
+    frame at the old one's place, the old editor back if the new build fails at start).
+    Then E2 (ADR 0107 §7).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

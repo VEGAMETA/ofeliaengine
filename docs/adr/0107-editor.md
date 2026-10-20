@@ -475,7 +475,7 @@ The game's `main` from a macro, `ofeliaengine edit`, the quick start as a scene.
     asset ids, with the scene's references rewritten to them, so two games from the
     template share no asset id;
   - `.ofelia/` in `.gitignore` (§4).
-- **`ofeliaengine edit [DIR]`** runs `cargo run --release --features editor` in the
+- **`ofeliaengine edit [DIR]`** ran `cargo run --release --features editor` in the
   game's folder, after checking that its manifest declares the feature; otherwise an
   error says what to add. It stays on release until E1-5c measures the dev profile
   against it.
@@ -593,6 +593,86 @@ The view in the session, and older autosaves brought back.
 - **Tested:** the view across a clean exit and a start (camera, selection and anchor,
   closed rows, filters, tool, snapping, recent commands); the session file's new blocks
   and skipped keys; an older autosave listed, picked and undone.
+
+## As built (E1-5c-1, 2026-10-20)
+
+The game's code rebuilt while the editor runs, and the editor restarted with it (§1;
+research `docs/research/rebuild-restart.md`).
+
+**Team decisions, 2026-10-20.** Measured first on ref-1: a change to the quick start's
+code to a finished build, with the editor feature, the median of 10.
+
+| Profile | Change → build | First build | PDB |
+|---|---|---|---|
+| release | 2.95 s | 92 s | 6 MB |
+| dev, as `new` wrote it | 2.07 s | 117 s | 170 MB |
+| dev, the engine without debug info | 1.48 s | 98 s | 11 MB |
+
+- **The editor builds with the last one** (option В): the game's code at `opt-level` 1
+  with line tables, the engine at 3 without debug info. `ofeliaengine new` writes it as
+  the dev profile. The game's code runs slower in Play than shipped.
+- **A new build restarts the editor by itself** while its window is in the background,
+  and is offered (Ctrl+R) while it is in front (option Б). "Editor: Restart Policy…"
+  sets always or ask; the session keeps it.
+
+How it works:
+
+- **The entry:** `engine_app::main!` with the feature calls `engine_editor::run_game`
+  with the game's crate (`GameCrate`, its manifest folder).
+- **The builder,** a thread:
+  - it watches the game's folder (`DirectoryWatcher`, recursive), and after a build the
+    folder of the sources outside it that cargo's dep-info names (the engine's crates);
+  - a change to a source (one the dep-info names, or before it a Rust file or a manifest
+    of the game's) settles 100 ms, then `cargo build --quiet --features editor
+    --message-format=json` runs below normal priority, without a console window;
+  - one build at a time; changes during a build build again after it; cargo's output
+    folder and `.ofelia/` are ignored;
+  - errors are read by their primary span (file, line, column), link errors without one;
+    warnings are counted.
+- **A new executable** (not `fresh`) is copied with its PDB into a slot of
+  `.ofelia/run/` (`a`, `b`, `c`): not the running one's, and passing over one whose files
+  are held.
+- **The restart:**
+  - the session is saved and flushed (the autosave, the view), the frame loop ends, and
+    the session ends, releasing the lock;
+  - the new copy starts in the same folder with the same arguments.
+    `ENGINE_EDITOR_RESTART` says when; `ENGINE_EDITOR_BUILD` names cargo's path of the
+    build, for its dep-info;
+  - the old process exits after it. The new editor waits up to 10 s for the lock and says
+    how long the restart took.
+- **Under `cargo run --features editor`** the editor runs cargo's own file. It copies
+  itself into a slot, starts that copy and exits, before its window opens.
+- **`ofeliaengine edit`:**
+  - builds, with cargo showing its messages, and copies the build into a slot;
+  - starts the copy in a job (`engine_platform::process::Job`) and waits until the job is
+    empty: the editor and its restarts;
+  - a failed build starts the newest slot's.
+- The editor's messages go to stderr and to
+  `%LOCALAPPDATA%/ofeliaengine/logs/<game>-editor.log`.
+- **Measured** on ref-1, a game made by `new` outside the repository, its window
+  offscreen:
+  - a change to its code rebuilt in the editor in 1.5–1.6 s;
+  - the restart, from the old editor starting the new one to the new one's first frame,
+    took 0.36–0.37 s.
+- **Tested:**
+  - a new build restarts by itself in the background, is offered in front and taken by
+    Ctrl+R, and is never taken by itself under "ask";
+  - the session is saved before the restart;
+  - a failed build's errors are shown by line and listed;
+  - the policy is picked in the palette and kept;
+  - the builder's dep-info, its watched folders, which changes build, cargo's JSON lines,
+    the slots;
+  - the launcher's arguments, executable, slot and last good build;
+  - the job counts a process and its children;
+  - end to end: the game made by `new` launched by `ofeliaengine edit`, its code changed,
+    rebuilt and restarted by itself.
+- **Not done:**
+  - the restart without a gap (E1-5c-2): the new window cloaked until its first frame at
+    the old window's place, and the old editor kept until then and back if the new build
+    fails at start;
+  - the editor's frame time during a build, measured;
+  - a build that finishes during Play (E3);
+  - a Dev Drive for game targets (a machine setting).
 
 ## Consequences
 
