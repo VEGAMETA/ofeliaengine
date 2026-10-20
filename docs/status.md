@@ -79,10 +79,17 @@ Last updated: 2026-10-20.
       under fresh ids;
     - `ofeliaengine edit` runs the game in its editor;
     - the quick start is a scene, and `find_named` finds its cube and camera.
+  - **E1-5b-1, autosave** (#266, ADR 0107 as built):
+    - unsaved changes autosaved into `.ofelia/` after 30 s at a quiet moment, and brought
+      back without a dialog after a crash or a clean exit;
+    - a scene file changed on disk is never written over: the take-disk and save-over
+      commands pick a side;
+    - one editor per project.
   - **Next:** the rest of E1 (ADR 0107 §7):
-    - E1-5b: autosave and the session in `.ofelia/`;
+    - E1-5b-2: the view in the session (cameras, selection, folded rows, panels), restoring
+      older autosaves;
     - E1-5c: rebuild and restart after a code change (under 1 s; dev measured against
-      release).
+      release; research done, `docs/research/rebuild-restart.md` comes with it).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

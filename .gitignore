@@ -18,3 +18,6 @@
 
 # graphify's knowledge graph, built on the machine (docs/status.md, knowledge graph).
 /graphify-out/
+
+# The editor's own files beside a project it opened: the session, autosaves (ADR 0107 §4).
+.ofelia/

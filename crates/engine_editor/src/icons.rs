@@ -83,3 +83,6 @@ pub const MENU_DOWN: &str = "\u{F035D}";
 pub const MIXED: &str = "\u{F0374}";
 /// Back to the default value (`md-undo`).
 pub const RESET: &str = "\u{F054C}";
+/// Something needs a look (`md-alert`): a scene's file changed on disk since its unsaved
+/// changes.
+pub const ALERT: &str = "\u{F0026}";

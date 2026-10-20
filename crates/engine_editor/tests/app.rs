@@ -299,7 +299,7 @@ fn the_quick_start_opens_in_the_editor() {
             .frame_overlaid(&mut game, Some(&mut overlay))
             .unwrap();
         player.set_view_rect(game.view_rect());
-        game.sync_assets(&player);
+        game.sync_assets(&mut player);
     }
     for name in ["Floor", "Cube", "Sun", "Camera"] {
         assert!(
