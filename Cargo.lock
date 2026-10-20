@@ -367,6 +367,7 @@ dependencies = [
  "engine_physics",
  "engine_physics_jolt",
  "engine_save",
+ "engine_scene",
  "engine_shader",
 ]
 
