@@ -72,9 +72,17 @@ Last updated: 2026-10-17.
   - **Scene format 3: the roots' order** (#263, ADR 0108; team decision 2026-10-20):
     `order = <n>` in a root's block, spaced so moving a root changes its line only; the
     editor's tree shows and keeps it; versions 1 and 2 load.
+  - **E1-5a, the game's `main`** (#PR, ADR 0107 as built):
+    - `engine_app::main!(settings, start)` runs the player, or the editor with the game's
+      `editor` feature;
+    - `ofeliaengine new` writes the feature, and the quick start's scene and materials
+      under fresh ids;
+    - `ofeliaengine edit` runs the game in its editor;
+    - the quick start is a scene, and `find_named` finds its cube and camera.
   - **Next:** the rest of E1 (ADR 0107 §7):
-    - E1-5: sessions, autosave, rebuild and restart; the game's `main` from a macro,
-      `ofeliaengine edit`, the quick start as a scene.
+    - E1-5b: autosave and the session in `.ofelia/`;
+    - E1-5c: rebuild and restart after a code change (under 1 s; dev measured against
+      release).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

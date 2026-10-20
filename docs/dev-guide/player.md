@@ -69,6 +69,54 @@ let mut player = Player::new(&PlayerSettings {
 - **An asset the player cannot find** leaves its entity undrawn and says why once in the
   log; `player.assets().problem(asset)` tells you too.
 
+## Your game's `main`
+
+A game made by `ofeliaengine new` builds itself from its scene and gets its `main` from a
+macro:
+
+```rust
+use engine_app::prelude::*;
+
+fn settings() -> Result<PlayerSettings, Box<dyn std::error::Error>> {
+    Ok(PlayerSettings {
+        scene: Some("scenes/main.scene".into()),
+        ..PlayerSettings::default()
+    })
+}
+
+// Once the scene is in the world: what the game moves, found by name.
+fn start(player: &mut Player) -> Result<MyGame, Box<dyn std::error::Error>> {
+    let door = find_named(player.world_mut(), "Door").ok_or("no `Door`")?;
+    Ok(MyGame { door })
+}
+
+engine_app::main!(settings, start);
+```
+
+- **Without the game's `editor` feature,** `main` runs the player:
+  `engine_app::run(settings, start)` makes it, loads the scene, makes the game with
+  `start` and runs it until the window closes.
+- **With it** (`cargo run --release --features editor`, or `ofeliaengine edit`), the
+  editor runs around the game ([editor.md](editor.md)); `start` makes the game when Play
+  starts.
+- **`find_named(world, name)`** finds an entity by its `Name`, the one the editor's tree
+  shows.
+- **A `main` of your own** works too. The macro writes these lines:
+
+  ```rust
+  fn main() -> Result<(), Box<dyn std::error::Error>> {
+      let settings = settings()?;
+      #[cfg(feature = "editor")]
+      {
+          engine_editor::run(settings, start)
+      }
+      #[cfg(not(feature = "editor"))]
+      {
+          engine_app::run(settings, start)
+      }
+  }
+  ```
+
 ## What the player does for you
 
 - **The process.**
@@ -302,11 +350,13 @@ folder is kept live, an edit showing in the running game. See `localization.md`.
 ## Crash reports
 
 The crash reporter runs your executable a second time, as a monitor. So the first line of
-your `main` decides which of the two it is:
+your `main` decides which of the two it is. A game with crash reports writes its own
+`main` ([above](#your-games-main)), with `engine_crash` among its dependencies, and
+starts it with:
 
 ```rust
 if engine_crash::run_monitor_if_requested() {
-    return; // this process was the crash monitor
+    return Ok(()); // this process was the crash monitor
 }
 let _crash = engine_crash::install(&engine_crash::CrashConfig::new("mygame"));
 ```

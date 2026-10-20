@@ -151,7 +151,7 @@ Where the game's Rust code runs, as put to the owner:
   prefab opens as a scene.
 - **One history across tabs** (ADR 0031). Undoing a step made in another tab switches to
   that tab.
-- **Scene files** are format 2 (ADR 0108).
+- **Scene files** are ADR 0108's format (version 3 since 2026-10-20: the roots' order).
 - **The project's local folder `.ofelia/`** holds the asset cache, autosaves and the
   session. It is never committed: `ofeliaengine new` ignores it.
 - **Autosave:**
@@ -458,11 +458,56 @@ Multi-editing in the inspector (`docs/research/ux/inspector.md` §4, §14).
 - **Not done:** the copy of a component to the selection (`inspector.md` §6, "Copy to
   selected"), header menus (§7).
 
+## As built (E1-5a, 2026-10-20)
+
+The game's `main` from a macro, `ofeliaengine edit`, the quick start as a scene.
+
+- **`engine_app::main!(settings, start)`** writes the game's `main`: `settings` gives the
+  player's settings, `start` (`engine_app::Start`) makes the game once its scene is in
+  the world. The macro expands in the game's crate, so `cfg(feature = "editor")` is the
+  game's own: with it, `engine_editor::run`; without it, `engine_app::run` (the player
+  made, its scene loaded, `start`, the frames until the window closes). A crate without
+  an `editor` feature (the engine's own examples) gets no `unexpected_cfgs` warning: the
+  macro allows it.
+- **`ofeliaengine new`** writes:
+  - the optional `engine_editor` dependency and the `editor` feature;
+  - the quick start's scene (`scenes/main.scene`) and its two materials, under fresh
+    asset ids, with the scene's references rewritten to them, so two games from the
+    template share no asset id;
+  - `.ofelia/` in `.gitignore` (§4).
+- **`ofeliaengine edit [DIR]`** runs `cargo run --release --features editor` in the
+  game's folder, after checking that its manifest declares the feature; otherwise an
+  error says what to add. It stays on release until E1-5c measures the dev profile
+  against it.
+- **The quick start is a scene:**
+  - a floor, a cube, the sun and a camera in `examples/quick_start/scenes/main.scene`
+    (version 3), with `.material` files;
+  - the code finds the cube and the camera by name (`engine_scene::find_named`, in the
+    prelude) and keeps the scene camera's lens, with the player's antialiasing for the
+    GPU;
+  - the test's image is the guide's (`docs/dev-guide/quick-start.png`), unchanged.
+- **Tested:**
+  - `new` writes the feature, and the scene and materials under ids that are not the
+    template's (two games get different ones); the scene names the materials by their
+    new ids;
+  - `edit` finds the feature in `[features]` only, and builds cargo's arguments;
+  - the editor opens the quick start offscreen on the game's own `settings` and `start`,
+    with its four entities and both materials found. The test was checked to fail with a
+    material missing.
+  - A game made by `new` outside the repository checks with and without the feature, in
+    its own target. The first check took 49 s, the engine's C and C++ included; the
+    editor added 5 s.
+- **Not done:**
+  - crash reports and logging from `main!` (a game that wants crash reports writes its
+    `main` by hand, `player.md`);
+  - autosave and the session (E1-5b);
+  - rebuild and restart (E1-5c).
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and
   systems over components, and a game builds itself from its loaded scene (`start`). The
-  quick start and `ofeliaengine new` move to this shape in E1.
+  quick start and `ofeliaengine new` moved to this shape in E1-5a.
 - **The player is split into parts the editor drives** (E1). The skeleton's separate
   device setup goes away.
 - **A shipped game costs nothing more:** the editor is not linked into it.
