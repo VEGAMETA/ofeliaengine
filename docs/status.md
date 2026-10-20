@@ -69,8 +69,10 @@ Last updated: 2026-10-17.
   - **E1-4b-3b, multi-editing** (#262, ADR 0107 as built): the selection's shared
     components, "—" where values differ, typed values to all and relative ones and drags
     from each one's own, one undo step.
+  - **Scene format 3: the roots' order** (#PR, ADR 0108; team decision 2026-10-20):
+    `order = <n>` in a root's block, spaced so moving a root changes its line only; the
+    editor's tree shows and keeps it; versions 1 and 2 load.
   - **Next:** the rest of E1 (ADR 0107 §7):
-    - the roots' order in scene files (sorted by id today) to settle;
     - E1-5: sessions, autosave, rebuild and restart; the game's `main` from a macro,
       `ofeliaengine edit`, the quick start as a scene.
 

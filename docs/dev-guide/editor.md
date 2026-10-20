@@ -77,7 +77,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   scene's objects (see below).
 - **Everything is undoable**, one step per action (a whole drag is one step). The scene's
   tab shows `*` while there are unsaved changes; undoing back to the saved state clears it.
-- **Saving** writes the scene file under the scene's own id, asset references by path.
+- **Saving** writes the scene file under the scene's own id, asset references by path,
+  the roots in the tree's order (`order` lines: [scenes.md](scenes.md#versions)).
   It is written beside the file and moved over it, so a failed save leaves the old file
   whole. A new scene is saved as `untitled.scene` in the project folder.
 - **Edit mode:** the game is not made and nothing ticks.

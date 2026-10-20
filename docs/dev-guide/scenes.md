@@ -4,9 +4,10 @@ Scenes are text files meant for version control. Two people can change the same
 scene and merge like code.
 
 ```text
-[scene version=2 id=9b41d07c2e8a4f6b8d3c1a5e7f902b64]
+[scene version=3 id=9b41d07c2e8a4f6b8d3c1a5e7f902b64]
 
 [entity 6c1f0a3e9d2b47c88e51f0d4a7b3c912]
+order = 1024
 Name = "Door"
 Transform.translation = (10, 0, 0)
 Health = 80
@@ -64,6 +65,9 @@ One line per value: `Component.path = value`.
   `Health = 80`. So is `Name`.
 - **A component with no fields** is written as `Marker = {}`.
 - **The header** carries the format's version and the scene's own id.
+- **A block's first lines** place the entity: `parent = <id>` for a child (written after
+  its parent, in the parent's child order), `order = <n>` for a root (its place among the
+  roots, as the editor's tree shows them).
 
 ## Names
 
@@ -168,6 +172,10 @@ there is no hidden structure to repair.
 
 - **Version 2** (ADR 0108) added strings and containers, names, asset references and the
   scene's id.
-- **Version 1 files load as they are.** Saving writes version 2.
+- **Version 3** (ADR 0108, format 3) added the roots' order: `order = <n>` in a root's
+  block (`RootOrder` in the world), spaced so moving a root changes its own line only.
+  Root blocks stay in id order. `order` on a child is a warning and is ignored.
+- **Versions 1 and 2 load as they are** (their roots have no order). Saving writes
+  version 3.
 - **Prefab instances** (any scene placed in another, with its overrides) come with the
   editor's prefabs (ADR 0107, phase E5).
