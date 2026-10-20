@@ -568,6 +568,32 @@ whose open questions were settled by its recommendations, team decision 2026-10-
 - **For E1-5c:** a restarted editor waits for the old one's lock instead of being
   refused.
 
+## As built (E1-5b-2, 2026-10-20)
+
+The view in the session, and older autosaves brought back.
+
+- **The session file** gains an `[editor]` block and a view per `[document]`. Keys and
+  sections it does not know are skipped, so a later editor's file still reads.
+  - `[editor]`: snapping by default and its steps; the last 50 commands run, by their
+    stable names.
+  - per scene: the orbit camera (target, yaw, pitch, distance); the selection by scene
+    id in pick order, and the anchor; the tree's closed rows (sorted, so an unchanged set
+    writes the same text); the tree's and the inspector's filters; the tool.
+- **Written** when its text changed: with every autosave, at the exit, and otherwise at
+  most every 10 s at a quiet moment.
+- **Back at start:** the camera, the selection (entities gone are left out), the closed
+  rows, the filters, the tool, snapping, and the palette's ranking of recent commands
+  (`Commands::recent`).
+- **"Scene: Restore Unsaved Changes…"** opens the command palette as a list: the scene's
+  latest autosave, the two older ones and the one kept after a conflict, the newest first,
+  named by their age. The query narrows the list. The pick replaces the scene as one undo
+  step, as "Take Disk Version" does (both through one replacement keyed by scene ids).
+- **Not kept:** panel sizes and open bottom tabs (the shell's panels are fixed for now);
+  undo history (§1); popups.
+- **Tested:** the view across a clean exit and a start (camera, selection and anchor,
+  closed rows, filters, tool, snapping, recent commands); the session file's new blocks
+  and skipped keys; an older autosave listed, picked and undone.
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and

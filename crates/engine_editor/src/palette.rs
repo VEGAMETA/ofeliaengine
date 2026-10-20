@@ -156,6 +156,20 @@ impl Commands {
         self.list.is_empty()
     }
 
+    /// The commands that ran, the longest ago first: what [`Commands::ran`] recorded,
+    /// for keeping across a restart.
+    pub fn recent(&self) -> Vec<CommandId> {
+        let mut ran: Vec<(u64, CommandId)> = self
+            .last_run
+            .iter()
+            .enumerate()
+            .filter(|&(_, &t)| t > 0)
+            .map(|(i, &t)| (t, CommandId(i as u32)))
+            .collect();
+        ran.sort_unstable_by_key(|&(t, _)| t);
+        ran.into_iter().map(|(_, id)| id).collect()
+    }
+
     /// Records that a command ran (for recency ranking).
     pub fn ran(&mut self, id: CommandId) {
         self.clock += 1;

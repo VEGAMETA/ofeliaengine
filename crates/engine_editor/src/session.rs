@@ -11,8 +11,8 @@
 //!   changed on disk since.
 
 use engine_platform::time::HighResTimer;
-use engine_scene::AssetId;
 use engine_scene::text::{quote_into, split_assignment, split_items, unquote};
+use engine_scene::{AssetId, SceneId};
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, Write as _};
@@ -40,6 +40,13 @@ pub(crate) const RESTORING: Duration = Duration::from_secs(10);
 
 /// Older autosaves kept beside a scene's latest (`.1`, `.2`).
 pub(crate) const OLDER_AUTOSAVES: u32 = 2;
+
+/// How often a view that changed (the camera, the selection, the tree) is written into
+/// the session, at a quiet moment.
+pub(crate) const VIEW_EVERY: Duration = Duration::from_secs(10);
+
+/// Recently run commands the session keeps.
+pub(crate) const RECENT: usize = 50;
 
 /// Whether an autosave due at `due` is written at `now`: never during a gesture (a drag,
 /// typing, a held button); once due, at a quiet moment, or at the latest [`PATIENCE`]
@@ -182,6 +189,23 @@ pub(crate) fn modified(path: &Path) -> Option<u64> {
     u64::try_from(since.as_nanos()).ok()
 }
 
+/// How a scene was looked at: the editor's camera, the selection, the tree.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct View {
+    /// The orbit camera's target, yaw, pitch and distance.
+    pub(crate) camera: Option<([f32; 3], f32, f32, f32)>,
+    /// The selection by scene id, in the order picked: the active one last.
+    pub(crate) selection: Vec<SceneId>,
+    /// Where a Shift range starts.
+    pub(crate) anchor: Option<SceneId>,
+    /// The tree's closed rows.
+    pub(crate) collapsed: Vec<SceneId>,
+    pub(crate) tree_filter: String,
+    pub(crate) inspector_filter: String,
+    /// The tool bar's tool (0: select).
+    pub(crate) tool: usize,
+}
+
 /// A scene the session had open.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Document {
@@ -193,21 +217,50 @@ pub(crate) struct Document {
     pub(crate) base: Option<Base>,
     /// Its unsaved changes, relative to `.ofelia/`.
     pub(crate) autosave: Option<PathBuf>,
+    /// How it was looked at.
+    pub(crate) view: View,
+}
+
+/// The editor's own state, the same for every scene.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct EditorState {
+    /// Snapping by default, and its steps: position, scale, angle, other numbers.
+    pub(crate) snapping: Option<(bool, [f64; 4])>,
+    /// The commands run, by their stable names, the longest ago first.
+    pub(crate) recent: Vec<String>,
 }
 
 /// `.ofelia/session`: what the editor brings back at its next start.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct SessionFile {
+    pub(crate) editor: EditorState,
     pub(crate) documents: Vec<Document>,
 }
 
-/// The session file's version.
+/// The session file's version. Keys and sections it does not know are skipped, so a
+/// later editor's file still reads.
 const VERSION: u32 = 1;
 
 impl SessionFile {
-    /// The file's text: a header, then a block per document.
+    /// The file's text: a header, the editor's block, then a block per document.
     pub(crate) fn to_text(&self) -> String {
-        let mut out = format!("[session version={VERSION}]\n");
+        let mut out = format!("[session version={VERSION}]\n\n[editor]\n");
+        if let Some((on, [position, scale, angle, number])) = self.editor.snapping {
+            let _ = writeln!(
+                out,
+                "snapping = ({on}, {position}, {scale}, {angle}, {number})"
+            );
+        }
+        if !self.editor.recent.is_empty() {
+            out.push_str("recent = [");
+            for (i, name) in self.editor.recent.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                quote_into(&mut out, name);
+            }
+            out.push_str("]\n");
+        }
         for d in &self.documents {
             out.push_str("\n[document]\n");
             if let Some(path) = &d.path {
@@ -224,6 +277,28 @@ impl SessionFile {
                 quote_into(&mut out, &slashes(path));
                 out.push('\n');
             }
+            let v = &d.view;
+            if let Some(([x, y, z], yaw, pitch, distance)) = v.camera {
+                let _ = writeln!(out, "camera = ({x}, {y}, {z}, {yaw}, {pitch}, {distance})");
+            }
+            write_ids(&mut out, "selection", &v.selection);
+            if let Some(anchor) = v.anchor {
+                let _ = writeln!(out, "anchor = @{anchor}");
+            }
+            write_ids(&mut out, "collapsed", &v.collapsed);
+            for (key, text) in [
+                ("tree_filter", &v.tree_filter),
+                ("inspector_filter", &v.inspector_filter),
+            ] {
+                if !text.is_empty() {
+                    let _ = write!(out, "{key} = ");
+                    quote_into(&mut out, text);
+                    out.push('\n');
+                }
+            }
+            if v.tool != 0 {
+                let _ = writeln!(out, "tool = {}", v.tool);
+            }
         }
         out
     }
@@ -232,8 +307,14 @@ impl SessionFile {
     ///
     /// # Errors
     ///
-    /// Another version, or a line that is not part of the format (with its number).
+    /// Another version, or a line the format cannot read (with its number).
     pub(crate) fn parse(text: &str) -> Result<Self, String> {
+        enum Section {
+            Editor,
+            Document,
+            /// A section of a later editor: skipped.
+            Other,
+        }
         let mut lines = text.lines().enumerate();
         let header = lines.next().map(|(_, l)| l.trim());
         let expected = format!("[session version={VERSION}]");
@@ -244,60 +325,158 @@ impl SessionFile {
             ));
         }
         let mut file = Self::default();
+        let mut section = Section::Other;
         for (n, line) in lines {
             let line = line.trim();
             let at = |e: String| format!("line {}: {e}", n + 1);
             if line.is_empty() {
                 continue;
             }
-            if line == "[document]" {
-                file.documents.push(Document {
-                    path: None,
-                    id: AssetId::NONE,
-                    base: None,
-                    autosave: None,
-                });
+            if line.starts_with('[') {
+                section = match line {
+                    "[editor]" => Section::Editor,
+                    "[document]" => {
+                        file.documents.push(Document {
+                            path: None,
+                            id: AssetId::NONE,
+                            base: None,
+                            autosave: None,
+                            view: View::default(),
+                        });
+                        Section::Document
+                    }
+                    _ => Section::Other,
+                };
                 continue;
             }
-            let doc = file
-                .documents
-                .last_mut()
-                .ok_or_else(|| at(format!("`{line}` before any [document]")))?;
             let (key, value) = split_assignment(line)
                 .ok_or_else(|| at(format!("`{line}` is not `key = value`")))?;
-            match key {
-                "path" => doc.path = Some(PathBuf::from(unquote(value).map_err(at)?)),
-                "autosave" => doc.autosave = Some(PathBuf::from(unquote(value).map_err(at)?)),
-                "id" => {
-                    doc.id = AssetId::parse(value)
-                        .ok_or_else(|| at(format!("`{value}` is not an asset id")))?;
-                }
-                "base" => {
-                    let inner = value
-                        .strip_prefix('(')
-                        .and_then(|v| v.strip_suffix(')'))
-                        .ok_or_else(|| at(format!("`{value}` is not (size, time, hash)")))?;
-                    let parts = split_items(inner);
-                    let [size, time, hash] = parts[..] else {
-                        return Err(at(format!("`{value}` is not (size, time, hash)")));
+            match section {
+                Section::Other => {}
+                Section::Editor => match key {
+                    "snapping" => {
+                        let parts = items(value, '(', ')').map_err(at)?;
+                        let [on, position, scale, angle, number] = parts[..] else {
+                            return Err(at(format!("`{value}` is not (on, 4 steps)")));
+                        };
+                        let on = match on {
+                            "true" => true,
+                            "false" => false,
+                            other => return Err(at(format!("`{other}` is not true or false"))),
+                        };
+                        file.editor.snapping = Some((
+                            on,
+                            [
+                                parse_number(position).map_err(at)?,
+                                parse_number(scale).map_err(at)?,
+                                parse_number(angle).map_err(at)?,
+                                parse_number(number).map_err(at)?,
+                            ],
+                        ));
+                    }
+                    "recent" => {
+                        file.editor.recent = items(value, '[', ']')
+                            .and_then(|names| names.into_iter().map(unquote).collect())
+                            .map_err(at)?;
+                    }
+                    _ => {}
+                },
+                Section::Document => {
+                    let Some(doc) = file.documents.last_mut() else {
+                        continue;
                     };
-                    let number = |s: &str| {
-                        s.trim()
-                            .parse::<u64>()
-                            .map_err(|_| at(format!("`{s}` is not a whole number")))
-                    };
-                    doc.base = Some(Base {
-                        size: number(size)?,
-                        time: number(time)?,
-                        hash: u64::from_str_radix(hash.trim(), 16)
-                            .map_err(|_| at(format!("`{hash}` is not a hex hash")))?,
-                    });
+                    read_document_key(doc, key, value).map_err(at)?;
                 }
-                other => return Err(at(format!("unknown key `{other}`"))),
             }
         }
         Ok(file)
     }
+}
+
+/// One `key = value` of a `[document]` block; keys of a later editor are skipped.
+fn read_document_key(doc: &mut Document, key: &str, value: &str) -> Result<(), String> {
+    let view = &mut doc.view;
+    match key {
+        "path" => doc.path = Some(PathBuf::from(unquote(value)?)),
+        "autosave" => doc.autosave = Some(PathBuf::from(unquote(value)?)),
+        "id" => {
+            doc.id =
+                AssetId::parse(value).ok_or_else(|| format!("`{value}` is not an asset id"))?;
+        }
+        "base" => {
+            let parts = items(value, '(', ')')?;
+            let [size, time, hash] = parts[..] else {
+                return Err(format!("`{value}` is not (size, time, hash)"));
+            };
+            doc.base = Some(Base {
+                size: parse_number(size)?,
+                time: parse_number(time)?,
+                hash: u64::from_str_radix(hash, 16)
+                    .map_err(|_| format!("`{hash}` is not a hex hash"))?,
+            });
+        }
+        "camera" => {
+            let parts = items(value, '(', ')')?;
+            let [x, y, z, yaw, pitch, distance] = parts[..] else {
+                return Err(format!("`{value}` is not (x, y, z, yaw, pitch, distance)"));
+            };
+            view.camera = Some((
+                [parse_number(x)?, parse_number(y)?, parse_number(z)?],
+                parse_number(yaw)?,
+                parse_number(pitch)?,
+                parse_number(distance)?,
+            ));
+        }
+        "selection" => view.selection = scene_ids(value)?,
+        "collapsed" => view.collapsed = scene_ids(value)?,
+        "anchor" => view.anchor = Some(scene_id(value)?),
+        "tree_filter" => view.tree_filter = unquote(value)?,
+        "inspector_filter" => view.inspector_filter = unquote(value)?,
+        "tool" => view.tool = parse_number(value)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Writes `key = [@id, …]` unless `ids` is empty.
+fn write_ids(out: &mut String, key: &str, ids: &[SceneId]) {
+    if ids.is_empty() {
+        return;
+    }
+    let _ = write!(out, "{key} = [");
+    for (i, id) in ids.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "@{id}");
+    }
+    out.push_str("]\n");
+}
+
+/// The items of `value` written between `open` and `close`: `(a, b)` or `[a, b]`.
+fn items(value: &str, open: char, close: char) -> Result<Vec<&str>, String> {
+    value
+        .strip_prefix(open)
+        .and_then(|v| v.strip_suffix(close))
+        .map(split_items)
+        .ok_or_else(|| format!("`{value}` is not {open}…{close}"))
+}
+
+fn parse_number<T: std::str::FromStr>(s: &str) -> Result<T, String> {
+    s.trim()
+        .parse()
+        .map_err(|_| format!("`{s}` is not a number"))
+}
+
+fn scene_id(s: &str) -> Result<SceneId, String> {
+    s.trim()
+        .strip_prefix('@')
+        .and_then(SceneId::parse)
+        .ok_or_else(|| format!("`{s}` is not @<scene id>"))
+}
+
+fn scene_ids(value: &str) -> Result<Vec<SceneId>, String> {
+    items(value, '[', ']')?.into_iter().map(scene_id).collect()
 }
 
 /// A path with forward slashes, as the project's other files write paths.
@@ -572,14 +751,28 @@ mod tests {
                     autosave: Some(PathBuf::from(
                         "autosave/main-41bd9902e9271812fecd6caddd8912bf.scene",
                     )),
+                    view: View {
+                        camera: Some(([0.5, -1.25, 3.0], 0.6, 0.45, 8.0)),
+                        selection: vec![SceneId::from_u128(2), SceneId::from_u128(3)],
+                        anchor: Some(SceneId::from_u128(2)),
+                        collapsed: vec![SceneId::from_u128(4)],
+                        tree_filter: String::from("cu\"be"),
+                        inspector_filter: String::new(),
+                        tool: 2,
+                    },
                 },
                 Document {
                     path: None,
                     id: AssetId::from_u128(7),
                     base: None,
                     autosave: None,
+                    view: View::default(),
                 },
             ],
+            editor: EditorState {
+                snapping: Some((true, [0.1, 0.25, 45.0, 0.1])),
+                recent: vec![String::from("edit.undo"), String::from("scene.duplicate")],
+            },
         };
         let text = file.to_text();
         assert!(text.starts_with("[session version=1]\n"), "{text}");
@@ -589,7 +782,14 @@ mod tests {
         );
         assert_eq!(SessionFile::parse(&text).unwrap(), file);
         assert!(SessionFile::parse("[session version=2]\n").is_err());
-        let bad = SessionFile::parse("[session version=1]\n[document]\nspeed = 3\n");
+        // A later editor's keys and sections are skipped; a value that does not read is
+        // an error on its line.
+        let later = SessionFile::parse(
+            "[session version=1]\n[panels]\nleft = 300\n[document]\nspeed = 3\ntool = 1\n",
+        )
+        .unwrap();
+        assert_eq!(later.documents[0].view.tool, 1);
+        let bad = SessionFile::parse("[session version=1]\n[document]\ntool = fast\n");
         assert!(bad.is_err_and(|e| e.starts_with("line 3:")));
     }
 
