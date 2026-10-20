@@ -96,7 +96,7 @@ Last updated: 2026-10-20.
     - a change rebuilds in about 1.5–1.6 s and the restart takes 0.36–0.37 s;
     - `ofeliaengine new` writes the editor's dev profile, and `ofeliaengine edit` is the
       launcher.
-  - **E1-5c-2, the restart without a gap** (#PR, ADR 0107 as built): the new window
+  - **E1-5c-2, the restart without a gap** (#269, ADR 0107 as built): the new window
     opens hidden at the old one's place and shows its first frames over it before the old
     editor exits; a new build that fails at its start leaves the old editor running with
     the reason; any start opens the window where the session kept it. E1 is done.
