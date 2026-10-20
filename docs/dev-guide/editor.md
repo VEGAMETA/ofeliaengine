@@ -223,6 +223,13 @@ you press Ctrl+S.
 - **Closing the editor asks nothing.** Unsaved changes stay in the session, and the next
   start brings them back, with the tab's `*`. After a crash they come back the same way,
   with at most the last 30 s or so lost; the status bar says so.
+- **The view comes back too:** the editor's camera, the selection (the active entity
+  last), the tree's closed rows, the filters, the tool, snapping and its steps, and the
+  palette's recently run commands. They are written when they change, at most every 10 s
+  at a quiet moment, and at the exit.
+- **Scene: Restore Unsaved Changes…** (Ctrl+Shift+P) lists the scene's autosaves, the
+  newest first: the latest, the two older ones, and the one kept when the disk version
+  was taken. The one you pick replaces the scene as one undo step.
 - **When the file changed on disk** since your unsaved changes (a teammate's commit, a
   pull), neither is written over:
   - your version comes back, the tab shows a warning sign, and the status bar names the
@@ -244,7 +251,6 @@ writing happens on a thread of its own. 0.15 ms for a scene of 200 entities, 8.9
 
 | Phase | What |
 |---|---|
-| E1-5b | the view in the session: cameras, selection, folded rows, panels; "Restore Unsaved Changes…" with the older autosaves |
 | E1-5c | rebuild and restart after a code change |
 | E2 | selection in the viewport, gizmos, placement by drag and drop |
 | E3 | Play on a copy of the world |

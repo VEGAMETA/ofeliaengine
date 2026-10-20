@@ -85,9 +85,10 @@ Last updated: 2026-10-20.
     - a scene file changed on disk is never written over: the take-disk and save-over
       commands pick a side;
     - one editor per project.
+  - **E1-5b-2, the view in the session** (#PR, ADR 0107 as built): the camera, the
+    selection, the tree's closed rows, the filters, the tool, snapping and recent commands
+    come back at start; "Restore Unsaved Changes…" brings back an older autosave.
   - **Next:** the rest of E1 (ADR 0107 §7):
-    - E1-5b-2: the view in the session (cameras, selection, folded rows, panels), restoring
-      older autosaves;
     - E1-5c: rebuild and restart after a code change (under 1 s; dev measured against
       release; research done, `docs/research/rebuild-restart.md` comes with it).
 
