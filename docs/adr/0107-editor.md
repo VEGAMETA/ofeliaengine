@@ -431,6 +431,33 @@ The selection in the scene tree, icons by kind (`docs/research/ux/scene-tree.md`
 - **Not done:** Ctrl+G (group under a new entity), multi-editing in the inspector
   (E1-4b-3b).
 
+## As built (E1-4b-3b, 2026-10-20)
+
+Multi-editing in the inspector (`docs/research/ux/inspector.md` §4, §14).
+
+- **What is shown:** the inspector is built from the active entity, then
+  `Inspector::compare` keeps the components every selected entity has and marks the parts
+  where another holds a different value (`Property::mixed`, a bit per part), shown "—".
+  Plain values are compared by their bytes part by part (a rotation as a whole), strings
+  and containers by their text. A field is changed (↺) when any entity's value differs
+  from the default. A checkbox that differs shows a dash.
+- **What an edit does**, to every selected entity with the component, as one undo step:
+  - a typed value is an expression worked out per entity, so an absolute one sets them
+    all and a relative one (`+=1`, `*2`) moves each from its own; "—" kept as it was
+    changes nothing;
+  - a drag moves each from its own start (the owner's snapping rules apply to each);
+  - a checkbox turns all off when all are on, otherwise all on; a choice, a reset and a
+    paste go to all; strings are set on all through the scene-path setter (`set_on`: the
+    entity index built once, nothing changed when one refuses the text).
+- **Measured** on ref-1's CPU, release, 200 entities: the frame 84 µs with one selected,
+  105 µs with all 200 selected (the comparison about 63 ns per entity: one component
+  lookup per entity and section, then the properties' bytes).
+- **Tested** through the editor's frames: shared components and dashes (a part, a name),
+  an absolute and a relative typed value, a drag from each start, a differing checkbox,
+  a reset and a paste on two entities, one undo step each.
+- **Not done:** the copy of a component to the selection (`inspector.md` §6, "Copy to
+  selected"), header menus (§7).
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and

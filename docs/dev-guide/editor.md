@@ -48,7 +48,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   - Delete and Ctrl+D act on the whole selection (a child goes with its selected
     parent), as one undo step; each copy comes right after its original, numbered, and
     the copies are selected.
-- **The inspector** edits the selected entity's components, field by field:
+- **The inspector** edits the selected entities' components, field by field. With
+  several selected:
+  - it shows the components they all have; a value that differs between them reads "—"
+    (a vector part by part: only the `x` that differs);
+  - a typed value goes to all of them; a relative one (`+=1`, `*2`) and a drag move each
+    from its own value; a checkbox that differs turns all on; reset and paste act on all;
+  - each edit is one undo step for all of them.
+
+  For each field:
   - **numbers** are dragged sideways (see snapping below), or clicked and typed (see
     typing values below); vectors show their parts with colored `x y z` labels, colors
     `r g b a`;
@@ -189,7 +197,6 @@ right button + WASD and focusing the selection come later.
 
 | Phase | What |
 |---|---|
-| E1-4b-3b | multi-editing: the selection's shared components, differing values read "—", relative edits per entity |
 | E1-5 | sessions, autosave, rebuild and restart after a code change |
 | E2 | selection in the viewport, gizmos, placement by drag and drop |
 | E3 | Play on a copy of the world |
@@ -208,5 +215,5 @@ the panels stay at Windows' SDR white level. `--hdr scrgb|hdr10|off` picks the o
 | | |
 |---|---|
 | Start and 60 frames | 0.51–0.69 s (budget for the start alone: 2 s) |
-| The editor's frame on the CPU (shell, tree of 200 entities, inspector) | 74 µs, 83–84 µs with a selection (92 µs with all 200 selected), 88 µs with the command palette open |
+| The editor's frame on the CPU (shell, tree of 200 entities, inspector) | 74 µs, 84 µs with a selection (105 µs with all 200 selected and compared), 88 µs with the command palette open |
 | The palette's `@` search over 10,000 objects, per keystroke | 0.62–0.73 ms |
