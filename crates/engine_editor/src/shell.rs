@@ -316,6 +316,8 @@ pub struct ShellModel<'a> {
     pub inspector_filter: &'a str,
     /// The command palette, while open.
     pub palette: Option<PaletteView<'a>>,
+    /// A hint by the pointer, and where (logical pixels): a keyboard transform's.
+    pub hint: Option<(&'a str, [f32; 2])>,
 }
 
 /// What happened in the shell this frame.
@@ -425,6 +427,9 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
         bottom_bar(ui, model, p, &mut out);
         if let Some(view) = &model.palette {
             palette(ui, view, p, &mut out, &mut popups);
+        }
+        if let Some((s, at)) = model.hint {
+            hint(ui, s, at, p);
         }
     });
     out.popup = popups.open;
@@ -873,6 +878,25 @@ fn scene_dock(
         ui.mark_region(tree);
         out.tree_hovered = ui.in_region(tree);
     });
+}
+
+/// A floating hint at `at`: what a keyboard transform does.
+fn hint(ui: &mut Ui, s: &str, at: [f32; 2], p: &Palette) {
+    ui.row(
+        "hint",
+        Style {
+            floating: Some(at),
+            padding: [6.0, 3.0, 6.0, 3.0],
+            radius: 4.0,
+            background: Some(p.header),
+            border: Some((p.field_hover, 1.0)),
+            align_cross: Align::Center,
+            ..Style::default()
+        },
+        |ui| {
+            text(ui, "text", s, TEXT, p.text);
+        },
+    );
 }
 
 /// The command palette: a floating box at the top of the window, its query field and the

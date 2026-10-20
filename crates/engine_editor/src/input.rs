@@ -114,6 +114,9 @@ pub struct InputCollector {
     alt: bool,
     /// Keys pressed this frame with the modifiers held then, for shortcuts.
     chords: Vec<Chord>,
+    /// The virtual keys pressed this frame: the letter on the key in Latin layouts (the
+    /// US one in others), for keys that mean their letter (a keyboard transform's X, Y, Z).
+    letters: Vec<u16>,
     /// What Ctrl+V pastes from (and the editor copies to).
     pub clipboard: Clipboard,
 }
@@ -175,6 +178,9 @@ impl InputCollector {
             }
             vk::LWIN | vk::RWIN => return,
             _ if !pressed => return,
+            _ => self.letters.push(virtual_key),
+        }
+        match virtual_key {
             vk::TAB => self.ui.keys.push(UiKey::Tab),
             vk::RETURN => self.ui.keys.push(UiKey::Enter),
             vk::SPACE => self.ui.keys.push(UiKey::Space),
@@ -247,6 +253,34 @@ impl InputCollector {
         &self.chords
     }
 
+    /// The virtual-key codes pressed this frame (Win32 `VK_*`): what the key says, where
+    /// its letter matters more than its place.
+    pub fn letters(&self) -> &[u16] {
+        &self.letters
+    }
+
+    /// Whether Alt is held.
+    pub fn alt(&self) -> bool {
+        self.alt
+    }
+
+    /// The characters typed this frame (after the keyboard layout).
+    pub fn text(&self) -> &str {
+        &self.ui.text
+    }
+
+    /// Takes this frame's keys, typed text, button presses and wheel: something had them
+    /// all (a keyboard transform), so the panels, the shortcuts and the camera do not.
+    pub fn consume(&mut self) {
+        self.pressed = [false; 3];
+        self.wheel = 0.0;
+        self.ui.keys.clear();
+        self.ui.text.clear();
+        self.ui.paste.clear();
+        self.chords.clear();
+        self.letters.clear();
+    }
+
     /// Whether Control is held.
     pub fn ctrl(&self) -> bool {
         self.ctrl
@@ -294,6 +328,7 @@ impl InputCollector {
         self.ui.text.clear();
         self.ui.paste.clear();
         self.chords.clear();
+        self.letters.clear();
     }
 }
 

@@ -103,9 +103,9 @@ pub(crate) struct ViewProj {
     clip: Mat4,
     world: Mat4,
     /// The viewport: x, y, width, height.
-    rect: [f32; 4],
-    eye: Vec3,
-    forward: Vec3,
+    pub(crate) rect: [f32; 4],
+    pub(crate) eye: Vec3,
+    pub(crate) forward: Vec3,
     /// 2 tan(fov / 2) / height: world units per pixel at a depth of 1.
     spread: f32,
 }
@@ -495,44 +495,55 @@ impl GizmoDrag {
             }
         }
     }
+}
 
-    /// A target's new world transform under `change`.
-    pub(crate) fn apply(&self, change: Change, target: &Target) -> Affine3A {
-        let (scale, rotation, translation) = target.world.to_scale_rotation_translation();
-        match change {
-            Change::Move(d) => {
-                Affine3A::from_scale_rotation_translation(scale, rotation, translation + d)
+/// A target's new world transform under `change` about `pivot`, a scale's factors along
+/// `axes`: the gizmo's and the keyboard's transforms alike.
+pub(crate) fn apply(change: Change, target: &Target, pivot: Vec3, axes: [Vec3; 3]) -> Affine3A {
+    let (scale, rotation, translation) = target.world.to_scale_rotation_translation();
+    match change {
+        Change::Move(d) => {
+            Affine3A::from_scale_rotation_translation(scale, rotation, translation + d)
+        }
+        Change::Turn(q) => Affine3A::from_scale_rotation_translation(
+            scale,
+            (q * rotation).normalize(),
+            pivot + q * (translation - pivot),
+        ),
+        Change::Scale(f) => {
+            // The offset from the pivot scaled along the axes; the entity's own scale along
+            // its local axis nearest each of them.
+            let offset = translation - pivot;
+            let mut moved = Vec3::ZERO;
+            for (i, &axis) in axes.iter().enumerate() {
+                moved += axis * offset.dot(axis) * f[i];
             }
-            Change::Turn(q) => Affine3A::from_scale_rotation_translation(
-                scale,
-                (q * rotation).normalize(),
-                self.pivot + q * (translation - self.pivot),
-            ),
-            Change::Scale(f) => {
-                // The offset from the pivot scaled along the gizmo's axes; the entity's own
-                // scale along its local axis nearest each gizmo axis.
-                let offset = translation - self.pivot;
-                let mut moved = Vec3::ZERO;
-                for (i, &axis) in self.axes.iter().enumerate() {
-                    moved += axis * offset.dot(axis) * f[i];
-                }
-                let mut own = scale;
-                for (i, &axis) in self.axes.iter().enumerate() {
-                    let local = [rotation * Vec3::X, rotation * Vec3::Y, rotation * Vec3::Z];
-                    let k = (0..3)
-                        .max_by(|&a, &b| {
-                            local[a]
-                                .dot(axis)
-                                .abs()
-                                .total_cmp(&local[b].dot(axis).abs())
-                        })
-                        .unwrap_or(i);
-                    own[k] *= f[i];
-                }
-                Affine3A::from_scale_rotation_translation(own, rotation, self.pivot + moved)
-            }
+            Affine3A::from_scale_rotation_translation(
+                scale * own_factors(f, rotation, axes),
+                rotation,
+                pivot + moved,
+            )
         }
     }
+}
+
+/// A scale's factors `f` along `axes` as factors along an entity's own axes (`rotation`
+/// turns them in the world): each factor goes to the entity's axis nearest its axis.
+pub(crate) fn own_factors(f: Vec3, rotation: Quat, axes: [Vec3; 3]) -> Vec3 {
+    let local = [rotation * Vec3::X, rotation * Vec3::Y, rotation * Vec3::Z];
+    let mut own = Vec3::ONE;
+    for (i, &axis) in axes.iter().enumerate() {
+        let k = (0..3)
+            .max_by(|&a, &b| {
+                local[a]
+                    .dot(axis)
+                    .abs()
+                    .total_cmp(&local[b].dot(axis).abs())
+            })
+            .unwrap_or(i);
+        own[k] *= f[i];
+    }
+    own
 }
 
 /// The gizmo's colors: x, y, z, the view's and uniform handles, and a handle under the
@@ -722,7 +733,7 @@ mod tests {
             local: Transform::IDENTITY,
         };
         let quarter = Quat::from_rotation_z(core::f32::consts::FRAC_PI_2);
-        let moved = d.apply(Change::Turn(quarter), &target);
+        let moved = apply(Change::Turn(quarter), &target, d.pivot, d.axes);
         assert!((Vec3::from(moved.translation) - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-4);
     }
 
@@ -736,7 +747,12 @@ mod tests {
             parent_inverse: Affine3A::IDENTITY,
             local: Transform::IDENTITY,
         };
-        let scaled = d.apply(Change::Scale(Vec3::new(2.0, 1.0, 1.0)), &target);
+        let scaled = apply(
+            Change::Scale(Vec3::new(2.0, 1.0, 1.0)),
+            &target,
+            d.pivot,
+            d.axes,
+        );
         let (scale, _, _) = scaled.to_scale_rotation_translation();
         assert!(
             (scale - Vec3::new(1.0, 1.0, 2.0)).length() < 1e-4,

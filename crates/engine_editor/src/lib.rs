@@ -20,6 +20,7 @@ mod palette;
 mod session;
 pub mod shell;
 mod snap;
+mod transform;
 mod undo;
 
 pub use app::{EditorGame, EditorOverlay, Start, editor, run, run_frames, run_game};

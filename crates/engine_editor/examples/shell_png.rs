@@ -401,6 +401,7 @@ fn main() {
             rows: &palette_rows,
             selected: 1,
         }),
+        hint: None,
     };
 
     // Lay the UI out: the viewport's rectangle sizes the 3D view.
