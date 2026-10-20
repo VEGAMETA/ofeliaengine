@@ -25,8 +25,8 @@ pub const SCENE: &str = "\u{F0FCE}";
 pub const SCRIPT: &str = "\u{F08B1}";
 /// Texture (`md-image`).
 pub const TEXTURE: &str = "\u{F02E9}";
-/// Mesh or model (`md-cube_outline`).
-pub const MESH: &str = "\u{F01A7}";
+/// A model's file (`md-shape`): the icon a model has everywhere.
+pub const MESH: &str = "\u{F0831}";
 /// Sound (`md-music_note`).
 pub const AUDIO: &str = "\u{F0387}";
 /// Any other file (`md-file_outline`).
@@ -34,8 +34,18 @@ pub const FILE: &str = "\u{F0224}";
 
 /// Spatial node (`md-axis_arrow`).
 pub const NODE_3D: &str = "\u{F0D49}";
-/// Mesh instance (`md-cube`).
-pub const MESH_INSTANCE: &str = "\u{F01A6}";
+/// A model of a mesh from a file (`md-shape`).
+pub const MODEL: &str = "\u{F0831}";
+/// The built-in cube (`md-cube_outline`).
+pub const CUBE: &str = "\u{F01A7}";
+/// The built-in sphere (`md-sphere`).
+pub const SPHERE: &str = "\u{F1954}";
+/// The built-in plane (`md-square_outline`).
+pub const PLANE: &str = "\u{F0763}";
+/// The built-in cylinder (`md-cylinder`).
+pub const CYLINDER: &str = "\u{F194E}";
+/// Spot light (`md-spotlight_beam`).
+pub const SPOT_LIGHT: &str = "\u{F04C9}";
 /// Light (`md-lightbulb_outline`).
 pub const LIGHT: &str = "\u{F0336}";
 /// Sun / directional light (`md-white_balance_sunny`).

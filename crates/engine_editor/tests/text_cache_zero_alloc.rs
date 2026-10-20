@@ -7,8 +7,8 @@
 use engine_editor::icons;
 use engine_editor::paint::UiText;
 use engine_editor::shell::{
-    Field, FileItem, FileKind, Palette, PaletteRow, PaletteView, Section, ShellModel, TreeItem,
-    Widget, build,
+    Field, FileItem, FileKind, MenuItem, Palette, PaletteRow, PaletteView, Section, ShellModel,
+    TreeItem, Widget, build,
 };
 use engine_ui::{TextMeasure, Theme, Ui, UiInput};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -80,6 +80,7 @@ fn item<'a>(depth: u16, icon: &'a str, name: &'a str, kind: &'a str) -> TreeItem
         kind,
         expanded: None,
         selected: false,
+        active: false,
         renaming: false,
     }
 }
@@ -147,12 +148,14 @@ fn a_steady_shell_frame_does_not_allocate() {
     // The command palette open over it all, a query typed.
     let rows = [
         PaletteRow {
+            icon: "",
             label: "Scene: Add Cube",
             matched: &[7, 11],
             category: 7,
             detail: "",
         },
         PaletteRow {
+            icon: "",
             label: "Scene: Duplicate Selection",
             matched: &[],
             category: 7,
@@ -175,7 +178,17 @@ fn a_steady_shell_frame_does_not_allocate() {
         playing: false,
         status: "engine 0.0.0",
         snap: true,
-        add_menu: Some(&["Empty", "Cube"]),
+        add_menu: Some(&[
+            MenuItem {
+                icon: icons::NODE_3D,
+                label: "Empty",
+            },
+            MenuItem {
+                icon: icons::CUBE,
+                label: "Cube",
+            },
+        ]),
+        reveal_row: Some(3),
         tree_filter: "",
         inspector_filter: "",
         palette: Some(PaletteView {

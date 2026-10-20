@@ -485,6 +485,8 @@ pub struct Ui {
     edit_draw: Option<(u64, f32, f32, [f32; 2])>,
     /// Hover regions under the mouse (the last layout's).
     regions: Vec<u64>,
+    /// A node to scroll into view after this frame's layout ([`Ui::reveal`]).
+    reveal: Option<u64>,
     /// Reused by `emit`: clip rectangles and (subtree end, clip depth) of open clips.
     clips: Vec<Rect>,
     open_clips: Vec<(u32, usize)>,
@@ -519,6 +521,7 @@ impl Ui {
             press_rect: Rect::default(),
             edit_draw: None,
             regions: Vec::new(),
+            reveal: None,
             clips: Vec::new(),
             open_clips: Vec::new(),
             last: NONE,
@@ -813,6 +816,13 @@ impl Ui {
         self.regions.contains(&id)
     }
 
+    /// Scrolls the scroll containers around node `id` (built in this frame) just enough to
+    /// show it, from the next frame on: the row the keyboard moved the selection to, an
+    /// object picked in a search.
+    pub fn reveal(&mut self, id: u64) {
+        self.reveal = Some(id);
+    }
+
     /// The draw commands of the frame ended last (valid until the next
     /// [`Ui::begin_frame`]): for painting after querying the layout ([`Ui::rect_of`]).
     pub fn last_frame(&self) -> Frame<'_> {
@@ -835,6 +845,7 @@ impl Ui {
             state.get(&id).map_or(0.0, |s| s.scroll)
         });
         self.update_scroll_limits();
+        self.apply_reveal();
         self.measure_edit(measure);
         self.focus_order.clear();
         self.focus_order
@@ -930,6 +941,42 @@ impl Ui {
         }
         edit.scroll = edit.scroll.max(0.0);
         self.edit_draw = Some((edit.node, edit.scroll, edit.caret_x, edit.select_x));
+    }
+
+    /// [`Ui::reveal`]: each scroll container above the node moves by as little as shows it,
+    /// the innermost first.
+    fn apply_reveal(&mut self) {
+        let Some(id) = self.reveal.take() else {
+            return;
+        };
+        let Some(i) = self.nodes.iter().position(|n| n.id == id) else {
+            return;
+        };
+        let mut rect = self.nodes[i].rect;
+        let mut a = self.nodes[i].parent;
+        while a != NONE {
+            let n = &self.nodes[a as usize];
+            if n.style.scroll {
+                let main = match n.style.direction {
+                    Direction::Row => 0,
+                    Direction::Column => 1,
+                };
+                let (start, len) = (n.rect.pos[main], n.rect.size[main]);
+                let (lo, hi) = (rect.pos[main], rect.pos[main] + rect.size[main]);
+                if let Some(s) = self.state.get_mut(&n.id) {
+                    let mut scroll = s.scroll;
+                    if lo < start {
+                        scroll -= start - lo;
+                    } else if hi > start + len {
+                        scroll += (hi - (start + len)).min(lo - start);
+                    }
+                    let scroll = scroll.clamp(0.0, s.scroll_max);
+                    rect.pos[main] -= scroll - s.scroll;
+                    s.scroll = scroll;
+                }
+            }
+            a = n.parent;
+        }
     }
 
     fn update_scroll_limits(&mut self) {

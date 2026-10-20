@@ -4,7 +4,8 @@
 //! under the UI). Works on any Vulkan 1.3 device, including lavapipe.
 //!
 //! `cargo run -p engine_editor --release --example shell_png -- [out.png] [--playing]
-//! [--palette]`: `--palette` shows the command palette open, "add" typed.
+//! [--palette] [--menu]`: `--palette` shows the command palette open, "add" typed;
+//! `--menu` the scene dock's add menu open.
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -12,8 +13,8 @@ use engine_core::math::{Mat4, Quat, Vec2, Vec3, look_at};
 use engine_editor::icons;
 use engine_editor::paint::{UiText, paint};
 use engine_editor::shell::{
-    Field, FileItem, FileKind, Palette, PaletteRow, PaletteView, Section, ShellModel, TreeItem,
-    Widget, build,
+    Field, FileItem, FileKind, MenuItem, Palette, PaletteRow, PaletteView, Section, ShellModel,
+    TreeItem, Widget, build,
 };
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, ViewFeatures,
@@ -51,6 +52,7 @@ fn tree_item<'a>(
         kind,
         expanded,
         selected,
+        active: selected,
         renaming: false,
     }
 }
@@ -59,6 +61,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let playing = args.iter().any(|a| a == "--playing");
     let show_palette = args.iter().any(|a| a == "--palette");
+    let show_menu = args.iter().any(|a| a == "--menu");
     let out_path = args
         .iter()
         .find(|a| !a.starts_with("--"))
@@ -179,23 +182,9 @@ fn main() {
             false,
         ),
         tree_item(1, icons::NODE_3D, "Level", "Node3D", Some(true), false),
-        tree_item(
-            2,
-            icons::MESH_INSTANCE,
-            "Ground",
-            "MeshInstance",
-            None,
-            false,
-        ),
+        tree_item(2, icons::MODEL, "Ground", "MeshInstance", None, false),
         tree_item(2, icons::NODE_3D, "Crates", "Node3D", Some(false), false),
-        tree_item(
-            2,
-            icons::MESH_INSTANCE,
-            "Tower",
-            "MeshInstance",
-            None,
-            false,
-        ),
+        tree_item(2, icons::MODEL, "Tower", "MeshInstance", None, false),
         tree_item(
             1,
             icons::CHARACTER,
@@ -205,14 +194,7 @@ fn main() {
             true,
         ),
         tree_item(2, icons::CAMERA, "Camera", "Camera3D", None, false),
-        tree_item(
-            2,
-            icons::MESH_INSTANCE,
-            "Model",
-            "MeshInstance",
-            None,
-            false,
-        ),
+        tree_item(2, icons::MODEL, "Model", "MeshInstance", None, false),
         tree_item(
             2,
             icons::COLLISION,
@@ -359,6 +341,7 @@ fn main() {
     let status = format!("engine 0.0.0  ·  Vulkan  ·  {adapter_name}");
     // "add" against "Scene: Add …": the title's first three letters.
     let row = |label, detail| PaletteRow {
+        icon: "",
         label,
         matched: &[7, 8, 9],
         category: 7,
@@ -372,6 +355,18 @@ fn main() {
         row("Scene: Add Empty", ""),
         row("Scene: Add Plane", ""),
         row("Scene: Add Point Light", ""),
+    ];
+    let item = |icon, label| MenuItem { icon, label };
+    let add_menu = [
+        item(icons::NODE_3D, "Empty"),
+        item(icons::CUBE, "Cube"),
+        item(icons::SPHERE, "Sphere"),
+        item(icons::PLANE, "Plane"),
+        item(icons::CYLINDER, "Cylinder"),
+        item(icons::SUN, "Sun"),
+        item(icons::LIGHT, "Point Light"),
+        item(icons::SPOT_LIGHT, "Spot Light"),
+        item(icons::CAMERA, "Camera"),
     ];
     let model = ShellModel {
         scenes: &["main.scene", "level_01.scene*", "меню.scene"],
@@ -396,7 +391,8 @@ fn main() {
         playing,
         status: &status,
         snap: false,
-        add_menu: None,
+        add_menu: show_menu.then_some(&add_menu[..]),
+        reveal_row: None,
         tree_filter: "",
         inspector_filter: "",
         palette: show_palette.then_some(PaletteView {

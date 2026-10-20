@@ -397,6 +397,40 @@ The command palette, reset to default, copying values
   vector's single part (Blender's Ctrl+C on a part); component headers' copy, paste and
   reset (`inspector.md` §7).
 
+## As built (E1-4b-3a, 2026-10-20)
+
+The selection in the scene tree, icons by kind (`docs/research/ux/scene-tree.md` §4).
+
+- **The selection** is a list in the order picked; the last is the active entity, which
+  the inspector shows (its header counts the rest) and F2 renames. A click selects one,
+  Ctrl+click adds or takes out, Shift+click selects the tree's rows from the anchor (the
+  last plain or Ctrl click), Ctrl+Shift+click adds that range. The active row is drawn
+  brighter than the others selected.
+- **The tree's keys** are commands bound in the tree's key context (`KeyContext::Panel`),
+  live after a press in the tree: Up and Down move, Shift extends, Left closes or goes to
+  the parent, Right opens or goes to the first child, Shift+Right opens the branch.
+  They show in the palette and are rebindable like every command.
+- **Delete and Ctrl+D act on the selection's roots** (a child goes with its selected
+  parent), as one undo step. A copy comes right after its original and is numbered among
+  its siblings ("Cube 2"); so is a new entity among the roots. Undo and redo select again
+  what was selected, by scene ids.
+- **`engine_ui::Ui::reveal`** scrolls the scroll containers around a node just enough to
+  show it, from the next frame: the row the keys moved to, an object picked with `@`.
+- **Icons by kind** (team decision, 2026-10-17): one icon per kind in the add menu, the
+  tree and the palette (objects, and the "Add …" commands); a model's is its built-in
+  shape's (cube, sphere, plane, cylinder) or a model's; the spot light has its own. An
+  icon takes a column of one width, so labels line up.
+- **Measured** on ref-1's CPU, release, 200 entities: the frame 83–84 µs with one selected
+  (82.5 before), 92 µs with all 200 selected. An icon is one text node of fixed width;
+  a container around each icon had cost 9 µs.
+- **Tested** through the editor's frames: Ctrl+, Shift+ and plain clicks, the header's
+  count, the arrows with and without Shift, the arrows going elsewhere after a click in
+  the viewport, Left and Right on a parent and a leaf, the selection duplicated and
+  deleted as one step and undone, numbered names, a picked row scrolled into view, the
+  kinds' icons in the menu and the tree; `engine_ui`: reveal.
+- **Not done:** Ctrl+G (group under a new entity), multi-editing in the inspector
+  (E1-4b-3b).
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and

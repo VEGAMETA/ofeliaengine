@@ -48,6 +48,8 @@ pub struct Palette {
     pub field_hover: Color,
     /// Selected rows and the active tool.
     pub selection: Color,
+    /// Rows selected besides the active one.
+    pub selection_dim: Color,
     /// Main text.
     pub text: Color,
     /// Secondary text: labels, inactive tabs, hints.
@@ -67,6 +69,7 @@ impl Default for Palette {
             field: srgb(45, 47, 55),
             field_hover: srgb(60, 63, 74),
             selection: srgb(52, 78, 120),
+            selection_dim: srgb(40, 54, 80),
             text: srgb(222, 224, 230),
             text_dim: srgb(140, 144, 156),
             accent: srgb(96, 150, 240),
@@ -90,8 +93,19 @@ pub struct TreeItem<'a> {
     pub expanded: Option<bool>,
     /// Selected.
     pub selected: bool,
+    /// The active one of the selection (the inspector shows it); drawn brighter.
+    pub active: bool,
     /// Its name is being edited in place (F2, a double click).
     pub renaming: bool,
+}
+
+/// An entry of a menu: an icon (see [`crate::icons`]; empty for none) and a label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MenuItem<'a> {
+    /// Glyph before the label.
+    pub icon: &'a str,
+    /// What the entry says.
+    pub label: &'a str,
 }
 
 /// How a property is shown in the inspector.
@@ -135,6 +149,8 @@ pub struct Field<'a> {
 /// A row of the command palette.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PaletteRow<'a> {
+    /// Glyph before the label (see [`crate::icons`]); empty for none.
+    pub icon: &'a str,
     /// "Category: Title", or an object's name.
     pub label: &'a str,
     /// The label's characters (indices) the query matched: highlighted.
@@ -291,7 +307,9 @@ pub struct ShellModel<'a> {
     /// Dragged values snap by default (the tool bar's grid button).
     pub snap: bool,
     /// The scene dock's add menu, while open: what it offers.
-    pub add_menu: Option<&'a [&'a str]>,
+    pub add_menu: Option<&'a [MenuItem<'a>]>,
+    /// The scene tree's row to scroll into view.
+    pub reveal_row: Option<usize>,
     /// What the scene tree is filtered by.
     pub tree_filter: &'a str,
     /// What the inspector is filtered by.
@@ -313,6 +331,8 @@ pub struct ShellResponse {
     pub tree_row: Option<usize>,
     /// A scene tree row's arrow was clicked: open or close it.
     pub tree_toggle: Option<usize>,
+    /// The mouse is over the scene tree (where its keys go after a click).
+    pub tree_hovered: bool,
     /// Renaming in the tree ended: committed (the name is `Ui::edited_text`) or cancelled.
     pub rename: Option<bool>,
     /// The tree's filter field was used (`Ui::edited_text` while it changes).
@@ -365,6 +385,16 @@ const INDENT: f32 = 14.0;
 
 fn text(ui: &mut Ui, key: &str, s: &str, size: f32, color: Color) -> u64 {
     ui.text_node(key, Style::default(), s, size, color, false)
+}
+
+/// An icon glyph in a column of one width, so the labels after icons line up (one text
+/// node: no container around it).
+fn icon(ui: &mut Ui, key: &str, glyph: &str, color: Color) {
+    let column = Style {
+        size: [Size::Fixed(ICON + 2.0), Size::Fit],
+        ..Style::default()
+    };
+    ui.text_node(key, column, glyph, ICON, color, false);
 }
 
 /// Builds the shell into `ui` (between `begin_frame` and `end_frame`).
@@ -575,7 +605,7 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
         dock_column(ui, "folders", Size::Fixed(220.0), p, |ui| {
             dock_title(ui, "FileSystem", p);
             ui.scroll_column("tree", |ui| {
-                out.folder = tree_rows(ui, model.folders, p).clicked;
+                out.folder = tree_rows(ui, model.folders, p, None).clicked;
             });
         });
         dock_column(ui, "listing", Size::Grow(1.0), p, |ui| {
@@ -716,7 +746,12 @@ struct RowsResponse {
 }
 
 /// Tree rows: a click on a row, on its arrow, and renaming in place.
-fn tree_rows(ui: &mut Ui, rows: &[TreeItem<'_>], p: &Palette) -> RowsResponse {
+fn tree_rows(
+    ui: &mut Ui,
+    rows: &[TreeItem<'_>],
+    p: &Palette,
+    reveal: Option<usize>,
+) -> RowsResponse {
     let mut out = RowsResponse::default();
     for (i, item) in rows.iter().enumerate() {
         ui.push_id(i as u64);
@@ -727,7 +762,11 @@ fn tree_rows(ui: &mut Ui, rows: &[TreeItem<'_>], p: &Palette) -> RowsResponse {
                 padding: [6.0 + INDENT * f32::from(item.depth), 0.0, 6.0, 0.0],
                 gap: 5.0,
                 align_cross: Align::Center,
-                background: item.selected.then_some(p.selection),
+                background: if item.active {
+                    Some(p.selection)
+                } else {
+                    item.selected.then_some(p.selection_dim)
+                },
                 ..Style::default()
             },
             |ui| {
@@ -752,7 +791,7 @@ fn tree_rows(ui: &mut Ui, rows: &[TreeItem<'_>], p: &Palette) -> RowsResponse {
                     out.toggled = Some(i);
                 }
                 if !item.icon.is_empty() {
-                    text(ui, "icon", item.icon, ICON, p.text_dim);
+                    icon(ui, "icon", item.icon, p.text_dim);
                 }
                 if item.renaming {
                     let style = Style {
@@ -777,6 +816,9 @@ fn tree_rows(ui: &mut Ui, rows: &[TreeItem<'_>], p: &Palette) -> RowsResponse {
         );
         if ui.sense(id, false).clicked && out.toggled != Some(i) {
             out.clicked = Some(i);
+        }
+        if reveal == Some(i) {
+            ui.reveal(id);
         }
         ui.pop_id();
     }
@@ -808,6 +850,7 @@ fn scene_dock(
                 |ui| {
                     text(ui, "icon", icons::PLUS, ICON, p.text);
                     if let Some(items) = model.add_menu {
+                        let items = items.iter().map(|m| (m.icon, m.label));
                         let popup = menu(ui, items, p, [-150.0, 24.0], &mut out.add_item);
                         popups.open = Some((popup, ui.id("add")));
                     }
@@ -821,12 +864,14 @@ fn scene_dock(
             }
         });
         out.tree_filter = filter(ui, model.tree_filter, "Filter nodes", p);
-        ui.scroll_column("tree", |ui| {
-            let rows = tree_rows(ui, model.tree, p);
+        let tree = ui.scroll_column("tree", |ui| {
+            let rows = tree_rows(ui, model.tree, p, model.reveal_row);
             out.tree_row = rows.clicked;
             out.tree_toggle = rows.toggled;
             out.rename = rows.rename;
         });
+        ui.mark_region(tree);
+        out.tree_hovered = ui.in_region(tree);
     });
 }
 
@@ -922,6 +967,14 @@ fn palette(
                         ..Style::default()
                     },
                     |ui| {
+                        if !row.icon.is_empty() {
+                            icon(ui, "icon", row.icon, p.text_dim);
+                            ui.container(
+                                "gap",
+                                Style::default().size(Size::Fixed(6.0), Size::Fit),
+                                |_| {},
+                            );
+                        }
                         label_runs(ui, row, p);
                         ui.spacer("fill");
                         text(ui, "detail", row.detail, SMALL, p.text_dim);
@@ -987,9 +1040,9 @@ fn run_text(ui: &mut Ui, run: u64, s: &str, class: u8, p: &Palette) {
 
 /// A floating list of items under its opener, `at` from the opener's corner; reports
 /// the clicked item. Returns the list's id.
-fn menu(
+fn menu<'a>(
     ui: &mut Ui,
-    items: &[&str],
+    items: impl IntoIterator<Item = (&'a str, &'a str)>,
     p: &Palette,
     at: [f32; 2],
     clicked: &mut Option<usize>,
@@ -1006,7 +1059,7 @@ fn menu(
             ..Style::default()
         },
         |ui| {
-            for (i, item) in items.iter().enumerate() {
+            for (i, (glyph, label)) in items.into_iter().enumerate() {
                 ui.push_id(i as u64);
                 let id = ui.id("item");
                 let hovered = ui.is_hovered(id);
@@ -1017,10 +1070,14 @@ fn menu(
                         padding: [10.0, 0.0, 10.0, 0.0],
                         align_cross: Align::Center,
                         background: hovered.then_some(p.selection),
+                        gap: 8.0,
                         ..Style::default()
                     },
                     |ui| {
-                        text(ui, "label", item, TEXT, p.text);
+                        if !glyph.is_empty() {
+                            icon(ui, "icon", glyph, p.text_dim);
+                        }
+                        text(ui, "label", label, TEXT, p.text);
                     },
                 );
                 if ui.sense(id, false).clicked {
@@ -1174,7 +1231,8 @@ fn choice(
             text(ui, "arrow", icons::MENU_DOWN, ICON, p.text_dim);
             if let Some(options) = open {
                 let mut picked = None;
-                let popup = menu(ui, options, p, [0.0, 22.0], &mut picked);
+                let items = options.iter().map(|&o| ("", o));
+                let popup = menu(ui, items, p, [0.0, 22.0], &mut picked);
                 popups.open = Some((popup, id));
                 if let Some(i) = picked {
                     *action = Some(FieldAction::Choose(i));

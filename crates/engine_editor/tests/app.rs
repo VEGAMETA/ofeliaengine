@@ -205,7 +205,9 @@ fn the_editor_draws_its_scene_in_the_viewport() {
         saved.starts_with(&text[..text.find('\n').unwrap()]),
         "the same header"
     );
-    assert_eq!(saved.matches("Name = \"Cube\"").count(), 2, "{saved}");
+    // The copy is numbered among its siblings.
+    assert_eq!(saved.matches("Name = \"Cube\"").count(), 1, "{saved}");
+    assert_eq!(saved.matches("Name = \"Cube 2\"").count(), 1, "{saved}");
     assert!(saved.contains("asset(\"red.material\""), "{saved}");
 
     // HDR (ADR 0038): on a display in HDR the panels are drawn in scRGB at Windows' SDR
