@@ -764,12 +764,88 @@ clipped to the viewport.
     on the grid; a turn about y keeping the scale; the tools' keys; a child of a turned
     parent moving along the world's x.
 - **Not done:**
-  - clicks and boxes in the viewport, and the selection's outline (E2-2: an id buffer,
-    an ADR first);
+  - clicks and boxes in the viewport, and the selection's outline (E2-3 since: an id
+    buffer, an ADR first);
   - keyboard transforms (G, R, S): R is the scale tool in Godot's keys, so the keys are
-    the team's to choose;
+    the team's to choose (E2-2, below);
   - the snapping values in the tool bar; pivot modes; frame and bookmarks; surfaces;
     overlays.
+
+## As built (E2-2, 2026-10-21)
+
+Keyboard transforms and two key maps (team decision, 2026-10-20: Blender's keys by
+default), in `engine_editor::transform` (`docs/research/ux/viewport-tools.md` §2, §8).
+
+- **The key maps:**
+  - Blender's, the default: G, R, S start a move, a turn, a scale; Q, W, E, T pick the
+    gizmo's tools;
+  - Godot's: Q, W, E, R pick the tools; G starts a move, and R or S during it switch to
+    a turn or a scale;
+  - "Editor: Key Map…" picks one, and the session keeps it (`keys = "godot"` in its
+    `[editor]` block). The transforms are commands too ("Transform: Move Selection").
+- **While one runs,** its keys, typed text and clicks are its own: the panels, the
+  shortcuts and the camera get none of them (`InputCollector::consume`).
+  - X, Y, Z keep it to an axis: the gizmo's axes first (the world's, or the active
+    entity's after Space), then the other ones, then free. With Shift, to the plane
+    across that axis.
+  - These letters (and G, R, S while it runs) go by the virtual key, the letter on the
+    key: Z on QWERTZ too, the Latin letter in Cyrillic layouts. Shortcuts stay physical
+    keys.
+  - A typed value (digits and `. , + - * / ( ) ^`, through `expr::evaluate`) takes the
+    pointer's place. Text that does not evaluate yet (`2*`) keeps the last value;
+    Backspace edits it. Without an axis, a move goes along x, a turn about the view's
+    axis, and a scale is uniform.
+  - G, R, S switch the transform: the targets go back, and the new one starts from the
+    pointer as its own undo step.
+  - Enter or a left click keeps it. Escape, a right click or the window losing the
+    keyboard reverts it (the history's `revert`).
+- **The pointer:**
+  - a move meets a plane through the pivot: the view's, the one holding the axis that
+    faces the camera most, or the plane kept to;
+  - a turn adds up the pointer's angle about the pivot on the screen, frame by frame, so
+    it goes past half a turn; its sign follows which way the axis faces;
+  - a scale is the pointer's distance from the pivot over its distance at the start;
+  - the owner's snapping rules hold as for the gizmo; typed values are exact.
+- **Exact parts in the file,** for the gizmo too from this phase:
+  - a turn sets the rotation from the target's own, the turn seen through the parent's
+    inverse rotation;
+  - a scale multiplies the target's own scale by its factors along its own axes;
+  - so `R Z 90` and `S 0.5` leave no float dust from a matrix's round trip;
+  - the active entity's axes lose components below 1e-6.
+- **On screen:**
+  - the gizmo hides;
+  - the axis kept to (or the plane's two) runs across the viewport through the pivot, in
+    its color;
+  - a turn or a scale draws a dashed line from the pivot to the pointer;
+  - a hint by the pointer says what it does ("Move along Z (local): 2 m", "Rotate about
+    Y: 45°  ·  in steps"), and the status bar lists the keys.
+- **Measured** on ref-1, release, 1600 × 900, 200 entities: the editor's frame took
+  80.3 µs with nothing selected, 89.9 µs with one selected and its gizmo, and 103.5 µs
+  during a keyboard move, the pointer moving every frame and the undo step set each
+  time.
+- **Tested:**
+  - the module:
+    - the axis keys cycle (the gizmo's axes, the others, free);
+    - typed values and expressions: text that does not evaluate keeps the last value,
+      letters are left out, a comma is a point;
+    - the pointer along an axis, and free with Ctrl on the grid;
+    - a turn past 270°, and in 45° steps;
+    - a scale by distance and in a plane;
+    - the guides across the viewport;
+  - through the editor's frames:
+    - G Z 25, Backspace, Enter as one step, then undone;
+    - R Z 90 and S Shift+Z 0,5 with exact parts;
+    - the pointer along x, then Escape, a right click (without a camera look) and the
+      focus loss each taking it back;
+    - a left click keeping it without grabbing the gizmo;
+    - Godot's keys: R the scale tool, S free, G then R switching to a turn;
+    - the key map picked in the palette and kept by the session.
+- **Not done:**
+  - Tab between a move's parts (Blender types x, y and z in turn);
+  - typed constants (`pi`) and units, the letters being the keys';
+  - the last operation adjustable afterwards, and Shift+R to repeat it;
+  - navigating the camera during a transform;
+  - picking and outlines (E2-3, an ADR first) and the rest of E2.
 
 ## Consequences
 

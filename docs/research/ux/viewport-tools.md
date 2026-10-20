@@ -19,7 +19,7 @@ CLAUDE.md §12: keyboard-first, immediate feedback, drag and drop where natural.
 
 | The developer wants to… | Ours | Keys |
 |---|---|---|
-| move a crate 2 m up | G Z 2 Enter (or drag the gizmo's Y arrow) | 4 |
+| move a crate 2 m up | G Y 2 Enter (y is up; or drag the gizmo's Y arrow) | 4 |
 | rotate it 90° about Y | R Y 90 Enter (or the gizmo with Ctrl: 15° steps) | 5 |
 | place a crate on a shelf | drag it from the file browser: it lands on the surface under the cursor, aligned to its normal, previewed while dragging | 1 drag |
 | put ten crates in a row | Ctrl+D, G X 1.2 Enter, then Shift+R nine times ("repeat last") | ~16 |
@@ -38,10 +38,11 @@ CLAUDE.md §12: keyboard-first, immediate feedback, drag and drop where natural.
      cursor (Blender, Godot);
    - the selection's outline is drawn in screen space from the id buffer.
 2. **Transforms:**
-   - **keyboard first:** G, R, S with axis keys and typed values or expressions, in every
-     key map (Blender);
+   - **keyboard first:** G, R, S with axis keys and typed values or expressions
+     (Blender). In Godot's key map, where R is the scale tool, G starts and R, S switch
+     it (team decision, 2026-10-20);
    - gizmos for move, rotate, scale and all three at once (Unity's transform tool);
-   - W, E, R pick the gizmo in the Godot key map;
+   - Q, W, E, T pick the gizmo in Blender's key map, the default; Q, W, E, R in Godot's;
    - Space toggles local and global axes;
    - pivots: median, each object's own origin, the active object.
 3. **Snapping:**
