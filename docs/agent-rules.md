@@ -46,6 +46,11 @@ Read this whole file before starting, and the repository's CLAUDE.md. (Canonical
 - `cargo --offline` where possible (fetch a new crate once online if needed; justify every new
   dependency: why, size, compile time, license, maintenance — CLAUDE.md §15; `tools/check.ps1 -Deny`).
 - GPUs: RTX 4060 Ti (default) and a Radeon RDNA2 2-CU iGPU (`ENGINE_ADAPTER=radeon`). Measure on both.
+- **A map of a subsystem new to you** (when built; it may lag behind main):
+  `H:\Desktop\ofeliaengine\graphify-out\GRAPH_REPORT.md` lists the subsystems with their main
+  types and documents; `graphify explain <Symbol>` and `graphify path <A> <B>` (run in the main
+  checkout) show what a symbol is tied to. It links by name and misses method calls: find
+  definitions and callers with search, and decisions in the ADRs (`docs/status.md`, knowledge graph).
   Benchmarks: release, `VK_LOADER_LAYERS_DISABLE=~implicit~`.
 
 ## Before the PR

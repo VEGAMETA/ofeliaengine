@@ -1,0 +1,252 @@
+{
+  "Vulkan types and resource descriptions": [
+    "vk",
+    "crates_engine_render_src_graph_mod_texturedesc",
+    "crates_engine_render_src_graph_access"
+  ],
+  "Player runtime, scenes and flight tests": [
+    "tests_golden_src_scene",
+    "crates_engine_app_src_player",
+    "instant"
+  ],
+  "Rendering docs: frame renderer, render graph": [
+    "docs_adr_readme",
+    "docs_dev_guide_rendering",
+    "crates_engine_render_src_lib"
+  ],
+  "Forward renderer pipelines": [
+    "crates_engine_render_src_forward_mod",
+    "crates_engine_render_src_forward_msaa",
+    "crates_engine_rhi_src_lazy_pipeline_lazypipeline"
+  ],
+  "Jolt FFI bindings": [
+    "crates_engine_physics_jolt_src_ffi",
+    "crates_engine_physics_jolt_src_ffi_jph_vec3",
+    "crates_engine_physics_jolt_src_lib_joltbackend_new"
+  ],
+  "Upscalers: DLSS, FSR, TAA": [
+    "crates_engine_dlss_tests_dlss",
+    "crates_engine_fsr_tests_fsr_main",
+    "crates_engine_dlss_examples_dlss_bench"
+  ],
+  "Frame graph and per-frame data": [
+    "crates_engine_render_src_graph_mod_framegraph",
+    "crates_engine_render_src_graph_mod_texture",
+    "crates_engine_render_src_mesh_geometryframe"
+  ],
+  "Buffers and materials": [
+    "crates_engine_render_src_graph_mod_buffer",
+    "crates_engine_rhi_src_memory_mod_allocation",
+    "crates_engine_render_src_material_materialtable"
+  ],
+  "Bindless descriptors and the RHI device": [
+    "crates_engine_rhi_src_bindless_bindless",
+    "crates_engine_rhi_src_error_rhierror",
+    "crates_engine_rhi_src_pipeline_spirv_words"
+  ],
+  "GPU allocator and uploads": [
+    "crates_engine_rhi_src_memory_mod_allocator",
+    "crates_engine_rhi_src_memory_mod",
+    "crates_engine_render_src_texture_pool_textureformat"
+  ],
+  "2D renderer": [
+    "crates_engine_render_src_upload_uploadring",
+    "crates_engine_render2d_src_canvas_canvas",
+    "crates_engine_render2d_src_canvas_quad"
+  ],
+  "Texture and scene streaming": [
+    "crates_engine_render_src_texture_pool_textureid",
+    "crates_engine_render_src_streaming",
+    "crates_engine_streaming_src_lib_scenestreamer"
+  ],
+  "Collider import in assets": [
+    "crates_engine_assets_src_colliders",
+    "crates_engine_assets_src_colliders_cook_colliders",
+    "crates_engine_assets_src_gltf_import_importedscene"
+  ],
+  "Audio mixer and spatial audio": [
+    "crates_engine_audio_src_mixer_renderer",
+    "crates_engine_audio_src_mixer",
+    "crates_engine_audio_src_spatial"
+  ],
+  "Geometry pool and meshes": [
+    "crates_engine_render_src_mesh_geometrypool",
+    "crates_engine_render_src_mesh_meshid",
+    "crates_engine_render_src_mesh"
+  ],
+  "Compute passes and screen effects": [
+    "crates_engine_render_src_compute_computeshader",
+    "crates_engine_render_src_panorama",
+    "crates_engine_render_src_compute_dispatch"
+  ],
+  "Docs: editor, scenes, saves, reflection": [
+    "docs_adr_0107_editor",
+    "docs_adr_0108_scene_format_2",
+    "docs_adr_0104_save_games"
+  ],
+  "Reflection probes and SSR": [
+    "crates_engine_render_src_reflections",
+    "crates_engine_render_src_reflections_reflectionprobes",
+    "crates_engine_render_src_reflections_probebox"
+  ],
+  "Camera math and test scenes": [
+    "crates_engine_core_src_math_look_at",
+    "crates_engine_core_src_math_vulkan_perspective",
+    "crates_engine_render_tests_gpu_selfcheck_cpuload_drop"
+  ],
+  "Physics API": [
+    "crates_engine_physics_src_lib_physicsbackend",
+    "crates_engine_physics_src_lib",
+    "crates_engine_physics_src_lib_physicserror"
+  ],
+  "Docs: ECS and networking": [
+    "crates_engine_ecs_src_lib",
+    "docs_adr_0019_networking_model",
+    "docs_adr_0074_replication_prediction_lag_compensation"
+  ],
+  "Player API": [
+    "crates_engine_app_src_player_player",
+    "crates_engine_app_src_player_apperror",
+    "crates_engine_app_src_player_player_frame_overlaid"
+  ],
+  "Docs: the player and the dev guide": [
+    "crates_engine_app_src_lib",
+    "docs_adr_0099_player_crate",
+    "docs_dev_guide_player"
+  ],
+  "Asset cooking": [
+    "crates_engine_assets_src_cook",
+    "crates_engine_assets_src_pack_invalid",
+    "crates_engine_assets_src_cook_write_pack"
+  ],
+  "Docs: core, build and checks": [
+    "crates_engine_core_src_lib",
+    "docs_research_core_audit_2",
+    "docs_adr_0077_faster_checks"
+  ],
+  "HDR panoramas and environment import": [
+    "crates_engine_core_src_jobs_pool_threadpool",
+    "crates_engine_assets_src_panorama",
+    "crates_engine_assets_tests_assets_hdr"
+  ],
+  "Texture import and the DDC": [
+    "path",
+    "crates_engine_assets_src_texture_import_build_mips",
+    "crates_engine_assets_src_ddc"
+  ],
+  "WASAPI audio output": [
+    "crates_engine_audio_src_output_mod",
+    "crates_engine_audio_src_output_mod_stream_loop",
+    "crates_engine_audio_src_output_mod_output"
+  ],
+  "Audio engine API": [
+    "crates_engine_audio_src_engine_audio",
+    "crates_engine_audio_src_engine",
+    "crates_engine_audio_src_engine_busid"
+  ],
+  "Network transport endpoints": [
+    "crates_engine_net_transport_src_endpoint",
+    "crates_engine_net_transport_src_endpoint_endpoint_s",
+    "crates_engine_net_transport_src_endpoint_connectionid"
+  ],
+  "Frame renderer tests and benches": [
+    "crates_engine_render_examples_scene_bench",
+    "crates_engine_render_tests_render_tonemap",
+    "crates_engine_frame_tests_frame"
+  ],
+  "Packs and streaming reads": [
+    "crates_engine_assets_src_pack_packerror",
+    "crates_engine_assets_src_pack",
+    "crates_engine_assets_src_pack_streamthread"
+  ],
+  "Brixelizer GI": [
+    "crates_engine_brixelizer_src_lib",
+    "crates_engine_brixelizer_src_lib_brixelizergi",
+    "crates_engine_brixelizer_src_lib_brixelizer"
+  ],
+  "Atmosphere and fog": [
+    "crates_engine_anim_src_raw_vec3",
+    "crates_engine_render_src_atmosphere",
+    "crates_engine_render_src_atmosphere_atmosphere"
+  ],
+  "Forward draw layout": [
+    "crates_engine_render_src_graph_mod_passcontext",
+    "crates_engine_render_src_forward_layout",
+    "crates_engine_render_src_forward_layout_forwardrenderer_layout_draws"
+  ],
+  "Docs: assets, streaming, localization": [
+    "crates_engine_assets_src_lib",
+    "docs_adr_0056_cooked_packs_and_streaming_reads",
+    "docs_adr_0057_texture_streaming"
+  ],
+  "Swapchain and presentation": [
+    "crates_engine_rhi_src_swapchain_swapchain",
+    "crates_engine_rhi_src_swapchain_surface",
+    "crates_engine_rhi_src_swapchain_outputcolor"
+  ],
+  "Animation clips and compression": [
+    "crates_engine_anim_src_compress",
+    "crates_engine_reflect_src_math_vec4",
+    "crates_engine_anim_src_clip_compressedclip"
+  ],
+  "Network channels": [
+    "crates_engine_net_transport_src_channel",
+    "crates_engine_net_transport_src_channel_channelconfig",
+    "crates_engine_net_transport_src_channel_unreliablesend"
+  ],
+  "Jolt C++ characters": [
+    "crates_engine_physics_jolt_csrc_ext",
+    "crates_engine_physics_jolt_csrc_ext_enginejoltcharacter",
+    "crates_engine_physics_jolt_csrc_ext_bufferrecorder"
+  ],
+  "Probe GI": [
+    "crates_engine_render_src_gi",
+    "crates_engine_render_src_gi_probegi",
+    "crates_engine_render_src_gi_giframe_g_add_update_passes"
+  ],
+  "Display and HDR detection": [
+    "crates_engine_platform_src_display",
+    "crates_engine_platform_src_display_displayquery",
+    "crates_engine_platform_src_display_com"
+  ],
+  "Save games": [
+    "crates_engine_save_tests_saves",
+    "crates_engine_save_src_capture_saveimage",
+    "crates_engine_save_src_capture"
+  ],
+  "Game components: audio sources, reflection": [
+    "crates_engine_app_src_sound_components_audiosource",
+    "crates_engine_app_src_sound_components_audiosource3d",
+    "crates_engine_app_src_game_game"
+  ],
+  "Video player": [
+    "crates_engine_video_src_player",
+    "crates_engine_video_src_player_videoplayer",
+    "crates_engine_video_src_player_videoerror"
+  ],
+  "Sound in the player": [
+    "crates_engine_app_src_sound_mod",
+    "crates_engine_app_src_sound_mod_sound",
+    "crates_engine_app_src_sound_mod_audiosettings"
+  ],
+  "Networking in the player": [
+    "crates_engine_app_src_net_mod",
+    "crates_engine_app_src_net_mod_network",
+    "crates_engine_app_src_net_mod_netevent"
+  ],
+  "AV1 parsing": [
+    "crates_engine_video_src_av1_frame",
+    "crates_engine_video_src_av1_mod_av1error",
+    "crates_engine_video_src_av1_sequence_sequenceheader"
+  ],
+  "Win32 windows and the input thread": [
+    "crates_engine_platform_src_window",
+    "crates_engine_platform_src_window_threadstate",
+    "crates_engine_platform_src_window_windowsystem"
+  ],
+  "Reflection and scene text": [
+    "crates_engine_reflect_src_lib_typeinfo",
+    "crates_engine_scene_src_text",
+    "crates_engine_reflect_src_math"
+  ]
+}
