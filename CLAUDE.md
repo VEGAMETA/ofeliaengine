@@ -117,6 +117,12 @@ Several agents may work at once, each on one task in its own git worktree with i
 `tools/check.ps1 -Gpu -Perf` on both GPUs. Their rules, including the owner's goals and the
 team decisions to respect, are in `docs/agent-rules.md`; every agent reads them first.
 
+A knowledge graph of the code and the docs (graphify, the main checkout's `graphify-out/`, not
+committed) is the map an agent new to a subsystem starts from: its report lists the subsystems
+with their main types and documents. The coordinator rebuilds it by hand when it has fallen
+behind (no git hooks; `docs/status.md`, knowledge graph). It links by name, so definitions,
+callers and exact facts come from search and the ADRs (team decision, 2026-10-20).
+
 ### When to stop and ask the humans
 - Irreversible architectural decisions (on-disk asset format, ECS model, public scripting API).
 - Any licensing uncertainty.
