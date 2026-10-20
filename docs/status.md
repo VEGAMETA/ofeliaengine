@@ -72,7 +72,7 @@ Last updated: 2026-10-17.
   - **Scene format 3: the roots' order** (#263, ADR 0108; team decision 2026-10-20):
     `order = <n>` in a root's block, spaced so moving a root changes its line only; the
     editor's tree shows and keeps it; versions 1 and 2 load.
-  - **E1-5a, the game's `main`** (#PR, ADR 0107 as built):
+  - **E1-5a, the game's `main`** (#264, ADR 0107 as built):
     - `engine_app::main!(settings, start)` runs the player, or the editor with the game's
       `editor` feature;
     - `ofeliaengine new` writes the feature, and the quick start's scene and materials
@@ -233,7 +233,9 @@ Last updated: 2026-10-17.
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
 - **Questions open with the owner:** none (2026-10-16: the virtual shadow pages stay off
   by default on discrete GPUs; the monitor was lent for exclusive full screen, see §6).
-- **Agents:** none run until the owner allows them again (§7).
+- **Agents** (team decision, 2026-10-20): at most 2 at a time, when there is a need, for
+  tasks that need no full test runs (research notes, surveys, drafts). Gates and merges
+  stay the coordinator's (§2).
 
 ## 1. What matters most
 
@@ -261,8 +263,10 @@ decisions). In short:
 
 - **Roles.** One coordinator session plans, writes agent briefs, gates and merges, and
   reports to the owner in Russian.
-- **Agents.** None until the owner allows them again (see §7). After that, at most **2**
-  agents at a time, all on Opus. Each works on one task in its own worktree under
+- **Agents.** At most **2** at a time, all on Opus (team decision, 2026-10-20), for tasks
+  that need no full test runs: research notes, surveys, drafts. They write into the
+  coordinator's scratchpad, and the coordinator reviews what they wrote before it is
+  committed. An agent on code works on one task in its own worktree under
   `H:\Desktop\ofeliaengine-wt\<name>`, building in its own `C:\cargo-target\<name>` (the NVMe
   drive, ADR 0077), and ends with a PR. The main checkout builds in `C:\cargo-target\ofeliaengine`
   (`.cargo/config.toml`).
@@ -1404,7 +1408,8 @@ measures a game's frame end to end; rerun it in later reviews to compare (window
 **Owner's instruction (2026-10-02): do this review yourself, and start no agents** (no
 `Agent` tool, no subagents, no background workers) until the owner explicitly says agents
 may run again. Read, measure and write on your own; ask the owner if something needs
-another pair of hands.
+another pair of hands. Since 2026-10-20 agents may run again within §2's limits; the
+review itself stays the coordinator's.
 
 Before taking the next item from the queue, review the core again with fresh eyes. The
 first audit (2026-10-01) produced most of the work above, so a second look now pays. Work
