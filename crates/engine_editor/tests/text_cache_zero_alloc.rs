@@ -115,7 +115,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         },
         Field {
             name: "Visible",
-            widget: Widget::Check(true),
+            widget: Widget::Check(Some(true)),
             changed: false,
         },
         Field {

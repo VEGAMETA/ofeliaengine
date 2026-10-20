@@ -28,7 +28,10 @@
 //!   filter box narrows it to matching names. Its `+` button adds an entity (a model, a
 //!   light, a camera) where the camera looks, numbered when a sibling has its name.
 //!   Delete and Ctrl+D act on the whole selection.
-//! - **The inspector** edits the selected entity's components ([`crate::inspector`]):
+//! - **The inspector** edits the selected entities' components ([`crate::inspector`]):
+//!   with several selected, the components they all have, a value that differs between
+//!   them shown "—"; a typed value goes to all of them, a drag or a relative expression
+//!   (`+=1`) moves each from its own value, as one undo step.
 //!   numbers are dragged sideways ([`crate::Snapping`]: Shift inverts the default, Ctrl
 //!   rounds to the grid) or clicked and typed (expressions, [`crate::expr`]); checkboxes
 //!   and enums are clicked; strings are typed. Its filter box narrows it to matching
@@ -106,6 +109,9 @@ const ADD_ICONS: [&str; 9] = [
 
 /// Where the scene tree's keys apply: after a click in it.
 const TREE_KEYS: KeyContext = KeyContext::Panel(1);
+
+/// What a part shows while the selected entities hold different values there.
+const MIXED: &str = "—";
 
 /// How long a message stays in the status bar, in seconds.
 const MESSAGE_SECONDS: f32 = 4.0;
@@ -346,8 +352,9 @@ impl engine_scene::text::ReadRefs for IndexRefs<'_> {
 struct Drag {
     property: Property,
     part: usize,
-    /// The property's numbers as shown when the drag started (degrees for angles).
-    start: [f64; 4],
+    /// Each dragged entity and its numbers when the drag started (degrees for angles):
+    /// each moves from its own.
+    starts: Vec<(Entity, [f64; 4])>,
     /// The drag's undo step: one per gesture.
     merge: u64,
     /// The step's name (`Edit Transform.translation`).
@@ -861,9 +868,14 @@ impl Editor {
             self.anchor = self.active();
         }
         match self.active() {
-            Some(e) => self
-                .inspector
-                .build(world, e, &self.assets, &mut self.defaults),
+            Some(e) => {
+                self.inspector
+                    .build(world, e, &self.assets, &mut self.defaults);
+                // The others selected: their shared components, "—" where they differ.
+                let others = &self.selection[..self.selection.len() - 1];
+                self.inspector
+                    .compare(world, &self.assets, e, others, &mut self.defaults);
+            }
             None => {
                 self.inspector.clear();
                 self.drag = None;
@@ -875,7 +887,12 @@ impl Editor {
         let mut spans: Vec<(usize, usize)> = Vec::with_capacity(properties.len());
         for p in properties {
             let start = values.len();
-            values.extend(self.inspector.values(p));
+            values.extend(
+                self.inspector
+                    .values(p)
+                    .enumerate()
+                    .map(|(i, v)| if p.mixed & 1 << i != 0 { MIXED } else { v }),
+            );
             spans.push((start, values.len()));
         }
         let open = self.open_choice;
@@ -926,7 +943,7 @@ impl Editor {
                             .filter(|&(c, o, _)| c == p.component && o == p.offset)
                             .map(|(_, _, part)| part),
                     },
-                    Kind::Bool => Widget::Check(first == "true"),
+                    Kind::Bool => Widget::Check((p.mixed == 0).then_some(first == "true")),
                     Kind::Choice => Widget::Choice {
                         current: first,
                         open: (open == Some((p.component, p.offset))).then_some(options.as_slice()),
@@ -1325,14 +1342,25 @@ impl Editor {
         }
     }
 
-    /// Applies an inspector field's action to the selected entity, as an undoable step.
+    /// The selected entities that have component `id`, the active one last: what an
+    /// inspector edit applies to.
+    fn targets(&self, world: &World, id: ComponentId) -> Vec<Entity> {
+        self.selection
+            .iter()
+            .copied()
+            .filter(|&e| world.get_raw(e, id).is_some())
+            .collect()
+    }
+
+    /// Applies an inspector field's action to every selected entity, as one undoable step.
     fn edit(&mut self, world: &mut World, event: FieldEvent) {
-        let Some(e) = self.active() else {
+        if self.active().is_none() {
             return;
-        };
+        }
         let Some((p, component)) = self.shown_property(event.section, event.field) else {
             return;
         };
+        let targets = self.targets(world, p.component);
         let title = format!("{component}.{}", self.inspector.name(&p));
         match event.action {
             FieldAction::Drag {
@@ -1341,16 +1369,19 @@ impl Editor {
                 start,
             } => {
                 if start || self.drag.is_none() {
-                    let Some(ptr) = world.get_raw(e, p.component) else {
-                        return;
-                    };
-                    // SAFETY: the entity's live value of the property's component.
-                    let values = unsafe { inspector::read_numbers(&p, ptr.as_ptr()) };
+                    let starts = targets
+                        .iter()
+                        .filter_map(|&t| {
+                            let ptr = world.get_raw(t, p.component)?;
+                            // SAFETY: the entity's live value of the property's component.
+                            Some((t, unsafe { inspector::read_numbers(&p, ptr.as_ptr()) }))
+                        })
+                        .collect();
                     self.gestures += 1;
                     self.drag = Some(Drag {
                         property: p,
                         part: usize::from(part),
-                        start: values,
+                        starts,
                         merge: self.gestures,
                         name: format!("Edit {title}"),
                         cancelled: false,
@@ -1372,20 +1403,26 @@ impl Editor {
                     Kind::Rotation => Quantity::Angle,
                     _ => return,
                 };
-                let mut values = drag.start;
-                values[drag.part] = self.snapping.drag(
-                    quantity,
-                    drag.start[drag.part],
-                    travel,
-                    self.input.shift(),
-                    self.input.ctrl(),
-                );
+                let (shift, ctrl) = (self.input.shift(), self.input.ctrl());
+                let moved: Vec<(Entity, [f64; 4])> = drag
+                    .starts
+                    .iter()
+                    .map(|&(t, start)| {
+                        let mut values = start;
+                        values[drag.part] =
+                            self.snapping
+                                .drag(quantity, start[drag.part], travel, shift, ctrl);
+                        (t, values)
+                    })
+                    .collect();
                 let (property, merge, name) = (drag.property, drag.merge, drag.name.clone());
                 self.history.begin(&name, Some(merge));
-                self.history.touch(world, e);
-                if let Some(ptr) = world.get_raw_mut(e, property.component) {
-                    // SAFETY: the entity's live value of the property's component.
-                    unsafe { inspector::write_numbers(&property, ptr.as_ptr(), values) };
+                for (t, values) in moved {
+                    self.history.touch(world, t);
+                    if let Some(ptr) = world.get_raw_mut(t, property.component) {
+                        // SAFETY: the entity's live value of the property's component.
+                        unsafe { inspector::write_numbers(&property, ptr.as_ptr(), values) };
+                    }
                 }
                 self.history.commit(world);
             }
@@ -1407,43 +1444,69 @@ impl Editor {
                 if !commit {
                     return;
                 }
-                let text = self.ui.edited_text().to_owned();
-                let Some(ptr) = world.get_raw(e, p.component) else {
+                let text = self.ui.edited_text().trim().to_owned();
+                if text == MIXED {
+                    // "—" kept as it was: each keeps its own.
                     return;
-                };
-                // SAFETY: the entity's live value of the property's component.
-                let mut values = unsafe { inspector::read_numbers(&p, ptr.as_ptr()) };
-                let part = usize::from(part).min(3);
-                match crate::expr::evaluate(&text, values[part]) {
-                    Ok(value) => {
-                        values[part] = value;
-                        self.history.begin(&format!("Set {title}"), None);
-                        self.history.touch(world, e);
-                        if let Some(ptr) = world.get_raw_mut(e, p.component) {
-                            // SAFETY: the entity's live value of the property's component.
-                            unsafe { inspector::write_numbers(&p, ptr.as_ptr(), values) };
-                        }
-                        self.history.commit(world);
-                    }
-                    Err(reason) => self.say(format!("{title}: {reason}")),
                 }
+                let part = usize::from(part).min(3);
+                // An absolute value goes to every entity; a relative one (`+=1`) is worked
+                // out from each one's own.
+                self.history.begin(&format!("Set {title}"), None);
+                for &t in &targets {
+                    let Some(ptr) = world.get_raw(t, p.component) else {
+                        continue;
+                    };
+                    // SAFETY: the entity's live value of the property's component.
+                    let mut values = unsafe { inspector::read_numbers(&p, ptr.as_ptr()) };
+                    match crate::expr::evaluate(&text, values[part]) {
+                        Ok(value) => values[part] = value,
+                        Err(reason) => {
+                            self.history.cancel(world);
+                            self.say(format!("{title}: {reason}"));
+                            return;
+                        }
+                    }
+                    self.history.touch(world, t);
+                    if let Some(ptr) = world.get_raw_mut(t, p.component) {
+                        // SAFETY: the entity's live value of the property's component.
+                        unsafe { inspector::write_numbers(&p, ptr.as_ptr(), values) };
+                    }
+                }
+                self.history.commit(world);
             }
             FieldAction::Text { commit } => {
                 if !commit {
                     return;
                 }
+                if self.ui.edited_text().trim() == MIXED {
+                    return;
+                }
                 let text = engine_scene::text::quote(self.ui.edited_text());
                 let path = self.path_of(&p, component);
-                if let Err(reason) = self.set(world, e, &path, &text) {
+                if let Err(reason) = self.set_on(world, &targets, &path, &text) {
                     self.say(format!("{title}: {reason}"));
                 }
             }
             FieldAction::Toggle => {
+                // All on turns off; otherwise (off, or differing) all on.
+                let on = |world: &World, t: Entity| {
+                    world.get_raw(t, p.component).is_some_and(|ptr| {
+                        // SAFETY: the entity's live value of the property's component.
+                        unsafe { *ptr.as_ptr().add(p.offset) != 0 }
+                    })
+                };
+                let to = !targets.iter().all(|&t| on(world, t));
                 self.history.begin(&format!("Toggle {title}"), None);
-                self.history.touch(world, e);
-                if let Some(ptr) = world.get_raw_mut(e, p.component) {
-                    // SAFETY: the entity's live value of the property's component.
-                    unsafe { inspector::toggle(&p, ptr.as_ptr()) };
+                for &t in &targets {
+                    if on(world, t) == to {
+                        continue;
+                    }
+                    self.history.touch(world, t);
+                    if let Some(ptr) = world.get_raw_mut(t, p.component) {
+                        // SAFETY: the entity's live value of the property's component.
+                        unsafe { inspector::toggle(&p, ptr.as_ptr()) };
+                    }
                 }
                 self.history.commit(world);
             }
@@ -1454,10 +1517,12 @@ impl Editor {
             FieldAction::Choose(i) => {
                 self.open_choice = None;
                 self.history.begin(&format!("Set {title}"), None);
-                self.history.touch(world, e);
-                if let Some(ptr) = world.get_raw_mut(e, p.component) {
-                    // SAFETY: the entity's live value of the property's component.
-                    unsafe { inspector::choose(&p, ptr.as_ptr(), i) };
+                for &t in &targets {
+                    self.history.touch(world, t);
+                    if let Some(ptr) = world.get_raw_mut(t, p.component) {
+                        // SAFETY: the entity's live value of the property's component.
+                        unsafe { inspector::choose(&p, ptr.as_ptr(), i) };
+                    }
                 }
                 self.history.commit(world);
             }
@@ -1467,11 +1532,13 @@ impl Editor {
                     return;
                 };
                 self.history.begin(&format!("Reset {title}"), None);
-                self.history.touch(world, e);
-                if let Some(ptr) = world.get_raw_mut(e, p.component) {
-                    // SAFETY: the entity's live value of the property's component, and the
-                    // component type's default value.
-                    unsafe { inspector::reset(&p, ptr.as_ptr(), default.as_ptr()) };
+                for &t in &targets {
+                    self.history.touch(world, t);
+                    if let Some(ptr) = world.get_raw_mut(t, p.component) {
+                        // SAFETY: the entity's live value of the property's component, and
+                        // the component type's default value.
+                        unsafe { inspector::reset(&p, ptr.as_ptr(), default.as_ptr()) };
+                    }
                 }
                 self.history.commit(world);
             }
@@ -1518,15 +1585,16 @@ impl Editor {
         }
     }
 
-    /// Sets a field from pasted text, read as its copy is written (scene text, a string as
-    /// it is), as one undoable step.
+    /// Sets a field of every selected entity from pasted text, read as its copy is
+    /// written (scene text, a string as it is), as one undoable step.
     fn paste_value(&mut self, world: &mut World, section: usize, field: usize, text: &str) {
-        let Some(e) = self.active() else {
+        if self.active().is_none() {
             return;
-        };
+        }
         let Some((p, component)) = self.shown_property(section, field) else {
             return;
         };
+        let targets = self.targets(world, p.component);
         let title = format!("{component}.{}", self.inspector.name(&p));
         let value = if matches!(p.ty.kind, TypeKind::String) {
             // One line, as a text field pastes it.
@@ -1539,7 +1607,7 @@ impl Editor {
             text.trim().to_owned()
         };
         let path = self.path_of(&p, component);
-        match self.set(world, e, &path, &value) {
+        match self.set_on(world, &targets, &path, &value) {
             Ok(()) => self.say(format!("Pasted {title}")),
             Err(reason) => self.say(format!("{title}: {reason}")),
         }
@@ -1894,16 +1962,19 @@ impl Editor {
         path: &str,
         value: &str,
     ) -> Result<(), String> {
+        self.set_on(world, &[entity], path, value)
+    }
+
+    /// [`Editor::set`] for every entity of `targets`, as one undoable step: when one
+    /// refuses the text, none changes.
+    fn set_on(
+        &mut self,
+        world: &mut World,
+        targets: &[Entity],
+        path: &str,
+        value: &str,
+    ) -> Result<(), String> {
         let (component, rest) = engine_scene::text::component_of(path);
-        let (id, info) = world
-            .component_ids_of(entity)
-            .ok_or("no such entity")?
-            .iter()
-            .find_map(|&id| {
-                let info = world.components().type_info(id)?;
-                (info.name == component).then_some((id, info))
-            })
-            .ok_or_else(|| format!("the entity has no `{component}`"))?;
         let segs = engine_scene::text::segments(rest)?;
         let index: HashMap<SceneId, Entity> = {
             let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
@@ -1911,20 +1982,37 @@ impl Editor {
         };
         let mut refs = IndexRefs { index: &index };
         self.history.begin(&format!("Set {path}"), None);
-        self.history.touch(world, entity);
-        let ptr = world
-            .get_raw_mut(entity, id)
-            .ok_or("the component is gone")?
-            .as_ptr();
-        // SAFETY: `ptr` is the entity's live value of the component `info` describes; the
-        // path and the text are checked against that description.
-        let result = unsafe {
-            engine_scene::text::resolve(&segs, info, ptr, &mut refs).and_then(|target| {
-                let (ty, attrs, at) =
-                    target.ok_or_else(|| format!("`{component}` has no `{rest}`"))?;
-                engine_scene::text::set_text(ty, &attrs, at, value, &mut refs)
-            })
-        };
+        let mut result = Ok(());
+        for &entity in targets {
+            let found = world.component_ids_of(entity).and_then(|ids| {
+                ids.iter().find_map(|&id| {
+                    let info = world.components().type_info(id)?;
+                    (info.name == component).then_some((id, info))
+                })
+            });
+            let Some((id, info)) = found else {
+                result = Err(format!("the entity has no `{component}`"));
+                break;
+            };
+            self.history.touch(world, entity);
+            let Some(ptr) = world.get_raw_mut(entity, id) else {
+                result = Err(String::from("the component is gone"));
+                break;
+            };
+            let ptr = ptr.as_ptr();
+            // SAFETY: `ptr` is the entity's live value of the component `info` describes;
+            // the path and the text are checked against that description.
+            result = unsafe {
+                engine_scene::text::resolve(&segs, info, ptr, &mut refs).and_then(|target| {
+                    let (ty, attrs, at) =
+                        target.ok_or_else(|| format!("`{component}` has no `{rest}`"))?;
+                    engine_scene::text::set_text(ty, &attrs, at, value, &mut refs)
+                })
+            };
+            if result.is_err() {
+                break;
+            }
+        }
         match result {
             Ok(()) => {
                 self.history.commit(world);
@@ -3167,5 +3255,169 @@ mod tests {
                 .iter()
                 .any(|&y| (y - rows[1]).abs() < 6.0)
         );
+    }
+
+    /// Two entities selected, A then B (B active): A at x 1 with a `Mover` (speed 2, on),
+    /// B at x 3 with a `Mover` (speed 5, off) when `both_move`.
+    fn two_selected(both_move: bool) -> (World, Editor, Entity, Entity) {
+        let mut world = World::new();
+        let a = world.spawn((
+            SceneId::new(),
+            Name::new("A"),
+            Transform::from_xyz(1.0, 0.0, 0.0),
+            GlobalTransform::default(),
+            Mover {
+                gait: Gait::Run,
+                enabled: true,
+                speed: 2.0,
+            },
+        ));
+        let b = world.spawn((
+            SceneId::new(),
+            Name::new("B"),
+            Transform::from_xyz(3.0, 0.0, 0.0),
+            GlobalTransform::default(),
+        ));
+        if both_move {
+            world.insert(
+                b,
+                Mover {
+                    gait: Gait::Run,
+                    enabled: false,
+                    speed: 5.0,
+                },
+            );
+        }
+        let mut ed = Editor::new(
+            [1280, 720],
+            std::env::temp_dir(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.selection = vec![a, b];
+        ed.update(&mut world);
+        ed.update(&mut world);
+        (world, ed, a, b)
+    }
+
+    #[test]
+    fn a_selection_shows_its_shared_components_with_dashes_where_they_differ() {
+        let (mut world, ed, _, _) = two_selected(false);
+        // B has no `Mover`: only the shared components are shown.
+        assert!(texts(&ed, "Mover").is_empty());
+        assert!(!texts(&ed, "Transform").is_empty());
+        // The x parts differ, y and z do not; the names differ.
+        let row = texts(&ed, "translation")[0];
+        let on_row = |s: &str| {
+            texts(&ed, s)
+                .iter()
+                .filter(|r| (r.pos[1] - row.pos[1]).abs() < 8.0 && r.pos[0] > row.pos[0])
+                .count()
+        };
+        assert_eq!(on_row(MIXED), 1, "x only");
+        assert_eq!(on_row("0"), 2, "y and z");
+        let name = texts(&ed, "value")[0];
+        assert!(
+            texts(&ed, MIXED)
+                .iter()
+                .any(|r| (r.pos[1] - name.pos[1]).abs() < 8.0),
+            "the names differ"
+        );
+        // Both have the same Mover when added: the section comes back.
+        let b = ed.selection[1];
+        world.insert(
+            b,
+            Mover {
+                gait: Gait::Run,
+                enabled: true,
+                speed: 2.0,
+            },
+        );
+        let mut ed = ed;
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Mover").is_empty());
+    }
+
+    #[test]
+    fn edits_go_to_every_selected_entity_each_from_its_own_value() {
+        let (mut world, mut ed, a, b) = two_selected(true);
+        let x = |world: &World| [a, b].map(|e| world.get::<Transform>(e).unwrap().translation.x);
+        let type_into = |ed: &mut Editor, world: &mut World, text: &str| {
+            ed.update(world);
+            let at = on_row(ed, "translation", MIXED);
+            click(ed, world, at);
+            ed.update(world);
+            chars(ed, text);
+            ed.update(world);
+            key(ed, 0x0D, 0x1C, true);
+            ed.update(world);
+        };
+        // An absolute value goes to both.
+        type_into(&mut ed, &mut world, "5");
+        assert_eq!(x(&world), [5.0, 5.0]);
+        assert_eq!(ed.history.steps().count(), 1, "one step for both");
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(x(&world), [1.0, 3.0]);
+        // A relative one moves each from its own.
+        type_into(&mut ed, &mut world, "+=1");
+        assert_eq!(x(&world), [2.0, 4.0]);
+        ed.run(&mut world, ed.ids.undo);
+
+        // A drag of 30 px moves each by 0.3 from its own start.
+        ed.update(&mut world);
+        let at = on_row(&ed, "translation", MIXED);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        mouse(&mut ed, at, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, [at[0] + 30.0, at[1]], None);
+        ed.update(&mut world);
+        mouse(&mut ed, [at[0] + 30.0, at[1]], Some(false));
+        ed.update(&mut world);
+        let [xa, xb] = x(&world);
+        assert!(
+            (xa - 1.3).abs() < 1e-5 && (xb - 3.3).abs() < 1e-5,
+            "{xa} {xb}"
+        );
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(x(&world), [1.0, 3.0]);
+
+        // A checkbox that differs turns both on, then both off.
+        let enabled = |world: &World| [a, b].map(|e| world.get::<Mover>(e).unwrap().enabled);
+        ed.update(&mut world);
+        let name = texts(&ed, "enabled")[0];
+        let check = [name.pos[0] + 104.0, name.pos[1] + name.size[1] / 2.0];
+        click(&mut ed, &mut world, check);
+        assert_eq!(enabled(&world), [true, true]);
+        click(&mut ed, &mut world, check);
+        assert_eq!(enabled(&world), [false, false]);
+
+        // The speeds differ from the default (0) in both: ↺ resets both.
+        let speed = |world: &World| [a, b].map(|e| world.get::<Mover>(e).unwrap().speed);
+        ed.update(&mut world);
+        let reset = on_row(&ed, "speed", icons::RESET);
+        click(&mut ed, &mut world, reset);
+        assert_eq!(speed(&world), [0.0, 0.0]);
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(speed(&world), [2.0, 5.0]);
+
+        // A paste goes to both, as one step.
+        ed.input.clipboard = Clipboard::Local(String::from("(0, 2, 0)"));
+        let steps = ed.history.steps().count();
+        ed.update(&mut world);
+        let row = texts(&ed, "translation")[0];
+        mouse(&mut ed, [row.pos[0] + 4.0, row.pos[1] + 4.0], None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[CTRL, V]);
+        for e in [a, b] {
+            assert_eq!(
+                world.get::<Transform>(e).unwrap().translation,
+                Vec3::new(0.0, 2.0, 0.0)
+            );
+        }
+        assert_eq!(ed.history.steps().count(), steps + 1);
     }
 }

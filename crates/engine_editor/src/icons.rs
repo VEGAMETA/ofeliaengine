@@ -79,5 +79,7 @@ pub const PLUS: &str = "\u{F0415}";
 pub const CHECK: &str = "\u{F012C}";
 /// A list that opens (`md-menu_down`).
 pub const MENU_DOWN: &str = "\u{F035D}";
+/// A checkbox whose entities differ (`md-minus`).
+pub const MIXED: &str = "\u{F0374}";
 /// Back to the default value (`md-undo`).
 pub const RESET: &str = "\u{F054C}";
