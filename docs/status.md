@@ -100,7 +100,7 @@ Last updated: 2026-10-20.
     opens hidden at the old one's place and shows its first frames over it before the old
     editor exits; a new build that fails at its start leaves the old editor running with
     the reason; any start opens the window where the session kept it. E1 is done.
-  - **E2-1, the gizmo** (#PR, ADR 0107 as built): move, rotate and scale handles at the
+  - **E2-1, the gizmo** (#270, ADR 0107 as built): move, rotate and scale handles at the
     selection's center, Q W E R for the tools, Space for local axes, the owner's
     snapping rules, one undo step per drag, Escape takes it back.
   - **Next:** the rest of E2 (ADR 0107 §7): picking from an id buffer and outlines (an
