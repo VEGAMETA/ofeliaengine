@@ -209,7 +209,9 @@ Decision: **`.cargo/config.toml` builds in `C:/cargo-target/ofeliaengine`** (car
 `CARGO_TARGET_DIR` first: agents keep their own `C:/cargo-target/<task>`).
 `tools/check.ps1` takes the build directory from `cargo metadata` (its tracy and loom builds
 go in it), `tools/clean.ps1` cleans it and removes agents' directories whose worktree is
-gone (only inside `cargo-target`, never `ofeliaengine` or one in use). Logs, golden-image
+gone (only inside `cargo-target`, never `ofeliaengine` or one in use; the nested tracy
+and loom directories are cleaned only when given with `-Targets`, see `docs/status.md`).
+Logs, golden-image
 renders and the shader cache stay in the repository's `target\` (small files people read).
 A machine without that drive layout overrides the directory with `CARGO_TARGET_DIR`.
 
