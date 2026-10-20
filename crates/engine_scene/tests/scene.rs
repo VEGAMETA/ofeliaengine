@@ -5,7 +5,7 @@
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Entity, GlobalTransform, Transform, World, reflect_component};
 use engine_reflect::Reflect;
-use engine_scene::{SceneId, SceneRegistry, assign_ids, load, save};
+use engine_scene::{RootOrder, SceneId, SceneRegistry, assign_ids, load, save};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 #[repr(u8)]
@@ -76,7 +76,7 @@ fn exact_text_of_a_small_scene() {
     let mut out = String::new();
     assert_eq!(save(&mut w, &registry(), &mut out).unwrap(), 2);
     let expected = "\
-[scene version=2]
+[scene version=3]
 
 [entity 00000000000000000000000000000002]
 Marker = {}
@@ -253,4 +253,72 @@ fn ids_are_assigned_once_and_unsaved_parents_make_roots() {
     assert_eq!(assign_ids(&mut w), 1);
     assert_eq!(assign_ids(&mut w), 0);
     assert_ne!(SceneId::new(), SceneId::new());
+}
+
+#[test]
+fn roots_keep_their_order_and_their_blocks_stay_in_id_order() {
+    let mut w = World::new();
+    let a = w.spawn((id(1), Transform::IDENTITY, RootOrder(2048)));
+    w.spawn((id(2), Transform::IDENTITY, RootOrder(1024)));
+    w.spawn((id(3), Transform::IDENTITY));
+    // A child's order is not written: children keep their parent's child order.
+    let child = w.spawn((id(4), Transform::IDENTITY, RootOrder(7)));
+    w.set_parent(child, Some(a)).unwrap();
+    let mut out = String::new();
+    save(&mut w, &registry(), &mut out).unwrap();
+    let keys: Vec<&str> = out
+        .lines()
+        .filter(|l| l.starts_with("[entity") || l.starts_with("order") || l.starts_with("parent"))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "[entity 00000000000000000000000000000001]",
+            "order = 2048",
+            "[entity 00000000000000000000000000000004]",
+            "parent = 00000000000000000000000000000001",
+            "[entity 00000000000000000000000000000002]",
+            "order = 1024",
+            "[entity 00000000000000000000000000000003]",
+        ]
+    );
+    // Read back: the roots' orders, none for the root without one or the child.
+    let mut w2 = World::new();
+    let report = load(&mut w2, &registry(), &out).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(report.version, 3);
+    let order = |i: usize| w2.get::<RootOrder>(report.entities[i]).copied();
+    assert_eq!(
+        [order(0), order(1), order(2), order(3)],
+        [Some(RootOrder(2048)), None, Some(RootOrder(1024)), None]
+    );
+}
+
+#[test]
+fn an_order_on_a_child_warns_and_format_2_still_loads() {
+    let text = "\
+[scene version=3]
+
+[entity 00000000000000000000000000000001]
+Transform.translation = (1, 0, 0)
+
+[entity 00000000000000000000000000000002]
+parent = 00000000000000000000000000000001
+order = 5
+";
+    let mut w = World::new();
+    let report = load(&mut w, &registry(), text).unwrap();
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    assert_eq!(report.warnings[0].0, 8);
+    assert!(w.get::<RootOrder>(report.entities[1]).is_none());
+    // Version 2 has no order: its roots load without one.
+    let v2 = "[scene version=2]\n\n[entity 00000000000000000000000000000001]\nTransform.translation = (1, 0, 0)\n";
+    let mut w = World::new();
+    let report = load(&mut w, &registry(), v2).unwrap();
+    assert_eq!(report.version, 2);
+    assert!(w.get::<RootOrder>(report.entities[0]).is_none());
+    // A bad number is an error on its line.
+    let bad = "[scene version=3]\n\n[entity 00000000000000000000000000000001]\norder = -1\n";
+    let e = load(&mut World::new(), &registry(), bad).unwrap_err();
+    assert_eq!(e.line, 4, "{e}");
 }

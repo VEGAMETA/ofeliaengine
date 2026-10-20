@@ -259,6 +259,37 @@ Scenes in the player.
   - `zero_alloc_models`: models shown and hidden in turn every tick, so the renderers
     follow every frame, without a heap allocation in the steady state.
 
+## Format 3: the roots' order (team decision, 2026-10-20)
+
+Format 2 wrote a scene's roots in the order of their ids, so the order the tree showed
+them in was lost on the next load. The options put to the owner:
+
+- sort the roots by name: nothing stored, but the order is not the user's;
+- an `order = <n>` line in each root's block: the user's order, kept; moving a root
+  changes its line only;
+- the order of the blocks in the file: nothing more stored, but moving two roots moves
+  whole blocks, with large diffs.
+
+**Chosen: the `order` line** (version 3).
+
+- A root's block holds `order = <n>` after its header; a child's holds `parent` instead.
+  Root blocks stay in id order, so moving a root changes its `order` line only.
+- In the world, the order is the `RootOrder` component (plain data, so undo keeps it).
+  The editor's tree shows roots by it, those without one last in spawn order. A scene
+  without orders (format 1 or 2, roots made by code) is numbered in the order shown when
+  the editor first draws it.
+- **Spaced values** (`RootOrder::STEP` = 1024): a new root goes after the last; a root
+  placed between two others takes the middle of the gap. When no gap is left, every root
+  is numbered again by steps, in the same undo step (ten copies of one root in a row do
+  it once).
+- `order` on a child's block is a warning and is ignored; a value that is not a whole
+  number from 0 to 4,294,967,295 is an error on its line.
+- **Versions:** saving writes version 3; versions 1 and 2 load as they are. An engine
+  that knows only version 2 refuses a version 3 file ("newer than this engine") rather
+  than misreading it.
+- **Children** keep their parent's child order through the order of their blocks, as
+  in format 2.
+
 ## Consequences
 
 - **Scenes, prefabs and saves share one value grammar.** One reader and one writer grow
