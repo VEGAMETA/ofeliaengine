@@ -66,7 +66,7 @@ Last updated: 2026-10-17.
     the arrows in the tree, Delete and Ctrl+D on the whole selection as one step, numbered
     names for new entities and copies, icons by kind in the add menu, the tree and the
     palette.
-  - **E1-4b-3b, multi-editing** (#PR, ADR 0107 as built): the selection's shared
+  - **E1-4b-3b, multi-editing** (#262, ADR 0107 as built): the selection's shared
     components, "—" where values differ, typed values to all and relative ones and drags
     from each one's own, one undo step.
   - **Next:** the rest of E1 (ADR 0107 §7):
