@@ -88,7 +88,7 @@ Last updated: 2026-10-20.
   - **E1-5b-2, the view in the session** (#267, ADR 0107 as built): the camera, the
     selection, the tree's closed rows, the filters, the tool, snapping and recent commands
     come back at start; "Restore Unsaved Changes…" brings back an older autosave.
-  - **E1-5c-1, rebuild and restart** (#PR, ADR 0107 as built; team decisions
+  - **E1-5c-1, rebuild and restart** (#268, ADR 0107 as built; team decisions
     2026-10-20, profile В and restart Б):
     - a code change builds the game in the background, its errors are shown by line, and
       the new build restarts the editor (by itself in the background, Ctrl+R in front)
