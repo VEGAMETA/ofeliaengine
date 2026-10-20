@@ -274,7 +274,7 @@ fn main() {
         },
         Field {
             name: "Hot reload",
-            widget: Widget::Check(true),
+            widget: Widget::Check(Some(true)),
             changed: true,
         },
     ];

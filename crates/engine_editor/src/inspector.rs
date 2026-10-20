@@ -9,6 +9,8 @@
 //! - **Strings** are typed; references and containers are shown as text.
 //! - **A changed field** (one that differs from its type's `Default`) can be reset
 //!   ([`Defaults`], [`reset`]).
+//! - **A selection of several entities** shows the components they all have; a part
+//!   where they hold different values is marked ([`Inspector::compare`], shown "—").
 
 use crate::snap::Quantity;
 use engine_core::math::{EulerRot, Quat};
@@ -105,8 +107,12 @@ pub struct Property {
     /// The component is written whole (`Name = "Door"`): its scene path is the component's
     /// name alone.
     pub whole: bool,
-    /// It differs from its type's default and can be reset ([`reset`]).
+    /// It differs from its type's default and can be reset ([`reset`]); with several
+    /// entities, in any of them.
     pub changed: bool,
+    /// The parts (bit `i` for part `i`) where the other selected entities hold another
+    /// value ([`Inspector::compare`]): shown "—".
+    pub mixed: u8,
     /// Its name in [`Inspector::text`].
     name: (u32, u32),
     /// Its values' texts in [`Inspector::text`].
@@ -133,6 +139,10 @@ pub struct Inspector {
     properties: Vec<Property>,
     sections: Vec<Section>,
     scratch: String,
+    /// What [`Inspector::compare`] rebuilds into, kept between frames.
+    spare: Vec<Property>,
+    spare_sections: Vec<Section>,
+    other_text: String,
 }
 
 impl Inspector {
@@ -217,6 +227,66 @@ impl Inspector {
                 properties: first..self.properties.len(),
             });
         }
+    }
+
+    /// Shows a selection: keeps the sections whose component every entity of `others`
+    /// has, marks the parts of each property where one of them holds another value than
+    /// `entity` (the one built from) as [`Property::mixed`], and marks a property changed
+    /// when any of them differs from its default. Plain values are compared by their
+    /// bytes, part by part (a rotation as a whole), strings and containers by their text.
+    pub fn compare(
+        &mut self,
+        world: &World,
+        assets: &AssetPaths,
+        entity: Entity,
+        others: &[Entity],
+        defaults: &mut Defaults,
+    ) {
+        if others.is_empty() {
+            return;
+        }
+        let mut kept = core::mem::take(&mut self.spare);
+        let mut sections = core::mem::take(&mut self.spare_sections);
+        kept.clear();
+        sections.clear();
+        'sections: for section in &self.sections {
+            let id = section.component;
+            let Some(base) = world.get_raw(entity, id) else {
+                continue;
+            };
+            // A name has no reset (see `build`).
+            let default = (section.title != "Name")
+                .then(|| defaults.of(world, id))
+                .flatten();
+            let first = kept.len();
+            kept.extend_from_slice(&self.properties[section.properties.clone()]);
+            // One lookup per entity and component; a component one of them lacks is not
+            // shown.
+            for &o in others {
+                let Some(other) = world.get_raw(o, id) else {
+                    kept.truncate(first);
+                    continue 'sections;
+                };
+                let (a, b) = (base.as_ptr().cast_const(), other.as_ptr().cast_const());
+                for p in &mut kept[first..] {
+                    // SAFETY: both are live values of the property's component.
+                    unsafe {
+                        p.mixed |= mixed_parts(p, a, b, world, assets, &mut self.other_text);
+                        if !p.changed
+                            && let Some(d) = default
+                        {
+                            p.changed = differs(p, b, d.as_ptr().cast_const());
+                        }
+                    }
+                }
+            }
+            sections.push(Section {
+                properties: first..kept.len(),
+                ..section.clone()
+            });
+        }
+        self.spare = core::mem::replace(&mut self.properties, kept);
+        self.spare_sections = core::mem::replace(&mut self.sections, sections);
     }
 
     /// The sections, in order.
@@ -369,6 +439,7 @@ impl Inspector {
                 kind,
                 whole,
                 changed: false,
+                mixed: 0,
                 name,
                 values,
                 count,
@@ -659,6 +730,62 @@ pub unsafe fn toggle(p: &Property, component: *mut u8) {
         let ptr = component.add(p.offset);
         let on = engine_reflect::read(ptr, p.ty) == Some(Value::Bool(true));
         let _ = engine_reflect::write(ptr, p.ty, &p.attrs, Value::Bool(!on));
+    }
+}
+
+/// The parts of a property where two values of its component differ (bit `i` for part
+/// `i`).
+///
+/// # Safety
+///
+/// `a` and `b` point to live values of the property's component.
+unsafe fn mixed_parts(
+    p: &Property,
+    a: *const u8,
+    b: *const u8,
+    world: &World,
+    assets: &AssetPaths,
+    scratch: &mut String,
+) -> u8 {
+    // SAFETY: the property's offset and size stay inside both values.
+    unsafe {
+        let (a, b) = (a.add(p.offset), b.add(p.offset));
+        let same = |a: *const u8, b: *const u8, n: usize| {
+            core::slice::from_raw_parts(a, n) == core::slice::from_raw_parts(b, n)
+        };
+        match p.kind {
+            Kind::Numbers {
+                len,
+                element,
+                stride,
+                ..
+            } => (0..usize::from(len))
+                .filter(|&i| {
+                    let at = i * usize::from(stride);
+                    !same(a.add(at), b.add(at), element.size)
+                })
+                .fold(0, |bits, i| bits | 1 << i),
+            Kind::Rotation => {
+                if same(a, b, p.ty.size) {
+                    0
+                } else {
+                    0b111
+                }
+            }
+            Kind::Bool | Kind::Choice => u8::from(!same(a, b, p.ty.size)),
+            Kind::Text if matches!(p.ty.kind, TypeKind::String) => {
+                u8::from(engine_reflect::read_str(a) != engine_reflect::read_str(b))
+            }
+            Kind::Text if is_entity(p.ty) || is_asset_ref(p.ty) => u8::from(!same(a, b, p.ty.size)),
+            Kind::Text => {
+                // Containers: by the text shown.
+                scratch.clear();
+                show(scratch, world, assets, p.ty, a);
+                let first = scratch.len();
+                show(scratch, world, assets, p.ty, b);
+                u8::from(scratch[..first] != scratch[first..])
+            }
+        }
     }
 }
 

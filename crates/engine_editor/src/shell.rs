@@ -124,8 +124,8 @@ pub enum Widget<'a> {
         /// The part being typed (a click without a drag): a text field instead.
         typing: Option<u8>,
     },
-    /// A checkbox.
-    Check(bool),
+    /// A checkbox; `None` while the selected entities differ.
+    Check(Option<bool>),
     /// One of several names; `open` lists them all while the list is open.
     Choice {
         /// The current one.
@@ -1181,22 +1181,27 @@ fn numbers(
 }
 
 /// A checkbox; reports a click.
-fn checkbox(ui: &mut Ui, on: bool, p: &Palette, action: &mut Option<FieldAction>) {
+fn checkbox(ui: &mut Ui, on: Option<bool>, p: &Palette, action: &mut Option<FieldAction>) {
+    let checked = on == Some(true);
     let id = ui.container(
         "check",
         Style {
             size: [Size::Fixed(16.0), Size::Fixed(16.0)],
             radius: 3.0,
-            background: Some(if on { p.accent } else { p.field }),
-            border: (!on).then_some((p.text_dim, 1.0)),
+            background: Some(if checked { p.accent } else { p.field }),
+            border: (!checked).then_some((p.text_dim, 1.0)),
             align_main: Align::Center,
             align_cross: Align::Center,
             ..Style::default()
         },
-        |ui| {
-            if on {
+        |ui| match on {
+            Some(true) => {
                 text(ui, "mark", icons::CHECK, 13.0, p.text);
             }
+            None => {
+                text(ui, "mark", icons::MIXED, 13.0, p.text_dim);
+            }
+            Some(false) => {}
         },
     );
     if ui.sense(id, false).clicked {
