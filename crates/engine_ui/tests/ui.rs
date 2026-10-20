@@ -483,6 +483,63 @@ fn search_boxes_keep_their_prefix_and_leave_up_and_down_to_the_list() {
     assert_eq!(ui.edited_text(), ">@cub");
 }
 
+/// A frame with a list of 20 rows of 20 px in a scroll container 100 px tall; row
+/// `reveal` asks to be shown. The list's id and the rows' ids.
+fn list_frame(ui: &mut Ui, reveal: Option<usize>) -> (u64, Vec<u64>) {
+    let mut ids = (0, Vec::new());
+    frame(ui, &UiInput::default(), |ui| {
+        let list = ui.container(
+            "list",
+            Style {
+                direction: Direction::Column,
+                scroll: true,
+                ..Style::default().size(Size::Fixed(200.0), Size::Fixed(100.0))
+            },
+            |ui| {
+                for i in 0..20 {
+                    ui.push_id(i);
+                    let row = ui.container(
+                        "row",
+                        Style::default().size(Size::Fixed(200.0), Size::Fixed(20.0)),
+                        |_| {},
+                    );
+                    if reveal == Some(i as usize) {
+                        ui.reveal(row);
+                    }
+                    ids.1.push(row);
+                    ui.pop_id();
+                }
+            },
+        );
+        ids.0 = list;
+    });
+    ids
+}
+
+#[test]
+fn reveal_scrolls_a_row_into_view_and_no_further() {
+    let mut ui = Ui::new(Theme::default());
+    let inside = |ui: &Ui, list: u64, row: u64| {
+        let (l, r) = (ui.rect_of(list).unwrap(), ui.rect_of(row).unwrap());
+        r.pos[1] >= l.pos[1] - 0.01 && r.pos[1] + r.size[1] <= l.pos[1] + l.size[1] + 0.01
+    };
+    let (list, rows) = list_frame(&mut ui, None);
+    assert!(!inside(&ui, list, rows[15]));
+    // Shown from the next frame on, at the bottom edge: the least scroll that shows it.
+    list_frame(&mut ui, Some(15));
+    let (list, rows) = list_frame(&mut ui, None);
+    assert!(inside(&ui, list, rows[15]));
+    assert_eq!(ui.scroll_offset(list), 220.0);
+    // A row already in view moves nothing; one above scrolls back to its top.
+    list_frame(&mut ui, Some(13));
+    list_frame(&mut ui, None);
+    assert_eq!(ui.scroll_offset(list), 220.0);
+    list_frame(&mut ui, Some(2));
+    let (list, rows) = list_frame(&mut ui, None);
+    assert!(inside(&ui, list, rows[2]));
+    assert_eq!(ui.scroll_offset(list), 40.0);
+}
+
 #[test]
 fn hover_regions_see_the_mouse_over_any_child() {
     let mut ui = Ui::new(Theme::default());

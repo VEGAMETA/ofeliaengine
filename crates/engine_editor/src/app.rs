@@ -21,9 +21,13 @@
 //! - **The viewport:** middle drag orbits, Shift + middle drag pans, right drag looks
 //!   around, the wheel zooms (`docs/research/ux/viewport-navigation.md`).
 //! - **The scene tree** shows the scene's entities (those with a `SceneId`) in their
-//!   hierarchy and order; a click selects, the arrow opens or closes a row, F2 or a
-//!   double click renames in place, the filter box narrows it to matching names. Its `+`
-//!   button adds an entity (a model, a light, a camera) where the camera looks.
+//!   hierarchy and order, each with its kind's icon. A click selects, Ctrl+click adds or
+//!   takes out, Shift+click selects a range; the last picked is the active one, which the
+//!   inspector shows. After a click in it, the arrows move the selection (Shift extends
+//!   it), Left and Right close and open rows. F2 or a double click renames in place, the
+//!   filter box narrows it to matching names. Its `+` button adds an entity (a model, a
+//!   light, a camera) where the camera looks, numbered when a sibling has its name.
+//!   Delete and Ctrl+D act on the whole selection.
 //! - **The inspector** edits the selected entity's components ([`crate::inspector`]):
 //!   numbers are dragged sideways ([`crate::Snapping`]: Shift inverts the default, Ctrl
 //!   rounds to the grid) or clicked and typed (expressions, [`crate::expr`]); checkboxes
@@ -43,8 +47,8 @@ use crate::input::{Button, InputCollector};
 use crate::inspector::{self, Defaults, Inspector, Kind, Property};
 use crate::paint::{UiText, paint};
 use crate::shell::{
-    Field, FieldAction, FieldEvent, Palette, PaletteAction, PaletteRow, PaletteView, Section,
-    ShellModel, TreeItem, Widget, build, dismissed,
+    Field, FieldAction, FieldEvent, MenuItem, Palette, PaletteAction, PaletteRow, PaletteView,
+    Section, ShellModel, TreeItem, Widget, build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
@@ -85,6 +89,23 @@ const ADD: [&str; 9] = [
     "Spot Light",
     "Camera",
 ];
+
+/// The add menu's kinds' icons, in its order: the same in the menu, the tree and the
+/// palette.
+const ADD_ICONS: [&str; 9] = [
+    icons::NODE_3D,
+    icons::CUBE,
+    icons::SPHERE,
+    icons::PLANE,
+    icons::CYLINDER,
+    icons::SUN,
+    icons::LIGHT,
+    icons::SPOT_LIGHT,
+    icons::CAMERA,
+];
+
+/// Where the scene tree's keys apply: after a click in it.
+const TREE_KEYS: KeyContext = KeyContext::Panel(1);
 
 /// How long a message stays in the status bar, in seconds.
 const MESSAGE_SECONDS: f32 = 4.0;
@@ -232,6 +253,13 @@ struct CommandIds {
     rename: CommandId,
     palette: CommandId,
     find: CommandId,
+    select_next: CommandId,
+    select_previous: CommandId,
+    extend_next: CommandId,
+    extend_previous: CommandId,
+    collapse: CommandId,
+    expand: CommandId,
+    expand_all: CommandId,
     /// "Add Cube" and the rest: the add menu's kinds, in its order.
     add_kinds: [CommandId; ADD.len()],
 }
@@ -251,6 +279,13 @@ fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
         rename: c.register("scene.rename", "Scene", "Rename Selection"),
         palette: c.register("editor.palette", "Editor", "Command Palette"),
         find: c.register("scene.find", "Scene", "Go to Object"),
+        select_next: c.register("scene.select_next", "Scene", "Select Next Row"),
+        select_previous: c.register("scene.select_previous", "Scene", "Select Previous Row"),
+        extend_next: c.register("scene.extend_next", "Scene", "Extend Selection Down"),
+        extend_previous: c.register("scene.extend_previous", "Scene", "Extend Selection Up"),
+        collapse: c.register("scene.collapse", "Scene", "Close Row"),
+        expand: c.register("scene.expand", "Scene", "Open Row"),
+        expand_all: c.register("scene.expand_all", "Scene", "Open Branch"),
         add_kinds: ADD.map(|kind| {
             let name = format!("scene.add.{}", kind.to_lowercase().replace(' ', "_"));
             c.register(&name, "Scene", &format!("Add {kind}"))
@@ -258,7 +293,17 @@ fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
     };
     let mut keymap = Keymap::new();
     let mut shortcuts = HashMap::new();
-    for (chord, id) in [
+    let tree = [
+        ("ArrowDown", ids.select_next),
+        ("ArrowUp", ids.select_previous),
+        ("Shift+ArrowDown", ids.extend_next),
+        ("Shift+ArrowUp", ids.extend_previous),
+        ("ArrowLeft", ids.collapse),
+        ("ArrowRight", ids.expand),
+        ("Shift+ArrowRight", ids.expand_all),
+    ]
+    .map(|(chord, id)| (chord, id, TREE_KEYS));
+    let global = [
         ("Ctrl+Z", ids.undo),
         ("Ctrl+Y", ids.redo),
         ("Ctrl+Shift+Z", ids.redo),
@@ -270,9 +315,11 @@ fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
         ("F2", ids.rename),
         ("Ctrl+Shift+P", ids.palette),
         ("Ctrl+P", ids.find),
-    ] {
+    ]
+    .map(|(chord, id)| (chord, id, KeyContext::Global));
+    for (chord, id, context) in global.into_iter().chain(tree) {
         if let Some(chord) = Chord::parse(chord) {
-            let _ = keymap.bind(chord, KeyContext::Global, id);
+            let _ = keymap.bind(chord, context, id);
             shortcuts.entry(id).or_insert_with(|| chord.to_string());
         }
     }
@@ -413,7 +460,17 @@ struct Editor {
     /// The editor's camera entity (runtime only: no scene id, never saved).
     camera: Option<Entity>,
     camera_drag: bool,
-    selected: Option<Entity>,
+    /// The selected entities in the order they were picked: the last is the active one,
+    /// which the inspector shows and F2 renames.
+    selection: Vec<Entity>,
+    /// Where a Shift+click or Shift+arrow range starts.
+    anchor: Option<Entity>,
+    /// The scene tree takes the arrows (a click went to it last).
+    tree_focus: bool,
+    /// The row to scroll into view in the next frame.
+    reveal: Option<Entity>,
+    /// The inspector's header: the active entity, and how many are selected.
+    selection_label: String,
     collapsed: HashSet<Entity>,
     /// The viewport panel in pixels, for the next frame's scene.
     view_rect: Option<[u32; 4]>,
@@ -480,23 +537,48 @@ fn kind_of(world: &World, e: Entity) -> (&'static str, &'static str) {
         (icons::CAMERA, "Camera")
     } else if world.get::<Sun>(e).is_some() {
         (icons::SUN, "Sun")
-    } else if world.get::<PointLight>(e).is_some() || world.get::<SpotLight>(e).is_some() {
+    } else if world.get::<SpotLight>(e).is_some() {
+        (icons::SPOT_LIGHT, "Light")
+    } else if world.get::<PointLight>(e).is_some() {
         (icons::LIGHT, "Light")
-    } else if world.get::<Model>(e).is_some() {
-        (icons::MESH_INSTANCE, "Model")
+    } else if let Some(model) = world.get::<Model>(e) {
+        (model_icon(model), "Model")
     } else {
         (icons::NODE_3D, "Entity")
     }
 }
 
-/// A new entity of the add menu's kind `what`, at `at`.
-fn spawn(world: &mut World, what: usize, at: Vec3) -> Entity {
+/// A model's icon: its built-in shape's, or a model's.
+fn model_icon(model: &Model) -> &'static str {
+    match model.mesh {
+        m if m == builtin::CUBE => icons::CUBE,
+        m if m == builtin::SPHERE => icons::SPHERE,
+        m if m == builtin::PLANE => icons::PLANE,
+        m if m == builtin::CYLINDER => icons::CYLINDER,
+        _ => icons::MODEL,
+    }
+}
+
+/// `base`, or `base` numbered ("Cube 2") when a name in `taken` already has it; a number
+/// `base` ends with is replaced ("Cube 2" gives "Cube 3").
+fn unique_name(base: &str, taken: &HashSet<&str>) -> String {
+    if !taken.contains(base) {
+        return base.to_owned();
+    }
+    let stem = match base.rsplit_once(' ') {
+        Some((head, tail)) if tail.parse::<u32>().is_ok() => head,
+        _ => base,
+    };
+    (2..)
+        .map(|n| format!("{stem} {n}"))
+        .find(|name| !taken.contains(name.as_str()))
+        .unwrap_or_else(|| base.to_owned())
+}
+
+/// A new entity of the add menu's kind `what` named `name`, at `at`.
+fn spawn(world: &mut World, what: usize, name: &str, at: Vec3) -> Entity {
     let mut transform = Transform::from_translation(at);
-    let e = world.spawn((
-        SceneId::new(),
-        Name::new(ADD[what]),
-        GlobalTransform::default(),
-    ));
+    let e = world.spawn((SceneId::new(), Name::new(name), GlobalTransform::default()));
     let model = |mesh| Model::new(mesh, builtin::MATERIAL);
     match what {
         1 => {
@@ -581,7 +663,11 @@ impl Editor {
             },
             camera: None,
             camera_drag: false,
-            selected: None,
+            selection: Vec::new(),
+            anchor: None,
+            tree_focus: false,
+            reveal: None,
+            selection_label: String::new(),
             collapsed: HashSet::new(),
             view_rect: None,
             root,
@@ -765,14 +851,16 @@ impl Editor {
             self.since = Instant::now();
         }
 
-        // The inspector: the selected entity's components, field by field.
+        // The inspector: the active entity's components, field by field.
+        self.selection
+            .retain(|&e| world.get::<SceneId>(e).is_some());
         if self
-            .selected
+            .anchor
             .is_some_and(|e| world.get::<SceneId>(e).is_none())
         {
-            self.selected = None;
+            self.anchor = self.active();
         }
-        match self.selected {
+        match self.active() {
             Some(e) => self
                 .inspector
                 .build(world, e, &self.assets, &mut self.defaults),
@@ -871,7 +959,21 @@ impl Editor {
             })
             .collect();
 
-        // The tree.
+        // The tree. A large selection is looked up through a set (one row at a time
+        // would be rows times selected).
+        let many = self.selection.len() > 16;
+        let set: HashSet<Entity> = if many {
+            self.selection.iter().copied().collect()
+        } else {
+            HashSet::new()
+        };
+        let in_selection = |e: Entity| {
+            if many {
+                set.contains(&e)
+            } else {
+                self.selection.contains(&e)
+            }
+        };
         let items: Vec<TreeItem<'_>> = self
             .rows
             .iter()
@@ -883,15 +985,33 @@ impl Editor {
                     name: world.get::<Name>(row.entity).map_or(kind, Name::as_str),
                     kind,
                     expanded: row.children.then(|| !self.collapsed.contains(&row.entity)),
-                    selected: Some(row.entity) == self.selected,
+                    selected: in_selection(row.entity),
+                    active: Some(row.entity) == self.active(),
                     renaming: Some(row.entity) == self.renaming,
                 }
             })
             .collect();
-        let selection = self.selected.map_or("", |e| {
-            world
+        self.selection_label.clear();
+        if let Some(e) = self.active() {
+            let name = world
                 .get::<Name>(e)
-                .map_or(kind_of(world, e).1, Name::as_str)
+                .map_or(kind_of(world, e).1, Name::as_str);
+            self.selection_label.push_str(name);
+            if self.selection.len() > 1 {
+                let _ = write!(
+                    self.selection_label,
+                    "  ·  {} selected",
+                    self.selection.len()
+                );
+            }
+        }
+        let reveal_row = self
+            .reveal
+            .take()
+            .and_then(|e| self.rows.iter().position(|r| r.entity == e));
+        let add_items: [MenuItem<'_>; ADD.len()] = core::array::from_fn(|i| MenuItem {
+            icon: ADD_ICONS[i],
+            label: ADD[i],
         });
         self.status.clear();
         if let Some((message, at)) = &self.message
@@ -922,8 +1042,9 @@ impl Editor {
             for i in cp.first..end {
                 palette_rows.push(if cp.finds_objects() {
                     let found = cp.objects[i];
-                    let kind = kind_of(world, found.entity).1;
+                    let (icon, kind) = kind_of(world, found.entity);
                     PaletteRow {
+                        icon,
                         label: world.get::<Name>(found.entity).map_or(kind, Name::as_str),
                         matched: &cp.highlights[found.matched.0 as usize..found.matched.1 as usize],
                         category: 0,
@@ -933,6 +1054,12 @@ impl Editor {
                     let m = &cp.commands[i];
                     let info = self.commands.info(m.id);
                     PaletteRow {
+                        icon: self
+                            .ids
+                            .add_kinds
+                            .iter()
+                            .position(|&k| k == m.id)
+                            .map_or("", |i| ADD_ICONS[i]),
                         label: info.label(),
                         matched: self.commands.highlights(m),
                         // "Scene: " is dimmed.
@@ -960,7 +1087,7 @@ impl Editor {
             tools: &tools,
             active_tool: self.active_tool,
             tree: &items,
-            selection,
+            selection: &self.selection_label,
             inspector: &sections,
             path: "res://",
             folders: &[],
@@ -977,7 +1104,8 @@ impl Editor {
             playing: false,
             status: &self.status,
             snap: self.snapping.on,
-            add_menu: self.add_open.then_some(&ADD[..]),
+            add_menu: self.add_open.then_some(&add_items[..]),
+            reveal_row,
             tree_filter: &self.tree_filter,
             inspector_filter: &self.inspector_filter,
             palette,
@@ -993,6 +1121,10 @@ impl Editor {
         }
         if response.snap {
             self.run(world, self.ids.snap);
+        }
+        // A press tells where the keys go: the tree's arrows after a press in it.
+        if self.ui.input().mouse_pressed {
+            self.tree_focus = response.tree_hovered;
         }
         if dismissed(&self.ui, &response) {
             self.add_open = false;
@@ -1015,19 +1147,23 @@ impl Editor {
             self.collapsed.insert(row.entity);
         }
         if let Some(row) = response.tree_row.and_then(|i| self.rows.get(i).copied()) {
-            // A second click on the same row soon after renames it.
-            let now = Instant::now();
-            let double = self.last_click.is_some_and(|(e, at)| {
-                e == row.entity && now.duration_since(at).as_secs_f32() < 0.45
-            });
-            self.last_click = (!double).then_some((row.entity, now));
-            if self.selected != Some(row.entity) {
-                self.open_choice = None;
-                self.typing = None;
-            }
-            self.selected = Some(row.entity);
-            if double {
-                self.renaming = Some(row.entity);
+            if self.input.shift() {
+                self.select_range(row.entity, self.input.ctrl());
+                self.last_click = None;
+            } else if self.input.ctrl() {
+                self.toggle(row.entity);
+                self.last_click = None;
+            } else {
+                // A second click on the same row soon after renames it.
+                let now = Instant::now();
+                let double = self.last_click.is_some_and(|(e, at)| {
+                    e == row.entity && now.duration_since(at).as_secs_f32() < 0.45
+                });
+                self.last_click = (!double).then_some((row.entity, now));
+                self.select_only(row.entity);
+                if double {
+                    self.renaming = Some(row.entity);
+                }
             }
         }
         if let Some(commit) = response.rename {
@@ -1102,9 +1238,10 @@ impl Editor {
         }
         // The shortcuts; while a field is typed in, only saving (the keys are the field's).
         let typing_text = self.ui.editing().is_some();
+        let contexts: &[KeyContext] = if self.tree_focus { &[TREE_KEYS] } else { &[] };
         for i in 0..self.input.chords().len() {
             let chord = self.input.chords()[i];
-            if let Some(id) = self.keymap.lookup(chord, &[])
+            if let Some(id) = self.keymap.lookup(chord, contexts)
                 && (!typing_text || id == self.ids.save)
             {
                 self.run(world, id);
@@ -1190,7 +1327,7 @@ impl Editor {
 
     /// Applies an inspector field's action to the selected entity, as an undoable step.
     fn edit(&mut self, world: &mut World, event: FieldEvent) {
-        let Some(e) = self.selected else {
+        let Some(e) = self.active() else {
             return;
         };
         let Some((p, component)) = self.shown_property(event.section, event.field) else {
@@ -1344,7 +1481,7 @@ impl Editor {
     /// Puts a field's value on the clipboard: its scene text (`(0, 1.5, 0)`, `true`,
     /// `Run`), a string as it is.
     fn copy_value(&mut self, world: &World, section: usize, field: usize) {
-        let Some(e) = self.selected else {
+        let Some(e) = self.active() else {
             return;
         };
         let Some((p, component)) = self.shown_property(section, field) else {
@@ -1384,7 +1521,7 @@ impl Editor {
     /// Sets a field from pasted text, read as its copy is written (scene text, a string as
     /// it is), as one undoable step.
     fn paste_value(&mut self, world: &mut World, section: usize, field: usize, text: &str) {
-        let Some(e) = self.selected else {
+        let Some(e) = self.active() else {
             return;
         };
         let Some((p, component)) = self.shown_property(section, field) else {
@@ -1496,13 +1633,147 @@ impl Editor {
         }
     }
 
-    /// Selects `e` and opens its parents' rows, so the tree shows it.
-    fn show(&mut self, world: &World, e: Entity) {
-        if self.selected != Some(e) {
+    /// The active entity: the last picked, which the inspector shows and F2 renames.
+    fn active(&self) -> Option<Entity> {
+        self.selection.last().copied()
+    }
+
+    /// Selects `e` alone, the anchor of the next range.
+    fn select_only(&mut self, e: Entity) {
+        let before = self.active();
+        self.selection.clear();
+        self.selection.push(e);
+        self.anchor = Some(e);
+        self.selection_changed(before);
+    }
+
+    /// Adds `e` to the selection, active, or takes it out (Ctrl+click).
+    fn toggle(&mut self, e: Entity) {
+        let before = self.active();
+        if let Some(i) = self.selection.iter().position(|&s| s == e) {
+            self.selection.remove(i);
+        } else {
+            self.selection.push(e);
+        }
+        self.anchor = Some(e);
+        self.selection_changed(before);
+    }
+
+    /// Selects the rows from the anchor to `to` in the tree's order, `to` active
+    /// (Shift+click, Shift+arrows); with `add`, besides what is selected (Ctrl+Shift).
+    fn select_range(&mut self, to: Entity, add: bool) {
+        let before = self.active();
+        let anchor = self.anchor.unwrap_or(to);
+        let rows = &self.rows;
+        let at = |e: Entity| rows.iter().position(|r| r.entity == e);
+        let Some(b) = at(to) else {
+            return self.select_only(to);
+        };
+        let a = at(anchor).unwrap_or(b);
+        let range: Vec<Entity> = if a <= b {
+            (a..=b).map(|i| rows[i].entity).collect()
+        } else {
+            (b..=a).rev().map(|i| rows[i].entity).collect()
+        };
+        if !add {
+            self.selection.clear();
+        }
+        for e in range {
+            self.selection.retain(|&s| s != e);
+            self.selection.push(e);
+        }
+        self.anchor = Some(anchor);
+        self.selection_changed(before);
+    }
+
+    /// After the selection changed: what belonged to the active entity goes, and its row
+    /// is scrolled into view.
+    fn selection_changed(&mut self, before: Option<Entity>) {
+        if self.active() != before {
             self.open_choice = None;
             self.typing = None;
+            self.drag = None;
         }
-        self.selected = Some(e);
+        self.reveal = self.active();
+    }
+
+    /// Moves the active row by `by` rows in the tree's order; with `extend`, the selection
+    /// becomes the range from the anchor to it.
+    fn step(&mut self, by: i64, extend: bool) {
+        let last = self.rows.len() as i64 - 1;
+        if last < 0 {
+            return;
+        }
+        let at = self
+            .active()
+            .and_then(|e| self.rows.iter().position(|r| r.entity == e));
+        let next = match at {
+            Some(i) => (i as i64 + by).clamp(0, last),
+            None if by > 0 => 0,
+            None => last,
+        };
+        let e = self.rows[next as usize].entity;
+        if extend {
+            self.select_range(e, false);
+        } else {
+            self.select_only(e);
+        }
+    }
+
+    /// The selected entities none of whose ancestors is selected: what Delete and Ctrl+D
+    /// act on (a child goes with its parent).
+    fn selection_roots(&self, world: &World) -> Vec<Entity> {
+        self.selection
+            .iter()
+            .copied()
+            .filter(|&e| {
+                let mut at = world.parent(e);
+                while let Some(p) = at {
+                    if self.selection.contains(&p) {
+                        return false;
+                    }
+                    at = world.parent(p);
+                }
+                world.contains(e)
+            })
+            .collect()
+    }
+
+    /// A name for an entity under `parent` (a root for none), numbered when a sibling other
+    /// than `except` has it.
+    fn sibling_name(
+        &mut self,
+        world: &mut World,
+        parent: Option<Entity>,
+        base: &str,
+        except: Option<Entity>,
+    ) -> String {
+        let siblings: Vec<Entity> = match parent {
+            Some(p) => world.children(p).collect(),
+            None => {
+                let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
+                let world = &*world;
+                q.iter_readonly(world)
+                    .map(|(e, _)| e)
+                    .filter(|&e| {
+                        world
+                            .parent(e)
+                            .is_none_or(|p| world.get::<SceneId>(p).is_none())
+                    })
+                    .collect()
+            }
+        };
+        let taken: HashSet<&str> = siblings
+            .iter()
+            .filter(|&&s| Some(s) != except)
+            .filter_map(|&s| world.get::<Name>(s).map(Name::as_str))
+            .collect();
+        unique_name(base, &taken)
+    }
+
+    /// Selects `e` and opens its parents' rows, so the tree shows it.
+    fn show(&mut self, world: &World, e: Entity) {
+        self.select_only(e);
         let mut at = world.parent(e);
         while let Some(p) = at {
             self.collapsed.remove(&p);
@@ -1516,11 +1787,12 @@ impl Editor {
         self.add_open = false;
         let step = self.snapping.position as f32;
         let at = (self.orbit.target / step).round() * step;
+        let name = self.sibling_name(world, None, ADD[what], None);
         self.history.begin(&format!("Add {}", ADD[what]), None);
-        let e = spawn(world, what, at);
+        let e = spawn(world, what, &name, at);
         self.history.touch_new(world, e);
         self.history.commit(world);
-        self.selected = Some(e);
+        self.select_only(e);
     }
 
     /// Runs a command.
@@ -1530,7 +1802,11 @@ impl Editor {
         if id == ids.undo || id == ids.redo {
             self.drag = None;
             self.open_choice = None;
-            let selected = self.selected.and_then(|e| world.get::<SceneId>(e).copied());
+            let selected: Vec<SceneId> = self
+                .selection
+                .iter()
+                .filter_map(|&e| world.get::<SceneId>(e).copied())
+                .collect();
             let done = if id == ids.undo {
                 self.history.undo(world).map(|name| format!("Undo: {name}"))
             } else {
@@ -1539,27 +1815,57 @@ impl Editor {
             if let Some(message) = done {
                 self.say(message);
             }
-            self.reselect(world, selected);
+            self.reselect(world, &selected);
         } else if id == ids.save {
             match self.save(world) {
                 Ok(path) => self.say(format!("Saved {}", path.display())),
                 Err(e) => self.say(format!("Not saved: {e}")),
             }
         } else if id == ids.delete {
-            if let Some(e) = self.selected.take() {
+            let roots = self.selection_roots(world);
+            if !roots.is_empty() {
                 self.history.begin("Delete", None);
-                self.history.delete_subtree(world, e);
+                for e in roots {
+                    self.history.delete_subtree(world, e);
+                }
                 self.history.commit(world);
+                self.selection.clear();
+                self.anchor = None;
             }
         } else if id == ids.duplicate {
-            if let Some(e) = self.selected {
+            let roots = self.selection_roots(world);
+            if !roots.is_empty() {
+                // Each copy right after its original, numbered among its siblings.
                 self.history.begin("Duplicate", None);
-                let copy = self.history.duplicate_subtree(world, e);
+                let mut copies = Vec::with_capacity(roots.len());
+                for e in roots {
+                    let Some(copy) = self.history.duplicate_subtree(world, e) else {
+                        continue;
+                    };
+                    let parent = world.parent(copy);
+                    let base = world.get::<Name>(copy).map(|n| n.as_str().to_owned());
+                    if let Some(base) = base {
+                        let name = self.sibling_name(world, parent, &base, Some(copy));
+                        world.insert(copy, Name::new(name));
+                    }
+                    copies.push(copy);
+                }
                 self.history.commit(world);
-                self.selected = copy.or(self.selected);
+                if !copies.is_empty() {
+                    let before = self.active();
+                    self.selection = copies;
+                    self.anchor = self.active();
+                    self.selection_changed(before);
+                }
             }
         } else if id == ids.rename {
-            self.renaming = self.selected;
+            self.renaming = self.active();
+        } else if id == ids.select_next || id == ids.select_previous {
+            self.step(if id == ids.select_next { 1 } else { -1 }, false);
+        } else if id == ids.extend_next || id == ids.extend_previous {
+            self.step(if id == ids.extend_next { 1 } else { -1 }, true);
+        } else if id == ids.collapse || id == ids.expand || id == ids.expand_all {
+            self.open_or_close(world, id);
         } else if id == ids.add {
             self.add_open = !self.add_open;
         } else if id == ids.snap {
@@ -1643,22 +1949,50 @@ impl Editor {
         self.history.commit(world);
     }
 
-    /// Selects the entity with scene id `id` again (undo and redo may have made it anew).
-    fn reselect(&mut self, world: &mut World, id: Option<SceneId>) {
-        let Some(id) = id else {
+    /// Selects the entities with scene ids `ids` again, in their order (undo and redo may
+    /// have made them anew); those gone are left out.
+    fn reselect(&mut self, world: &mut World, ids: &[SceneId]) {
+        let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
+        let index: HashMap<SceneId, Entity> =
+            q.iter_readonly(world).map(|(e, &id)| (id, e)).collect();
+        let before = self.active();
+        self.selection = ids.iter().filter_map(|id| index.get(id).copied()).collect();
+        if self.anchor.is_none_or(|a| !self.selection.contains(&a)) {
+            self.anchor = self.active();
+        }
+        self.selection_changed(before);
+    }
+
+    /// Left, Right and Shift+Right in the tree: closes the active row (or goes to its
+    /// parent), opens it (or goes to its first child), or opens its whole branch.
+    fn open_or_close(&mut self, world: &World, id: CommandId) {
+        let Some(e) = self.active() else {
             return;
         };
-        if self
-            .selected
-            .is_some_and(|e| world.get::<SceneId>(e) == Some(&id))
+        let has_children = world.children(e).any(|c| world.get::<SceneId>(c).is_some());
+        if id == self.ids.expand_all {
+            let mut stack = vec![e];
+            while let Some(x) = stack.pop() {
+                self.collapsed.remove(&x);
+                stack.extend(world.children(x));
+            }
+        } else if id == self.ids.collapse {
+            if has_children && !self.collapsed.contains(&e) {
+                self.collapsed.insert(e);
+            } else if let Some(p) = world
+                .parent(e)
+                .filter(|&p| world.get::<SceneId>(p).is_some())
+            {
+                self.select_only(p);
+            }
+        } else if has_children && self.collapsed.remove(&e) {
+            self.reveal = Some(e);
+        } else if let Some(child) = world
+            .children(e)
+            .find(|&c| world.get::<SceneId>(c).is_some())
         {
-            return;
+            self.select_only(child);
         }
-        let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
-        self.selected = q
-            .iter_readonly(world)
-            .find(|&(_, &s)| s == id)
-            .map(|(e, _)| e);
     }
 
     /// Saves the scene to its file (`untitled.scene` in the project for a new one): every
@@ -1717,20 +2051,33 @@ impl<G> EditorGame<G> {
         }
     }
 
-    /// The entity selected in the scene tree.
+    /// The active entity of the selection: the last picked, which the inspector shows.
     pub fn selected(&self) -> Option<Entity> {
-        self.shared.borrow().selected
+        self.shared.borrow().active()
     }
 
-    /// Selects an entity (or nothing), as a click in the tree does.
+    /// The selected entities, in the order they were picked (the active one last).
+    pub fn selection(&self) -> Vec<Entity> {
+        self.shared.borrow().selection.clone()
+    }
+
+    /// Selects an entity alone (or nothing), as a click in the tree does.
     pub fn select(&mut self, entity: Option<Entity>) {
-        self.shared.borrow_mut().selected = entity;
+        let mut shared = self.shared.borrow_mut();
+        match entity {
+            Some(e) => shared.select_only(e),
+            None => {
+                shared.selection.clear();
+                shared.anchor = None;
+            }
+        }
     }
 
     /// Runs an editor command by its stable name (`edit.undo`, `edit.redo`, `file.save`,
     /// `scene.delete`, `scene.duplicate`, `scene.add`, `scene.add.cube` and the add menu's
-    /// other kinds, `scene.rename`, `scene.find`, `editor.palette`, `edit.snap`), as its
-    /// shortcut does. False if there is no such command.
+    /// other kinds, `scene.rename`, `scene.find`, `scene.select_next` and the tree's other
+    /// moves, `editor.palette`, `edit.snap`), as its shortcut does. False if there is no
+    /// such command.
     pub fn run_command(&mut self, world: &mut World, name: &str) -> bool {
         let mut shared = self.shared.borrow_mut();
         let Some(id) = shared.commands.find(name) else {
@@ -2009,7 +2356,7 @@ mod tests {
             AssetPaths::new(),
         )
         .unwrap();
-        ed.selected = Some(cube);
+        ed.select_only(cube);
         ed.update(&mut world);
         ed.update(&mut world);
         let x = |world: &World| world.get::<Transform>(cube).unwrap().translation.x;
@@ -2105,7 +2452,7 @@ mod tests {
             AssetPaths::new(),
         )
         .unwrap();
-        ed.selected = Some(e);
+        ed.select_only(e);
         ed.update(&mut world);
         ed.update(&mut world);
         // The checkbox: right of the name column, on the name's row.
@@ -2194,15 +2541,15 @@ mod tests {
             q.iter_readonly(world).count()
         };
         ed.add(&mut world, 1);
-        let cube = ed.selected.unwrap();
+        let cube = ed.active().unwrap();
         assert_eq!(world.get::<Name>(cube).map(Name::as_str), Some("Cube"));
         assert_eq!(world.get::<Model>(cube).unwrap().mesh, builtin::CUBE);
         ed.run(&mut world, ed.ids.duplicate);
-        let copy = ed.selected.unwrap();
+        let copy = ed.active().unwrap();
         assert_ne!(copy, cube);
         assert_eq!(models(&mut world), 2);
         ed.run(&mut world, ed.ids.delete);
-        assert!(ed.selected.is_none());
+        assert!(ed.selection.is_empty());
         assert_eq!(models(&mut world), 1);
         ed.run(&mut world, ed.ids.undo);
         assert_eq!(models(&mut world), 2);
@@ -2249,7 +2596,7 @@ mod tests {
             AssetPaths::new(),
         )
         .unwrap();
-        ed.selected = Some(cube);
+        ed.select_only(cube);
         ed.update(&mut world);
         ed.update(&mut world);
         (world, ed, cube, lamp)
@@ -2290,7 +2637,7 @@ mod tests {
         let row = texts(&ed, "Lamp")[0];
         let at = [row.pos[0] + 4.0, row.pos[1] + row.size[1] / 2.0];
         click(&mut ed, &mut world, at);
-        assert_eq!(ed.selected, Some(lamp));
+        assert_eq!(ed.active(), Some(lamp));
         click(&mut ed, &mut world, at);
         assert_eq!(ed.renaming, Some(lamp));
         ed.update(&mut world);
@@ -2444,7 +2791,7 @@ mod tests {
         chord(&mut ed, &mut world, &[ENTER]);
         assert!(ed.command_palette.is_none());
         assert_eq!(names(&mut world), ["Cube", "Cylinder", "Lamp"]);
-        let cylinder = ed.selected.unwrap();
+        let cylinder = ed.active().unwrap();
         assert_eq!(ed.history.steps().count(), 1);
 
         // Ctrl+P: the scene's objects. "c" finds the cube and the cylinder, best first
@@ -2460,14 +2807,14 @@ mod tests {
         chord(&mut ed, &mut world, &[DOWN]);
         assert_eq!(ed.command_palette.as_ref().unwrap().selected, 1);
         chord(&mut ed, &mut world, &[ENTER]);
-        assert_eq!(ed.selected, Some(cylinder));
+        assert_eq!(ed.active(), Some(cylinder));
         // "@lam" and Enter: the lamp.
         chord(&mut ed, &mut world, &[CTRL, P]);
         ed.update(&mut world);
         chars(&mut ed, "lam");
         ed.update(&mut world);
         chord(&mut ed, &mut world, &[ENTER]);
-        assert_eq!(ed.selected, Some(lamp));
+        assert_eq!(ed.active(), Some(lamp));
 
         // Escape closes it, and so does a click elsewhere; nothing runs.
         chord(&mut ed, &mut world, &[CTRL, SHIFT, P]);
@@ -2493,7 +2840,7 @@ mod tests {
             [row.pos[0] + 4.0, row.pos[1] + row.size[1] / 2.0],
         );
         assert!(ed.command_palette.is_none());
-        assert_eq!(names(&mut world), ["Cube", "Cylinder", "Lamp", "Lamp"]);
+        assert_eq!(names(&mut world), ["Cube", "Cylinder", "Lamp", "Lamp 2"]);
     }
 
     #[test]
@@ -2552,10 +2899,273 @@ mod tests {
         ed.update(&mut world);
         chord(&mut ed, &mut world, &[CTRL, C]);
         assert_eq!(ed.input.clipboard.text().as_deref(), Some("Cube"));
-        ed.selected = Some(lamp);
+        ed.select_only(lamp);
         ed.update(&mut world);
         ed.update(&mut world);
         chord(&mut ed, &mut world, &[CTRL, V]);
         assert_eq!(world.get::<Name>(lamp).map(Name::as_str), Some("Cube"));
+    }
+
+    /// A key with the extended flag, as Windows sends the arrows.
+    fn arrow(ed: &mut Editor, world: &mut World, keys: &[(u16, u16)], vk: u16, sc: u16) {
+        for &(k, s) in keys {
+            key(ed, k, s, true);
+        }
+        event(
+            ed,
+            WindowEventKind::Key {
+                virtual_key: vk,
+                scancode: sc,
+                extended: true,
+                pressed: true,
+                repeat: false,
+            },
+        );
+        ed.update(world);
+        for &(k, s) in keys.iter().rev() {
+            key(ed, k, s, false);
+        }
+    }
+
+    const UP: (u16, u16) = (0x26, 0x48);
+    const LEFT: (u16, u16) = (0x25, 0x4B);
+    const RIGHT: (u16, u16) = (0x27, 0x4D);
+    const DOWN_KEY: (u16, u16) = (0x28, 0x50);
+
+    /// Where the text `s` is drawn in the scene tree's dock (left of the inspector).
+    fn in_tree(ed: &Editor, s: &str) -> Vec<Rect> {
+        let hint = texts(ed, "Filter nodes")[0];
+        let (x0, x1) = (hint.pos[0] - 40.0, hint.pos[0] + 240.0);
+        texts(ed, s)
+            .into_iter()
+            .filter(|r| r.pos[0] > x0 && r.pos[0] < x1 && r.pos[1] > hint.pos[1])
+            .collect()
+    }
+
+    /// A click on the tree row named `name`, with `mods` held.
+    fn click_row(ed: &mut Editor, world: &mut World, name: &str, mods: &[(u16, u16)]) {
+        ed.update(world);
+        let r = in_tree(ed, name)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("no row `{name}`"));
+        for &(k, s) in mods {
+            key(ed, k, s, true);
+        }
+        click(ed, world, [r.pos[0] + 4.0, r.pos[1] + r.size[1] / 2.0]);
+        for &(k, s) in mods.iter().rev() {
+            key(ed, k, s, false);
+        }
+    }
+
+    /// The names of the selected entities, in their order.
+    fn selected_names(ed: &Editor, world: &World) -> Vec<String> {
+        ed.selection
+            .iter()
+            .map(|&e| world.get::<Name>(e).unwrap().as_str().to_owned())
+            .collect()
+    }
+
+    /// Three entities in the tree: Cube, Lamp, Crate, nothing selected.
+    fn three_entities() -> (World, Editor) {
+        let (mut world, mut ed, _, _) = two_entities();
+        world.spawn((
+            SceneId::new(),
+            Name::new("Crate"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        ed.selection.clear();
+        ed.update(&mut world);
+        ed.update(&mut world);
+        (world, ed)
+    }
+
+    #[test]
+    fn the_tree_selects_with_ctrl_shift_and_the_arrows() {
+        let (mut world, mut ed) = three_entities();
+        click_row(&mut ed, &mut world, "Cube", &[]);
+        assert_eq!(selected_names(&ed, &world), ["Cube"]);
+        // Ctrl+click adds, active; again takes out.
+        click_row(&mut ed, &mut world, "Crate", &[CTRL]);
+        assert_eq!(selected_names(&ed, &world), ["Cube", "Crate"]);
+        click_row(&mut ed, &mut world, "Cube", &[CTRL]);
+        assert_eq!(selected_names(&ed, &world), ["Crate"]);
+        // Shift+click: the rows from the anchor (Cube, the last Ctrl+click) to the click.
+        click_row(&mut ed, &mut world, "Lamp", &[]);
+        click_row(&mut ed, &mut world, "Crate", &[SHIFT]);
+        assert_eq!(selected_names(&ed, &world), ["Lamp", "Crate"]);
+        // The inspector's header counts them; the active one is Crate.
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Crate  ·  2 selected").is_empty());
+
+        // After a click in the tree the arrows move the selection, Shift extends it.
+        click_row(&mut ed, &mut world, "Cube", &[]);
+        let (d_vk, d_sc) = DOWN_KEY;
+        arrow(&mut ed, &mut world, &[], d_vk, d_sc);
+        assert_eq!(selected_names(&ed, &world), ["Lamp"]);
+        arrow(&mut ed, &mut world, &[SHIFT], d_vk, d_sc);
+        assert_eq!(selected_names(&ed, &world), ["Lamp", "Crate"]);
+        let (u_vk, u_sc) = UP;
+        arrow(&mut ed, &mut world, &[], u_vk, u_sc);
+        assert_eq!(selected_names(&ed, &world), ["Lamp"]);
+        // A click elsewhere (the viewport) takes the arrows away from the tree.
+        click(&mut ed, &mut world, [400.0, 300.0]);
+        arrow(&mut ed, &mut world, &[], d_vk, d_sc);
+        assert_eq!(selected_names(&ed, &world), ["Lamp"]);
+    }
+
+    #[test]
+    fn left_and_right_close_and_open_rows() {
+        let (mut world, mut ed) = three_entities();
+        let names = |world: &World, ed: &Editor| -> Vec<String> {
+            ed.rows
+                .iter()
+                .map(|r| world.get::<Name>(r.entity).unwrap().as_str().to_owned())
+                .collect()
+        };
+        // Crate under Lamp.
+        let lamp = ed.rows[1].entity;
+        let crate_ = ed.rows[2].entity;
+        world.set_parent(crate_, Some(lamp)).unwrap();
+        ed.update(&mut world);
+        click_row(&mut ed, &mut world, "Lamp", &[]);
+        let (l_vk, l_sc) = LEFT;
+        let (r_vk, r_sc) = RIGHT;
+        arrow(&mut ed, &mut world, &[], l_vk, l_sc);
+        ed.update(&mut world);
+        assert_eq!(names(&world, &ed), ["Cube", "Lamp"], "Left closes the row");
+        arrow(&mut ed, &mut world, &[], r_vk, r_sc);
+        ed.update(&mut world);
+        assert_eq!(
+            names(&world, &ed),
+            ["Cube", "Lamp", "Crate"],
+            "Right opens it"
+        );
+        arrow(&mut ed, &mut world, &[], r_vk, r_sc);
+        assert_eq!(
+            selected_names(&ed, &world),
+            ["Crate"],
+            "then goes to its child"
+        );
+        arrow(&mut ed, &mut world, &[], l_vk, l_sc);
+        assert_eq!(
+            selected_names(&ed, &world),
+            ["Lamp"],
+            "Left on a leaf: its parent"
+        );
+    }
+
+    #[test]
+    fn the_selection_is_deleted_and_duplicated_whole_with_numbered_names() {
+        let (mut world, mut ed) = three_entities();
+        click_row(&mut ed, &mut world, "Cube", &[]);
+        click_row(&mut ed, &mut world, "Crate", &[CTRL]);
+        // Ctrl+D: each copy after its original, numbered; the copies are selected.
+        ed.run(&mut world, ed.ids.duplicate);
+        assert_eq!(selected_names(&ed, &world), ["Cube 2", "Crate 2"]);
+        assert_eq!(
+            names(&mut world),
+            ["Crate", "Crate 2", "Cube", "Cube 2", "Lamp"]
+        );
+        assert_eq!(ed.history.steps().count(), 1, "one step");
+        // Delete: both copies, one step; undo brings them back selected.
+        ed.run(&mut world, ed.ids.delete);
+        assert!(ed.selection.is_empty());
+        assert_eq!(names(&mut world), ["Crate", "Cube", "Lamp"]);
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(
+            names(&mut world),
+            ["Crate", "Crate 2", "Cube", "Cube 2", "Lamp"]
+        );
+        // A new entity is numbered among the roots too.
+        ed.add(&mut world, 1);
+        assert_eq!(selected_names(&ed, &world), ["Cube 3"]);
+        // A child goes with its selected parent: deleting both deletes once.
+        let lamp = ed
+            .rows
+            .iter()
+            .find(|r| world.get::<Name>(r.entity).unwrap().as_str() == "Lamp")
+            .unwrap()
+            .entity;
+        let cube = ed.active().unwrap();
+        world.set_parent(cube, Some(lamp)).unwrap();
+        ed.selection = vec![lamp, cube];
+        assert_eq!(ed.selection_roots(&world), [lamp]);
+    }
+
+    #[test]
+    fn a_picked_row_is_scrolled_into_view() {
+        let (mut world, mut ed, _, _) = two_entities();
+        for i in 0..60 {
+            world.spawn((
+                SceneId::new(),
+                Name::new(format!("Prop {i:02}").as_str()),
+                Transform::IDENTITY,
+                GlobalTransform::default(),
+            ));
+        }
+        ed.update(&mut world);
+        ed.update(&mut world);
+        // Below the window at first: not drawn, or drawn below it.
+        let y = |ed: &Editor| {
+            in_tree(ed, "Prop 59")
+                .first()
+                .map_or(f32::INFINITY, |r| r.pos[1])
+        };
+        assert!(y(&ed) > 720.0);
+        // Ctrl+P, "@prop 59", Enter: selected, and its row comes into view.
+        chord(&mut ed, &mut world, &[CTRL, P]);
+        ed.update(&mut world);
+        chars(&mut ed, "prop 59");
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[ENTER]);
+        for _ in 0..3 {
+            ed.update(&mut world);
+        }
+        assert_eq!(selected_names(&ed, &world), ["Prop 59"]);
+        assert!(y(&ed) < 680.0, "{}", y(&ed));
+    }
+
+    #[test]
+    fn kinds_have_their_icons_in_the_menu_and_the_tree() {
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            std::env::temp_dir(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        // The add menu shows every kind's icon.
+        ed.add_open = true;
+        ed.update(&mut world);
+        for glyph in ADD_ICONS {
+            assert!(!texts(&ed, glyph).is_empty(), "{glyph:?} in the menu");
+        }
+        // A sphere's row has the sphere's icon, a spot light's the spot's.
+        ed.add(&mut world, 2);
+        ed.add(&mut world, 7);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let rows: Vec<f32> = in_tree(&ed, "Sphere")
+            .iter()
+            .chain(in_tree(&ed, "Spot Light").iter())
+            .map(|r| r.pos[1])
+            .collect();
+        let glyph_rows =
+            |glyph: &str| -> Vec<f32> { in_tree(&ed, glyph).iter().map(|r| r.pos[1]).collect() };
+        assert!(
+            glyph_rows(icons::SPHERE)
+                .iter()
+                .any(|&y| (y - rows[0]).abs() < 6.0)
+        );
+        assert!(
+            glyph_rows(icons::SPOT_LIGHT)
+                .iter()
+                .any(|&y| (y - rows[1]).abs() < 6.0)
+        );
     }
 }
