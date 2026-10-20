@@ -49,7 +49,7 @@ use crate::icons;
 use crate::input::{Button, InputCollector};
 use crate::inspector::{self, Defaults, Inspector, Kind, Property};
 use crate::paint::{UiText, paint};
-use crate::session::{self, Base, Document, LastRun, Lock, SessionFile, Writer};
+use crate::session::{self, Base, Document, EditorState, LastRun, Lock, SessionFile, View, Writer};
 use crate::shell::{
     Field, FieldAction, FieldEvent, MenuItem, Palette, PaletteAction, PaletteRow, PaletteView,
     Section, ShellModel, TreeItem, Widget, build, dismissed,
@@ -275,6 +275,8 @@ struct CommandIds {
     /// version, or write the unsaved one over it.
     take_disk: CommandId,
     save_over_disk: CommandId,
+    /// The scene's autosaves in the palette, to bring one back.
+    restore_autosave: CommandId,
     /// "Add Cube" and the rest: the add menu's kinds, in its order.
     add_kinds: [CommandId; ADD.len()],
 }
@@ -306,6 +308,11 @@ fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
             "scene.save_over_disk_version",
             "Scene",
             "Save Over Disk Version",
+        ),
+        restore_autosave: c.register(
+            "scene.restore_autosave",
+            "Scene",
+            "Restore Unsaved Changes…",
         ),
         add_kinds: ADD.map(|kind| {
             let name = format!("scene.add.{}", kind.to_lowercase().replace(' ', "_"));
@@ -391,8 +398,29 @@ struct Found {
     matched: (u32, u32),
 }
 
+/// A list the palette offers in place of commands and objects: the autosaves
+/// "Restore Unsaved Changes…" can bring back.
+#[derive(Debug, Default)]
+struct Choices {
+    /// What the box says while nothing is typed.
+    hint: &'static str,
+    items: Vec<Choice>,
+    /// The items matching the query, in their order: an item and its matched letters (a
+    /// range of the palette's `highlights`).
+    shown: Vec<(usize, (u32, u32))>,
+}
+
+/// One item of a palette's list.
+#[derive(Debug)]
+struct Choice {
+    label: String,
+    detail: String,
+    /// The autosave it brings back.
+    path: PathBuf,
+}
+
 /// The command palette while it is open: one box for every command and, after `@`, the
-/// scene's objects (`docs/research/ux/command-palette.md`).
+/// scene's objects (`docs/research/ux/command-palette.md`); or a list to pick from.
 #[derive(Debug, Default)]
 struct CommandPalette {
     /// What is typed.
@@ -411,17 +439,21 @@ struct CommandPalette {
     /// allocates nothing once they have grown).
     order: Vec<Entity>,
     stack: Vec<Entity>,
+    /// A list to pick from instead.
+    choices: Option<Choices>,
 }
 
 impl CommandPalette {
     /// Whether the query looks for the scene's objects (`@`) rather than commands.
     fn finds_objects(&self) -> bool {
-        self.query.trim_start().starts_with('@')
+        self.choices.is_none() && self.query.trim_start().starts_with('@')
     }
 
     /// How many results there are.
     fn len(&self) -> usize {
-        if self.finds_objects() {
+        if let Some(choices) = &self.choices {
+            choices.shown.len()
+        } else if self.finds_objects() {
             self.objects.len()
         } else {
             self.commands.len()
@@ -581,6 +613,11 @@ struct Session {
     conflict: bool,
     /// Until when the lock says `restoring`.
     restoring_until: Option<Instant>,
+    /// The session file's text as last written: an unchanged one is not written again.
+    last_text: String,
+    /// When the view is written next if it changed: at most every
+    /// `session::VIEW_EVERY`, at a quiet moment.
+    view_due: Instant,
 }
 
 /// How long ago a time in nanoseconds since 1970 was, for messages.
@@ -1158,7 +1195,17 @@ impl Editor {
         if let Some(cp) = &self.command_palette {
             let end = (cp.first + PALETTE_ROWS).min(cp.len());
             for i in cp.first..end {
-                palette_rows.push(if cp.finds_objects() {
+                palette_rows.push(if let Some(choices) = &cp.choices {
+                    let (item, matched) = choices.shown[i];
+                    let c = &choices.items[item];
+                    PaletteRow {
+                        icon: icons::SCENE,
+                        label: &c.label,
+                        matched: &cp.highlights[matched.0 as usize..matched.1 as usize],
+                        category: 0,
+                        detail: &c.detail,
+                    }
+                } else if cp.finds_objects() {
                     let found = cp.objects[i];
                     let (icon, kind) = kind_of(world, found.entity);
                     PaletteRow {
@@ -1193,7 +1240,10 @@ impl Editor {
         }
         let palette = self.command_palette.as_ref().map(|cp| PaletteView {
             query: &cp.query,
-            hint: "Type a command, or @ and an object's name",
+            hint: cp
+                .choices
+                .as_ref()
+                .map_or("Type a command, or @ and an object's name", |c| c.hint),
             rows: &palette_rows,
             selected: cp.selected.saturating_sub(cp.first),
         });
@@ -1721,6 +1771,7 @@ impl Editor {
         let cp = self
             .command_palette
             .get_or_insert_with(CommandPalette::default);
+        cp.choices = None;
         cp.query.clear();
         cp.query.push_str(query);
         self.search_palette(world);
@@ -1737,7 +1788,18 @@ impl Editor {
         cp.objects.clear();
         cp.highlights.clear();
         let query = cp.query.trim_start();
-        if let Some(name) = query.strip_prefix('@') {
+        if let Some(choices) = &mut cp.choices {
+            // A list keeps its own order; the query narrows it.
+            choices.shown.clear();
+            cp.fuzzy.set_query(query);
+            for (i, item) in choices.items.iter().enumerate() {
+                if cp.fuzzy.score(&item.label).is_some() {
+                    let start = cp.highlights.len() as u32;
+                    cp.highlights.extend_from_slice(cp.fuzzy.positions());
+                    choices.shown.push((i, (start, cp.highlights.len() as u32)));
+                }
+            }
+        } else if let Some(name) = query.strip_prefix('@') {
             cp.commands.clear();
             let ids = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
             let world = &*world;
@@ -1790,7 +1852,12 @@ impl Editor {
                     return;
                 };
                 let i = cp.first + row;
-                if cp.finds_objects() {
+                if let Some(choices) = &cp.choices {
+                    if let Some(&(item, _)) = choices.shown.get(i) {
+                        let path = choices.items[item].path.clone();
+                        self.restore_autosave(world, &path);
+                    }
+                } else if cp.finds_objects() {
                     if let Some(found) = cp.objects.get(i) {
                         self.show(world, found.entity);
                     }
@@ -2053,6 +2120,8 @@ impl Editor {
             }
         } else if id == ids.take_disk {
             self.take_disk_version(world);
+        } else if id == ids.restore_autosave {
+            self.pick_autosave(world);
         } else if id == ids.delete {
             let roots = self.selection_roots(world);
             if !roots.is_empty() {
@@ -2284,7 +2353,7 @@ impl Editor {
                     .remove(vec![session::older(&old, 1), session::older(&old, 2), old]);
             }
         }
-        self.write_session();
+        self.write_session(world);
         Ok(path)
     }
 
@@ -2330,15 +2399,21 @@ impl Editor {
             last_input: Instant::now(),
             conflict: false,
             restoring_until: None,
+            last_text: String::new(),
+            view_due: Instant::now() + session::VIEW_EVERY,
             dir,
         };
         let mut learned = AssetPaths::new();
         let mut note = None;
         let previous = s.dir.join("session");
+        let mut editor_state = None;
         let doc = match std::fs::read_to_string(&previous) {
             Err(_) => None,
             Ok(text) => match SessionFile::parse(&text) {
-                Ok(f) => f.documents.into_iter().find(|d| d.path == self.scene_path),
+                Ok(f) => {
+                    editor_state = Some(f.editor);
+                    f.documents.into_iter().find(|d| d.path == self.scene_path)
+                }
                 Err(e) => {
                     let _ = std::fs::rename(&previous, s.dir.join("session.broken"));
                     note = Some(format!(
@@ -2354,7 +2429,7 @@ impl Editor {
             .and_then(|d| d.autosave.as_ref())
             .map(|a| s.dir.join(a))
             .filter(|a| a.is_file());
-        if let (Some(doc), Some(autosave)) = (doc, autosave) {
+        if let (Some(doc), Some(autosave)) = (&doc, autosave) {
             let name = self.file_name();
             if last == LastRun::CrashedRestoring {
                 note = Some(format!(
@@ -2412,11 +2487,90 @@ impl Editor {
             self.scene_id,
         ));
         self.session = Some(s);
-        self.write_session();
+        // How the editor and the scene were looked at: back too.
+        if let Some(state) = &editor_state {
+            self.apply_editor_state(state);
+        }
+        if let Some(doc) = &doc {
+            self.apply_view(world, &doc.view);
+        }
+        self.write_session(world);
         if let Some(note) = note {
             self.say(note);
         }
         Ok(learned)
+    }
+
+    /// The editor's own state from a session: snapping, and the order of recently run
+    /// commands (the palette ranks them first).
+    fn apply_editor_state(&mut self, state: &EditorState) {
+        if let Some((on, [position, scale, angle, number])) = state.snapping {
+            self.snapping.on = on;
+            self.snapping.position = position;
+            self.snapping.scale = scale;
+            self.snapping.angle = angle;
+            self.snapping.number = number;
+        }
+        for name in &state.recent {
+            if let Some(id) = self.commands.find(name) {
+                self.commands.ran(id);
+            }
+        }
+    }
+
+    /// A scene's view from a session: the camera, the selection by scene ids (those gone
+    /// left out), the tree's closed rows, the filters, the tool.
+    fn apply_view(&mut self, world: &mut World, view: &View) {
+        if let Some(([x, y, z], yaw, pitch, distance)) = view.camera {
+            self.orbit.target = Vec3::new(x, y, z);
+            self.orbit.yaw = yaw;
+            self.orbit.pitch = pitch;
+            self.orbit.distance = distance;
+        }
+        let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
+        let index: HashMap<SceneId, Entity> =
+            q.iter_readonly(world).map(|(e, &id)| (id, e)).collect();
+        self.collapsed = view
+            .collapsed
+            .iter()
+            .filter_map(|id| index.get(id).copied())
+            .collect();
+        self.selection = view
+            .selection
+            .iter()
+            .filter_map(|id| index.get(id).copied())
+            .collect();
+        self.anchor = view
+            .anchor
+            .and_then(|id| index.get(&id).copied())
+            .filter(|a| self.selection.contains(a))
+            .or_else(|| self.active());
+        self.reveal = self.active();
+        self.tree_filter.clone_from(&view.tree_filter);
+        self.inspector_filter.clone_from(&view.inspector_filter);
+        self.active_tool = view.tool.min(self.tools.len() - 1);
+    }
+
+    /// The scene's view as a session keeps it.
+    fn view(&self, world: &World) -> View {
+        let id = |e: Entity| world.get::<SceneId>(e).copied();
+        let mut collapsed: Vec<SceneId> = self.collapsed.iter().filter_map(|&e| id(e)).collect();
+        // A set has no order of its own: sorted, the text stays the same while it does.
+        collapsed.sort_unstable();
+        View {
+            camera: Some((
+                self.orbit.target.to_array(),
+                self.orbit.yaw,
+                self.orbit.pitch,
+                self.orbit.distance,
+            )),
+            selection: self.selection.iter().filter_map(|&e| id(e)).collect(),
+            anchor: self.anchor.and_then(id),
+            collapsed,
+            tree_filter: self.tree_filter.clone(),
+            inspector_filter: self.inspector_filter.clone(),
+            tool: self.active_tool,
+        }
     }
 
     /// Puts the scene of `autosave` in the world in place of the scene's entities. The
@@ -2439,13 +2593,35 @@ impl Editor {
         Ok(report.assets)
     }
 
-    /// Writes the session file on the writer's thread: the scene, what its file was, and
-    /// its autosave while it has one.
-    fn write_session(&self) {
-        let Some(s) = &self.session else {
+    /// Writes the session file on the writer's thread, unless it would be the same text:
+    /// the editor's state, then the scene, what its file was, its autosave while it has
+    /// one and its view.
+    fn write_session(&mut self, world: &World) {
+        if self.session.is_none() {
+            return;
+        }
+        let recent = self.commands.recent();
+        let editor = EditorState {
+            snapping: Some((
+                self.snapping.on,
+                [
+                    self.snapping.position,
+                    self.snapping.scale,
+                    self.snapping.angle,
+                    self.snapping.number,
+                ],
+            )),
+            recent: recent[recent.len().saturating_sub(session::RECENT)..]
+                .iter()
+                .map(|&id| self.commands.info(id).name.clone())
+                .collect(),
+        };
+        let view = self.view(world);
+        let Some(s) = &mut self.session else {
             return;
         };
         let file = SessionFile {
+            editor,
             documents: vec![Document {
                 path: self.scene_path.clone(),
                 id: self.scene_id,
@@ -2453,10 +2629,27 @@ impl Editor {
                 autosave: s
                     .autosaved
                     .map(|_| session::autosave_name(self.scene_path.as_deref(), self.scene_id)),
+                view,
             }],
         };
-        s.writer
-            .write(s.dir.join("session"), file.to_text(), 0, Duration::ZERO);
+        let text = file.to_text();
+        if text != s.last_text {
+            s.writer
+                .write(s.dir.join("session"), text.clone(), 0, Duration::ZERO);
+            s.last_text = text;
+        }
+    }
+
+    /// A gesture runs: a drag, typing, a held button. Autosaves wait for its end.
+    fn gesture(&self) -> bool {
+        self.drag.is_some()
+            || self.typing.is_some()
+            || self.renaming.is_some()
+            || self.camera_drag
+            || self.ui.editing().is_some()
+            || [Button::Left, Button::Right, Button::Middle]
+                .into_iter()
+                .any(|b| self.input.held(b))
     }
 
     /// The session's part of the frame: the writer's failures told, the lock's state moved
@@ -2485,6 +2678,15 @@ impl Editor {
             self.say(format!("Not autosaved: {e}"));
         }
         self.keep_autosave(world, false);
+        // The view (the camera, the selection, the tree) when it changed, now and then.
+        let now = Instant::now();
+        let gesture = self.gesture();
+        if let Some(s) = &mut self.session
+            && session::autosave_now(now, s.view_due, s.last_input, gesture)
+        {
+            s.view_due = now + session::VIEW_EVERY;
+            self.write_session(world);
+        }
     }
 
     /// Keeps the scene's autosave in step with its unsaved changes: written once they have
@@ -2492,14 +2694,7 @@ impl Editor {
     /// deleted with the older ones once the scene is clean again.
     fn keep_autosave(&mut self, world: &mut World, now: bool) {
         let head = self.history.head();
-        let gesture = self.drag.is_some()
-            || self.typing.is_some()
-            || self.renaming.is_some()
-            || self.camera_drag
-            || self.ui.editing().is_some()
-            || [Button::Left, Button::Right, Button::Middle]
-                .into_iter()
-                .any(|b| self.input.held(b));
+        let gesture = self.gesture();
         let Some(s) = &mut self.session else {
             return;
         };
@@ -2512,7 +2707,7 @@ impl Editor {
                     session::older(path, 2),
                     path.clone(),
                 ]);
-                self.write_session();
+                self.write_session(world);
             }
             return;
         }
@@ -2552,7 +2747,7 @@ impl Editor {
         );
         s.autosaved = Some(head);
         s.due = None;
-        self.write_session();
+        self.write_session(world);
     }
 
     /// Autosaves the unsaved changes now and waits until the session is on the disk:
@@ -2571,7 +2766,7 @@ impl Editor {
             return;
         }
         self.keep_autosave(world, true);
-        self.write_session();
+        self.write_session(world);
         if let Some(mut s) = self.session.take() {
             s.writer.flush();
             if let Some(lock) = s.lock.take() {
@@ -2593,38 +2788,11 @@ impl Editor {
         let Some(file) = self.scene_path.as_ref().map(|p| self.root.join(p)) else {
             return;
         };
-        let text = match std::fs::read_to_string(&file) {
-            Ok(text) => text,
-            Err(e) => {
-                self.say(format!("{}: {e}", file.display()));
-                return;
-            }
-        };
-        let old = self.roots(world, None);
-        self.history.begin("Take Disk Version", None);
-        // The scene's entities recorded and gone first: the history knows entities by
-        // their scene ids, so the file's entities loaded after are the same entities to
-        // it where their ids are the same, and the others new.
-        for e in old {
-            self.history.delete_subtree(world, e);
+        if let Err(e) = self.replace_scene(world, &file, "Take Disk Version") {
+            self.say(e);
+            return;
         }
-        let report = match engine_scene::load(world, &SceneRegistry::from_program(), &text) {
-            Ok(report) => report,
-            Err(e) => {
-                self.history.cancel(world);
-                self.say(format!("{}: {e}", file.display()));
-                return;
-            }
-        };
-        for &e in &report.entities {
-            self.history.touch_new(world, e);
-        }
-        self.history.commit(world);
         self.saved_head = self.history.head();
-        self.selection.clear();
-        self.anchor = None;
-        self.assets.extend(&report.assets);
-        self.pending_assets.extend(&report.assets);
         if let Some(s) = &mut self.session {
             s.conflict = false;
             s.base = Base::of(&file);
@@ -2633,10 +2801,102 @@ impl Editor {
                 s.writer.rename(s.autosave.clone(), aside);
             }
         }
-        self.write_session();
+        self.write_session(world);
         self.say(String::from(
             "Took the version on disk; Ctrl+Z brings your changes back",
         ));
+    }
+
+    /// The scene's entities replaced by the scene in `file`, as one undo step named
+    /// `step`.
+    ///
+    /// The scene's entities are recorded and gone first: the history knows entities by
+    /// their scene ids, so the file's entities loaded after are the same entities to it
+    /// where their ids are the same, and the others are new.
+    fn replace_scene(&mut self, world: &mut World, file: &Path, step: &str) -> Result<(), String> {
+        let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let old = self.roots(world, None);
+        self.history.begin(step, None);
+        for e in old {
+            self.history.delete_subtree(world, e);
+        }
+        let report = match engine_scene::load(world, &SceneRegistry::from_program(), &text) {
+            Ok(report) => report,
+            Err(e) => {
+                self.history.cancel(world);
+                return Err(format!("{}: {e}", file.display()));
+            }
+        };
+        for &e in &report.entities {
+            self.history.touch_new(world, e);
+        }
+        self.history.commit(world);
+        self.selection.clear();
+        self.anchor = None;
+        self.assets.extend(&report.assets);
+        self.pending_assets.extend(&report.assets);
+        Ok(())
+    }
+
+    /// "Restore Unsaved Changes…": the scene's autosaves in the palette, the newest first
+    /// (the latest, the two older, one kept after a conflict).
+    fn pick_autosave(&mut self, world: &mut World) {
+        let name = self.file_name();
+        let Some(s) = &self.session else {
+            self.say(String::from(
+                "No session: the editor keeps no autosaves here",
+            ));
+            return;
+        };
+        let latest = &s.autosave;
+        let mut found: Vec<(u64, PathBuf, &'static str)> = [
+            (latest.clone(), "the latest autosave"),
+            (session::older(latest, 1), "an older autosave"),
+            (session::older(latest, 2), "an older autosave"),
+            (
+                latest.with_extension("conflict.scene"),
+                "kept when the disk version was taken",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(path, kind)| Some((session::modified(&path)?, path, kind)))
+        .collect();
+        if found.is_empty() {
+            self.say(format!("No autosaves of {name}"));
+            return;
+        }
+        found.sort_unstable_by_key(|&(time, _, _)| core::cmp::Reverse(time));
+        let items = found
+            .into_iter()
+            .map(|(time, path, kind)| Choice {
+                label: format!("{name} from {}", ago(time)),
+                detail: String::from(kind),
+                path,
+            })
+            .collect();
+        self.open_palette(world, "");
+        if let Some(cp) = &mut self.command_palette {
+            cp.choices = Some(Choices {
+                hint: "Pick the unsaved changes to bring back",
+                items,
+                shown: Vec::new(),
+            });
+        }
+        self.search_palette(world);
+    }
+
+    /// The scene of a picked autosave in place of the scene, as one undo step: Ctrl+Z
+    /// takes it back.
+    fn restore_autosave(&mut self, world: &mut World, autosave: &Path) {
+        let when =
+            session::modified(autosave).map_or_else(String::new, |t| format!(" from {}", ago(t)));
+        match self.replace_scene(world, autosave, "Restore Unsaved Changes") {
+            Ok(()) => self.say(format!(
+                "Brought back the unsaved changes of {}{when}; Ctrl+Z takes them back",
+                self.file_name()
+            )),
+            Err(e) => self.say(format!("Not restored: {e}")),
+        }
     }
 }
 
@@ -4316,6 +4576,99 @@ mod tests {
             message(&ed)
         );
         assert!(autosave.is_file(), "the changes are kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_view_comes_back_with_the_session() {
+        let dir = project("session-view");
+        let (mut world, mut ed) = start(&dir);
+        let cube = engine_scene::find_named(&mut world, "Cube").unwrap();
+        ed.orbit.target = Vec3::new(1.5, -2.0, 0.25);
+        ed.orbit.yaw = 1.25;
+        ed.orbit.pitch = -0.5;
+        ed.orbit.distance = 12.0;
+        ed.select_only(cube);
+        ed.collapsed.insert(cube);
+        ed.tree_filter = String::from("Cu");
+        ed.inspector_filter = String::from("trans");
+        ed.active_tool = 2;
+        // Y: snapping by default, a command run (the palette ranks it first).
+        let snap = ed.ids.snap;
+        ed.run(&mut world, snap);
+        assert!(ed.snapping.on);
+        ed.end_session(&mut world);
+
+        let (mut world, ed) = start(&dir);
+        let cube = engine_scene::find_named(&mut world, "Cube").unwrap();
+        assert_eq!(ed.orbit.target, Vec3::new(1.5, -2.0, 0.25));
+        assert_eq!(
+            (ed.orbit.yaw, ed.orbit.pitch, ed.orbit.distance),
+            (1.25, -0.5, 12.0)
+        );
+        assert_eq!(ed.selection, [cube]);
+        assert_eq!(ed.anchor, Some(cube));
+        assert!(ed.collapsed.contains(&cube));
+        assert_eq!(
+            (ed.tree_filter.as_str(), ed.inspector_filter.as_str()),
+            ("Cu", "trans")
+        );
+        assert_eq!(ed.active_tool, 2);
+        assert!(ed.snapping.on);
+        let recent: Vec<&str> = ed
+            .commands
+            .recent()
+            .into_iter()
+            .map(|id| ed.commands.info(id).name.as_str())
+            .collect();
+        assert_eq!(recent, ["edit.snap"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn older_autosaves_come_back_from_the_palette() {
+        let dir = project("session-older");
+        let (mut world, mut ed) = start(&dir);
+        move_cube(&mut ed, &mut world, 1.0);
+        ed.save_session(&mut world);
+        // A minute later the next autosave moves this one down to `.1`.
+        let latest = autosave_of(&ed);
+        let minute_ago = std::time::SystemTime::now() - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&latest)
+            .unwrap()
+            .set_modified(minute_ago)
+            .unwrap();
+        move_cube(&mut ed, &mut world, 2.0);
+        ed.save_session(&mut world);
+        assert!(session::older(&latest, 1).is_file());
+
+        let restore = ed.ids.restore_autosave;
+        ed.run(&mut world, restore);
+        let cp = ed.command_palette.as_ref().unwrap();
+        let choices = cp.choices.as_ref().unwrap();
+        let labels: Vec<&str> = choices.items.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["main.scene from just now", "main.scene from 1 min ago"]
+        );
+        assert_eq!(choices.shown.len(), 2);
+        // The older one: x = 1 again, as one step that Ctrl+Z takes back.
+        ed.palette_action(&mut world, PaletteAction::Run(1));
+        assert_eq!(cube_x(&mut world), 1.0);
+        assert!(
+            message(&ed).starts_with("Brought back the unsaved changes of main.scene"),
+            "{}",
+            message(&ed)
+        );
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert_eq!(cube_x(&mut world), 2.0);
+        // Opened again as the command palette, it lists commands.
+        ed.open_palette(&mut world, "");
+        assert!(ed.command_palette.as_ref().unwrap().choices.is_none());
+        ed.end_session(&mut world);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
