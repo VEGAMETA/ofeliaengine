@@ -62,7 +62,7 @@ Last updated: 2026-10-17.
     runs every command (the add menu's kinds among them), `@` (Ctrl+P) finds the scene's
     objects; ↺ and Backspace reset a field to its default; Ctrl+C and Ctrl+V over a field
     copy and paste its value.
-  - **E1-4b-3a, the selection** (#PR, ADR 0107 as built): Ctrl+click, Shift+click and
+  - **E1-4b-3a, the selection** (#261, ADR 0107 as built): Ctrl+click, Shift+click and
     the arrows in the tree, Delete and Ctrl+D on the whole selection as one step, numbered
     names for new entities and copies, icons by kind in the add menu, the tree and the
     palette.
