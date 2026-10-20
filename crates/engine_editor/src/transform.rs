@@ -1,6 +1,6 @@
 //! Keyboard transforms (ADR 0107 E2; `docs/research/ux/viewport-tools.md` §2, §8): a key
-//! moves, turns or scales the selection with the pointer at once, no handle to grab
-//! (Blender's G, R, S). While one runs:
+//! moves, turns or scales the selection with the pointer at once, no handle to grab (Q,
+//! R, E in our keys; Blender's G, R, S). While one runs:
 //!
 //! - **X, Y, Z** keep it to an axis: the gizmo's first (the world's, or the active
 //!   entity's after Space), the other ones with the same key again, free a third time.
@@ -16,7 +16,7 @@
 //!   for the grid ([`crate::Snapping`]). Typed values are exact.
 //!
 //! The editor keeps it with Enter or a left click and takes it back with Escape or a right
-//! click; G, R and S start the other transforms over.
+//! click; the keys that start the transforms start the others over.
 
 use crate::expr;
 use crate::gizmo::{Change, Target, ViewProj, hit_plane};

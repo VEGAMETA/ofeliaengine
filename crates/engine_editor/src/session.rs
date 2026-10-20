@@ -231,8 +231,10 @@ pub(crate) struct EditorState {
     pub(crate) recent: Vec<String>,
     /// What a new build of the game's code does (`background`, `always`, `ask`).
     pub(crate) restart: Option<String>,
-    /// Which keys the editor uses (`blender`, `godot`).
+    /// Which keys the editor uses (`ofelia`, `blender`, `godot`).
     pub(crate) keys: Option<String>,
+    /// The camera's flight speed, meters per second.
+    pub(crate) fly: Option<f64>,
     /// Where the editor's window was.
     pub(crate) window: Option<WindowPlacement>,
 }
@@ -277,6 +279,9 @@ impl SessionFile {
             out.push_str("keys = ");
             quote_into(&mut out, keys);
             out.push('\n');
+        }
+        if let Some(fly) = self.editor.fly {
+            let _ = writeln!(out, "fly = {fly}");
         }
         if let Some(w) = self.editor.window {
             let _ = writeln!(
@@ -405,6 +410,7 @@ impl SessionFile {
                     }
                     "restart" => file.editor.restart = Some(unquote(value).map_err(at)?),
                     "keys" => file.editor.keys = Some(unquote(value).map_err(at)?),
+                    "fly" => file.editor.fly = Some(parse_number(value).map_err(at)?),
                     "window" => {
                         let parts = items(value, '(', ')').map_err(at)?;
                         let [left, top, right, bottom, maximized] = parts[..] else {
@@ -820,6 +826,7 @@ mod tests {
                 recent: vec![String::from("edit.undo"), String::from("scene.duplicate")],
                 restart: Some(String::from("ask")),
                 keys: Some(String::from("godot")),
+                fly: Some(7.5),
                 window: Some(WindowPlacement {
                     left: -7,
                     top: 0,

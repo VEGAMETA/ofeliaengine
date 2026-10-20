@@ -1,5 +1,5 @@
-//! The editor's viewport camera: it orbits a target point, pans, zooms and looks around
-//! (`docs/research/ux/viewport-navigation.md`). Angles are in radians, distances in
+//! The editor's viewport camera: it orbits a target point, pans, zooms, looks around and
+//! flies (`docs/research/ux/viewport-navigation.md`). Angles are in radians, distances in
 //! meters; drags come in physical pixels.
 
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
@@ -81,6 +81,14 @@ impl OrbitCamera {
         self.target += (-right * dx + up * dy) * meters_per_pixel;
     }
 
+    /// Flies the eye and the target together: `forward` along the view, `right` across it
+    /// and level, `up` along the world's +Y, in meters.
+    pub fn fly(&mut self, forward: f32, right: f32, up: f32) {
+        let ahead = -self.back();
+        let side = ahead.cross(Vec3::Y).normalize_or_zero();
+        self.target += ahead * forward + side * right + Vec3::Y * up;
+    }
+
     /// Moves toward the target by wheel notches (positive: closer).
     pub fn zoom(&mut self, notches: f32) {
         self.distance = (self.distance * ZOOM_PER_NOTCH.powf(notches)).clamp(0.05, 10_000.0);
@@ -132,6 +140,29 @@ mod tests {
         c.zoom(2.0);
         assert!(close(c.target, target));
         assert!((c.distance - 16.0 * 0.85 * 0.85).abs() < 1e-4);
+    }
+
+    #[test]
+    fn fly_moves_eye_and_target_along_the_view_and_up_the_world() {
+        let mut c = OrbitCamera::default();
+        let (eye, offset) = (c.eye(), c.eye() - c.target);
+        let ahead = (c.target - eye).normalize();
+        c.fly(2.0, 0.0, 0.0);
+        assert!(close(c.eye(), eye + ahead * 2.0));
+        assert!(close(c.eye() - c.target, offset), "the view stays");
+        c.fly(0.0, 0.0, 1.5);
+        assert!(
+            close(c.eye(), eye + ahead * 2.0 + Vec3::Y * 1.5),
+            "up is the world's"
+        );
+        let before = c.eye();
+        c.fly(0.0, 1.0, 0.0);
+        let side = c.eye() - before;
+        assert!((side.length() - 1.0).abs() < 1e-4, "{side}");
+        assert!(
+            side.y.abs() < 1e-6 && side.dot(ahead).abs() < 1e-4,
+            "level, across"
+        );
     }
 
     #[test]

@@ -37,9 +37,12 @@
 //!   and enums are clicked; strings are typed. Its filter box narrows it to matching
 //!   fields. A changed field has a reset button (↺); over a field, Backspace resets it,
 //!   and Ctrl+C and Ctrl+V copy and paste its value as scene text.
-//! - **Moving things** in the viewport (ADR 0107 E2): the selection's gizmo (Q, W, E and T
-//!   pick its handles), and keyboard transforms (G, R, S; X, Y, Z for an axis, a typed
-//!   value). These are Blender's keys, the default; "Editor: Key Map…" takes Godot's.
+//! - **Moving things** in the viewport (ADR 0107 E2): keyboard transforms (Q, E, R; X, Y,
+//!   Z for an axis, a typed value), and the selection's gizmo (Shift+Q, E, R pick its
+//!   handles). These are our keys, the default; "Editor: Key Map…" takes Blender's or
+//!   Godot's.
+//! - **Flying:** with the right button held, W, A, S, D fly the camera, Q down, E up,
+//!   Shift faster, and the wheel sets the speed (Godot's freelook).
 //! - **The command palette** (Ctrl+Shift+P) finds and runs every command, the add menu's
 //!   kinds among them ("Add Cube"); after `@` (Ctrl+P) it finds the scene's objects by
 //!   name and selects the one picked.
@@ -70,6 +73,7 @@ use engine_app::{
 };
 use engine_core::math::{Affine3A, Quat, Vec2, Vec3};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
+use engine_input::Key;
 use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind};
 use engine_reflect::TypeKind;
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
@@ -608,27 +612,41 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+R", ids.restart),
         ("Space", ids.local_axes),
     ];
-    // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2): G, R, S at
-    // once in Blender's keys, the tools then on Q, W, E, T; Q, W, E, R in Godot's, G
-    // transforming (R and S then switch it, `Editor::key_transform_frame`).
+    // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
+    // - ours: Q, E, R at once and with Shift the gizmo's handles, the left hand beside
+    //   W, A, S, D (the camera's flight);
+    // - Blender's: G, R, S, the tools on Q, W, E, T;
+    // - Godot's: the tools on Q, W, E, R, G transforming (R and S then switch it,
+    //   `Editor::key_transform_frame`).
     let preset_keys: &[(&str, CommandId)] = match preset {
+        KeyPreset::Ofelia => &[
+            ("Q", ids.transforms[0]),
+            ("R", ids.transforms[1]),
+            ("E", ids.transforms[2]),
+            ("Shift+Q", ids.tools[1]),
+            ("Shift+R", ids.tools[2]),
+            ("Shift+E", ids.tools[3]),
+        ],
         KeyPreset::Blender => &[
             ("G", ids.transforms[0]),
             ("R", ids.transforms[1]),
             ("S", ids.transforms[2]),
+            ("Q", ids.tools[0]),
+            ("W", ids.tools[1]),
+            ("E", ids.tools[2]),
             ("T", ids.tools[3]),
         ],
-        KeyPreset::Godot => &[("G", ids.transforms[0]), ("R", ids.tools[3])],
+        KeyPreset::Godot => &[
+            ("G", ids.transforms[0]),
+            ("Q", ids.tools[0]),
+            ("W", ids.tools[1]),
+            ("E", ids.tools[2]),
+            ("R", ids.tools[3]),
+        ],
     };
-    let tools = [
-        ("Q", ids.tools[0]),
-        ("W", ids.tools[1]),
-        ("E", ids.tools[2]),
-    ];
     let global = global
         .into_iter()
         .chain(preset_keys.iter().copied())
-        .chain(tools)
         .map(|(chord, id)| (chord, id, KeyContext::Global));
     for (chord, id, context) in global.chain(tree) {
         if let Some(chord) = Chord::parse(chord) {
@@ -750,22 +768,25 @@ impl RestartPolicy {
     }
 }
 
-/// Which keys the editor uses (team decision, 2026-10-20): Blender's by default (G, R, S
-/// move, rotate and scale at once; Q, W, E, T pick the tools), or Godot's (Q, W, E, R pick
-/// the tools; G moves, then R rotates and S scales).
+/// Which keys the editor uses. Ours by default (team decision, 2026-10-21): Q, E, R move,
+/// scale and rotate at once, Shift+Q, E, R pick the gizmo's handles, and W, A, S, D fly the
+/// camera while the right button is held. Or Blender's (G, R, S at once; Q, W, E, T the
+/// tools), or Godot's (Q, W, E, R the tools; G moves, then R rotates and S scales).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum KeyPreset {
     #[default]
+    Ofelia,
     Blender,
     Godot,
 }
 
 impl KeyPreset {
-    const ALL: [Self; 2] = [Self::Blender, Self::Godot];
+    const ALL: [Self; 3] = [Self::Ofelia, Self::Blender, Self::Godot];
 
     /// Its name in the session file.
     fn name(self) -> &'static str {
         match self {
+            Self::Ofelia => "ofelia",
             Self::Blender => "blender",
             Self::Godot => "godot",
         }
@@ -777,11 +798,32 @@ impl KeyPreset {
 
     fn label(self) -> &'static str {
         match self {
+            Self::Ofelia => {
+                "ofeliaengine's keys: Q, E, R move, scale, rotate; Shift+Q, E, R the gizmo"
+            }
             Self::Blender => "Blender's keys: G, R, S move, rotate, scale; Q, W, E, T the tools",
             Self::Godot => "Godot's keys: Q, W, E, R the tools; G moves (then R rotates, S scales)",
         }
     }
+
+    /// The letters that start a keyboard transform's move, turn and scale, and switch one
+    /// to another while it runs (Win32 virtual keys).
+    fn transform_letters(self) -> [u16; 3] {
+        match self {
+            // Q, R, E.
+            Self::Ofelia => [0x51, 0x52, 0x45],
+            // G, R, S.
+            Self::Blender | Self::Godot => [0x47, 0x52, 0x53],
+        }
+    }
 }
+
+/// The camera's flight (the right button held, W, A, S, D): its speed at first in meters
+/// per second, the factor a wheel notch changes it by and its bounds, and Shift's factor.
+const FLY_SPEED: f32 = 5.0;
+const FLY_NOTCH: f32 = 1.2;
+const FLY_RANGE: (f32, f32) = (0.05, 1000.0);
+const FLY_FAST: f32 = 3.0;
 
 /// Where the game's code stands, for the status bar.
 #[derive(Debug, Clone, Default)]
@@ -994,6 +1036,10 @@ struct Editor {
     /// pivot's line to the pointer) and its hint by the pointer.
     guides: Vec<(Vec2, Vec2, usize)>,
     hint: String,
+    /// The camera's flight speed (the wheel while flying), meters per second.
+    fly_speed: f32,
+    /// When the last frame was: flying moves by the time since.
+    last_frame: Instant,
     tools: [String; 4],
     active_tool: usize,
     status: String,
@@ -1243,6 +1289,8 @@ impl Editor {
             key_transform: None,
             guides: Vec::new(),
             hint: String::new(),
+            fly_speed: FLY_SPEED,
+            last_frame: Instant::now(),
             tools: [
                 format!("{} Select", icons::TOOL_SELECT),
                 format!("{} Move", icons::TOOL_MOVE),
@@ -1418,6 +1466,11 @@ impl Editor {
     /// into the world, the camera from the viewport's drags.
     #[allow(clippy::too_many_lines)]
     fn update(&mut self, world: &mut World) {
+        // The frame's time, for flying: at most a tenth of a second, so a stall does not
+        // throw the camera.
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+        self.last_frame = now;
         self.tick_session(world);
         self.tick_builds(world);
         let camera = self.camera(world);
@@ -1609,6 +1662,14 @@ impl Editor {
         self.status.clear();
         if self.key_transform.is_some() {
             let _ = write!(self.status, "{}  ·  ", transform::HELP);
+        }
+        if self.flying() {
+            let _ = write!(
+                self.status,
+                "Flying at {:.1} m/s: W A S D, Q down, E up, Shift faster, the wheel for \
+                 speed  ·  ",
+                self.fly_speed
+            );
         }
         if let Some(change) = self.gizmo_drag.as_ref().and_then(|d| d.last) {
             let _ = match change {
@@ -1908,10 +1969,16 @@ impl Editor {
             let merge = drag.merge;
             self.history.revert(world, merge);
         }
-        // The shortcuts; while a field is typed in, only saving (the keys are the field's).
+        // The shortcuts; while a field is typed in, only saving (the keys are the field's),
+        // and none while the right button flies the camera (the letters are the flight's).
         let typing_text = self.ui.editing().is_some();
         let contexts: &[KeyContext] = if self.tree_focus { &[TREE_KEYS] } else { &[] };
-        for i in 0..self.input.chords().len() {
+        let chords = if self.flying() {
+            0
+        } else {
+            self.input.chords().len()
+        };
+        for i in 0..chords {
             let chord = self.input.chords()[i];
             if let Some(id) = self.keymap.lookup(chord, contexts)
                 && (!typing_text || id == self.ids.save)
@@ -1946,10 +2013,19 @@ impl Editor {
                     }
                 } else {
                     self.orbit.look(dx, dy);
+                    self.fly(dt);
                 }
             }
-            if over {
-                self.orbit.zoom(self.input.wheel_notches());
+            // The wheel zooms, or sets the speed while flying.
+            let notches = self.input.wheel_notches();
+            if self.flying() {
+                if notches != 0.0 {
+                    let (low, high) = FLY_RANGE;
+                    self.fly_speed = (self.fly_speed * FLY_NOTCH.powf(notches)).clamp(low, high);
+                    self.say(format!("Flight speed {:.1} m/s", self.fly_speed));
+                }
+            } else if over {
+                self.orbit.zoom(notches);
             }
             self.view_rect = Some([
                 (x * scale).round() as u32,
@@ -2719,11 +2795,12 @@ impl Editor {
         self.key_transform = Some(t);
     }
 
-    /// A keyboard transform's frame. Its keys (X, Y, Z, G, R, S by the letter on the key;
-    /// Backspace, Enter, Escape), the typed value and the clicks are its own: the panels,
-    /// the shortcuts and the camera do not get them. Then what it does with the pointer,
-    /// set as one undo step. Enter or a left click keeps it; Escape, a right click or the
-    /// window losing the keyboard takes it back; G, R and S start another over.
+    /// A keyboard transform's frame. Its keys (X, Y, Z and the transforms' letters by the
+    /// letter on the key; Backspace, Enter, Escape), the typed value and the clicks are its
+    /// own: the panels, the shortcuts and the camera do not get them. Then what it does with
+    /// the pointer, set as one undo step. Enter or a left click keeps it; Escape, a right
+    /// click or the window losing the keyboard takes it back; another transform's letter
+    /// starts that one over.
     fn key_transform_frame(&mut self, world: &mut World) {
         /// Win32 virtual-key codes.
         const BACK: u16 = 0x08;
@@ -2747,6 +2824,7 @@ impl Editor {
         // Letters with Ctrl or Alt are not the transform's.
         let plain = !self.input.ctrl() && !self.input.alt();
         let plane = self.input.shift();
+        let [move_key, turn_key, scale_key] = self.key_preset.transform_letters();
         for i in 0..self.input.letters().len() {
             let kind = match self.input.letters()[i] {
                 BACK => {
@@ -2765,9 +2843,9 @@ impl Editor {
                     t.constrain(usize::from(vk - 0x58), plane);
                     None
                 }
-                0x47 if plain => Some(transform::Kind::Move),
-                0x52 if plain => Some(transform::Kind::Turn),
-                0x53 if plain => Some(transform::Kind::Scale),
+                vk if plain && vk == move_key => Some(transform::Kind::Move),
+                vk if plain && vk == turn_key => Some(transform::Kind::Turn),
+                vk if plain && vk == scale_key => Some(transform::Kind::Scale),
                 _ => None,
             };
             if let Some(kind) = kind
@@ -2796,6 +2874,31 @@ impl Editor {
         if !keep {
             self.key_transform = Some(t);
         }
+    }
+
+    /// Whether the right button flies the camera now.
+    fn flying(&self) -> bool {
+        self.camera_drag && self.input.held(Button::Right) && !self.input.held(Button::Middle)
+    }
+
+    /// Flies the camera while the right button is held, as Godot's freelook: W, A, S, D
+    /// along the view and across it, Q down and E up, by their place on the keyboard;
+    /// Shift three times faster.
+    fn fly(&mut self, dt: f32) {
+        let held = |plus: Key, minus: Key| {
+            f32::from(self.input.key_held(plus)) - f32::from(self.input.key_held(minus))
+        };
+        let way = Vec3::new(
+            held(Key::KeyW, Key::KeyS),
+            held(Key::KeyD, Key::KeyA),
+            held(Key::KeyE, Key::KeyQ),
+        );
+        if way == Vec3::ZERO {
+            return;
+        }
+        let fast = if self.input.shift() { FLY_FAST } else { 1.0 };
+        let way = way.normalize() * self.fly_speed * fast * dt;
+        self.orbit.fly(way.x, way.y, way.z);
     }
 
     /// The scene's roots (entities with a scene id under none), as the tree shows them:
@@ -2957,7 +3060,10 @@ impl Editor {
         } else if id == ids.restart_policy {
             self.pick_policy(world);
         } else if let Some(tool) = ids.tools.iter().position(|&t| t == id) {
-            self.active_tool = tool;
+            // In our keys the select tool (all the handles) has no key of its own: the active
+            // tool's key again takes it.
+            let back = tool == self.active_tool && self.key_preset == KeyPreset::Ofelia;
+            self.active_tool = if back { 0 } else { tool };
         } else if let Some(i) = ids.transforms.iter().position(|&t| t == id) {
             let kinds = [
                 transform::Kind::Move,
@@ -3394,6 +3500,10 @@ impl Editor {
         if let Some(preset) = state.keys.as_deref().and_then(KeyPreset::from_name) {
             self.use_keys(preset);
         }
+        if let Some(fly) = state.fly {
+            let (low, high) = FLY_RANGE;
+            self.fly_speed = (fly as f32).clamp(low, high);
+        }
     }
 
     /// A scene's view from a session: the camera, the selection by scene ids (those gone
@@ -3495,6 +3605,7 @@ impl Editor {
                 .collect(),
             restart: Some(String::from(self.restart_policy.name())),
             keys: Some(String::from(self.key_preset.name())),
+            fly: Some(f64::from(self.fly_speed)),
             window: self.window,
         };
         let view = self.view(world);
@@ -3524,6 +3635,8 @@ impl Editor {
     /// A gesture runs: a drag, typing, a held button. Autosaves wait for its end.
     fn gesture(&self) -> bool {
         self.drag.is_some()
+            || self.gizmo_drag.is_some()
+            || self.key_transform.is_some()
             || self.typing.is_some()
             || self.renaming.is_some()
             || self.camera_drag
@@ -6314,10 +6427,8 @@ mod tests {
             GlobalTransform::default(),
         ));
         let mut ed = gizmo_editor("gizmo-turn", &mut world, cube);
-        // E: the rotate tool, rings only.
-        key(&mut ed, 0x45, 0x12, true);
-        ed.update(&mut world);
-        key(&mut ed, 0x45, 0x12, false);
+        // Shift+R: the rotate tool, rings only.
+        chord(&mut ed, &mut world, &[SHIFT, R]);
         ed.update(&mut world);
         assert_eq!(ed.active_tool, 2);
         assert!(ed.gizmo.tips.is_empty() && ed.gizmo.quads.is_empty());
@@ -6349,14 +6460,10 @@ mod tests {
             Some(false),
         );
         ed.update(&mut world);
-        // T: the scale tool (Blender's keys); Q: all of them again.
-        key(&mut ed, 0x54, 0x14, true);
-        ed.update(&mut world);
-        key(&mut ed, 0x54, 0x14, false);
+        // Shift+E: the scale tool; again: all of them.
+        chord(&mut ed, &mut world, &[SHIFT, E]);
         assert_eq!(ed.active_tool, 3);
-        key(&mut ed, 0x51, 0x10, true);
-        ed.update(&mut world);
-        key(&mut ed, 0x51, 0x10, false);
+        chord(&mut ed, &mut world, &[SHIFT, E]);
         assert_eq!(ed.active_tool, 0);
     }
 
@@ -6412,6 +6519,8 @@ mod tests {
     // More keys: virtual key and scan code.
     const G: (u16, u16) = (0x47, 0x22);
     const Q: (u16, u16) = (0x51, 0x10);
+    const E: (u16, u16) = (0x45, 0x12);
+    const W: (u16, u16) = (0x57, 0x11);
     const R: (u16, u16) = (0x52, 0x13);
     const S: (u16, u16) = (0x53, 0x1F);
     const X: (u16, u16) = (0x58, 0x2D);
@@ -6428,13 +6537,13 @@ mod tests {
     }
 
     #[test]
-    fn g_z_and_a_typed_value_move_the_selection_exactly_as_one_step() {
+    fn q_z_and_a_typed_value_move_the_selection_exactly_as_one_step() {
         let mut world = World::new();
         let cube = cube_at(&mut world, Transform::IDENTITY);
         let mut ed = gizmo_editor("keys-move", &mut world, cube);
         mouse(&mut ed, [700.0, 300.0], None);
-        chord(&mut ed, &mut world, &[G]);
-        assert!(ed.key_transform.is_some(), "G starts a move");
+        chord(&mut ed, &mut world, &[Q]);
+        assert!(ed.key_transform.is_some(), "Q starts a move");
         ed.update(&mut world);
         assert!(!ed.gizmo_shown, "the gizmo is hidden meanwhile");
         chord(&mut ed, &mut world, &[Z]);
@@ -6469,7 +6578,7 @@ mod tests {
     }
 
     #[test]
-    fn r_and_s_turn_and_scale_by_typed_values_with_exact_parts() {
+    fn r_and_e_turn_and_scale_by_typed_values_with_exact_parts() {
         let mut world = World::new();
         let cube = cube_at(&mut world, Transform::from_xyz(1.0, 0.0, 0.0));
         let mut ed = gizmo_editor("keys-turn", &mut world, cube);
@@ -6489,8 +6598,8 @@ mod tests {
         assert_eq!(t.translation, Vec3::new(1.0, 0.0, 0.0), "about its center");
         // The world's transforms follow the scene's for the next transform.
         world.insert(cube, GlobalTransform(t.to_affine()));
-        // S Shift+Z 0.5: halved across z, the rotation exact.
-        chord(&mut ed, &mut world, &[S]);
+        // E Shift+Z 0.5: halved across z, the rotation exact.
+        chord(&mut ed, &mut world, &[E]);
         chord(&mut ed, &mut world, &[SHIFT, Z]);
         type_chars(&mut ed, "0,5");
         ed.update(&mut world);
@@ -6510,7 +6619,7 @@ mod tests {
         let at = |world: &World| world.get::<Transform>(cube).unwrap().translation;
         let (grab, dir) = x_arrow(&ed);
         mouse(&mut ed, grab.to_array(), None);
-        chord(&mut ed, &mut world, &[G]);
+        chord(&mut ed, &mut world, &[Q]);
         chord(&mut ed, &mut world, &[X]);
         mouse(&mut ed, (grab + dir * 50.0).to_array(), None);
         ed.update(&mut world);
@@ -6523,7 +6632,7 @@ mod tests {
         assert_eq!(at(&world), Vec3::ZERO, "Escape: back where it was");
         assert_eq!(ed.history.steps().count(), 0);
         // A right click: taken back, and the camera does not look around.
-        chord(&mut ed, &mut world, &[G]);
+        chord(&mut ed, &mut world, &[Q]);
         mouse(&mut ed, (grab + dir * 80.0).to_array(), None);
         ed.update(&mut world);
         assert_ne!(at(&world), Vec3::ZERO, "free: in the view's plane");
@@ -6534,7 +6643,7 @@ mod tests {
         right_button(&mut ed, false);
         ed.update(&mut world);
         // The window losing the keyboard.
-        chord(&mut ed, &mut world, &[G]);
+        chord(&mut ed, &mut world, &[Q]);
         mouse(&mut ed, (grab + dir * 30.0).to_array(), None);
         ed.update(&mut world);
         event(&mut ed, WindowEventKind::Focused(false));
@@ -6551,7 +6660,7 @@ mod tests {
         let mut ed = gizmo_editor("keys-click", &mut world, cube);
         let (grab, dir) = x_arrow(&ed);
         mouse(&mut ed, grab.to_array(), None);
-        chord(&mut ed, &mut world, &[G]);
+        chord(&mut ed, &mut world, &[Q]);
         chord(&mut ed, &mut world, &[X]);
         // The gizmo moves with the cube: the pointer stays on its x arrow.
         mouse(&mut ed, (grab + dir * 40.0).to_array(), None);
@@ -6626,7 +6735,7 @@ mod tests {
     fn the_key_map_is_picked_in_the_palette_and_kept() {
         let dir = project("keys-kept");
         let (mut world, mut ed) = start(&dir);
-        assert_eq!(ed.key_preset, KeyPreset::Blender, "Blender's by default");
+        assert_eq!(ed.key_preset, KeyPreset::Ofelia, "ours by default");
         let keys = ed.ids.keys;
         ed.run(&mut world, keys);
         let labels: Vec<String> = ed
@@ -6641,17 +6750,101 @@ mod tests {
             .map(|c| c.label.clone())
             .collect();
         assert_eq!(labels, KeyPreset::ALL.map(|p| String::from(p.label())));
-        ed.palette_action(&mut world, PaletteAction::Run(1));
+        ed.palette_action(&mut world, PaletteAction::Run(2));
         assert_eq!(ed.key_preset, KeyPreset::Godot);
+        // The flight's speed is kept too.
+        ed.fly_speed = 7.5;
         ed.end_session(&mut world);
         let (_, ed) = start(&dir);
         assert_eq!(ed.key_preset, KeyPreset::Godot);
+        assert_eq!(ed.fly_speed, 7.5);
         assert_eq!(
             ed.shortcuts.get(&ed.ids.tools[3]).map(String::as_str),
             Some("R")
         );
         assert_eq!(ed.shortcuts.get(&ed.ids.transforms[1]), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn our_keys_start_transforms_with_q_e_r_and_pick_the_handles_with_shift() {
+        let mut world = World::new();
+        let cube = cube_at(&mut world, Transform::IDENTITY);
+        let mut ed = gizmo_editor("keys-ours", &mut world, cube);
+        let kind = |ed: &Editor| ed.key_transform.as_ref().map(|t| t.kind);
+        mouse(&mut ed, [700.0, 300.0], None);
+        chord(&mut ed, &mut world, &[E]);
+        assert_eq!(kind(&ed), Some(transform::Kind::Scale), "E scales");
+        chord(&mut ed, &mut world, &[R]);
+        assert_eq!(
+            kind(&ed),
+            Some(transform::Kind::Turn),
+            "R during it: a turn"
+        );
+        chord(&mut ed, &mut world, &[Q]);
+        assert_eq!(kind(&ed), Some(transform::Kind::Move), "Q: a move");
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert_eq!(kind(&ed), None);
+        // G and S are free in our keys.
+        chord(&mut ed, &mut world, &[G]);
+        chord(&mut ed, &mut world, &[S]);
+        assert_eq!(kind(&ed), None);
+        // Shift+Q: the arrows; again: all the handles.
+        chord(&mut ed, &mut world, &[SHIFT, Q]);
+        assert_eq!(ed.active_tool, 1);
+        chord(&mut ed, &mut world, &[SHIFT, Q]);
+        assert_eq!(ed.active_tool, 0);
+        assert_eq!(ed.history.steps().count(), 0);
+    }
+
+    #[test]
+    fn the_right_button_flies_the_camera_with_wasd_and_the_wheel_sets_its_speed() {
+        let mut world = World::new();
+        let cube = cube_at(&mut world, Transform::IDENTITY);
+        let mut ed = gizmo_editor("fly", &mut world, cube);
+        let [x, y, w, h] = ed.view_rect.unwrap();
+        mouse(&mut ed, [(x + w / 2) as f32, (y + h / 2) as f32], None);
+        right_button(&mut ed, true);
+        ed.update(&mut world);
+        assert!(ed.camera_drag);
+        // A frame of a second, counted as a tenth: a stall does not throw the camera.
+        let long_frame = |ed: &mut Editor, world: &mut World| {
+            ed.last_frame = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+            ed.update(world);
+        };
+        let eye = ed.orbit.eye();
+        let ahead = (ed.orbit.target - eye).normalize();
+        key(&mut ed, W.0, W.1, true);
+        long_frame(&mut ed, &mut world);
+        key(&mut ed, W.0, W.1, false);
+        let moved = ed.orbit.eye() - eye;
+        assert!((moved - ahead * FLY_SPEED * 0.1).length() < 1e-3, "{moved}");
+        // E up, three times as fast with Shift; the letters are the flight's, not shortcuts.
+        let eye = ed.orbit.eye();
+        key(&mut ed, SHIFT.0, SHIFT.1, true);
+        key(&mut ed, E.0, E.1, true);
+        long_frame(&mut ed, &mut world);
+        key(&mut ed, E.0, E.1, false);
+        key(&mut ed, SHIFT.0, SHIFT.1, false);
+        let up = ed.orbit.eye() - eye;
+        assert!(
+            (up - Vec3::Y * FLY_SPEED * FLY_FAST * 0.1).length() < 1e-3,
+            "{up}"
+        );
+        assert!(ed.key_transform.is_none() && ed.active_tool == 0);
+        // The wheel sets the speed while flying, and zooms again after.
+        let distance = ed.orbit.distance;
+        event(&mut ed, WindowEventKind::Wheel { x: 0.0, y: 1.0 });
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!((ed.fly_speed - FLY_SPEED * FLY_NOTCH).abs() < 1e-4);
+        assert_eq!(ed.orbit.distance, distance);
+        assert!(ed.status.starts_with("Flying at 6.0 m/s"), "{}", ed.status);
+        right_button(&mut ed, false);
+        ed.update(&mut world);
+        event(&mut ed, WindowEventKind::Wheel { x: 0.0, y: 1.0 });
+        ed.update(&mut world);
+        assert!(ed.orbit.distance < distance, "the wheel zooms");
     }
 
     /// The editor's frame on the CPU (`Editor::update`, 1600 × 900) with 200 entities:
