@@ -34,3 +34,5 @@ engine_runtime.workspace = true
 engine_scene.workspace = true
 engine_text.workspace = true
 engine_ui.workspace = true
+# Cargo's build messages, read as JSON (E1-5c; already in the tree through glTF import).
+serde_json = "1"

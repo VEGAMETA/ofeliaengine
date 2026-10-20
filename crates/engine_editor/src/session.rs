@@ -228,6 +228,8 @@ pub(crate) struct EditorState {
     pub(crate) snapping: Option<(bool, [f64; 4])>,
     /// The commands run, by their stable names, the longest ago first.
     pub(crate) recent: Vec<String>,
+    /// What a new build of the game's code does (`background`, `always`, `ask`).
+    pub(crate) restart: Option<String>,
 }
 
 /// `.ofelia/session`: what the editor brings back at its next start.
@@ -260,6 +262,11 @@ impl SessionFile {
                 quote_into(&mut out, name);
             }
             out.push_str("]\n");
+        }
+        if let Some(restart) = &self.editor.restart {
+            out.push_str("restart = ");
+            quote_into(&mut out, restart);
+            out.push('\n');
         }
         for d in &self.documents {
             out.push_str("\n[document]\n");
@@ -379,6 +386,7 @@ impl SessionFile {
                             .and_then(|names| names.into_iter().map(unquote).collect())
                             .map_err(at)?;
                     }
+                    "restart" => file.editor.restart = Some(unquote(value).map_err(at)?),
                     _ => {}
                 },
                 Section::Document => {
@@ -772,6 +780,7 @@ mod tests {
             editor: EditorState {
                 snapping: Some((true, [0.1, 0.25, 45.0, 0.1])),
                 recent: vec![String::from("edit.undo"), String::from("scene.duplicate")],
+                restart: Some(String::from("ask")),
             },
         };
         let text = file.to_text();

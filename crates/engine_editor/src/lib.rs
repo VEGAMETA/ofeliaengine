@@ -8,6 +8,7 @@
 //! the project's `.ofelia/` folder (ADR 0107 §4).
 
 pub mod app;
+mod build;
 pub mod camera;
 pub mod expr;
 pub mod icons;
@@ -20,7 +21,8 @@ pub mod shell;
 mod snap;
 mod undo;
 
-pub use app::{EditorGame, EditorOverlay, Start, editor, run, run_frames};
+pub use app::{EditorGame, EditorOverlay, Start, editor, run, run_frames, run_game};
+pub use build::{BUILD_VAR, GameCrate};
 pub use palette::{
     Chord, CommandId, CommandInfo, Commands, Conflict, Fuzzy, KeyContext, Keymap, Match,
 };
