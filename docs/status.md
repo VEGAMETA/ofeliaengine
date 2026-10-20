@@ -110,7 +110,7 @@ Last updated: 2026-10-20.
       takes it back;
     - a hint by the pointer, the axis drawn across the viewport;
     - Godot's keys through "Editor: Key Map…".
-  - **E2-2b, our keys and the camera's flight** (#PR, ADR 0107 as built; team decision
+  - **E2-2b, our keys and the camera's flight** (#272, ADR 0107 as built; team decision
     2026-10-21):
     - Q, E, R transform at once, Shift+Q, E, R pick the gizmo's handles; Blender's and
       Godot's key maps in "Editor: Key Map…";
