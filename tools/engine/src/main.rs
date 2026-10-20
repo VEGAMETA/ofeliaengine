@@ -16,7 +16,8 @@
 //! ofeliaengine sounds build <DIR> -o <OUT.pack>    a sounds folder into a sound pack, every
 //!                                                  file as it is (ADR 0105)
 //! ofeliaengine new <DIR>                           a game started from the quick start
-//! ofeliaengine save dump <FILE>                    a save as text, either encoding (ADR 0104)
+//! ofeliaengine edit [DIR]                          a game in its editor (ADR 0107)
+//! ofeliaengine save dump <FILE>                   a save as text, either encoding (ADR 0104)
 //! ofeliaengine save info <FILE>                    a save's header
 //! ```
 //!
@@ -25,6 +26,7 @@
 // A command-line tool reports on stdout/stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod edit;
 mod loc;
 mod new;
 mod sounds;
@@ -81,9 +83,17 @@ usage:
   ofeliaengine new <DIR> [--engine <PATH>] [--name <NAME>]
                                                    a game started from the quick start
                                                    (docs/dev-guide/quick-start.md): its
-                                                   manifest on this engine (or --engine),
-                                                   the engine's build settings, a cube on a
-                                                   floor in src/main.rs, a sounds folder
+                                                   manifest on this engine (or --engine)
+                                                   with the editor as its `editor` feature,
+                                                   the engine's build settings, the game in
+                                                   src/main.rs, its scene (a cube on a
+                                                   floor) and materials under fresh ids, a
+                                                   sounds folder
+  ofeliaengine edit [DIR] [-- <ARGS>...]
+                                                   the game in DIR (default: the working
+                                                   folder) in its editor: cargo run
+                                                   --release --features editor there, ARGS
+                                                   passed to the game
   ofeliaengine sounds build <DIR> -o <OUT.pack> [--level <N>]
                                                    every sound file under the folder (WAV,
                                                    Ogg Vorbis, Opus, FLAC) into a sound pack
@@ -116,6 +126,7 @@ enum Command {
     Loc(loc::LocArgs),
     Sounds(sounds::SoundsArgs),
     New(new::NewArgs),
+    Edit(edit::EditArgs),
     Save { info: bool, file: PathBuf },
 }
 
@@ -143,6 +154,7 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some("loc") => loc::parse_loc(args).map(Command::Loc),
         Some("sounds") => sounds::parse_sounds(args).map(Command::Sounds),
         Some("new") => new::parse_new(args).map(Command::New),
+        Some("edit") => edit::parse_edit(args).map(Command::Edit),
         Some("save") => {
             let info = match args.next().as_deref() {
                 Some("dump") => false,
@@ -454,6 +466,7 @@ fn main() -> ExitCode {
         Command::Loc(args) => loc::run_loc(args),
         Command::Sounds(args) => sounds::run_sounds(args),
         Command::New(args) => new::run_new(args),
+        Command::Edit(args) => edit::run_edit(args),
         Command::Save { info, file } => save(*info, file),
     };
     match result {
@@ -598,6 +611,7 @@ mod tests {
             | Command::Loc(_)
             | Command::Sounds(_)
             | Command::New(_)
+            | Command::Edit(_)
             | Command::Save { .. } => Err(String::from("not a shaders command")),
         }
     }
@@ -609,6 +623,7 @@ mod tests {
             | Command::Loc(_)
             | Command::Sounds(_)
             | Command::New(_)
+            | Command::Edit(_)
             | Command::Save { .. } => Err(String::from("not a cook command")),
         }
     }

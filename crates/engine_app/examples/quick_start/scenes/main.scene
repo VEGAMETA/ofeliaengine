@@ -1,0 +1,49 @@
+[scene version=3 id=41bd9902e9271812fecd6caddd8912bf]
+
+[entity 3f35825513cd79099f8c4e4b1b3a8ccc]
+order = 1024
+Model.mesh = asset("builtin#cube", 6f66656c6961206275696c74696e0001)
+Model.material = asset("materials/floor.material", f5fd23a380126f700e2821c49451695f)
+Model.hidden = false
+Name = "Floor"
+Transform.rotation = (0, 0, 0, 1)
+Transform.translation = (0, -0.55, 0)
+Transform.scale = (20, 0.1, 20)
+
+[entity 40fca0fe9d48fb820ff2a121c1560a27]
+order = 2048
+Model.mesh = asset("builtin#cube", 6f66656c6961206275696c74696e0001)
+Model.material = asset("materials/paint.material", 65802ae9e6af1b4650f36d452759209d)
+Model.hidden = false
+Name = "Cube"
+Transform.rotation = (0, 0, 0, 1)
+Transform.translation = (0, 0, 0)
+Transform.scale = (1, 1, 1)
+
+[entity 5da1bb65b5d3eed7519877811d97eb21]
+order = 4096
+Camera.fov_y = 1
+Camera.near = 0.05
+Camera.far = 200
+Camera.exposure = 1
+Camera.auto_exposure = 0
+Camera.antialiasing = 1
+Camera.quality = 0
+Camera.cinematic = 0
+Camera.priority = 0
+Camera.active = 1
+Camera.cut_generation = 0
+Camera.shutter = 0
+Name = "Camera"
+Transform.rotation = (-0.15309092, 0.28605306, 0.046352208, 0.9447689)
+Transform.translation = (2, 1.2, 3)
+Transform.scale = (1, 1, 1)
+
+[entity f4d4f784e9fe9b360d0dc5ff6a233db4]
+order = 3072
+Name = "Sun"
+Sun.color = (1.2, 1.2, 1.2)
+Sun.ambient = (0.04, 0.04, 0.04)
+Transform.rotation = (-0.47942555, 0, 0, 0.87758255)
+Transform.translation = (0, 0, 0)
+Transform.scale = (1, 1, 1)

@@ -20,4 +20,4 @@ pub use engine_render::mesh::{MeshId, cube};
 pub use engine_runtime::{
     Camera, Ease, MeshRenderer, PointLight, Repeat, SpotLight, Sun, Timer, Tween, look_rotation,
 };
-pub use engine_scene::{AssetId, AssetRef, Name, SceneId};
+pub use engine_scene::{AssetId, AssetRef, Name, SceneId, find_named};

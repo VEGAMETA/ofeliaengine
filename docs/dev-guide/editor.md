@@ -4,6 +4,17 @@ The editor runs inside your game's own build (ADR 0107): the player runs the gam
 draws the scene into the viewport panel, and the editor's shell (the team's Godot layout)
 is drawn over the frame. Your components and systems are native in it.
 
+In your game's folder (a game made by `ofeliaengine new` has the `editor` feature):
+
+```text
+cargo run --release --features editor
+```
+
+`ofeliaengine edit [DIR]` runs the same, after checking that the game's `Cargo.toml` has
+the feature. The editor opens the scene of the game's settings (`PlayerSettings::scene`).
+
+Without a game, the editor's own binary opens a scene file:
+
 ```text
 cargo run -p engine_editor --release --bin editor -- scenes/main.scene --project C:/games/mygame
 ```
@@ -13,16 +24,20 @@ cargo run -p engine_editor --release --bin editor -- scenes/main.scene --project
 - **`--frames N`** renders N frames and exits (smoke tests), printing the time with the
   start.
 
-From a game's own build:
+**How a game runs it:** the game's `main` is `engine_app::main!(settings, start)`
+([player.md](player.md#your-games-main)). With the game's `editor` feature it calls
+`engine_editor::run(settings, start)`; without it, the player, and a shipped game does
+not link the editor. `start` makes the game from the player when Play starts (Play comes
+with phase E3). The manifest, as `ofeliaengine new` writes it (with the engine's path):
 
-```rust
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // The game's settings; their `scene` is what the editor opens.
-    engine_editor::run(settings()?, start)
-}
+```toml
+[dependencies]
+engine_app = { path = "../ofeliaengine/crates/engine_app" }
+engine_editor = { path = "../ofeliaengine/crates/engine_editor", optional = true }
+
+[features]
+editor = ["dep:engine_editor"]
 ```
-
-`start` makes the game from the player when Play starts (Play comes with phase E3).
 
 ## What works now
 
@@ -198,7 +213,7 @@ right button + WASD and focusing the selection come later.
 
 | Phase | What |
 |---|---|
-| E1-5 | sessions, autosave, rebuild and restart after a code change |
+| E1-5b, E1-5c | autosave and the session, rebuild and restart after a code change |
 | E2 | selection in the viewport, gizmos, placement by drag and drop |
 | E3 | Play on a copy of the world |
 

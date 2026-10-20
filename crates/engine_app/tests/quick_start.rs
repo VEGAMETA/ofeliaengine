@@ -1,6 +1,7 @@
-//! The quick start's game (`examples/quick_start.rs`, what `ofeliaengine new` starts a game
-//! from) renders its scene: offscreen, the red cube stands on the grey floor in the middle
-//! of the picture. `ENGINE_QUICK_START_PNG=<file>` writes the frame.
+//! The quick start's game (`examples/quick_start.rs` and its scene in
+//! `examples/quick_start/`, what `ofeliaengine new` starts a game from) renders its scene:
+//! offscreen, the red cube stands on the grey floor in the middle of the picture.
+//! `ENGINE_QUICK_START_PNG=<file>` writes the frame.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -14,6 +15,9 @@ use engine_app::{Player, Window};
 fn the_quick_start_shows_its_cube() {
     let (width, height) = (640u32, 360u32);
     let mut settings = quick_start::settings().unwrap();
+    // The game's folder, where `scenes/main.scene` is.
+    settings.project =
+        Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/quick_start"));
     settings.window = Window::Offscreen { width, height };
     settings.process_setup = false;
     settings.pipeline_cache = Some(None);
@@ -27,7 +31,7 @@ fn the_quick_start_shows_its_cube() {
         }
         Err(e) => panic!("GPU required but unavailable: {e}"),
     };
-    let mut game = quick_start::scene(&mut player).unwrap();
+    let mut game = quick_start::start(&mut player).unwrap();
     player.set_frame_time(Some(1.0 / 60.0));
     for _ in 0..30 {
         player.frame(&mut game).unwrap();

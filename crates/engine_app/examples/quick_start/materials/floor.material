@@ -1,0 +1,9 @@
+[material version=1 id=f5fd23a380126f700e2821c49451695f]
+
+base_color = [0.3, 0.3, 0.32, 1]
+metallic = 0
+roughness = 0.9
+emissive = [0, 0, 0]
+alpha = Opaque
+alpha_cutoff = 0.5
+double_sided = false

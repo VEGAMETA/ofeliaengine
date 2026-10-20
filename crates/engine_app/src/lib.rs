@@ -60,6 +60,7 @@
 //! runs the same executable.
 
 mod assets;
+mod entry;
 mod game;
 mod net;
 mod overlay;
@@ -88,6 +89,7 @@ pub use engine_save::{
     ApplyOptions, CaptureOptions, Encoding, LoadReport, LoadedSave, SaveHeader, SaveImage, SceneId,
     SlotInfo, Transient,
 };
+pub use entry::{Start, run};
 pub use game::{FrameParts, Game};
 pub use net::{
     HitCapsule, HostOptions, NetConfig, NetEvent, NetInput, NetState, Network, PlayerId, Predicted,

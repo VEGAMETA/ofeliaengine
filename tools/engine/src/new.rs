@@ -1,14 +1,33 @@
 //! `ofeliaengine new <DIR>`: a game started from the quick start
-//! (`docs/dev-guide/quick-start.md`). Its manifest depends on this engine's player, its
-//! build settings are the engine's, its `src/main.rs` is the quick start's game (a cube on
-//! a floor, a camera flown with WASD and the mouse), and its `sounds/` folder is the one
-//! the player reads while developing.
+//! (`docs/dev-guide/quick-start.md`). Its manifest depends on this engine's player, with
+//! the editor behind its `editor` feature (ADR 0107 §1); its build settings are the
+//! engine's; its `src/main.rs` is the quick start's game (a camera flown with WASD and the
+//! mouse, a cube that turns) and `scenes/main.scene` its scene (a cube on a floor under
+//! the sun), with the scene's materials; its `sounds/` folder is the one the player reads
+//! while developing.
 
+use engine_scene::AssetId;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// The quick start's game, which the player's tests render (`crates/engine_app/tests`).
 const MAIN: &str = include_str!("../../../crates/engine_app/examples/quick_start.rs");
+/// The quick start's scene and its materials (`crates/engine_app/examples/quick_start/`),
+/// by their paths in the game.
+const ASSETS: [(&str, &str); 3] = [
+    (
+        "scenes/main.scene",
+        include_str!("../../../crates/engine_app/examples/quick_start/scenes/main.scene"),
+    ),
+    (
+        "materials/floor.material",
+        include_str!("../../../crates/engine_app/examples/quick_start/materials/floor.material"),
+    ),
+    (
+        "materials/paint.material",
+        include_str!("../../../crates/engine_app/examples/quick_start/materials/paint.material"),
+    ),
+];
 /// The engine's pinned toolchain: the game builds the engine with it.
 const TOOLCHAIN: &str = include_str!("../../../rust-toolchain.toml");
 
@@ -72,6 +91,30 @@ fn toml_path(path: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// The id in a scene's or a material's header (`[scene version=3 id=<32 hex digits>]`).
+fn header_id(text: &str) -> Option<&str> {
+    let header = text.lines().next()?;
+    header[header.find(" id=")? + 4..].get(..32)
+}
+
+/// The quick start's scene and materials with fresh ids, the scene's references to the
+/// materials too: assets of two games started from it never share an id, so a material
+/// copied from one game to the other stays an asset of its own.
+fn assets() -> Result<Vec<(&'static str, String)>, String> {
+    let mut files: Vec<(&str, String)> = ASSETS
+        .iter()
+        .map(|&(path, text)| (path, text.to_owned()))
+        .collect();
+    for (path, text) in ASSETS {
+        let old = header_id(text).ok_or_else(|| format!("{path}: no id in its header"))?;
+        let new = AssetId::new().to_string();
+        for (_, text) in &mut files {
+            *text = text.replace(old, &new);
+        }
+    }
+    Ok(files)
+}
+
 pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
     let dir = &args.dir;
     if dir.exists()
@@ -100,15 +143,17 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
             |n| n.to_string_lossy().into_owned(),
         ))
     });
-    let files: [(&str, String); 7] = [
+    let mut files: Vec<(&str, String)> = vec![
         ("Cargo.toml", manifest(&name, &engine)),
         (".cargo/config.toml", String::from(CONFIG)),
         ("src/main.rs", MAIN.replace("pub(crate) ", "")),
         ("sounds/README.md", String::from(SOUNDS)),
         ("rust-toolchain.toml", String::from(TOOLCHAIN)),
-        (".gitignore", String::from("/target\n*.pack\n")),
+        // `.ofelia/` is the editor's: its autosaves, its session, the asset cache.
+        (".gitignore", String::from("/target\n*.pack\n/.ofelia/\n")),
         ("README.md", readme(&name, &engine)),
     ];
+    files.extend(assets()?);
     for (path, text) in &files {
         let path = dir.join(path);
         if let Some(parent) = path.parent() {
@@ -121,7 +166,11 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
         dir.display(),
         toml_path(&engine)
     );
-    println!("next:\n  cd {}\n  cargo run --release", dir.display());
+    println!(
+        "next:\n  cd {}\n  cargo run --release                     play it\n  \
+         cargo run --release --features editor   edit its scene (`ofeliaengine edit`)",
+        dir.display()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -137,6 +186,14 @@ publish = false
 # The player (`engine_app`): the window, the GPU, the renderer, input, sound, saves,
 # networking, driven by your game's hooks. `engine_app::prelude` has what a game uses most.
 engine_app = {{ path = "{engine}/crates/engine_app" }}
+# The editor around your game, built only with the `editor` feature: a shipped game does
+# not link it.
+engine_editor = {{ path = "{engine}/crates/engine_editor", optional = true }}
+
+[features]
+# `cargo run --release --features editor` (or `ofeliaengine edit`): `engine_app::main!`
+# runs the editor around the game.
+editor = ["dep:engine_editor"]
 
 # A workspace of its own, even inside another folder that has one.
 [workspace]
@@ -180,12 +237,15 @@ fn readme(name: &str, engine: &Path) -> String {
         "# {name}\n\n\
          A game on ofeliaengine, started from its quick start.\n\n\
          ```text\n\
-         cargo run --release\n\
+         cargo run --release                     # play it\n\
+         cargo run --release --features editor   # edit its scene (`ofeliaengine edit`)\n\
          ```\n\n\
          A red cube turns on a floor; fly around it with WASD and the mouse.\n\
-         `src/main.rs` is the whole game.\n\n\
+         `src/main.rs` is the game's code, `scenes/main.scene` its scene (what the editor\n\
+         edits) and `materials/` the scene's materials.\n\n\
          Next: the guides in `{docs}`:\n\
-         `quick-start.md` first, then `player.md`, `input.md`, `scenes.md` and the rest.\n"
+         `quick-start.md` first, then `editor.md`, `player.md`, `input.md`, `scenes.md` and\n\
+         the rest.\n"
     )
 }
 
@@ -213,17 +273,53 @@ mod tests {
             name: None,
         };
         run_new(&args).unwrap();
-        let manifest = std::fs::read_to_string(game.join("Cargo.toml")).unwrap();
+        let read = |path: &str| std::fs::read_to_string(game.join(path)).unwrap();
+        let manifest = read("Cargo.toml");
         assert!(manifest.contains("name = \"my_game\""));
         assert!(manifest.contains("/crates/engine_app\" }"));
+        assert!(manifest.contains("/crates/engine_editor\", optional = true }"));
+        // What `ofeliaengine edit` looks for.
+        assert!(crate::edit::has_editor_feature(&manifest));
         assert!(!manifest.contains('\\'));
-        let main = std::fs::read_to_string(game.join("src/main.rs")).unwrap();
-        assert!(main.contains("fn main()") && !main.contains("pub(crate)"));
+        let main = read("src/main.rs");
+        assert!(
+            main.contains("engine_app::main!(settings, start);") && !main.contains("pub(crate)")
+        );
+        assert!(read(".gitignore").lines().any(|l| l == "/.ofelia/"));
         assert!(game.join(".cargo/config.toml").is_file());
         assert!(game.join("sounds/README.md").is_file());
         assert!(game.join("rust-toolchain.toml").is_file());
+
+        // The scene and its materials, under ids of their own: not the template's, and
+        // the scene names the materials by theirs.
+        let scene = read("scenes/main.scene");
+        let paint = read("materials/paint.material");
+        let floor = read("materials/floor.material");
+        for (path, text) in ASSETS {
+            let old = header_id(text).unwrap();
+            for new in [&scene, &paint, &floor] {
+                assert!(!new.contains(old), "{path}'s id stayed");
+            }
+        }
+        let paint_id = header_id(&paint).unwrap();
+        assert!(scene.contains(&format!("asset(\"materials/paint.material\", {paint_id})")));
+        let floor_id = header_id(&floor).unwrap();
+        assert!(scene.contains(&format!("asset(\"materials/floor.material\", {floor_id})")));
+        // The engine's built-in cube keeps its id.
+        assert!(scene.contains("asset(\"builtin#cube\", 6f66656c6961206275696c74696e0001)"));
+
         // Not over a game already there.
         assert!(run_new(&args).is_err());
+        // Another game gets other ids.
+        let other = dir.join("Other");
+        run_new(&NewArgs {
+            dir: other.clone(),
+            engine: None,
+            name: None,
+        })
+        .unwrap();
+        let other_scene = std::fs::read_to_string(other.join("scenes/main.scene")).unwrap();
+        assert_ne!(header_id(&other_scene), header_id(&scene));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
