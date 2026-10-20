@@ -209,11 +209,43 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
 The bindings follow Godot (`docs/research/ux/viewport-navigation.md`). Flying with
 right button + WASD and focusing the selection come later.
 
+## Autosave and the session
+
+The editor keeps its own files in the project's `.ofelia/` folder (ADR 0107 §4). They are
+never committed: `ofeliaengine new` ignores the folder. Your scene file changes only when
+you press Ctrl+S.
+
+- **Unsaved changes are autosaved** 30 s after the first one, at a quiet moment: never
+  during a drag or while you type, and at the latest 30 s later. Each scene keeps its
+  latest autosave and two older ones (`.ofelia/autosave/<scene>-<id>.scene`, `.1`, `.2`),
+  at least 30 s apart. Once the scene is clean again (saved, or undone back to its file),
+  its autosaves go.
+- **Closing the editor asks nothing.** Unsaved changes stay in the session, and the next
+  start brings them back, with the tab's `*`. After a crash they come back the same way,
+  with at most the last 30 s or so lost; the status bar says so.
+- **When the file changed on disk** since your unsaved changes (a teammate's commit, a
+  pull), neither is written over:
+  - your version comes back, the tab shows a warning sign, and the status bar names the
+    file until you choose;
+  - Ctrl+S writes nothing and says why;
+  - **Scene: Take Disk Version** (Ctrl+Shift+P) loads the file as one undo step: Ctrl+Z
+    brings your version back. Your autosave is kept as `….conflict.scene`;
+  - **Scene: Save Over Disk Version** writes yours over it.
+- **One editor per project:** a second one on the same folder stops with "another editor
+  has this project open".
+- **If a start crashes while it brings changes back** (within its first 10 s), the next
+  one opens the file as saved and says where the changes are kept.
+
+What it costs (ref-1, release): the autosave's text is made on the editor's thread, the
+writing happens on a thread of its own. 0.15 ms for a scene of 200 entities, 8.9 ms for
+10,000 (once per 30 s at most, at a quiet moment).
+
 ## Coming next
 
 | Phase | What |
 |---|---|
-| E1-5b, E1-5c | autosave and the session, rebuild and restart after a code change |
+| E1-5b | the view in the session: cameras, selection, folded rows, panels; "Restore Unsaved Changes…" with the older autosaves |
+| E1-5c | rebuild and restart after a code change |
 | E2 | selection in the viewport, gizmos, placement by drag and drop |
 | E3 | Play on a copy of the world |
 

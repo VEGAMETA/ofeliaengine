@@ -503,6 +503,71 @@ The game's `main` from a macro, `ofeliaengine edit`, the quick start as a scene.
   - autosave and the session (E1-5b);
   - rebuild and restart (E1-5c).
 
+## As built (E1-5b-1, 2026-10-20)
+
+Autosave and the unsaved changes brought back (§4; UX note `docs/research/ux/sessions.md`,
+whose open questions were settled by its recommendations, team decision 2026-10-20).
+
+- **`.ofelia/` in the project:**
+  - `session.lock`, held open without sharing while an editor runs: a second editor on
+    the project is refused, and a lock found at start that nobody holds means the last
+    run did not exit cleanly;
+  - `session`, the session file in the scene grammar (`[session version=1]`, a
+    `[document]` block per scene): the scene's path and id, what its file was (size,
+    last write time, a 64-bit hash) and its autosave;
+  - `autosave/<stem>-<scene id>.scene` and two older copies (`.1`, `.2`), each the text
+    Ctrl+S would write.
+- **When:**
+  - the first change not in an autosave sets a deadline 30 s on; later changes do not
+    move it;
+  - the write waits for a quiet moment (no drag, no typing, no button held, a second
+    without input), at the latest 30 s past the deadline;
+  - `EditorGame::save_session` writes at once and waits for the disk (before Play and
+    before a restart);
+  - once the scene is clean again, its autosaves go.
+- **Writing:** the text is made on the editor's thread; one writer thread writes every
+  file whole (beside it, flushed, renamed over it, a refused rename retried) and moves
+  the older copies down when the newest is at least 30 s old.
+- **At start** (`EditorGame::begin_session`, called by `run`): the lock is taken, and the
+  scene's autosave, if the session lists one, replaces the loaded scene in the world;
+  the tab shows `*` and the status bar says from when, and "after a crash" when the lock
+  was left behind.
+- **At a clean exit** (`EditorGame::end_session`): the last changes autosaved, every write
+  on the disk, the lock gone. Nothing is asked (VS Code's hot exit).
+- **The file changed on disk** since the changes were made from it: the changes come back
+  marked (a warning sign on the tab, a note in the status bar). Ctrl+S refuses; "Take Disk
+  Version" loads the file as one undo step and keeps the autosave as `….conflict.scene`;
+  "Save Over Disk Version" writes the changes over it. A file gone from the disk is
+  written again by Ctrl+S.
+- **A start that crashes while it brings changes back:** the lock says `restoring` for
+  its first 10 s, and a start that finds it so opens the file as saved, saying where the
+  changes are kept.
+- **Measured** on ref-1, release, entities with a name, a transform and a model:
+  - 200 entities: the text 0.15 ms, loading it back 0.41 ms;
+  - 10,000: 8.9 ms and 19 ms;
+  - the file's hash 0.58 ms at 10,000;
+  - the per-frame cost is a few comparisons, without allocating.
+- **Tested** (`engine_editor`, without a GPU):
+  - changes back after a crash and after a clean exit;
+  - a second editor refused;
+  - Ctrl+S writes, and the autosave goes;
+  - a file changed on disk: Ctrl+S refused, the disk version taken and undone, the
+    changes saved over it;
+  - the deadline and the quiet moment;
+  - autosaves gone once the scene is clean;
+  - a start that stopped while restoring;
+  - the lock, the session file, the base and the writer, each on its own.
+- **Not done:**
+  - the view in the session: cameras, selection, folded rows, panels, recent commands
+    (E1-5b-2);
+  - "Restore Unsaved Changes…" with the older autosaves (E1-5b-2);
+  - the text of a 10,000-entity scene (8.9 ms) made behind the frame from a copy of the
+    world, as save games do (ADR 0104);
+  - Ctrl+S through the writer;
+  - files watched while the editor runs (E4).
+- **For E1-5c:** a restarted editor waits for the old one's lock instead of being
+  refused.
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and
