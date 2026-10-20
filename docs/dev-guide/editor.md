@@ -267,6 +267,13 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
   - While the window is in front, it offers the restart: **Ctrl+R** (Editor: Restart with
     the New Build).
   - **Editor: Restart Policy…** makes it always restart by itself, or always ask.
+  - **No gap:** the editor's window stays until the new build has drawn its first frames.
+    The new window opens hidden at the old one's place (maximized if it was), shows those
+    frames, and takes the keyboard if the old window had it. Then the old editor exits.
+  - **A new build that fails at its start** (a panic in `settings()`, a crash) leaves the
+    editor running. The status bar says why: "Not restarted: the new build stopped at its
+    start (exit code: 101); this editor goes on".
+- **The window opens where it was:** the session keeps its place, for any start.
 - **Builds use the dev profile** `ofeliaengine new` writes (team decision, 2026-10-20):
   - your code at `opt-level` 1, with file and line debug info; the engine at 3, without
     debug info;
@@ -283,7 +290,6 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 
 | Phase | What |
 |---|---|
-| E1-5c-2 | the restart without a gap: the new window at the old one's place, shown at its first frame, the old editor back if the new build fails at start |
 | E2 | selection in the viewport, gizmos, placement by drag and drop |
 | E3 | Play on a copy of the world |
 

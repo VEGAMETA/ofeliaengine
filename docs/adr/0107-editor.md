@@ -674,6 +674,52 @@ How it works:
   - a build that finishes during Play (E3);
   - a Dev Drive for game targets (a machine setting).
 
+## As built (E1-5c-2, 2026-10-20)
+
+The restart without a gap, and the window where it was.
+
+- **The window's place** (`engine_platform::window::WindowPlacement`) is the restored
+  rectangle and whether the window is maximized, as `GetWindowPlacement` gives it:
+  - `WindowDesc::placement` opens a window there (`SetWindowPlacement`; Windows moves one
+    off every monitor back onto one);
+  - the player has `PlayerSettings::window_placement` and `Player::window_placement`;
+  - the editor reads its window's place every 30 frames and at the exit, and the session
+    keeps it (`[editor] window`);
+  - every start opens there, the session's place read before the window is made.
+- **Hidden until drawn:** `WindowDesc::cloaked` and `PlayerSettings::start_hidden` make
+  the window cloaked (`DWMWA_CLOAK`: composed, not shown); `Player::show_window` uncloaks
+  it and can bring it to the front.
+- **The handover:**
+  1. The old editor saves and ends its session.
+  2. It starts the new build with `ENGINE_EDITOR_RESTART` set to `<when> <its process
+     id> <in front>`, and lets it take the foreground (`AllowSetForegroundWindow`) when
+     its window had it.
+  3. The new editor opens hidden at the old window's place. After its second frame it
+     shows itself, in front if asked, and writes `.ofelia/run/up-<old process id>`.
+  4. The old editor waits for that file, polling every 5 ms, with its window still on the
+     screen. Then it exits.
+- **When the new build fails at its start:**
+  - it may exit first, or show nothing within 20 s; in the second case it is ended;
+  - the old editor takes its session back (`resume_session`: the lock again, a new
+    writer, its autosave and conflict as they were) and goes on;
+  - the status bar says why until the next build.
+- **Measured** on ref-1, a game made by `new`, its window offscreen:
+  - the old editor waited 0.37–0.41 s from starting the new build to the signal;
+  - the new editor reached its first frame in 0.34–0.38 s.
+- **Tested:**
+  - the restart's variable read, the older form too;
+  - the wait: a start that exits is a failure with its exit code, a signal is a success,
+    and the signal file is taken;
+  - a failed restart goes on with its session, the lock held again;
+  - a window opens at its placement, cloaked, and is uncloaked by command;
+  - the session keeps the window's place.
+  - End to end: a code change handed over, a new build that panicked at its start left
+    the old editor running with the reason, and the next build was handed over.
+- **Not done:**
+  - the swap watched on a real screen. ref-1's desktop is in use, so the checks ran
+    offscreen;
+  - a build that finishes during Play (E3).
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and

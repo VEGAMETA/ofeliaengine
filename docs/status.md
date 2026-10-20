@@ -96,9 +96,13 @@ Last updated: 2026-10-20.
     - a change rebuilds in about 1.5–1.6 s and the restart takes 0.36–0.37 s;
     - `ofeliaengine new` writes the editor's dev profile, and `ofeliaengine edit` is the
       launcher.
-  - **Next:** E1-5c-2, the restart without a gap (the new window cloaked until its first
-    frame at the old one's place, the old editor back if the new build fails at start).
-    Then E2 (ADR 0107 §7).
+  - **E1-5c-2, the restart without a gap** (#PR, ADR 0107 as built): the new window
+    opens hidden at the old one's place and shows its first frames over it before the old
+    editor exits; a new build that fails at its start leaves the old editor running with
+    the reason; any start opens the window where the session kept it. E1 is done.
+  - **Next:** E2, the viewport tools (ADR 0107 §7): picking from an id buffer, outlines,
+    gizmos, snapping, keyboard transforms, placement on surfaces, duplicate, frame,
+    bookmarks, overlays through debug draw channels.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
