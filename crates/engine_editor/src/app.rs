@@ -37,6 +37,9 @@
 //!   and enums are clicked; strings are typed. Its filter box narrows it to matching
 //!   fields. A changed field has a reset button (↺); over a field, Backspace resets it,
 //!   and Ctrl+C and Ctrl+V copy and paste its value as scene text.
+//! - **Moving things** in the viewport (ADR 0107 E2): the selection's gizmo (Q, W, E and T
+//!   pick its handles), and keyboard transforms (G, R, S; X, Y, Z for an axis, a typed
+//!   value). These are Blender's keys, the default; "Editor: Key Map…" takes Godot's.
 //! - **The command palette** (Ctrl+Shift+P) finds and runs every command, the add menu's
 //!   kinds among them ("Add Cube"); after `@` (Ctrl+P) it finds the scene's objects by
 //!   name and selects the one picked.
@@ -48,7 +51,7 @@ use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
 use crate::camera::OrbitCamera;
-use crate::gizmo::{COLORS, Change, Gizmo, GizmoDrag, Handle, Mode, Target, ViewProj};
+use crate::gizmo::{self, COLORS, Change, Gizmo, GizmoDrag, Handle, Mode, Target, ViewProj};
 use crate::icons;
 use crate::input::{Button, InputCollector};
 use crate::inspector::{self, Defaults, Inspector, Kind, Property};
@@ -59,12 +62,13 @@ use crate::shell::{
     Section, ShellModel, TreeItem, Widget, build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
+use crate::transform::{self, KeyTransform};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
 use engine_app::{
     AppError, Game, Model, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup,
     Window, builtin,
 };
-use engine_core::math::{Quat, Vec2, Vec3};
+use engine_core::math::{Affine3A, Quat, Vec2, Vec3};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
 use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind};
 use engine_reflect::TypeKind;
@@ -509,13 +513,16 @@ struct CommandIds {
     tools: [CommandId; 4],
     /// The gizmo along the active entity's axes, or the world's.
     local_axes: CommandId,
+    /// Keyboard transforms of the selection: move, rotate, scale.
+    transforms: [CommandId; 3],
+    /// Which keys the editor uses: Blender's or Godot's.
+    keys: CommandId,
     /// "Add Cube" and the rest: the add menu's kinds, in its order.
     add_kinds: [CommandId; ADD.len()],
 }
 
-/// The editor's commands, their default shortcuts, and the shortcut the palette shows
-/// beside each command (its first).
-fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
+/// The editor's commands.
+fn commands() -> (Commands, CommandIds) {
     let mut c = Commands::new();
     let ids = CommandIds {
         undo: c.register("edit.undo", "Edit", "Undo"),
@@ -557,11 +564,23 @@ fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
             c.register("tool.scale", "Tool", "Scale"),
         ],
         local_axes: c.register("tool.local_axes", "Tool", "Local Axes"),
+        transforms: [
+            c.register("transform.move", "Transform", "Move Selection"),
+            c.register("transform.rotate", "Transform", "Rotate Selection"),
+            c.register("transform.scale", "Transform", "Scale Selection"),
+        ],
+        keys: c.register("editor.keys", "Editor", "Key Map…"),
         add_kinds: ADD.map(|kind| {
             let name = format!("scene.add.{}", kind.to_lowercase().replace(' ', "_"));
             c.register(&name, "Scene", &format!("Add {kind}"))
         }),
     };
+    (c, ids)
+}
+
+/// The shortcuts of key map `preset`, and the shortcut the palette shows beside each
+/// command (its first).
+fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, String>) {
     let mut keymap = Keymap::new();
     let mut shortcuts = HashMap::new();
     let tree = [
@@ -587,21 +606,37 @@ fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
         ("Ctrl+Shift+P", ids.palette),
         ("Ctrl+P", ids.find),
         ("Ctrl+R", ids.restart),
-        // The tools as in Godot (`docs/research/ux/viewport-tools.md` §2).
+        ("Space", ids.local_axes),
+    ];
+    // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2): G, R, S at
+    // once in Blender's keys, the tools then on Q, W, E, T; Q, W, E, R in Godot's, G
+    // transforming (R and S then switch it, `Editor::key_transform_frame`).
+    let preset_keys: &[(&str, CommandId)] = match preset {
+        KeyPreset::Blender => &[
+            ("G", ids.transforms[0]),
+            ("R", ids.transforms[1]),
+            ("S", ids.transforms[2]),
+            ("T", ids.tools[3]),
+        ],
+        KeyPreset::Godot => &[("G", ids.transforms[0]), ("R", ids.tools[3])],
+    };
+    let tools = [
         ("Q", ids.tools[0]),
         ("W", ids.tools[1]),
         ("E", ids.tools[2]),
-        ("R", ids.tools[3]),
-        ("Space", ids.local_axes),
-    ]
-    .map(|(chord, id)| (chord, id, KeyContext::Global));
-    for (chord, id, context) in global.into_iter().chain(tree) {
+    ];
+    let global = global
+        .into_iter()
+        .chain(preset_keys.iter().copied())
+        .chain(tools)
+        .map(|(chord, id)| (chord, id, KeyContext::Global));
+    for (chord, id, context) in global.chain(tree) {
         if let Some(chord) = Chord::parse(chord) {
             let _ = keymap.bind(chord, context, id);
             shortcuts.entry(id).or_insert_with(|| chord.to_string());
         }
     }
-    (c, keymap, ids, shortcuts)
+    (keymap, shortcuts)
 }
 
 /// Entity references read from text: by scene id, through an index of the world.
@@ -676,6 +711,7 @@ enum Pick {
     /// Opens the last build's error with this index in VS Code.
     Problem(usize),
     Policy(RestartPolicy),
+    Keys(KeyPreset),
 }
 
 /// What a new build does (team decision, 2026-10-20): by itself while the editor's window
@@ -710,6 +746,39 @@ impl RestartPolicy {
             Self::Background => "Restart by itself while the editor is in the background",
             Self::Always => "Always restart by itself",
             Self::Ask => "Always ask before restarting",
+        }
+    }
+}
+
+/// Which keys the editor uses (team decision, 2026-10-20): Blender's by default (G, R, S
+/// move, rotate and scale at once; Q, W, E, T pick the tools), or Godot's (Q, W, E, R pick
+/// the tools; G moves, then R rotates and S scales).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum KeyPreset {
+    #[default]
+    Blender,
+    Godot,
+}
+
+impl KeyPreset {
+    const ALL: [Self; 2] = [Self::Blender, Self::Godot];
+
+    /// Its name in the session file.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Blender => "blender",
+            Self::Godot => "godot",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Blender => "Blender's keys: G, R, S move, rotate, scale; Q, W, E, T the tools",
+            Self::Godot => "Godot's keys: Q, W, E, R the tools; G moves (then R rotates, S scales)",
         }
     }
 }
@@ -917,6 +986,14 @@ struct Editor {
     hovered_handle: Option<Handle>,
     /// The gizmo along the active entity's axes (Space), else the world's.
     local_axes: bool,
+    /// Which keys the keymap has.
+    key_preset: KeyPreset,
+    /// A keyboard transform while it runs (ADR 0107 E2-2).
+    key_transform: Option<KeyTransform>,
+    /// Its guides this frame (an axis' line, or a plane's two, by color index; 3 the
+    /// pivot's line to the pointer) and its hint by the pointer.
+    guides: Vec<(Vec2, Vec2, usize)>,
+    hint: String,
     tools: [String; 4],
     active_tool: usize,
     status: String,
@@ -1095,7 +1172,8 @@ impl Editor {
             panel: palette.dock,
             ..Theme::default()
         });
-        let (commands, keymap, ids, shortcuts) = commands();
+        let (commands, ids) = commands();
+        let (keymap, shortcuts) = keymap(&ids, KeyPreset::default());
         Ok(Self {
             ui,
             text: UiText::new()?,
@@ -1161,6 +1239,10 @@ impl Editor {
             gizmo_drag: None,
             hovered_handle: None,
             local_axes: false,
+            key_preset: KeyPreset::default(),
+            key_transform: None,
+            guides: Vec::new(),
+            hint: String::new(),
             tools: [
                 format!("{} Select", icons::TOOL_SELECT),
                 format!("{} Move", icons::TOOL_MOVE),
@@ -1188,6 +1270,9 @@ impl Editor {
             WindowEventKind::Focused(focused) => {
                 if !focused {
                     input.focus_lost();
+                    if let Some(t) = &mut self.key_transform {
+                        t.cancel = true;
+                    }
                 }
                 self.focused = focused;
             }
@@ -1343,6 +1428,10 @@ impl Editor {
             self.fps = self.frames as f64 / elapsed;
             self.frames = 0;
             self.since = Instant::now();
+        }
+        // A keyboard transform has the frame's keys and clicks while it runs.
+        if self.key_transform.is_some() {
+            self.key_transform_frame(world);
         }
 
         // The inspector: the active entity's components, field by field.
@@ -1518,6 +1607,9 @@ impl Editor {
             label: ADD[i],
         });
         self.status.clear();
+        if self.key_transform.is_some() {
+            let _ = write!(self.status, "{}  ·  ", transform::HELP);
+        }
         if let Some(change) = self.gizmo_drag.as_ref().and_then(|d| d.last) {
             let _ = match change {
                 Change::Move(d) => write!(self.status, "Move ({}, {}, {})", d.x, d.y, d.z),
@@ -1644,6 +1736,19 @@ impl Editor {
         });
         let scenes = [self.scene_label.as_str()];
         let tools = self.tools.each_ref().map(String::as_str);
+        // A keyboard transform's hint below and right of the pointer, in the window.
+        let hint_at = {
+            let s = self.scale.max(0.5);
+            let [w, h] = [self.size[0] as f32 / s, self.size[1] as f32 / s];
+            let [x, y] = self
+                .input
+                .cursor()
+                .map_or([w * 0.5, h * 0.5], |[x, y]| [x / s, y / s]);
+            [
+                (x + 18.0).min(w - 300.0).max(4.0),
+                (y + 20.0).min(h - 40.0).max(4.0),
+            ]
+        };
         let model = ShellModel {
             scenes: &scenes,
             active_scene: 0,
@@ -1672,6 +1777,10 @@ impl Editor {
             tree_filter: &self.tree_filter,
             inspector_filter: &self.inspector_filter,
             palette,
+            hint: self
+                .key_transform
+                .as_ref()
+                .map(|_| (self.hint.as_str(), hint_at)),
         };
         let scale = self.scale.max(0.5);
         let logical = [self.size[0] as f32 / scale, self.size[1] as f32 / scale];
@@ -2254,6 +2363,7 @@ impl Editor {
                             Pick::Autosave(path) => self.restore_autosave(world, &path),
                             Pick::Problem(p) => self.open_problem(p),
                             Pick::Policy(p) => self.set_restart_policy(world, p),
+                            Pick::Keys(p) => self.set_key_preset(world, p),
                         }
                     }
                 } else if cp.finds_objects() {
@@ -2398,6 +2508,12 @@ impl Editor {
         };
         let view = ViewProj::new(&self.orbit, rect);
         let cursor = self.input.cursor().map(|[x, y]| Vec2::new(x, y));
+        // A keyboard transform hides the gizmo and shows its guides.
+        if let Some(t) = &self.key_transform {
+            t.guides(&view, cursor, &mut self.guides);
+            self.hovered_handle = None;
+            return;
+        }
         if let Some(mut drag) = self.gizmo_drag.take()
             && self.input.held(Button::Left)
         {
@@ -2429,28 +2545,16 @@ impl Editor {
                 _ => (drag.pivot, drag.axes),
             }
         } else {
-            let mut sum = Vec3::ZERO;
-            let mut n = 0u32;
-            for &e in &self.selection {
-                if !self.has_selected_ancestor(world, e)
-                    && let Some(g) = world.get::<GlobalTransform>(e)
-                {
-                    sum += Vec3::from(g.0.translation);
-                    n += 1;
-                }
-            }
-            if n == 0 {
+            let Some(pivot) = self.selection_pivot(world) else {
                 self.hovered_handle = None;
                 return;
-            }
-            let axes = match self.active().and_then(|e| world.get::<GlobalTransform>(e)) {
-                Some(g) if self.local_axes => {
-                    let m = g.0.matrix3;
-                    [m.x_axis, m.y_axis, m.z_axis].map(|a| Vec3::from(a).normalize_or_zero())
-                }
-                _ => [Vec3::X, Vec3::Y, Vec3::Z],
             };
-            (sum / n as f32, axes)
+            let axes = if self.local_axes {
+                self.own_axes(world)
+            } else {
+                [Vec3::X, Vec3::Y, Vec3::Z]
+            };
+            (pivot, axes)
         };
         self.gizmo_shown = self.gizmo.layout(&view, mode, pivot, axes, scale);
         if self.gizmo_drag.is_some() {
@@ -2468,52 +2572,230 @@ impl Editor {
         if let (Some(handle), Some(at)) = (self.hovered_handle, cursor)
             && self.input.pressed(Button::Left)
         {
-            let targets: Vec<Target> = self
-                .selection
-                .iter()
-                .copied()
-                .filter(|&e| !self.has_selected_ancestor(world, e))
-                .filter_map(|e| {
-                    let local = *world.get::<Transform>(e)?;
-                    let global = world.get::<GlobalTransform>(e)?.0;
-                    let parent_inverse = world
-                        .parent(e)
-                        .and_then(|p| world.get::<GlobalTransform>(p))
-                        .map_or(engine_core::math::Affine3A::IDENTITY, |g| g.0.inverse());
-                    Some(Target {
-                        entity: e,
-                        world: global,
-                        parent_inverse,
-                        local,
-                    })
-                })
-                .collect();
+            let targets = self.transform_targets(world);
             self.gestures += 1;
             self.gizmo_drag =
                 GizmoDrag::start(&self.gizmo, &view, handle, at, targets, self.gestures);
         }
     }
 
-    /// One frame of a gizmo drag: every target set from where it started, as one undo
-    /// step for the whole gesture. A move changes the position only and a turn keeps the
-    /// scale exact, so files get no float dust.
+    /// The selection's pivot: the middle of the selected entities that no selected entity
+    /// carries; none without one.
+    fn selection_pivot(&self, world: &World) -> Option<Vec3> {
+        let mut sum = Vec3::ZERO;
+        let mut n = 0u32;
+        for &e in &self.selection {
+            if !self.has_selected_ancestor(world, e)
+                && let Some(g) = world.get::<GlobalTransform>(e)
+            {
+                sum += Vec3::from(g.0.translation);
+                n += 1;
+            }
+        }
+        (n > 0).then(|| sum / n as f32)
+    }
+
+    /// The active entity's axes in the world, the world's without one: what "local" is to
+    /// the gizmo and to keyboard transforms. Float dust is taken off (a quarter turn
+    /// leaves 4e-8 across), so moves along them stay exact.
+    fn own_axes(&self, world: &World) -> [Vec3; 3] {
+        let Some(g) = self.active().and_then(|e| world.get::<GlobalTransform>(e)) else {
+            return [Vec3::X, Vec3::Y, Vec3::Z];
+        };
+        let m = g.0.matrix3;
+        [m.x_axis, m.y_axis, m.z_axis].map(|a| {
+            let a = Vec3::from(a).normalize_or_zero();
+            Vec3::select(a.abs().cmplt(Vec3::splat(1e-6)), Vec3::ZERO, a).normalize_or_zero()
+        })
+    }
+
+    /// What a transform moves: the selected entities that no selected entity carries,
+    /// each with its world transform, its parent's inverse and its own transform now.
+    fn transform_targets(&self, world: &World) -> Vec<Target> {
+        self.selection
+            .iter()
+            .copied()
+            .filter(|&e| !self.has_selected_ancestor(world, e))
+            .filter_map(|e| {
+                let local = *world.get::<Transform>(e)?;
+                let global = world.get::<GlobalTransform>(e)?.0;
+                let parent_inverse = world
+                    .parent(e)
+                    .and_then(|p| world.get::<GlobalTransform>(p))
+                    .map_or(Affine3A::IDENTITY, |g| g.0.inverse());
+                Some(Target {
+                    entity: e,
+                    world: global,
+                    parent_inverse,
+                    local,
+                })
+            })
+            .collect()
+    }
+
+    /// One frame of a gizmo drag ([`Editor::set_targets`]).
     fn apply_gizmo(&mut self, world: &mut World, drag: &GizmoDrag, change: Change) {
-        self.history.begin(drag.handle.step(), Some(drag.merge));
-        for t in &drag.targets {
+        let (step, merge) = (drag.handle.step(), drag.merge);
+        self.set_targets(
+            world,
+            step,
+            merge,
+            &drag.targets,
+            change,
+            (drag.pivot, drag.axes),
+        );
+    }
+
+    /// Sets every target from where it started under `change` about the pivot (a scale's
+    /// factors along the axes: `gizmo::apply`), in undo step `name` merged by `merge`: one
+    /// step per gesture. Only the parts that change are set, from the target's own
+    /// values: a move sets the position, a turn the rotation (the turn seen from the
+    /// parent), a scale the scale (its factors along the target's own axes), so a typed
+    /// 0.5 or 90° is exact in the file.
+    fn set_targets(
+        &mut self,
+        world: &mut World,
+        name: &str,
+        merge: u64,
+        targets: &[Target],
+        change: Change,
+        (pivot, axes): (Vec3, [Vec3; 3]),
+    ) {
+        self.history.begin(name, Some(merge));
+        for t in targets {
             self.history.touch(world, t.entity);
-            let local = t.parent_inverse * drag.apply(change, t);
-            let (scale, rotation, translation) = local.to_scale_rotation_translation();
+            let local = t.parent_inverse * gizmo::apply(change, t, pivot, axes);
+            let (_, rotation, _) = t.world.to_scale_rotation_translation();
+            // The parent's inverse turn: world to the parent's space.
+            let (_, inverse, _) = t.parent_inverse.to_scale_rotation_translation();
             if let Some(tr) = world.get_mut::<Transform>(t.entity) {
                 *tr = t.local;
-                tr.translation = translation;
+                tr.translation = Vec3::from(local.translation);
                 match change {
                     Change::Move(_) => {}
-                    Change::Turn(_) => tr.rotation = rotation,
-                    Change::Scale(_) => tr.scale = scale,
+                    Change::Turn(q) => {
+                        tr.rotation =
+                            (inverse * q * inverse.inverse() * t.local.rotation).normalize();
+                    }
+                    Change::Scale(f) => {
+                        tr.scale = t.local.scale * gizmo::own_factors(f, rotation, axes);
+                    }
                 }
             }
         }
         self.history.commit(world);
+    }
+
+    /// Starts a keyboard transform of the selection from the pointer (ADR 0107 E2-2):
+    /// nothing while a drag runs.
+    fn start_key_transform(&mut self, world: &World, kind: transform::Kind) {
+        if self.key_transform.is_some()
+            || self.gizmo_drag.is_some()
+            || self.drag.is_some()
+            || self.camera_drag
+        {
+            return;
+        }
+        let Some(pivot) = self.selection_pivot(world) else {
+            self.say(String::from("Select something to move, rotate or scale"));
+            return;
+        };
+        let Some(rect) = self.view_rect else {
+            return;
+        };
+        let view = ViewProj::new(&self.orbit, rect);
+        let start = self
+            .input
+            .cursor()
+            .map(|[x, y]| Vec2::new(x, y))
+            .or_else(|| view.screen(pivot))
+            .unwrap_or(Vec2::ZERO);
+        let targets = self.transform_targets(world);
+        let mut t = KeyTransform::new(pivot, self.own_axes(world), self.local_axes, targets);
+        self.gestures += 1;
+        t.begin(kind, &view, start, self.gestures);
+        self.add_open = false;
+        self.open_choice = None;
+        self.key_transform = Some(t);
+    }
+
+    /// A keyboard transform's frame. Its keys (X, Y, Z, G, R, S by the letter on the key;
+    /// Backspace, Enter, Escape), the typed value and the clicks are its own: the panels,
+    /// the shortcuts and the camera do not get them. Then what it does with the pointer,
+    /// set as one undo step. Enter or a left click keeps it; Escape, a right click or the
+    /// window losing the keyboard takes it back; G, R and S start another over.
+    fn key_transform_frame(&mut self, world: &mut World) {
+        /// Win32 virtual-key codes.
+        const BACK: u16 = 0x08;
+        const RETURN: u16 = 0x0D;
+        const ESCAPE: u16 = 0x1B;
+        let Some(rect) = self.view_rect else {
+            return;
+        };
+        let Some(mut t) = self.key_transform.take() else {
+            return;
+        };
+        let view = ViewProj::new(&self.orbit, rect);
+        let at = self
+            .input
+            .cursor()
+            .map(|[x, y]| Vec2::new(x, y))
+            .or_else(|| view.screen(t.pivot))
+            .unwrap_or(Vec2::ZERO);
+        let mut keep = self.input.pressed(Button::Left);
+        let mut cancel = t.cancel || self.input.pressed(Button::Right);
+        // Letters with Ctrl or Alt are not the transform's.
+        let plain = !self.input.ctrl() && !self.input.alt();
+        let plane = self.input.shift();
+        for i in 0..self.input.letters().len() {
+            let kind = match self.input.letters()[i] {
+                BACK => {
+                    t.backspace();
+                    None
+                }
+                RETURN => {
+                    keep = true;
+                    None
+                }
+                ESCAPE => {
+                    cancel = true;
+                    None
+                }
+                vk @ 0x58..=0x5A if plain => {
+                    t.constrain(usize::from(vk - 0x58), plane);
+                    None
+                }
+                0x47 if plain => Some(transform::Kind::Move),
+                0x52 if plain => Some(transform::Kind::Turn),
+                0x53 if plain => Some(transform::Kind::Scale),
+                _ => None,
+            };
+            if let Some(kind) = kind
+                && kind != t.kind
+            {
+                self.history.revert(world, t.merge);
+                self.gestures += 1;
+                t.begin(kind, &view, at, self.gestures);
+            }
+        }
+        t.type_text(self.input.text());
+        self.input.consume();
+        if cancel {
+            self.history.revert(world, t.merge);
+            return;
+        }
+        let (invert, round) = (self.input.shift(), self.input.ctrl());
+        if let Some(change) = t.change(&view, at, &self.snapping, invert, round)
+            && change != t.last
+        {
+            t.last = change;
+            let step = t.kind.step();
+            self.set_targets(world, step, t.merge, &t.targets, change, t.frame());
+        }
+        t.hint(&mut self.hint, self.snapping.on != invert, round);
+        if !keep {
+            self.key_transform = Some(t);
+        }
     }
 
     /// The scene's roots (entities with a scene id under none), as the tree shows them:
@@ -2676,6 +2958,15 @@ impl Editor {
             self.pick_policy(world);
         } else if let Some(tool) = ids.tools.iter().position(|&t| t == id) {
             self.active_tool = tool;
+        } else if let Some(i) = ids.transforms.iter().position(|&t| t == id) {
+            let kinds = [
+                transform::Kind::Move,
+                transform::Kind::Turn,
+                transform::Kind::Scale,
+            ];
+            self.start_key_transform(world, kinds[i]);
+        } else if id == ids.keys {
+            self.pick_keys(world);
         } else if id == ids.local_axes {
             self.local_axes = !self.local_axes;
             self.say(String::from(if self.local_axes {
@@ -3100,6 +3391,9 @@ impl Editor {
         if let Some(policy) = state.restart.as_deref().and_then(RestartPolicy::from_name) {
             self.restart_policy = policy;
         }
+        if let Some(preset) = state.keys.as_deref().and_then(KeyPreset::from_name) {
+            self.use_keys(preset);
+        }
     }
 
     /// A scene's view from a session: the camera, the selection by scene ids (those gone
@@ -3200,6 +3494,7 @@ impl Editor {
                 .map(|&id| self.commands.info(id).name.clone())
                 .collect(),
             restart: Some(String::from(self.restart_policy.name())),
+            keys: Some(String::from(self.key_preset.name())),
             window: self.window,
         };
         let view = self.view(world);
@@ -3640,6 +3935,31 @@ impl Editor {
         self.say(String::from(policy.label()));
     }
 
+    /// "Editor: Key Map…": Blender's keys or Godot's, in the palette.
+    fn pick_keys(&mut self, world: &mut World) {
+        let items = KeyPreset::ALL
+            .into_iter()
+            .map(|p| Choice {
+                label: String::from(p.label()),
+                detail: String::from(if p == self.key_preset { "now" } else { "" }),
+                pick: Pick::Keys(p),
+            })
+            .collect();
+        self.open_list(world, "Which keys the editor uses", items);
+    }
+
+    fn set_key_preset(&mut self, world: &mut World, preset: KeyPreset) {
+        self.use_keys(preset);
+        self.write_session(world);
+        self.say(String::from(preset.label()));
+    }
+
+    /// Takes the shortcuts of key map `preset`.
+    fn use_keys(&mut self, preset: KeyPreset) {
+        self.key_preset = preset;
+        (self.keymap, self.shortcuts) = keymap(&self.ids, preset);
+    }
+
     /// Opens the palette as a list to pick from.
     fn open_list(&mut self, world: &mut World, hint: &'static str, items: Vec<Choice>) {
         self.open_palette(world, "");
@@ -3910,15 +4230,20 @@ impl<G: Game> Game for EditorGame<G> {
     }
 }
 
-/// Draws the gizmo below the UI (layer −1), clipped to the viewport: the handle `lit`
-/// (under the pointer, or dragged) in its own color.
-fn draw_gizmo(gizmo: &Gizmo, lit: Option<Handle>, rect: [u32; 4], scale: f32, canvas: &mut Canvas) {
-    canvas.set_clip(Some(ClipRect {
+/// The viewport's rectangle as a clip.
+fn clip_of(rect: [u32; 4]) -> ClipRect {
+    ClipRect {
         x: rect[0] as i32,
         y: rect[1] as i32,
         width: rect[2],
         height: rect[3],
-    }));
+    }
+}
+
+/// Draws the gizmo below the UI (layer −1), clipped to the viewport: the handle `lit`
+/// (under the pointer, or dragged) in its own color.
+fn draw_gizmo(gizmo: &Gizmo, lit: Option<Handle>, rect: [u32; 4], scale: f32, canvas: &mut Canvas) {
+    canvas.set_clip(Some(clip_of(rect)));
     let order = Order::layer(-1);
     let color = |h: Handle| {
         if Some(h) == lit {
@@ -3962,6 +4287,35 @@ fn draw_gizmo(gizmo: &Gizmo, lit: Option<Handle>, rect: [u32; 4], scale: f32, ca
     canvas.set_clip(None);
 }
 
+/// Draws a keyboard transform's guides below the UI, clipped to the viewport: an axis'
+/// line in its color, the pivot's line to the pointer dashed.
+fn draw_guides(guides: &[(Vec2, Vec2, usize)], rect: [u32; 4], scale: f32, canvas: &mut Canvas) {
+    canvas.set_clip(Some(clip_of(rect)));
+    let order = Order::layer(-1);
+    for &(a, b, i) in guides {
+        let mut color = COLORS[i.min(3)];
+        if i < 3 {
+            canvas.draw(&Quad::line(a, b, 1.5 * scale).color(color).order(order));
+            continue;
+        }
+        color.w = 0.7;
+        let length = a.distance(b);
+        let along = (b - a) / length.max(1e-3);
+        let (dash, gap) = (6.0 * scale, 5.0 * scale);
+        let mut s = 0.0;
+        while s < length {
+            let e = (s + dash).min(length);
+            canvas.draw(
+                &Quad::line(a + along * s, a + along * e, scale)
+                    .color(color)
+                    .order(order),
+            );
+            s += dash + gap;
+        }
+    }
+    canvas.set_clip(None);
+}
+
 /// Paints the editor's shell over the player's frame.
 pub struct EditorOverlay {
     shared: Rc<RefCell<Editor>>,
@@ -3996,6 +4350,16 @@ impl Overlay for EditorOverlay {
             let mut shared = self.shared.borrow_mut();
             let editor = &mut *shared;
             self.canvas.clear();
+            if editor.key_transform.is_some()
+                && let Some(rect) = editor.view_rect
+            {
+                draw_guides(
+                    &editor.guides,
+                    rect,
+                    editor.scale.max(0.5),
+                    &mut self.canvas,
+                );
+            }
             if editor.gizmo_shown
                 && let Some(rect) = editor.view_rect
             {
@@ -5985,10 +6349,10 @@ mod tests {
             Some(false),
         );
         ed.update(&mut world);
-        // R: the scale tool; Q: all of them again.
-        key(&mut ed, 0x52, 0x13, true);
+        // T: the scale tool (Blender's keys); Q: all of them again.
+        key(&mut ed, 0x54, 0x14, true);
         ed.update(&mut world);
-        key(&mut ed, 0x52, 0x13, false);
+        key(&mut ed, 0x54, 0x14, false);
         assert_eq!(ed.active_tool, 3);
         key(&mut ed, 0x51, 0x10, true);
         ed.update(&mut world);
@@ -6028,10 +6392,272 @@ mod tests {
         ed.update(&mut world);
     }
 
+    /// Characters typed, as the keyboard layout gives them.
+    fn type_chars(ed: &mut Editor, text: &str) {
+        for c in text.chars() {
+            event(ed, WindowEventKind::Char(c));
+        }
+    }
+
+    fn right_button(ed: &mut Editor, pressed: bool) {
+        event(
+            ed,
+            WindowEventKind::MouseButton {
+                button: MouseButton::Right,
+                pressed,
+            },
+        );
+    }
+
+    // More keys: virtual key and scan code.
+    const G: (u16, u16) = (0x47, 0x22);
+    const Q: (u16, u16) = (0x51, 0x10);
+    const R: (u16, u16) = (0x52, 0x13);
+    const S: (u16, u16) = (0x53, 0x1F);
+    const X: (u16, u16) = (0x58, 0x2D);
+    const Y: (u16, u16) = (0x59, 0x15);
+    const Z: (u16, u16) = (0x5A, 0x2C);
+
+    fn cube_at(world: &mut World, at: Transform) -> Entity {
+        world.spawn((
+            SceneId::new(),
+            Name::new("Cube"),
+            at,
+            GlobalTransform(at.to_affine()),
+        ))
+    }
+
+    #[test]
+    fn g_z_and_a_typed_value_move_the_selection_exactly_as_one_step() {
+        let mut world = World::new();
+        let cube = cube_at(&mut world, Transform::IDENTITY);
+        let mut ed = gizmo_editor("keys-move", &mut world, cube);
+        mouse(&mut ed, [700.0, 300.0], None);
+        chord(&mut ed, &mut world, &[G]);
+        assert!(ed.key_transform.is_some(), "G starts a move");
+        ed.update(&mut world);
+        assert!(!ed.gizmo_shown, "the gizmo is hidden meanwhile");
+        chord(&mut ed, &mut world, &[Z]);
+        type_chars(&mut ed, "25");
+        ed.update(&mut world);
+        assert_eq!(
+            world.get::<Transform>(cube).unwrap().translation,
+            Vec3::new(0.0, 0.0, 25.0)
+        );
+        chord(&mut ed, &mut world, &[BACKSPACE]);
+        assert_eq!(
+            world.get::<Transform>(cube).unwrap().translation,
+            Vec3::new(0.0, 0.0, 2.0)
+        );
+        assert_eq!(ed.hint, "Move along Z: 2 m");
+        assert!(ed.status.starts_with(transform::HELP), "{}", ed.status);
+        assert_eq!(ed.guides.len(), 1, "the z axis' line");
+        chord(&mut ed, &mut world, &[ENTER]);
+        assert!(ed.key_transform.is_none(), "Enter keeps it");
+        assert_eq!(ed.history.steps().count(), 1, "one step");
+        let t = *world.get::<Transform>(cube).unwrap();
+        assert_eq!(t.translation, Vec3::new(0.0, 0.0, 2.0));
+        assert_eq!((t.rotation, t.scale), (Quat::IDENTITY, Vec3::ONE));
+        ed.update(&mut world);
+        assert!(ed.gizmo_shown, "the gizmo is back");
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert_eq!(
+            world.get::<Transform>(cube).unwrap().translation,
+            Vec3::ZERO
+        );
+    }
+
+    #[test]
+    fn r_and_s_turn_and_scale_by_typed_values_with_exact_parts() {
+        let mut world = World::new();
+        let cube = cube_at(&mut world, Transform::from_xyz(1.0, 0.0, 0.0));
+        let mut ed = gizmo_editor("keys-turn", &mut world, cube);
+        mouse(&mut ed, [700.0, 300.0], None);
+        // R Z 90: a quarter turn about z, about the cube's own center.
+        chord(&mut ed, &mut world, &[R]);
+        chord(&mut ed, &mut world, &[Z]);
+        type_chars(&mut ed, "90");
+        chord(&mut ed, &mut world, &[ENTER]);
+        let t = *world.get::<Transform>(cube).unwrap();
+        assert!(
+            (t.rotation * Vec3::X - Vec3::Y).length() < 1e-6,
+            "{}",
+            t.rotation
+        );
+        assert_eq!(t.scale, Vec3::ONE, "a turn keeps the scale exact");
+        assert_eq!(t.translation, Vec3::new(1.0, 0.0, 0.0), "about its center");
+        // The world's transforms follow the scene's for the next transform.
+        world.insert(cube, GlobalTransform(t.to_affine()));
+        // S Shift+Z 0.5: halved across z, the rotation exact.
+        chord(&mut ed, &mut world, &[S]);
+        chord(&mut ed, &mut world, &[SHIFT, Z]);
+        type_chars(&mut ed, "0,5");
+        ed.update(&mut world);
+        assert_eq!(ed.hint, "Scale on XY: ×0.5");
+        chord(&mut ed, &mut world, &[ENTER]);
+        let s = *world.get::<Transform>(cube).unwrap();
+        assert_eq!(s.scale, Vec3::new(0.5, 0.5, 1.0));
+        assert_eq!(s.rotation, t.rotation, "a scale keeps the rotation exact");
+        assert_eq!(ed.history.steps().count(), 2);
+    }
+
+    #[test]
+    fn the_pointer_moves_and_escape_a_right_click_or_focus_loss_take_it_back() {
+        let mut world = World::new();
+        let cube = cube_at(&mut world, Transform::IDENTITY);
+        let mut ed = gizmo_editor("keys-escape", &mut world, cube);
+        let at = |world: &World| world.get::<Transform>(cube).unwrap().translation;
+        let (grab, dir) = x_arrow(&ed);
+        mouse(&mut ed, grab.to_array(), None);
+        chord(&mut ed, &mut world, &[G]);
+        chord(&mut ed, &mut world, &[X]);
+        mouse(&mut ed, (grab + dir * 50.0).to_array(), None);
+        ed.update(&mut world);
+        let moved = at(&world);
+        assert!(moved.x > 0.1, "{moved}");
+        assert_eq!((moved.y, moved.z), (0.0, 0.0), "along x only");
+        assert!(ed.hint.starts_with("Move along X: "), "{}", ed.hint);
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert!(ed.key_transform.is_none());
+        assert_eq!(at(&world), Vec3::ZERO, "Escape: back where it was");
+        assert_eq!(ed.history.steps().count(), 0);
+        // A right click: taken back, and the camera does not look around.
+        chord(&mut ed, &mut world, &[G]);
+        mouse(&mut ed, (grab + dir * 80.0).to_array(), None);
+        ed.update(&mut world);
+        assert_ne!(at(&world), Vec3::ZERO, "free: in the view's plane");
+        right_button(&mut ed, true);
+        ed.update(&mut world);
+        assert!(ed.key_transform.is_none() && !ed.camera_drag);
+        assert_eq!(at(&world), Vec3::ZERO);
+        right_button(&mut ed, false);
+        ed.update(&mut world);
+        // The window losing the keyboard.
+        chord(&mut ed, &mut world, &[G]);
+        mouse(&mut ed, (grab + dir * 30.0).to_array(), None);
+        ed.update(&mut world);
+        event(&mut ed, WindowEventKind::Focused(false));
+        ed.update(&mut world);
+        assert!(ed.key_transform.is_none());
+        assert_eq!(at(&world), Vec3::ZERO);
+        assert_eq!(ed.history.steps().count(), 0);
+    }
+
+    #[test]
+    fn a_left_click_keeps_it_and_grabs_no_handle() {
+        let mut world = World::new();
+        let cube = cube_at(&mut world, Transform::IDENTITY);
+        let mut ed = gizmo_editor("keys-click", &mut world, cube);
+        let (grab, dir) = x_arrow(&ed);
+        mouse(&mut ed, grab.to_array(), None);
+        chord(&mut ed, &mut world, &[G]);
+        chord(&mut ed, &mut world, &[X]);
+        // The gizmo moves with the cube: the pointer stays on its x arrow.
+        mouse(&mut ed, (grab + dir * 40.0).to_array(), None);
+        ed.update(&mut world);
+        mouse(&mut ed, (grab + dir * 40.0).to_array(), Some(true));
+        ed.update(&mut world);
+        assert!(ed.key_transform.is_none(), "the click keeps it");
+        assert!(ed.gizmo_drag.is_none(), "and is not the gizmo's");
+        assert!(world.get::<Transform>(cube).unwrap().translation.x > 0.1);
+        mouse(&mut ed, (grab + dir * 40.0).to_array(), Some(false));
+        ed.update(&mut world);
+        assert_eq!(ed.history.steps().count(), 1);
+        assert_eq!(ed.selection, [cube], "the selection stays");
+    }
+
+    #[test]
+    fn godots_keys_pick_the_scale_tool_with_r_and_switch_a_move_to_a_turn() {
+        let mut world = World::new();
+        let cube = cube_at(&mut world, Transform::IDENTITY);
+        let mut ed = gizmo_editor("keys-godot", &mut world, cube);
+        ed.use_keys(KeyPreset::Godot);
+        chord(&mut ed, &mut world, &[R]);
+        assert_eq!(ed.active_tool, 3, "R: the scale tool");
+        assert!(ed.key_transform.is_none());
+        chord(&mut ed, &mut world, &[S]);
+        assert!(ed.key_transform.is_none(), "S is free in Godot's keys");
+        // Q: the arrows again.
+        chord(&mut ed, &mut world, &[Q]);
+        ed.update(&mut world);
+        let (grab, dir) = x_arrow(&ed);
+        mouse(&mut ed, grab.to_array(), None);
+        chord(&mut ed, &mut world, &[G]);
+        mouse(&mut ed, (grab + dir * 50.0).to_array(), None);
+        ed.update(&mut world);
+        assert_ne!(
+            world.get::<Transform>(cube).unwrap().translation,
+            Vec3::ZERO
+        );
+        // R during it: the move taken back, a turn from here.
+        chord(&mut ed, &mut world, &[R]);
+        assert_eq!(
+            ed.key_transform.as_ref().map(|t| t.kind),
+            Some(transform::Kind::Turn)
+        );
+        assert_eq!(
+            world.get::<Transform>(cube).unwrap().translation,
+            Vec3::ZERO
+        );
+        chord(&mut ed, &mut world, &[Y]);
+        type_chars(&mut ed, "-90");
+        chord(&mut ed, &mut world, &[ENTER]);
+        let t = *world.get::<Transform>(cube).unwrap();
+        assert!(
+            (t.rotation * Vec3::X - Vec3::Z).length() < 1e-6,
+            "{}",
+            t.rotation
+        );
+        assert_eq!(ed.history.steps().count(), 1, "the turn only");
+        // Blender's keys again: R turns, T picks the scale tool.
+        ed.use_keys(KeyPreset::Blender);
+        assert_eq!(
+            ed.shortcuts.get(&ed.ids.tools[3]).map(String::as_str),
+            Some("T")
+        );
+        assert_eq!(
+            ed.shortcuts.get(&ed.ids.transforms[1]).map(String::as_str),
+            Some("R")
+        );
+    }
+
+    #[test]
+    fn the_key_map_is_picked_in_the_palette_and_kept() {
+        let dir = project("keys-kept");
+        let (mut world, mut ed) = start(&dir);
+        assert_eq!(ed.key_preset, KeyPreset::Blender, "Blender's by default");
+        let keys = ed.ids.keys;
+        ed.run(&mut world, keys);
+        let labels: Vec<String> = ed
+            .command_palette
+            .as_ref()
+            .unwrap()
+            .choices
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|c| c.label.clone())
+            .collect();
+        assert_eq!(labels, KeyPreset::ALL.map(|p| String::from(p.label())));
+        ed.palette_action(&mut world, PaletteAction::Run(1));
+        assert_eq!(ed.key_preset, KeyPreset::Godot);
+        ed.end_session(&mut world);
+        let (_, ed) = start(&dir);
+        assert_eq!(ed.key_preset, KeyPreset::Godot);
+        assert_eq!(
+            ed.shortcuts.get(&ed.ids.tools[3]).map(String::as_str),
+            Some("R")
+        );
+        assert_eq!(ed.shortcuts.get(&ed.ids.transforms[1]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The editor's frame on the CPU (`Editor::update`, 1600 × 900) with 200 entities:
-    /// nothing selected, then one with the gizmo; and the gizmo's layout and hit test
-    /// alone: `cargo test -p engine_editor --release --lib editor_frame_cost -- --ignored
-    /// --nocapture`.
+    /// nothing selected, then one with the gizmo, then a keyboard move following the
+    /// pointer; and the gizmo's layout and hit test alone: `cargo test -p engine_editor
+    /// --release --lib editor_frame_cost -- --ignored --nocapture`.
     #[test]
     #[ignore = "a measurement"]
     fn editor_frame_cost() {
@@ -6069,6 +6695,24 @@ mod tests {
         ed.select_only(first.unwrap());
         let one = time(&mut ed, &mut world);
         assert!(ed.gizmo_shown);
+        // The pointer somewhere else every frame: a change set in the undo step each time.
+        let step = |ed: &mut Editor, world: &mut World, i: usize| {
+            mouse(ed, [800.0 + (i % 50) as f32, 450.0], None);
+            ed.update(world);
+        };
+        mouse(&mut ed, [800.0, 450.0], None);
+        let g = ed.ids.transforms[0];
+        ed.run(&mut world, g);
+        for i in 0..100 {
+            step(&mut ed, &mut world, i);
+        }
+        let t = Instant::now();
+        for i in 0..2000 {
+            step(&mut ed, &mut world, i);
+        }
+        let moving = t.elapsed().as_secs_f64() * 1e6 / 2000.0;
+        assert!(ed.key_transform.is_some());
+        assert_eq!(ed.history.steps().count(), 1, "one step for the whole move");
         let view = ViewProj::new(&ed.orbit, ed.view_rect.unwrap());
         let mut gizmo = Gizmo::default();
         let t = Instant::now();
@@ -6084,8 +6728,9 @@ mod tests {
         }
         let layout = t.elapsed().as_secs_f64() * 1e6 / 10_000.0;
         println!(
-            "editor frame: nothing selected {none:.1} µs, one selected with the gizmo {one:.1} µs; \
-             the gizmo's layout and hit test {layout:.2} µs ({} lines)",
+            "editor frame: nothing selected {none:.1} µs, one selected with the gizmo {one:.1} µs, \
+             a keyboard move {moving:.1} µs; the gizmo's layout and hit test {layout:.2} µs \
+             ({} lines)",
             gizmo.lines.len()
         );
     }

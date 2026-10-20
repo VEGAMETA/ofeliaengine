@@ -197,6 +197,7 @@ fn a_steady_shell_frame_does_not_allocate() {
             rows: &rows,
             selected: 1,
         }),
+        hint: None,
     };
     let palette = Palette::default();
     let mut ui = Ui::new(Theme::default());

@@ -231,6 +231,8 @@ pub(crate) struct EditorState {
     pub(crate) recent: Vec<String>,
     /// What a new build of the game's code does (`background`, `always`, `ask`).
     pub(crate) restart: Option<String>,
+    /// Which keys the editor uses (`blender`, `godot`).
+    pub(crate) keys: Option<String>,
     /// Where the editor's window was.
     pub(crate) window: Option<WindowPlacement>,
 }
@@ -269,6 +271,11 @@ impl SessionFile {
         if let Some(restart) = &self.editor.restart {
             out.push_str("restart = ");
             quote_into(&mut out, restart);
+            out.push('\n');
+        }
+        if let Some(keys) = &self.editor.keys {
+            out.push_str("keys = ");
+            quote_into(&mut out, keys);
             out.push('\n');
         }
         if let Some(w) = self.editor.window {
@@ -397,6 +404,7 @@ impl SessionFile {
                             .map_err(at)?;
                     }
                     "restart" => file.editor.restart = Some(unquote(value).map_err(at)?),
+                    "keys" => file.editor.keys = Some(unquote(value).map_err(at)?),
                     "window" => {
                         let parts = items(value, '(', ')').map_err(at)?;
                         let [left, top, right, bottom, maximized] = parts[..] else {
@@ -811,6 +819,7 @@ mod tests {
                 snapping: Some((true, [0.1, 0.25, 45.0, 0.1])),
                 recent: vec![String::from("edit.undo"), String::from("scene.duplicate")],
                 restart: Some(String::from("ask")),
+                keys: Some(String::from("godot")),
                 window: Some(WindowPlacement {
                     left: -7,
                     top: 0,

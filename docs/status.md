@@ -103,8 +103,15 @@ Last updated: 2026-10-20.
   - **E2-1, the gizmo** (#270, ADR 0107 as built): move, rotate and scale handles at the
     selection's center, Q W E R for the tools, Space for local axes, the owner's
     snapping rules, one undo step per drag, Escape takes it back.
+  - **E2-2, keyboard transforms** (#271, ADR 0107 as built; team decision 2026-10-20,
+    Blender's keys by default):
+    - G, R, S; X, Y, Z for an axis (again: the local one) and Shift for a plane;
+    - typed values and expressions; Enter or a click keeps, Escape or a right click
+      takes it back;
+    - a hint by the pointer, the axis drawn across the viewport;
+    - Godot's keys through "Editor: Key Map…".
   - **Next:** the rest of E2 (ADR 0107 §7): picking from an id buffer and outlines (an
-    ADR first), keyboard transforms, placement on surfaces, frame, bookmarks, overlays.
+    ADR first), placement on surfaces, frame, bookmarks, overlays.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

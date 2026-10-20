@@ -114,8 +114,13 @@ editor = ["dep:engine_editor"]
 | Rename the active entity | F2 |
 | The command palette | Ctrl+Shift+P |
 | Go to a scene object (the palette with `@`) | Ctrl+P |
-| The tools: select, move, rotate, scale | Q, W, E, R |
+| Move, rotate, scale the selection at once ([keyboard transforms](#keyboard-transforms)) | G, R, S |
+| The gizmo's tools: select, move, rotate, scale | Q, W, E, T |
 | The gizmo along the active entity's axes, or the world's | Space |
+
+These are Blender's keys, the default. **Editor: Key Map…** (Ctrl+Shift+P) takes Godot's
+instead: Q, W, E, R pick the tools, and G starts a move (R and S then switch it to a turn
+or a scale). The session keeps the choice.
 
 After a click in the scene tree (its keys, rebindable like the rest):
 
@@ -139,7 +144,10 @@ While a field is typed in, the keys are the field's: Delete, Y or Ctrl+A edit th
 and only Ctrl+S still saves. Text fields work as Windows' own: Shift and Ctrl with the
 arrows, Home and End, Ctrl+A, Ctrl+C, Ctrl+X and Ctrl+V with the clipboard.
 
-Keys are physical positions, so they stay put on any keyboard layout. Every command has a
+Keys are physical positions, so they stay put on any keyboard layout. A keyboard
+transform's X, Y and Z (and G, R, S while it runs) go by the letter on the key instead: Z
+is the key that says Z on a German keyboard too, and in a Cyrillic layout the key's Latin
+letter counts. Every command has a
 stable name (`edit.undo`, `file.save`, `scene.duplicate`…) that the command palette, the
 keymap file and scripts use; `EditorGame::run_command` runs one by name.
 
@@ -155,9 +163,10 @@ keymap file and scripts use; `EditorGame::run_command` runs one by name.
   `#[reflect(step = …)]`), whole numbers 1.
 - The grid button in the tool bar (or Y) makes snapping the default; Shift then drags
   freely.
-- The viewport's gizmo follows the same rules ([below](#moving-things-in-the-viewport)):
-  a move in steps of 0.1 m, a turn of 45°, a scale of 0.1; with Ctrl, the selection's
-  center lands on the grid.
+- The viewport's gizmo and keyboard transforms follow the same rules
+  ([below](#moving-things-in-the-viewport)): a move in steps of 0.1 m, a turn of 45°, a
+  scale of 0.1; with Ctrl, the selection's center lands on the grid. Typed values are
+  exact.
 
 ## The command palette
 
@@ -213,7 +222,7 @@ moving with its selected parent.
 | Select | Q | all below: arrows, squares, rings, and the scale boxes halfway along the arrows |
 | Move | W | an arrow per axis, a square per plane, a dot in the middle for the view's plane |
 | Rotate | E | a ring per axis, the half that faces you |
-| Scale | R | a line and a box per axis, a box in the middle for all three |
+| Scale | T (R in Godot's keys) | a line and a box per axis, a box in the middle for all three |
 
 - **Drag a handle** with the left button. The handle under the pointer is drawn yellow,
   and the status bar shows the change ("Move (0.3, 0, 0)", "Rotate 45°").
@@ -221,11 +230,41 @@ moving with its selected parent.
   steps the default.
 - **Escape** during a drag puts everything back. Each drag is one undo step.
 - **Space** turns the gizmo to the active entity's axes, and back to the world's.
-- **Exact values:** a move changes the position only and a turn keeps the scale exactly,
-  so the scene file gets no float dust (`0.99999994`). A scale goes along the entity's
-  own axis nearest the handle's.
+- **Exact values:** only what changes is written, from the entity's own values: a move
+  sets the position, a turn the rotation, a scale the scale. The scene file gets no
+  float dust (`0.99999994`). A scale goes along the entity's own axis nearest the
+  handle's.
 - Handles seen edge-on are left out: a plane square from the side, a ring seen as a line,
   an arrow pointing at you.
+
+## Keyboard transforms
+
+**G, R or S** moves, rotates or scales the selection with the pointer at once: there is no
+handle to grab (Blender's way). The gizmo hides meanwhile. A hint by the pointer says what
+it does ("Move along Y: 2 m", "Rotate about Y: 45°  ·  in steps"), and the status bar lists
+the keys.
+
+| While it runs | What happens |
+|---|---|
+| the pointer moves | a move follows it in the view's plane; a turn follows its angle around the pivot (past half a turn too); a scale follows its distance from the pivot |
+| X, Y, Z | keeps it to that axis, drawn across the viewport in the axis' color. The same key again takes the active entity's axes (the world's, after Space); a third time frees it |
+| Shift+X, Y, Z | keeps it to the plane across that axis: a move in that plane, a scale along its two axes |
+| a typed value | metres, degrees or a factor, an expression too (`2*1.5`, `-90`, `(1+2)/4`); it takes the pointer's place. Backspace edits it, and `,` is a decimal point |
+| G, R, S | starts the other transform over from here |
+| Enter, a left click | keeps it, as one undo step |
+| Escape, a right click | puts everything back (leaving the window does too) |
+
+- **Without an axis,** a typed move goes along x, a typed turn about the view's axis, and a
+  typed scale is uniform. A typed turn about an axis is counterclockwise looking down
+  that axis.
+- **The pointer follows the snapping rules** above: Shift for steps, Ctrl for the grid.
+  Typed values are exact: `R Y 90` leaves exactly a quarter turn in the file, `S 0.5`
+  exactly half the scale.
+- **Examples:** G Y 2 Enter moves a crate 2 m up (y is up); R Y 90 Enter turns it a
+  quarter about the vertical; S Shift+Y 2 Enter doubles its width and depth and keeps
+  its height.
+- The palette has them as commands too: "Transform: Move Selection", "Rotate Selection",
+  "Scale Selection".
 
 ## Viewport navigation
 
@@ -318,7 +357,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 
 | Phase | What |
 |---|---|
-| E2 | clicks and boxes in the viewport (from an id buffer), the selection's outline, keyboard transforms (G, R, S with typed values), frame and bookmarks, placement on surfaces, overlays |
+| E2 | clicks and boxes in the viewport (from an id buffer), the selection's outline, frame and bookmarks, placement on surfaces, overlays |
 | E3 | Play on a copy of the world |
 
 The whole plan is ADR 0107 §7.
@@ -337,3 +376,4 @@ the panels stay at Windows' SDR white level. `--hdr scrgb|hdr10|off` picks the o
 | Start and 60 frames | 0.51–0.69 s (budget for the start alone: 2 s) |
 | The editor's frame on the CPU (shell, tree of 200 entities, inspector) | 74 µs, 84 µs with a selection (105 µs with all 200 selected and compared), 88 µs with the command palette open |
 | The palette's `@` search over 10,000 objects, per keystroke | 0.62–0.73 ms |
+| The editor's frame during a keyboard move (the pointer moving, the undo step set every frame) | 103.5 µs (89.9 µs with one selected and its gizmo, 80.3 µs with nothing selected) |
