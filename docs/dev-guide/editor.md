@@ -29,12 +29,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **The viewport** shows the scene through the game's renderer (every feature the player
   has), from the editor's own camera, in the panel's rectangle.
 - **The scene tree** lists the scene's entities (those with a scene id) in their hierarchy:
-  - each row shows its name (`Name`) and its kind (camera, sun, light, model);
-  - a click selects a row; its arrow opens or closes it;
+  - each row shows its kind's icon, its name (`Name`) and its kind (camera, sun, light,
+    model); a model's icon is its shape's (cube, sphere, plane, cylinder), the same icons
+    as in the add menu and the palette;
+  - a click selects a row; Ctrl+click adds it to the selection or takes it out;
+    Shift+click selects the rows from the last clicked one. The last picked is the
+    active one: the inspector shows it, F2 renames it, and the inspector's header says
+    how many are selected;
+  - after a click in the tree, the arrows move the selection (Shift extends it), Left
+    closes a row (or goes to its parent), Right opens it (or goes to its first child),
+    Shift+Right opens its whole branch;
+  - the row's arrow opens or closes it;
   - **F2** or a double click renames it in place (Enter keeps, Escape drops);
   - the filter box keeps the rows whose names match, with their parents;
   - **`+`** (or Ctrl+A) adds an entity where the camera looks, on the grid: an empty
-    entity, a cube, sphere, plane or cylinder, a sun, a point or spot light, a camera.
+    entity, a cube, sphere, plane or cylinder, a sun, a point or spot light, a camera. It
+    is named after its kind, numbered when a sibling has that name ("Cube 2");
+  - Delete and Ctrl+D act on the whole selection (a child goes with its selected
+    parent), as one undo step; each copy comes right after its original, numbered, and
+    the copies are selected.
 - **The inspector** edits the selected entity's components, field by field:
   - **numbers** are dragged sideways (see snapping below), or clicked and typed (see
     typing values below); vectors show their parts with colored `x y z` labels, colors
@@ -72,9 +85,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Duplicate the selection (with its children) | Ctrl+D |
 | Add an entity | Ctrl+A |
 | Snap by default, or not | Y |
-| Rename the selection | F2 |
+| Rename the active entity | F2 |
 | The command palette | Ctrl+Shift+P |
 | Go to a scene object (the palette with `@`) | Ctrl+P |
+
+After a click in the scene tree (its keys, rebindable like the rest):
+
+| Keys | What they do |
+|---|---|
+| Up, Down | select the previous or the next row |
+| Shift+Up, Shift+Down | extend the selection |
+| Left | close the row, or go to its parent |
+| Right | open the row, or go to its first child |
+| Shift+Right | open the whole branch |
 
 With the mouse over an inspector field that is not being typed in:
 
@@ -166,7 +189,7 @@ right button + WASD and focusing the selection come later.
 
 | Phase | What |
 |---|---|
-| E1-4b-3 | multi-selection and multi-editing (differing values read "—", relative edits per entity) |
+| E1-4b-3b | multi-editing: the selection's shared components, differing values read "—", relative edits per entity |
 | E1-5 | sessions, autosave, rebuild and restart after a code change |
 | E2 | selection in the viewport, gizmos, placement by drag and drop |
 | E3 | Play on a copy of the world |
@@ -185,5 +208,5 @@ the panels stay at Windows' SDR white level. `--hdr scrgb|hdr10|off` picks the o
 | | |
 |---|---|
 | Start and 60 frames | 0.51–0.69 s (budget for the start alone: 2 s) |
-| The editor's frame on the CPU (shell, tree of 200 entities, inspector) | 74 µs, 83 µs with a selection, 88 µs with the command palette open |
+| The editor's frame on the CPU (shell, tree of 200 entities, inspector) | 74 µs, 83–84 µs with a selection (92 µs with all 200 selected), 88 µs with the command palette open |
 | The palette's `@` search over 10,000 objects, per keystroke | 0.62–0.73 ms |

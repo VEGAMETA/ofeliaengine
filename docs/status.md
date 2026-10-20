@@ -62,10 +62,14 @@ Last updated: 2026-10-17.
     runs every command (the add menu's kinds among them), `@` (Ctrl+P) finds the scene's
     objects; ↺ and Backspace reset a field to its default; Ctrl+C and Ctrl+V over a field
     copy and paste its value.
+  - **E1-4b-3a, the selection** (#PR, ADR 0107 as built): Ctrl+click, Shift+click and
+    the arrows in the tree, Delete and Ctrl+D on the whole selection as one step, numbered
+    names for new entities and copies, icons by kind in the add menu, the tree and the
+    palette.
   - **Next:** the rest of E1 (ADR 0107 §7):
-    - E1-4b-3: multi-selection and multi-editing; icons by kind, the same in the add
-      menu, the tree and the palette (team decision, 2026-10-17); the roots' order in
-      scene files (sorted by id today) to settle;
+    - E1-4b-3b: multi-editing in the inspector (shared components, "—" for differing
+      values, relative edits per entity); the roots' order in scene files (sorted by id
+      today) to settle;
     - E1-5: sessions, autosave, rebuild and restart; the game's `main` from a macro,
       `ofeliaengine edit`, the quick start as a scene.
 
