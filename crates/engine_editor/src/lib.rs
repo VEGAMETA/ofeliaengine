@@ -11,6 +11,7 @@ pub mod app;
 mod build;
 pub mod camera;
 pub mod expr;
+mod gizmo;
 pub mod icons;
 pub mod input;
 pub mod inspector;

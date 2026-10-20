@@ -91,6 +91,20 @@ impl Snapping {
         round: bool,
     ) -> f64 {
         let free = start + f64::from(travel) * speed(quantity, start);
+        self.snap(quantity, start, free, invert, round)
+    }
+
+    /// A value moved from `start` to `free` (a gizmo's drag in world units or degrees),
+    /// as the rules say with Shift (`invert`) and Ctrl (`round`) held: in whole steps from
+    /// the start, or rounded to the step, or free.
+    pub fn snap(
+        &self,
+        quantity: Quantity,
+        start: f64,
+        free: f64,
+        invert: bool,
+        round: bool,
+    ) -> f64 {
         let step = self.step(quantity);
         let value = if round {
             (free / step).round() * step
