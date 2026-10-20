@@ -720,6 +720,57 @@ The restart without a gap, and the window where it was.
     offscreen;
   - a build that finishes during Play (E3).
 
+## As built (E2-1, 2026-10-20)
+
+The transform gizmo (`docs/research/ux/viewport-tools.md` §2, §3), in
+`engine_editor::gizmo`. It is drawn by the editor's overlay below its panels (layer −1),
+clipped to the viewport.
+
+- **Handles by tool** (Q, W, E, R, Godot's keys):
+  - move: arrows, the planes' squares, a dot for the view's plane;
+  - rotate: rings, the half facing the camera;
+  - scale: lines with boxes, a box in the middle for all three;
+  - select: all of them, the scale boxes halfway along the arrows.
+- **Size and visibility:** 110 logical pixels at any distance. Handles seen edge-on are
+  left out (a square thinner than 30 px², a ring within 9° of its edge, an arrow shorter
+  than a quarter of the gizmo).
+- **The pivot** is the middle of the selected entities that no selected entity carries.
+  The axes are the world's, or the active entity's (Space).
+- **Under the pointer,** in screen space: boxes and squares first, then the nearest line
+  within 7 pixels.
+- **A drag** meets the plane the handle moves in:
+  - an axis's plane faces the camera most; a square's, ring's or view handle's is its
+    own;
+  - the change is snapped by the owner's rules through `Snapping::snap` (the inspector's
+    `drag` now goes through it as well): a move's pivot coordinate along each axis, a
+    turn's angle, a scale's factor.
+- **Each frame of a drag** sets every target from where it started, in one undo step for
+  the gesture (the inspector's merge key). Escape reverts it.
+  - A move changes the local position only. A turn keeps the scale exactly; a scale keeps
+    the rotation exactly.
+  - Targets under a parent go through the parent's inverse world transform. A scale goes
+    along the target's own axis nearest each handle.
+- **Measured** on ref-1, release, 1600 × 900, 200 entities:
+  - the editor's frame took 82.1 µs with nothing selected, and 91.4 µs with one selected
+    and its gizmo (the inspector included);
+  - the gizmo's layout and hit test took 3.5 µs for 101 lines.
+- **Tested:**
+  - projection and rays agree;
+  - handles are found where they are drawn, and those seen edge-on are left out;
+  - an arrow moves along its axis with Shift and Ctrl;
+  - a ring turns about its axis in 45° steps;
+  - a scale goes along the nearest own axis;
+  - through the editor's frames: an arrow drag as one step and undone; Escape, and Ctrl
+    on the grid; a turn about y keeping the scale; the tools' keys; a child of a turned
+    parent moving along the world's x.
+- **Not done:**
+  - clicks and boxes in the viewport, and the selection's outline (E2-2: an id buffer,
+    an ADR first);
+  - keyboard transforms (G, R, S): R is the scale tool in Godot's keys, so the keys are
+    the team's to choose;
+  - the snapping values in the tool bar; pivot modes; frame and bookmarks; surfaces;
+    overlays.
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and

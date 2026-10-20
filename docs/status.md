@@ -100,9 +100,11 @@ Last updated: 2026-10-20.
     opens hidden at the old one's place and shows its first frames over it before the old
     editor exits; a new build that fails at its start leaves the old editor running with
     the reason; any start opens the window where the session kept it. E1 is done.
-  - **Next:** E2, the viewport tools (ADR 0107 §7): picking from an id buffer, outlines,
-    gizmos, snapping, keyboard transforms, placement on surfaces, duplicate, frame,
-    bookmarks, overlays through debug draw channels.
+  - **E2-1, the gizmo** (#PR, ADR 0107 as built): move, rotate and scale handles at the
+    selection's center, Q W E R for the tools, Space for local axes, the owner's
+    snapping rules, one undo step per drag, Escape takes it back.
+  - **Next:** the rest of E2 (ADR 0107 §7): picking from an id buffer and outlines (an
+    ADR first), keyboard transforms, placement on surfaces, frame, bookmarks, overlays.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
