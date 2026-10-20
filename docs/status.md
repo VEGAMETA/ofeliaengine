@@ -270,6 +270,19 @@ decisions). In short:
 - **Backups.** Everything is pushed: agents push after every commit. When the usage limit
   stops agents, the coordinator snapshots their uncommitted work to `backup/wip*`
   branches, then resumes them by message.
+- **Knowledge graph** (team decision, 2026-10-20): a map for agents new to a subsystem.
+  graphify (`/graphify`, output in the main checkout's `graphify-out/`, not committed)
+  holds the code by its syntax and the documents' concepts from an LLM pass.
+  - Rebuilt by hand, not by git hooks: they rebuilt it after every commit and merge, CPU
+    the perf checks then wait out. `graphify update .` refreshes the code, then
+    `tools/graphify_post.py` (8 s; `--recluster` after an LLM pass) adds references
+    between documents and crates and mentions tied to the code they name, drops noisy
+    guessed edges, and names communities from the anchors in `tools/graphify_labels.json`.
+  - An LLM pass over the documents reads their outlines (`--outlines`, about a third of
+    the text): the ADRs, the research notes and the dev guide cost about 1.2 M subagent
+    tokens on 2026-10-20.
+  - Measured: for exact questions (who calls a function) search is faster and right; the
+    graph links by name and misses method calls. It is for orientation.
 - **Machine.** ref-1 needs VDDCR_SOC at 1.25 V, or the Radeon flips LDS bits under CPU load
   (`docs/research/radeon-igpu-lds-faults.md`). `check.ps1 -Gpu` runs that self-check first.
 

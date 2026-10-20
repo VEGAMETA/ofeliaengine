@@ -15,3 +15,6 @@
 
 # Test scenes downloaded by tools/fetch-test-assets.ps1 (never committed).
 /test-assets/
+
+# graphify's knowledge graph, built on the machine (docs/status.md, knowledge graph).
+/graphify-out/
