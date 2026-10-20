@@ -114,6 +114,8 @@ editor = ["dep:engine_editor"]
 | Rename the active entity | F2 |
 | The command palette | Ctrl+Shift+P |
 | Go to a scene object (the palette with `@`) | Ctrl+P |
+| The tools: select, move, rotate, scale | Q, W, E, R |
+| The gizmo along the active entity's axes, or the world's | Space |
 
 After a click in the scene tree (its keys, rebindable like the rest):
 
@@ -153,7 +155,9 @@ keymap file and scripts use; `EditorGame::run_command` runs one by name.
   `#[reflect(step = …)]`), whole numbers 1.
 - The grid button in the tool bar (or Y) makes snapping the default; Shift then drags
   freely.
-- The viewport's gizmos (phase E2) follow the same rules.
+- The viewport's gizmo follows the same rules ([below](#moving-things-in-the-viewport)):
+  a move in steps of 0.1 m, a turn of 45°, a scale of 0.1; with Ctrl, the selection's
+  center lands on the grid.
 
 ## The command palette
 
@@ -198,6 +202,30 @@ A typed value that is not a number changes nothing; the status bar says why.
 
 `EditorGame::set(world, entity, "Transform.translation", "(3, 0, 0)")` sets a value by its
 scene path from scene text, as one undoable step: for tests, scripts and the command line.
+
+## Moving things in the viewport
+
+The selection's gizmo sits at its center: the middle of the selected entities, a child
+moving with its selected parent.
+
+| Tool | Key | Handles |
+|---|---|---|
+| Select | Q | all below: arrows, squares, rings, and the scale boxes halfway along the arrows |
+| Move | W | an arrow per axis, a square per plane, a dot in the middle for the view's plane |
+| Rotate | E | a ring per axis, the half that faces you |
+| Scale | R | a line and a box per axis, a box in the middle for all three |
+
+- **Drag a handle** with the left button. The handle under the pointer is drawn yellow,
+  and the status bar shows the change ("Move (0.3, 0, 0)", "Rotate 45°").
+- **Snapping** follows the rules above: Shift for steps, Ctrl for the grid, Y to make
+  steps the default.
+- **Escape** during a drag puts everything back. Each drag is one undo step.
+- **Space** turns the gizmo to the active entity's axes, and back to the world's.
+- **Exact values:** a move changes the position only and a turn keeps the scale exactly,
+  so the scene file gets no float dust (`0.99999994`). A scale goes along the entity's
+  own axis nearest the handle's.
+- Handles seen edge-on are left out: a plane square from the side, a ring seen as a line,
+  an arrow pointing at you.
 
 ## Viewport navigation
 
@@ -290,7 +318,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 
 | Phase | What |
 |---|---|
-| E2 | selection in the viewport, gizmos, placement by drag and drop |
+| E2 | clicks and boxes in the viewport (from an id buffer), the selection's outline, keyboard transforms (G, R, S with typed values), frame and bookmarks, placement on surfaces, overlays |
 | E3 | Play on a copy of the world |
 
 The whole plan is ADR 0107 §7.

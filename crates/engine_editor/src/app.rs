@@ -48,6 +48,7 @@ use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
 use crate::camera::OrbitCamera;
+use crate::gizmo::{COLORS, Change, Gizmo, GizmoDrag, Handle, Mode, Target, ViewProj};
 use crate::icons;
 use crate::input::{Button, InputCollector};
 use crate::inspector::{self, Defaults, Inspector, Kind, Property};
@@ -63,11 +64,11 @@ use engine_app::{
     AppError, Game, Model, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup,
     Window, builtin,
 };
-use engine_core::math::{Quat, Vec3};
+use engine_core::math::{Quat, Vec2, Vec3};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
 use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind};
 use engine_reflect::TypeKind;
-use engine_render2d::{Canvas, GlyphTexture, QuadMode, Renderer2d, View2d};
+use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, PointLight, SpotLight, Sun, look_rotation};
 use engine_scene::{AssetId, AssetPaths, Name, RootOrder, SaveOptions, SceneId, SceneRegistry};
 use engine_ui::{Theme, Ui, UiKey};
@@ -504,6 +505,10 @@ struct CommandIds {
     build_now: CommandId,
     /// What a new build does: by itself in the background, always, or ask.
     restart_policy: CommandId,
+    /// The tool bar's tools: select (all of the gizmo), move, rotate, scale.
+    tools: [CommandId; 4],
+    /// The gizmo along the active entity's axes, or the world's.
+    local_axes: CommandId,
     /// "Add Cube" and the rest: the add menu's kinds, in its order.
     add_kinds: [CommandId; ADD.len()],
 }
@@ -545,6 +550,13 @@ fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
         build_errors: c.register("build.errors", "Build", "Show Errors…"),
         build_now: c.register("build.now", "Build", "Build the Game's Code"),
         restart_policy: c.register("editor.restart_policy", "Editor", "Restart Policy…"),
+        tools: [
+            c.register("tool.select", "Tool", "Select"),
+            c.register("tool.move", "Tool", "Move"),
+            c.register("tool.rotate", "Tool", "Rotate"),
+            c.register("tool.scale", "Tool", "Scale"),
+        ],
+        local_axes: c.register("tool.local_axes", "Tool", "Local Axes"),
         add_kinds: ADD.map(|kind| {
             let name = format!("scene.add.{}", kind.to_lowercase().replace(' ', "_"));
             c.register(&name, "Scene", &format!("Add {kind}"))
@@ -575,6 +587,12 @@ fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
         ("Ctrl+Shift+P", ids.palette),
         ("Ctrl+P", ids.find),
         ("Ctrl+R", ids.restart),
+        // The tools as in Godot (`docs/research/ux/viewport-tools.md` §2).
+        ("Q", ids.tools[0]),
+        ("W", ids.tools[1]),
+        ("E", ids.tools[2]),
+        ("R", ids.tools[3]),
+        ("Space", ids.local_axes),
     ]
     .map(|(chord, id)| (chord, id, KeyContext::Global));
     for (chord, id, context) in global.into_iter().chain(tree) {
@@ -891,6 +909,14 @@ struct Editor {
     add_open: bool,
     /// Drag gestures so far (each its own undo step).
     gestures: u64,
+    /// The viewport's transform gizmo (ADR 0107 E2), laid out this frame when shown.
+    gizmo: Gizmo,
+    gizmo_shown: bool,
+    gizmo_drag: Option<GizmoDrag>,
+    /// The gizmo's handle under the pointer.
+    hovered_handle: Option<Handle>,
+    /// The gizmo along the active entity's axes (Space), else the world's.
+    local_axes: bool,
     tools: [String; 4],
     active_tool: usize,
     status: String,
@@ -1130,6 +1156,11 @@ impl Editor {
             open_choice: None,
             add_open: false,
             gestures: 0,
+            gizmo: Gizmo::default(),
+            gizmo_shown: false,
+            gizmo_drag: None,
+            hovered_handle: None,
+            local_axes: false,
             tools: [
                 format!("{} Select", icons::TOOL_SELECT),
                 format!("{} Move", icons::TOOL_MOVE),
@@ -1487,6 +1518,20 @@ impl Editor {
             label: ADD[i],
         });
         self.status.clear();
+        if let Some(change) = self.gizmo_drag.as_ref().and_then(|d| d.last) {
+            let _ = match change {
+                Change::Move(d) => write!(self.status, "Move ({}, {}, {})", d.x, d.y, d.z),
+                Change::Turn(q) => {
+                    write!(
+                        self.status,
+                        "Rotate {:.1}°",
+                        q.to_axis_angle().1.to_degrees()
+                    )
+                }
+                Change::Scale(f) => write!(self.status, "Scale ×({}, {}, {})", f.x, f.y, f.z),
+            };
+            self.status.push_str("  ·  ");
+        }
         match &self.build_state {
             BuildState::Building(since) => {
                 let _ = write!(
@@ -1804,6 +1849,7 @@ impl Editor {
                 ((h * scale).round() as u32).max(1),
             ]);
         }
+        self.gizmo_frame(world, scale);
         self.input.next_frame();
         let eye = self.orbit.eye();
         if let Some(t) = world.get_mut::<Transform>(camera) {
@@ -2328,6 +2374,148 @@ impl Editor {
             .collect()
     }
 
+    /// Whether an ancestor of `e` is selected too: it moves with that one.
+    fn has_selected_ancestor(&self, world: &World, e: Entity) -> bool {
+        let mut at = world.parent(e);
+        while let Some(p) = at {
+            if self.selection.contains(&p) {
+                return true;
+            }
+            at = world.parent(p);
+        }
+        false
+    }
+
+    /// The gizmo's part of the frame (ADR 0107 E2): a drag in progress goes on, is taken
+    /// back by Escape or ends with the button; the gizmo is laid out at the selection's
+    /// pivot (the middle of the selected entities that no selected entity carries); a left
+    /// press on one of its handles starts a drag.
+    fn gizmo_frame(&mut self, world: &mut World, scale: f32) {
+        self.gizmo_shown = false;
+        let Some(rect) = self.view_rect else {
+            self.gizmo_drag = None;
+            return;
+        };
+        let view = ViewProj::new(&self.orbit, rect);
+        let cursor = self.input.cursor().map(|[x, y]| Vec2::new(x, y));
+        if let Some(mut drag) = self.gizmo_drag.take()
+            && self.input.held(Button::Left)
+        {
+            if self.ui.input().keys.contains(&UiKey::Escape) && !drag.cancelled {
+                drag.cancelled = true;
+                drag.last = None;
+                self.history.revert(world, drag.merge);
+            } else if !drag.cancelled
+                && let Some(at) = cursor
+                && let Some(change) = drag.change(
+                    &view,
+                    at,
+                    &self.snapping,
+                    self.input.shift(),
+                    self.input.ctrl(),
+                )
+                && drag.last != Some(change)
+            {
+                drag.last = Some(change);
+                self.apply_gizmo(world, &drag, change);
+            }
+            self.gizmo_drag = Some(drag);
+        }
+        let mode = Mode::of_tool(self.active_tool);
+        let (pivot, axes) = if let Some(drag) = &self.gizmo_drag {
+            // Where the drag has carried the selection.
+            match drag.last {
+                Some(Change::Move(d)) => (drag.pivot + d, drag.axes),
+                _ => (drag.pivot, drag.axes),
+            }
+        } else {
+            let mut sum = Vec3::ZERO;
+            let mut n = 0u32;
+            for &e in &self.selection {
+                if !self.has_selected_ancestor(world, e)
+                    && let Some(g) = world.get::<GlobalTransform>(e)
+                {
+                    sum += Vec3::from(g.0.translation);
+                    n += 1;
+                }
+            }
+            if n == 0 {
+                self.hovered_handle = None;
+                return;
+            }
+            let axes = match self.active().and_then(|e| world.get::<GlobalTransform>(e)) {
+                Some(g) if self.local_axes => {
+                    let m = g.0.matrix3;
+                    [m.x_axis, m.y_axis, m.z_axis].map(|a| Vec3::from(a).normalize_or_zero())
+                }
+                _ => [Vec3::X, Vec3::Y, Vec3::Z],
+            };
+            (sum / n as f32, axes)
+        };
+        self.gizmo_shown = self.gizmo.layout(&view, mode, pivot, axes, scale);
+        if self.gizmo_drag.is_some() {
+            return;
+        }
+        let free = !self.camera_drag
+            && self.command_palette.is_none()
+            && !self.add_open
+            && self.open_choice.is_none()
+            && self.renaming.is_none();
+        self.hovered_handle = match cursor {
+            Some(at) if self.gizmo_shown && free && view.contains(at) => self.gizmo.hit(at, scale),
+            _ => None,
+        };
+        if let (Some(handle), Some(at)) = (self.hovered_handle, cursor)
+            && self.input.pressed(Button::Left)
+        {
+            let targets: Vec<Target> = self
+                .selection
+                .iter()
+                .copied()
+                .filter(|&e| !self.has_selected_ancestor(world, e))
+                .filter_map(|e| {
+                    let local = *world.get::<Transform>(e)?;
+                    let global = world.get::<GlobalTransform>(e)?.0;
+                    let parent_inverse = world
+                        .parent(e)
+                        .and_then(|p| world.get::<GlobalTransform>(p))
+                        .map_or(engine_core::math::Affine3A::IDENTITY, |g| g.0.inverse());
+                    Some(Target {
+                        entity: e,
+                        world: global,
+                        parent_inverse,
+                        local,
+                    })
+                })
+                .collect();
+            self.gestures += 1;
+            self.gizmo_drag =
+                GizmoDrag::start(&self.gizmo, &view, handle, at, targets, self.gestures);
+        }
+    }
+
+    /// One frame of a gizmo drag: every target set from where it started, as one undo
+    /// step for the whole gesture. A move changes the position only and a turn keeps the
+    /// scale exact, so files get no float dust.
+    fn apply_gizmo(&mut self, world: &mut World, drag: &GizmoDrag, change: Change) {
+        self.history.begin(drag.handle.step(), Some(drag.merge));
+        for t in &drag.targets {
+            self.history.touch(world, t.entity);
+            let local = t.parent_inverse * drag.apply(change, t);
+            let (scale, rotation, translation) = local.to_scale_rotation_translation();
+            if let Some(tr) = world.get_mut::<Transform>(t.entity) {
+                *tr = t.local;
+                tr.translation = translation;
+                match change {
+                    Change::Move(_) => {}
+                    Change::Turn(_) => tr.rotation = rotation,
+                    Change::Scale(_) => tr.scale = scale,
+                }
+            }
+        }
+        self.history.commit(world);
+    }
+
     /// The scene's roots (entities with a scene id under none), as the tree shows them:
     /// by their order, those without one last in spawn order; `except` left out.
     fn roots(&mut self, world: &mut World, except: Option<Entity>) -> Vec<Entity> {
@@ -2486,6 +2674,15 @@ impl Editor {
             }
         } else if id == ids.restart_policy {
             self.pick_policy(world);
+        } else if let Some(tool) = ids.tools.iter().position(|&t| t == id) {
+            self.active_tool = tool;
+        } else if id == ids.local_axes {
+            self.local_axes = !self.local_axes;
+            self.say(String::from(if self.local_axes {
+                "The gizmo along the active entity's axes"
+            } else {
+                "The gizmo along the world's axes"
+            }));
         } else if id == ids.delete {
             let roots = self.selection_roots(world);
             if !roots.is_empty() {
@@ -3713,6 +3910,58 @@ impl<G: Game> Game for EditorGame<G> {
     }
 }
 
+/// Draws the gizmo below the UI (layer −1), clipped to the viewport: the handle `lit`
+/// (under the pointer, or dragged) in its own color.
+fn draw_gizmo(gizmo: &Gizmo, lit: Option<Handle>, rect: [u32; 4], scale: f32, canvas: &mut Canvas) {
+    canvas.set_clip(Some(ClipRect {
+        x: rect[0] as i32,
+        y: rect[1] as i32,
+        width: rect[2],
+        height: rect[3],
+    }));
+    let order = Order::layer(-1);
+    let color = |h: Handle| {
+        if Some(h) == lit {
+            COLORS[4]
+        } else {
+            h.axis().map_or(COLORS[3], |i| COLORS[i])
+        }
+    };
+    for &(h, a, b) in &gizmo.lines {
+        canvas.draw(&Quad::line(a, b, 2.0 * scale).color(color(h)).order(order));
+    }
+    for &(h, tip, direction) in &gizmo.tips {
+        let base = tip - direction * 14.0 * scale;
+        canvas.draw(
+            &Quad::line(base, tip, 7.0 * scale)
+                .color(color(h))
+                .order(order),
+        );
+    }
+    for &(h, corners) in &gizmo.quads {
+        let mut c = color(h);
+        // A square lit is filled; the others only outlined, faint.
+        if Some(h) != lit {
+            c.w = 0.75;
+        }
+        for i in 0..4 {
+            canvas.draw(
+                &Quad::line(corners[i], corners[(i + 1) % 4], 1.5 * scale)
+                    .color(c)
+                    .order(order),
+            );
+        }
+    }
+    for &(h, center, half) in &gizmo.boxes {
+        canvas.draw(
+            &Quad::solid(center, Vec2::splat(half * 2.0))
+                .color(color(h))
+                .order(order),
+        );
+    }
+    canvas.set_clip(None);
+}
+
 /// Paints the editor's shell over the player's frame.
 pub struct EditorOverlay {
     shared: Rc<RefCell<Editor>>,
@@ -3747,6 +3996,22 @@ impl Overlay for EditorOverlay {
             let mut shared = self.shared.borrow_mut();
             let editor = &mut *shared;
             self.canvas.clear();
+            if editor.gizmo_shown
+                && let Some(rect) = editor.view_rect
+            {
+                let lit = editor
+                    .gizmo_drag
+                    .as_ref()
+                    .map(|d| d.handle)
+                    .or(editor.hovered_handle);
+                draw_gizmo(
+                    &editor.gizmo,
+                    lit,
+                    rect,
+                    editor.scale.max(0.5),
+                    &mut self.canvas,
+                );
+            }
             paint(
                 &editor.ui.last_frame(),
                 &mut editor.text,
@@ -5547,6 +5812,282 @@ mod tests {
         );
         ed.end_session(&mut world);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An editor with `world`'s entity `e` selected, the gizmo laid out.
+    fn gizmo_editor(name: &str, world: &mut World, e: Entity) -> Editor {
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder(name),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.select_only(e);
+        ed.update(world);
+        ed.update(world);
+        assert!(ed.gizmo_shown, "the gizmo is shown for the selection");
+        ed
+    }
+
+    /// The x arrow on the screen: a point on it and its direction.
+    fn x_arrow(ed: &Editor) -> (Vec2, Vec2) {
+        let (_, tip, dir) = ed
+            .gizmo
+            .tips
+            .iter()
+            .copied()
+            .find(|t| t.0 == Handle::Axis(0))
+            .unwrap();
+        (tip - dir * 30.0, dir)
+    }
+
+    #[test]
+    fn the_gizmo_moves_the_selection_along_an_axis_as_one_step() {
+        let mut world = World::new();
+        let cube = world.spawn((
+            SceneId::new(),
+            Name::new("Cube"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        let mut ed = gizmo_editor("gizmo-move", &mut world, cube);
+        let (grab, dir) = x_arrow(&ed);
+        mouse(&mut ed, grab.to_array(), None);
+        ed.update(&mut world);
+        assert_eq!(ed.hovered_handle, Some(Handle::Axis(0)));
+        mouse(&mut ed, grab.to_array(), Some(true));
+        ed.update(&mut world);
+        assert!(ed.gizmo_drag.is_some(), "the press takes the arrow");
+        mouse(&mut ed, (grab + dir * 50.0).to_array(), None);
+        ed.update(&mut world);
+        let t = *world.get::<Transform>(cube).unwrap();
+        assert!(t.translation.x > 0.1, "{:?}", t.translation);
+        assert_eq!(
+            (t.translation.y, t.translation.z),
+            (0.0, 0.0),
+            "along x only"
+        );
+        // The status bar shows it from the next frame (it is built before the gizmo's).
+        ed.update(&mut world);
+        assert!(ed.status.starts_with("Move ("), "{}", ed.status);
+        mouse(&mut ed, (grab + dir * 80.0).to_array(), None);
+        ed.update(&mut world);
+        mouse(&mut ed, (grab + dir * 80.0).to_array(), Some(false));
+        ed.update(&mut world);
+        assert!(ed.gizmo_drag.is_none(), "the release ends it");
+        assert_eq!(ed.history.steps().count(), 1, "one step for the drag");
+        assert_eq!(
+            world.get::<Transform>(cube).unwrap().rotation,
+            Quat::IDENTITY,
+            "a move keeps the rotation exact"
+        );
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert_eq!(
+            world.get::<Transform>(cube).unwrap().translation,
+            Vec3::ZERO
+        );
+    }
+
+    #[test]
+    fn escape_takes_a_gizmo_drag_back_and_ctrl_rounds_to_the_grid() {
+        let mut world = World::new();
+        let cube = world.spawn((
+            SceneId::new(),
+            Transform::from_xyz(0.03, 0.0, 0.0),
+            GlobalTransform(engine_core::math::Affine3A::from_translation(Vec3::new(
+                0.03, 0.0, 0.0,
+            ))),
+        ));
+        let mut ed = gizmo_editor("gizmo-escape", &mut world, cube);
+        let x = |world: &World| world.get::<Transform>(cube).unwrap().translation.x;
+        let (grab, dir) = x_arrow(&ed);
+        mouse(&mut ed, grab.to_array(), Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, (grab + dir * 40.0).to_array(), None);
+        ed.update(&mut world);
+        assert!(x(&world) > 0.1);
+        key(&mut ed, 0x1B, 0x01, true);
+        ed.update(&mut world);
+        assert_eq!(x(&world), 0.03, "Escape: back where it was");
+        mouse(&mut ed, (grab + dir * 70.0).to_array(), None);
+        ed.update(&mut world);
+        assert_eq!(
+            x(&world),
+            0.03,
+            "the cancelled gesture changes nothing more"
+        );
+        mouse(&mut ed, (grab + dir * 70.0).to_array(), Some(false));
+        ed.update(&mut world);
+        assert_eq!(ed.history.steps().count(), 0);
+        // Ctrl: the center lands on the grid (steps of 0.1).
+        key(&mut ed, 0x1B, 0x01, false);
+        let (grab, dir) = x_arrow(&ed);
+        mouse(&mut ed, grab.to_array(), Some(true));
+        ed.update(&mut world);
+        key(&mut ed, 0x11, 0x1D, true);
+        mouse(&mut ed, (grab + dir * 47.0).to_array(), None);
+        ed.update(&mut world);
+        let snapped = x(&world);
+        assert!(snapped > 0.1, "{snapped}");
+        assert!(
+            (snapped * 10.0 - (snapped * 10.0).round()).abs() < 1e-4,
+            "on the grid: {snapped}"
+        );
+        key(&mut ed, 0x11, 0x1D, false);
+        mouse(&mut ed, (grab + dir * 47.0).to_array(), Some(false));
+        ed.update(&mut world);
+    }
+
+    #[test]
+    fn a_turn_keeps_the_scale_exact_and_the_tools_change_the_handles() {
+        let mut world = World::new();
+        let cube = world.spawn((
+            SceneId::new(),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        let mut ed = gizmo_editor("gizmo-turn", &mut world, cube);
+        // E: the rotate tool, rings only.
+        key(&mut ed, 0x45, 0x12, true);
+        ed.update(&mut world);
+        key(&mut ed, 0x45, 0x12, false);
+        ed.update(&mut world);
+        assert_eq!(ed.active_tool, 2);
+        assert!(ed.gizmo.tips.is_empty() && ed.gizmo.quads.is_empty());
+        // The ring about y: grabbed at one of its pieces, dragged along it.
+        let (_, a, b) = ed
+            .gizmo
+            .lines
+            .iter()
+            .copied()
+            .find(|l| l.0 == Handle::Ring(1))
+            .unwrap();
+        let at = (a + b) * 0.5;
+        mouse(&mut ed, at.to_array(), Some(true));
+        ed.update(&mut world);
+        assert_eq!(
+            ed.gizmo_drag.as_ref().map(|d| d.handle),
+            Some(Handle::Ring(1))
+        );
+        mouse(&mut ed, (at + (b - a).normalize() * 60.0).to_array(), None);
+        ed.update(&mut world);
+        let t = *world.get::<Transform>(cube).unwrap();
+        let (axis, angle) = t.rotation.to_axis_angle();
+        assert!(angle.abs() > 0.05, "turned: {angle}");
+        assert!(axis.y.abs() > 0.999, "about y: {axis}");
+        assert_eq!(t.scale, Vec3::ONE, "a turn keeps the scale exact");
+        mouse(
+            &mut ed,
+            (at + (b - a).normalize() * 60.0).to_array(),
+            Some(false),
+        );
+        ed.update(&mut world);
+        // R: the scale tool; Q: all of them again.
+        key(&mut ed, 0x52, 0x13, true);
+        ed.update(&mut world);
+        key(&mut ed, 0x52, 0x13, false);
+        assert_eq!(ed.active_tool, 3);
+        key(&mut ed, 0x51, 0x10, true);
+        ed.update(&mut world);
+        key(&mut ed, 0x51, 0x10, false);
+        assert_eq!(ed.active_tool, 0);
+    }
+
+    #[test]
+    fn a_child_of_a_turned_parent_moves_along_the_worlds_axis() {
+        let mut world = World::new();
+        let turn = Quat::from_rotation_y(core::f32::consts::FRAC_PI_2);
+        let parent_world = engine_core::math::Affine3A::from_rotation_translation(turn, Vec3::ZERO);
+        let parent = world.spawn((
+            SceneId::new(),
+            Transform::IDENTITY.with_rotation(turn),
+            GlobalTransform(parent_world),
+        ));
+        // Its local +x lies along the world's −z.
+        let child_local = engine_core::math::Affine3A::from_translation(Vec3::X);
+        let child = world.spawn((
+            SceneId::new(),
+            Transform::from_xyz(1.0, 0.0, 0.0),
+            GlobalTransform(parent_world * child_local),
+        ));
+        world.set_parent(child, Some(parent)).unwrap();
+        let mut ed = gizmo_editor("gizmo-child", &mut world, child);
+        let (grab, dir) = x_arrow(&ed);
+        mouse(&mut ed, grab.to_array(), Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, (grab + dir * 50.0).to_array(), None);
+        ed.update(&mut world);
+        // The world's +x is the parent's +z: the child's local z grows, its x stays.
+        let t = *world.get::<Transform>(child).unwrap();
+        assert!((t.translation.x - 1.0).abs() < 1e-4, "{:?}", t.translation);
+        assert!(t.translation.z > 0.1, "{:?}", t.translation);
+        mouse(&mut ed, (grab + dir * 50.0).to_array(), Some(false));
+        ed.update(&mut world);
+    }
+
+    /// The editor's frame on the CPU (`Editor::update`, 1600 × 900) with 200 entities:
+    /// nothing selected, then one with the gizmo; and the gizmo's layout and hit test
+    /// alone: `cargo test -p engine_editor --release --lib editor_frame_cost -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "a measurement"]
+    fn editor_frame_cost() {
+        let mut world = World::new();
+        let mut first = None;
+        for i in 0..200 {
+            let e = world.spawn((
+                SceneId::new(),
+                Name::new(format!("Cube {i}")),
+                Transform::from_xyz(i as f32 * 0.5, 0.0, 0.0),
+                GlobalTransform::default(),
+                Model::new(builtin::CUBE, builtin::MATERIAL),
+            ));
+            first.get_or_insert(e);
+        }
+        let mut ed = Editor::new(
+            [1600, 900],
+            folder("frame-cost"),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        let time = |ed: &mut Editor, world: &mut World| {
+            for _ in 0..100 {
+                ed.update(world);
+            }
+            let t = Instant::now();
+            for _ in 0..2000 {
+                ed.update(world);
+            }
+            t.elapsed().as_secs_f64() * 1e6 / 2000.0
+        };
+        let none = time(&mut ed, &mut world);
+        ed.select_only(first.unwrap());
+        let one = time(&mut ed, &mut world);
+        assert!(ed.gizmo_shown);
+        let view = ViewProj::new(&ed.orbit, ed.view_rect.unwrap());
+        let mut gizmo = Gizmo::default();
+        let t = Instant::now();
+        for _ in 0..10_000 {
+            gizmo.layout(
+                &view,
+                Mode::All,
+                Vec3::ZERO,
+                [Vec3::X, Vec3::Y, Vec3::Z],
+                1.0,
+            );
+            std::hint::black_box(gizmo.hit(Vec2::new(800.0, 450.0), 1.0));
+        }
+        let layout = t.elapsed().as_secs_f64() * 1e6 / 10_000.0;
+        println!(
+            "editor frame: nothing selected {none:.1} µs, one selected with the gizmo {one:.1} µs; \
+             the gizmo's layout and hit test {layout:.2} µs ({} lines)",
+            gizmo.lines.len()
+        );
     }
 
     /// What an autosave costs the UI thread (the scene's text), a restore (the text loaded)
