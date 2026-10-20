@@ -28,6 +28,10 @@ engine_save.workspace = true
 # Fresh asset ids for a new game's scene and materials (`new`); already built for
 # engine_save.
 engine_scene.workspace = true
+# `edit`: the editor and its restarts waited for in one job (already built for the rest).
+engine_platform.workspace = true
+# `edit`: cargo's JSON messages (already in the tree through glTF import).
+serde_json = "1"
 engine_shader.workspace = true
 # Colliders baked into Jolt's binary form for packs (ADR 0101).
 engine_physics.workspace = true

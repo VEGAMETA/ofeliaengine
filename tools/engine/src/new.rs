@@ -167,8 +167,9 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
         toml_path(&engine)
     );
     println!(
-        "next:\n  cd {}\n  cargo run --release                     play it\n  \
-         cargo run --release --features editor   edit its scene (`ofeliaengine edit`)",
+        "next:\n  cd {}\n  cargo run --release            play it\n  \
+         cargo run --features editor    edit it; a code change rebuilds and restarts it \
+         (`ofeliaengine edit`)",
         dir.display()
     );
     Ok(ExitCode::SUCCESS)
@@ -191,19 +192,23 @@ engine_app = {{ path = "{engine}/crates/engine_app" }}
 engine_editor = {{ path = "{engine}/crates/engine_editor", optional = true }}
 
 [features]
-# `cargo run --release --features editor` (or `ofeliaengine edit`): `engine_app::main!`
-# runs the editor around the game.
+# `cargo run --features editor` (or `ofeliaengine edit`): `engine_app::main!` runs the
+# editor around the game, which rebuilds it when its code changes.
 editor = ["dep:engine_editor"]
 
 # A workspace of its own, even inside another folder that has one.
 [workspace]
 
-# The engine's build settings: your code builds fast, the engine runs fast.
+# The engine's build settings: your code builds fast, the engine runs fast. The editor
+# builds with this profile: file and line for your code in panics and the debugger, none
+# written for the engine's, so a change rebuilds in about 1.5 s.
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 [profile.release]
 opt-level = 3
@@ -237,8 +242,8 @@ fn readme(name: &str, engine: &Path) -> String {
         "# {name}\n\n\
          A game on ofeliaengine, started from its quick start.\n\n\
          ```text\n\
-         cargo run --release                     # play it\n\
-         cargo run --release --features editor   # edit its scene (`ofeliaengine edit`)\n\
+         cargo run --release           # play it\n\
+         cargo run --features editor   # edit it (`ofeliaengine edit`): a code change rebuilds and restarts it\n\
          ```\n\n\
          A red cube turns on a floor; fly around it with WASD and the mouse.\n\
          `src/main.rs` is the game's code, `scenes/main.scene` its scene (what the editor\n\

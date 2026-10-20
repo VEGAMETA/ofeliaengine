@@ -44,6 +44,9 @@
 //!   Ctrl+Y or Ctrl+Shift+Z redo, Ctrl+S save, Delete, Ctrl+D duplicate, Ctrl+A add, Y
 //!   snapping by default, F2 rename.
 
+use crate::build::{
+    self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
+};
 use crate::camera::OrbitCamera;
 use crate::icons;
 use crate::input::{Button, InputCollector};
@@ -132,15 +135,80 @@ pub fn run<G: Game>(settings: PlayerSettings, start: Start<G>) -> Result<(), Err
     run_frames(settings, start, None).map(|_| ())
 }
 
+/// Runs the editor around a game whose code it builds while it runs (ADR 0107 §1, E1-5c):
+/// what `engine_app::main!` calls with the game's `editor` feature, `game` being the
+/// game's crate.
+///
+/// - A change to the game's code (or to the engine's) is built in the background, at a
+///   lower priority; the status bar shows the build and its errors ("Build: Show
+///   Errors…").
+/// - The new build restarts the editor: by itself while its window is in the background,
+///   offered (Ctrl+R) while it is in front ("Editor: Restart Policy…"); the session comes
+///   back as it was.
+/// - It builds while it runs a slot's copy of the game (`.ofelia/run/`), as
+///   `ofeliaengine edit` starts it: under `cargo run`, cargo's own file cannot be written
+///   over while it runs.
+///
+/// Its messages go to stderr and `%LOCALAPPDATA%/ofeliaengine/logs/<game>-editor.log`.
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn run_game<G: Game>(
+    settings: PlayerSettings,
+    start: Start<G>,
+    game: GameCrate,
+) -> Result<(), Error> {
+    let name = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| String::from("game"));
+    let _log = engine_log::init(&engine_log::LogConfig {
+        file: Some(engine_log::report::log_file(&format!("{name}-editor"))),
+        ..engine_log::LogConfig::default()
+    });
+    // Started as cargo's own file (`cargo run`): a copy in a slot runs instead, so builds
+    // can write that file, and this process ends before it opens a window.
+    if let Ok(exe) = std::env::current_exe()
+        && !in_slot(&game, &exe)
+    {
+        let files = [exe.clone(), exe.with_extension("pdb")];
+        match build::copy_to_slot(&game.run_dir(), &exe, &files, &exe) {
+            Ok(copy) => {
+                let mut command = std::process::Command::new(&copy);
+                command
+                    .args(std::env::args_os().skip(1))
+                    .env(BUILD_VAR, &exe);
+                if let Ok(dir) = std::env::current_dir() {
+                    command.current_dir(dir);
+                }
+                command.spawn()?;
+                return Ok(());
+            }
+            Err(e) => log::warn!(target: "engine_editor", "code changes are not built: {e}"),
+        }
+    }
+    run_inner(settings, start, None, Some(game)).map(|_| ())
+}
+
 /// [`run`] for `frames` frames at most (smoke runs): how many ran.
 ///
 /// # Errors
 ///
 /// As [`run`].
 pub fn run_frames<G: Game>(
+    settings: PlayerSettings,
+    start: Start<G>,
+    frames: Option<u64>,
+) -> Result<u64, Error> {
+    run_inner(settings, start, frames, None)
+}
+
+fn run_inner<G: Game>(
     mut settings: PlayerSettings,
     start: Start<G>,
     frames: Option<u64>,
+    game_crate: Option<GameCrate>,
 ) -> Result<u64, Error> {
     // The editor keeps Windows' power throttling (the team's decision, CLAUDE.md §5): it
     // saves power while its window is in the background.
@@ -158,9 +226,12 @@ pub fn run_frames<G: Game>(
     let (mut game, mut overlay) = editor(&mut player, &settings, start)?;
     // The scene's unsaved changes from the last run, back (ADR 0107 §4).
     game.begin_session(&mut player)?;
+    if let Some(game_crate) = game_crate {
+        game.begin_builds(game_crate);
+    }
     let mut count = 0;
     let mut result: Result<(), Error> = Ok(());
-    while !player.closing() && frames.is_none_or(|n| count < n) {
+    while !player.closing() && !game.quitting() && frames.is_none_or(|n| count < n) {
         if let Err(e) = player.frame_overlaid(&mut game, Some(&mut overlay)) {
             result = Err(e.into());
             break;
@@ -172,7 +243,31 @@ pub fn run_frames<G: Game>(
     // Nothing is asked at the exit: unsaved changes stay in the session.
     game.end_session(player.world_mut());
     overlay.destroy(&mut player)?;
+    // A restart: the new build starts while this window is still up, the lock let go.
+    if let Some((exe, artifact)) = game.restart_with() {
+        spawn_restart(&exe, artifact.as_deref())?;
+    }
     result.map(|()| count)
+}
+
+/// Starts the editor again from a new build's slot copy, in this process's folder with its
+/// arguments: `ENGINE_EDITOR_RESTART` says when, `ENGINE_EDITOR_BUILD` which build.
+fn spawn_restart(exe: &Path, artifact: Option<&Path>) -> std::io::Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(std::env::args_os().skip(1))
+        .env(RESTART_VAR, now.to_string());
+    match artifact {
+        Some(a) => command.env(BUILD_VAR, a),
+        None => command.env_remove(BUILD_VAR),
+    };
+    if let Ok(dir) = std::env::current_dir() {
+        command.current_dir(dir);
+    }
+    command.spawn().map(drop)
 }
 
 /// The editor's two halves for a player: the game it wraps (window events, the frame's
@@ -277,6 +372,13 @@ struct CommandIds {
     save_over_disk: CommandId,
     /// The scene's autosaves in the palette, to bring one back.
     restore_autosave: CommandId,
+    /// The new build, now (Ctrl+R).
+    restart: CommandId,
+    /// The last build's errors in the palette, to open one in VS Code.
+    build_errors: CommandId,
+    build_now: CommandId,
+    /// What a new build does: by itself in the background, always, or ask.
+    restart_policy: CommandId,
     /// "Add Cube" and the rest: the add menu's kinds, in its order.
     add_kinds: [CommandId; ADD.len()],
 }
@@ -314,6 +416,10 @@ fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
             "Scene",
             "Restore Unsaved Changes…",
         ),
+        restart: c.register("editor.restart", "Editor", "Restart with the New Build"),
+        build_errors: c.register("build.errors", "Build", "Show Errors…"),
+        build_now: c.register("build.now", "Build", "Build the Game's Code"),
+        restart_policy: c.register("editor.restart_policy", "Editor", "Restart Policy…"),
         add_kinds: ADD.map(|kind| {
             let name = format!("scene.add.{}", kind.to_lowercase().replace(' ', "_"));
             c.register(&name, "Scene", &format!("Add {kind}"))
@@ -343,6 +449,7 @@ fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
         ("F2", ids.rename),
         ("Ctrl+Shift+P", ids.palette),
         ("Ctrl+P", ids.find),
+        ("Ctrl+R", ids.restart),
     ]
     .map(|(chord, id)| (chord, id, KeyContext::Global));
     for (chord, id, context) in global.into_iter().chain(tree) {
@@ -415,9 +522,67 @@ struct Choices {
 struct Choice {
     label: String,
     detail: String,
-    /// The autosave it brings back.
-    path: PathBuf,
+    pick: Pick,
 }
+
+/// What picking a palette list's item does.
+#[derive(Debug, Clone)]
+enum Pick {
+    /// Brings back this autosave.
+    Autosave(PathBuf),
+    /// Opens the last build's error with this index in VS Code.
+    Problem(usize),
+    Policy(RestartPolicy),
+}
+
+/// What a new build does (team decision, 2026-10-20): by itself while the editor's window
+/// is in the background (the developer is in the code editor), offered while it is in
+/// front; or always by itself, or always asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum RestartPolicy {
+    #[default]
+    Background,
+    Always,
+    Ask,
+}
+
+impl RestartPolicy {
+    const ALL: [Self; 3] = [Self::Background, Self::Always, Self::Ask];
+
+    /// Its name in the session file.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Always => "always",
+            Self::Ask => "ask",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Background => "Restart by itself while the editor is in the background",
+            Self::Always => "Always restart by itself",
+            Self::Ask => "Always ask before restarting",
+        }
+    }
+}
+
+/// Where the game's code stands, for the status bar.
+#[derive(Debug, Clone, Default)]
+enum BuildState {
+    #[default]
+    Idle,
+    Building(Instant),
+    /// What the status bar says about it.
+    Failed(String),
+}
+
+/// What the editor says when it does not build the game's code.
+const NOT_BUILDING: &str = "Code changes are built while the editor runs from `ofeliaengine edit`";
 
 /// The command palette while it is open: one box for every command and, after `@`, the
 /// scene's objects (`docs/research/ux/command-palette.md`); or a list to pick from.
@@ -540,6 +705,24 @@ struct Editor {
     /// The session in the project's `.ofelia/` (ADR 0107 §4): none until
     /// `begin_session`, so editors that tests and tools make write nothing there.
     session: Option<Session>,
+    /// The game's crate when the editor runs inside the game's build (`run_game`).
+    game_crate: Option<GameCrate>,
+    /// Builds of the game's code (E1-5c): none until `begin_builds`, nor while the
+    /// editor runs cargo's own file.
+    builds: Option<Builds>,
+    /// The last build's errors, for "Build: Show Errors…".
+    problems: Vec<Problem>,
+    build_state: BuildState,
+    /// A new build waiting for a restart: its slot's executable, and cargo's path of it.
+    ready: Option<(PathBuf, Option<PathBuf>)>,
+    /// The editor restarts with this build once its frame loop ends.
+    restart_with: Option<(PathBuf, Option<PathBuf>)>,
+    /// The window has the keyboard: a new build is offered, not taken.
+    focused: bool,
+    /// A restart started this editor then (nanoseconds since 1970): told at its first
+    /// frame.
+    restarted_at: Option<u128>,
+    restart_policy: RestartPolicy,
     /// The scene tab: the file's name, then `*` with unsaved changes.
     scene_label: String,
     /// Where the player's assets are, for showing and saving references by path.
@@ -783,6 +966,15 @@ impl Editor {
             scene_id,
             saved_head: 0,
             session: None,
+            game_crate: None,
+            builds: None,
+            problems: Vec::new(),
+            build_state: BuildState::Idle,
+            ready: None,
+            restart_with: None,
+            focused: false,
+            restarted_at: std::env::var(RESTART_VAR).ok().and_then(|v| v.parse().ok()),
+            restart_policy: RestartPolicy::Background,
             scene_label: String::new(),
             assets,
             pending_assets: AssetPaths::new(),
@@ -830,7 +1022,12 @@ impl Editor {
                 self.size = [width, height];
             }
             WindowEventKind::ScaleChanged { dpi } => self.scale = dpi as f32 / 96.0,
-            WindowEventKind::Focused(false) => input.focus_lost(),
+            WindowEventKind::Focused(focused) => {
+                if !focused {
+                    input.focus_lost();
+                }
+                self.focused = focused;
+            }
             WindowEventKind::CursorMoved { x, y } => input.cursor_moved(x as f32, y as f32),
             WindowEventKind::CursorLeft => input.cursor_left(),
             WindowEventKind::MouseButton { button, pressed } => {
@@ -974,6 +1171,7 @@ impl Editor {
     #[allow(clippy::too_many_lines)]
     fn update(&mut self, world: &mut World) {
         self.tick_session(world);
+        self.tick_builds(world);
         let camera = self.camera(world);
         self.collect_rows(world);
         self.frames += 1;
@@ -1157,6 +1355,23 @@ impl Editor {
             label: ADD[i],
         });
         self.status.clear();
+        match &self.build_state {
+            BuildState::Building(since) => {
+                let _ = write!(
+                    self.status,
+                    "Building the game's code… {:.1} s  ·  ",
+                    since.elapsed().as_secs_f32()
+                );
+            }
+            BuildState::Failed(text) => {
+                let _ = write!(self.status, "{text} (Build: Show Errors…)  ·  ");
+            }
+            BuildState::Idle if self.ready.is_some() => {
+                self.status
+                    .push_str("The new build is ready: Ctrl+R restarts with it  ·  ");
+            }
+            BuildState::Idle => {}
+        }
         if self.session.as_ref().is_some_and(|s| s.conflict) {
             let _ = write!(
                 self.status,
@@ -1854,8 +2069,11 @@ impl Editor {
                 let i = cp.first + row;
                 if let Some(choices) = &cp.choices {
                     if let Some(&(item, _)) = choices.shown.get(i) {
-                        let path = choices.items[item].path.clone();
-                        self.restore_autosave(world, &path);
+                        match choices.items[item].pick.clone() {
+                            Pick::Autosave(path) => self.restore_autosave(world, &path),
+                            Pick::Problem(p) => self.open_problem(p),
+                            Pick::Policy(p) => self.set_restart_policy(world, p),
+                        }
                     }
                 } else if cp.finds_objects() {
                     if let Some(found) = cp.objects.get(i) {
@@ -2122,6 +2340,17 @@ impl Editor {
             self.take_disk_version(world);
         } else if id == ids.restore_autosave {
             self.pick_autosave(world);
+        } else if id == ids.restart {
+            self.restart(world);
+        } else if id == ids.build_errors {
+            self.pick_problem(world);
+        } else if id == ids.build_now {
+            match &self.builds {
+                Some(builds) => builds.build_now(),
+                None => self.say(String::from(NOT_BUILDING)),
+            }
+        } else if id == ids.restart_policy {
+            self.pick_policy(world);
         } else if id == ids.delete {
             let roots = self.selection_roots(world);
             if !roots.is_empty() {
@@ -2387,7 +2616,27 @@ impl Editor {
     /// or its crash, without asking. Returns the asset paths the restored scene named.
     fn begin_session(&mut self, world: &mut World) -> Result<AssetPaths, Error> {
         let dir = self.root.join(session::DIR);
-        let (mut lock, last) = Lock::take(&dir)?;
+        let mut tries = 0;
+        let mut timer = None;
+        let (mut lock, last) = loop {
+            match Lock::take(&dir) {
+                Ok(taken) => break taken,
+                // A restart's new editor: the last one is letting go of the project.
+                Err(e) if self.restarted_at.is_some() && e.contains("another editor") => {
+                    tries += 1;
+                    if tries > 200 {
+                        return Err(e.into());
+                    }
+                    if timer.is_none() {
+                        timer = engine_platform::time::HighResTimer::new().ok();
+                    }
+                    if let Some(t) = &timer {
+                        let _ = t.sleep(Duration::from_millis(50));
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
         let file = self.scene_path.as_ref().map(|p| self.root.join(p));
         let mut s = Session {
             lock: None,
@@ -2516,6 +2765,9 @@ impl Editor {
                 self.commands.ran(id);
             }
         }
+        if let Some(policy) = state.restart.as_deref().and_then(RestartPolicy::from_name) {
+            self.restart_policy = policy;
+        }
     }
 
     /// A scene's view from a session: the camera, the selection by scene ids (those gone
@@ -2615,6 +2867,7 @@ impl Editor {
                 .iter()
                 .map(|&id| self.commands.info(id).name.clone())
                 .collect(),
+            restart: Some(String::from(self.restart_policy.name())),
         };
         let view = self.view(world);
         let Some(s) = &mut self.session else {
@@ -2838,6 +3091,195 @@ impl Editor {
         Ok(())
     }
 
+    /// Starts building the game's code on changes (E1-5c) when the editor runs a slot's
+    /// copy of the game, as `ofeliaengine edit` starts it: `cargo run` runs cargo's own
+    /// file, which a build cannot write over while it runs.
+    fn begin_builds(&mut self, game: GameCrate) {
+        let running = std::env::current_exe().unwrap_or_default();
+        if !in_slot(&game, &running) {
+            self.say(String::from(NOT_BUILDING));
+            self.game_crate = Some(game);
+            return;
+        }
+        let artifact = std::env::var_os(BUILD_VAR).map(PathBuf::from);
+        match Builds::start(&game, running, artifact) {
+            Ok(builds) => self.builds = Some(builds),
+            Err(e) => self.say(format!("Code changes are not built: {e}")),
+        }
+        self.game_crate = Some(game);
+    }
+
+    /// The builds' part of the frame: what the builder did, and a new build taken when
+    /// the restart policy says so.
+    fn tick_builds(&mut self, world: &mut World) {
+        if let Some(at) = self.restarted_at.take() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let took = now.saturating_sub(at) as f64 / 1e9;
+            self.say(format!("Restarted with the new build in {took:.2} s"));
+        }
+        let events: Vec<BuildEvent> = self
+            .builds
+            .as_ref()
+            .map(|b| b.events().collect())
+            .unwrap_or_default();
+        for event in events {
+            match event {
+                BuildEvent::Started => self.build_state = BuildState::Building(Instant::now()),
+                BuildEvent::Finished(built) => self.finished_build(built),
+            }
+        }
+        if self.ready.is_some()
+            && self.restart_with.is_none()
+            && self.restarts_by_itself()
+            && !self.gesture()
+        {
+            self.restart(world);
+        }
+    }
+
+    /// Whether a new build restarts the editor without being asked.
+    fn restarts_by_itself(&self) -> bool {
+        match self.restart_policy {
+            RestartPolicy::Background => !self.focused,
+            RestartPolicy::Always => true,
+            RestartPolicy::Ask => false,
+        }
+    }
+
+    fn finished_build(&mut self, built: Built) {
+        if built.success {
+            self.problems.clear();
+            self.build_state = BuildState::Idle;
+            let took = built.took.as_secs_f32();
+            match built.exe {
+                Some(exe) => {
+                    self.ready = Some((exe, built.artifact));
+                    self.say(format!("Built in {took:.1} s"));
+                }
+                None => self.say(format!("Built in {took:.1} s: nothing changed")),
+            }
+            return;
+        }
+        let game = self
+            .game_crate
+            .as_ref()
+            .map_or_else(|| self.root.clone(), |g| g.manifest_dir.clone());
+        let n = built.errors.len();
+        let text = match (built.errors.first(), &built.failure) {
+            (Some(first), _) => format!(
+                "Build failed: {n} error{}, {}: {}",
+                if n == 1 { "" } else { "s" },
+                first.location(&game),
+                first.message
+            ),
+            (None, Some(failure)) => format!("Build failed: {failure}"),
+            (None, None) => String::from("Build failed"),
+        };
+        log::warn!(target: "engine_editor", "{text}");
+        self.problems = built.errors;
+        self.build_state = BuildState::Failed(text);
+    }
+
+    /// Restarts with the new build: the session saved (the unsaved changes, the view),
+    /// then the frame loop ends and the build starts in a new process (`run_game`).
+    fn restart(&mut self, world: &mut World) {
+        let Some(ready) = self.ready.take() else {
+            self.say(String::from(if self.builds.is_some() {
+                "No new build to restart with yet"
+            } else {
+                NOT_BUILDING
+            }));
+            return;
+        };
+        self.save_session(world);
+        self.restart_with = Some(ready);
+    }
+
+    /// "Build: Show Errors…": the last build's errors in the palette.
+    fn pick_problem(&mut self, world: &mut World) {
+        if self.problems.is_empty() {
+            self.say(String::from("The last build had no errors"));
+            return;
+        }
+        let game = self
+            .game_crate
+            .as_ref()
+            .map_or_else(|| self.root.clone(), |g| g.manifest_dir.clone());
+        let items = self
+            .problems
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Choice {
+                label: p.location(&game),
+                detail: p.message.clone(),
+                pick: Pick::Problem(i),
+            })
+            .collect();
+        self.open_list(world, "Pick an error to open it in VS Code", items);
+    }
+
+    /// Opens an error at its line in VS Code (`code -g`); without VS Code, its place goes
+    /// to the clipboard.
+    fn open_problem(&mut self, index: usize) {
+        let Some(problem) = self.problems.get(index) else {
+            return;
+        };
+        let Some((path, line, column)) = &problem.at else {
+            let message = problem.message.clone();
+            self.say(message);
+            return;
+        };
+        let place = format!("{}:{line}:{column}", path.display());
+        let mut command = std::process::Command::new("code.cmd");
+        command.args(["-g", &place]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NO_WINDOW: the batch file's console stays hidden.
+            command.creation_flags(0x0800_0000);
+        }
+        if command.spawn().is_ok() {
+            self.say(format!("Opened {place} in VS Code"));
+        } else {
+            self.input.clipboard.set_text(&place);
+            self.say(format!("VS Code (`code`) is not on PATH: copied {place}"));
+        }
+    }
+
+    /// "Editor: Restart Policy…": what a new build does, in the palette.
+    fn pick_policy(&mut self, world: &mut World) {
+        let items = RestartPolicy::ALL
+            .into_iter()
+            .map(|p| Choice {
+                label: String::from(p.label()),
+                detail: String::from(if p == self.restart_policy { "now" } else { "" }),
+                pick: Pick::Policy(p),
+            })
+            .collect();
+        self.open_list(world, "What a new build of the game's code does", items);
+    }
+
+    fn set_restart_policy(&mut self, world: &mut World, policy: RestartPolicy) {
+        self.restart_policy = policy;
+        self.write_session(world);
+        self.say(String::from(policy.label()));
+    }
+
+    /// Opens the palette as a list to pick from.
+    fn open_list(&mut self, world: &mut World, hint: &'static str, items: Vec<Choice>) {
+        self.open_palette(world, "");
+        if let Some(cp) = &mut self.command_palette {
+            cp.choices = Some(Choices {
+                hint,
+                items,
+                shown: Vec::new(),
+            });
+        }
+        self.search_palette(world);
+    }
+
     /// "Restore Unsaved Changes…": the scene's autosaves in the palette, the newest first
     /// (the latest, the two older, one kept after a conflict).
     fn pick_autosave(&mut self, world: &mut World) {
@@ -2871,18 +3313,10 @@ impl Editor {
             .map(|(time, path, kind)| Choice {
                 label: format!("{name} from {}", ago(time)),
                 detail: String::from(kind),
-                path,
+                pick: Pick::Autosave(path),
             })
             .collect();
-        self.open_palette(world, "");
-        if let Some(cp) = &mut self.command_palette {
-            cp.choices = Some(Choices {
-                hint: "Pick the unsaved changes to bring back",
-                items,
-                shown: Vec::new(),
-            });
-        }
-        self.search_palette(world);
+        self.open_list(world, "Pick the unsaved changes to bring back", items);
     }
 
     /// The scene of a picked autosave in place of the scene, as one undo step: Ctrl+Z
@@ -2951,6 +3385,23 @@ impl<G> EditorGame<G> {
     /// before Play and before a restart.
     pub fn save_session(&mut self, world: &mut World) {
         self.shared.borrow_mut().save_session(world);
+    }
+
+    /// Builds the game's code on changes while the editor runs a slot's copy of the game
+    /// (`run_game` calls it).
+    pub fn begin_builds(&mut self, game: GameCrate) {
+        self.shared.borrow_mut().begin_builds(game);
+    }
+
+    /// The editor is restarting with a new build: its frame loop ends.
+    pub fn quitting(&self) -> bool {
+        self.shared.borrow().restart_with.is_some()
+    }
+
+    /// The build to restart with, once the frame loop has ended: its slot's executable,
+    /// and cargo's path of it.
+    pub fn restart_with(&mut self) -> Option<(PathBuf, Option<PathBuf>)> {
+        self.shared.borrow_mut().restart_with.take()
     }
 
     /// Ends the session at a clean exit: the unsaved changes autosaved, every write on the
@@ -4669,6 +5120,138 @@ mod tests {
         ed.open_palette(&mut world, "");
         assert!(ed.command_palette.as_ref().unwrap().choices.is_none());
         ed.end_session(&mut world);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_build_restarts_by_itself_in_the_background_and_is_offered_in_front() {
+        let dir = project("rebuild-policy");
+        let (mut world, mut ed) = start(&dir);
+        let slot = dir.join(".ofelia/run/b/game.exe");
+        let built = || Built {
+            success: true,
+            took: Duration::from_millis(1480),
+            exe: Some(slot.clone()),
+            artifact: Some(PathBuf::from("C:\\t\\debug\\game.exe")),
+            ..Built::default()
+        };
+        // In front: offered, and Ctrl+R takes it.
+        event(&mut ed, WindowEventKind::Focused(true));
+        ed.finished_build(built());
+        ed.update(&mut world);
+        assert!(ed.restart_with.is_none(), "offered, not taken");
+        assert!(ed.status.contains("Ctrl+R restarts"), "{}", ed.status);
+        let restart = ed.ids.restart;
+        ed.run(&mut world, restart);
+        assert_eq!(
+            ed.restart_with.as_ref().map(|(exe, _)| exe),
+            Some(&slot),
+            "Ctrl+R restarts with it"
+        );
+        // In the background: taken by itself, the session saved first.
+        ed.restart_with = None;
+        move_cube(&mut ed, &mut world, 3.0);
+        event(&mut ed, WindowEventKind::Focused(false));
+        ed.finished_build(built());
+        ed.update(&mut world);
+        assert!(ed.restart_with.is_some(), "taken in the background");
+        let autosave = autosave_of(&ed);
+        assert!(autosave.is_file(), "the session saved before the restart");
+        // Asked always: never by itself.
+        ed.restart_with = None;
+        ed.restart_policy = RestartPolicy::Ask;
+        ed.finished_build(built());
+        ed.update(&mut world);
+        assert!(ed.restart_with.is_none());
+        ed.end_session(&mut world);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_build_shows_its_errors_by_line() {
+        let dir = project("rebuild-errors");
+        let (mut world, mut ed) = start(&dir);
+        ed.game_crate = Some(GameCrate::new(dir.clone()));
+        ed.finished_build(Built {
+            success: false,
+            errors: vec![
+                Problem {
+                    at: Some((dir.join("src").join("main.rs"), 12, 5)),
+                    message: String::from("mismatched types"),
+                },
+                Problem {
+                    at: None,
+                    message: String::from("linking failed"),
+                },
+            ],
+            ..Built::default()
+        });
+        ed.update(&mut world);
+        assert!(
+            ed.status
+                .contains("Build failed: 2 errors, src/main.rs:12:5: mismatched types"),
+            "{}",
+            ed.status
+        );
+        let errors = ed.ids.build_errors;
+        ed.run(&mut world, errors);
+        let cp = ed.command_palette.as_ref().unwrap();
+        let labels: Vec<&str> = cp
+            .choices
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert_eq!(labels, ["src/main.rs:12:5", "the build"]);
+        // The next good build clears them.
+        ed.command_palette = None;
+        ed.finished_build(Built {
+            success: true,
+            ..Built::default()
+        });
+        ed.update(&mut world);
+        assert!(!ed.status.contains("Build failed"), "{}", ed.status);
+        assert!(ed.problems.is_empty());
+        // Without builds (cargo's own file), the commands say how to get them.
+        let now = ed.ids.build_now;
+        ed.run(&mut world, now);
+        assert_eq!(message(&ed), NOT_BUILDING);
+        ed.end_session(&mut world);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_restart_policy_is_picked_in_the_palette_and_kept() {
+        let dir = project("rebuild-kept");
+        let (mut world, mut ed) = start(&dir);
+        let policy = ed.ids.restart_policy;
+        ed.run(&mut world, policy);
+        let labels: Vec<String> = ed
+            .command_palette
+            .as_ref()
+            .unwrap()
+            .choices
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|c| c.label.clone())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Restart by itself while the editor is in the background",
+                "Always restart by itself",
+                "Always ask before restarting"
+            ]
+        );
+        ed.palette_action(&mut world, PaletteAction::Run(2));
+        assert_eq!(ed.restart_policy, RestartPolicy::Ask);
+        ed.end_session(&mut world);
+        let (_, ed) = start(&dir);
+        assert_eq!(ed.restart_policy, RestartPolicy::Ask);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

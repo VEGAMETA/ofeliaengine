@@ -54,15 +54,18 @@ A red cube turns on a floor. Fly around it: **WASD** moves, the **mouse** looks.
 ## 4. Edit it
 
 ```text
-cargo run --release --features editor
+cargo run --features editor
 ```
 
-The same game in its editor (`ofeliaengine edit` runs this). It opens `scenes/main.scene`:
+The same game in its editor (`ofeliaengine edit` starts it too). It opens
+`scenes/main.scene`:
 
 - **Click the cube** in the scene tree, then drag its numbers in the inspector: it moves
   as you drag, and Ctrl+Z takes it back.
 - **Add** a light or another cube with **+** in the scene tree (or Ctrl+A).
 - **Ctrl+S** saves the scene; `cargo run --release` plays what you saved.
+- **Change the code** (the cube's speed in `src/main.rs`) and save: the editor rebuilds the
+  game in the background and restarts with it, the scene as it was.
 
 The first build with the editor compiles it too. Its keys and tools:
 [editor.md](editor.md).

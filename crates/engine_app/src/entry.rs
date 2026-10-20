@@ -55,9 +55,14 @@ macro_rules! main {
         #[allow(unexpected_cfgs)]
         fn main() -> ::std::result::Result<(), ::std::boxed::Box<dyn ::std::error::Error>> {
             let settings = $settings()?;
+            // The editor builds the game's code while it runs: this crate's.
             #[cfg(feature = "editor")]
             {
-                ::engine_editor::run(settings, $start)
+                ::engine_editor::run_game(
+                    settings,
+                    $start,
+                    ::engine_editor::GameCrate::new(env!("CARGO_MANIFEST_DIR")),
+                )
             }
             #[cfg(not(feature = "editor"))]
             {

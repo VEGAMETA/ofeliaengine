@@ -7,11 +7,13 @@ is drawn over the frame. Your components and systems are native in it.
 In your game's folder (a game made by `ofeliaengine new` has the `editor` feature):
 
 ```text
-cargo run --release --features editor
+cargo run --features editor
 ```
 
-`ofeliaengine edit [DIR]` runs the same, after checking that the game's `Cargo.toml` has
-the feature. The editor opens the scene of the game's settings (`PlayerSettings::scene`).
+`ofeliaengine edit [DIR]` starts it too, and keeps the console with the editor; when the
+first build fails, it starts the last good one. The editor opens the scene of the game's
+settings (`PlayerSettings::scene`), and rebuilds the game when its code changes
+([below](#code-changes)).
 
 Without a game, the editor's own binary opens a scene file:
 
@@ -247,11 +249,41 @@ What it costs (ref-1, release): the autosave's text is made on the editor's thre
 writing happens on a thread of its own. 0.15 ms for a scene of 200 entities, 8.9 ms for
 10,000 (once per 30 s at most, at a quiet moment).
 
+## Code changes
+
+The editor rebuilds your game while it runs (ADR 0107 §1):
+
+- **A change to its code** starts `cargo build --features editor` in the background,
+  below normal priority. That is a change in `src/`, in `Cargo.toml`, or in the engine's
+  sources the game was built from. The status bar shows the build, and a change during
+  it builds again after it.
+- **Errors** show in the status bar, the first one with its file and line. **Build: Show
+  Errors…** (Ctrl+Shift+P) lists them all. The one you pick opens at its line in VS Code
+  (`code` on `PATH`); without VS Code, its place goes to the clipboard.
+- **The new build restarts the editor** with the session as it was: the scene's unsaved
+  changes, the camera, the selection.
+  - While the editor's window is in the background (you are typing code), it restarts
+    by itself.
+  - While the window is in front, it offers the restart: **Ctrl+R** (Editor: Restart with
+    the New Build).
+  - **Editor: Restart Policy…** makes it always restart by itself, or always ask.
+- **Builds use the dev profile** `ofeliaengine new` writes (team decision, 2026-10-20):
+  - your code at `opt-level` 1, with file and line debug info; the engine at 3, without
+    debug info;
+  - on ref-1 a change to the quick start's code rebuilds in about 1.5–1.6 s (release: 3.0 s),
+    and the restart takes 0.36–0.37 s;
+  - your code runs slower in the editor than in a release build, so measure your game's
+    speed in a release build.
+- **The editor runs a copy of the build** from `.ofelia/run/`: three slots, each the
+  executable and its PDB. Windows keeps a running program's file locked, and cargo must
+  write its own. Run under `cargo run --features editor`, the editor moves into a slot
+  before its window opens.
+
 ## Coming next
 
 | Phase | What |
 |---|---|
-| E1-5c | rebuild and restart after a code change |
+| E1-5c-2 | the restart without a gap: the new window at the old one's place, shown at its first frame, the old editor back if the new build fails at start |
 | E2 | selection in the viewport, gizmos, placement by drag and drop |
 | E3 | Play on a copy of the world |
 

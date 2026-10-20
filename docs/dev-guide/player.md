@@ -96,7 +96,7 @@ engine_app::main!(settings, start);
 - **Without the game's `editor` feature,** `main` runs the player:
   `engine_app::run(settings, start)` makes it, loads the scene, makes the game with
   `start` and runs it until the window closes.
-- **With it** (`cargo run --release --features editor`, or `ofeliaengine edit`), the
+- **With it** (`cargo run --features editor`, or `ofeliaengine edit`), the
   editor runs around the game ([editor.md](editor.md)); `start` makes the game when Play
   starts.
 - **`find_named(world, name)`** finds an entity by its `Name`, the one the editor's tree

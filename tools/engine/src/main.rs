@@ -91,9 +91,12 @@ usage:
                                                    sounds folder
   ofeliaengine edit [DIR] [-- <ARGS>...]
                                                    the game in DIR (default: the working
-                                                   folder) in its editor: cargo run
-                                                   --release --features editor there, ARGS
-                                                   passed to the game
+                                                   folder) in its editor: built with its
+                                                   editor feature (the dev profile), run
+                                                   as a copy in .ofelia/run/ so code
+                                                   changes rebuild and restart it, waited
+                                                   for; a failed build starts the last
+                                                   good one; ARGS passed to the game
   ofeliaengine sounds build <DIR> -o <OUT.pack> [--level <N>]
                                                    every sound file under the folder (WAV,
                                                    Ogg Vorbis, Opus, FLAC) into a sound pack
