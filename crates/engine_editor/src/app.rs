@@ -222,44 +222,169 @@ fn run_inner<G: Game>(
             height: 900,
         };
     }
+    // A restart's new editor opens hidden where the last one's window was, and shows
+    // its first frame over it (E1-5c-2); any start opens where the session's window was.
+    let restarted = Restarted::from_env();
+    let root = settings
+        .project
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    if let Some(placement) = session::peek_window(&root.join(session::DIR)) {
+        settings.window_placement = Some(placement);
+    }
+    settings.start_hidden = restarted.is_some();
     let mut player = Player::new(&settings)?;
     let (mut game, mut overlay) = editor(&mut player, &settings, start)?;
     // The scene's unsaved changes from the last run, back (ADR 0107 §4).
     game.begin_session(&mut player)?;
+    let run_dir = game_crate.as_ref().map(GameCrate::run_dir);
     if let Some(game_crate) = game_crate {
         game.begin_builds(game_crate);
     }
     let mut count = 0;
     let mut result: Result<(), Error> = Ok(());
-    while !player.closing() && !game.quitting() && frames.is_none_or(|n| count < n) {
-        if let Err(e) = player.frame_overlaid(&mut game, Some(&mut overlay)) {
-            result = Err(e.into());
-            break;
+    loop {
+        while !player.closing() && !game.quitting() && frames.is_none_or(|n| count < n) {
+            if let Err(e) = player.frame_overlaid(&mut game, Some(&mut overlay)) {
+                result = Err(e.into());
+                break;
+            }
+            player.set_view_rect(game.view_rect());
+            game.sync_assets(&mut player);
+            count += 1;
+            if count % 30 == 1 {
+                game.note_window(player.window_placement());
+            }
+            // Its second frame drawn: shown, and the last editor told it can go.
+            if count == 2
+                && let Some(r) = &restarted
+            {
+                player.show_window(r.front);
+                if let (Some(from), Some(run_dir)) = (r.from, &run_dir) {
+                    let _ = std::fs::write(run_dir.join(format!("up-{from}")), b"");
+                }
+            }
         }
-        player.set_view_rect(game.view_rect());
-        game.sync_assets(&mut player);
-        count += 1;
+        // Nothing is asked at the exit: unsaved changes stay in the session.
+        game.note_window(player.window_placement());
+        game.end_session(player.world_mut());
+        let (Some((exe, artifact)), Some(run_dir)) = (game.restart_with(), &run_dir) else {
+            break;
+        };
+        // A restart: this window stays until the new build shows its first frame.
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        match hand_over(&exe, &args, artifact.as_deref(), game.focused(), run_dir) {
+            Ok(took) => {
+                log::info!(
+                    target: "engine_editor",
+                    "handed over to the new build in {:.2} s",
+                    took.as_secs_f32()
+                );
+                break;
+            }
+            Err(why) => {
+                // The new build failed at its start: this editor goes on.
+                game.resume_session(&mut player)?;
+                game.restart_failed(why);
+            }
+        }
     }
-    // Nothing is asked at the exit: unsaved changes stay in the session.
-    game.end_session(player.world_mut());
     overlay.destroy(&mut player)?;
-    // A restart: the new build starts while this window is still up, the lock let go.
-    if let Some((exe, artifact)) = game.restart_with() {
-        spawn_restart(&exe, artifact.as_deref())?;
-    }
     result.map(|()| count)
 }
 
+/// How long a restart's new editor may take to show its first frame.
+const HANDOVER_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// What `ENGINE_EDITOR_RESTART` tells an editor a restart started: when (nanoseconds since
+/// 1970), the editor it takes over from, and whether that one's window was in front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Restarted {
+    at: u128,
+    from: Option<u32>,
+    front: bool,
+}
+
+impl Restarted {
+    fn from_env() -> Option<Self> {
+        Self::parse(&std::env::var(RESTART_VAR).ok()?)
+    }
+
+    /// `<nanoseconds> <process id> <1: in front>`.
+    fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split_whitespace();
+        let at = parts.next()?.parse().ok()?;
+        let from = parts.next().and_then(|p| p.parse().ok());
+        let front = parts.next() == Some("1");
+        Some(Self { at, from, front })
+    }
+}
+
+/// Starts the new build and waits until it shows its first frame (it writes `up-<this
+/// process's id>` into `.ofelia/run/`): this editor's window stays on the screen until
+/// then. Fails when the new one exits first or takes longer than `HANDOVER_TIMEOUT`
+/// (ended then): how long it took, or why it failed.
+fn hand_over(
+    exe: &Path,
+    args: &[std::ffi::OsString],
+    artifact: Option<&Path>,
+    front: bool,
+    run_dir: &Path,
+) -> Result<Duration, String> {
+    let started = Instant::now();
+    let up = run_dir.join(format!("up-{}", std::process::id()));
+    let _ = std::fs::remove_file(&up);
+    let mut child =
+        spawn_restart(exe, args, artifact, front).map_err(|e| format!("{}: {e}", exe.display()))?;
+    if front {
+        // It brings its window to the front: this process is in the foreground.
+        engine_platform::window::allow_foreground(child.id());
+    }
+    let timer = engine_platform::time::HighResTimer::new().map_err(|e| e.to_string())?;
+    loop {
+        if up.exists() {
+            let took = started.elapsed();
+            // Taken; its writer may still have it open for a moment.
+            for _ in 0..40 {
+                if std::fs::remove_file(&up).is_ok() || !up.exists() {
+                    break;
+                }
+                let _ = timer.sleep(Duration::from_millis(5));
+            }
+            return Ok(took);
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!("the new build stopped at its start ({status})"));
+        }
+        if started.elapsed() > HANDOVER_TIMEOUT {
+            let _ = child.kill();
+            return Err(format!(
+                "the new build showed nothing in {} s",
+                HANDOVER_TIMEOUT.as_secs()
+            ));
+        }
+        let _ = timer.sleep(Duration::from_millis(5));
+    }
+}
+
 /// Starts the editor again from a new build's slot copy, in this process's folder with its
-/// arguments: `ENGINE_EDITOR_RESTART` says when, `ENGINE_EDITOR_BUILD` which build.
-fn spawn_restart(exe: &Path, artifact: Option<&Path>) -> std::io::Result<()> {
+/// arguments: `ENGINE_EDITOR_RESTART` says when, which editor it takes over from and
+/// whether its window was in front; `ENGINE_EDITOR_BUILD` which build.
+fn spawn_restart(
+    exe: &Path,
+    args: &[std::ffi::OsString],
+    artifact: Option<&Path>,
+    front: bool,
+) -> std::io::Result<std::process::Child> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let mut command = std::process::Command::new(exe);
-    command
-        .args(std::env::args_os().skip(1))
-        .env(RESTART_VAR, now.to_string());
+    command.args(args).env(
+        RESTART_VAR,
+        format!("{now} {} {}", std::process::id(), u8::from(front)),
+    );
     match artifact {
         Some(a) => command.env(BUILD_VAR, a),
         None => command.env_remove(BUILD_VAR),
@@ -267,7 +392,7 @@ fn spawn_restart(exe: &Path, artifact: Option<&Path>) -> std::io::Result<()> {
     if let Ok(dir) = std::env::current_dir() {
         command.current_dir(dir);
     }
-    command.spawn().map(drop)
+    command.spawn()
 }
 
 /// The editor's two halves for a player: the game it wraps (window events, the frame's
@@ -722,6 +847,11 @@ struct Editor {
     /// A restart started this editor then (nanoseconds since 1970): told at its first
     /// frame.
     restarted_at: Option<u128>,
+    /// Where the window is (`note_window`), kept in the session for the next start.
+    window: Option<engine_platform::window::WindowPlacement>,
+    /// The session's state when it ended for a restart, to go on with it when the new
+    /// build fails at its start: its base, autosave, what the autosave holds, the conflict.
+    ended: Option<(Option<Base>, PathBuf, Option<u64>, bool)>,
     restart_policy: RestartPolicy,
     /// The scene tab: the file's name, then `*` with unsaved changes.
     scene_label: String,
@@ -973,7 +1103,9 @@ impl Editor {
             ready: None,
             restart_with: None,
             focused: false,
-            restarted_at: std::env::var(RESTART_VAR).ok().and_then(|v| v.parse().ok()),
+            restarted_at: Restarted::from_env().map(|r| r.at),
+            window: None,
+            ended: None,
             restart_policy: RestartPolicy::Background,
             scene_label: String::new(),
             assets,
@@ -1362,6 +1494,9 @@ impl Editor {
                     "Building the game's code… {:.1} s  ·  ",
                     since.elapsed().as_secs_f32()
                 );
+            }
+            BuildState::Failed(text) if self.problems.is_empty() => {
+                let _ = write!(self.status, "{text}  ·  ");
             }
             BuildState::Failed(text) => {
                 let _ = write!(self.status, "{text} (Build: Show Errors…)  ·  ");
@@ -2868,6 +3003,7 @@ impl Editor {
                 .map(|&id| self.commands.info(id).name.clone())
                 .collect(),
             restart: Some(String::from(self.restart_policy.name())),
+            window: self.window,
         };
         let view = self.view(world);
         let Some(s) = &mut self.session else {
@@ -3025,7 +3161,47 @@ impl Editor {
             if let Some(lock) = s.lock.take() {
                 lock.release();
             }
+            self.ended = Some((s.base, s.autosave, s.autosaved, s.conflict));
         }
+    }
+
+    /// Goes on with the session ended for a restart whose new build failed at its start:
+    /// the lock taken again (the failed one may still be letting go of it), a new writer,
+    /// the session written as this editor has it.
+    fn resume_session(&mut self, world: &mut World) -> Result<(), Error> {
+        let Some((base, autosave, autosaved, conflict)) = self.ended.take() else {
+            return Ok(());
+        };
+        let dir = self.root.join(session::DIR);
+        let mut tries = 0;
+        let timer = engine_platform::time::HighResTimer::new()?;
+        let lock = loop {
+            match Lock::take(&dir) {
+                Ok((lock, _)) => break lock,
+                Err(e) if tries < 100 && e.contains("another editor") => {
+                    tries += 1;
+                    let _ = timer.sleep(Duration::from_millis(50));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
+        let now = Instant::now();
+        self.session = Some(Session {
+            dir,
+            lock: Some(lock),
+            writer: Writer::new()?,
+            base,
+            autosave,
+            autosaved,
+            due: None,
+            last_input: now,
+            conflict,
+            restoring_until: None,
+            last_text: String::new(),
+            view_due: now + session::VIEW_EVERY,
+        });
+        self.write_session(world);
+        Ok(())
     }
 
     /// The scene's file in place of its unsaved changes, after it changed on disk since
@@ -3402,6 +3578,36 @@ impl<G> EditorGame<G> {
     /// and cargo's path of it.
     pub fn restart_with(&mut self) -> Option<(PathBuf, Option<PathBuf>)> {
         self.shared.borrow_mut().restart_with.take()
+    }
+
+    /// Whether the editor's window has the keyboard.
+    pub fn focused(&self) -> bool {
+        self.shared.borrow().focused
+    }
+
+    /// Where the editor's window is (`Player::window_placement`): the session keeps it, so
+    /// the next start and a restart's new editor open there.
+    pub fn note_window(&mut self, placement: Option<engine_platform::window::WindowPlacement>) {
+        if placement.is_some() {
+            self.shared.borrow_mut().window = placement;
+        }
+    }
+
+    /// Goes on with the session after a restart whose new build failed at its start.
+    ///
+    /// # Errors
+    ///
+    /// When the project's lock or the writer cannot be had again.
+    pub fn resume_session(&mut self, player: &mut Player) -> Result<(), Error> {
+        self.shared.borrow_mut().resume_session(player.world_mut())
+    }
+
+    /// Tells that a restart failed: the status bar keeps it until the next build.
+    pub fn restart_failed(&mut self, why: String) {
+        let mut shared = self.shared.borrow_mut();
+        let text = format!("Not restarted: {why}; this editor goes on");
+        log::warn!(target: "engine_editor", "{text}");
+        shared.build_state = BuildState::Failed(text);
     }
 
     /// Ends the session at a clean exit: the unsaved changes autosaved, every write on the
@@ -5252,6 +5458,94 @@ mod tests {
         ed.end_session(&mut world);
         let (_, ed) = start(&dir);
         assert_eq!(ed.restart_policy, RestartPolicy::Ask);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_restart_says_when_from_whom_and_whether_in_front() {
+        assert_eq!(
+            Restarted::parse("1760990000000000000 4242 1"),
+            Some(Restarted {
+                at: 1_760_990_000_000_000_000,
+                from: Some(4242),
+                front: true
+            })
+        );
+        // E1-5c-1's restarts gave the time alone.
+        assert_eq!(
+            Restarted::parse("17"),
+            Some(Restarted {
+                at: 17,
+                from: None,
+                front: false
+            })
+        );
+        assert_eq!(Restarted::parse("soon"), None);
+    }
+
+    #[test]
+    fn the_last_editor_waits_for_the_new_ones_first_frame_or_its_failure() {
+        let dir = folder("handover");
+        let cmd = PathBuf::from(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
+        let args = |words: &[&str]| -> Vec<std::ffi::OsString> {
+            words.iter().map(std::ffi::OsString::from).collect()
+        };
+        // It stops at its start: the exit code says so.
+        let failed = hand_over(&cmd, &args(&["/C", "exit", "3"]), None, false, &dir);
+        assert!(
+            failed
+                .as_ref()
+                .is_err_and(|e| e.contains("stopped at its start")),
+            "{failed:?}"
+        );
+        // It shows its first frame: it writes `up-<this process>`.
+        let up = dir.join(format!("up-{}", std::process::id()));
+        let path = up.to_string_lossy().into_owned();
+        assert!(
+            !path.contains(' '),
+            "a path cmd takes without quotes: {path}"
+        );
+        let took = hand_over(
+            &cmd,
+            &args(&["/C", "type", "nul", ">", &path]),
+            None,
+            false,
+            &dir,
+        );
+        assert!(took.is_ok(), "{took:?}");
+        assert!(!up.exists(), "the signal is taken");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_restart_goes_on_with_the_session() {
+        let dir = project("handover-resume");
+        let (mut world, mut ed) = start(&dir);
+        move_cube(&mut ed, &mut world, 3.0);
+        ed.save_session(&mut world);
+        let autosave = autosave_of(&ed);
+        // The restart ends the session…
+        ed.end_session(&mut world);
+        assert!(ed.session.is_none());
+        assert!(!dir.join(".ofelia/session.lock").exists());
+        // …and the new build failed at its start: this editor takes it back as it was.
+        ed.resume_session(&mut world).unwrap();
+        assert!(dir.join(".ofelia/session.lock").exists());
+        assert_eq!(autosave_of(&ed), autosave);
+        assert!(ed.session.as_ref().unwrap().autosaved.is_some());
+        let mut other = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            Some(PathBuf::from("main.scene")),
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        assert!(
+            other.begin_session(&mut World::new()).is_err(),
+            "the lock is held again"
+        );
+        ed.end_session(&mut world);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

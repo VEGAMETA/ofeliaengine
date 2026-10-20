@@ -25,7 +25,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Instant;
-use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::ValidateRect;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{
@@ -85,6 +86,12 @@ pub struct WindowDesc {
     /// The monitor to open on (an `HMONITOR`, as in
     /// [`Monitor::handle`](crate::display::Monitor::handle)); `None`: the primary monitor.
     pub monitor: Option<isize>,
+    /// Where a windowed window opens, as [`window_placement`] read it earlier; `None`:
+    /// centred on its monitor. Windows moves a placement off every monitor back onto one.
+    pub placement: Option<WindowPlacement>,
+    /// Created cloaked (`DWMWA_CLOAK`): composed but not shown until
+    /// [`WindowSystem::set_cloaked`] uncloaks it, so its first frame appears whole.
+    pub cloaked: bool,
 }
 
 impl Default for WindowDesc {
@@ -97,8 +104,56 @@ impl Default for WindowDesc {
             visible: true,
             mode: WindowMode::Windowed,
             monitor: None,
+            placement: None,
+            cloaked: false,
         }
     }
+}
+
+/// Where a window is on the desktop, as Windows keeps it (`WINDOWPLACEMENT`): its restored
+/// rectangle in workspace coordinates (physical pixels) and whether it is maximized. What
+/// an application saves to open its window where it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowPlacement {
+    /// The restored rectangle's left edge.
+    pub left: i32,
+    /// Its top edge.
+    pub top: i32,
+    /// Its right edge (exclusive).
+    pub right: i32,
+    /// Its bottom edge (exclusive).
+    pub bottom: i32,
+    /// Maximized (or minimized from maximized).
+    pub maximized: bool,
+}
+
+/// Where window `hwnd` (a [`WindowHandle::hwnd`]) is now; none for a window that is gone.
+/// A minimized window's is where it is restored to.
+pub fn window_placement(hwnd: isize) -> Option<WindowPlacement> {
+    // SAFETY: plain data; all zeros is a valid value.
+    let mut wp: WINDOWPLACEMENT = unsafe { core::mem::zeroed() };
+    wp.length = core::mem::size_of::<WINDOWPLACEMENT>() as u32;
+    // SAFETY: any window handle may be asked, from any thread; `wp` is a valid out pointer
+    // with its length set.
+    if unsafe { GetWindowPlacement(hwnd as HWND, &mut wp) } == 0 {
+        return None;
+    }
+    let r = wp.rcNormalPosition;
+    Some(WindowPlacement {
+        left: r.left,
+        top: r.top,
+        right: r.right,
+        bottom: r.bottom,
+        maximized: wp.showCmd == SW_SHOWMAXIMIZED as u32
+            || (wp.showCmd == SW_SHOWMINIMIZED as u32 && wp.flags & WPF_RESTORETOMAXIMIZED != 0),
+    })
+}
+
+/// Lets process `process` bring its window to the front, as the foreground process may:
+/// for a window that takes over from this process's.
+pub fn allow_foreground(process: u32) {
+    // SAFETY: no pointers; fails harmlessly when this process may not grant it.
+    unsafe { AllowSetForegroundWindow(process) };
 }
 
 /// Mouse buttons reported by window messages.
@@ -204,6 +259,8 @@ enum Command {
     Create(WindowDesc, mpsc::Sender<io::Result<WindowHandle>>),
     SetTitle(WindowId, String),
     SetMode(WindowId, WindowMode),
+    SetCloaked(WindowId, bool),
+    Foreground(WindowId),
     Destroy(WindowId),
     Quit,
 }
@@ -295,6 +352,18 @@ impl WindowSystem {
     /// [`WindowEventKind::Resized`] follows.
     pub fn set_mode(&self, window: WindowId, mode: WindowMode) -> io::Result<()> {
         self.send(Command::SetMode(window, mode))
+    }
+
+    /// Shows a window created cloaked ([`WindowDesc::cloaked`]), or cloaks one. DWM keeps
+    /// composing a cloaked window, so uncloaked it shows its last frame at once.
+    pub fn set_cloaked(&self, window: WindowId, cloaked: bool) -> io::Result<()> {
+        self.send(Command::SetCloaked(window, cloaked))
+    }
+
+    /// Brings a window to the front, with the keyboard, when Windows allows it (this
+    /// process is in the foreground, or one in it allowed it: [`allow_foreground`]).
+    pub fn bring_to_front(&self, window: WindowId) -> io::Result<()> {
+        self.send(Command::Foreground(window))
     }
 
     /// Destroys a window. A [`WindowEventKind::Destroyed`] event follows.
@@ -590,6 +659,17 @@ fn handle_command(state: &ThreadState, control: HWND, command: Command) {
                 set_mode(state, hwnd, mode);
             }
         }
+        Command::SetCloaked(id, cloaked) => {
+            if let Some(hwnd) = state.hwnd_of(id) {
+                set_cloak(hwnd, cloaked);
+            }
+        }
+        Command::Foreground(id) => {
+            if let Some(hwnd) = state.hwnd_of(id) {
+                // SAFETY: live window of this thread.
+                unsafe { SetForegroundWindow(hwnd) };
+            }
+        }
         Command::Destroy(id) => {
             if let Some(hwnd) = state.hwnd_of(id) {
                 // SAFETY: live window of this thread. Sends `WM_DESTROY` synchronously.
@@ -825,6 +905,21 @@ fn set_mode(state: &ThreadState, hwnd: HWND, mode: WindowMode) {
     }
 }
 
+/// Cloaks or uncloaks a window (`DWMWA_CLOAK`).
+fn set_cloak(hwnd: HWND, cloaked: bool) {
+    let value = i32::from(cloaked);
+    // SAFETY: live window of this thread; a `BOOL` of the attribute's size, outliving the
+    // call. A failure (DWM off) leaves the window as it is.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK as u32,
+            (&raw const value).cast(),
+            core::mem::size_of::<i32>() as u32,
+        )
+    };
+}
+
 fn create_window(state: &ThreadState, desc: &WindowDesc) -> io::Result<WindowHandle> {
     let id = WindowId(state.next_id.get());
     state.next_id.set(id.0 + 1);
@@ -906,9 +1001,42 @@ fn create_window(state: &ThreadState, desc: &WindowDesc) -> io::Result<WindowHan
         push_client_size(state, id, hwnd);
     }
     state.push(id, WindowEventKind::ScaleChanged { dpi });
-    if desc.visible {
-        // SAFETY: live window of this thread.
-        unsafe { ShowWindow(hwnd, SW_SHOW) };
+    if desc.cloaked {
+        set_cloak(hwnd, true);
+    }
+    match desc.placement {
+        // Where it was: placed and shown (maximized as it was) in one call.
+        Some(p) if desc.mode == WindowMode::Windowed => {
+            let wp = WINDOWPLACEMENT {
+                length: core::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                flags: 0,
+                showCmd: if !desc.visible {
+                    SW_HIDE as u32
+                } else if p.maximized {
+                    SW_SHOWMAXIMIZED as u32
+                } else {
+                    SW_SHOWNORMAL as u32
+                },
+                ptMinPosition: POINT { x: -1, y: -1 },
+                ptMaxPosition: POINT { x: -1, y: -1 },
+                rcNormalPosition: RECT {
+                    left: p.left,
+                    top: p.top,
+                    right: p.right,
+                    bottom: p.bottom,
+                },
+            };
+            // SAFETY: live window of this thread; `wp` is valid with its length set. Sends
+            // `WM_SIZE`, and `WM_DPICHANGED` when it lands on a monitor of another DPI.
+            unsafe { SetWindowPlacement(hwnd, &wp) };
+            push_client_size(state, id, hwnd);
+        }
+        _ => {
+            if desc.visible {
+                // SAFETY: live window of this thread.
+                unsafe { ShowWindow(hwnd, SW_SHOW) };
+            }
+        }
     }
     Ok(WindowHandle {
         id,
@@ -1366,6 +1494,33 @@ mod tests {
         });
         assert!(events.iter().any(|e| e.kind == WindowEventKind::Destroyed));
         assert_eq!(system.dropped_events(), 0);
+    }
+
+    #[test]
+    fn a_window_opens_where_its_placement_says_cloaked_until_shown() {
+        let mut system = WindowSystem::start(256).unwrap();
+        let placement = WindowPlacement {
+            left: 100,
+            top: 120,
+            right: 900,
+            bottom: 720,
+            maximized: false,
+        };
+        let window = system
+            .create_window(&WindowDesc {
+                placement: Some(placement),
+                cloaked: true,
+                ..hidden()
+            })
+            .unwrap();
+        assert_eq!(window_placement(window.hwnd), Some(placement));
+        // Uncloaked and cloaked again by command: the window stays where it is.
+        system.set_cloaked(window.id, false).unwrap();
+        system.set_cloaked(window.id, true).unwrap();
+        system.destroy_window(window.id).unwrap();
+        wait_for(&mut system, Duration::from_secs(5), |e| {
+            e.iter().any(|e| e.kind == WindowEventKind::Destroyed)
+        });
     }
 
     #[test]
