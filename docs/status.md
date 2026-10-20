@@ -85,7 +85,7 @@ Last updated: 2026-10-20.
     - a scene file changed on disk is never written over: the take-disk and save-over
       commands pick a side;
     - one editor per project.
-  - **E1-5b-2, the view in the session** (#PR, ADR 0107 as built): the camera, the
+  - **E1-5b-2, the view in the session** (#267, ADR 0107 as built): the camera, the
     selection, the tree's closed rows, the filters, the tool, snapping and recent commands
     come back at start; "Restore Unsaved Changes…" brings back an older autosave.
   - **Next:** the rest of E1 (ADR 0107 §7):
