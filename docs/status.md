@@ -79,7 +79,7 @@ Last updated: 2026-10-20.
       under fresh ids;
     - `ofeliaengine edit` runs the game in its editor;
     - the quick start is a scene, and `find_named` finds its cube and camera.
-  - **E1-5b-1, autosave** (#PR, ADR 0107 as built):
+  - **E1-5b-1, autosave** (#266, ADR 0107 as built):
     - unsaved changes autosaved into `.ofelia/` after 30 s at a quiet moment, and brought
       back without a dialog after a crash or a clean exit;
     - a scene file changed on disk is never written over: the take-disk and save-over
