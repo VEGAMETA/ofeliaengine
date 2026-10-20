@@ -366,9 +366,11 @@ dependencies = [
  "engine_log",
  "engine_physics",
  "engine_physics_jolt",
+ "engine_platform",
  "engine_save",
  "engine_scene",
  "engine_shader",
+ "serde_json",
 ]
 
 [[package]]
@@ -450,6 +452,7 @@ dependencies = [
  "engine_text",
  "engine_ui",
  "log",
+ "serde_json",
 ]
 
 [[package]]
