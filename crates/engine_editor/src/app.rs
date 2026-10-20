@@ -49,6 +49,7 @@ use crate::icons;
 use crate::input::{Button, InputCollector};
 use crate::inspector::{self, Defaults, Inspector, Kind, Property};
 use crate::paint::{UiText, paint};
+use crate::session::{self, Base, Document, LastRun, Lock, SessionFile, Writer};
 use crate::shell::{
     Field, FieldAction, FieldEvent, MenuItem, Palette, PaletteAction, PaletteRow, PaletteView,
     Section, ShellModel, TreeItem, Widget, build, dismissed,
@@ -72,7 +73,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -155,6 +156,8 @@ pub fn run_frames<G: Game>(
     }
     let mut player = Player::new(&settings)?;
     let (mut game, mut overlay) = editor(&mut player, &settings, start)?;
+    // The scene's unsaved changes from the last run, back (ADR 0107 §4).
+    game.begin_session(&mut player)?;
     let mut count = 0;
     let mut result: Result<(), Error> = Ok(());
     while !player.closing() && frames.is_none_or(|n| count < n) {
@@ -163,9 +166,11 @@ pub fn run_frames<G: Game>(
             break;
         }
         player.set_view_rect(game.view_rect());
-        game.sync_assets(&player);
+        game.sync_assets(&mut player);
         count += 1;
     }
+    // Nothing is asked at the exit: unsaved changes stay in the session.
+    game.end_session(player.world_mut());
     overlay.destroy(&mut player)?;
     result.map(|()| count)
 }
@@ -266,6 +271,10 @@ struct CommandIds {
     collapse: CommandId,
     expand: CommandId,
     expand_all: CommandId,
+    /// After the scene's file changed on disk since its unsaved changes: take the file's
+    /// version, or write the unsaved one over it.
+    take_disk: CommandId,
+    save_over_disk: CommandId,
     /// "Add Cube" and the rest: the add menu's kinds, in its order.
     add_kinds: [CommandId; ADD.len()],
 }
@@ -292,6 +301,12 @@ fn commands() -> (Commands, Keymap, CommandIds, HashMap<CommandId, String>) {
         collapse: c.register("scene.collapse", "Scene", "Close Row"),
         expand: c.register("scene.expand", "Scene", "Open Row"),
         expand_all: c.register("scene.expand_all", "Scene", "Open Branch"),
+        take_disk: c.register("scene.take_disk_version", "Scene", "Take Disk Version"),
+        save_over_disk: c.register(
+            "scene.save_over_disk_version",
+            "Scene",
+            "Save Over Disk Version",
+        ),
         add_kinds: ADD.map(|kind| {
             let name = format!("scene.add.{}", kind.to_lowercase().replace(' ', "_"));
             c.register(&name, "Scene", &format!("Add {kind}"))
@@ -488,12 +503,17 @@ struct Editor {
     /// The scene's own id, written in its header.
     scene_id: AssetId,
     /// The history's head at the last save (or the start): changes are unsaved while it
-    /// differs.
+    /// differs (`u64::MAX` after unsaved changes were restored).
     saved_head: u64,
+    /// The session in the project's `.ofelia/` (ADR 0107 §4): none until
+    /// `begin_session`, so editors that tests and tools make write nothing there.
+    session: Option<Session>,
     /// The scene tab: the file's name, then `*` with unsaved changes.
     scene_label: String,
     /// Where the player's assets are, for showing and saving references by path.
     assets: AssetPaths,
+    /// Asset paths of a scene the editor loaded, for the player (`sync_assets`).
+    pending_assets: AssetPaths,
     history: History,
     commands: Commands,
     keymap: Keymap,
@@ -536,6 +556,42 @@ struct Editor {
     frames: u64,
     since: Instant,
     fps: f64,
+}
+
+/// The session while the editor runs (ADR 0107 §4): the project's lock, the writer, and
+/// where the scene's unsaved changes are.
+struct Session {
+    /// `<project>/.ofelia`.
+    dir: PathBuf,
+    lock: Option<Lock>,
+    writer: Writer,
+    /// What the scene's file was when it was loaded or last saved.
+    base: Option<Base>,
+    /// The scene's autosave, `.ofelia/autosave/<stem>-<id>.scene`, its older ones beside
+    /// it (`session::older`).
+    autosave: PathBuf,
+    /// The history's head the scene's autosave holds; none while it has none.
+    autosaved: Option<u64>,
+    /// When the changes not in an autosave are autosaved.
+    due: Option<Instant>,
+    /// The last key, button, pointer or wheel input.
+    last_input: Instant,
+    /// The scene's file changed on disk since its unsaved changes were made from it:
+    /// neither is written over until a command picks one.
+    conflict: bool,
+    /// Until when the lock says `restoring`.
+    restoring_until: Option<Instant>,
+}
+
+/// How long ago a time in nanoseconds since 1970 was, for messages.
+fn ago(nanos: u64) -> String {
+    let then = std::time::UNIX_EPOCH + Duration::from_nanos(nanos);
+    let seconds = then.elapsed().map_or(0, |d| d.as_secs());
+    match seconds {
+        0..60 => String::from("just now"),
+        60..3600 => format!("{} min ago", seconds / 60),
+        _ => format!("{} h ago", seconds / 3600),
+    }
 }
 
 /// An icon and a kind for an entity: its main component's.
@@ -689,8 +745,10 @@ impl Editor {
             scene_path,
             scene_id,
             saved_head: 0,
+            session: None,
             scene_label: String::new(),
             assets,
+            pending_assets: AssetPaths::new(),
             history: History::new(),
             commands,
             keymap,
@@ -759,6 +817,18 @@ impl Editor {
             } => input.key(virtual_key, scancode, extended, pressed),
             WindowEventKind::Char(c) => input.char(c),
             _ => {}
+        }
+        if let Some(s) = &mut self.session
+            && matches!(
+                event.kind,
+                WindowEventKind::CursorMoved { .. }
+                    | WindowEventKind::MouseButton { .. }
+                    | WindowEventKind::Wheel { .. }
+                    | WindowEventKind::Key { .. }
+                    | WindowEventKind::Char(_)
+            )
+        {
+            s.last_input = event.time;
         }
     }
 
@@ -866,6 +936,7 @@ impl Editor {
     /// into the world, the camera from the viewport's drags.
     #[allow(clippy::too_many_lines)]
     fn update(&mut self, world: &mut World) {
+        self.tick_session(world);
         let camera = self.camera(world);
         self.collect_rows(world);
         self.frames += 1;
@@ -1049,6 +1120,14 @@ impl Editor {
             label: ADD[i],
         });
         self.status.clear();
+        if self.session.as_ref().is_some_and(|s| s.conflict) {
+            let _ = write!(
+                self.status,
+                "{} changed on disk since your unsaved changes: Take Disk Version or Save \
+                 Over Disk Version (Ctrl+Shift+P)  ·  ",
+                self.file_name()
+            );
+        }
         if let Some((message, at)) = &self.message
             && at.elapsed().as_secs_f32() < MESSAGE_SECONDS
         {
@@ -1069,6 +1148,10 @@ impl Editor {
         }
         if self.history.head() != self.saved_head {
             self.scene_label.push('*');
+        }
+        if self.session.as_ref().is_some_and(|s| s.conflict) {
+            self.scene_label.push(' ');
+            self.scene_label.push_str(icons::ALERT);
         }
         // The command palette's results in view.
         let mut palette_rows: Vec<PaletteRow<'_>> = Vec::new();
@@ -1949,11 +2032,27 @@ impl Editor {
                 self.say(message);
             }
             self.reselect(world, &selected);
-        } else if id == ids.save {
-            match self.save(world) {
-                Ok(path) => self.say(format!("Saved {}", path.display())),
-                Err(e) => self.say(format!("Not saved: {e}")),
+        } else if id == ids.save || id == ids.save_over_disk {
+            let conflict = self.session.as_ref().is_some_and(|s| s.conflict);
+            if id == ids.save && conflict {
+                self.say(format!(
+                    "Not saved: {} changed on disk since your unsaved changes; Take Disk \
+                     Version or Save Over Disk Version (Ctrl+Shift+P) picks one",
+                    self.file_name()
+                ));
+            } else if id == ids.save_over_disk && !conflict {
+                self.say(String::from(
+                    "Nothing to save over: the file on disk is the one your changes started \
+                     from",
+                ));
+            } else {
+                match self.save(world) {
+                    Ok(path) => self.say(format!("Saved {}", path.display())),
+                    Err(e) => self.say(format!("Not saved: {e}")),
+                }
             }
+        } else if id == ids.take_disk {
+            self.take_disk_version(world);
         } else if id == ids.delete {
             let roots = self.selection_roots(world);
             if !roots.is_empty() {
@@ -2156,14 +2255,7 @@ impl Editor {
     /// entity with a scene id, under the scene's own id, asset references by path. Written
     /// beside the file, then moved over it, so a failure leaves the old file whole.
     fn save(&mut self, world: &mut World) -> Result<PathBuf, String> {
-        let registry = SceneRegistry::from_program();
-        let mut text = String::new();
-        let options = SaveOptions {
-            id: Some(self.scene_id),
-            assets: Some(&self.assets),
-        };
-        engine_scene::save_with(world, &registry, &options, &mut text)
-            .map_err(|e| e.to_string())?;
+        let text = self.scene_text(world)?;
         let relative = match &self.scene_path {
             Some(p) => p.clone(),
             None => untitled(&self.root),
@@ -2177,7 +2269,374 @@ impl Editor {
         std::fs::rename(&partial, &path).map_err(|e| format!("{}: {e}", path.display()))?;
         self.scene_path = Some(relative);
         self.saved_head = self.history.head();
+        if let Some(s) = &mut self.session {
+            s.base = session::modified(&path).map(|t| Base::of_bytes(text.as_bytes(), t));
+            s.conflict = false;
+            s.due = None;
+            // A scene saved for the first time: its autosave had the untitled name.
+            let named = s.dir.join(session::autosave_name(
+                self.scene_path.as_deref(),
+                self.scene_id,
+            ));
+            let old = std::mem::replace(&mut s.autosave, named);
+            if s.autosaved.take().is_some() {
+                s.writer
+                    .remove(vec![session::older(&old, 1), session::older(&old, 2), old]);
+            }
+        }
+        self.write_session();
         Ok(path)
+    }
+
+    /// The scene's file name, for messages: `untitled` before its first save.
+    fn file_name(&self) -> String {
+        self.scene_path
+            .as_deref()
+            .and_then(Path::file_name)
+            .map_or_else(
+                || String::from("untitled"),
+                |n| n.to_string_lossy().into_owned(),
+            )
+    }
+
+    /// The scene's text, as Ctrl+S and an autosave write it: every entity with a scene id,
+    /// under the scene's own id, asset references by path.
+    fn scene_text(&self, world: &mut World) -> Result<String, String> {
+        let registry = SceneRegistry::from_program();
+        let mut text = String::new();
+        let options = SaveOptions {
+            id: Some(self.scene_id),
+            assets: Some(&self.assets),
+        };
+        engine_scene::save_with(world, &registry, &options, &mut text)
+            .map_err(|e| e.to_string())?;
+        Ok(text)
+    }
+
+    /// Starts the session in the project's `.ofelia/`: takes its lock, then brings back the
+    /// scene's unsaved changes from their autosave as the last run left them, at its exit
+    /// or its crash, without asking. Returns the asset paths the restored scene named.
+    fn begin_session(&mut self, world: &mut World) -> Result<AssetPaths, Error> {
+        let dir = self.root.join(session::DIR);
+        let (mut lock, last) = Lock::take(&dir)?;
+        let file = self.scene_path.as_ref().map(|p| self.root.join(p));
+        let mut s = Session {
+            lock: None,
+            writer: Writer::new()?,
+            base: file.as_deref().and_then(Base::of),
+            autosave: PathBuf::new(),
+            autosaved: None,
+            due: None,
+            last_input: Instant::now(),
+            conflict: false,
+            restoring_until: None,
+            dir,
+        };
+        let mut learned = AssetPaths::new();
+        let mut note = None;
+        let previous = s.dir.join("session");
+        let doc = match std::fs::read_to_string(&previous) {
+            Err(_) => None,
+            Ok(text) => match SessionFile::parse(&text) {
+                Ok(f) => f.documents.into_iter().find(|d| d.path == self.scene_path),
+                Err(e) => {
+                    let _ = std::fs::rename(&previous, s.dir.join("session.broken"));
+                    note = Some(format!(
+                        "The session could not be read ({e}); it is kept as \
+                         .ofelia/session.broken"
+                    ));
+                    None
+                }
+            },
+        };
+        let autosave = doc
+            .as_ref()
+            .and_then(|d| d.autosave.as_ref())
+            .map(|a| s.dir.join(a))
+            .filter(|a| a.is_file());
+        if let (Some(doc), Some(autosave)) = (doc, autosave) {
+            let name = self.file_name();
+            if last == LastRun::CrashedRestoring {
+                note = Some(format!(
+                    "The last start stopped while it brought back the unsaved changes of \
+                     {name}: it opened as saved, and they are kept in {}",
+                    autosave.display()
+                ));
+            } else {
+                lock.mark("restoring")?;
+                s.restoring_until = Some(Instant::now() + session::RESTORING);
+                // What the changes were made from, against the file now: none for a scene
+                // never saved.
+                let disk = file
+                    .as_deref()
+                    .map(|f| (f.is_file(), doc.base.and_then(|b| b.matches(f))));
+                match self.restore(world, &autosave) {
+                    Err(e) => {
+                        note = Some(format!(
+                            "The unsaved changes of {name} could not be read ({e}); they are \
+                             kept in {}",
+                            autosave.display()
+                        ));
+                    }
+                    Ok(paths) => {
+                        learned = paths;
+                        self.saved_head = u64::MAX;
+                        s.autosaved = Some(self.history.head());
+                        let when = session::modified(&autosave)
+                            .map_or_else(String::new, |t| format!(" from {}", ago(t)));
+                        let restored = if last == LastRun::Crashed {
+                            format!("After a crash: restored the unsaved changes of {name}{when}")
+                        } else {
+                            format!("Restored the unsaved changes of {name}{when}")
+                        };
+                        note = Some(match disk {
+                            None | Some((true, Some(true))) => restored,
+                            Some((false, _)) => {
+                                format!(
+                                    "{restored}; its file is gone from the disk, Ctrl+S writes it"
+                                )
+                            }
+                            Some((true, _)) => {
+                                s.conflict = true;
+                                format!("{restored}; its file changed on disk since")
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        s.lock = Some(lock);
+        // By the scene's id after a restore (an untitled scene's comes from its autosave).
+        s.autosave = s.dir.join(session::autosave_name(
+            self.scene_path.as_deref(),
+            self.scene_id,
+        ));
+        self.session = Some(s);
+        self.write_session();
+        if let Some(note) = note {
+            self.say(note);
+        }
+        Ok(learned)
+    }
+
+    /// Puts the scene of `autosave` in the world in place of the scene's entities. The
+    /// world is left as it was when the file cannot be read.
+    fn restore(&mut self, world: &mut World, autosave: &Path) -> Result<AssetPaths, String> {
+        let text = std::fs::read_to_string(autosave).map_err(|e| e.to_string())?;
+        let old = self.roots(world, None);
+        let report = engine_scene::load(world, &SceneRegistry::from_program(), &text)
+            .map_err(|e| e.to_string())?;
+        for (line, warning) in &report.warnings {
+            log::warn!(target: "engine_editor", "{}:{line}: {warning}", autosave.display());
+        }
+        for e in old {
+            world.despawn_recursive(e);
+        }
+        if let Some(id) = report.id {
+            self.scene_id = id;
+        }
+        self.assets.extend(&report.assets);
+        Ok(report.assets)
+    }
+
+    /// Writes the session file on the writer's thread: the scene, what its file was, and
+    /// its autosave while it has one.
+    fn write_session(&self) {
+        let Some(s) = &self.session else {
+            return;
+        };
+        let file = SessionFile {
+            documents: vec![Document {
+                path: self.scene_path.clone(),
+                id: self.scene_id,
+                base: s.base,
+                autosave: s
+                    .autosaved
+                    .map(|_| session::autosave_name(self.scene_path.as_deref(), self.scene_id)),
+            }],
+        };
+        s.writer
+            .write(s.dir.join("session"), file.to_text(), 0, Duration::ZERO);
+    }
+
+    /// The session's part of the frame: the writer's failures told, the lock's state moved
+    /// on, the autosave kept in step with the unsaved changes.
+    fn tick_session(&mut self, world: &mut World) {
+        let Some(s) = &mut self.session else {
+            return;
+        };
+        let mut failed = None;
+        for w in s.writer.finished() {
+            if let Err(e) = w.result {
+                // Written again at its next time.
+                if w.path == s.autosave {
+                    s.autosaved = None;
+                }
+                failed = Some(e);
+            }
+        }
+        if s.restoring_until.is_some_and(|t| Instant::now() >= t) {
+            s.restoring_until = None;
+            if let Some(lock) = &mut s.lock {
+                let _ = lock.mark("running");
+            }
+        }
+        if let Some(e) = failed {
+            self.say(format!("Not autosaved: {e}"));
+        }
+        self.keep_autosave(world, false);
+    }
+
+    /// Keeps the scene's autosave in step with its unsaved changes: written once they have
+    /// waited `session::AUTOSAVE_AFTER` and a quiet moment came (at once with `now`), and
+    /// deleted with the older ones once the scene is clean again.
+    fn keep_autosave(&mut self, world: &mut World, now: bool) {
+        let head = self.history.head();
+        let gesture = self.drag.is_some()
+            || self.typing.is_some()
+            || self.renaming.is_some()
+            || self.camera_drag
+            || self.ui.editing().is_some()
+            || [Button::Left, Button::Right, Button::Middle]
+                .into_iter()
+                .any(|b| self.input.held(b));
+        let Some(s) = &mut self.session else {
+            return;
+        };
+        if head == self.saved_head {
+            s.due = None;
+            if s.autosaved.take().is_some() {
+                let path = &s.autosave;
+                s.writer.remove(vec![
+                    session::older(path, 1),
+                    session::older(path, 2),
+                    path.clone(),
+                ]);
+                self.write_session();
+            }
+            return;
+        }
+        if s.autosaved == Some(head) {
+            s.due = None;
+            return;
+        }
+        let at = Instant::now();
+        let due = *s.due.get_or_insert(at + session::AUTOSAVE_AFTER);
+        if now || session::autosave_now(at, due, s.last_input, gesture) {
+            self.autosave(world);
+        }
+    }
+
+    /// Writes the scene's unsaved changes into its autosave (the newest of three) and the
+    /// session after it. Only their text is made here; the writer's thread writes them.
+    fn autosave(&mut self, world: &mut World) {
+        let text = match self.scene_text(world) {
+            Ok(text) => text,
+            Err(e) => {
+                if let Some(s) = &mut self.session {
+                    s.due = None;
+                }
+                self.say(format!("Not autosaved: {e}"));
+                return;
+            }
+        };
+        let head = self.history.head();
+        let Some(s) = &mut self.session else {
+            return;
+        };
+        s.writer.write(
+            s.autosave.clone(),
+            text,
+            session::OLDER_AUTOSAVES,
+            session::AUTOSAVE_AFTER,
+        );
+        s.autosaved = Some(head);
+        s.due = None;
+        self.write_session();
+    }
+
+    /// Autosaves the unsaved changes now and waits until the session is on the disk:
+    /// before Play and before a restart.
+    fn save_session(&mut self, world: &mut World) {
+        self.keep_autosave(world, true);
+        if let Some(s) = &self.session {
+            s.writer.flush();
+        }
+    }
+
+    /// Ends the session at a clean exit: the unsaved changes autosaved, every write on the
+    /// disk, the lock released.
+    fn end_session(&mut self, world: &mut World) {
+        if self.session.is_none() {
+            return;
+        }
+        self.keep_autosave(world, true);
+        self.write_session();
+        if let Some(mut s) = self.session.take() {
+            s.writer.flush();
+            if let Some(lock) = s.lock.take() {
+                lock.release();
+            }
+        }
+    }
+
+    /// The scene's file in place of its unsaved changes, after it changed on disk since
+    /// they were made: one undo step (Ctrl+Z brings them back), their autosave kept aside
+    /// as `….conflict.scene`.
+    fn take_disk_version(&mut self, world: &mut World) {
+        if !self.session.as_ref().is_some_and(|s| s.conflict) {
+            self.say(String::from(
+                "Nothing to take: the file on disk is the one your changes started from",
+            ));
+            return;
+        }
+        let Some(file) = self.scene_path.as_ref().map(|p| self.root.join(p)) else {
+            return;
+        };
+        let text = match std::fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(e) => {
+                self.say(format!("{}: {e}", file.display()));
+                return;
+            }
+        };
+        let old = self.roots(world, None);
+        self.history.begin("Take Disk Version", None);
+        // The scene's entities recorded and gone first: the history knows entities by
+        // their scene ids, so the file's entities loaded after are the same entities to
+        // it where their ids are the same, and the others new.
+        for e in old {
+            self.history.delete_subtree(world, e);
+        }
+        let report = match engine_scene::load(world, &SceneRegistry::from_program(), &text) {
+            Ok(report) => report,
+            Err(e) => {
+                self.history.cancel(world);
+                self.say(format!("{}: {e}", file.display()));
+                return;
+            }
+        };
+        for &e in &report.entities {
+            self.history.touch_new(world, e);
+        }
+        self.history.commit(world);
+        self.saved_head = self.history.head();
+        self.selection.clear();
+        self.anchor = None;
+        self.assets.extend(&report.assets);
+        self.pending_assets.extend(&report.assets);
+        if let Some(s) = &mut self.session {
+            s.conflict = false;
+            s.base = Base::of(&file);
+            if s.autosaved.take().is_some() {
+                let aside = s.autosave.with_extension("conflict.scene");
+                s.writer.rename(s.autosave.clone(), aside);
+            }
+        }
+        self.write_session();
+        self.say(String::from(
+            "Took the version on disk; Ctrl+Z brings your changes back",
+        ));
     }
 }
 
@@ -2198,14 +2657,47 @@ impl<G> EditorGame<G> {
         self.shared.borrow().view_rect
     }
 
-    /// Learns the player's asset paths again when they changed (a scene loaded since):
-    /// the inspector shows references by path.
-    pub fn sync_assets(&mut self, player: &Player) {
-        let paths = player.assets().paths();
+    /// Gives the player the asset paths of scenes the editor loaded, and learns the
+    /// player's again when they changed (a scene loaded since): the inspector shows
+    /// references by path.
+    pub fn sync_assets(&mut self, player: &mut Player) {
         let mut shared = self.shared.borrow_mut();
+        if !shared.pending_assets.is_empty() {
+            player.assets_mut().add_paths(&shared.pending_assets);
+            shared.pending_assets = AssetPaths::new();
+        }
+        let paths = player.assets().paths();
         if shared.assets.len() != paths.len() {
             shared.assets = paths.clone();
         }
+    }
+
+    /// Starts the session in the project's `.ofelia/` (ADR 0107 §4): takes the project's
+    /// lock, and brings back the scene's unsaved changes from their autosave, as the last
+    /// run left them at its exit or its crash, without asking. From then on unsaved changes
+    /// are autosaved there after 30 s, at a quiet moment, never over the scene's file.
+    /// [`run`] calls it; an editor made with [`editor`] has no session until it does.
+    ///
+    /// # Errors
+    ///
+    /// Another editor has the project open, or `.ofelia/` cannot be written.
+    pub fn begin_session(&mut self, player: &mut Player) -> Result<(), Error> {
+        let learned = self.shared.borrow_mut().begin_session(player.world_mut())?;
+        player.assets_mut().add_paths(&learned);
+        Ok(())
+    }
+
+    /// Autosaves the unsaved changes now and waits until the session is on the disk:
+    /// before Play and before a restart.
+    pub fn save_session(&mut self, world: &mut World) {
+        self.shared.borrow_mut().save_session(world);
+    }
+
+    /// Ends the session at a clean exit: the unsaved changes autosaved, every write on the
+    /// disk, the project's lock released. Nothing is asked: the next start brings the
+    /// changes back. [`run`] calls it when the window closes.
+    pub fn end_session(&mut self, world: &mut World) {
+        self.shared.borrow_mut().end_session(world);
     }
 
     /// The active entity of the selection: the last picked, which the inspector shows.
@@ -3560,5 +4052,331 @@ mod tests {
         ed.update(&mut world);
         assert_eq!(row_names(&ed, &world), ["A", "A 2", "B", "Cube"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A project whose `main.scene` holds a cube at the origin.
+    fn project(name: &str) -> PathBuf {
+        let dir = folder(name);
+        let mut world = World::new();
+        world.spawn((
+            SceneId::new(),
+            Name::new("Cube"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        let mut text = String::new();
+        let options = SaveOptions {
+            id: Some(AssetId::new()),
+            assets: None,
+        };
+        engine_scene::save_with(
+            &mut world,
+            &SceneRegistry::from_program(),
+            &options,
+            &mut text,
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.scene"), text).unwrap();
+        dir
+    }
+
+    /// An editor started on the project as the editor's binary starts one: the scene's
+    /// file loaded into a new world, then the session begun.
+    fn start(dir: &Path) -> (World, Editor) {
+        let mut world = World::new();
+        let text = std::fs::read_to_string(dir.join("main.scene")).unwrap();
+        engine_scene::load(&mut world, &SceneRegistry::from_program(), &text).unwrap();
+        let (_, id) = engine_scene::scene_header(&text).unwrap();
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.to_path_buf(),
+            Some(PathBuf::from("main.scene")),
+            id.unwrap(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.begin_session(&mut world).unwrap();
+        (world, ed)
+    }
+
+    fn cube_x(world: &mut World) -> f32 {
+        let cube = engine_scene::find_named(world, "Cube").unwrap();
+        world.get::<Transform>(cube).unwrap().translation.x
+    }
+
+    fn move_cube(ed: &mut Editor, world: &mut World, x: f32) {
+        let cube = engine_scene::find_named(world, "Cube").unwrap();
+        ed.set(
+            world,
+            cube,
+            "Transform.translation",
+            &format!("({x}, 0, 0)"),
+        )
+        .unwrap();
+    }
+
+    fn message(ed: &Editor) -> &str {
+        ed.message.as_ref().map_or("", |(m, _)| m.as_str())
+    }
+
+    fn flush(ed: &Editor) {
+        ed.session.as_ref().unwrap().writer.flush();
+    }
+
+    fn autosave_of(ed: &Editor) -> PathBuf {
+        ed.session.as_ref().unwrap().autosave.clone()
+    }
+
+    #[test]
+    fn unsaved_changes_come_back_after_a_crash_and_after_a_clean_exit() {
+        let dir = project("session-back");
+        let file = std::fs::read_to_string(dir.join("main.scene")).unwrap();
+        let (mut world, mut ed) = start(&dir);
+        move_cube(&mut ed, &mut world, 3.0);
+        ed.update(&mut world);
+        let autosave = autosave_of(&ed);
+        assert!(!autosave.exists(), "not before its time");
+        // A second editor on the same project is refused.
+        let mut other = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            Some(PathBuf::from("main.scene")),
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        let refused = other.begin_session(&mut World::new());
+        assert!(refused.is_err_and(|e| e.to_string().contains("another editor")));
+        // Before Play or a restart: autosaved at once.
+        ed.save_session(&mut world);
+        let saved = std::fs::read_to_string(&autosave).unwrap();
+        assert!(
+            saved.contains("Transform.translation = (3, 0, 0)"),
+            "{saved}"
+        );
+
+        // A crash: the editor is gone without ending its session.
+        drop(ed);
+        let (mut world, mut ed) = start(&dir);
+        assert_eq!(cube_x(&mut world), 3.0, "the unsaved changes are back");
+        assert!(
+            message(&ed).starts_with("After a crash: restored the unsaved changes of main.scene"),
+            "{}",
+            message(&ed)
+        );
+        ed.update(&mut world);
+        assert!(ed.scene_label.ends_with('*'), "{}", ed.scene_label);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("main.scene")).unwrap(),
+            file,
+            "the user's file is untouched"
+        );
+
+        // A clean exit with them asks nothing, and the next start has them again.
+        ed.end_session(&mut world);
+        assert!(!dir.join(".ofelia/session.lock").exists());
+        let (mut world, mut ed) = start(&dir);
+        assert_eq!(cube_x(&mut world), 3.0);
+        assert!(
+            message(&ed).starts_with("Restored the unsaved changes of main.scene"),
+            "{}",
+            message(&ed)
+        );
+        // Ctrl+S writes them, and the autosave goes.
+        let save = ed.ids.save;
+        ed.run(&mut world, save);
+        ed.update(&mut world);
+        ed.end_session(&mut world);
+        let written = std::fs::read_to_string(dir.join("main.scene")).unwrap();
+        assert!(written.contains("(3, 0, 0)"), "{written}");
+        assert!(!autosave.exists(), "a clean scene has no autosave");
+        let (mut world, ed) = start(&dir);
+        assert_eq!(cube_x(&mut world), 3.0);
+        assert_eq!(message(&ed), "", "nothing to bring back");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scene_changed_on_disk_is_never_written_over() {
+        let dir = project("session-conflict");
+        let file = dir.join("main.scene");
+        let (mut world, mut ed) = start(&dir);
+        move_cube(&mut ed, &mut world, 3.0);
+        ed.save_session(&mut world);
+        drop(ed);
+        // A teammate's change lands meanwhile.
+        let theirs = std::fs::read_to_string(&file).unwrap().replace(
+            "Transform.translation = (0, 0, 0)",
+            "Transform.translation = (5, 0, 0)",
+        );
+        assert!(theirs.contains("(5, 0, 0)"), "{theirs}");
+        std::fs::write(&file, &theirs).unwrap();
+
+        let (mut world, mut ed) = start(&dir);
+        assert_eq!(cube_x(&mut world), 3.0, "the unsaved changes come back");
+        assert!(
+            message(&ed).ends_with("its file changed on disk since"),
+            "{}",
+            message(&ed)
+        );
+        ed.update(&mut world);
+        assert!(ed.scene_label.contains(icons::ALERT), "{}", ed.scene_label);
+        assert!(
+            ed.status.contains("main.scene changed on disk"),
+            "{}",
+            ed.status
+        );
+        // Ctrl+S writes nothing and says why.
+        let save = ed.ids.save;
+        ed.run(&mut world, save);
+        assert!(message(&ed).starts_with("Not saved"), "{}", message(&ed));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), theirs);
+        // Their version as one undo step, ours kept aside.
+        let take = ed.ids.take_disk;
+        ed.run(&mut world, take);
+        assert_eq!(cube_x(&mut world), 5.0);
+        ed.update(&mut world);
+        assert!(
+            !ed.scene_label.ends_with('*') && !ed.scene_label.contains(icons::ALERT),
+            "{}",
+            ed.scene_label
+        );
+        flush(&ed);
+        let aside = autosave_of(&ed).with_extension("conflict.scene");
+        assert!(aside.is_file(), "{}", aside.display());
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert_eq!(cube_x(&mut world), 3.0, "Ctrl+Z brings ours back");
+
+        // Ours kept at a clean exit (a crash this soon after a restore would open the file
+        // as saved), theirs changed once more: this time ours goes over it.
+        ed.end_session(&mut world);
+        std::fs::write(&file, theirs.replace("(5, 0, 0)", "(7, 0, 0)")).unwrap();
+        let (mut world, mut ed) = start(&dir);
+        assert_eq!(cube_x(&mut world), 3.0);
+        let over = ed.ids.save_over_disk;
+        ed.run(&mut world, over);
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            written.contains("Transform.translation = (3, 0, 0)"),
+            "{written}"
+        );
+        ed.update(&mut world);
+        assert!(!ed.scene_label.contains(icons::ALERT), "{}", ed.scene_label);
+        ed.end_session(&mut world);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn autosaves_wait_for_their_time_and_go_once_the_scene_is_clean() {
+        let dir = project("session-clean");
+        let (mut world, mut ed) = start(&dir);
+        move_cube(&mut ed, &mut world, 3.0);
+        ed.update(&mut world);
+        let autosave = autosave_of(&ed);
+        let s = ed.session.as_mut().unwrap();
+        let due = s.due.expect("the change set its time");
+        assert!(due > Instant::now() + Duration::from_secs(25));
+        // Its time comes, after a second without input.
+        let earlier = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
+        s.due = Some(earlier);
+        s.last_input = earlier;
+        ed.update(&mut world);
+        flush(&ed);
+        assert!(autosave.is_file(), "autosaved at its time");
+        // Undone back to the file: the scene is clean, and its autosave goes.
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        ed.update(&mut world);
+        flush(&ed);
+        assert!(!autosave.exists());
+        let session = std::fs::read_to_string(dir.join(".ofelia/session")).unwrap();
+        assert!(!session.contains("autosave ="), "{session}");
+        ed.end_session(&mut world);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_start_that_stopped_while_restoring_opens_the_file_as_saved() {
+        let dir = project("session-restoring");
+        let (mut world, mut ed) = start(&dir);
+        move_cube(&mut ed, &mut world, 3.0);
+        ed.save_session(&mut world);
+        let autosave = autosave_of(&ed);
+        drop(ed);
+        // This start brings the changes back, then stops before the lock says running.
+        let (mut world, ed) = start(&dir);
+        assert_eq!(cube_x(&mut world), 3.0);
+        drop(ed);
+        let (mut world, ed) = start(&dir);
+        assert_eq!(cube_x(&mut world), 0.0, "opened as saved");
+        assert!(
+            message(&ed).starts_with("The last start stopped"),
+            "{}",
+            message(&ed)
+        );
+        assert!(autosave.is_file(), "the changes are kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What an autosave costs the UI thread (the scene's text), a restore (the text loaded)
+    /// and the file's base (its hash), at 200 and 10,000 entities with a name, a transform
+    /// and a model: `cargo test -p engine_editor --release --lib autosave_cost -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "a measurement"]
+    fn autosave_cost() {
+        let t = Instant::now();
+        let registry = SceneRegistry::from_program();
+        println!(
+            "SceneRegistry::from_program: {:.3} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+        for n in [200usize, 10_000] {
+            let dir = folder(&format!("autosave-cost-{n}"));
+            let mut world = World::new();
+            for i in 0..n {
+                world.spawn((
+                    SceneId::new(),
+                    Name::new(format!("Cube {i}")),
+                    Transform::from_xyz(i as f32, 0.0, 0.0),
+                    GlobalTransform::default(),
+                    Model::new(builtin::CUBE, builtin::MATERIAL),
+                ));
+            }
+            let ed = Editor::new(
+                [1280, 720],
+                dir.clone(),
+                Some(PathBuf::from("main.scene")),
+                AssetId::new(),
+                AssetPaths::new(),
+            )
+            .unwrap();
+            let best = |f: &mut dyn FnMut()| {
+                (0..10)
+                    .map(|_| {
+                        let t = Instant::now();
+                        f();
+                        t.elapsed().as_secs_f64() * 1e3
+                    })
+                    .fold(f64::MAX, f64::min)
+            };
+            let mut text = String::new();
+            let make = best(&mut || text = ed.scene_text(&mut world).unwrap());
+            let load = best(&mut || {
+                let mut w = World::new();
+                engine_scene::load(&mut w, &registry, &text).unwrap();
+            });
+            let path = dir.join("main.scene");
+            std::fs::write(&path, &text).unwrap();
+            let base = best(&mut || {
+                session::Base::of(&path).unwrap();
+            });
+            println!(
+                "{n} entities, {} KiB: text {make:.2} ms, load {load:.2} ms, base {base:.2} ms",
+                text.len() / 1024
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

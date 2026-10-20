@@ -4,7 +4,8 @@
 //! shortcuts' core. [`shell`] lays out the editor window (the team's Godot layout) and
 //! [`paint`] draws `engine_ui` frames with `engine_render2d` and `engine_text`; [`icons`]
 //! names the icon glyphs it uses. [`input`] turns window events into UI input and
-//! [`camera`] is the viewport's orbit camera.
+//! [`camera`] is the viewport's orbit camera. The session and the scenes' autosaves live in
+//! the project's `.ofelia/` folder (ADR 0107 §4).
 
 pub mod app;
 pub mod camera;
@@ -14,6 +15,7 @@ pub mod input;
 pub mod inspector;
 pub mod paint;
 mod palette;
+mod session;
 pub mod shell;
 mod snap;
 mod undo;
