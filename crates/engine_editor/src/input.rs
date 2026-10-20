@@ -112,6 +112,9 @@ pub struct InputCollector {
     shift: bool,
     ctrl: bool,
     alt: bool,
+    /// Physical keys held now, a bit per [`Key`]: for keys that act while held (flying the
+    /// camera).
+    held_keys: [u64; 4],
     /// Keys pressed this frame with the modifiers held then, for shortcuts.
     chords: Vec<Chord>,
     /// The virtual keys pressed this frame: the letter on the key in Latin layouts (the
@@ -163,6 +166,15 @@ impl InputCollector {
     /// A key changed state: its Win32 virtual-key code, and its scan code and extended
     /// flag (the physical key shortcuts name, ADR 0021). Held keys repeat.
     pub fn key(&mut self, virtual_key: u16, scancode: u16, extended: bool, pressed: bool) {
+        let physical = Key::from_scancode(scancode, extended);
+        if let Some(k) = physical {
+            let bit = 1u64 << (k as usize % 64);
+            if pressed {
+                self.held_keys[k as usize / 64] |= bit;
+            } else {
+                self.held_keys[k as usize / 64] &= !bit;
+            }
+        }
         match virtual_key {
             vk::SHIFT | vk::LSHIFT | vk::RSHIFT => {
                 self.shift = pressed;
@@ -203,7 +215,7 @@ impl InputCollector {
             }
             _ => {}
         }
-        if let Some(key) = Key::from_scancode(scancode, extended) {
+        if let Some(key) = physical {
             self.chords.push(Chord {
                 ctrl: self.ctrl,
                 shift: self.shift,
@@ -233,6 +245,7 @@ impl InputCollector {
         self.shift = false;
         self.ctrl = false;
         self.alt = false;
+        self.held_keys = [0; 4];
     }
 
     /// This frame's UI input, in logical pixels (`scale` physical pixels per logical one).
@@ -257,6 +270,11 @@ impl InputCollector {
     /// its letter matters more than its place.
     pub fn letters(&self) -> &[u16] {
         &self.letters
+    }
+
+    /// Whether the physical key `key` is held.
+    pub fn key_held(&self, key: Key) -> bool {
+        (self.held_keys[key as usize / 64] & (1 << (key as usize % 64))) != 0
     }
 
     /// Whether Alt is held.
@@ -392,6 +410,19 @@ mod tests {
             ui.mouse_released && !ui.mouse_down,
             "a held button is released"
         );
+    }
+
+    #[test]
+    fn held_keys_follow_presses_and_releases() {
+        let mut input = InputCollector::new();
+        input.key(0x57, 0x11, false, true); // W
+        input.next_frame();
+        assert!(input.key_held(Key::KeyW), "held across frames");
+        input.key(0x57, 0x11, false, false);
+        assert!(!input.key_held(Key::KeyW));
+        input.key(0x41, 0x1E, false, true); // A
+        input.focus_lost();
+        assert!(!input.key_held(Key::KeyA), "dropped with the focus");
     }
 
     #[test]

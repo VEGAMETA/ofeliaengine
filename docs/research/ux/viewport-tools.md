@@ -19,10 +19,10 @@ CLAUDE.md §12: keyboard-first, immediate feedback, drag and drop where natural.
 
 | The developer wants to… | Ours | Keys |
 |---|---|---|
-| move a crate 2 m up | G Y 2 Enter (y is up; or drag the gizmo's Y arrow) | 4 |
+| move a crate 2 m up | Q Y 2 Enter (y is up; or drag the gizmo's Y arrow) | 4 |
 | rotate it 90° about Y | R Y 90 Enter (or the gizmo with Ctrl: 15° steps) | 5 |
 | place a crate on a shelf | drag it from the file browser: it lands on the surface under the cursor, aligned to its normal, previewed while dragging | 1 drag |
-| put ten crates in a row | Ctrl+D, G X 1.2 Enter, then Shift+R nine times ("repeat last") | ~16 |
+| put ten crates in a row | Ctrl+D, Q X 1.2 Enter, then a "repeat last" nine times | ~16 |
 | put a fallen prop back on the floor | End (dropped onto the surface below) | 1 |
 | pick a lamp behind a pillar | click again at the same spot (cycles), or Alt+click for the list | 2 |
 | change the last move from 2 to 2.5 m | the "last operation" panel by the cursor: type 2.5 | ~3 |
@@ -38,11 +38,13 @@ CLAUDE.md §12: keyboard-first, immediate feedback, drag and drop where natural.
      cursor (Blender, Godot);
    - the selection's outline is drawn in screen space from the id buffer.
 2. **Transforms:**
-   - **keyboard first:** G, R, S with axis keys and typed values or expressions
-     (Blender). In Godot's key map, where R is the scale tool, G starts and R, S switch
-     it (team decision, 2026-10-20);
+   - **keyboard first:** transforms at once with axis keys and typed values or
+     expressions (Blender's G, R, S). In our key map, the default, on Q, E, R: the left
+     hand beside W, A, S, D, which fly the camera (team decision, 2026-10-21). In Godot's,
+     where R is the scale tool, G starts and R, S switch it (team decision, 2026-10-20);
    - gizmos for move, rotate, scale and all three at once (Unity's transform tool);
-   - Q, W, E, T pick the gizmo in Blender's key map, the default; Q, W, E, R in Godot's;
+   - Shift+Q, E, R pick the gizmo's handles in ours (the same again: all of them); Q, W,
+     E, T in Blender's key map; Q, W, E, R in Godot's;
    - Space toggles local and global axes;
    - pivots: median, each object's own origin, the active object.
 3. **Snapping:**

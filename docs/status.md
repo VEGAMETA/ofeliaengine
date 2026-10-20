@@ -104,12 +104,18 @@ Last updated: 2026-10-20.
     selection's center, Q W E R for the tools, Space for local axes, the owner's
     snapping rules, one undo step per drag, Escape takes it back.
   - **E2-2, keyboard transforms** (#271, ADR 0107 as built; team decision 2026-10-20,
-    Blender's keys by default):
+    Blender's keys by default, ours since E2-2b):
     - G, R, S; X, Y, Z for an axis (again: the local one) and Shift for a plane;
     - typed values and expressions; Enter or a click keeps, Escape or a right click
       takes it back;
     - a hint by the pointer, the axis drawn across the viewport;
     - Godot's keys through "Editor: Key Map…".
+  - **E2-2b, our keys and the camera's flight** (#272, ADR 0107 as built; team decision
+    2026-10-21):
+    - Q, E, R transform at once, Shift+Q, E, R pick the gizmo's handles; Blender's and
+      Godot's key maps in "Editor: Key Map…";
+    - with the right button held, W, A, S, D fly the camera, Q and E down and up, Shift
+      faster, and the wheel sets the speed (kept by the session).
   - **Next:** the rest of E2 (ADR 0107 §7): picking from an id buffer and outlines (an
     ADR first), placement on surfaces, frame, bookmarks, overlays.
 
