@@ -670,6 +670,8 @@ impl Player {
                     visible: true,
                     mode,
                     monitor: settings.monitor,
+                    placement: settings.window_placement,
+                    cloaked: settings.start_hidden,
                 })
                 .map_err(AppError::at("the window"))?;
             startup
@@ -1551,6 +1553,24 @@ impl Player {
     /// The window (none offscreen).
     pub fn window(&self) -> Option<WindowHandle> {
         self.window
+    }
+
+    /// Where the window is now, to open it there next time
+    /// ([`PlayerSettings::window_placement`]); none offscreen.
+    pub fn window_placement(&self) -> Option<engine_platform::window::WindowPlacement> {
+        self.window
+            .and_then(|w| engine_platform::window::window_placement(w.hwnd))
+    }
+
+    /// Shows a window opened hidden ([`PlayerSettings::start_hidden`]) with the frame it
+    /// last drew; with `front`, brings it to the front too (when Windows allows it).
+    pub fn show_window(&self, front: bool) {
+        if let (Some(windows), Some(window)) = (&self.windows, self.window) {
+            let _ = windows.set_cloaked(window.id, false);
+            if front {
+                let _ = windows.bring_to_front(window.id);
+            }
+        }
     }
 
     /// The sky, its light, the atmosphere and fog (`engine_render::environment`): set them

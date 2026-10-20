@@ -58,6 +58,12 @@ pub struct PlayerSettings {
     /// The monitor (an `HMONITOR`, `engine_platform::display::Monitor::handle`); `None`:
     /// the primary one.
     pub monitor: Option<isize>,
+    /// Where a windowed window opens, as `Player::window_placement` read it earlier (the
+    /// editor keeps its own); `None`: centred on its monitor.
+    pub window_placement: Option<engine_platform::window::WindowPlacement>,
+    /// The window opens hidden (cloaked by DWM, still drawn) until `Player::show_window`:
+    /// its first frame appears whole, over the window it takes over from.
+    pub start_hidden: bool,
     /// The GPU: `ENGINE_ADAPTER` if set, else this.
     pub adapter: AdapterPreference,
     /// The validation layer: `None` as the build has it (debug builds validate), `Some(true)`
@@ -164,6 +170,8 @@ impl Default for PlayerSettings {
             project: None,
             window: Window::FullScreen,
             monitor: None,
+            window_placement: None,
+            start_hidden: false,
             adapter: AdapterPreference::HighPerformance,
             validation: None,
             vsync: false,
