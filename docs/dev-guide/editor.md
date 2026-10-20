@@ -114,13 +114,20 @@ editor = ["dep:engine_editor"]
 | Rename the active entity | F2 |
 | The command palette | Ctrl+Shift+P |
 | Go to a scene object (the palette with `@`) | Ctrl+P |
-| Move, rotate, scale the selection at once ([keyboard transforms](#keyboard-transforms)) | G, R, S |
-| The gizmo's tools: select, move, rotate, scale | Q, W, E, T |
+| Move, scale, rotate the selection at once ([keyboard transforms](#keyboard-transforms)) | Q, E, R |
+| The gizmo's handles: move, scale, rotate (the same again: all of them) | Shift+Q, Shift+E, Shift+R |
 | The gizmo along the active entity's axes, or the world's | Space |
+| Fly the camera ([viewport navigation](#viewport-navigation)) | the right button held + W, A, S, D |
 
-These are Blender's keys, the default. **Editor: Key Map…** (Ctrl+Shift+P) takes Godot's
-instead: Q, W, E, R pick the tools, and G starts a move (R and S then switch it to a turn
-or a scale). The session keeps the choice.
+These are our keys, the default (team decision, 2026-10-21): the left hand stays beside
+W, A, S, D, which fly the camera. **Editor: Key Map…** (Ctrl+Shift+P) takes another set,
+and the session keeps the choice:
+
+| Key map | Transforms at once | The gizmo's tools |
+|---|---|---|
+| ours | Q move, E scale, R rotate | Shift+Q, Shift+E, Shift+R |
+| Blender's | G move, R rotate, S scale | Q select, W move, E rotate, T scale |
+| Godot's | G move (then R rotates, S scales) | Q select, W move, E rotate, R scale |
 
 After a click in the scene tree (its keys, rebindable like the rest):
 
@@ -145,9 +152,9 @@ and only Ctrl+S still saves. Text fields work as Windows' own: Shift and Ctrl wi
 arrows, Home and End, Ctrl+A, Ctrl+C, Ctrl+X and Ctrl+V with the clipboard.
 
 Keys are physical positions, so they stay put on any keyboard layout. A keyboard
-transform's X, Y and Z (and G, R, S while it runs) go by the letter on the key instead: Z
-is the key that says Z on a German keyboard too, and in a Cyrillic layout the key's Latin
-letter counts. Every command has a
+transform's X, Y and Z (and the transforms' own letters while it runs) go by the letter on
+the key instead: Z is the key that says Z on a German keyboard too, and in a Cyrillic
+layout the key's Latin letter counts. Every command has a
 stable name (`edit.undo`, `file.save`, `scene.duplicate`…) that the command palette, the
 keymap file and scripts use; `EditorGame::run_command` runs one by name.
 
@@ -217,12 +224,12 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
 The selection's gizmo sits at its center: the middle of the selected entities, a child
 moving with its selected parent.
 
-| Tool | Key | Handles |
+| Tool | Key (Blender's, Godot's) | Handles |
 |---|---|---|
-| Select | Q | all below: arrows, squares, rings, and the scale boxes halfway along the arrows |
-| Move | W | an arrow per axis, a square per plane, a dot in the middle for the view's plane |
-| Rotate | E | a ring per axis, the half that faces you |
-| Scale | T (R in Godot's keys) | a line and a box per axis, a box in the middle for all three |
+| Select | the active tool's key again (Q, Q) | all below: arrows, squares, rings, and the scale boxes halfway along the arrows |
+| Move | Shift+Q (W, W) | an arrow per axis, a square per plane, a dot in the middle for the view's plane |
+| Rotate | Shift+R (E, E) | a ring per axis, the half that faces you |
+| Scale | Shift+E (T, R) | a line and a box per axis, a box in the middle for all three |
 
 - **Drag a handle** with the left button. The handle under the pointer is drawn yellow,
   and the status bar shows the change ("Move (0.3, 0, 0)", "Rotate 45°").
@@ -239,8 +246,8 @@ moving with its selected parent.
 
 ## Keyboard transforms
 
-**G, R or S** moves, rotates or scales the selection with the pointer at once: there is no
-handle to grab (Blender's way). The gizmo hides meanwhile. A hint by the pointer says what
+**Q, E or R** moves, scales or rotates the selection with the pointer at once: there is no
+handle to grab (Blender's way, on G, R, S in its key map). The gizmo hides meanwhile. A hint by the pointer says what
 it does ("Move along Y: 2 m", "Rotate about Y: 45°  ·  in steps"), and the status bar lists
 the keys.
 
@@ -250,7 +257,7 @@ the keys.
 | X, Y, Z | keeps it to that axis, drawn across the viewport in the axis' color. The same key again takes the active entity's axes (the world's, after Space); a third time frees it |
 | Shift+X, Y, Z | keeps it to the plane across that axis: a move in that plane, a scale along its two axes |
 | a typed value | metres, degrees or a factor, an expression too (`2*1.5`, `-90`, `(1+2)/4`); it takes the pointer's place. Backspace edits it, and `,` is a decimal point |
-| G, R, S | starts the other transform over from here |
+| Q, E, R | starts another transform over from here (G, R, S in Blender's and Godot's keys) |
 | Enter, a left click | keeps it, as one undo step |
 | Escape, a right click | puts everything back (leaving the window does too) |
 
@@ -258,10 +265,10 @@ the keys.
   typed scale is uniform. A typed turn about an axis is counterclockwise looking down
   that axis.
 - **The pointer follows the snapping rules** above: Shift for steps, Ctrl for the grid.
-  Typed values are exact: `R Y 90` leaves exactly a quarter turn in the file, `S 0.5`
+  Typed values are exact: `R Y 90` leaves exactly a quarter turn in the file, `E 0.5`
   exactly half the scale.
-- **Examples:** G Y 2 Enter moves a crate 2 m up (y is up); R Y 90 Enter turns it a
-  quarter about the vertical; S Shift+Y 2 Enter doubles its width and depth and keeps
+- **Examples:** Q Y 2 Enter moves a crate 2 m up (y is up); R Y 90 Enter turns it a
+  quarter about the vertical; E Shift+Y 2 Enter doubles its width and depth and keeps
   its height.
 - The palette has them as commands too: "Transform: Move Selection", "Rotate Selection",
   "Scale Selection".
@@ -274,9 +281,13 @@ the keys.
 | Pan | Shift + middle drag |
 | Zoom toward the pivot | mouse wheel |
 | Look around (the pivot follows) | right drag |
+| Fly | the right button held + W, A, S, D along and across the view; Q down, E up; Shift three times faster |
+| The flight's speed | the wheel while flying: 5 m/s at first, ×1.2 a notch |
 
-The bindings follow Godot (`docs/research/ux/viewport-navigation.md`). Flying with
-right button + WASD and focusing the selection come later.
+The bindings follow Godot (`docs/research/ux/viewport-navigation.md`). While the right
+button flies the camera, the letters are the flight's: no shortcut runs. W, A, S, D, Q and
+E go by their place on the keyboard (Z, Q, S, D on AZERTY). Focusing the selection comes
+later.
 
 ## Autosave and the session
 
@@ -293,8 +304,8 @@ you press Ctrl+S.
   start brings them back, with the tab's `*`. After a crash they come back the same way,
   with at most the last 30 s or so lost; the status bar says so.
 - **The view comes back too:** the editor's camera, the selection (the active entity
-  last), the tree's closed rows, the filters, the tool, snapping and its steps, and the
-  palette's recently run commands. They are written when they change, at most every 10 s
+  last), the tree's closed rows, the filters, the tool, snapping and its steps, the key
+  map, the flight's speed, and the palette's recently run commands. They are written when they change, at most every 10 s
   at a quiet moment, and at the exit.
 - **Scene: Restore Unsaved Changes…** (Ctrl+Shift+P) lists the scene's autosaves, the
   newest first: the latest, the two older ones, and the one kept when the disk version

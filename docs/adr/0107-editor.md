@@ -847,6 +847,46 @@ default), in `engine_editor::transform` (`docs/research/ux/viewport-tools.md` §
   - navigating the camera during a transform;
   - picking and outlines (E2-3, an ADR first) and the rest of E2.
 
+## As built (E2-2b, 2026-10-21)
+
+Our key map and the camera's flight (team decision, 2026-10-21: Q, E, R transform at once,
+W, A, S, D fly the camera as in Godot, the wheel sets the speed).
+
+- **Three key maps,** ours the default:
+  - ours: Q, E, R start a move, a scale, a turn; Shift+Q, E, R pick the gizmo's handles,
+    and the active one's key again goes back to all of them;
+  - Blender's: G, R, S; the tools on Q, W, E, T;
+  - Godot's: the tools on Q, W, E, R; G, then R or S switch it;
+  - "Editor: Key Map…" picks one and the session keeps it (`keys = "ofelia"`). While a
+    transform runs, its map's letters (by the virtual key) start another over.
+- **Flight** (`docs/research/ux/viewport-navigation.md`):
+  - with the right button held, W, A, S, D move along and across the view, Q and E down
+    and up the world's axis, and Shift moves three times faster;
+  - its keys go by their physical place: the input collector keeps the held keys, which
+    it did not before, and drops them when the window loses the keyboard;
+  - each frame moves by the time since the last, at most a tenth of a second, so a stall
+    does not throw the camera;
+  - while flying no shortcut runs, so Q and E do not start transforms. The wheel sets the
+    speed (5 m/s at first, ×1.2 a notch, within 0.05–1,000 m/s), which the session
+    keeps (`fly = 5`). Without the right button the wheel zooms, as before;
+  - the status bar says how to fly while it lasts.
+- **Fixed:** a keyboard transform (and a gizmo drag) now counts as a gesture, so the
+  autosave never writes a transform half done.
+- **Tested:**
+  - the camera's flight along the view, up the world's axis and level across;
+  - held keys across frames and dropped with the focus;
+  - through the editor's frames:
+    - our keys: E, R, Q starting and switching transforms; G and S free; Shift+Q and
+      Shift+Q again;
+    - flying: W ahead and E up with Shift, each by its speed over a tenth of a second;
+      the letters not running shortcuts; the wheel setting the speed, then zooming once
+      the button is let go;
+    - the key map and the speed kept by the session.
+  - The earlier tests use our keys now (Q, E for moves and scales; Shift+R and Shift+E
+    for the tools).
+- **Not done:** acceleration while a key is held; flying with the middle button; focusing
+  the selection (F).
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and

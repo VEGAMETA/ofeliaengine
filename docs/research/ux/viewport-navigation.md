@@ -41,11 +41,16 @@ Common to all four:
 - Pan speed follows the pivot's distance and the field of view, so the scene under the
   cursor moves with it.
 - Pitch stops at ±89°: no flip over the pole.
+- **Flying as Godot's freelook** (team decision, 2026-10-21):
+  - the right button held, W, A, S, D move along and across the view, Q and E down and up
+    the world's axis, and Shift moves three times faster;
+  - the wheel sets the speed while flying (5 m/s at first, ×1.2 a notch), and the session
+    keeps it;
+  - the keys go by their place on the keyboard (the input collector keeps the held ones),
+    and no shortcut runs while flying.
 
 ## Not yet (next steps)
 
-- Fly with right button + WASD/QE and wheel speed while flying (needs held-key state in
-  the input collector).
 - Focus selection (F): move the pivot to the selection's bounds.
 - Zoom that passes through the pivot (dolly when close), orbit around the point under
   the cursor.
