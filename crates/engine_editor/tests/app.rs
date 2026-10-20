@@ -260,3 +260,64 @@ fn frames(
         .unwrap()
         .unwrap()
 }
+
+/// The quick start's game, what `ofeliaengine new` starts a game from.
+#[path = "../../engine_app/examples/quick_start.rs"]
+#[allow(dead_code)]
+mod quick_start;
+
+/// What `ofeliaengine edit` runs for a game made by `ofeliaengine new`: the editor on the
+/// game's own settings and `start` (its `main!` with the `editor` feature), offscreen.
+/// The scene opens with its materials found.
+#[test]
+fn the_quick_start_opens_in_the_editor() {
+    let project =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine_app/examples/quick_start");
+    assert!(project.join("scenes/main.scene").is_file());
+    let mut settings = quick_start::settings().unwrap();
+    settings.project = Some(project);
+    settings.window = Window::Offscreen {
+        width: 1280,
+        height: 720,
+    };
+    settings.process_setup = false;
+    settings.pipeline_cache = Some(None);
+    settings.warm_up = false;
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, quick_start::start).unwrap();
+    for _ in 0..3 {
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
+            .unwrap();
+        player.set_view_rect(game.view_rect());
+        game.sync_assets(&player);
+    }
+    for name in ["Floor", "Cube", "Sun", "Camera"] {
+        assert!(
+            engine_scene::find_named(player.world_mut(), name).is_some(),
+            "no {name}"
+        );
+    }
+    for name in ["Floor", "Cube"] {
+        let entity = engine_scene::find_named(player.world_mut(), name).unwrap();
+        let model = *player.world_mut().get::<Model>(entity).unwrap();
+        assert_ne!(model.material, builtin::MATERIAL, "{name}'s material");
+        assert_eq!(player.assets().problem(model.material), None, "{name}");
+        // Drawn: its mesh and material were made.
+        let world = player.world_mut();
+        assert!(
+            world.get::<engine_runtime::MeshRenderer>(entity).is_some(),
+            "{name}"
+        );
+    }
+    overlay.destroy(&mut player).unwrap();
+}
