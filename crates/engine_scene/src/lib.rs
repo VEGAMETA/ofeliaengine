@@ -212,6 +212,25 @@ impl Name {
     }
 }
 
+/// The entity named `name` (its [`Name`]): what a game finds in its loaded scene ("Cube",
+/// "Camera"). With several of that name, one of them; `None` for none.
+///
+/// ```
+/// use engine_ecs::World;
+/// use engine_scene::{Name, find_named};
+///
+/// let mut world = World::new();
+/// let door = world.spawn((Name::new("Door"),));
+/// assert_eq!(find_named(&mut world, "Door"), Some(door));
+/// assert_eq!(find_named(&mut world, "Gate"), None);
+/// ```
+pub fn find_named(world: &mut World, name: &str) -> Option<Entity> {
+    let mut q = QueryState::<(Entity, &Name)>::new(world);
+    q.iter_readonly(world)
+        .find(|(_, n)| n.as_str() == name)
+        .map(|(e, _)| e)
+}
+
 type Fill<'a> = dyn FnMut(*mut u8) + 'a;
 
 /// How a registered type's values are reached.
