@@ -242,6 +242,8 @@ pub(crate) struct EditorState {
     pub(crate) pick_transparent: Option<bool>,
     /// What rotating and scaling turn about (`median`, `origins`, `active`).
     pub(crate) pivot: Option<String>,
+    /// Whether the viewport shows its overlays (lights' and cameras' icons and reach).
+    pub(crate) overlays: Option<bool>,
     /// Where the editor's window was.
     pub(crate) window: Option<WindowPlacement>,
 }
@@ -292,6 +294,9 @@ impl SessionFile {
         }
         if let Some(on) = self.editor.pick_transparent {
             let _ = writeln!(out, "pick_transparent = {on}");
+        }
+        if let Some(on) = self.editor.overlays {
+            let _ = writeln!(out, "overlays = {on}");
         }
         if let Some(pivot) = &self.editor.pivot {
             out.push_str("pivot = ");
@@ -432,6 +437,13 @@ impl SessionFile {
                     "restart" => file.editor.restart = Some(unquote(value).map_err(at)?),
                     "keys" => file.editor.keys = Some(unquote(value).map_err(at)?),
                     "pivot" => file.editor.pivot = Some(unquote(value).map_err(at)?),
+                    "overlays" => {
+                        file.editor.overlays = Some(match value {
+                            "true" => true,
+                            "false" => false,
+                            other => return Err(at(format!("`{other}` is not true or false"))),
+                        });
+                    }
                     "fly" => file.editor.fly = Some(parse_number(value).map_err(at)?),
                     "pick_transparent" => {
                         file.editor.pick_transparent = Some(match value {
@@ -877,6 +889,7 @@ mod tests {
                 fly: Some(7.5),
                 pick_transparent: Some(false),
                 pivot: Some(String::from("origins")),
+                overlays: Some(false),
                 window: Some(WindowPlacement {
                     left: -7,
                     top: 0,
