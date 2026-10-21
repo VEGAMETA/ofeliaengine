@@ -36,7 +36,9 @@ CLAUDE.md §12: keyboard-first, immediate feedback, drag and drop where natural.
      2026-10-21; the scene tree keeps Shift for a range and Ctrl for one row);
    - a drag on empty space draws a box: no modifier (Godot, Figma). Alone it replaces
      the selection, with Shift it adds, with Ctrl it takes out; it takes what it touches
-     with a visible pixel, with Alt hidden objects too (team decision, 2026-10-21);
+     with a visible pixel, with Alt hidden objects too (team decision, 2026-10-21). As
+     built, a drag anywhere but on the gizmo's handles draws one: no drag moves objects
+     without the gizmo, so a drag that starts on one would otherwise do nothing;
    - clicking again at the same spot cycles (Unity); Alt+click lists what is under the
      cursor (Blender, Godot);
    - the selection's outline is drawn in screen space, 2 px, its hidden parts dimmed;

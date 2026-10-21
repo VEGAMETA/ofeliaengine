@@ -336,7 +336,8 @@ fn main() {
     let mut pipeline_stats = false;
     // The editor's pick at the view's middle every frame (ADR 0109): from the view's culled
     // commands (`view`, the default), from the GPU scene's candidates (`scene`, with
-    // `--scene-draws --rays`), or what lies under the pixel (`list`, the same way).
+    // `--scene-draws --rays`), what lies under the pixel (`list`, the same way), or a box over
+    // the whole view: what shows (`box`) or everything (`box-hidden`).
     let mut pick: Option<String> = None;
     // The editor's outline of three instances (ADR 0109; with `--scene-draws --rays`): the
     // smallest by their world boxes (`small`, the default) or the largest (`large`).
@@ -1790,7 +1791,15 @@ fn main() {
                             );
                             pick_cpu.push(start.elapsed().as_secs_f64() * 1e6);
                         }
-                        (Some("list"), Some((scene_frame, _))) => {
+                        (Some(mode @ ("list" | "box" | "box-hidden")), Some((scene_frame, _))) => {
+                            let list = match mode {
+                                "list" => ListRequest::around(request.x, request.y, 3, true),
+                                _ => ListRequest {
+                                    rect: [0, 0, WIDTH, HEIGHT],
+                                    visible: mode == "box",
+                                    transparent: true,
+                                },
+                            };
                             let start = Instant::now();
                             picker.add_list_pass(
                                 &mut fg,
@@ -1800,12 +1809,7 @@ fn main() {
                                 &mats,
                                 scene_frame,
                                 &pick_view,
-                                ListRequest {
-                                    x: request.x,
-                                    y: request.y,
-                                    radius: 3,
-                                    transparent: true,
-                                },
+                                list,
                                 number,
                             );
                             pick_cpu.push(start.elapsed().as_secs_f64() * 1e6);
@@ -2086,7 +2090,12 @@ fn main() {
                     let us = f64::from(time.gpu_us);
                     if matches!(
                         time.name,
-                        "pick" | "pick copy" | "pick list clear" | "pick list" | "pick list copy"
+                        "pick"
+                            | "pick copy"
+                            | "pick list clear"
+                            | "pick list depth"
+                            | "pick list"
+                            | "pick list copy"
                     ) {
                         pick_frame += us;
                     }

@@ -97,11 +97,11 @@ const SHADOW_VERTEX_MASKED: &[u8] = include_bytes!("../../shaders/forward.shadow
 const SHADOW_VERTEX_PIECES: &[u8] = include_bytes!("../../shaders/forward.shadowVertexPieces.spv");
 const SHADOW_VERTEX_MASKED_PIECES: &[u8] =
     include_bytes!("../../shaders/forward.shadowVertexMaskedPieces.spv");
-const SHADOW_FRAGMENT_MASKED: &[u8] =
+pub(crate) const SHADOW_FRAGMENT_MASKED: &[u8] =
     include_bytes!("../../shaders/forward.shadowFragmentMasked.spv");
 const FRAGMENT: &[u8] = include_bytes!("../../shaders/forward.fragmentMain.spv");
 const FRAGMENT_MASKED: &[u8] = include_bytes!("../../shaders/forward.fragmentMasked.spv");
-const DEPTH_VERTEX: &[u8] = include_bytes!("../../shaders/forward.depthVertex.spv");
+pub(crate) const DEPTH_VERTEX: &[u8] = include_bytes!("../../shaders/forward.depthVertex.spv");
 const FRAGMENT_MOTION: &[u8] = include_bytes!("../../shaders/forward.fragmentMainMotion.spv");
 const FRAGMENT_AO: &[u8] = include_bytes!("../../shaders/forward.fragmentMainAo.spv");
 const FRAGMENT_MASKED_MOTION: &[u8] =

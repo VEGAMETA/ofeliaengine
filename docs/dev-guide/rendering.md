@@ -2587,7 +2587,8 @@ match picker.add_scene_pass(&mut fg, &mut ring, &bindless, &geo, &mats, &scene_f
     PickPass::Empty => { /* nothing can be there: that is the answer */ }
     PickPass::Busy => { /* every readback waits to be polled, or the ring is full */ }
 }
-let list = ListRequest { x, y, radius: 3, transparent: true };
+// What lies within 3 pixels of the pixel: every surface, front to back.
+let list = ListRequest::around(x, y, 3, true);
 picker.add_list_pass(&mut fg, &mut ring, &bindless, &geo, &mats, &scene_frame, &view, list,
     frame_number);
 ```
@@ -2600,9 +2601,14 @@ picker.add_list_pass(&mut fg, &mut ring, &bindless, &geo, &mats, &scene_frame, &
   in their current pose; blended ones too with `transparent`. An id is the index the view's
   vertex shaders read the instance with: the GPU scene's slot (`RenderExtract::instance`
   gives an entity's).
-- **What it costs** (Sponza at 1080p): the square 7.0 µs on an RTX 4060 Ti and 134 µs on
+- **Boxes:** a `ListRequest` with any `rect`. With `visible`, only what shows counts: the
+  candidates' depth is drawn first, then each pixel's nearest surface keeps its depth (a
+  box selection by visible pixels); without, every surface there.
+- **What it costs** (Sponza at 1080p): the square 7.0 µs on an RTX 4060 Ti and 130 µs on
   the integrated Radeon (the view's commands drawn again: 18–20 µs and 0.51 ms); the list
-  10 µs and 107 µs. Pick when the pixel or the scene changed, not every frame.
+  10 µs and 112 µs; a box over the whole view 110 µs (visible) or 95 µs (every surface)
+  on the RTX, 2.2 ms or 3.0 ms on the iGPU. Pick when the pixels or the scene changed,
+  not every frame.
 - **Views that nobody picks in pay nothing:** the picker's pipelines are its own.
 
 **Outlines** of chosen instances, as the editor draws its selection:

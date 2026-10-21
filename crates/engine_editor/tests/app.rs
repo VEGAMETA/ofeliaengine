@@ -251,7 +251,8 @@ fn the_editor_draws_its_scene_in_the_viewport() {
 /// viewport hovers it, a click there selects it through the pick of its pixel and
 /// outlines it (`ENGINE_EDITOR_PICK_PNG=<file>` writes that frame), and a click on the
 /// empty sky clears the selection. Clicking the cube again cycles to a cube hidden inside
-/// it, then back.
+/// it, then back. A box over the view takes the outer cube, with Alt both
+/// (`ENGINE_EDITOR_BOX_PNG=<file>` writes the frame of the first box being dragged).
 #[test]
 fn a_click_in_the_viewport_selects_what_is_drawn_there() {
     let dir = std::env::temp_dir().join(format!("ofelia-editor-pick-{}", std::process::id()));
@@ -428,6 +429,16 @@ fn a_click_in_the_viewport_selects_what_is_drawn_there() {
     assert_eq!(game.hovered(), None);
     left_click(&mut player, &mut game, &mut overlay);
     assert!(game.selection().is_empty(), "a click on nothing clears it");
+    // A box over the whole view takes what shows: the outer cube; with Alt the one inside
+    // too, the nearest active.
+    let corners = (
+        ((x + w - 20) as i32, (y + 20) as i32),
+        ((x + 20) as i32, (y + h - 20) as i32),
+    );
+    drag_box(&mut player, &mut game, &mut overlay, corners, false);
+    assert_eq!(game.selection(), [cube], "what shows in the box");
+    drag_box(&mut player, &mut game, &mut overlay, corners, true);
+    assert_eq!(game.selection(), [inner, cube], "hidden ones too");
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -462,6 +473,80 @@ fn left_click(player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut 
         editor_frame(player, game, overlay);
     }
     for _ in 0..6 {
+        editor_frame(player, game, overlay);
+    }
+}
+
+/// A box dragged from `from` to `to` (the window's pixels), with Alt held when `alt`, then
+/// frames enough for its last box to answer.
+fn drag_box(
+    player: &mut Player,
+    game: &mut EditorGame<NoGame>,
+    overlay: &mut EditorOverlay,
+    (from, to): ((i32, i32), (i32, i32)),
+    alt: bool,
+) {
+    let key = |game: &mut EditorGame<NoGame>, pressed| {
+        send(
+            game,
+            WindowEventKind::Key {
+                virtual_key: 0x12,
+                scancode: 0x38,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        );
+    };
+    if alt {
+        key(game, true);
+    }
+    let button = |pressed| WindowEventKind::MouseButton {
+        button: MouseButton::Left,
+        pressed,
+    };
+    send(
+        game,
+        WindowEventKind::CursorMoved {
+            x: from.0,
+            y: from.1,
+        },
+    );
+    editor_frame(player, game, overlay);
+    send(game, button(true));
+    editor_frame(player, game, overlay);
+    // Across in a few steps, a frame each.
+    for k in 1..=4 {
+        let at = (
+            from.0 + (to.0 - from.0) * k / 4,
+            from.1 + (to.1 - from.1) * k / 4,
+        );
+        send(game, WindowEventKind::CursorMoved { x: at.0, y: at.1 });
+        editor_frame(player, game, overlay);
+    }
+    // `ENGINE_EDITOR_BOX_PNG=<file>` writes the frame of the box being dragged.
+    if !alt && let Ok(path) = std::env::var("ENGINE_EDITOR_BOX_PNG") {
+        let rgba = player
+            .capture_overlaid(game, Some(overlay))
+            .unwrap()
+            .unwrap();
+        let extent = player.extent();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    send(game, button(false));
+    editor_frame(player, game, overlay);
+    for _ in 0..6 {
+        editor_frame(player, game, overlay);
+    }
+    if alt {
+        key(game, false);
         editor_frame(player, game, overlay);
     }
 }
