@@ -68,6 +68,14 @@ hulls, when the game asks its physics for them (`ScenePhysics::sync_blockout`, p
 blockout set `internal_edges`, and the seams between pieces are as smooth as one floor.
 In the editor, **View: Colliders** (the palette) draws the pieces that collide.
 
+## Navigation
+
+The visible surface of the brushes that collide bakes into a navigation mesh
+(`Blockout::surface_triangles`, then `engine_nav::bake`; navigation.md). In the editor,
+**View: Navigation** bakes it in the background a moment after each edit and draws it, so
+you see at once where an agent can walk: through a doorway wide enough, up stairs whose
+steps are low enough.
+
 ## What it costs
 
 - The player evaluates a group again only where something changed: moving a door among
@@ -95,8 +103,7 @@ one undo step; the eye turns it off.
 
 ## Coming
 
-The navigation mesh made from the brushes in the background, sides of a room left open (a
-courtyard), radius handles for cylinders and spheres, a face pulled out into a new brush
+Sides of a room left open (a courtyard), radius handles for cylinders and spheres, a face pulled out into a new brush
 (Alt+drag), faces and edges edited by hand,
 colliders and the navigation mesh made from them, and baking a group into a mesh: ADR
 0110's steps.

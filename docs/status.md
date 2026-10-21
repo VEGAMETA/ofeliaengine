@@ -204,8 +204,12 @@ Last updated: 2026-10-20.
     hulls (`ScenePhysics::sync_blockout`); moving bodies with `BodyDesc::internal_edges`
     roll on over the seams (measured: 0.00 mm, where rounded hulls or separate bodies knock
     3-8 mm); View: Colliders in the editor.
-  - **Next:** E2b-4b, the navigation mesh baked in the background from the brushes'
-    surface, shown in the overlays.
+  - **E2b-4b, navigation** (#295): View: Navigation bakes the brushes' visible surface in
+    the background a moment after each edit, on a pool of the editor's own, and draws the
+    mesh; 400 rooms (357 tiles) in 158 ms on four workers. Games bake it from
+    `Blockout::surface_triangles`.
+  - **Next:** E2b-5, editing faces, edges and corners (Tab), then E2b-6, baking a group into
+    a mesh; or E3, Play.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

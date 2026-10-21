@@ -255,6 +255,44 @@ unsigned int engine_nav_add_tile(EngineNavMesh* nav, const unsigned char* bytes,
 	return status;
 }
 
+// The mesh's polygons' edges, for drawing: up to `max` of them as their two ends (6 floats
+// each) into `out`, and into `boundary` 1 for an edge no other polygon shares (a wall, a
+// drop) or 0. Returns how many there are: more than `max` asks for more room.
+int engine_nav_edges(const EngineNavMesh* nav, float* out, unsigned char* boundary, int max)
+{
+	const dtNavMesh* mesh = nav->mesh;
+	int n = 0;
+	for (int i = 0; i < mesh->getMaxTiles(); ++i)
+	{
+		const dtMeshTile* tile = mesh->getTile(i);
+		if (!tile || !tile->header)
+			continue;
+		for (int p = 0; p < tile->header->polyCount; ++p)
+		{
+			const dtPoly& poly = tile->polys[p];
+			if (poly.getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
+				continue;
+			for (int k = 0; k < poly.vertCount; ++k)
+			{
+				const unsigned short nei = poly.neis[k];
+				// An inner edge is drawn once, by its polygon of the two with the lower index.
+				if (nei != 0 && !(nei & DT_EXT_LINK) && (int)(nei - 1) < p)
+					continue;
+				if (n < max)
+				{
+					const float* a = &tile->verts[poly.verts[k] * 3];
+					const float* b = &tile->verts[poly.verts[(k + 1) % poly.vertCount] * 3];
+					std::memcpy(&out[n * 6], a, 3 * sizeof(float));
+					std::memcpy(&out[n * 6 + 3], b, 3 * sizeof(float));
+					boundary[n] = nei == 0 ? 1 : 0;
+				}
+				++n;
+			}
+		}
+	}
+	return n;
+}
+
 // The nearest point on the mesh to `point`, within `extent` of it. Returns 1 when found.
 int engine_nav_nearest(const EngineNavMesh* nav, const float* point, const float* extent, float* out)
 {

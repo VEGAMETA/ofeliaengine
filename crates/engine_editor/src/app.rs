@@ -559,6 +559,8 @@ struct CommandIds {
     overlays: CommandId,
     /// The blockout's colliders over the viewport (ADR 0110 E2b-4).
     colliders: CommandId,
+    /// The navigation mesh baked from the brushes, over the viewport (E2b-4b).
+    navigation: CommandId,
     /// Which keys the editor uses: Blender's or Godot's.
     keys: CommandId,
     /// Whether clicks pick transparent surfaces or through them.
@@ -634,6 +636,7 @@ fn commands() -> (Commands, CommandIds) {
         pivot: c.register("transform.pivot", "Transform", "Next Pivot"),
         overlays: c.register("view.overlays", "View", "Overlays"),
         colliders: c.register("view.colliders", "View", "Colliders"),
+        navigation: c.register("view.navigation", "View", "Navigation"),
         keys: c.register("editor.keys", "Editor", "Key Map…"),
         pick_transparent: c.register(
             "viewport.pick_transparent",
@@ -1347,7 +1350,18 @@ struct Editor {
     /// group's epoch and place) to make them again only when that changes.
     show_colliders: bool,
     collider_edges: Vec<(Vec3, Vec3)>,
-    collider_key: Vec<(Entity, u64, [f32; 12])>,
+    collider_key: BlockoutKey,
+    /// The navigation mesh shown over the viewport (View: Navigation, E2b-4b): its edges as
+    /// last baked (their ends, and whether each is a boundary), what that bake was made
+    /// from, a bake running in the background, and since when the brushes have been as they
+    /// are now (a bake waits a moment after an edit).
+    show_nav: bool,
+    nav_edges: Vec<(Vec3, Vec3, bool)>,
+    nav_key: BlockoutKey,
+    nav_job: Option<std::sync::mpsc::Receiver<Result<NavBaked, String>>>,
+    nav_changed: Option<(Instant, BlockoutKey)>,
+    /// The bakes' own workers, made with the first: the player's pool keeps its frames.
+    nav_pool: Option<std::sync::Arc<engine_core::jobs::ThreadPool>>,
     /// A brush being drawn (B, Shift+B), and its brush once it has a size, as last made.
     draw: Option<Draw>,
     drawn: Option<(Entity, Made)>,
@@ -1748,6 +1762,12 @@ impl Editor {
             show_colliders: false,
             collider_edges: Vec::new(),
             collider_key: Vec::new(),
+            show_nav: false,
+            nav_edges: Vec::new(),
+            nav_key: Vec::new(),
+            nav_job: None,
+            nav_changed: None,
+            nav_pool: None,
             draw: None,
             drawn: None,
             draw_lines: Vec::new(),
@@ -4709,6 +4729,99 @@ impl Editor {
         self.draw = Some(d);
     }
 
+    /// The navigation's frame (ADR 0110 E2b-4b): a bake's answer taken; a bake started in
+    /// the background once the brushes have stayed as they are for [`NAV_WAIT`] and no
+    /// gesture runs, from the visible surface of the brushes that collide, for a human-sized
+    /// agent (`BakeSettings::default`).
+    fn navigation_frame(&mut self, blockout: &engine_app::Blockout, world: &World) {
+        let key = blockout_key(blockout, world);
+        if key != self.nav_key && self.nav_changed.as_ref().is_none_or(|(_, k)| *k != key) {
+            self.nav_changed = Some((Instant::now(), key));
+        }
+        if let Some(job) = &self.nav_job {
+            match job.try_recv() {
+                Ok(Ok(baked)) => {
+                    self.nav_job = None;
+                    let tiles = if baked.tiles == 1 { "tile" } else { "tiles" };
+                    self.say(format!(
+                        "Navigation: {} {tiles} from {} triangles in {:.0} ms",
+                        baked.tiles, baked.triangles, baked.ms
+                    ));
+                    self.nav_edges = baked.edges;
+                }
+                Ok(Err(e)) => {
+                    self.nav_job = None;
+                    self.say(format!("Navigation not baked: {e}"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.nav_job = None,
+            }
+        }
+        let due = self
+            .nav_changed
+            .as_ref()
+            .is_some_and(|(at, _)| at.elapsed() >= NAV_WAIT);
+        if self.nav_job.is_some() || !due || self.gesture() {
+            return;
+        }
+        let Some((_, key)) = self.nav_changed.take() else {
+            return;
+        };
+        self.nav_key = key;
+        // Half the cores, at most four: 400 rooms (357 tiles) bake in 0.15 s on four
+        // workers, 0.61 s on one (`engine_nav` tests, ADR 0110).
+        let pool = match &self.nav_pool {
+            Some(pool) => std::sync::Arc::clone(pool),
+            None => {
+                let workers =
+                    std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(1, 4));
+                match engine_core::jobs::ThreadPool::builder()
+                    .workers(workers)
+                    .thread_name("ofelia-navigation")
+                    .build()
+                {
+                    Ok(pool) => {
+                        let pool = std::sync::Arc::new(pool);
+                        self.nav_pool = Some(std::sync::Arc::clone(&pool));
+                        pool
+                    }
+                    Err(e) => {
+                        self.say(format!("Navigation not baked: {e}"));
+                        return;
+                    }
+                }
+            }
+        };
+        let (mut vertices, mut triangles) = (Vec::new(), Vec::new());
+        blockout.surface_triangles(world, &mut vertices, &mut triangles);
+        let (send, answer) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name(String::from("ofelia-navigation-bake"))
+            .spawn(move || {
+                let start = Instant::now();
+                let settings = engine_nav::BakeSettings::default();
+                let result = pool
+                    .install(|| engine_nav::bake(&vertices, &triangles, &settings, Some(&pool)))
+                    .and_then(|data| {
+                        let mesh = engine_nav::NavMesh::new(&data)?;
+                        let mut edges = Vec::new();
+                        mesh.edges(&mut edges);
+                        Ok(NavBaked {
+                            edges,
+                            tiles: data.tiles.len(),
+                            triangles: triangles.len(),
+                            ms: start.elapsed().as_secs_f64() * 1e3,
+                        })
+                    })
+                    .map_err(|e| e.to_string());
+                let _ = send.send(result);
+            });
+        match spawned {
+            Ok(_) => self.nav_job = Some(answer),
+            Err(e) => self.say(format!("Navigation not baked: {e}")),
+        }
+    }
+
     /// The corners and edges a drawing lands on (team decision 2a): each brush's box, a
     /// room's walls' box too, in the world; `except` (the brush being drawn) and brushes
     /// that are off left out.
@@ -4966,6 +5079,14 @@ impl Editor {
             self.toggle_rooms(world);
         } else if let Some(k) = ids.steps.iter().position(|&c| c == id) {
             self.pick_step(world, k);
+        } else if id == ids.navigation {
+            self.show_nav = !self.show_nav;
+            self.nav_key.clear();
+            self.say(String::from(if self.show_nav {
+                "Navigation shown: where an agent 1.8 m tall walks, baked a moment after each edit"
+            } else {
+                "Navigation hidden"
+            }));
         } else if id == ids.colliders {
             self.show_colliders = !self.show_colliders;
             self.collider_key.clear();
@@ -6159,20 +6280,18 @@ impl<G> EditorGame<G> {
         // The newest pick's entity, and what to outline (ADR 0109), through the
         // extraction's slots.
         let runtime = player.runtime();
+        // The navigation's overlay (E2b-4b): baked in the background a moment after the
+        // brushes last changed.
+        if shared.show_nav {
+            shared.navigation_frame(player.blockout(), &runtime.world);
+        } else {
+            shared.nav_edges.clear();
+            shared.nav_key.clear();
+        }
         // The colliders' overlay (ADR 0110 E2b-4): the edges again when a group changed.
         if shared.show_colliders {
             let world = &runtime.world;
-            let mut key: Vec<(Entity, u64, [f32; 12])> = player
-                .blockout()
-                .groups()
-                .map(|(g, epoch)| {
-                    let placed = world
-                        .get::<GlobalTransform>(g)
-                        .map_or(Affine3A::IDENTITY, |t| t.0);
-                    (g, epoch, placed.to_cols_array())
-                })
-                .collect();
-            key.sort_unstable_by_key(|k| k.0.to_bits());
+            let key = blockout_key(player.blockout(), world);
             if key != shared.collider_key {
                 let mut edges = core::mem::take(&mut shared.collider_edges);
                 player.blockout().collider_edges(world, &mut edges);
@@ -6305,6 +6424,11 @@ impl<G> EditorGame<G> {
         let shared = self.shared.borrow();
         let view = ViewProj::new(&shared.orbit, shared.view_rect?);
         view.screen(p).map(|p| p.to_array())
+    }
+
+    /// The navigation mesh's edges the overlay shows now (View: Navigation): for tests.
+    pub fn navigation_edges(&self) -> Vec<(Vec3, Vec3, bool)> {
+        self.shared.borrow().nav_edges.clone()
     }
 
     /// The entity under the pointer in the viewport, as the newest pick saw it (ADR 0109).
@@ -6649,6 +6773,66 @@ fn draw_drawing(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canv
             let red = Vec4::new(1.0, 0.35, 0.3, 1.0);
             canvas.draw(&Quad::circle(at, 5.0 * scale).color(red).order(order));
             canvas.draw(&Quad::circle(at, 2.5 * scale).color(dark).order(order));
+        }
+    }
+    canvas.set_clip(None);
+}
+
+/// What the blockout's groups are: each group, its epoch and its place, by group.
+type BlockoutKey = Vec<(Entity, u64, [f32; 12])>;
+
+/// What the blockout's groups are now. Colliders and the navigation are made again when it
+/// changes.
+fn blockout_key(blockout: &engine_app::Blockout, world: &World) -> BlockoutKey {
+    let mut key: BlockoutKey = blockout
+        .groups()
+        .map(|(g, epoch)| {
+            let placed = world
+                .get::<GlobalTransform>(g)
+                .map_or(Affine3A::IDENTITY, |t| t.0);
+            (g, epoch, placed.to_cols_array())
+        })
+        .collect();
+    key.sort_unstable_by_key(|k| k.0.to_bits());
+    key
+}
+
+/// A navigation mesh baked in the background: its edges (ends, a boundary or not), how
+/// many tiles, from how many triangles, in how long.
+#[derive(Debug)]
+struct NavBaked {
+    edges: Vec<(Vec3, Vec3, bool)>,
+    tiles: usize,
+    triangles: usize,
+    ms: f64,
+}
+
+/// How long the brushes stay as they are before their navigation is baked again.
+const NAV_WAIT: Duration = Duration::from_millis(300);
+
+/// The most navigation edges drawn.
+const NAV_EDGES: usize = 60_000;
+
+/// The navigation mesh over the viewport (ADR 0110 E2b-4b), under the panels: its
+/// boundaries (walls, drops) bright green, the edges between its polygons faint, a
+/// couple of centimetres above the surface.
+fn draw_navigation(editor: &Editor, rect: [u32; 4], canvas: &mut Canvas) {
+    if !editor.show_nav || editor.nav_edges.is_empty() {
+        return;
+    }
+    let scale = editor.scale.max(0.5);
+    let view = ViewProj::new(&editor.orbit, rect);
+    canvas.set_clip(Some(clip_of(rect)));
+    let order = Order::layer(-1);
+    let lift = Vec3::Y * 0.02;
+    for &(a, b, boundary) in editor.nav_edges.iter().take(NAV_EDGES) {
+        if let (Some(a), Some(b)) = (view.screen(a + lift), view.screen(b + lift)) {
+            let (width, color) = if boundary {
+                (1.5 * scale, Vec4::new(0.35, 1.0, 0.45, 0.9))
+            } else {
+                (scale, Vec4::new(0.35, 1.0, 0.45, 0.3))
+            };
+            canvas.draw(&Quad::line(a, b, width).color(color).order(order));
         }
     }
     canvas.set_clip(None);
@@ -7035,6 +7219,7 @@ impl Overlay for EditorOverlay {
             }
             if let Some(rect) = editor.view_rect {
                 draw_overlays(editor, rect, &self.glyphs, &mut self.canvas);
+                draw_navigation(editor, rect, &mut self.canvas);
                 draw_colliders(editor, rect, &mut self.canvas);
                 draw_sides(editor, rect, &self.glyphs, &mut self.canvas);
                 if editor.draw.is_some() {

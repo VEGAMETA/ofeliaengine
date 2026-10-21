@@ -451,6 +451,7 @@ dependencies = [
  "engine_input",
  "engine_latency",
  "engine_log",
+ "engine_nav",
  "engine_platform",
  "engine_profiler",
  "engine_reflect",

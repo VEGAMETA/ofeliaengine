@@ -19,6 +19,23 @@ agent of human size can walk on, made from the level's colliders when you cook t
 - The cook prints its size: `a navigation mesh of 6 tiles, 23.6 KiB, baked in 0.03 s`.
 - `--no-navmesh` leaves it out. `--no-colliders` leaves it out too: it is made from them.
 
+### From blockout brushes
+
+A scene's brushes ([blockout.md](blockout.md)) bake the same way, while the game runs:
+
+```rust
+let (mut vertices, mut triangles) = (Vec::new(), Vec::new());
+player.blockout().surface_triangles(&player.runtime().world, &mut vertices, &mut triangles);
+let data = engine_nav::bake(&vertices, &triangles, &engine_nav::BakeSettings::default(), Some(jobs))?;
+world.insert_resource(engine_nav::NavMesh::new(&data)?);
+```
+
+- **What is walkable:** the visible surface of the brushes that collide; the insides of
+  brushes stay out, where Recast would find walkable islands.
+- **What it costs:** 400 rooms on a ground of 240 × 200 m (357 tiles) bake in 0.61 s on
+  one thread, 0.16 s on four workers and 0.09 s on eight; a few rooms in a millisecond or
+  two.
+
 ## Finding paths
 
 ```rust
@@ -55,6 +72,6 @@ match nav.path(from, to, extent, &mut corners) {
 - **Doors and moving obstacles:** carving them out while the game runs.
 - **Jumps, ladders and teleports** (off-mesh links), areas that cost more to cross (mud,
   water), agents of other sizes.
-- **Seeing it:** the mesh and paths drawn in the editor.
+- **Seeing paths** in the editor (the mesh itself shows: View: Navigation, over brushes).
 
 They come in that order (ADR 0103).

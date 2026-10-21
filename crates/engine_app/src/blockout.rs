@@ -347,6 +347,44 @@ impl Blockout {
         }
     }
 
+    /// The visible surface of every group's colliding brushes in the world (`world` places
+    /// the groups), as triangles counter-clockwise seen from outside, into `vertices` and
+    /// `triangles` (cleared first): what a navigation mesh is baked from (ADR 0110). The
+    /// pieces' insides stay out: Recast would find walkable islands in them.
+    pub fn surface_triangles(
+        &self,
+        world: &World,
+        vertices: &mut Vec<Vec3>,
+        triangles: &mut Vec<[u32; 3]>,
+    ) {
+        vertices.clear();
+        triangles.clear();
+        for (&key, state) in &self.groups {
+            let placed = world
+                .get::<GlobalTransform>(key)
+                .map_or(Affine3A::IDENTITY, |g| g.0);
+            state.group.for_each_polygon(|owner, polygon| {
+                if !state
+                    .inputs
+                    .get(owner.brush as usize)
+                    .is_some_and(|i| i.brush.collides)
+                {
+                    return;
+                }
+                let first = vertices.len() as u32;
+                vertices.extend(
+                    polygon
+                        .corners
+                        .iter()
+                        .map(|c| placed.transform_point3((c.to_f64() * UNIT).as_vec3())),
+                );
+                for i in 1..polygon.corners.len().saturating_sub(1) as u32 {
+                    triangles.push([first, first + i, first + i + 1]);
+                }
+            });
+        }
+    }
+
     /// The edges of every group's colliding pieces in the world (`world` places the groups)
     /// into `out` (cleared first): what the editor's overlay shows of the colliders.
     pub fn collider_edges(&self, world: &World, out: &mut Vec<(Vec3, Vec3)>) {

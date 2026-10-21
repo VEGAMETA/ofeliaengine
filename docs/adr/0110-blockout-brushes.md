@@ -464,3 +464,28 @@ Proposed (question 3):
   it. In the editor: View: Colliders on and off; looked at over two brushes.
 - **Left for E2b-4b:** the navigation mesh, baked in the background from the visible
   surface, shown in the overlays.
+
+## As built (E2b-4b, 2026-10-21): navigation
+
+- **`Blockout::surface_triangles`:** the visible surface of every group's colliding
+  brushes in the world, fans of its polygons (counter-clockwise from outside, as Recast
+  wants them); the pieces' insides stay out.
+- **`engine_nav::NavMesh::edges`:** the mesh's polygons' edges for drawing, each inner edge
+  once and each marked a boundary or not (a new function of the shim, reading Detour's
+  tiles).
+- **The editor, View: Navigation:** a bake a third of a second after the brushes last
+  changed, when no gesture runs, on a background thread and a pool of the editor's own
+  (half the cores, at most four, so the player's pool keeps its frames); the edges drawn
+  over the viewport, boundaries bright green; the status bar tells the tiles and the time.
+- **Measured** (`engine_nav` tests, release, ref-1): 400 rooms of 10.4 × 8.4 m with walls
+  and ceilings on a ground of 240 × 200 m, 16,802 triangles, 357 tiles: 612 ms on one
+  thread, 299 ms on 2 workers, 158 ms on 4, 92 ms on 8.
+- **Decided on that:** every bake bakes every tile. A large level shows its mesh within half
+  a second of an edit (the wait and the bake), the editor never stops for it, and baking
+  only the tiles an edit touched (ADR 0110's plan) waits until a level makes that half
+  second felt.
+- **Tested:** in `engine_nav`, a floor's edges on it, its rim a boundary all round, a
+  wall's sides boundaries and inner edges between polygons; in the editor on both GPUs, a
+  floor and a wall with a gap baked a moment after View: Navigation turns on, the mesh on
+  the floor and its boundaries along both sides of the wall, then the wall moved and baked
+  again, the boundaries with it; looked at.
