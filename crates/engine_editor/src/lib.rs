@@ -13,6 +13,7 @@ pub mod camera;
 mod draw;
 pub mod expr;
 mod gizmo;
+mod handles;
 pub mod icons;
 pub mod input;
 pub mod inspector;

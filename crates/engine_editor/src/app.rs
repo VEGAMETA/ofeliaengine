@@ -58,8 +58,9 @@ use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
 use crate::camera::OrbitCamera;
-use crate::draw::{self, Draw, Made, ROOM_WALLS, Stage};
+use crate::draw::{self, Draw, Landed, Made, ROOM_WALLS, Stage};
 use crate::gizmo::{self, COLORS, Change, Gizmo, GizmoDrag, Handle, Mode, Target, ViewProj};
+use crate::handles::{Handles, Side, SideDrag};
 use crate::icons;
 use crate::input::{Button, InputCollector};
 use crate::inspector::{self, Defaults, Inspector, Kind, Property};
@@ -1321,6 +1322,11 @@ struct Editor {
     gizmo: Gizmo,
     gizmo_shown: bool,
     gizmo_drag: Option<GizmoDrag>,
+    /// The active brush's side handles (ADR 0110 E2b-3c), the one under the pointer, and
+    /// a side being dragged.
+    handles: Handles,
+    hovered_side: Option<Side>,
+    side_drag: Option<SideDrag>,
     /// The gizmo's handle under the pointer.
     hovered_handle: Option<Handle>,
     /// The gizmo along the active entity's axes (Space), else the world's.
@@ -1342,6 +1348,12 @@ struct Editor {
     draw_labels: Vec<(Vec2, String)>,
     draw_edges: Vec<(Vec3, Vec3)>,
     draw_sizes: Vec<(Vec3, f32)>,
+    /// Where the drawing's point landed on another brush this frame (on the screen; a
+    /// corner, else an edge), and the corners and edges it can land on.
+    draw_landed: Option<(Vec2, bool)>,
+    land_corners: Vec<Vec3>,
+    land_edges: Vec<(Vec3, Vec3)>,
+    brush_boxes: Option<QueryState<(Entity, &'static Brush, &'static GlobalTransform)>>,
     /// The camera's flight speed (the wheel while flying), meters per second.
     fly_speed: f32,
     /// When the last frame was: flying moves by the time since.
@@ -1715,6 +1727,9 @@ impl Editor {
             gizmo: Gizmo::default(),
             gizmo_shown: false,
             gizmo_drag: None,
+            handles: Handles::default(),
+            hovered_side: None,
+            side_drag: None,
             hovered_handle: None,
             local_axes: false,
             key_preset: KeyPreset::default(),
@@ -1727,6 +1742,10 @@ impl Editor {
             draw_labels: Vec::new(),
             draw_edges: Vec::new(),
             draw_sizes: Vec::new(),
+            draw_landed: None,
+            land_corners: Vec::new(),
+            land_edges: Vec::new(),
+            brush_boxes: None,
             fly_speed: FLY_SPEED,
             last_frame: Instant::now(),
             pick_request: None,
@@ -3153,6 +3172,7 @@ impl Editor {
             && self.open_choice.is_none()
             && self.renaming.is_none()
             && self.gizmo_drag.is_none()
+            && self.side_drag.is_none()
             && self.key_transform.is_none()
             && self.draw.is_none()
             && self.drag.is_none();
@@ -3167,7 +3187,9 @@ impl Editor {
             }
         });
         if self.input.pressed(Button::Left) {
-            self.press_at = cursor.filter(|_| request.is_some() && self.hovered_handle.is_none());
+            self.press_at = cursor.filter(|_| {
+                request.is_some() && self.hovered_handle.is_none() && self.hovered_side.is_none()
+            });
         }
         let near = 4.0 * self.scale.max(0.5);
         // An icon (a light, a camera) is above the scene: it takes the pointer first.
@@ -3882,9 +3904,19 @@ impl Editor {
         if let Some(t) = &self.key_transform {
             t.guides(&view, cursor, &mut self.guides);
             self.hovered_handle = None;
+            self.handles.clear();
+            self.hovered_side = None;
             return;
         }
         if self.draw.is_some() {
+            self.hovered_handle = None;
+            self.handles.clear();
+            self.hovered_side = None;
+            return;
+        }
+        // The active brush's side handles take the pointer before the gizmo's; the gizmo
+        // hides while a side is dragged.
+        if self.sides_frame(world, &view, cursor, scale) {
             self.hovered_handle = None;
             return;
         }
@@ -3961,7 +3993,11 @@ impl Editor {
             && self.open_choice.is_none()
             && self.renaming.is_none();
         self.hovered_handle = match cursor {
-            Some(at) if self.gizmo_shown && free && view.contains(at) => self.gizmo.hit(at, scale),
+            Some(at)
+                if self.gizmo_shown && free && self.hovered_side.is_none() && view.contains(at) =>
+            {
+                self.gizmo.hit(at, scale)
+            }
             _ => None,
         };
         if let (Some(handle), Some(at)) = (self.hovered_handle, cursor)
@@ -4037,6 +4073,95 @@ impl Editor {
                 })
             })
             .collect()
+    }
+
+    /// The active brush's side handles (ADR 0110 E2b-3c): laid out where they face the
+    /// camera; a press on one starts a drag of its side, which follows the pointer until the
+    /// release (Escape takes it back), one undo step. True while a side is dragged.
+    fn sides_frame(
+        &mut self,
+        world: &mut World,
+        view: &ViewProj,
+        cursor: Option<Vec2>,
+        scale: f32,
+    ) -> bool {
+        if let Some(mut drag) = self.side_drag.take() {
+            if !self.input.held(Button::Left) {
+                self.layout_sides(world, view);
+                return false;
+            }
+            if self.ui.input().keys.contains(&UiKey::Escape) && !drag.cancelled {
+                drag.cancelled = true;
+                self.history.revert(world, drag.merge);
+            } else if !drag.cancelled
+                && let Some(at) = cursor
+                && let Some((size, translation)) = drag.change(
+                    view,
+                    at,
+                    &self.snapping,
+                    self.input.shift(),
+                    self.input.ctrl(),
+                )
+            {
+                self.history.begin("Resize Brush", Some(drag.merge));
+                self.history.touch(world, drag.entity);
+                if let Some(b) = world.get_mut::<Brush>(drag.entity) {
+                    b.size = size;
+                }
+                if let Some(t) = world.get_mut::<Transform>(drag.entity) {
+                    t.translation = translation;
+                }
+                self.history.commit(world);
+            }
+            self.layout_sides(world, view);
+            self.hovered_side = Some(drag.side);
+            self.side_drag = Some(drag);
+            return true;
+        }
+        self.layout_sides(world, view);
+        let free = !self.camera_drag
+            && self.command_palette.is_none()
+            && !self.add_open
+            && self.open_choice.is_none()
+            && self.renaming.is_none()
+            && self.gizmo_drag.is_none()
+            && self.box_drag.is_none();
+        self.hovered_side = match cursor {
+            Some(at) if free && view.contains(at) => self.handles.hit(at, scale),
+            _ => None,
+        };
+        if let (Some(side), Some(e)) = (self.hovered_side, self.handles.entity)
+            && self.input.pressed(Button::Left)
+            && let (Some(brush), Some(local), Some(placed)) = (
+                world.get::<Brush>(e),
+                world.get::<Transform>(e),
+                world.get::<GlobalTransform>(e),
+            )
+        {
+            self.gestures += 1;
+            self.side_drag = Some(SideDrag::start(
+                e,
+                side,
+                brush.size,
+                *local,
+                placed.0,
+                self.gestures,
+            ));
+            return true;
+        }
+        false
+    }
+
+    /// The active brush's handles, alone in the selection or not; none for anything else.
+    fn layout_sides(&mut self, world: &World, view: &ViewProj) {
+        let active = self.active().and_then(|e| {
+            let size = world.get::<Brush>(e)?.size;
+            Some((e, size, world.get::<GlobalTransform>(e)?.0))
+        });
+        match active {
+            Some((e, size, placed)) => self.handles.layout(view, e, size, placed),
+            None => self.handles.clear(),
+        }
     }
 
     /// One frame of a gizmo drag ([`Editor::set_targets`]).
@@ -4508,6 +4633,7 @@ impl Editor {
         }
         let cursor = self.input.cursor().map(|[x, y]| Vec2::new(x, y));
         let over = cursor.is_some_and(|at| view.contains(at));
+        self.collect_landing(world, self.drawn.map(|(e, _)| e));
         if let Some(at) = cursor
             && !cancel
         {
@@ -4523,6 +4649,9 @@ impl Editor {
                 snap: &self.snapping,
                 invert: self.input.shift(),
                 round: self.input.ctrl(),
+                corners: &self.land_corners,
+                edges: &self.land_edges,
+                reach: 8.0 * self.scale.max(0.5),
             };
             make |= d.pointer(&pointer);
             // The surface under the pointer for the mark, a few frames on.
@@ -4566,6 +4695,51 @@ impl Editor {
             }
         }
         self.draw = Some(d);
+    }
+
+    /// The corners and edges a drawing lands on (team decision 2a): each brush's box, a
+    /// room's walls' box too, in the world; `except` (the brush being drawn) and brushes
+    /// that are off left out.
+    fn collect_landing(&mut self, world: &mut World, except: Option<Entity>) {
+        self.land_corners.clear();
+        self.land_edges.clear();
+        let q = self
+            .brush_boxes
+            .get_or_insert_with(|| QueryState::new(world));
+        let world = &*world;
+        for (e, brush, placed) in q.iter_readonly(world) {
+            if Some(e) == except || is_off(world, e) {
+                continue;
+            }
+            let (lo, hi) = (
+                Vec3::new(-brush.size.x * 0.5, 0.0, -brush.size.z * 0.5),
+                Vec3::new(brush.size.x * 0.5, brush.size.y, brush.size.z * 0.5),
+            );
+            let walls = Vec3::splat(brush.hollow);
+            let boxes = if brush.is_room() {
+                &[(lo, hi), (lo - walls, hi + walls)][..]
+            } else {
+                &[(lo, hi)][..]
+            };
+            for &(lo, hi) in boxes {
+                let corners: [Vec3; 8] = core::array::from_fn(|i| {
+                    let pick = |bit: usize, a: f32, b: f32| if i & bit != 0 { b } else { a };
+                    placed.0.transform_point3(Vec3::new(
+                        pick(1, lo.x, hi.x),
+                        pick(2, lo.y, hi.y),
+                        pick(4, lo.z, hi.z),
+                    ))
+                });
+                self.land_corners.extend_from_slice(&corners);
+                for (i, &c) in corners.iter().enumerate() {
+                    for bit in [1, 2, 4] {
+                        if i & bit == 0 {
+                            self.land_edges.push((c, corners[i | bit]));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The brush being drawn as `made`, in its drawing's undo step `merge`: spawned in its
@@ -4638,6 +4812,10 @@ impl Editor {
     /// through it; then the box's edges and its sizes.
     fn draw_overlay(&mut self, d: &Draw, view: &ViewProj) {
         self.draw_lines.clear();
+        self.draw_landed = d.landed.and_then(|l| {
+            let corner = matches!(l, Landed::Corner(_));
+            view.screen(l.point()).map(|at| (at, corner))
+        });
         let mut labels = core::mem::take(&mut self.draw_labels);
         let mut shown = 0;
         if let (Stage::Aim, Some((corner, normal))) = (d.stage, d.mark) {
@@ -4699,6 +4877,7 @@ impl Editor {
         let ids = self.ids;
         if id == ids.undo || id == ids.redo {
             self.drag = None;
+            self.side_drag = None;
             self.open_choice = None;
             let selected: Vec<SceneId> = self
                 .selection
@@ -5414,6 +5593,7 @@ impl Editor {
     fn gesture(&self) -> bool {
         self.drag.is_some()
             || self.gizmo_drag.is_some()
+            || self.side_drag.is_some()
             || self.key_transform.is_some()
             || self.draw.is_some()
             || self.typing.is_some()
@@ -6411,17 +6591,87 @@ fn draw_drawing(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canv
             canvas.draw(&Quad::line(a, b, 1.5 * scale).color(color).order(order));
         }
     }
-    let size = 13.0 * scale;
     for (at, text) in &editor.draw_labels {
-        let width = text.chars().count() as f32 * size * 0.55 + 10.0 * scale;
+        label(&mut editor.text, glyphs, canvas, *at, text, scale);
+    }
+    // Landed on another brush: a corner as a green dot, an edge as a red ring (SketchUp's
+    // colors; the shapes tell them apart without color).
+    if let Some((at, corner)) = editor.draw_landed {
+        let dark = Vec4::new(0.08, 0.08, 0.1, 0.9);
+        canvas.draw(&Quad::circle(at, 7.0 * scale).color(dark).order(order));
+        if corner {
+            let green = Vec4::new(0.3, 0.95, 0.4, 1.0);
+            canvas.draw(&Quad::circle(at, 5.0 * scale).color(green).order(order));
+        } else {
+            let red = Vec4::new(1.0, 0.35, 0.3, 1.0);
+            canvas.draw(&Quad::circle(at, 5.0 * scale).color(red).order(order));
+            canvas.draw(&Quad::circle(at, 2.5 * scale).color(dark).order(order));
+        }
+    }
+    canvas.set_clip(None);
+}
+
+/// A size over the viewport: `text` on a dark label centered on `at`.
+fn label(
+    text_cache: &mut UiText,
+    glyphs: &GlyphTexture,
+    canvas: &mut Canvas,
+    at: Vec2,
+    text: &str,
+    scale: f32,
+) {
+    let order = Order::layer(-1);
+    let size = 13.0 * scale;
+    let width = text.chars().count() as f32 * size * 0.55 + 10.0 * scale;
+    canvas.draw(
+        &Quad::rounded_rect(at, Vec2::new(width, size + 6.0 * scale), 4.0 * scale)
+            .color(Vec4::new(0.08, 0.08, 0.1, 0.8))
+            .order(order),
+    );
+    text_cache.draw_centered(canvas, glyphs, text, size, at, Vec4::ONE, order);
+}
+
+/// The active brush's side handles (ADR 0110 E2b-3c), under the panels: light squares on
+/// dark rims, the one under the pointer or dragged orange; while a side is dragged, its
+/// size on a label above it.
+fn draw_sides(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canvas: &mut Canvas) {
+    if editor.handles.at.is_empty() {
+        return;
+    }
+    let scale = editor.scale.max(0.5);
+    canvas.set_clip(Some(clip_of(rect)));
+    let order = Order::layer(-1);
+    for &(side, at) in &editor.handles.at {
+        let lit = editor.hovered_side == Some(side);
+        let color = if lit {
+            Vec4::new(1.0, 0.62, 0.18, 1.0)
+        } else {
+            Vec4::new(0.9, 0.95, 1.0, 1.0)
+        };
         canvas.draw(
-            &Quad::rounded_rect(*at, Vec2::new(width, size + 6.0 * scale), 4.0 * scale)
-                .color(Vec4::new(0.08, 0.08, 0.1, 0.8))
+            &Quad::solid(at, Vec2::splat(11.0 * scale))
+                .color(Vec4::new(0.08, 0.08, 0.1, 0.85))
                 .order(order),
         );
-        editor
-            .text
-            .draw_centered(canvas, glyphs, text, size, *at, Vec4::ONE, order);
+        canvas.draw(
+            &Quad::solid(at, Vec2::splat(7.0 * scale))
+                .color(color)
+                .order(order),
+        );
+    }
+    if let Some(drag) = &editor.side_drag
+        && let Some(&(_, at)) = editor.handles.at.iter().find(|(s, _)| *s == drag.side)
+    {
+        let mut text = transform::short(drag.length);
+        text.push_str(" m");
+        label(
+            &mut editor.text,
+            glyphs,
+            canvas,
+            at - Vec2::new(0.0, 20.0 * scale),
+            &text,
+            scale,
+        );
     }
     canvas.set_clip(None);
 }
@@ -6720,6 +6970,7 @@ impl Overlay for EditorOverlay {
             }
             if let Some(rect) = editor.view_rect {
                 draw_overlays(editor, rect, &self.glyphs, &mut self.canvas);
+                draw_sides(editor, rect, &self.glyphs, &mut self.canvas);
                 if editor.draw.is_some() {
                     draw_drawing(editor, rect, &self.glyphs, &mut self.canvas);
                 }
@@ -8001,6 +8252,81 @@ mod tests {
         let brush = world.get::<Brush>(room).unwrap();
         assert_eq!(brush.hollow, ROOM_WALLS);
         assert!((brush.size - Vec3::new(4.0, 3.0, 3.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn a_brushs_side_handle_drags_its_side_as_one_step_and_escape_takes_it_back() {
+        let mut world = World::new();
+        let mut ed = draw_editor("sides", &mut world);
+        ed.add(&mut world, FIRST_BRUSH);
+        let e = ed.active().unwrap();
+        // Its global transform, as the runtime makes it.
+        let placed = world.get::<Transform>(e).unwrap().to_affine();
+        world.insert(e, GlobalTransform(placed));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let size = world.get::<Brush>(e).unwrap().size;
+        let plus_x = Side {
+            axis: 0,
+            positive: true,
+        };
+        let at = |ed: &Editor| {
+            ed.handles
+                .at
+                .iter()
+                .find(|(s, _)| *s == plus_x)
+                .map(|&(_, at)| at)
+                .expect("the +x side faces the camera")
+        };
+        let grab = at(&ed);
+        mouse(&mut ed, grab.to_array(), None);
+        ed.update(&mut world);
+        assert_eq!(ed.hovered_side, Some(plus_x));
+        assert!(ed.hovered_handle.is_none(), "before the gizmo's");
+        mouse(&mut ed, grab.to_array(), Some(true));
+        ed.update(&mut world);
+        assert!(ed.side_drag.is_some());
+        // 1 m further out along +x, in two moves: snapping on, whole 0.1 m steps.
+        let out = |ed: &Editor, dx: f32| {
+            let p = placed.transform_point3(Vec3::new(size.x * 0.5 + dx, size.y * 0.5, 0.0));
+            on_view(ed, p)
+        };
+        for dx in [0.5, 1.0] {
+            let to = out(&ed, dx);
+            mouse(&mut ed, to, None);
+            ed.update(&mut world);
+        }
+        let b = world.get::<Brush>(e).unwrap().size;
+        assert!((b.x - (size.x + 1.0)).abs() < 1e-4, "{b}");
+        let t = world.get::<Transform>(e).unwrap().translation;
+        assert!(
+            (t.x - (placed.translation.x + 0.5)).abs() < 1e-4,
+            "the −x side stays: {t}"
+        );
+        let to = out(&ed, 1.0);
+        mouse(&mut ed, to, Some(false));
+        ed.update(&mut world);
+        assert!(ed.side_drag.is_none());
+        assert_eq!(ed.history.steps().count(), 2, "the add and the resize");
+        // Another drag taken back with Escape.
+        world.insert(
+            e,
+            GlobalTransform(world.get::<Transform>(e).unwrap().to_affine()),
+        );
+        ed.update(&mut world);
+        let grab = at(&ed);
+        mouse(&mut ed, grab.to_array(), None);
+        ed.update(&mut world);
+        mouse(&mut ed, grab.to_array(), Some(true));
+        ed.update(&mut world);
+        let to = (grab + Vec2::new(40.0, 0.0)).to_array();
+        mouse(&mut ed, to, None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert!((world.get::<Brush>(e).unwrap().size.x - (size.x + 1.0)).abs() < 1e-4);
+        mouse(&mut ed, to, Some(false));
+        ed.update(&mut world);
+        assert_eq!(ed.history.steps().count(), 2, "nothing more");
     }
 
     #[test]

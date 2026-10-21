@@ -395,3 +395,33 @@ Proposed (question 3):
   - in the editor: Ctrl+H, undo, a room drawn.
 - **Left:** sides of a room left open (a courtyard), a room's walls of another thickness
   from the editor (the inspector sets `hollow`), arches.
+
+## As built (E2b-3c, 2026-10-21): side handles and landing on other brushes
+
+- **`engine_editor::handles`:** the active brush shows a handle in the middle of each side
+  of its size facing the camera (its own +x, −x, top, base, +z, −z). A drag moves that
+  side along its normal on the plane holding that line that faces the camera most; the
+  opposite side stays (the origin, the base's middle, moves half the change along x or z,
+  all of it for the base, none for the top). The owner's snapping rules on the size;
+  free on the millimetres, never below one. One undo step per drag, Escape reverting it;
+  the handles come before the gizmo's under the pointer and hide it while one is dragged.
+- **Landing (the team's answer 2):** while drawing, the corners of every other brush's box
+  (a room's walls' box too) and its twelve edges are candidates within 8 px of the
+  pointer, corners first. The first corner lands on one (on an edge running along an
+  axis, at a step of the grid along it); the base's other corner on one projected into
+  the base's plane; the height on a corner's when the pointer is over it. They come
+  before the grid. The overlay marks a corner with a green dot and an edge with a red
+  ring (SketchUp's colors; the shapes tell them apart), and the hint says which.
+- **Tested:**
+  - the sides' middles, the handles facing the camera and the hit;
+  - a side dragged along a turned brush's normal with the opposite side kept, in steps
+    with snapping; the top keeping the origin and the base moving it; the millimetre floor;
+  - landing on a corner, an edge at a grid step along it, the grid elsewhere, a height
+    from a corner;
+  - in the editor: a side dragged as one undo step, before the gizmo, Escape taking
+    another back; a doorway's corner landing on the wall's edge, on the grid;
+  - on both GPUs: a crate's handles shown, and a drawn corner three pixels off the crate's
+    corner landing on it exactly through the real surface pick.
+- **Left:** radius handles for cylinders and spheres, Alt+drag pulling a face into a new
+  brush, landing on faces' middles and edges' midpoints, the candidates culled to the view
+  for very large levels.
