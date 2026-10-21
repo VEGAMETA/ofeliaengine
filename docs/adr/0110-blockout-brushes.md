@@ -157,10 +157,13 @@ brushes' polygons gathered for their meshes; medians of 31):
   entity, hidden from scenes. Picks then return the brush (ADR 0109). A changed brush
   swaps its mesh. T-junctions are split before the triangles are made, so no cracks show
   once coordinates are rounded.
-- **The grid material:** a material type (ADR 0092) drawing lines in the UVs' metres,
-  antialiased from screen-space derivatives (Golus 2023), tinted per brush, floors, walls
-  and ceilings shaded apart by their normals. Its pipelines are made with the first brush:
-  a scene without brushes pays nothing.
+- **The grid material:** the built-in material with a grid texture (a 1 m cell, lines
+  every 25 cm, its mipmaps, 16× anisotropy; ADR 0098) over the UVs' metres, its color the
+  brush's tint. Golus (2023) finds such a texture "basically as good as a simple texture
+  based grid can look"; it needs no pipeline of its own, so nothing is compiled, no
+  register moves, and a cooked game draws it as is. A procedural material type (ADR 0092:
+  lines antialiased from screen-space derivatives, made with the first brush) replaces it
+  if the texture's moiré or blur shows.
 - **Colliders: the pieces as convex hulls,** one static compound body per group (solid,
   unlike a triangle mesh: casts starting inside find it). They are made when an edit ends
   and before Play, not during a drag (the editor runs no physics while editing). The
