@@ -176,7 +176,7 @@ Last updated: 2026-10-20.
     engine as in release and no validation layer (`ENGINE_VALIDATION=1`), and playing uses
     it too (`cargo run`). Small changes now go in batches with targeted tests (the owner,
     2026-10-21).
-  - **E2b-2b, brushes in the editor** (#PR, ADR 0110 accepted: rooms merge, the owner's
+  - **E2b-2b, brushes in the editor** (#289, ADR 0110 accepted: rooms merge, the owner's
     snapping with inference, the format as proposed): the add menu in groups (Point,
     Mesh, Blockout, Light, Camera; "Empty" is "Point"), brushes into the selection's or the
     scene's blockout group, cones (pointed, truncated) and tori; snapping on G.
