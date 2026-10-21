@@ -170,7 +170,7 @@ Last updated: 2026-10-20.
     shapes (box, wedge, stairs, cylinder, sphere), each group evaluated in the player's
     frame where something changed, a mesh per brush with a grid texture (cracks at
     T-junctions closed by growing each polygon 0.05 mm); `docs/dev-guide/blockout.md`.
-  - **The owner's notes after trying the editor** (#PR): the camera's drags lock and hide
+  - **The owner's notes after trying the editor** (#288): the camera's drags lock and hide
     the cursor; the tree's eye and H turn entities off with what is below them
     (`Disabled`, saved; not drawn, lights dark, brushes out); a game's `dev` build has the
     engine as in release and no validation layer (`ENGINE_VALIDATION=1`), and playing uses
