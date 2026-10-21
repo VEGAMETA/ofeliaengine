@@ -445,6 +445,7 @@ name = "engine_editor"
 version = "0.0.0"
 dependencies = [
  "engine_app",
+ "engine_brush",
  "engine_core",
  "engine_crash",
  "engine_ecs",

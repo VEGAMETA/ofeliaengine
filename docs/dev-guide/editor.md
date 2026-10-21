@@ -137,6 +137,7 @@ editor = ["dep:engine_editor"]
 | Put the selection on the surface below it | End |
 | Draw a brush, a cut ([drawing brushes](#drawing-brushes)) | B, Shift+B |
 | Make the selected brushes rooms (walls 0.2 m thick), or solid again | Ctrl+H |
+| Edit the selected brushes' faces ([editing faces](#editing-faces)), with the pointer over the viewport | Tab |
 | Drag the selection over surfaces | Ctrl+Shift with a move handle |
 | What rotating and scaling turn about: the middle, each entity's own origin, the active entity | . (Period) |
 
@@ -381,6 +382,27 @@ names the shape and its sizes ("Stairs 1 × 1.8 × [1.2] m, 6 steps of 0.2 m").
   that runs along an axis, on the grid), the base's other corner on one as seen in the
   base's plane, and the height on a corner's when the pointer is over it. The hint says
   "on a corner" or "on an edge". So a new brush meets the old ones exactly.
+
+### Editing faces
+
+**Tab** with the pointer over the viewport edits the selected brushes' faces (Blender's Tab;
+over the panels, Tab goes from field to field). The gizmo and the handles hide; every face's
+edges show thin, and the face under the pointer lights blue.
+
+| While editing | What happens |
+|---|---|
+| a drag on a face | moves it along its normal; the brush keeps its other faces. A move that would leave nothing of the brush stops before it |
+| Alt+drag on a face | pulls a new brush out of it, as far as the pointer goes; pushed in, a cut of the face's outline that deep (a doorway pushed into a wall). It goes into the same group, and its faces are edited next too |
+| Tab, Escape, a click on no face | ends the editing (the click selects what it hits) |
+| Escape during a drag | takes the drag back |
+
+- **An edited brush keeps its planes:** its shape (box, wedge, cylinder…) becomes plain
+  planes (`BrushShape::Planes`), and its side handles go. Undo brings the shape back. A
+  room stays a room: what moves is its inside's plane, the wall following.
+- **Snapping** follows the rules above: the distance in whole steps with snapping on (G),
+  Shift the other way, Ctrl rounds it; free, millimetres. The distance shows on the face
+  while it is dragged.
+- **Every drag is one undo step.**
 
 ### Colliders
 

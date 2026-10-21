@@ -12,6 +12,7 @@ mod build;
 pub mod camera;
 mod draw;
 pub mod expr;
+mod faces;
 mod gizmo;
 mod handles;
 pub mod icons;
