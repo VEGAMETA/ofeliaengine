@@ -217,10 +217,10 @@ Last updated: 2026-10-20.
   - **E2b-6a, exporting a group** (#298; the owner chose E2b-6 before E3): Blockout: Export
     to glTF writes a group's surface as a `.glb` beside the scene, a part per tint over the
     embedded grid, so Blender opens the greybox as it looks.
-  - **E2b-6b, models from glTF files** (#PR): a `Model`'s mesh and material from a glTF
+  - **E2b-6b, models from glTF files** (#299): a `Model`'s mesh and material from a glTF
     file's parts (by name or `#index`), its textures decoded with their levels in the
     frame they are first used; `.meta` files (`AssetMeta`) with the file's id.
-  - **E2b-6c, Bake to Mesh** (#PR): a group written beside the scene as `<group>.glb` and
+  - **E2b-6c, Bake to Mesh** (#299): a group written beside the scene as `<group>.glb` and
     drawn from it by a model per tint under the group, as one undo step; its brushes, not
     drawn, keep colliding and making the navigation; Blockout: Unbake brings them back.
     E2b is done but for the cook's path, which waits for the one-button build (E14).
