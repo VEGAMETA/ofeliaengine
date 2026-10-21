@@ -116,7 +116,7 @@ Last updated: 2026-10-20.
       Godot's key maps in "Editor: Key Map…";
     - with the right button held, W, A, S, D fly the camera, Q and E down and up, Shift
       faster, and the wheel sets the speed (kept by the session).
-  - **E2-3, picking and the outline** (ADR 0109, research `docs/research/viewport-picking.md`;
+  - **E2-3, picking and the outline** (#273 the design, ADR 0109, research `docs/research/viewport-picking.md`;
     team decisions 2026-10-21: hover, transparent pickable behind a switch, hidden parts of
     the outline dimmed, boxes by visible pixels with Alt for hidden ones, 2 px, Shift+click
     toggles in the viewport): steps E2-3a front-most picks, E2-3b the outline, E2-3c boxes,
