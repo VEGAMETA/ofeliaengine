@@ -160,7 +160,13 @@ Last updated: 2026-10-20.
     pieces, the pieces as hulls, the visible surface for navigation) and
     `docs/research/ux/blockout.md` (drawn on surfaces with B, typed sizes, face handles,
     Tab for faces, edges and corners, cuts shown dashed, Play at once, bake to a mesh).
-  - **Next:** the blockout's ADR, with the exact core prototyped and measured.
+  - **E2b-1, the core** (#286, ADR 0110, proposed: three questions to the team):
+    `engine_brush`, convex brushes as integer planes with every side exact in `i128`
+    (3.4 ns), Godot's order over convex pieces, the surface each brush owns, a `Group`
+    kept evaluated through edits (a door dragged among 2,001 brushes 0.58 ms on one
+    thread; from nothing 57 ms).
+  - **Next:** E2b-2, brushes in the player and the editor (components, meshes per brush,
+    the grid material, Blockout in the add menu).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

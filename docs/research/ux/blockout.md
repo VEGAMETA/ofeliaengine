@@ -4,7 +4,7 @@ Checked: 2026-10-21. Products were studied as products: their manuals, release n
 well-known tutorials and forum threads. TrenchBroom (GPL): its manual and key bindings
 only, no code. Godot (MIT): the CSG gizmo's source was read to confirm its colors and
 handles; no code was carried over. Input for [ADR 0107](../../adr/0107-editor.md) §7
-(phase E2b) and the blockout's own ADR. The technique (planes, CSG, colliders, navigation):
+(phase E2b) and [ADR 0110](../../adr/0110-blockout-brushes.md). The technique (planes, CSG, colliders, navigation):
 [../blockout.md](../blockout.md).
 
 The phase as the owner set it (ADR 0107 §7, 2026-10-17): brushes for greyboxing a level,

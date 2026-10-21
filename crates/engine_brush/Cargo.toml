@@ -1,0 +1,23 @@
+[package]
+name = "engine_brush"
+description = "Blockout brushes (ADR 0110): convex brushes held as integer planes, their exact CSG, and what a game needs from them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Math (glam's f64 vectors for output; ADR 0012).
+engine_core.workspace = true
+# Tracy zones (CLAUDE.md §14).
+engine_profiler.workspace = true
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
+
+[[bench]]
+name = "csg"
+harness = false
