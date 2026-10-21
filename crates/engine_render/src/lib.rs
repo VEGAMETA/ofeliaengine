@@ -65,6 +65,7 @@ pub mod material;
 pub mod mesh;
 pub mod motion_blur;
 pub mod msaa;
+pub mod outline;
 pub mod panorama;
 pub mod particles;
 pub mod pick;

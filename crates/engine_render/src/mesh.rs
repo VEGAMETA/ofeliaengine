@@ -1897,6 +1897,21 @@ impl GeometryFrame<'_> {
         self.pool.mesh(id)
     }
 
+    /// A mesh's finest resident level as a draw: its first index, index count and vertex
+    /// offset (`None` for stale ids and nothing resident).
+    pub(crate) fn finest_draw(&self, id: MeshId) -> Option<(u32, u32, u32)> {
+        let info = self.pool.mesh(id)?;
+        let level = self
+            .pool
+            .mesh_residency(id)
+            .map_or(0, |(resident, _)| resident);
+        let lod = info
+            .lods
+            .get(level as usize)
+            .filter(|_| level < info.lod_count)?;
+        (lod.index_count > 0).then_some((lod.first_index, lod.index_count, info.first_vertex))
+    }
+
     /// Device address of the positions (three floats per vertex).
     pub fn position_address(&self) -> vk::DeviceAddress {
         self.pool.positions.address

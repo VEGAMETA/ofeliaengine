@@ -2352,6 +2352,23 @@ impl SceneFrame<'_> {
         &self.scene.batches
     }
 
+    /// A live slot's mesh and pipeline state bits (`forward.rs`), for passes that draw
+    /// chosen instances alone (outlines, ADR 0109).
+    pub(crate) fn slot_draw(&self, slot: u32) -> Option<(MeshId, u8)> {
+        let s = self.scene.slots.get(slot as usize).filter(|s| s.alive)?;
+        Some((s.mesh, s.state))
+    }
+
+    /// A live slot's world box (its minimum and maximum corners) from its transform as
+    /// last uploaded, for passes that bound chosen instances on the screen (outlines).
+    pub(crate) fn slot_box(&self, slot: u32) -> Option<(Vec3, Vec3)> {
+        let s = self.scene.slots.get(slot as usize).filter(|s| s.alive)?;
+        let d = self.scene.data.get(slot as usize)?;
+        let (c, e) =
+            crate::cull::transform_box(&matrix_of(&d.rows), s.local_center, s.local_extents);
+        Some((c - e, c + e))
+    }
+
     /// The upload this frame's data comes from: consecutive frames that uploaded have
     /// consecutive serials.
     pub(crate) fn serial(&self) -> u64 {

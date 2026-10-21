@@ -26,6 +26,7 @@ mod meshlets;
 mod motion;
 mod motion_blur;
 mod occlusion;
+mod outline;
 mod particles;
 mod pick;
 mod post;

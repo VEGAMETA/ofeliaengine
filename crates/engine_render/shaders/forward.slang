@@ -2178,6 +2178,68 @@ uint pickFragmentMasked(PickMaskedOut input) : SV_Target0
     return input.instance + 1u;
 }
 
+// Outlines (ADR 0109, `outline.rs`): chosen instances drawn alone into a mask, each pixel
+// its item's class and number, `(class + 1) << 24 | (item + 1)` (0 where none is), over a
+// depth of its own. An item is the instance index of the draw: `push.visible` holds the
+// items' slots, `push.light_tiles` their classes.
+struct OutlineOut
+{
+    float4 position : SV_Position;
+    nointerpolation uint value : OUTLINE;
+};
+
+struct OutlineMaskedOut
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    nointerpolation uint material : MATERIAL;
+    nointerpolation uint value : OUTLINE;
+};
+
+uint outline_value(uint item)
+{
+    return ((push.light_tiles[item] + 1u) << 24) | (item + 1u);
+}
+
+[shader("vertex")]
+OutlineOut outlineVertex(uint vertex : SV_VulkanVertexID, uint item : SV_VulkanInstanceID)
+{
+    Instance inst = read_instance(push.instances, push.visible[item]);
+    OutlineOut o;
+    o.position = clip_position(inst, load_position(vertex)).clip;
+    o.value = outline_value(item);
+    return o;
+}
+
+// Masked materials: texture coordinates for the alpha test.
+[shader("vertex")]
+OutlineMaskedOut outlineVertexMasked(uint vertex : SV_VulkanVertexID, uint item : SV_VulkanInstanceID)
+{
+    Instance inst = read_instance(push.instances, push.visible[item]);
+    OutlineMaskedOut o;
+    o.position = clip_position(inst, load_position(vertex)).clip;
+    o.uv = read_attributes(vertex).uv;
+    o.material = inst.material;
+    o.value = outline_value(item);
+    return o;
+}
+
+[shader("fragment")]
+uint outlineFragment(OutlineOut input) : SV_Target0
+{
+    return input.value;
+}
+
+[shader("fragment")]
+uint outlineFragmentMasked(OutlineMaskedOut input) : SV_Target0
+{
+    MaterialContext ctx = coverage_context(input.uv, input.material);
+    MATERIAL.Params p = MATERIAL::load(ctx);
+    if (MATERIAL::alpha(ctx, p) < MATERIAL::alpha_cutoff(p))
+        discard;
+    return input.value;
+}
+
 static const float PI = 3.14159265;
 
 float distribution_ggx(float n_dot_h, float a)
