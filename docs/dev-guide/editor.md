@@ -382,6 +382,12 @@ names the shape and its sizes ("Stairs 1 × 1.8 × [1.2] m, 6 steps of 0.2 m").
   base's plane, and the height on a corner's when the pointer is over it. The hint says
   "on a corner" or "on an edge". So a new brush meets the old ones exactly.
 
+### Colliders
+
+**View: Colliders** (the palette) draws the edges of the brushes' pieces that collide,
+thin and cyan over the viewport: what the game's physics gets from them
+([blockout.md](blockout.md#colliders)).
+
 ### Sizing a brush by its sides
 
 The active brush shows a small square in the middle of each side facing the camera. Drag

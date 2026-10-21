@@ -75,7 +75,10 @@ fn hulls(points: usize) {
         .iter()
         .map(|p| {
             world
-                .create_shape(&ShapeDesc::ConvexHull { points: p })
+                .create_shape(&ShapeDesc::ConvexHull {
+                    points: p,
+                    convex_radius: engine_physics::HULL_RADIUS,
+                })
                 .unwrap()
         })
         .collect();

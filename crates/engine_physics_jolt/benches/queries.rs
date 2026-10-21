@@ -66,6 +66,7 @@ fn queries() {
                 Vec3::new(0.0, 0.4, 0.0),
                 Vec3::new(0.2, 0.2, 0.2),
             ],
+            convex_radius: engine_physics::HULL_RADIUS,
         })
         .unwrap();
     let rays = scenes::ray_grid(64);

@@ -425,3 +425,42 @@ Proposed (question 3):
 - **Left:** radius handles for cylinders and spheres, Alt+drag pulling a face into a new
   brush, landing on faces' middles and edges' midpoints, the candidates culled to the view
   for very large levels.
+
+## As built (E2b-4a, 2026-10-21): colliders
+
+- **Measured first** (`engine_physics_jolt` tests, `characters.rs`): two floor boxes side by
+  side as hulls, the seam at x = 0; a ball of 0.25 m rolled across at 3.8 m/s and a
+  character walked across at 3 m/s; how far each strays at the seam from its height
+  before it, and the ball's speed lost over 1.2 m (0.06 m/s of it its damping):
+
+  | hulls | bodies | the ball smooths internal edges | ball | speed lost | character |
+  |---|---|---|---:|---:|---:|
+  | rounded 5 cm (Jolt's default) | two | no | 7.78 mm | 0.157 m/s | 3.25 mm |
+  | sharp | two | no | 6.37 mm | 0.179 m/s | 3.79 mm |
+  | rounded | one compound | no | 7.78 mm | 0.157 m/s | 2.72 mm |
+  | rounded | one compound | yes | 4.38 mm | 0.095 m/s | 2.72 mm |
+  | sharp | one compound | no | 6.37 mm | 0.179 m/s | 0.00 mm |
+  | **sharp** | **one compound** | **yes** | **0.00 mm** | **0.060 m/s** | **0.00 mm** |
+
+  The rounding is not the knock: the knock is the next hull's edge (a ghost contact),
+  which Jolt's enhanced internal edge removal smooths only within one body, and rounding
+  leaves a groove it cannot.
+- **So:** a static body per brush group, its colliding pieces as sharp hulls (convex
+  radius 0) in one compound, in the world (`ScenePhysics::sync_blockout`, the hulls'
+  points from the pieces' exact corners); moving bodies set `BodyDesc::internal_edges`.
+  `engine_physics` gained `ShapeDesc::ConvexHull::convex_radius` (`HULL_RADIUS`, 5 cm, for
+  everything else, as before) and `BodyDesc::internal_edges` (Jolt's
+  `SetEnhancedInternalEdgeRemoval`).
+- **`Blockout`:** `groups()` (each group's epoch, bumped whenever its pieces may have
+  changed), `hulls(group)` (the pieces of brushes that collide), `collider_edges` (for the
+  overlay).
+- **When:** the game calls `sync_blockout` from its tick; a group is made again when its
+  epoch or its place changes, and its body goes with it. The editor makes none (it runs
+  no physics while editing): **View: Colliders** draws the pieces' edges, made again when
+  a group changes.
+- **Tested:** in the player on both GPUs, a ball rolled across the seam between two
+  floor brushes stays within a micrometre of its height; a brush with `collides: false`
+  is not hit by a ray; an edit makes the group's body again, and a group removed takes
+  it. In the editor: View: Colliders on and off; looked at over two brushes.
+- **Left for E2b-4b:** the navigation mesh, baked in the background from the visible
+  surface, shown in the overlays.

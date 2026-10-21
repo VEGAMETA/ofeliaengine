@@ -38,8 +38,8 @@ use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
 use engine_ecs::{Entity, GlobalTransform, Transform, World};
 use engine_physics::ecs::{KinematicTarget, PhysicsPose, PhysicsSync, RigidBody};
 use engine_physics::{
-    BodyDesc, BodyId, GravityMode, MotionType, PhysicsBackend, PhysicsError, PhysicsSettings,
-    ShapeId,
+    BodyDesc, BodyId, CompoundChild, GravityMode, MotionType, PhysicsBackend, PhysicsError,
+    PhysicsSettings, ShapeDesc, ShapeId,
 };
 use engine_physics_jolt::JoltBackend;
 use engine_reflect::Reflect;
@@ -83,6 +83,18 @@ pub struct ScenePhysics {
     settings: PhysicsSettings,
     /// The moving bodies with ids, for saves (made with the pack's bodies).
     saved: Option<engine_ecs::QueryState<(&'static RigidBody, &'static SceneId)>>,
+    /// The blockout's bodies, by brush group (ADR 0110).
+    blockout: HashMap<Entity, BlockoutBody>,
+}
+
+/// A brush group's static body: the group's epoch and place it was made for, its body and
+/// its shapes (the hulls and their compound).
+#[derive(Debug)]
+struct BlockoutBody {
+    epoch: u64,
+    placed: [f32; 12],
+    body: BodyId,
+    shapes: Vec<ShapeId>,
 }
 
 /// Placement tolerance for round shapes rebuilt for a scale (scene units).
@@ -99,6 +111,7 @@ impl ScenePhysics {
             bodies: Vec::new(),
             settings: settings.clone(),
             saved: None,
+            blockout: HashMap::new(),
         })
     }
 
@@ -317,6 +330,112 @@ impl ScenePhysics {
             self.saved = Some(engine_ecs::QueryState::new(world));
         }
         Ok(report)
+    }
+
+    /// The blockout's colliders (ADR 0110): a static body per brush group, the pieces of its
+    /// brushes that collide as sharp convex hulls in one compound, in the world. Bodies that
+    /// move over it with [`BodyDesc::internal_edges`] roll and slide on over the seams
+    /// between its pieces (measured: no knock, where rounded hulls or separate bodies knock
+    /// 3-8 mm). A group made again when its pieces or its place change, gone with it. Call
+    /// it once the player has drawn a frame of the brushes (from `Game::tick`, a frame after
+    /// an edit); it returns how many groups it made again.
+    pub fn sync_blockout(
+        &mut self,
+        world: &World,
+        blockout: &crate::Blockout,
+    ) -> Result<usize, AppError> {
+        engine_profiler::zone!("app::physics::sync_blockout");
+        let mut made = 0;
+        let mut seen = Vec::new();
+        let mut hulls = Vec::new();
+        for (group, epoch) in blockout.groups() {
+            seen.push(group);
+            let placed = world
+                .get::<GlobalTransform>(group)
+                .map_or(Affine3A::IDENTITY, |g| g.0);
+            let key = placed.to_cols_array();
+            if self
+                .blockout
+                .get(&group)
+                .is_some_and(|b| b.epoch == epoch && b.placed == key)
+            {
+                continue;
+            }
+            if let Some(old) = self.blockout.remove(&group) {
+                self.drop_blockout_body(old);
+            }
+            blockout.hulls(group, &mut hulls);
+            let mut shapes = Vec::with_capacity(hulls.len() + 1);
+            let mut children = Vec::with_capacity(hulls.len());
+            for points in &hulls {
+                let points: Vec<Vec3> =
+                    points.iter().map(|&p| placed.transform_point3(p)).collect();
+                // A sliver of a piece makes no hull: left out, the rest still collide.
+                let Ok(shape) = self.physics.create_shape(&ShapeDesc::ConvexHull {
+                    points: &points,
+                    convex_radius: 0.0,
+                }) else {
+                    continue;
+                };
+                shapes.push(shape);
+                children.push(CompoundChild {
+                    shape,
+                    position: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
+                });
+            }
+            if children.is_empty() {
+                for s in shapes {
+                    self.physics.destroy_shape(s);
+                }
+                continue;
+            }
+            let compound = self
+                .physics
+                .create_shape(&ShapeDesc::Compound {
+                    children: &children,
+                })
+                .map_err(AppError::at("a brush group's collider"))?;
+            shapes.push(compound);
+            let body = self
+                .physics
+                .create_body(&BodyDesc::fixed(compound, Vec3::ZERO))
+                .map_err(AppError::at("a brush group's body"))?;
+            self.blockout.insert(
+                group,
+                BlockoutBody {
+                    epoch,
+                    placed: key,
+                    body,
+                    shapes,
+                },
+            );
+            made += 1;
+        }
+        let gone: Vec<Entity> = self
+            .blockout
+            .keys()
+            .copied()
+            .filter(|g| !seen.contains(g))
+            .collect();
+        for g in gone {
+            if let Some(old) = self.blockout.remove(&g) {
+                self.drop_blockout_body(old);
+            }
+        }
+        Ok(made)
+    }
+
+    /// The blockout's body of `group`, if it has one.
+    pub fn blockout_body(&self, group: Entity) -> Option<BodyId> {
+        self.blockout.get(&group).map(|b| b.body)
+    }
+
+    fn drop_blockout_body(&mut self, old: BlockoutBody) {
+        self.physics.destroy_body(old.body);
+        for s in old.shapes {
+            self.physics.destroy_shape(s);
+        }
     }
 
     /// One fixed step of `dt` seconds: kinematic targets, the simulation, the poses back.

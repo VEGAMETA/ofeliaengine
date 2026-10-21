@@ -468,6 +468,32 @@ non-uniform, mirrored. Nothing is regenerated and nothing errors.
   collider by the cook.
 - **A zero scale** turns the collider off.
 
+### Blockout brushes
+
+A scene's brushes ([blockout.md](blockout.md)) collide through the same world: one call
+after the player has drawn a frame of them, from `Game::tick`:
+
+```rust
+physics.sync_blockout(&player.runtime().world, player.blockout())?;
+```
+
+- **A static body per brush group,** its brushes' pieces as sharp convex hulls in one
+  compound; a brush with `collides: false` is left out.
+- **Made again only when the group changes** (a brush edited, moved, added, turned off)
+  or moves, and gone with it.
+- **Moving bodies set `internal_edges`** (`BodyDesc { internal_edges: true, .. }`): Jolt
+  then smooths their contacts with the edges between the compound's parts, and a ball
+  rolls on over the seam between two floor brushes as over one floor. Measured (ADR 0110):
+  without it, or with hulls rounded the usual 5 cm, or with each piece a body of its own, a
+  ball knocks 4-8 mm at every seam and loses speed; characters 3-4 mm.
+
+### Hulls: rounded or sharp
+
+`ShapeDesc::ConvexHull { points, convex_radius }`: how far the hull's edges and corners
+are rounded. `engine_physics::HULL_RADIUS` (5 cm, Jolt's own) for props: robust contacts,
+soft corners. 0 for level geometry made of hulls that meet side by side: rounded ones make
+a groove at every seam.
+
 ### Editing them later
 
 Colliders are stored as the engine's own data: points of hulls, parameters of

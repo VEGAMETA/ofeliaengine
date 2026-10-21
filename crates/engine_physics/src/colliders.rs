@@ -88,7 +88,14 @@ fn part(
             *center,
             *rotation,
         ),
-        Shape::Hull { points } => (ShapeDesc::ConvexHull { points }, Vec3::ZERO, Quat::IDENTITY),
+        Shape::Hull { points } => (
+            ShapeDesc::ConvexHull {
+                points,
+                convex_radius: crate::HULL_RADIUS,
+            },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        ),
         Shape::Mesh {
             vertices,
             triangles,

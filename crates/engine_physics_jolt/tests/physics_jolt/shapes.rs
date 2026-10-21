@@ -162,7 +162,10 @@ fn baked_shapes_restore_the_same_geometry() {
         })
         .unwrap();
     let hull = w
-        .create_shape(&ShapeDesc::ConvexHull { points: &vertices })
+        .create_shape(&ShapeDesc::ConvexHull {
+            points: &vertices,
+            convex_radius: engine_physics::HULL_RADIUS,
+        })
         .unwrap();
     let compound = w
         .create_shape(&ShapeDesc::Compound {

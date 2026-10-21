@@ -351,6 +351,7 @@ fn shapes_and_teleport() {
                 Vec3::new(0.0, 0.0, 1.0),
                 Vec3::new(0.0, 1.5, 0.0),
             ],
+            convex_radius: engine_physics::HULL_RADIUS,
         })
         .unwrap();
     let mesh = w
@@ -388,7 +389,8 @@ fn shapes_and_teleport() {
     // Degenerate hull is rejected.
     assert!(
         w.create_shape(&ShapeDesc::ConvexHull {
-            points: &[Vec3::ZERO; 4]
+            points: &[Vec3::ZERO; 4],
+            convex_radius: engine_physics::HULL_RADIUS,
         })
         .is_err()
     );

@@ -60,6 +60,14 @@ for e in [room, inside, door] {
 }
 ```
 
+## Colliders
+
+Brushes collide: each brush group becomes one static body, its brushes' pieces as convex
+hulls, when the game asks its physics for them (`ScenePhysics::sync_blockout`, physics.md
+§11). `collides: false` leaves a brush out (decoration). Bodies that roll or slide over a
+blockout set `internal_edges`, and the seams between pieces are as smooth as one floor.
+In the editor, **View: Colliders** (the palette) draws the pieces that collide.
+
 ## What it costs
 
 - The player evaluates a group again only where something changed: moving a door among
@@ -87,7 +95,8 @@ one undo step; the eye turns it off.
 
 ## Coming
 
-Sides of a room left open (a courtyard), radius handles for cylinders and spheres, a face
-pulled out into a new brush (Alt+drag), faces and edges edited by hand,
+The navigation mesh made from the brushes in the background, sides of a room left open (a
+courtyard), radius handles for cylinders and spheres, a face pulled out into a new brush
+(Alt+drag), faces and edges edited by hand,
 colliders and the navigation mesh made from them, and baking a group into a mesh: ADR
 0110's steps.

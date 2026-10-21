@@ -21,7 +21,7 @@
 //! itself.
 
 use engine_brush::{Group, Plane, Shape, Triangles, triangles};
-use engine_core::math::{DMat3, DVec3, Mat3, Vec3};
+use engine_core::math::{Affine3A, DMat3, DVec3, Mat3, Vec3};
 use engine_ecs::{
     Changed, Entity, GlobalTransform, Parent, QueryState, Transform, With, Without, World,
 };
@@ -256,6 +256,8 @@ struct GroupState {
     group: Group,
     entities: Vec<Entity>,
     inputs: Vec<Input>,
+    /// Changes whenever its pieces may have: what colliders made from it follow.
+    epoch: u64,
 }
 
 type Brushes = QueryState<Entity, With<Brush>>;
@@ -283,6 +285,8 @@ pub struct Blockout {
     queries: Option<Queries>,
     triangles: Triangles,
     polygons: Vec<(engine_brush::Owner, engine_brush::Polygon)>,
+    /// The groups' epochs so far.
+    epochs: u64,
 }
 
 struct Queries {
@@ -304,6 +308,71 @@ impl Blockout {
     /// How many brushes have a mesh.
     pub fn meshes(&self) -> usize {
         self.meshes.len()
+    }
+
+    /// The brush groups evaluated, each with a number that changes whenever its pieces may
+    /// have (a brush in no group is a group of its own, by its entity): what colliders
+    /// follow (ADR 0110).
+    pub fn groups(&self) -> impl Iterator<Item = (Entity, u64)> + '_ {
+        self.groups.iter().map(|(&e, s)| (e, s.epoch))
+    }
+
+    /// Group `group`'s colliders into `out` (cleared first): the pieces of its brushes that
+    /// collide (`Brush::collides`), each the points of a convex hull in the group's space,
+    /// metres.
+    pub fn hulls(&self, group: Entity, out: &mut Vec<Vec<Vec3>>) {
+        out.clear();
+        let Some(state) = self.groups.get(&group) else {
+            return;
+        };
+        for (b, solid) in state.group.pieces() {
+            if !state
+                .inputs
+                .get(b as usize)
+                .is_some_and(|i| i.brush.collides)
+            {
+                continue;
+            }
+            let mut points: Vec<Vec3> = solid
+                .corners()
+                .map(|p| (p.to_f64() * UNIT).as_vec3())
+                .collect();
+            points.sort_unstable_by(|a, b| {
+                a.to_array()
+                    .partial_cmp(&b.to_array())
+                    .unwrap_or(core::cmp::Ordering::Equal)
+            });
+            points.dedup();
+            out.push(points);
+        }
+    }
+
+    /// The edges of every group's colliding pieces in the world (`world` places the groups)
+    /// into `out` (cleared first): what the editor's overlay shows of the colliders.
+    pub fn collider_edges(&self, world: &World, out: &mut Vec<(Vec3, Vec3)>) {
+        out.clear();
+        for (&key, state) in &self.groups {
+            let placed = world
+                .get::<GlobalTransform>(key)
+                .map_or(Affine3A::IDENTITY, |g| g.0);
+            let at =
+                |p: &engine_brush::Point| placed.transform_point3((p.to_f64() * UNIT).as_vec3());
+            for (b, solid) in state.group.pieces() {
+                if !state
+                    .inputs
+                    .get(b as usize)
+                    .is_some_and(|i| i.brush.collides)
+                {
+                    continue;
+                }
+                for face in &solid.faces {
+                    let c = &face.polygon.corners;
+                    for i in 0..c.len() {
+                        out.push((at(&c[i]), at(&c[(i + 1) % c.len()])));
+                    }
+                }
+            }
+        }
     }
 
     /// Brings the brushes' meshes in step with the world: run where models turn into
@@ -413,7 +482,8 @@ impl Blockout {
             }
             let inputs: Vec<Input> = entities.iter().map(|&e| input(world, key, e)).collect();
             let state = self.groups.entry(key).or_default();
-            if state.entities != entities {
+            let mut redone = state.entities != entities;
+            if redone {
                 // Brushes came, went or moved in the tree: the group from nothing.
                 for e in &state.entities {
                     if !entities.contains(e) {
@@ -438,8 +508,13 @@ impl Blockout {
                         let b = to_brush(&input, state.group.planes_mut());
                         state.group.set(i, b);
                         state.inputs[i] = input;
+                        redone = true;
                     }
                 }
+            }
+            if redone {
+                self.epochs += 1;
+                state.epoch = self.epochs;
             }
             for i in state.group.take_changed() {
                 changed_entities.push(state.entities[i as usize]);

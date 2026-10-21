@@ -163,6 +163,10 @@ pub struct CompoundChild {
     pub rotation: Quat,
 }
 
+/// How far a convex hull's edges and corners are rounded by default, metres (Jolt's own
+/// default): contacts stay robust, corners soften a little.
+pub const HULL_RADIUS: f32 = 0.05;
+
 /// A collision shape to create.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ShapeDesc<'a> {
@@ -194,6 +198,11 @@ pub enum ShapeDesc<'a> {
     ConvexHull {
         /// Points (at least 4, not coplanar).
         points: &'a [Vec3],
+        /// How far its edges and corners are rounded, at most (the backend may take less on
+        /// a thin hull). [`HULL_RADIUS`] for a prop's parts; 0 keeps them sharp, as level
+        /// geometry needs where hulls meet side by side (ADR 0110: a 5 cm rounding makes a
+        /// groove at every seam).
+        convex_radius: f32,
     },
     /// Triangle mesh (static geometry; dynamic bodies should use convex shapes).
     TriangleMesh {
@@ -257,6 +266,11 @@ pub struct BodyDesc {
     pub sensor: bool,
     /// May go to sleep when at rest.
     pub allow_sleeping: bool,
+    /// Contacts with the edges between the parts of a compound, a mesh or a height field
+    /// it moves over are smoothed (Jolt's enhanced internal edge removal): it rolls or
+    /// slides on over the seams of a level's pieces instead of knocking on them (ADR 0110).
+    /// Costs a little per contact; for bodies that move over level geometry.
+    pub internal_edges: bool,
     /// Game data returned in events and query hits.
     pub user_data: u64,
 }
@@ -281,6 +295,7 @@ impl BodyDesc {
             mass: None,
             sensor: false,
             allow_sleeping: true,
+            internal_edges: false,
             user_data: 0,
         }
     }

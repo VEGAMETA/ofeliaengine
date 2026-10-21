@@ -73,6 +73,7 @@ fn shapes_cast_down_onto_the_ground() {
                 Vec3::new(0.5, 0.9, -0.5),
                 Vec3::new(0.0, 0.9, 0.5),
             ],
+            convex_radius: engine_physics::HULL_RADIUS,
         })
         .unwrap();
     // From y = 10 down 20 m: the fraction is (10 - lowest point depth) / 20.

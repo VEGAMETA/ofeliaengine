@@ -906,12 +906,15 @@ impl PhysicsBackend for JoltBackend {
                     half_height,
                     radius,
                 } => JPH_CylinderShape_Create(half_height, radius),
-                ShapeDesc::ConvexHull { points } => {
+                ShapeDesc::ConvexHull {
+                    points,
+                    convex_radius,
+                } => {
                     let points: Vec<JPH_Vec3> = points.iter().copied().map(v3).collect();
                     let settings = JPH_ConvexHullShapeSettings_Create(
                         points.as_ptr(),
                         points.len() as u32,
-                        0.05,
+                        convex_radius.max(0.0),
                     );
                     let shape = JPH_ConvexHullShapeSettings_CreateShape(settings);
                     JPH_ShapeSettings_Destroy(settings);
@@ -1101,6 +1104,7 @@ impl PhysicsBackend for JoltBackend {
                 },
             );
             JPH_BodyCreationSettings_SetAllowSleeping(settings, desc.allow_sleeping);
+            JPH_BodyCreationSettings_SetEnhancedInternalEdgeRemoval(settings, desc.internal_edges);
             JPH_BodyCreationSettings_SetFriction(settings, desc.friction);
             JPH_BodyCreationSettings_SetRestitution(settings, desc.restitution);
             JPH_BodyCreationSettings_SetLinearDamping(settings, desc.linear_damping);

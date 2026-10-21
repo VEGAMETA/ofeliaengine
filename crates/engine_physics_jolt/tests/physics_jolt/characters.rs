@@ -335,3 +335,127 @@ fn rejects_degenerate_capsules() {
     let s = w.character(ball).unwrap();
     assert!(s.is_grounded() && s.position.y.abs() < 0.03, "{s:?}");
 }
+
+/// Two floor boxes side by side as convex hulls, the seam at x = 0 (ADR 0110: a blockout's
+/// pieces), each hull's edges rounded `convex_radius`: two static bodies, or one compound.
+fn hull_floor(w: &mut JoltBackend, convex_radius: f32, compound: bool) {
+    let mut children = Vec::new();
+    for (x0, x1) in [(-6.0, 0.0), (0.0, 6.0)] {
+        let points: Vec<Vec3> = (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 != 0 { x1 } else { x0 },
+                    if i & 2 != 0 { 0.0 } else { -1.0 },
+                    if i & 4 != 0 { 3.0 } else { -3.0 },
+                )
+            })
+            .collect();
+        let shape = w
+            .create_shape(&ShapeDesc::ConvexHull {
+                points: &points,
+                convex_radius,
+            })
+            .unwrap();
+        if compound {
+            children.push(engine_physics::CompoundChild {
+                shape,
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+            });
+        } else {
+            w.create_body(&BodyDesc::fixed(shape, Vec3::ZERO)).unwrap();
+        }
+    }
+    if compound {
+        let shape = w
+            .create_shape(&ShapeDesc::Compound {
+                children: &children,
+            })
+            .unwrap();
+        w.create_body(&BodyDesc::fixed(shape, Vec3::ZERO)).unwrap();
+    }
+}
+
+/// A ball rolled and a character walked across the seam between two hulls (ADR 0110): as
+/// two bodies, or one compound, the ball with internal edges smoothed or not, the hulls'
+/// edges rounded (Jolt's 5 cm) or sharp. Prints how far each strays at the seam from its
+/// own height before it, on one hull, and the ball's speed across it.
+#[test]
+fn a_ball_rolls_on_over_the_seams_of_a_compound_with_internal_edges_smoothed() {
+    let mut seen = Vec::new();
+    for (radius, compound, edges) in [
+        (engine_physics::HULL_RADIUS, false, false),
+        (0.0, false, false),
+        (engine_physics::HULL_RADIUS, true, false),
+        (engine_physics::HULL_RADIUS, true, true),
+        (0.0, true, false),
+        (0.0, true, true),
+    ] {
+        let mut w = world();
+        hull_floor(&mut w, radius, compound);
+        let ball = w.create_shape(&ShapeDesc::Sphere { radius: 0.25 }).unwrap();
+        // Rolling from the start: 4 m/s, turning as fast as that needs.
+        let b = w
+            .create_body(&BodyDesc {
+                linear_velocity: Vec3::new(4.0, 0.0, 0.0),
+                angular_velocity: Vec3::new(0.0, 0.0, -4.0 / 0.25),
+                internal_edges: edges,
+                ..BodyDesc::dynamic(ball, Vec3::new(-4.0, 0.25, 0.0))
+            })
+            .unwrap();
+        let mut track = Vec::new();
+        for _ in 0..120 {
+            w.step(DT, 1).unwrap();
+            let (p, _) = w.transform(b).unwrap();
+            let (v, _) = w.velocity(b).unwrap();
+            track.push((p.x, p.y, v.x));
+        }
+        let (ball_off, before, after) = across(&track);
+        let c = character(&mut w, Vec3::new(-4.0, 0.0, 1.5));
+        run(&mut w, c, Vec3::ZERO, 0.5);
+        let motor = CharacterMotor::default();
+        let mut walk = Vec::new();
+        for _ in 0..150 {
+            tick(&mut w, c, &motor, Vec3::new(3.0, 0.0, 0.0));
+            let s = w.character(c).unwrap();
+            walk.push((s.position.x, s.position.y, s.velocity.x));
+        }
+        let (walk_off, _, _) = across(&walk);
+        println!(
+            "convex radius {radius}, compound {compound}, internal edges {edges}: the ball {:.2} mm off at the seam, {before:.3} -> {after:.3} m/s across it; the character {:.2} mm off",
+            ball_off * 1e3,
+            walk_off * 1e3
+        );
+        seen.push((ball_off, before - after, walk_off));
+    }
+    // Sharp hulls in one compound, the ball smoothing internal edges: no knock at all.
+    let (ball, loss, walk) = seen[5];
+    assert!(ball < 0.5e-3, "{ball}");
+    // What its damping alone takes over those 1.2 m (0.06 m/s); the knocks take 0.1-0.18.
+    assert!(loss < 0.07, "{loss}");
+    assert!(walk < 0.5e-3, "{walk}");
+}
+
+/// From samples of (x, height, speed along x): how far the height strays within 0.6 m of
+/// the seam from its mean between 2.5 and 1 m before it, and the speed 0.6 m before the
+/// seam and 0.6 m after.
+fn across(track: &[(f32, f32, f32)]) -> (f32, f32, f32) {
+    let before: Vec<f32> = track
+        .iter()
+        .filter(|t| t.0 > -2.5 && t.0 < -1.0)
+        .map(|t| t.1)
+        .collect();
+    let level = before.iter().sum::<f32>() / before.len().max(1) as f32;
+    let off = track
+        .iter()
+        .filter(|t| t.0 > -0.6 && t.0 < 0.6)
+        .map(|t| (t.1 - level).abs())
+        .fold(0.0, f32::max);
+    let speed = |x: f32| {
+        track
+            .iter()
+            .min_by(|a, b| (a.0 - x).abs().total_cmp(&(b.0 - x).abs()))
+            .map_or(0.0, |t| t.2)
+    };
+    (off, speed(-0.6), speed(0.6))
+}
