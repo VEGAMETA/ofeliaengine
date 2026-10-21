@@ -32,4 +32,4 @@ pub use palette::{
     Chord, CommandId, CommandInfo, Commands, Conflict, Fuzzy, KeyContext, Keymap, Match,
 };
 pub use snap::{Quantity, Snapping};
-pub use undo::{History, Transaction};
+pub use undo::{History, PlayMark, Transaction, WorldSnapshot};

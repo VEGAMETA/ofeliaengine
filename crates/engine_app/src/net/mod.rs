@@ -353,6 +353,8 @@ pub(crate) trait NetDrive: Send {
     fn configure(&mut self, server: ServerSettings, client: ClientSettings);
     /// The frame's start: the game's requests, the port mapping's news.
     fn begin_frame(&mut self, world: &mut World, now: Instant);
+    /// Ends the session now, whatever it is (the editor's Stop).
+    fn end(&mut self, world: &mut World);
     /// Joined: the client runs this frame's ticks.
     fn is_client(&self) -> bool;
     /// Hosting: before the game's tick (after `Game::net_input`).
@@ -506,6 +508,12 @@ impl<I: InputData> NetDrive for Driver<I> {
     fn configure(&mut self, server: ServerSettings, client: ClientSettings) {
         self.server_settings = server;
         self.client_settings = client;
+    }
+
+    fn end(&mut self, world: &mut World) {
+        if !matches!(self.session, Session::Offline) {
+            self.leave(world);
+        }
     }
 
     fn begin_frame(&mut self, world: &mut World, now: Instant) {

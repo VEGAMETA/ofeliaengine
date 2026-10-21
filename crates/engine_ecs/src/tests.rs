@@ -32,6 +32,22 @@ struct Aligned(u64);
 component!(Aligned);
 
 #[test]
+fn resources_are_listed_and_dropped_by_type() {
+    struct Score;
+    struct Level;
+    let mut w = World::new();
+    w.insert_resource(Score);
+    w.insert_resource(Level);
+    let _ = w.remove_resource::<Level>();
+    // Registered once, now empty: not listed.
+    let types: Vec<core::any::TypeId> = w.resource_types().collect();
+    assert_eq!(types, [core::any::TypeId::of::<Score>()]);
+    assert!(w.remove_resource_of(core::any::TypeId::of::<Score>()));
+    assert!(!w.remove_resource_of(core::any::TypeId::of::<Score>()));
+    assert!(w.resource::<Score>().is_none() && w.resource_types().next().is_none());
+}
+
+#[test]
 fn spawn_get_insert_remove_despawn() {
     let mut w = World::new();
     let es: Vec<Entity> = (0..1000)

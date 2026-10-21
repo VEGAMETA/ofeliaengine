@@ -140,6 +140,7 @@ editor = ["dep:engine_editor"]
 | Edit the selected brushes' faces, edges and corners ([editing faces](#editing-faces)), with the pointer over the viewport | Tab |
 | Drag the selection over surfaces | Ctrl+Shift with a move handle |
 | What rotating and scaling turn about: the middle, each entity's own origin, the active entity | . (Period) |
+| Play the scene, stop ([playing](#playing)) | F5, F8 |
 
 These are our keys, the default (team decision, 2026-10-21): the left hand stays beside
 W, A, S, D, which fly the camera. **Editor: Key Map…** (Ctrl+Shift+P) takes another set,
@@ -471,6 +472,43 @@ E go by their place on the keyboard (Z, Q, S, D on AZERTY). Framing takes each o
 bounds as the renderer has them, and lights, cameras and empty entities as points with
 half a meter around them; nothing selected, it frames the whole scene.
 
+## Playing
+
+**F5** (or ▶ at the end of the tab row) plays the scene: your game's `start` makes the
+game on the scene's world, and its ticks run. **F8** (■) stops, and the scene is as it was
+before Play.
+
+When Play starts:
+- the session is saved first;
+- the editor's camera steps aside, so the scene's own cameras show the game.
+
+While playing:
+- **The viewport shows the game**, inside a green edge, without the editor's gizmo,
+  outlines or icons.
+- **The tree and the inspector show the running world.** Edits apply at once and are the
+  play's: Stop takes them back with the rest. Undo reaches the edits made while playing,
+  not those from before.
+- **Keys without Ctrl or Alt go to the game** (letters, arrows, Space, Delete); F1 to F12
+  and Ctrl's chords stay the editor's.
+- **Saving, restarting and baking wait for Stop**, and so do the autosave and a build's
+  restart.
+
+Stop puts back everything the game changed or added:
+- the entities it spawned go;
+- components it added go;
+- moved and changed things come back as they were, despawned ones come back;
+- resources it inserted go;
+- its videos close, its voices stop and its network session ends.
+
+Keeping the scene and putting it back take milliseconds: 7 and 8 ms for 10,000 entities.
+
+**A panic in your game's code** stops Play instead of the editor. The status bar says the
+message and where it happened (`the game panicked in `tick`: … (src/game.rs:42)`), and the
+crash reporter still writes its report.
+
+**While editing, the scene stands still:** tweens, timers and sounds start only with Play,
+so editing never changes the scene behind your back.
+
 ## Autosave and the session
 
 The editor keeps its own files in the project's `.ofelia/` folder (ADR 0107 §4). They are
@@ -551,7 +589,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | Phase | What |
 |---|---|
 | E2b | blockout: brushes for greyboxing a level (box, wedge, stairs, cylinder; add, subtract), their colliders and navigation mesh |
-| E3 | Play on a copy of the world |
+| E3 | Play: pause and step, play from the editor's camera, restart, keeping changes, the game's own window (Play and Stop are done) |
 
 The whole plan is ADR 0107 §7.
 

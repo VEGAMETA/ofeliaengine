@@ -562,6 +562,8 @@ pub struct Player {
     saves: SaveState,
     /// The world's timers and tweens, moved before every tick (ADR 0104).
     timing: engine_runtime::Timing,
+    /// The world's time runs ([`Player::set_simulating`]).
+    simulating: bool,
 }
 
 /// One of the pack's instances as the level made it: what loading a save makes again
@@ -1121,6 +1123,7 @@ impl Player {
             closing: false,
             first_present_ms: None,
             timing,
+            simulating: true,
             assets: crate::Assets::new(settings.project.clone().unwrap_or_default()),
             blockout: crate::Blockout::new(),
             view_rect: None,
@@ -1184,6 +1187,29 @@ impl Player {
     /// The same, to learn asset paths or make an asset ahead of its first use.
     pub fn assets_mut(&mut self) -> &mut crate::Assets {
         &mut self.assets
+    }
+
+    /// Whether the world's time runs (ADR 0107 E3): the game's ticks, the timers and tweens,
+    /// the sources' sound. Off, the world is drawn as it is and kept still: what the editor
+    /// does while editing (a scene's tweens, timers and sounds wait for Play), and what a
+    /// pause is. On by default.
+    pub fn set_simulating(&mut self, on: bool) {
+        self.simulating = on;
+    }
+
+    /// Whether the world's time runs ([`Self::set_simulating`]).
+    pub fn simulating(&self) -> bool {
+        self.simulating
+    }
+
+    /// Ends what a run of the game left in the player (ADR 0107 E3, the editor's Stop):
+    /// every video closed, every voice stopped, the network session left.
+    pub fn end_run(&mut self) {
+        self.videos.close_all();
+        self.sound.stop_all();
+        if let Some(net) = self.net.as_mut() {
+            net.end(&mut self.runtime.world);
+        }
     }
 
     /// Reads asset file `file` again on its next use, and makes the models that use it
@@ -1947,6 +1973,7 @@ impl Player {
             net.begin_frame(&mut self.runtime.world, Instant::now());
         }
         let joined = self.net.as_ref().is_some_and(|n| n.is_client());
+        let simulating = self.simulating;
         let stages = {
             let game_cell = RefCell::new(&mut *game);
             let timing = &mut self.timing;
@@ -1977,7 +2004,9 @@ impl Player {
                     }
                     game_cell.borrow_mut().net_input(world);
                     // Timers move once a frame here: re-simulated ticks must not move them.
-                    timing.advance(world, elapsed as f32);
+                    if simulating {
+                        timing.advance(world, elapsed as f32);
+                    }
                     self.runtime.frame_driven(
                         &(),
                         &mut self.scene,
@@ -1993,6 +2022,10 @@ impl Player {
                     |world, (), dt| {
                         if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                             input.sample_tick(Instant::now());
+                        }
+                        // Kept still: the tick only places and extracts what is there.
+                        if !simulating {
+                            return;
                         }
                         // Hosting: the guests' inputs in, the host's input into its pawn.
                         if let Some(host) = net.as_mut() {
@@ -2061,6 +2094,7 @@ impl Player {
             main.as_ref().map(|m| &m.camera),
             game.acoustics(),
             elapsed,
+            self.simulating,
         );
         report.sound = us(t);
         // Videos: their clocks, decoding ahead, the pictures due (ADR 0100).

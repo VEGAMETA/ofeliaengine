@@ -148,6 +148,15 @@ impl Videos {
         }
     }
 
+    /// Closes every video at the next frame (the editor's Stop).
+    pub(crate) fn close_all(&mut self) {
+        for slot in &mut self.slots {
+            if let Some(entry) = slot.entry.as_mut() {
+                entry.closing = true;
+            }
+        }
+    }
+
     /// Plays on (from the start once ended).
     pub fn play(&mut self, id: VideoId) {
         self.control(id, |p| p.play(), |c| c.playing = Some(true));

@@ -429,3 +429,143 @@ fn duplicates_copy_subtrees_with_their_inner_references() {
     h.redo(&mut w);
     assert!(text(&mut w).len() > before.len());
 }
+
+/// A component of the game's own, not saved by scenes (no reflection): Stop takes it off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Velocity(f32);
+engine_ecs::component!(Velocity);
+
+#[test]
+fn play_puts_the_world_back_and_forgets_its_steps() {
+    let mut w = World::new();
+    let mut h = History::new();
+    // The scene: a root with two children, one following the other, one with a tag.
+    let root = spawn(&mut w, 0.0);
+    let a = spawn(&mut w, 1.0);
+    let b = spawn(&mut w, 2.0);
+    w.set_parent(a, Some(root)).unwrap();
+    w.set_parent(b, Some(root)).unwrap();
+    w.insert(
+        a,
+        Follow {
+            target: b,
+            distance: 2.0,
+        },
+    );
+    w.insert(b, Name::new("B"));
+    w.insert(
+        b,
+        Tag {
+            label: String::from("crate"),
+            friends: vec![a],
+            level: Some(1),
+        },
+    );
+    // A step before Play, and the editor's own entity (no scene id).
+    h.begin("Move", None);
+    h.touch(&mut w, root);
+    w.get_mut::<Transform>(root).unwrap().translation.y = 5.0;
+    h.commit(&mut w);
+    let camera = w.spawn((Transform::from_xyz(9.0, 9.0, 9.0),));
+    let before = text(&mut w);
+
+    let mark = h.begin_play();
+    let snapshot = h.snapshot_world(&mut w);
+    assert_eq!(snapshot.scene_entities(), 3);
+    // Playing: things move, a component of the game's own comes, b goes, a bullet and a
+    // scene entity the game loads come, and an edit is made (an undoable step of the play
+    // world); undo does not reach the step made before Play.
+    w.get_mut::<Transform>(a).unwrap().translation.x = 40.0;
+    w.insert(a, Velocity(3.0));
+    w.get_mut::<Tag>(b).unwrap().label = String::from("broken");
+    let kids: Vec<Entity> = w.children(b).collect();
+    assert!(kids.is_empty());
+    let _ = w.set_parent(b, None);
+    w.despawn(b);
+    let bullet = w.spawn((Transform::from_xyz(0.0, 1.0, 0.0), Velocity(50.0)));
+    let loaded = spawn(&mut w, 7.0);
+    w.set_parent(loaded, Some(root)).unwrap();
+    h.begin("Rename", None);
+    h.touch(&mut w, a);
+    w.insert(a, Name::new("Renamed while playing"));
+    h.commit(&mut w);
+    assert!(h.undo(&mut w).is_some(), "the play world's own step");
+    assert!(
+        h.undo(&mut w).is_none() && !h.can_undo(),
+        "not the step before Play"
+    );
+
+    // Stop: the scene as it was, the editor's entity kept, the play's steps gone.
+    h.restore_world(&mut w, &snapshot);
+    h.end_play(mark);
+    assert_eq!(text(&mut w), before);
+    assert!(!w.contains(bullet) && !w.contains(loaded));
+    assert!(
+        w.get::<Velocity>(a).is_none(),
+        "the game's own component went"
+    );
+    assert_eq!(
+        w.get::<Transform>(camera).unwrap().translation.x,
+        9.0,
+        "the editor's own entity stays"
+    );
+    // b came back, a follows it again, and the children are in their order.
+    let kids: Vec<Entity> = w.children(root).collect();
+    assert_eq!(kids.len(), 2);
+    assert_eq!(kids[0], a);
+    assert_eq!(w.get::<Follow>(a).unwrap().target, kids[1]);
+    assert_eq!(w.get::<Tag>(kids[1]).unwrap().friends, vec![a]);
+    // The step before Play undoes as before.
+    assert!(h.can_undo());
+    assert_eq!(h.undo(&mut w).as_deref(), Some("Move"));
+    assert_eq!(w.get::<Transform>(root).unwrap().translation.y, 0.0);
+}
+
+/// What entering and leaving Play costs the world: 10,000 scene entities (a transform, a
+/// name, a tag with a string and a list), half of them moved while playing and 1,000
+/// spawned. Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "a measurement"]
+fn measure_play_snapshot_and_restore() {
+    let mut w = World::new();
+    let mut h = History::new();
+    let all: Vec<Entity> = (0..10_000)
+        .map(|i| {
+            let e = spawn(&mut w, i as f32);
+            w.insert(e, Name::new(format!("Prop {i}")));
+            w.insert(
+                e,
+                Tag {
+                    label: String::from("prop"),
+                    friends: Vec::new(),
+                    level: Some(i % 7),
+                },
+            );
+            e
+        })
+        .collect();
+    let mut best = [f64::MAX; 2];
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        let mark = h.begin_play();
+        let snapshot = h.snapshot_world(&mut w);
+        let enter = t.elapsed().as_secs_f64() * 1e3;
+        for &e in all.iter().step_by(2) {
+            w.get_mut::<Transform>(e).unwrap().translation.y += 1.0;
+        }
+        for i in 0..1000 {
+            w.spawn((Transform::from_xyz(i as f32, 0.0, 0.0), Velocity(1.0)));
+        }
+        let t = std::time::Instant::now();
+        h.restore_world(&mut w, &snapshot);
+        h.end_play(mark);
+        let leave = t.elapsed().as_secs_f64() * 1e3;
+        best = [best[0].min(enter), best[1].min(leave)];
+        assert_eq!(w.get::<Transform>(all[0]).unwrap().translation.y, 0.0);
+        println!(
+            "snapshot {enter:.1} ms ({} KB), restore {leave:.1} ms",
+            snapshot.bytes() / 1024
+        );
+    }
+    println!("best of 5: Play {:.1} ms, Stop {:.1} ms", best[0], best[1]);
+}
