@@ -30,13 +30,18 @@ CLAUDE.md §12: keyboard-first, immediate feedback, drag and drop where natural.
 ## What we take
 
 1. **Selection:**
-   - a click picks the nearest object under the cursor, from an id buffer the editor's
-     views write;
-   - Ctrl+click toggles, Shift+click adds;
-   - a drag on empty space draws a box: no modifier (Godot, Figma);
+   - a click picks the nearest object under the cursor, from ids drawn for a small
+     region around it;
+   - Shift+click adds, or takes out what is already selected (team decision,
+     2026-10-21; the scene tree keeps Shift for a range and Ctrl for one row);
+   - a drag on empty space draws a box: no modifier (Godot, Figma). Alone it replaces
+     the selection, with Shift it adds, with Ctrl it takes out; it takes what it touches
+     with a visible pixel, with Alt hidden objects too (team decision, 2026-10-21);
    - clicking again at the same spot cycles (Unity); Alt+click lists what is under the
      cursor (Blender, Godot);
-   - the selection's outline is drawn in screen space from the id buffer.
+   - the selection's outline is drawn in screen space, 2 px, its hidden parts dimmed;
+     the object under the pointer is highlighted before a click (team decision,
+     2026-10-21). How: ADR 0109 (`../viewport-picking.md`).
 2. **Transforms:**
    - **keyboard first:** transforms at once with axis keys and typed values or
      expressions (Blender's G, R, S). In our key map, the default, on Q, E, R: the left
