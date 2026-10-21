@@ -569,3 +569,62 @@ fn measure_play_snapshot_and_restore() {
     }
     println!("best of 5: Play {:.1} ms, Stop {:.1} ms", best[0], best[1]);
 }
+
+#[test]
+fn changes_kept_from_play_enter_the_scene_as_one_step() {
+    use engine_editor::PlayChange;
+    let mut w = World::new();
+    let mut h = History::new();
+    let root = spawn(&mut w, 0.0);
+    let a = spawn(&mut w, 1.0);
+    let b = spawn(&mut w, 2.0);
+    w.set_parent(a, Some(root)).unwrap();
+    w.insert(b, Name::new("B"));
+    let b_id = *w.get::<SceneId>(b).unwrap();
+    let before = text(&mut w);
+    let mark = h.begin_play();
+    let snapshot = h.snapshot_world(&mut w);
+    // Playing: a moves and gets the game's own component, b goes, an entity is made under
+    // the root.
+    w.get_mut::<Transform>(a).unwrap().translation.x = 40.0;
+    w.insert(a, Velocity(3.0));
+    let _ = w.set_parent(b, None);
+    w.despawn(b);
+    let c = w.spawn((
+        Transform::from_xyz(5.0, 0.0, 0.0),
+        Name::new("Made"),
+        Velocity(1.0),
+    ));
+    w.set_parent(c, Some(root)).unwrap();
+    let changes = h.changes_since(&mut w, &snapshot);
+    assert!(
+        changes.contains(&PlayChange::Changed {
+            entity: a,
+            components: vec!["Transform"],
+        }),
+        "the game's own component is not the scene's: {changes:?}"
+    );
+    assert!(changes.contains(&PlayChange::Gone { id: b_id }));
+    assert!(changes.contains(&PlayChange::Made { entity: c }));
+    assert_eq!(changes.len(), 3, "{changes:?}");
+
+    // Stop, keeping a's move, the made entity and b's going.
+    let kept = h.capture_kept(&mut w, &[a, c], &[b_id]);
+    assert_eq!(kept.len(), 3);
+    h.restore_world(&mut w, &snapshot);
+    h.end_play(mark);
+    assert_eq!(text(&mut w), before);
+    h.begin("Keep Changes", None);
+    h.keep(&mut w, &kept);
+    assert!(h.commit(&mut w));
+    assert_eq!(w.get::<Transform>(a).unwrap().translation.x, 40.0);
+    assert!(w.get::<Velocity>(a).is_none());
+    assert!(engine_scene::find_named(&mut w, "B").is_none());
+    let made = engine_scene::find_named(&mut w, "Made").unwrap();
+    assert!(w.get::<SceneId>(made).is_some() && w.get::<Velocity>(made).is_none());
+    assert_eq!(w.parent(made), Some(root));
+    assert_eq!(w.get::<Transform>(made).unwrap().translation.x, 5.0);
+    // One step takes it all back.
+    assert_eq!(h.undo(&mut w).as_deref(), Some("Keep Changes"));
+    assert_eq!(text(&mut w), before);
+}

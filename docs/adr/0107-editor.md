@@ -1138,3 +1138,23 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
     ticks go on;
   - the game's `engine_input::Input` listens to no device meanwhile (its filter kept and
     given back on returning or at Stop).
+
+## As built (E3-3, 2026-10-22): keeping changes
+
+- **What changed since Play** (`History::changes_since`): the scene's entities whose
+  saved components (reflected, not `hidden` or `skip`) or place differ, by component;
+  the entities made since; the scene's entities despawned since. Computed when asked,
+  from the snapshot Play took. ECS change ticks are per chunk, not per entity, so the
+  tree's per-frame marks on everything changed are left for later.
+- **Marking:**
+  - Ctrl+K keeps the selection's changes (Unreal's K, with Ctrl: plain letters are the
+    game's while it plays); the tree's badge says "Kept";
+  - Ctrl+Shift+K lists the changes in the palette, each line kept or not, the first
+    keeping every change.
+- **At Stop:**
+  1. the kept entities' saved components and places are taken (`History::capture_kept`;
+     entities made while playing get new scene ids);
+  2. the world is put back;
+  3. the kept states go in as one undo step, "Keep Changes" (`History::keep`): saved
+     components set or removed to match, runtime components left alone, the missing
+     ones spawned, kept despawns deleted.

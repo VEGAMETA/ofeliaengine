@@ -236,7 +236,12 @@ Last updated: 2026-10-20.
     editor's camera (the scene's camera put there, `PlayFrom` for the game's player),
     Ctrl+F5 restarts, Shift+F8 ejects (the editor's camera and tools on the running game,
     the game's keyboard and mouse off).
-  - **Next:** E3-3, keeping changes made while playing; then the game's own window.
+  - **E3-3, keeping changes** (#PR): Ctrl+K keeps the selection's changes made while
+    playing ("Kept" in the tree), Ctrl+Shift+K lists everything changed since Play (by
+    component, made, despawned) to pick from; at Stop they go into the scene as one undo
+    step, the game's runtime components left out, what it made becoming scene entities.
+  - **Next:** E3-4, the game's own window during Play (the UX note's default); then E4,
+    assets.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

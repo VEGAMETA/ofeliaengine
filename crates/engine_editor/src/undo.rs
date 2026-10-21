@@ -118,6 +118,15 @@ impl Codecs {
     fn records(&mut self, world: &World, id: ComponentId) -> bool {
         world.components().is_pod(id) || self.lines(world, id).is_some()
     }
+
+    /// Whether scenes save the component: reflected, not runtime state (`hidden`, `skip`),
+    /// recorded by undo.
+    fn saved(&mut self, world: &World, id: ComponentId) -> bool {
+        let Some(info) = world.components().type_info(id) else {
+            return false;
+        };
+        !info.attrs.hidden && !info.attrs.skip && self.records(world, id)
+    }
 }
 
 /// Whether a type holds entity references anywhere (inside lists, options and maps too).
@@ -245,6 +254,8 @@ pub struct History {
 pub struct WorldSnapshot {
     states: Vec<Change>,
     alive: HashMap<Entity, Box<[ComponentId]>>,
+    /// The named scene entities' names, for what a list says of those despawned since.
+    names: HashMap<SceneId, String>,
 }
 
 impl WorldSnapshot {
@@ -256,6 +267,55 @@ impl WorldSnapshot {
     /// Bytes of recorded state.
     pub fn bytes(&self) -> usize {
         transaction_bytes(&self.states)
+    }
+
+    /// The name scene entity `id` had then.
+    pub fn name_of(&self, id: SceneId) -> Option<&str> {
+        self.names.get(&id).map(String::as_str)
+    }
+}
+
+/// What changed since a [`WorldSnapshot`] in what scenes save (ADR 0107 E3: the changes
+/// made while playing, to keep).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlayChange {
+    /// A scene entity whose saved components or place differ: their names (`Parent` for
+    /// its place).
+    Changed {
+        /// The entity.
+        entity: Entity,
+        /// What differs.
+        components: Vec<&'static str>,
+    },
+    /// An entity made since (by the game, or by a scene it loaded).
+    Made {
+        /// The entity.
+        entity: Entity,
+    },
+    /// A scene entity despawned since.
+    Gone {
+        /// Its scene id.
+        id: SceneId,
+    },
+}
+
+/// The states of entities as they were taken, to give the world again with
+/// [`History::keep`]: what changes kept from Play bring into the scene.
+#[derive(Default)]
+pub struct Kept {
+    /// By scene id: the saved components and place, or `None` to despawn.
+    states: Vec<(SceneId, Option<EntityState>)>,
+}
+
+impl Kept {
+    /// How many entities it changes.
+    pub fn len(&self) -> usize {
+        self.states.len()
+    }
+
+    /// Whether it changes none.
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
     }
 }
 
@@ -685,12 +745,16 @@ impl History {
         let all: Vec<Entity> = q.iter_readonly(world).collect();
         let mut states = Vec::new();
         let mut alive = HashMap::with_capacity(all.len());
+        let mut names = HashMap::new();
         for e in all {
             let types: Box<[ComponentId]> = world
                 .component_ids_of(e)
                 .map_or_else(Box::default, Box::from);
             alive.insert(e, types);
             if let Some(&id) = world.get::<SceneId>(e) {
+                if let Some(name) = world.get::<engine_scene::Name>(e) {
+                    names.insert(id, name.as_str().to_owned());
+                }
                 let before = Some(self.snapshot(world, e));
                 states.push(Change {
                     id,
@@ -699,7 +763,161 @@ impl History {
                 });
             }
         }
-        WorldSnapshot { states, alive }
+        WorldSnapshot {
+            states,
+            alive,
+            names,
+        }
+    }
+
+    /// What changed since `snapshot` in what scenes save: the scene's entities whose
+    /// saved components or place differ, the entities made since, and the scene's
+    /// entities despawned since.
+    pub fn changes_since(
+        &mut self,
+        world: &mut World,
+        snapshot: &WorldSnapshot,
+    ) -> Vec<PlayChange> {
+        let index = id_index(world);
+        let mut out = Vec::new();
+        for c in &snapshot.states {
+            let Some(before) = &c.before else {
+                continue;
+            };
+            let Some(&e) = index.get(&c.id) else {
+                out.push(PlayChange::Gone { id: c.id });
+                continue;
+            };
+            let now = self.snapshot(world, e);
+            let mut components: Vec<&'static str> = Vec::new();
+            let mut differ = |cid: ComponentId| {
+                if let Some(info) = world.components().type_info(cid)
+                    && !components.contains(&info.name)
+                {
+                    components.push(info.name);
+                }
+            };
+            for r in &now.components {
+                let then = before.components.iter().find(|b| b.id == r.id);
+                if then != Some(r) && self.codecs.saved(world, r.id) {
+                    differ(r.id);
+                }
+            }
+            for b in &before.components {
+                if !now.components.iter().any(|r| r.id == b.id) && self.codecs.saved(world, b.id) {
+                    differ(b.id);
+                }
+            }
+            if now.parent != before.parent {
+                components.push("Parent");
+            }
+            if !components.is_empty() {
+                out.push(PlayChange::Changed {
+                    entity: e,
+                    components,
+                });
+            }
+        }
+        let mut q = QueryState::<Entity>::new(world);
+        out.extend(
+            q.iter_readonly(world)
+                .filter(|e| !snapshot.alive.contains_key(e))
+                .map(|entity| PlayChange::Made { entity }),
+        );
+        out
+    }
+
+    /// The saved components and places of `entities` as they are now, and the scene
+    /// entities `gone` (despawned), to give the world again with [`Self::keep`]. Entities
+    /// without a scene id (made while playing) get a new one.
+    pub fn capture_kept(
+        &mut self,
+        world: &mut World,
+        entities: &[Entity],
+        gone: &[SceneId],
+    ) -> Kept {
+        let mut states = Vec::with_capacity(entities.len() + gone.len());
+        for &e in entities {
+            if !world.contains(e) {
+                continue;
+            }
+            let id = match world.get::<SceneId>(e) {
+                Some(&id) => id,
+                None => {
+                    let id = SceneId::new();
+                    world.insert(e, id);
+                    id
+                }
+            };
+            let mut state = self.snapshot(world, e);
+            state.components.retain(|r| self.codecs.saved(world, r.id));
+            states.push((id, Some(state)));
+        }
+        states.extend(gone.iter().map(|&id| (id, None)));
+        Kept { states }
+    }
+
+    /// Gives the world the states `kept` holds, in the open action (one undo step): each
+    /// entity its kept saved components and place (its other components stay), those not
+    /// in the world spawned with their scene ids, those kept gone despawned.
+    pub fn keep(&mut self, world: &mut World, kept: &Kept) {
+        if self.open.is_none() {
+            return;
+        }
+        let mut index = id_index(world);
+        let mut made = Vec::new();
+        for (id, state) in &kept.states {
+            match (state, index.get(id).copied()) {
+                (Some(_), Some(e)) => self.touch(world, e),
+                (Some(_), None) => {
+                    let e = world.spawn((*id,));
+                    index.insert(*id, e);
+                    made.push(e);
+                }
+                (None, Some(e)) => self.delete_subtree(world, e),
+                (None, None) => {}
+            }
+        }
+        let index = id_index(world);
+        let skip = Skip::of(world);
+        for (id, state) in &kept.states {
+            let (Some(state), Some(&e)) = (state, index.get(id)) else {
+                continue;
+            };
+            // Only what scenes save: the entity's runtime components stay.
+            let current: Vec<ComponentId> = world
+                .component_ids_of(e)
+                .map(<[ComponentId]>::to_vec)
+                .unwrap_or_default();
+            for cid in current {
+                if !skip.skips(cid)
+                    && self.codecs.saved(world, cid)
+                    && !state.components.iter().any(|r| r.id == cid)
+                {
+                    world.remove_raw(e, cid);
+                }
+            }
+            let partial = EntityState {
+                components: state.components.clone(),
+                parent: None,
+            };
+            restore_kept(world, &mut self.codecs, &index, e, &partial);
+            let parent = state
+                .parent
+                .and_then(|(pid, i)| index.get(&pid).map(|&p| (p, i)));
+            match parent {
+                Some((p, i)) if world.parent(e) != Some(p) => {
+                    let _ = world.set_parent_at(e, Some(p), i as usize);
+                }
+                None if world.parent(e).is_some() => {
+                    let _ = world.set_parent(e, None);
+                }
+                _ => {}
+            }
+        }
+        for e in made {
+            self.touch_new(world, e);
+        }
     }
 
     /// Puts the world back as `snapshot` found it: entities made since go; components
@@ -979,6 +1197,48 @@ fn restore_components(
             }
         }
         // Keep the copy aligned for the component: copy into an aligned buffer.
+        let layout = world
+            .components()
+            .layout(r.id)
+            .unwrap_or(core::alloc::Layout::new::<u8>());
+        let mut aligned = AlignedBuf::new(layout);
+        aligned.bytes_mut()[..bytes.len()].copy_from_slice(&bytes);
+        // SAFETY: plain-data bytes of this component type, aligned.
+        unsafe { world.insert_raw(e, r.id, aligned.ptr()) };
+    }
+}
+
+/// Sets the components of `state` on `e` (and no others), entity references resolved
+/// through `index`: kept changes, over what the entity has.
+fn restore_kept(
+    world: &mut World,
+    codecs: &mut Codecs,
+    index: &HashMap<SceneId, Entity>,
+    e: Entity,
+    state: &EntityState,
+) {
+    for r in &state.components {
+        let (bytes, refs) = match &r.value {
+            Value::Bytes { bytes, refs } => (bytes, refs),
+            Value::Lines(text) => {
+                restore_lines(world, codecs, index, e, r.id, text);
+                continue;
+            }
+        };
+        let mut bytes = bytes.to_vec();
+        for &(off, target) in refs {
+            let entity = target
+                .and_then(|id| index.get(&id).copied())
+                .unwrap_or(Entity::NULL);
+            let off = off as usize;
+            // SAFETY: the offset holds an `Entity` inside the value.
+            unsafe {
+                bytes[off..]
+                    .as_mut_ptr()
+                    .cast::<Entity>()
+                    .write_unaligned(entity);
+            }
+        }
         let layout = world
             .components()
             .layout(r.id)

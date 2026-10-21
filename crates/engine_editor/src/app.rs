@@ -73,7 +73,7 @@ use crate::shell::{
 };
 use crate::snap::{Quantity, Snapping};
 use crate::transform::{self, KeyTransform};
-use crate::undo::{PlayMark, WorldSnapshot};
+use crate::undo::{PlayChange, PlayMark, WorldSnapshot};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
 use core::any::TypeId;
 use engine_app::{
@@ -579,6 +579,9 @@ struct CommandIds {
     pause: CommandId,
     step: CommandId,
     eject: CommandId,
+    /// Keeping changes made while playing (E3-3).
+    keep: CommandId,
+    keep_list: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
     /// the next pivot.
     steps: [CommandId; 3],
@@ -667,6 +670,8 @@ fn commands() -> (Commands, CommandIds) {
         pause: c.register("play.pause", "Play", "Pause or Go On"),
         step: c.register("play.step", "Play", "Step One Tick"),
         eject: c.register("play.eject", "Play", "Eject or Return to the Game"),
+        keep: c.register("play.keep", "Play", "Keep the Selection's Changes"),
+        keep_list: c.register("play.keep_list", "Play", "Keep Changes…"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
             c.register("snap.angle_step", "Snapping", "Angle Step…"),
@@ -754,6 +759,9 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("F7", ids.pause),
         ("Shift+F7", ids.step),
         ("Shift+F8", ids.eject),
+        // Unreal's K, with Ctrl: plain letters are the game's while it plays.
+        ("Ctrl+K", ids.keep),
+        ("Ctrl+Shift+K", ids.keep_list),
     ];
     // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
     // - ours: Q, E, R at once and with Shift the gizmo's handles, the left hand beside
@@ -894,6 +902,19 @@ enum Pick {
     Select(Entity),
     /// Sets a snapping step (0 position, 1 angle, 2 scale) to this value.
     Step(usize, f64),
+    /// Keeps a change made while playing, or not (E3-3).
+    Keep(KeepItem),
+}
+
+/// What a line of the "Keep Changes…" list keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeepItem {
+    /// Every change, or none when every one is kept.
+    All,
+    /// An entity's changes (or the entity, made while playing).
+    Entity(Entity),
+    /// A scene entity's going.
+    Gone(SceneId),
 }
 
 /// What a list of what lies under the pointer is for (ADR 0109).
@@ -2260,6 +2281,10 @@ impl Editor {
             .iter()
             .map(|row| {
                 let (icon, kind) = kind_of(world, row.entity);
+                let kind = match &self.play {
+                    Some(p) if p.keep.contains(&row.entity) => "Kept",
+                    _ => kind,
+                };
                 TreeItem {
                     depth: row.depth,
                     icon,
@@ -3199,6 +3224,7 @@ impl Editor {
                             Pick::Keys(p) => self.set_key_preset(world, p),
                             Pick::Select(e) => self.show(world, e),
                             Pick::Step(k, value) => self.set_step(world, k, value),
+                            Pick::Keep(item) => self.toggle_keep(world, item),
                         }
                     }
                 } else if cp.finds_objects() {
@@ -5216,8 +5242,146 @@ impl Editor {
             entered: Duration::ZERO,
             from_here,
             paused: false,
+            keep: Vec::new(),
+            keep_gone: Vec::new(),
             ejected: None,
         }
+    }
+
+    /// Ctrl+K while playing (Unreal's K): the selection's changes kept at Stop, or not
+    /// when they all are.
+    fn keep_selection(&mut self, world: &World) {
+        let Some(p) = self.play.as_mut() else {
+            self.say(String::from(
+                "Changes are kept from Play: F5 plays, then Ctrl+K keeps the selection's",
+            ));
+            return;
+        };
+        if self.selection.is_empty() {
+            self.say(String::from("Select what to keep, then Ctrl+K"));
+            return;
+        }
+        let all = self.selection.iter().all(|e| p.keep.contains(e));
+        for &e in &self.selection {
+            let at = p.keep.iter().position(|k| *k == e);
+            match (all, at) {
+                (true, Some(i)) => {
+                    p.keep.swap_remove(i);
+                }
+                (false, None) => p.keep.push(e),
+                _ => {}
+            }
+        }
+        let n = self.selection.len();
+        let what = if n == 1 {
+            world
+                .get::<Name>(self.selection[0])
+                .map_or_else(|| String::from("1 entity"), |name| name.as_str().to_owned())
+        } else {
+            format!("{n} entities")
+        };
+        self.say(if all {
+            format!("{what}: changes not kept")
+        } else {
+            format!("{what}: changes kept at Stop (Ctrl+K again: not)")
+        });
+    }
+
+    /// "Keep Changes…": what changed since Play, each line kept at Stop or not.
+    fn keep_list(&mut self, world: &mut World) {
+        let Some(p) = self.play.as_ref() else {
+            self.say(String::from("Nothing is playing (F5 plays the scene)"));
+            return;
+        };
+        let changes = self.history.changes_since(world, &p.snapshot);
+        let kept = |item: &PlayChange| match item {
+            PlayChange::Changed { entity, .. } | PlayChange::Made { entity } => {
+                p.keep.contains(entity)
+            }
+            PlayChange::Gone { id } => p.keep_gone.contains(id),
+        };
+        let all = !changes.is_empty() && changes.iter().all(kept);
+        let mut items = vec![Choice {
+            label: String::from(if all {
+                "Keep none of them"
+            } else {
+                "Keep every change"
+            }),
+            detail: format!("{} changed since Play", changes.len()),
+            pick: Pick::Keep(KeepItem::All),
+        }];
+        for change in &changes {
+            let mark = if kept(change) { "kept" } else { "not kept" };
+            let (label, what, item) = match change {
+                PlayChange::Changed { entity, components } => (
+                    label_of(world, *entity),
+                    components.join(", "),
+                    KeepItem::Entity(*entity),
+                ),
+                PlayChange::Made { entity } => (
+                    label_of(world, *entity),
+                    String::from("made while playing"),
+                    KeepItem::Entity(*entity),
+                ),
+                PlayChange::Gone { id } => (
+                    p.snapshot
+                        .name_of(*id)
+                        .map_or_else(|| format!("an entity ({id})"), str::to_owned),
+                    String::from("despawned while playing"),
+                    KeepItem::Gone(*id),
+                ),
+            };
+            items.push(Choice {
+                label,
+                detail: format!("{what} · {mark}"),
+                pick: Pick::Keep(item),
+            });
+        }
+        self.open_list(world, "Pick what Stop keeps (Enter toggles)", items);
+    }
+
+    /// A line of "Keep Changes…" picked: kept or not, and the list again.
+    fn toggle_keep(&mut self, world: &mut World, item: KeepItem) {
+        let Some(p) = self.play.as_mut() else {
+            return;
+        };
+        match item {
+            KeepItem::Entity(e) => match p.keep.iter().position(|k| *k == e) {
+                Some(i) => {
+                    p.keep.swap_remove(i);
+                }
+                None => p.keep.push(e),
+            },
+            KeepItem::Gone(id) => match p.keep_gone.iter().position(|k| *k == id) {
+                Some(i) => {
+                    p.keep_gone.swap_remove(i);
+                }
+                None => p.keep_gone.push(id),
+            },
+            KeepItem::All => {
+                let changes = self.history.changes_since(world, &p.snapshot);
+                let kept = |c: &PlayChange| match c {
+                    PlayChange::Changed { entity, .. } | PlayChange::Made { entity } => {
+                        p.keep.contains(entity)
+                    }
+                    PlayChange::Gone { id } => p.keep_gone.contains(id),
+                };
+                let all = !changes.is_empty() && changes.iter().all(kept);
+                p.keep.clear();
+                p.keep_gone.clear();
+                if !all {
+                    for c in &changes {
+                        match c {
+                            PlayChange::Changed { entity, .. } | PlayChange::Made { entity } => {
+                                p.keep.push(*entity);
+                            }
+                            PlayChange::Gone { id } => p.keep_gone.push(*id),
+                        }
+                    }
+                }
+            }
+        }
+        self.keep_list(world);
     }
 
     /// Whether the viewport is the game's: playing and not ejected.
@@ -5307,8 +5471,23 @@ impl Editor {
                 world.remove_resource_of(kind);
             }
         }
+        // What Stop keeps, taken before the world is put back.
+        let kept = if playing.keep.is_empty() && playing.keep_gone.is_empty() {
+            None
+        } else {
+            Some(
+                self.history
+                    .capture_kept(world, &playing.keep, &playing.keep_gone),
+            )
+        };
         self.history.restore_world(world, &playing.snapshot);
         self.history.end_play(playing.mark);
+        let kept = kept.filter(|k| !k.is_empty()).map_or(0, |kept| {
+            self.history.begin("Keep Changes", None);
+            self.history.keep(world, &kept);
+            self.history.commit(world);
+            kept.len()
+        });
         let ids = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
         let index: HashMap<SceneId, Entity> =
             ids.iter_readonly(world).map(|(e, id)| (*id, e)).collect();
@@ -5325,9 +5504,15 @@ impl Editor {
             "play: entered in {:.1} ms, played {played:.1} s, the scene put back in {stopped:.1} ms",
             playing.entered.as_secs_f64() * 1e3
         );
-        match why {
-            Some(why) => format!("Play stopped: {why}"),
-            None => format!("Stopped after {played:.0} s: the scene is as it was"),
+        match (why, kept) {
+            (Some(why), _) => format!("Play stopped: {why}"),
+            (None, 0) => format!("Stopped after {played:.0} s: the scene is as it was"),
+            (None, n) => {
+                let s = if n == 1 { "y" } else { "ies" };
+                format!(
+                    "Stopped after {played:.0} s: kept the changes of {n} entit{s} (Ctrl+Z takes them back), the rest as it was"
+                )
+            }
         }
     }
 
@@ -5956,6 +6141,10 @@ impl Editor {
             }
         } else if id == ids.eject {
             self.eject(world);
+        } else if id == ids.keep {
+            self.keep_selection(world);
+        } else if id == ids.keep_list {
+            self.keep_list(world);
         } else if id == ids.stop {
             if self.play.is_some() {
                 self.play_request = Some(PlayRequest::Stop);
@@ -8097,6 +8286,10 @@ struct Playing {
     from_here: bool,
     /// The world's time stands; the game's hooks are not called.
     paused: bool,
+    /// The entities whose changes Stop keeps (made while playing: kept as new ones), and
+    /// the scene entities whose going it keeps.
+    keep: Vec<Entity>,
+    keep_gone: Vec<SceneId>,
     /// The editor's camera and tools on the running world (Unreal's eject), with the
     /// devices the game's input listened to before, given back on returning.
     ejected: Option<Option<engine_input::DeviceFilter>>,
@@ -8172,6 +8365,13 @@ struct Baked {
     path: String,
     parts: Vec<(String, String)>,
     triangles: usize,
+}
+
+/// What a list calls entity `e`: its name, or its kind.
+fn label_of(world: &World, e: Entity) -> String {
+    world
+        .get::<Name>(e)
+        .map_or_else(|| kind_of(world, e).1.to_owned(), |n| n.as_str().to_owned())
 }
 
 /// The blockout group `e` is in: itself, or its nearest ancestor with a [`BrushGroup`].
