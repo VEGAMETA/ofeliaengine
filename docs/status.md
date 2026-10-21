@@ -204,7 +204,7 @@ Last updated: 2026-10-20.
     hulls (`ScenePhysics::sync_blockout`); moving bodies with `BodyDesc::internal_edges`
     roll on over the seams (measured: 0.00 mm, where rounded hulls or separate bodies knock
     3-8 mm); View: Colliders in the editor.
-  - **E2b-4b, navigation** (#PR): View: Navigation bakes the brushes' visible surface in
+  - **E2b-4b, navigation** (#295): View: Navigation bakes the brushes' visible surface in
     the background a moment after each edit, on a pool of the editor's own, and draws the
     mesh; 400 rooms (357 tiles) in 158 ms on four workers. Games bake it from
     `Blockout::surface_triangles`.
