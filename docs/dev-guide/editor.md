@@ -232,9 +232,15 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   Shift or Ctrl click, or a click elsewhere, starts over.
 - **Alt+click** lists everything under the pointer in the palette, nearest first, hidden
   objects too: pick one to select it, or type to narrow the list.
+- **A box:** press anywhere in the viewport but on the gizmo's handles and drag. It takes
+  every object it shows a pixel of, outlined thinly while you drag; at the release it
+  becomes the selection, with **Shift** it is added, with **Ctrl** taken out (those it
+  would take out lose their orange line meanwhile). With **Alt** (a dashed frame) it takes
+  hidden objects too. Escape takes the box back. The nearest object taken ends active.
 - A press on one of the gizmo's handles drags it instead, and a press that moves more than
-  4 pixels is not a click. The select tool's middle handle sits at the object's middle: to
-  click there again, click beside it, or use a tool without it (rotate).
+  4 pixels draws a box instead of clicking. The select tool's middle handle sits at the
+  object's middle: to click there again, click beside it, or use a tool without it
+  (rotate).
 - What is picked is what is drawn: masked surfaces through their holes, skinned meshes in
   their current pose, transparent ones too. **Viewport: Pick Transparent Surfaces** in the
   palette turns the last off, so clicks go through glass; the session keeps it. Lights,

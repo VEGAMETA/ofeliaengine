@@ -133,9 +133,13 @@ Last updated: 2026-10-20.
       front to back; a click again at the same spot cycles behind the active entity,
       Alt+click offers the list in the palette; "Pick Transparent Surfaces" kept by the
       session;
-    - then E2-3c-2 boxes.
-  - **Next:** E2-3c-2; then the rest of E2 (ADR 0107 §7): placement on surfaces, frame,
-    bookmarks, overlays.
+    - **E2-3c-2, boxes** (#PR): a drag in the viewport draws a box that takes what shows
+      in it (two passes over the candidates), with Alt hidden objects too; Shift adds,
+      Ctrl takes out, Escape takes it back; what it takes is outlined while dragging. A
+      whole-view box on Sponza: RTX 110 µs, iGPU 2.2 ms (one atomic per wave: from 1 ms
+      and 3.4 ms on the RTX).
+  - **Next:** the rest of E2 (ADR 0107 §7): placement on surfaces, frame, bookmarks,
+    overlays.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

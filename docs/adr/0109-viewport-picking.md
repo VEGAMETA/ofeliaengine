@@ -284,9 +284,59 @@ occlusion culling dropped. So:
 - **Not done:** boxes (E2-3c-2). The select tool's middle handle sits at an object's
   middle and takes a click there before cycling does.
 
+## As built (E2-3c-2, 2026-10-21)
+
+- **A list of any rectangle** (`ListRequest { rect, visible, transparent }`;
+  `ListRequest::around` for a pixel and a radius):
+  - without `visible`, every surface there, as E2-3c-1's list (a box with Alt);
+  - with `visible`, what shows: the candidates' depth first (the existing `depthVertex`,
+    and `depthVertexMasked` with `shadowFragmentMasked`, in pipelines of the picker's
+    own), then the candidates again over it with the list's vertex shaders and new
+    fragment entry points `pickVisibleFragment` and its masked twin, tested before
+    shading (`[earlydepthstencil]`, less or equal). The positions are `precise`, so both
+    passes rasterize the same depths, as the view's depth prepass and its forward pass do.
+    Blended surfaces count with `transparent` and then hide what is behind them, as in
+    the square.
+- **One atomic per wave:** a box over the whole view put every fragment of an object on
+  its item's word. The list's fragments now take the wave's minimum when the wave shades
+  one item and write it from one lane, and skip the atomic when the word already holds a
+  depth as near (texture feedback's way). A whole-view box on the RTX: 1,035 → 110 µs
+  (visible), 3,427 → 95 µs (every surface); the 7 × 7 list unchanged. This changed the
+  list fragments' SPIR-V of E2-3c-1.
+- **Candidates of one mesh are one instanced draw:** they are sorted by state and mesh,
+  and consecutive items share a command.
+- **The editor's box:**
+  - a press in the viewport not on a handle, dragged past 4 px, draws a box (a light
+    frame, dashed with Alt); Escape takes it back;
+  - while it is dragged, its box is asked for whenever it changed, one at a time (a slow
+    GPU draws a box every few frames, not every frame; one not answered within 8 frames
+    is asked again), and what it takes is outlined in the hovered one's line; with Ctrl
+    the selected ones it would take out lose their own;
+  - at the release its last box is asked again and, answered, replaces the selection,
+    adds to it with Shift, or takes out of it with Ctrl; the nearest taken ends active.
+- **Measured** on Sponza, 1920 × 1080 (`scene_bench --scene-draws --rays --pick
+  scene|list|box|box-hidden`, the passes with their copies, medians), the RTX 4060 Ti,
+  then the Radeon iGPU:
+  - the square 7.0–7.8 µs, then 130 µs; the list 10 µs, then 112 µs;
+  - a box over the whole view (66 instances show, 75 are there): 110 µs and 95 µs, then
+    2.2 ms and 3.0 ms; the CPU's part 3–5 µs.
+- **Tested:**
+  - on both GPUs, with synchronization validation: over the whole view what shows is the
+    blended quad, the large one behind and the one aside while transparent surfaces count
+    (the blended quad covers the opaque one on the screen and hides it), the opaque one
+    instead of the blended one otherwise; every surface there is all four drawn; a box
+    around the one aside holds it alone;
+  - the editor's logic: a box asked for one at a time, its catch outlined, replacing,
+    adding with Shift, taking out with Ctrl, hidden objects with Alt, taken back by
+    Escape, no click;
+  - on the player, both GPUs: a box over the view takes the outer cube; with Alt the cube
+    hidden inside too.
+- **Not done:** a box's cost on the iGPU over a whole heavy view (2–3 ms while dragging);
+  coarser detail levels or a lower resolution for the box would cut it.
+
 ## Steps
 
 - **E2-3a:** front-most picks (hover, click, Shift); the player's extension.
 - **E2-3b:** the outline (selection, active, hover).
 - **E2-3c-1:** cycling, Alt+click's list, "pick transparent"; picks from candidates.
-- **E2-3c-2:** boxes (visible, with Alt hidden too).
+- **E2-3c-2:** boxes (visible, with Alt hidden too); one atomic per wave in lists.
