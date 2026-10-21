@@ -1119,6 +1119,12 @@ fn a_brushs_handles_show_and_a_drawn_corner_lands_on_its_corner() {
     // Its first corner, half its size back from its base's middle, is the crate's.
     let first = Vec3::new(at.x - size.x * 0.5, at.y, at.z - size.z * 0.5);
     assert!(first.distance(Vec3::new(1.0, 0.0, 1.0)) < 1e-4, "{first}");
+    // View: Colliders shows both brushes' pieces (`ENGINE_EDITOR_COLLIDERS_PNG`).
+    assert!(game.run_command(player.world_mut(), "view.colliders"));
+    for _ in 0..3 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    write(&mut player, &mut game, &mut overlay, "ENGINE_EDITOR_COLLIDERS_PNG");
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

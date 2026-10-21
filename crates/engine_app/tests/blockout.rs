@@ -4,7 +4,9 @@
 //! offscreen. The room's inside shows dark through the door, the lit wall beside it shows
 //! the grid's lines; moving the door moves the hole, and a cut taken out takes its walls.
 //! `ENGINE_BLOCKOUT_PNG=<file>` writes the frame. Rooms: a hall and a corridor drawn into
-//! it open into each other with no doorway cut (`ENGINE_ROOMS_PNG=<file>`).
+//! it open into each other with no doorway cut (`ENGINE_ROOMS_PNG=<file>`). Colliders: a
+//! ball rolls on over the seam between two floor brushes, and an edit makes the group's
+//! body again.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -412,5 +414,156 @@ fn rooms_open_into_each_other_with_no_doorway_cut() {
         .unwrap();
         std::fs::write(path, png).unwrap();
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_ball_rolls_on_over_the_seam_between_floor_brushes_and_an_edit_makes_the_body_again() {
+    use engine_app::ScenePhysics;
+    use engine_physics::{BodyDesc, PhysicsBackend, PhysicsSettings, QueryFilter, Ray, ShapeDesc};
+    let dir = std::env::temp_dir().join(format!("ofelia-colliders-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("scenes")).unwrap();
+    let mut world = World::new();
+    let group = world.spawn((
+        SceneId::new(),
+        Name::new("Blockout"),
+        Transform::IDENTITY,
+        BrushGroup::default(),
+    ));
+    // Two floors 6 × 1 × 6 m side by side, their seam at x = 0, and a crate that does not
+    // collide.
+    for (name, x) in [("West", -3.0), ("East", 3.0)] {
+        let e = world.spawn((
+            SceneId::new(),
+            Name::new(name),
+            Transform::from_xyz(x, -1.0, 0.0),
+            Brush::new(BrushShape::Box, Vec3::new(6.0, 1.0, 6.0)),
+        ));
+        world.set_parent(e, Some(group)).unwrap();
+    }
+    let mut ghost = Brush::new(BrushShape::Box, Vec3::splat(1.0));
+    ghost.collides = false;
+    let e = world.spawn((
+        SceneId::new(),
+        Name::new("Ghost"),
+        Transform::from_xyz(2.0, 0.0, 2.0),
+        ghost,
+    ));
+    world.set_parent(e, Some(group)).unwrap();
+    let eye = Vec3::new(0.0, 3.0, 9.0);
+    world.spawn((
+        SceneId::new(),
+        Name::new("Camera"),
+        Transform::from_translation(eye).with_rotation(look_rotation(eye, Vec3::ZERO, Vec3::Y)),
+        Camera::perspective(1.0, 0.05, 200.0),
+    ));
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("scenes/main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("colliders test"),
+        window: Window::Offscreen {
+            width: 320,
+            height: 180,
+        },
+        scene: Some("scenes/main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..4 {
+        player.frame(&mut game).unwrap();
+    }
+    let mut physics = ScenePhysics::new(&PhysicsSettings {
+        threads: 0,
+        ..PhysicsSettings::default()
+    })
+    .unwrap();
+    let sync = |physics: &mut ScenePhysics, player: &Player| {
+        physics
+            .sync_blockout(&player.runtime().world, player.blockout())
+            .unwrap()
+    };
+    assert_eq!(sync(&mut physics, &player), 1, "the group's body");
+    assert_eq!(sync(&mut physics, &player), 0, "nothing changed");
+    let group = named(player.world_mut(), "Blockout");
+    let first = physics.blockout_body(group).unwrap();
+    // A ball rolled across the seam: it stays on the floor, no knock.
+    let dt = 1.0 / 60.0;
+    let w = physics.physics();
+    let shape = w.create_shape(&ShapeDesc::Sphere { radius: 0.25 }).unwrap();
+    let ball = w
+        .create_body(&BodyDesc {
+            linear_velocity: Vec3::new(4.0, 0.0, 0.0),
+            angular_velocity: Vec3::new(0.0, 0.0, -16.0),
+            internal_edges: true,
+            ..BodyDesc::dynamic(shape, Vec3::new(-4.0, 0.25, 0.0))
+        })
+        .unwrap();
+    let (mut lowest, mut highest) = (f32::MAX, f32::MIN);
+    for _ in 0..120 {
+        physics.step(player.world_mut(), dt).unwrap();
+        let (p, _) = physics.physics().transform(ball).unwrap();
+        if p.x > -1.0 && p.x < 1.0 {
+            lowest = lowest.min(p.y);
+            highest = highest.max(p.y);
+        }
+    }
+    println!("the ball across the seam: {lowest} to {highest}");
+    assert!(highest - lowest < 1e-3, "{lowest} to {highest}");
+    assert!((lowest - 0.25).abs() < 0.03, "on the floor: {lowest}");
+    // The crate that does not collide: a ray down through it reaches the floor.
+    let down = Ray {
+        origin: Vec3::new(2.0, 5.0, 2.0),
+        direction: Vec3::new(0.0, -10.0, 0.0),
+    };
+    let hit = physics
+        .physics()
+        .raycast(&down, QueryFilter::default())
+        .unwrap();
+    assert!(
+        hit.point.y.abs() < 1e-3,
+        "through the ghost to the floor: {}",
+        hit.point
+    );
+    // An edit: the east floor 1 cm lower; a frame, and the group's body is made again.
+    let world = player.world_mut();
+    let east = named(world, "East");
+    world.get_mut::<Transform>(east).unwrap().translation.y = -1.01;
+    player.frame(&mut game).unwrap();
+    assert_eq!(sync(&mut physics, &player), 1);
+    assert_ne!(physics.blockout_body(group), Some(first));
+    // The group gone: its body too.
+    player.world_mut().despawn_recursive(group);
+    for _ in 0..2 {
+        player.frame(&mut game).unwrap();
+    }
+    assert_eq!(sync(&mut physics, &player), 0);
+    assert!(physics.blockout_body(group).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }

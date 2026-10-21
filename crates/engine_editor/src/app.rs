@@ -557,6 +557,8 @@ struct CommandIds {
     pivot: CommandId,
     /// The viewport's overlays: icons of lights and cameras, and the selected ones' reach.
     overlays: CommandId,
+    /// The blockout's colliders over the viewport (ADR 0110 E2b-4).
+    colliders: CommandId,
     /// Which keys the editor uses: Blender's or Godot's.
     keys: CommandId,
     /// Whether clicks pick transparent surfaces or through them.
@@ -631,6 +633,7 @@ fn commands() -> (Commands, CommandIds) {
         ],
         pivot: c.register("transform.pivot", "Transform", "Next Pivot"),
         overlays: c.register("view.overlays", "View", "Overlays"),
+        colliders: c.register("view.colliders", "View", "Colliders"),
         keys: c.register("editor.keys", "Editor", "Key Map…"),
         pick_transparent: c.register(
             "viewport.pick_transparent",
@@ -1339,6 +1342,12 @@ struct Editor {
     /// pivot's line to the pointer) and its hint by the pointer.
     guides: Vec<(Vec2, Vec2, usize)>,
     hint: String,
+    /// The blockout's colliders shown over the viewport (View: Colliders), their edges in
+    /// the world as the player last evaluated them, and what those were made from (each
+    /// group's epoch and place) to make them again only when that changes.
+    show_colliders: bool,
+    collider_edges: Vec<(Vec3, Vec3)>,
+    collider_key: Vec<(Entity, u64, [f32; 12])>,
     /// A brush being drawn (B, Shift+B), and its brush once it has a size, as last made.
     draw: Option<Draw>,
     drawn: Option<(Entity, Made)>,
@@ -1736,6 +1745,9 @@ impl Editor {
             key_transform: None,
             guides: Vec::new(),
             hint: String::new(),
+            show_colliders: false,
+            collider_edges: Vec::new(),
+            collider_key: Vec::new(),
             draw: None,
             drawn: None,
             draw_lines: Vec::new(),
@@ -4954,6 +4966,14 @@ impl Editor {
             self.toggle_rooms(world);
         } else if let Some(k) = ids.steps.iter().position(|&c| c == id) {
             self.pick_step(world, k);
+        } else if id == ids.colliders {
+            self.show_colliders = !self.show_colliders;
+            self.collider_key.clear();
+            self.say(String::from(if self.show_colliders {
+                "Colliders shown: the brushes' pieces that collide"
+            } else {
+                "Colliders hidden"
+            }));
         } else if id == ids.overlays {
             self.overlays = !self.overlays;
             self.write_session(world);
@@ -6139,6 +6159,29 @@ impl<G> EditorGame<G> {
         // The newest pick's entity, and what to outline (ADR 0109), through the
         // extraction's slots.
         let runtime = player.runtime();
+        // The colliders' overlay (ADR 0110 E2b-4): the edges again when a group changed.
+        if shared.show_colliders {
+            let world = &runtime.world;
+            let mut key: Vec<(Entity, u64, [f32; 12])> = player
+                .blockout()
+                .groups()
+                .map(|(g, epoch)| {
+                    let placed = world
+                        .get::<GlobalTransform>(g)
+                        .map_or(Affine3A::IDENTITY, |t| t.0);
+                    (g, epoch, placed.to_cols_array())
+                })
+                .collect();
+            key.sort_unstable_by_key(|k| k.0.to_bits());
+            if key != shared.collider_key {
+                let mut edges = core::mem::take(&mut shared.collider_edges);
+                player.blockout().collider_edges(world, &mut edges);
+                shared.collider_edges = edges;
+                shared.collider_key = key;
+            }
+        } else {
+            shared.collider_edges.clear();
+        }
         let extract = runtime.extract();
         let slot_of = |e: Entity| extract.instance(e).map(|i| i.slot());
         shared.resolve_pick(&runtime.world, slot_of);
@@ -6611,6 +6654,28 @@ fn draw_drawing(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canv
     canvas.set_clip(None);
 }
 
+/// The most collider edges drawn: a level's worth; beyond, the overlay would cost frames.
+const COLLIDER_EDGES: usize = 60_000;
+
+/// The blockout's colliders over the viewport (ADR 0110 E2b-4), under the panels: the
+/// edges of the brushes' pieces that collide, thin and cyan, as the physics gets them.
+fn draw_colliders(editor: &Editor, rect: [u32; 4], canvas: &mut Canvas) {
+    if !editor.show_colliders || editor.collider_edges.is_empty() {
+        return;
+    }
+    let scale = editor.scale.max(0.5);
+    let view = ViewProj::new(&editor.orbit, rect);
+    canvas.set_clip(Some(clip_of(rect)));
+    let order = Order::layer(-1);
+    let color = Vec4::new(0.35, 0.95, 1.0, 0.7);
+    for &(a, b) in editor.collider_edges.iter().take(COLLIDER_EDGES) {
+        if let (Some(a), Some(b)) = (view.screen(a), view.screen(b)) {
+            canvas.draw(&Quad::line(a, b, scale).color(color).order(order));
+        }
+    }
+    canvas.set_clip(None);
+}
+
 /// A size over the viewport: `text` on a dark label centered on `at`.
 fn label(
     text_cache: &mut UiText,
@@ -6970,6 +7035,7 @@ impl Overlay for EditorOverlay {
             }
             if let Some(rect) = editor.view_rect {
                 draw_overlays(editor, rect, &self.glyphs, &mut self.canvas);
+                draw_colliders(editor, rect, &mut self.canvas);
                 draw_sides(editor, rect, &self.glyphs, &mut self.canvas);
                 if editor.draw.is_some() {
                     draw_drawing(editor, rect, &self.glyphs, &mut self.canvas);
@@ -8327,6 +8393,23 @@ mod tests {
         mouse(&mut ed, to, Some(false));
         ed.update(&mut world);
         assert_eq!(ed.history.steps().count(), 2, "nothing more");
+    }
+
+    #[test]
+    fn view_colliders_switches_the_colliders_overlay() {
+        let mut world = World::new();
+        let mut ed = draw_editor("colliders", &mut world);
+        assert!(!ed.show_colliders, "off at first");
+        let id = ed.ids.colliders;
+        ed.run(&mut world, id);
+        assert!(ed.show_colliders);
+        assert!(
+            ed.message
+                .as_ref()
+                .is_some_and(|m| m.0.starts_with("Colliders shown"))
+        );
+        ed.run(&mut world, id);
+        assert!(!ed.show_colliders);
     }
 
     #[test]

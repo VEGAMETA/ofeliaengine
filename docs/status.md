@@ -200,8 +200,12 @@ Last updated: 2026-10-20.
     sides dragged by handles, the opposite side staying; while drawing, corners land on
     other brushes' corners and edges within 8 px (a green dot, a red ring), before the
     grid.
-  - **Next:** E2b-4, colliders (the pieces as hulls) and the navigation mesh baked in the
-    background, both in the overlays.
+  - **E2b-4a, colliders** (#PR): a static compound per brush group, its pieces as sharp
+    hulls (`ScenePhysics::sync_blockout`); moving bodies with `BodyDesc::internal_edges`
+    roll on over the seams (measured: 0.00 mm, where rounded hulls or separate bodies knock
+    3-8 mm); View: Colliders in the editor.
+  - **Next:** E2b-4b, the navigation mesh baked in the background from the brushes'
+    surface, shown in the overlays.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

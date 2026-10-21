@@ -590,6 +590,10 @@ unsafe extern "C" {
         settings: *mut JPH_BodyCreationSettings,
         value: bool,
     );
+    pub(crate) fn JPH_BodyCreationSettings_SetEnhancedInternalEdgeRemoval(
+        settings: *mut JPH_BodyCreationSettings,
+        value: bool,
+    );
     pub(crate) fn JPH_BodyCreationSettings_SetFriction(
         settings: *mut JPH_BodyCreationSettings,
         value: f32,
