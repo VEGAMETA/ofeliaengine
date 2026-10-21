@@ -322,3 +322,39 @@ Proposed (question 3):
   torus with no hole; the add menu's Blockout group opened beside it by the pointer, a click
   on Torus making a group and the brush, the next brush joining it, the tree's kinds, undo
   taking both back.
+
+## As built (E2b-3a, 2026-10-21): drawing brushes
+
+- **`engine_editor::draw`:** B draws a brush on the surface under the pointer (ADR 0109's
+  surface pick, the selection included), Shift+B a cut. B again before the first click
+  goes through the add menu's shapes; Shift+B and B switch the operation.
+  - **The stages:** a click sets the first corner in the surface's plane (`u` along x on
+    floors and ceilings, `v` up walls and slopes, `u × normal = v`); the base follows the
+    pointer and a click or a dragged press's release keeps it; the height follows the
+    pointer along the normal, either way; a click makes it.
+  - **Typed sizes:** the sides with Tab between, Enter, the height; a cut's typed height
+    goes into the surface.
+  - **R** turns where wedges and stairs rise (away from the first corner along the second
+    side). Drawn stairs get steps of about 0.2 m.
+  - **Normals:** a surface normal within 3° of an axis is that axis.
+  - **Snapping:** the owner's rules, the first corner rounded to the grid in the plane;
+    free corners and sizes on the brushes' millimetre grid.
+- **Live:** the brush exists from its first height on, in the drawing's undo step (with
+  the group it makes when the scene has none), changed as the pointer moves and
+  reverted by Escape or a right click; the blockout evaluates it in the same frame, so a
+  cut shows its hole as it is drawn. The overlay draws the box's edges (a cut's dashed,
+  orange) and its sizes; the mark before the first click is a square and a cross in the
+  surface's plane.
+- **Keys:** the drawing has the frame's keys and the clicks in the view. The camera
+  keeps the middle button and the wheel, and the right button before the first click.
+- **Tested:**
+  - the stages, the planes, snapping, typed sizes and a cut on a wall, R, the shapes'
+    cycle, edges and labels (unit tests);
+  - in the editor: a box in three clicks as one undo step in a new group; a doorway
+    typed into a wall's face, into the wall's group; a right click and Escape dropping
+    it; the right button flying the camera before the first click;
+  - on both GPUs: the corner lands on a floor 0.5 m below the ground through the
+    surface pick, and the brush is meshed as it is drawn.
+- **Left for E2b-3b and after:** hollow rooms that merge (Ctrl+H), the face handles,
+  corners landing on other brushes' corners and edges, a cut "through the brush it was
+  drawn on" with no height given, the stamp (B, Enter), the walkability hint.

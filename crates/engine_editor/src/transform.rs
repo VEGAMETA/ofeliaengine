@@ -434,7 +434,7 @@ impl KeyTransform {
 }
 
 /// A number for the hint: at most four decimals, no trailing zeros, no `-0`.
-fn short(v: f32) -> String {
+pub(crate) fn short(v: f32) -> String {
     let s = format!("{v:.4}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" || s.is_empty() {

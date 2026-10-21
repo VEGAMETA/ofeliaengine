@@ -135,6 +135,7 @@ editor = ["dep:engine_editor"]
 | Follow the active entity as it moves (again: stop) | Shift+F |
 | Set a camera bookmark, go to it | Ctrl+1..9, 1..9 |
 | Put the selection on the surface below it | End |
+| Draw a brush, a cut ([drawing brushes](#drawing-brushes)) | B, Shift+B |
 | Drag the selection over surfaces | Ctrl+Shift with a move handle |
 | What rotating and scaling turn about: the middle, each entity's own origin, the active entity | . (Period) |
 
@@ -347,6 +348,34 @@ the keys.
   its height.
 - The palette has them as commands too: "Transform: Move Selection", "Rotate Selection",
   "Scale Selection".
+
+## Drawing brushes
+
+**B** draws a blockout brush on the surface under the pointer, **Shift+B** a cut
+([blockout.md](blockout.md)); the status bar lists the keys, and a hint by the pointer
+names the shape and its sizes ("Stairs 1 × 1.8 × [1.2] m, 6 steps of 0.2 m").
+
+| While drawing | What happens |
+|---|---|
+| before the first click | a mark shows where the first corner lands: on the surface under the pointer (the selection's too), else on the ground. The camera still moves (the right button, the middle one, the wheel) |
+| B again, before the first click | the next shape: box, wedge, stairs, cylinder, cone, truncated cone, sphere, torus; Shift+B makes it a cut, B a brush again |
+| a click | the first corner; then the base follows the pointer in the surface's plane, and a second click (or a press dragged away and released) keeps it |
+| the pointer, then | the height follows it along the surface's normal, either way; a click keeps it and makes the brush |
+| a typed size | the base's first side, Tab, the second, Enter; the height, Enter. Metres and expressions, as in keyboard transforms. A cut's typed height goes into the surface, a brush's out of it |
+| R | turns the shape a quarter about the normal: wedges and stairs rise away from the first corner along the second side, until turned |
+| Escape, a right click | drops it (leaving the window does too) |
+
+- **The brush is there as you draw it,** cutting and cut as it will be: a doorway opens
+  in the wall as it deepens. The box's edges and sizes show over it, a cut's dashed and
+  orange.
+- **Where it goes:** into the selection's blockout group, else the scene's first, else a
+  new "Blockout" group, at its end; one undo step, and it ends selected.
+- **Snapping** follows the rules above: with snapping on (G), or Shift with it off, the
+  first corner lands on the grid of the position step in the surface's plane and sizes go
+  in whole steps; Ctrl rounds the corner under the pointer to the grid. Free, corners and
+  sizes still land on the brushes' millimetre grid.
+- **Stairs** get as many steps as make each about 0.2 m high.
+- The palette has them as "Blockout: Draw Brush" and "Blockout: Draw Cut".
 
 ## Viewport navigation
 
