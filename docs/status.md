@@ -160,7 +160,7 @@ Last updated: 2026-10-20.
     pieces, the pieces as hulls, the visible surface for navigation) and
     `docs/research/ux/blockout.md` (drawn on surfaces with B, typed sizes, face handles,
     Tab for faces, edges and corners, cuts shown dashed, Play at once, bake to a mesh).
-  - **E2b-1, the core** (#PR, ADR 0110, proposed: three questions to the team):
+  - **E2b-1, the core** (#286, ADR 0110, proposed: three questions to the team):
     `engine_brush`, convex brushes as integer planes with every side exact in `i128`
     (3.4 ns), Godot's order over convex pieces, the surface each brush owns, a `Group`
     kept evaluated through edits (a door dragged among 2,001 brushes 0.58 ms on one
