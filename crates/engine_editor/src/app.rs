@@ -75,13 +75,15 @@ use engine_app::{
     AppError, Game, Model, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup,
     Window, builtin,
 };
-use engine_core::math::{Affine3A, Quat, Vec2, Vec3, Vec4};
+use engine_core::math::{Affine3A, Quat, Vec2, Vec3, Vec4, look_at, vulkan_orthographic};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
 use engine_input::Key;
 use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind};
 use engine_reflect::TypeKind;
 use engine_render::outline::{OutlineClass, OutlineItem, OutlineStyle, OutlineView, Outliner};
-use engine_render::pick::{ListRequest, PickPass, PickRequest, PickView, Picker};
+use engine_render::pick::{
+    ListRequest, PickPass, PickRequest, PickView, Picker, SurfaceRequest, SurfaceResult,
+};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, PointLight, SpotLight, Sun, look_rotation};
 use engine_scene::{AssetId, AssetPaths, Name, RootOrder, SaveOptions, SceneId, SceneRegistry};
@@ -534,6 +536,8 @@ struct CommandIds {
     local_axes: CommandId,
     /// Keyboard transforms of the selection: move, rotate, scale.
     transforms: [CommandId; 3],
+    /// Puts each selected entity on the surface below it.
+    drop: CommandId,
     /// Which keys the editor uses: Blender's or Godot's.
     keys: CommandId,
     /// Whether clicks pick transparent surfaces or through them.
@@ -596,6 +600,7 @@ fn commands() -> (Commands, CommandIds) {
             c.register("transform.rotate", "Transform", "Rotate Selection"),
             c.register("transform.scale", "Transform", "Scale Selection"),
         ],
+        drop: c.register("transform.drop", "Transform", "Drop to the Surface Below"),
         keys: c.register("editor.keys", "Editor", "Key Map…"),
         pick_transparent: c.register(
             "viewport.pick_transparent",
@@ -659,6 +664,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Space", ids.local_axes),
         ("F", ids.frame),
         ("Shift+F", ids.follow),
+        ("End", ids.drop),
     ];
     // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
     // - ours: Q, E, R at once and with Shift the gizmo's handles, the left hand beside
@@ -839,6 +845,28 @@ enum BoxMode {
 /// Frames a box's answer may take before it is asked again (a pick the GPU could not
 /// take).
 const BOX_PATIENCE: u64 = 8;
+
+/// End's drops (ADR 0107 E2-5): the entities still to drop, their shared undo step, and
+/// the one being dropped.
+#[derive(Debug, Clone)]
+struct Dropping {
+    queue: Vec<Entity>,
+    merge: u64,
+    current: Option<DropOne>,
+}
+
+/// One entity being dropped: its instances' slots with its children's (none: not named
+/// yet), its place (the box of an entity without an instance), the frame its surface was
+/// asked in with the box's bottom it measured from, and the surface found (none: nothing
+/// below).
+#[derive(Debug, Clone)]
+struct DropOne {
+    entity: Entity,
+    slots: Option<Vec<u32>>,
+    place: Vec3,
+    asked: Option<(u64, f32)>,
+    found: Option<Option<engine_render::pick::SurfaceHit>>,
+}
 
 /// How long the camera takes to fly to a framing or a bookmark, in seconds.
 const CAMERA_MOVE: f32 = 0.2;
@@ -1203,6 +1231,13 @@ struct Editor {
     follow: Option<(Entity, Vec3)>,
     /// The camera's bookmarks, 1 to 9 (the document's; the session keeps them).
     bookmarks: [Option<OrbitCamera>; 9],
+    /// Surfaces (ADR 0107 E2-5): the surface under the pointer the overlay picks this
+    /// frame (at the render size), the newest one it found, and the selection's world box
+    /// as it last found it; End's drops.
+    surface_request: Option<SurfaceRequest>,
+    surfaced: Option<SurfaceResult>,
+    selection_box: Option<(Vec3, Vec3)>,
+    dropping: Option<Dropping>,
     /// What the overlay outlines (ADR 0109): the GPU scene's slots of the selection, its
     /// children and the hovered entity, as [`Editor::outline`] last found them.
     outline_items: Vec<OutlineItem>,
@@ -1478,6 +1513,10 @@ impl Editor {
             camera_move: None,
             follow: None,
             bookmarks: [None; 9],
+            surface_request: None,
+            surfaced: None,
+            selection_box: None,
+            dropping: None,
             outline_items: Vec::new(),
             tools: [
                 format!("{} Select", icons::TOOL_SELECT),
@@ -2236,6 +2275,7 @@ impl Editor {
             self.pick_frame(over, Vec2::new(x * scale, y * scale));
         }
         self.gizmo_frame(world, scale);
+        self.drop_frame(world);
         self.input.next_frame();
         let eye = self.orbit.eye();
         if let Some(t) = world.get_mut::<Transform>(camera) {
@@ -3046,6 +3086,76 @@ impl Editor {
         self.say(format!("Following {name} (Shift+F again: stop)"));
     }
 
+    /// End: puts each selected entity (those no selected entity carries) on the surface
+    /// below it, one after the other, as one undo step: its box's bottom on the first
+    /// surface under the bottom's middle, the selection left out.
+    fn drop_selection(&mut self, world: &World) {
+        let queue = self.selection_roots(world);
+        if queue.is_empty() {
+            self.say(String::from("Nothing selected to drop"));
+            return;
+        }
+        self.gestures += 1;
+        self.dropping = Some(Dropping {
+            queue: queue.into_iter().rev().collect(),
+            merge: self.gestures,
+            current: None,
+        });
+    }
+
+    /// End's frame: the next entity to drop, and the one whose surface was found moved
+    /// onto it.
+    fn drop_frame(&mut self, world: &mut World) {
+        let Some(mut d) = self.dropping.take() else {
+            return;
+        };
+        if let Some(one) = &d.current
+            && let Some(found) = one.found
+        {
+            let e = one.entity;
+            match (found, one.asked) {
+                (Some(hit), Some((_, bottom))) => {
+                    if let Some(target) = self
+                        .transform_targets(world)
+                        .into_iter()
+                        .find(|t| t.entity == e)
+                    {
+                        let change = Change::Move(Vec3::Y * (hit.point.y - bottom));
+                        self.set_targets(
+                            world,
+                            "Drop to the Surface Below",
+                            d.merge,
+                            &[target],
+                            change,
+                            (Vec3::ZERO, [Vec3::X, Vec3::Y, Vec3::Z]),
+                        );
+                    }
+                }
+                _ => {
+                    let name = world.get::<Name>(e).map_or("it", Name::as_str);
+                    self.say(format!("Nothing below {name}"));
+                }
+            }
+            d.current = None;
+        }
+        if d.current.is_none() {
+            let Some(e) = d.queue.pop() else {
+                return;
+            };
+            let place = world
+                .get::<GlobalTransform>(e)
+                .map_or(Vec3::ZERO, |g| Vec3::from(g.0.translation));
+            d.current = Some(DropOne {
+                entity: e,
+                slots: None,
+                place,
+                asked: None,
+                found: None,
+            });
+        }
+        self.dropping = Some(d);
+    }
+
     /// 1 to 9: flies to bookmark `n`; Ctrl with the digit sets it to the camera as it is.
     fn bookmark(&mut self, world: &World, n: usize, set: bool) {
         if set {
@@ -3265,6 +3375,27 @@ impl Editor {
                 self.history.revert(world, drag.merge);
             } else if !drag.cancelled
                 && let Some(at) = cursor
+                && drag.handle.moves()
+                && self.input.ctrl()
+                && self.input.shift()
+            {
+                // Ctrl+Shift: on the surface under the pointer, the selection left out; the
+                // newest one found places it (a few frames behind the pointer).
+                let local = (at - Vec2::new(rect[0] as f32, rect[1] as f32)).max(Vec2::ZERO);
+                self.surface_request = Some(SurfaceRequest {
+                    x: (local.x * self.view_scale[0]) as u32,
+                    y: (local.y * self.view_scale[1]) as u32,
+                    transparent: self.pick_transparent,
+                });
+                if let Some(hit) = self.surfaced.and_then(|r| r.hit) {
+                    let change = Change::Move(drag.on_surface(hit.point, hit.normal) - drag.pivot);
+                    if drag.last != Some(change) {
+                        drag.last = Some(change);
+                        self.apply_gizmo(world, &drag, change);
+                    }
+                }
+            } else if !drag.cancelled
+                && let Some(at) = cursor
                 && let Some(change) = drag.change(
                     &view,
                     at,
@@ -3318,6 +3449,12 @@ impl Editor {
             self.gestures += 1;
             self.gizmo_drag =
                 GizmoDrag::start(&self.gizmo, &view, handle, at, targets, self.gestures);
+            self.surfaced = None;
+            if let Some(drag) = &mut self.gizmo_drag {
+                drag.extent = self
+                    .selection_box
+                    .map(|(lo, hi)| (lo - drag.pivot, hi - drag.pivot));
+            }
         }
     }
 
@@ -3739,6 +3876,8 @@ impl Editor {
             self.start_key_transform(world, kinds[i]);
         } else if id == ids.keys {
             self.pick_keys(world);
+        } else if id == ids.drop {
+            self.drop_selection(world);
         } else if id == ids.frame {
             self.frame_selection(world);
         } else if id == ids.follow {
@@ -4886,6 +5025,19 @@ impl<G> EditorGame<G> {
         shared.resolve_pick(&runtime.world, slot_of);
         shared.resolve_list(&runtime.world, slot_of);
         shared.outline(&runtime.world, slot_of);
+        // End: the instances of the entity being dropped, with its children's.
+        if let Some(one) = shared.dropping.as_mut().and_then(|d| d.current.as_mut())
+            && one.slots.is_none()
+        {
+            let world = &runtime.world;
+            let mut slots = Vec::new();
+            let mut stack = vec![one.entity];
+            while let Some(e) = stack.pop() {
+                slots.extend(slot_of(e));
+                stack.extend(world.children(e));
+            }
+            one.slots = Some(slots);
+        }
     }
 
     /// Starts the session in the project's `.ofelia/` (ADR 0107 §4): takes the project's
@@ -5316,6 +5468,114 @@ impl Overlay for EditorOverlay {
                         editor.listed = Some((request, view.frame_number, Vec::new()));
                     }
                 }
+                // The selection's instances (its outline's items but the hovered one): its
+                // world box, and what surface picks leave out.
+                let selected: Vec<u32> = editor
+                    .outline_items
+                    .iter()
+                    .filter(|i| i.class != OutlineClass::Hovered)
+                    .map(|i| i.slot)
+                    .collect();
+                if let Some(scene) = view.scene {
+                    editor.selection_box = selected
+                        .iter()
+                        .filter_map(|&s| scene.slot_box(s))
+                        .reduce(|(a, b), (lo, hi)| (a.min(lo), b.max(hi)));
+                    if let Some(result) = self.picker.poll_surface(view.frame_number) {
+                        let result = *result;
+                        match editor.dropping.as_mut().and_then(|d| d.current.as_mut()) {
+                            Some(one) if one.asked.is_some_and(|(f, _)| f == result.frame) => {
+                                one.found = Some(result.hit);
+                            }
+                            _ => editor.surfaced = Some(result),
+                        }
+                    }
+                    // Under the pointer, through the view's camera.
+                    if let Some(request) = editor.surface_request.take() {
+                        self.picker.add_surface_pass(
+                            pass.fg,
+                            pass.ring,
+                            pass.bindless,
+                            view.geometry,
+                            view.materials,
+                            scene,
+                            &pick_view,
+                            request,
+                            &selected,
+                            view.frame_number,
+                        );
+                    }
+                    // End: below the entity's box's bottom, looking down, a centimeter a
+                    // pixel.
+                    if let Some(one) = editor.dropping.as_mut().and_then(|d| d.current.as_mut())
+                        && one.asked.is_none()
+                        && let Some(slots) = &one.slots
+                    {
+                        let (lo, hi) = slots
+                            .iter()
+                            .filter_map(|&s| scene.slot_box(s))
+                            .reduce(|(a, b), (lo, hi)| (a.min(lo), b.max(hi)))
+                            .unwrap_or((one.place, one.place));
+                        let below = Vec3::new((lo.x + hi.x) * 0.5, lo.y, (lo.z + hi.z) * 0.5);
+                        let down = PickView {
+                            clip_from_world: vulkan_orthographic(
+                                -0.015, 0.015, -0.015, 0.015, 0.001, 10_000.0,
+                            ) * look_at(below, below - Vec3::Y, Vec3::NEG_Z),
+                            size: (3, 3),
+                        };
+                        let mut exclude = selected.clone();
+                        exclude.extend_from_slice(slots);
+                        let declared = self.picker.add_surface_pass(
+                            pass.fg,
+                            pass.ring,
+                            pass.bindless,
+                            view.geometry,
+                            view.materials,
+                            scene,
+                            &down,
+                            SurfaceRequest {
+                                x: 1,
+                                y: 1,
+                                transparent: editor.pick_transparent,
+                            },
+                            &exclude,
+                            view.frame_number,
+                        );
+                        match declared {
+                            PickPass::Declared => one.asked = Some((view.frame_number, lo.y)),
+                            // Nothing below: answered at once.
+                            PickPass::Empty => {
+                                one.asked = Some((view.frame_number, lo.y));
+                                one.found = Some(None);
+                            }
+                            PickPass::Busy => {}
+                        }
+                    }
+                }
+                // Framing (F): the selection's world boxes (its outline's items but the
+                // hovered one) with its places, or the scene's bounds.
+                if let Some(points) = editor.frame_asked.take() {
+                    let mut bounds = points;
+                    if let Some(scene) = view.scene {
+                        if points.is_none() {
+                            let (lo, hi) = scene.bounds();
+                            bounds = (lo.cmple(hi).all()).then_some((lo, hi));
+                        } else {
+                            for item in &editor.outline_items {
+                                if item.class != OutlineClass::Hovered
+                                    && let Some((lo, hi)) = scene.slot_box(item.slot)
+                                {
+                                    bounds = Some(
+                                        bounds.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    editor.framed = bounds;
+                }
+                // The square under the pointer last: drawn from the view's commands, it holds
+                // the picker for the frame.
                 if let Some(request) = editor.pick_request.take() {
                     let declared = match view.scene {
                         Some(scene) => self.picker.add_scene_pass(
@@ -5344,28 +5604,6 @@ impl Overlay for EditorOverlay {
                     if declared == PickPass::Empty {
                         editor.picked = Some((request, view.frame_number, None));
                     }
-                }
-                // Framing (F): the selection's world boxes (its outline's items but the
-                // hovered one) with its places, or the scene's bounds.
-                if let Some(points) = editor.frame_asked.take() {
-                    let mut bounds = points;
-                    if let Some(scene) = view.scene {
-                        if points.is_none() {
-                            let (lo, hi) = scene.bounds();
-                            bounds = (lo.cmple(hi).all()).then_some((lo, hi));
-                        } else {
-                            for item in &editor.outline_items {
-                                if item.class != OutlineClass::Hovered
-                                    && let Some((lo, hi)) = scene.slot_box(item.slot)
-                                {
-                                    bounds = Some(
-                                        bounds.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    editor.framed = bounds;
                 }
                 // The outlines, below the panels.
                 if let Some(scene) = view.scene
@@ -8270,6 +8508,114 @@ mod tests {
                 .all(|(n, b)| (n == 2) == b.is_some())
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A surface hit at `point` facing `normal`, as the overlay's pick would give it.
+    fn hit(point: Vec3, normal: Vec3) -> engine_render::pick::SurfaceHit {
+        engine_render::pick::SurfaceHit {
+            instance: 0,
+            point,
+            normal,
+        }
+    }
+
+    #[test]
+    fn end_drops_each_selected_entity_onto_the_surface_below_as_one_step() {
+        let mut world = World::new();
+        let high = cube_at(&mut world, Transform::from_xyz(0.0, 3.0, 0.0));
+        let low = cube_at(&mut world, Transform::from_xyz(4.0, 1.0, 0.0));
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder("drop"),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        ed.selection = vec![high, low];
+        let drop = ed.ids.drop;
+        assert_eq!(ed.shortcuts.get(&drop).map(String::as_str), Some("End"));
+        ed.run(&mut world, drop);
+        // One after the other: the overlay names each one's instances, finds the box's
+        // bottom and the surface below it.
+        for (e, bottom, floor) in [(high, 2.5, 0.0), (low, 0.5, -2.0)] {
+            ed.update(&mut world);
+            let one = ed.dropping.as_mut().unwrap().current.as_mut().unwrap();
+            assert_eq!(one.entity, e);
+            one.slots = Some(Vec::new());
+            one.asked = Some((1, bottom));
+            one.found = Some(Some(hit(Vec3::new(0.0, floor, 0.0), Vec3::Y)));
+        }
+        ed.update(&mut world);
+        assert!(ed.dropping.is_none(), "all dropped");
+        let y = |world: &World, e| world.get::<Transform>(e).unwrap().translation.y;
+        assert!((y(&world, high) - 0.5).abs() < 1e-5, "{}", y(&world, high));
+        assert!((y(&world, low) - -1.5).abs() < 1e-5, "{}", y(&world, low));
+        // One undo step takes both back.
+        ed.history.undo(&mut world);
+        assert!((y(&world, high) - 3.0).abs() < 1e-5 && (y(&world, low) - 1.0).abs() < 1e-5);
+        // Nothing below: said so, left where it is.
+        ed.history.redo(&mut world);
+        ed.selection = vec![high];
+        ed.run(&mut world, drop);
+        ed.update(&mut world);
+        let one = ed.dropping.as_mut().unwrap().current.as_mut().unwrap();
+        one.slots = Some(Vec::new());
+        one.asked = Some((1, 0.0));
+        one.found = Some(None);
+        ed.update(&mut world);
+        assert!(ed.status.contains("Nothing below") || ed.message.is_some());
+        assert!((y(&world, high) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ctrl_shift_drags_the_selection_over_surfaces() {
+        let mut world = World::new();
+        let cube = cube_at(&mut world, Transform::from_xyz(0.0, 2.0, 0.0));
+        let mut ed = gizmo_editor("surface-drag", &mut world, cube);
+        // The cube's world box as the overlay found it: a unit cube about its place.
+        ed.selection_box = Some((Vec3::new(-0.5, 1.5, -0.5), Vec3::new(0.5, 2.5, 0.5)));
+        // The x arrow, Ctrl+Shift held: pressed, then moved.
+        let (center, _) = x_arrow(&ed);
+        mouse(&mut ed, center.to_array(), None);
+        ed.update(&mut world);
+        key(&mut ed, CTRL.0, CTRL.1, true);
+        key(&mut ed, SHIFT.0, SHIFT.1, true);
+        mouse(&mut ed, center.to_array(), Some(true));
+        ed.update(&mut world);
+        assert!(ed.gizmo_drag.is_some());
+        mouse(&mut ed, [center.x + 30.0, center.y], None);
+        ed.update(&mut world);
+        assert!(
+            ed.surface_request.is_some(),
+            "the surface under the pointer is asked for"
+        );
+        // Found: a floor at y = -1. The cube sits on it.
+        ed.surfaced = Some(engine_render::pick::SurfaceResult {
+            frame: 1,
+            request: ed.surface_request.unwrap(),
+            hit: Some(hit(Vec3::new(3.0, -1.0, 2.0), Vec3::Y)),
+        });
+        mouse(&mut ed, [center.x + 31.0, center.y], None);
+        ed.update(&mut world);
+        let at = world.get::<Transform>(cube).unwrap().translation;
+        assert!((at - Vec3::new(3.0, -0.5, 2.0)).length() < 1e-4, "{at}");
+        // A wall facing +X: its side on it.
+        ed.surfaced = Some(engine_render::pick::SurfaceResult {
+            frame: 2,
+            request: ed.surface_request.unwrap(),
+            hit: Some(hit(Vec3::new(5.0, 1.0, 0.0), Vec3::X)),
+        });
+        mouse(&mut ed, [center.x + 32.0, center.y], None);
+        ed.update(&mut world);
+        let at = world.get::<Transform>(cube).unwrap().translation;
+        assert!((at - Vec3::new(5.5, 1.0, 0.0)).length() < 1e-4, "{at}");
+        key(&mut ed, CTRL.0, CTRL.1, false);
+        key(&mut ed, SHIFT.0, SHIFT.1, false);
+        mouse(&mut ed, [center.x + 32.0, center.y], Some(false));
+        ed.update(&mut world);
+        assert!(ed.gizmo_drag.is_none());
     }
 
     #[test]

@@ -86,6 +86,11 @@ impl Handle {
         }
     }
 
+    /// Whether it moves the selection (an arrow, a square, the middle).
+    pub(crate) fn moves(self) -> bool {
+        matches!(self, Self::Axis(_) | Self::Plane(_) | Self::View)
+    }
+
     /// The undo step's name.
     pub(crate) fn step(self) -> &'static str {
         match self {
@@ -374,6 +379,9 @@ pub(crate) struct GizmoDrag {
     pub(crate) cancelled: bool,
     /// What it did last: the status bar shows it, and the gizmo follows a move.
     pub(crate) last: Option<Change>,
+    /// The selection's world box at the press, around the pivot (its corners less the
+    /// pivot): placing it on a surface puts the box's face on it.
+    pub(crate) extent: Option<(Vec3, Vec3)>,
 }
 
 /// What a drag does to the selection, in world space about the pivot.
@@ -386,6 +394,20 @@ pub(crate) enum Change {
 }
 
 impl GizmoDrag {
+    /// Where the pivot goes to put the selection on a surface at `point` facing `normal`:
+    /// the selection's box (its extent at the press) touching the surface from the
+    /// normal's side; the pivot itself on it without a box.
+    pub(crate) fn on_surface(&self, point: Vec3, normal: Vec3) -> Vec3 {
+        let Some((lo, hi)) = self.extent else {
+            return point;
+        };
+        // How far the box reaches behind the pivot along the normal.
+        let behind = (0..3)
+            .map(|k| (-lo[k] * normal[k]).max(-hi[k] * normal[k]))
+            .sum::<f32>();
+        point + normal * behind
+    }
+
     /// A drag of `handle` from pixel `press`; none when its plane cannot be found from
     /// there (it runs along the view).
     pub(crate) fn start(
@@ -420,6 +442,7 @@ impl GizmoDrag {
             merge,
             cancelled: false,
             last: None,
+            extent: None,
         })
     }
 
@@ -561,6 +584,47 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::float_cmp)]
 
     use super::*;
+
+    #[test]
+    fn on_a_surface_the_box_touches_it_from_the_normals_side() {
+        let mut drag = GizmoDrag {
+            handle: Handle::View,
+            pivot: Vec3::new(1.0, 5.0, 0.0),
+            axes: [Vec3::X, Vec3::Y, Vec3::Z],
+            grab: Vec3::ZERO,
+            press: Vec2::ZERO,
+            normal: Vec3::Z,
+            targets: Vec::new(),
+            merge: 1,
+            cancelled: false,
+            last: None,
+            extent: None,
+        };
+        let point = Vec3::new(3.0, 0.0, 2.0);
+        assert_eq!(
+            drag.on_surface(point, Vec3::Y),
+            point,
+            "no box: the pivot on it"
+        );
+        // A box from 0.25 below the pivot to 1.75 above, 0.5 to each side.
+        drag.extent = Some((Vec3::new(-0.5, -0.25, -0.5), Vec3::new(0.5, 1.75, 0.5)));
+        assert_eq!(
+            drag.on_surface(point, Vec3::Y),
+            point + Vec3::Y * 0.25,
+            "on a floor"
+        );
+        assert_eq!(
+            drag.on_surface(point, Vec3::NEG_Y),
+            point - Vec3::Y * 1.75,
+            "under a ceiling"
+        );
+        assert_eq!(
+            drag.on_surface(point, Vec3::X),
+            point + Vec3::X * 0.5,
+            "on a wall"
+        );
+        assert!(Handle::View.moves() && Handle::Axis(1).moves() && !Handle::Ring(0).moves());
+    }
 
     fn camera() -> OrbitCamera {
         // Looking at the origin from +Z, level: x to the right, y up on the screen.
