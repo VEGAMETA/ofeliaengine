@@ -1,7 +1,7 @@
 //! The player: a game's process, window, device, presentation, scene and frame loop.
 
 use crate::game::{FrameParts, Game};
-use crate::overlay::{Overlay, OverlayOutput, OverlayPass};
+use crate::overlay::{Overlay, OverlayOutput, OverlayPass, OverlayView};
 use crate::process::ProcessSetup;
 use crate::report::{FrameReport, Startup, StartupPipelines};
 use crate::settings::{PlayerSettings, Window};
@@ -2445,6 +2445,14 @@ impl Player {
                     bindless: &self.bindless,
                     target: ui_target.unwrap_or(target),
                     extent,
+                    view: Some(OverlayView {
+                        frame: &view_frame,
+                        camera: &camera,
+                        rect: view_rect,
+                        geometry: &geo,
+                        materials: &mats,
+                        frame_number: frame.number,
+                    }),
                 })?;
             }
             if let Some(encode) = &self.encode {

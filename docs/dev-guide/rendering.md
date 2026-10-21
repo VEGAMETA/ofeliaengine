@@ -2555,3 +2555,37 @@ ofeliaengine cook level.gltf -o level.pack --pso game.pso.ron
 - **`<scene>.pso.ron` next to the scene** is used when `--pso` is not given; a type the
   record does not name is cooked whole.
 - ClearCoatTest's type: 128 entry points in 4.0 s → 1 in 0.6 s, the pack 1.93 → 0.98 MB.
+
+## 23. Picking: which instance is under a pixel
+
+`engine_render::pick::Picker` (ADR 0109) answers what a view shows at a pixel on any GPU, as
+the editor's clicks do: it draws the view's culled commands again into a 32 × 32 square
+around the pixel and reads back each pixel's instance.
+
+```rust
+use engine_render::pick::{PickPass, PickRequest, Picker};
+
+// Once:
+let mut picker = Picker::new(&device, &mut allocator, &bindless, frames_in_flight)?;
+
+// Every frame, after the view's passes (`passes`, at its `render` size):
+if let Some(result) = picker.poll(frame_number) {
+    // The instance at the pixel, or the nearest within 3 pixels: the GPU scene's slot.
+    let slot = result.nearest(3);
+}
+let request = PickRequest { x, y, transparent: true };
+match picker.add_pass(&mut fg, &bindless, &geo, &mats, &passes, render, request, frame_number) {
+    PickPass::Declared => {}            // its result comes `frames_in_flight` frames later
+    PickPass::Empty => { /* nothing is drawn: nothing to pick */ }
+    PickPass::Busy => { /* every readback waits to be polled */ }
+}
+```
+
+- **What it picks:** what the view draws: masked surfaces through their holes, skinned meshes
+  in their current pose; blended ones too with `transparent`. An id is the index the view's
+  vertex shaders read the instance with: the GPU scene's slot (`RenderExtract::instance`
+  gives an entity's).
+- **What it costs:** the visible instances' vertex work. On Sponza at 1080p: 19–20 µs on an
+  RTX 4060 Ti, about 0.5 ms on the integrated Radeon. Pick when the pixel or the scene
+  changed, not every frame.
+- **Views that nobody picks in pay nothing:** the picker's pipelines are its own.

@@ -9,6 +9,7 @@ use engine_app::{Assets, Game, MaterialFile, Model, Player, PlayerSettings, Wind
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Transform, World};
 use engine_editor::{EditorGame, EditorOverlay};
+use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind, WindowId};
 use engine_runtime::Sun;
 use engine_scene::{AssetId, AssetRef, Name, SaveOptions, SceneId, SceneRegistry, save_with};
 
@@ -244,6 +245,164 @@ fn the_editor_draws_its_scene_in_the_viewport() {
     );
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Picking on the player (ADR 0109): the pointer over the red cube drawn in the
+/// viewport hovers it, a click there selects it through the pick of its pixel, and a
+/// click on the empty sky clears the selection.
+#[test]
+fn a_click_in_the_viewport_selects_what_is_drawn_there() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-pick-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let red_id = AssetId::new();
+    let red = MaterialFile {
+        base_color: [0.8, 0.1, 0.1, 1.0],
+        ..MaterialFile::default()
+    };
+    std::fs::write(dir.join("red.material"), red.to_text(red_id)).unwrap();
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Cube"),
+        Transform::from_scale(Vec3::splat(2.0)),
+        Model::new(builtin::CUBE, AssetRef::file(red_id)),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Sun {
+            color: Vec3::splat(1.2),
+            ambient: Vec3::splat(0.04),
+        },
+    ));
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(AssetRef::file(red_id), "red.material");
+    let mut text = String::new();
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+    };
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor pick test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..20 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let cube = engine_scene::find_named(player.world_mut(), "Cube").unwrap();
+    // The red cube's middle on the screen.
+    let rgba = player
+        .capture_overlaid(&mut game, Some(&mut overlay))
+        .unwrap()
+        .unwrap();
+    let [x, y, w, h] = game.view_rect().unwrap();
+    let (mut sum, mut n) = ((0u64, 0u64), 0u64);
+    for py in (y..y + h).step_by(2) {
+        for px in (x..x + w).step_by(2) {
+            let i = ((py * width + px) * 4) as usize;
+            let [r, g, b] = [rgba[i], rgba[i + 1], rgba[i + 2]].map(f32::from);
+            if r > 1.6 * g && r > 1.6 * b && r > 40.0 {
+                sum = (sum.0 + u64::from(px), sum.1 + u64::from(py));
+                n += 1;
+            }
+        }
+    }
+    assert!(n > 50, "the cube is drawn: {n} red pixels");
+    let on_cube = ((sum.0 / n) as i32, (sum.1 / n) as i32);
+    send(
+        &mut game,
+        WindowEventKind::CursorMoved {
+            x: on_cube.0,
+            y: on_cube.1,
+        },
+    );
+    for _ in 0..6 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(game.hovered(), Some(cube), "hovered at {on_cube:?}");
+    assert_eq!(game.selected(), None);
+    left_click(&mut player, &mut game, &mut overlay);
+    assert_eq!(game.selection(), [cube], "clicked at {on_cube:?}");
+    // The sky: the viewport's top left, away from the cube.
+    send(
+        &mut game,
+        WindowEventKind::CursorMoved {
+            x: (x + 12) as i32,
+            y: (y + 40) as i32,
+        },
+    );
+    for _ in 0..6 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(game.hovered(), None);
+    left_click(&mut player, &mut game, &mut overlay);
+    assert!(game.selection().is_empty(), "a click on nothing clears it");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The editor's loop: a frame, the view's rectangle, then the pick's entity.
+fn editor_frame(player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay) {
+    player.frame_overlaid(game, Some(overlay)).unwrap();
+    player.set_view_rect(game.view_rect());
+    game.sync_assets(player);
+}
+
+/// A window event, as the player hands it to the editor.
+fn send(game: &mut EditorGame<NoGame>, kind: WindowEventKind) {
+    game.event(&WindowEvent {
+        window: WindowId(0),
+        time: std::time::Instant::now(),
+        kind,
+    });
+}
+
+/// A left click where the pointer is, then frames enough for its pick to answer (the frames
+/// in flight and a few more).
+fn left_click(player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay) {
+    for pressed in [true, false] {
+        send(
+            game,
+            WindowEventKind::MouseButton {
+                button: MouseButton::Left,
+                pressed,
+            },
+        );
+        editor_frame(player, game, overlay);
+    }
+    for _ in 0..6 {
+        editor_frame(player, game, overlay);
+    }
 }
 
 /// A few frames for the edits to reach the screen, then the frame's pixels.

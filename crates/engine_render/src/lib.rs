@@ -67,6 +67,7 @@ pub mod motion_blur;
 pub mod msaa;
 pub mod panorama;
 pub mod particles;
+pub mod pick;
 pub mod png;
 pub mod post;
 pub mod postaa;

@@ -143,6 +143,52 @@ occlusion culling dropped. So:
   - the square's redraw: the visible instances' vertex work, about texture feedback's;
   - the mask: the outlined instances; the edge pass: a scissored full-resolution pass.
 
+## As built (E2-3a, 2026-10-21)
+
+- **`engine_render::pick`:** `Picker::add_pass` draws the view's culled commands (both
+  phases, the meshlet lists too) into a 32 × 32 square, the viewport shifted so the
+  pixel lands in its middle. The new entry points write the instance index + 1 into
+  R32_UINT with a D32 depth; masked materials are alpha-tested; blended ones are drawn
+  with depth writes when the pick takes them (on in the editor). The square is copied
+  into a ring of readback buffers (frames in flight + 1) and polled.
+  - `PickResult::nearest(radius)` takes the pixel's instance, or the nearest within the
+    radius (3 px in the editor).
+  - `add_pass` says whether it declared the pick, found the view empty (nothing to
+    pick), or every readback busy.
+  - No other SPIR-V changed: the four entry points are new files, and the shaders' build
+    rewrote nothing else, so no other pipeline's registers can move.
+- **The player** gives an overlay `OverlayPass::view`: the view's frame (culled commands,
+  render and output sizes, depth), its camera and rectangle, the geometry and material
+  frames, the frame's number.
+- **The editor:**
+  - the pointer over the viewport asks for its pixel (at the render size) whenever the
+    pointer, the camera or the history's head changed;
+  - the overlay polls the picker and declares the frame's pick;
+  - after each frame, `sync_assets` names the instance's entity through the extraction
+    (the scene's entities and their slots), as the hovered one;
+  - a press and release within 4 px, not on a gizmo handle, waits for a pick drawn
+    from the next frame on, then selects (Shift or Ctrl: toggles; on nothing: clears,
+    unless toggling), opening the tree to the row.
+- **Measured** on Sponza, 1920 × 1080, `scene_bench --pick --scene-draws` (the pick and
+  its copy, median): 19–20 µs on the RTX 4060 Ti, about 0.5 ms on the Radeon iGPU. The
+  iGPU's cost is the visible instances' vertex work (its depth prepass is 0.29–0.94 ms).
+  Drawing only candidate instances under the pointer (E2-3c's machinery) would cut it
+  most: to measure there.
+- **Tested:**
+  - on both GPUs, with synchronization validation: an opaque quad picked over the one it
+    hides; a masked quad whose alpha is zero picks the one behind it; a blended quad is
+    picked only while transparent surfaces are; the background and the view's edge pick
+    nothing;
+  - the nearest id within the radius;
+  - the editor's logic: the pointer's pixel at the view's size, hovered, not asked
+    again while nothing changes; a click waits for a pick of its frame or later; Shift
+    adds and takes out; a click on nothing clears or, with Shift, keeps; a press on a
+    handle and a drag are no clicks;
+  - on the player, both GPUs: the pointer over the red cube hovers it, a click selects
+    it, a click on the sky clears the selection.
+- **Not done:** the outline and the hover's (E2-3b); boxes, cycling and the list
+  (E2-3c); the switch for transparent surfaces (on).
+
 ## Steps
 
 - **E2-3a:** front-most picks (hover, click, Shift); the player's extension.

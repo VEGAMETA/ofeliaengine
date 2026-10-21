@@ -100,6 +100,7 @@ use engine_render::grading::{ColorGrading, GradingLut};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, LodIndices, MeshData, MeshId};
+use engine_render::pick::{PickRequest, Picker, SQUARE};
 use engine_render::png::{PngFormat, encode_png};
 use engine_render::post::{Composite, HDR_FORMAT, ToneCurve, Tonemap};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
@@ -332,6 +333,8 @@ fn main() {
     let mut meshlets = true;
     let mut meshlet_culling = false;
     let mut pipeline_stats = false;
+    // The editor's pick at the view's middle every frame (ADR 0109).
+    let mut pick = false;
     let mut msaa_stats: u32 = 0;
     let mut post = false;
     let mut graded = false;
@@ -423,6 +426,7 @@ fn main() {
             "--no-meshlets" => meshlets = false,
             "--meshlet-culling" => meshlet_culling = true,
             "--pipeline-stats" => pipeline_stats = true,
+            "--pick" => pick = true,
             "--cached-shadows" => cached_shadows = true,
             "--walk" => walk = args.next().unwrap().parse().unwrap(),
             "--turn" => turn = args.next().unwrap().parse().unwrap(),
@@ -1473,6 +1477,8 @@ fn main() {
         // The cached cascades' texels drawn per frame (ADR 0093).
         let mut cache_texels = Vec::new();
         let last = mode == "textured" && screenshot.is_some();
+        let mut picker = pick.then(|| Picker::new(&device, &mut allocator, &bindless, 1).unwrap());
+        let mut pick_time = Vec::new();
         let mut frame = 0;
         let mut meshlet_room = 0u32;
         // Whether the GI updates of the frame before were the convergence's: pass times
@@ -1702,6 +1708,25 @@ fn main() {
                         .add_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &draws, &view),
                 }
                 .unwrap();
+                // `--pick`: the editor's pick at the view's middle (ADR 0109).
+                if let Some(picker) = picker.as_mut() {
+                    let number = frame as u64 + 1;
+                    picker.poll(number);
+                    picker.add_pass(
+                        &mut fg,
+                        &bindless,
+                        &geo,
+                        &mats,
+                        &passes,
+                        (WIDTH, HEIGHT),
+                        PickRequest {
+                            x: WIDTH / 2,
+                            y: HEIGHT / 2,
+                            transparent: true,
+                        },
+                        number,
+                    );
+                }
                 // `GI_DEBUG=1`: the screenshot shows the GI irradiance per pixel instead.
                 let shown = passes
                     .gi
@@ -1918,8 +1943,12 @@ fn main() {
                 let (mut decal_tiles_frame, mut decal_frame) = (0.0, 0.0);
                 let (mut tlas_frame, mut camera_rays_frame) = (0.0, 0.0);
                 let mut gi_resolve_frame = 0.0;
+                let mut pick_frame = 0.0;
                 for time in graph.gpu_pass_times() {
                     let us = f64::from(time.gpu_us);
+                    if matches!(time.name, "pick" | "pick copy") {
+                        pick_frame += us;
+                    }
                     if time.name.starts_with("dof ") {
                         match dof_us.iter_mut().find(|(n, _)| *n == time.name) {
                             Some((_, v)) => v.push(us),
@@ -2008,6 +2037,7 @@ fn main() {
                 decal_tiles_time.push(decal_tiles_frame);
                 tlas_time.push(tlas_frame);
                 gi_resolve_time.push(gi_resolve_frame);
+                pick_time.push(pick_frame);
                 camera_rays_time.push(camera_rays_frame);
                 decal_time.push(decal_frame);
                 local_views.push(f64::from(renderer.local_shadow_stats().views_drawn));
@@ -2091,6 +2121,14 @@ fn main() {
                 std::fs::write(file, png).unwrap();
             }
             frame += 1;
+        }
+        if let Some(mut picker) = picker.take() {
+            println!(
+                "pick ({SQUARE} × {SQUARE} at the view's middle, its copy included): {:.1} µs",
+                median(&mut pick_time)
+            );
+            // SAFETY: the GPU is idle after each frame.
+            unsafe { picker.destroy(&mut allocator) };
         }
         println!(
             "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} | {:.0} | {:.0} | {:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} |",

@@ -219,6 +219,24 @@ A typed value that is not a number changes nothing; the status bar says why.
 `EditorGame::set(world, entity, "Transform.translation", "(3, 0, 0)")` sets a value by its
 scene path from scene text, as one undoable step: for tests, scripts and the command line.
 
+## Picking in the viewport
+
+- **A click** on an object in the viewport selects it, and the tree opens to its row. A
+  click misses nothing thinner than 3 pixels: the nearest object within them is taken.
+- **Shift+click** (or Ctrl+click) adds an object to the selection, or takes it out when it
+  is already selected. In the scene tree Shift selects a range and Ctrl one row, as in
+  every list.
+- **A click on nothing** clears the selection; with Shift or Ctrl it keeps it.
+- A press on one of the gizmo's handles drags it instead, and a press that moves more than
+  4 pixels is not a click.
+- What is picked is what is drawn: masked surfaces through their holes, skinned meshes in
+  their current pose, transparent ones too. Lights, cameras and empty entities have no
+  geometry: pick them in the tree until their icons come.
+- A click answers a frame or two later: the editor draws the pixels around it once more,
+  each with the object it shows (ADR 0109). The pointer's pixel is drawn again whenever the
+  pointer, the camera or the scene moves, for the outline of what is under it (coming
+  next).
+
 ## Moving things in the viewport
 
 The selection's gizmo sits at its center: the middle of the selected entities, a child
@@ -368,7 +386,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 
 | Phase | What |
 |---|---|
-| E2 | clicks and boxes in the viewport (from an id buffer), the selection's outline, frame and bookmarks, placement on surfaces, overlays |
+| E2 | the selection's outline and the one under the pointer, boxes, cycling through what is under the pointer and its list (Alt+click), frame and bookmarks, placement on surfaces, overlays |
 | E3 | Play on a copy of the world |
 
 The whole plan is ADR 0107 §7.

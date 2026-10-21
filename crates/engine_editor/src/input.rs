@@ -324,6 +324,11 @@ impl InputCollector {
         self.pressed[button as usize]
     }
 
+    /// Whether `button` went up this frame.
+    pub fn released(&self, button: Button) -> bool {
+        self.released[button as usize]
+    }
+
     /// Cursor movement this frame while the right or middle button was held (physical
     /// pixels).
     pub fn drag(&self) -> [f32; 2] {
