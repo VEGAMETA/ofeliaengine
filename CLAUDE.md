@@ -114,8 +114,9 @@ If the structure does not exist yet, create it as needed, not all at once.
 ### Parallel agents
 Several agents may work at once, each on one task in its own git worktree with its own
 `CARGO_TARGET_DIR` (never shared), ending in a pull request that the coordinator merges after
-`tools/check.ps1 -Gpu -Perf` on both GPUs. Their rules, including the owner's goals and the
-team decisions to respect, are in `docs/agent-rules.md`; every agent reads them first.
+`tools/check.ps1 -Gpu` on both GPUs, and `-Perf` when the change can move the gate's scenes
+(§5). Their rules, including the owner's goals and the team decisions to respect, are in
+`docs/agent-rules.md`; every agent reads them first.
 
 A knowledge graph of the code and the docs (graphify, the main checkout's `graphify-out/`, not
 committed) is the map an agent new to a subsystem starts from: its report lists the subsystems
@@ -231,7 +232,10 @@ version must include the date it was checked.
 - **Per-pass GPU time gate** (ADR 0062): `tools/check.ps1 -Perf` renders fixed scenes on both
   GPUs and compares every pass with the vendor's baseline (`tests/golden/perf`); 3 % and more
   than max(5 µs, 0.5 % of the frame) is a regression; uniform shifts (clocks, other work) are
-  reported as such. Advisory on ref-1 until a dedicated machine exists, but every merge checks it.
+  reported as such. Advisory on ref-1 until a dedicated machine exists. Every merge that can
+  move it checks it: one that changes an existing SPIR-V, or code the gate's scenes run (the
+  render graph, their passes, the frame renderer, the player's frame). New entry points and
+  code those scenes never run get `-Gpu` alone (team decision, 2026-10-21; ADR 0062).
 - **A feature costs nothing where it is not used — not even shader registers.** On the AMD
   driver, dead code under a specialization constant still raised forward shading from 64 to 72
   VGPRs (9–13 % slower). Use separate entry points with literal arguments and lazily created

@@ -320,8 +320,10 @@ decisions). In short:
   drive, ADR 0077), and ends with a PR. The main checkout builds in `C:\cargo-target\ofeliaengine`
   (`.cargo/config.toml`).
 - **Gate.**
-  - The coordinator merges after its own `tools/check.ps1 -Gpu -Perf`, plus `-Deny` when
-    dependencies change.
+  - The coordinator merges after its own `tools/check.ps1 -Gpu`, plus `-Perf` when the
+    change can move the gate's scenes (an existing SPIR-V, or code they run, changed; team
+    decision, 2026-10-21, ADR 0062) and `-Deny` when dependencies change. Scripts,
+    examples and docs get light checks: `-Affected`, or the touched crates' own.
   - The checks take a machine-wide GPU lock and wait for a quiet CPU before measuring.
   - Before a merge, the branch has origin/main merged in.
 - **After a merge.**

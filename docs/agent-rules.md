@@ -60,7 +60,10 @@ Read this whole file before starting, and the repository's CLAUDE.md. (Canonical
   depends on `engine_workspace_hack` (or on `engine_core`).
 - `powershell -NoProfile -ExecutionPolicy Bypass -File tools/check.ps1 -Gpu -Perf` (plus `-Deny`
   for dependency changes, `-Loom` for lock-free code) must be green, with your target dir and
-  ENGINE_TEST_ASSETS set.
+  ENGINE_TEST_ASSETS set. Leave `-Perf` out only when the change cannot move the gate's
+  scenes: no existing `.spv` changed, and they run none of the changed code (the render
+  graph, their passes, the frame renderer, the player's frame). The PR then says so, with
+  the diff's stat (ADR 0062).
 - **Golden images** (`tests/golden`, ADR 0062): existing shots must stay identical unless your
   change is meant to alter the picture; then look at the new renders in `target/golden/<vendor>/`,
   rewrite them with `ENGINE_GOLDEN_UPDATE=1` on both GPUs and explain why in the PR. A new
