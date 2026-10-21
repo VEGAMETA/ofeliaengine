@@ -196,7 +196,12 @@ Last updated: 2026-10-20.
     group, whatever the order, so a corridor opens a hall's wall with no doorway cut;
     Ctrl+H for the selection and while drawing. 400 rooms and 380 corridors: 121 ms from
     nothing, a corridor dragged 1.45 ms.
-  - **Next:** E2b-3c, the face handles and corners that land on other brushes'.
+  - **E2b-3c, side handles and landing** (#293; the team's answer 2): the active brush's
+    sides dragged by handles, the opposite side staying; while drawing, corners land on
+    other brushes' corners and edges within 8 px (a green dot, a red ring), before the
+    grid.
+  - **Next:** E2b-4, colliders (the pieces as hulls) and the navigation mesh baked in the
+    background, both in the overlays.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

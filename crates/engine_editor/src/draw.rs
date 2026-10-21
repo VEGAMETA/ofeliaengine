@@ -21,6 +21,10 @@
 //!   surface's plane and sizes go in whole steps from it; Ctrl rounds the corner under the
 //!   pointer to the grid. Free, corners and sizes still land on the brushes' millimetre
 //!   grid, which their planes are held on.
+//! - **Other brushes' corners and edges** come first (team decision, 2026-10-21; SketchUp's
+//!   inference): within a few pixels of the pointer, the first corner lands on a corner or
+//!   on an edge, the base's other corner on one as seen in the base's plane, and the height
+//!   on a corner's height when the pointer is over that corner.
 //!
 //! Escape or a right click drops it; the brush is one undo step.
 
@@ -58,6 +62,22 @@ const AXIS_COS: f32 = 0.9986;
 
 /// A press dragged this far (physical pixels) and released keeps the base.
 const DRAG_PIXELS: f32 = 4.0;
+
+/// What a point landed on: another brush's corner, or a point of its edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Landed {
+    Corner(Vec3),
+    Edge(Vec3),
+}
+
+impl Landed {
+    /// Where it landed.
+    pub(crate) fn point(self) -> Vec3 {
+        match self {
+            Self::Corner(p) | Self::Edge(p) => p,
+        }
+    }
+}
 
 /// A shape B draws.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -161,6 +181,76 @@ pub(crate) struct Pointer<'a> {
     /// Shift and Ctrl, held.
     pub(crate) invert: bool,
     pub(crate) round: bool,
+    /// Other brushes' corners and edges in the world, and how near the pointer (physical
+    /// pixels) takes one.
+    pub(crate) corners: &'a [Vec3],
+    pub(crate) edges: &'a [(Vec3, Vec3)],
+    pub(crate) reach: f32,
+}
+
+impl Pointer<'_> {
+    /// The corner nearest the pointer on the screen within reach, else the point of an
+    /// edge; each mapped by `onto` first (into a plane).
+    fn land(&self, onto: impl Fn(Vec3) -> Vec3, edges: bool) -> Option<Landed> {
+        let mut best: Option<(f32, Vec3)> = None;
+        for &c in self.corners {
+            let c = onto(c);
+            if let Some(d) = self.view.screen(c).map(|s| s.distance(self.at))
+                && d <= self.reach
+                && best.is_none_or(|(b, _)| d < b)
+            {
+                best = Some((d, c));
+            }
+        }
+        if let Some((_, c)) = best {
+            return Some(Landed::Corner(c));
+        }
+        if !edges {
+            return None;
+        }
+        let ray = self.view.ray(self.at);
+        for &(a, b) in self.edges {
+            let (a, b) = (onto(a), onto(b));
+            let p = nearest_on_segment(ray, a, b);
+            if let Some(d) = self.view.screen(p).map(|s| s.distance(self.at))
+                && d <= self.reach
+                && best.is_none_or(|(b, _)| d < b)
+            {
+                best = Some((d, self.along_grid(p, a, b)));
+            }
+        }
+        best.map(|(_, p)| Landed::Edge(p))
+    }
+
+    /// `p` on the edge `a`–`b` with its place along an edge that runs along an axis on the
+    /// grid, as the rules say (the millimetres when free), within the edge.
+    fn along_grid(&self, mut p: Vec3, a: Vec3, b: Vec3) -> Vec3 {
+        let Some(i) = (0..3).find(|&i| (b - a).normalize_or_zero()[i].abs() >= AXIS_COS) else {
+            return p;
+        };
+        let on = if self.round || self.snap.on != self.invert {
+            let step = self.snap.step(Quantity::Position) as f32;
+            (p[i] / step).round() * step
+        } else {
+            mm(p[i])
+        };
+        p[i] = on.clamp(a[i].min(b[i]), a[i].max(b[i]));
+        p
+    }
+}
+
+/// The point of segment `a`–`b` nearest the ray `(origin, direction)`.
+fn nearest_on_segment((o, d): (Vec3, Vec3), a: Vec3, b: Vec3) -> Vec3 {
+    let e = b - a;
+    let (dd, de, ee) = (d.dot(d), d.dot(e), e.dot(e));
+    let w = o - a;
+    let denominator = dd * ee - de * de;
+    let t = if denominator.abs() < 1e-9 || ee < 1e-12 {
+        0.0
+    } else {
+        ((dd * e.dot(w) - de * d.dot(w)) / denominator).clamp(0.0, 1.0)
+    };
+    a + e * t
 }
 
 /// What a drawing makes: the shape and its operation, where its base's middle is and how
@@ -190,6 +280,8 @@ pub(crate) struct Draw {
     pub(crate) room: bool,
     /// Where the first corner lands now, and the normal of its surface.
     pub(crate) mark: Option<(Vec3, Vec3)>,
+    /// What the point the pointer moves landed on this frame, if another brush's.
+    pub(crate) landed: Option<Landed>,
     /// What is typed for the first side, the second and the height.
     typed: [String; 3],
     /// The one being typed: 0 or 1 the base's sides, 2 the height.
@@ -210,6 +302,7 @@ impl Draw {
             turns: 0,
             room: false,
             mark: None,
+            landed: None,
             typed: Default::default(),
             field: 0,
             merge,
@@ -299,9 +392,13 @@ impl Draw {
     /// The pointer's frame: the mark, the base or the height follows it, and a click (or
     /// a drag's release) goes on; true when the brush is to be made.
     pub(crate) fn pointer(&mut self, p: &Pointer) -> bool {
+        self.landed = None;
         match self.stage {
             Stage::Aim => {
-                self.mark = aim(p);
+                self.mark = aim(p).map(|(corner, normal, landed)| {
+                    self.landed = landed;
+                    (corner, normal)
+                });
                 if p.press
                     && let Some((corner, normal)) = self.mark
                 {
@@ -334,7 +431,17 @@ impl Draw {
     /// The base's other corner for the pointer: where its ray meets the plane, in whole
     /// steps from the first corner or rounded to the grid as the rules say; typed sides
     /// take the pointer's lengths, its directions kept.
-    fn base_to(&self, plane: &BasePlane, p: &Pointer) -> Option<Vec2> {
+    fn base_to(&mut self, plane: &BasePlane, p: &Pointer) -> Option<Vec2> {
+        // Another brush's corner or edge, as seen in the base's plane, first.
+        if self.typed.iter().take(2).all(String::is_empty)
+            && let Some(landed) = p.land(
+                |c| c - plane.normal * (c - plane.corner).dot(plane.normal),
+                true,
+            )
+        {
+            self.landed = Some(landed);
+            return Some(plane.coords(landed.point()).map(mm));
+        }
         let free = plane
             .coords(hit_plane(p.view.ray(p.at), plane.corner, plane.normal)?)
             .to_array();
@@ -359,9 +466,14 @@ impl Draw {
     /// The height for the pointer: along the normal through the base's middle, on the
     /// plane holding that line that faces the camera most, in whole steps as the rules
     /// say; a typed one out of the surface for a brush, into it for a cut.
-    fn height(&self, plane: &BasePlane, to: Vec2, p: &Pointer) -> Option<f32> {
+    fn height(&mut self, plane: &BasePlane, to: Vec2, p: &Pointer) -> Option<f32> {
         if let Some(h) = self.typed(2) {
             return Some(mm(if self.op == BrushOp::Cut { -h } else { h }));
+        }
+        // The pointer over another brush's corner: its height.
+        if let Some(landed) = p.land(|c| c, false) {
+            self.landed = Some(landed);
+            return Some(mm((landed.point() - plane.corner).dot(plane.normal)));
         }
         let middle = plane.point(to * 0.5);
         let n = plane.normal;
@@ -459,6 +571,7 @@ impl Draw {
         let sizes: [f32; 3] = match self.stage {
             Stage::Aim => {
                 out.push_str(": click the first corner  ·  B: next shape");
+                self.landed_note(out);
                 return;
             }
             Stage::Base { to, .. } => [to.x.abs(), to.y.abs(), 0.0],
@@ -487,6 +600,16 @@ impl Draw {
                 short(made.size.y / steps as f32)
             );
         }
+        self.landed_note(out);
+    }
+
+    /// Where the point landed, for the hint.
+    fn landed_note(&self, out: &mut String) {
+        match self.landed {
+            Some(Landed::Corner(_)) => out.push_str("  ·  on a corner"),
+            Some(Landed::Edge(_)) => out.push_str("  ·  on an edge"),
+            None => {}
+        }
     }
 }
 
@@ -495,12 +618,16 @@ impl Draw {
 /// sits on the brushes' millimetre grid along it. In the plane it goes on the grid when
 /// the rules say so (there is no start to step from, so steps round too), else on the
 /// millimetre grid.
-fn aim(p: &Pointer) -> Option<(Vec3, Vec3)> {
+fn aim(p: &Pointer) -> Option<(Vec3, Vec3, Option<Landed>)> {
+    let landed = p.land(|c| c, true);
     let (mut point, normal) = match p.surface {
         Some(hit) => hit,
         None => (hit_plane(p.view.ray(p.at), Vec3::ZERO, Vec3::Y)?, Vec3::Y),
     };
     let (normal, axis) = to_axis(normal);
+    if let Some(landed) = landed {
+        return Some((landed.point(), normal, Some(landed)));
+    }
     if let Some(i) = axis {
         point[i] = (point[i] * 1000.0).round() / 1000.0;
     }
@@ -516,7 +643,7 @@ fn aim(p: &Pointer) -> Option<(Vec3, Vec3)> {
         };
         point += axis * (on - c);
     }
-    Some((point, normal))
+    Some((point, normal, None))
 }
 
 /// `n` as the axis it is nearly along, with that axis' index; or as it is.
@@ -561,6 +688,9 @@ mod tests {
             snap,
             invert: false,
             round: false,
+            corners: &[],
+            edges: &[],
+            reach: 8.0,
         }
     }
 
@@ -802,6 +932,58 @@ mod tests {
         assert!(hint.starts_with("Box room 4 × 3 × [3] m"), "{hint}");
         d.again(BrushOp::Cut);
         assert_eq!(d.made().unwrap().hollow, 0.0);
+    }
+
+    #[test]
+    fn corners_and_edges_of_other_brushes_come_before_the_grid() {
+        let view = view();
+        let snap = Snapping {
+            on: true,
+            ..Snapping::default()
+        };
+        // A box from (2, 0, 2) to (3, 1.5, 3), off the 0.1 m grid by a little.
+        let (lo, hi) = (Vec3::new(2.013, 0.0, 2.027), Vec3::new(3.013, 1.5, 3.027));
+        let corners = [
+            lo,
+            Vec3::new(hi.x, 0.0, lo.z),
+            Vec3::new(hi.x, 0.0, hi.z),
+            Vec3::new(lo.x, 0.0, hi.z),
+            Vec3::new(lo.x, 1.5, lo.z),
+            hi,
+        ];
+        let edges = [(lo, Vec3::new(lo.x, 0.0, hi.z))];
+        let with = |at: Vec3| Pointer {
+            corners: &corners,
+            edges: &edges,
+            ..pointer(&view, &snap, at)
+        };
+        let mut d = Draw::new(BrushOp::Add, 0, 1);
+        // A few millimetres from its corner: the corner, not the grid.
+        let mut p = with(lo + Vec3::new(0.004, 0.0, -0.003));
+        p.press = true;
+        d.pointer(&p);
+        assert_eq!(d.mark.unwrap().0, lo);
+        assert_eq!(d.landed, Some(Landed::Corner(lo)));
+        // The base's other corner on the box's −x edge near its middle: on the edge, at a
+        // whole step along it (z = 2.5).
+        let half = Vec3::new(lo.x, 0.0, (lo.z + hi.z) * 0.5);
+        d.pointer(&with(half + Vec3::new(0.003, 0.0, 0.0)));
+        let Stage::Base { to, .. } = d.stage else {
+            panic!()
+        };
+        assert!(matches!(d.landed, Some(Landed::Edge(_))), "{:?}", d.landed);
+        assert!((to - Vec2::new(0.0, 2.5 - lo.z)).length() < 1e-5, "{to}");
+        // Elsewhere, the grid again.
+        d.pointer(&with(Vec3::new(1.0, 0.0, 0.0)));
+        assert!(d.landed.is_none());
+        // The height: the pointer over the box's top corner takes its 1.5 m.
+        d.pointer(&with(Vec3::new(1.0, 0.0, 0.5)));
+        d.enter();
+        d.pointer(&with(hi));
+        let Stage::Height { height, .. } = d.stage else {
+            panic!()
+        };
+        assert!((height - 1.5).abs() < 1e-6, "{height}");
     }
 
     #[test]

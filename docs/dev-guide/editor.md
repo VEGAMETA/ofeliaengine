@@ -376,6 +376,20 @@ names the shape and its sizes ("Stairs 1 × 1.8 × [1.2] m, 6 steps of 0.2 m").
   first corner lands on the grid of the position step in the surface's plane and sizes go
   in whole steps; Ctrl rounds the corner under the pointer to the grid. Free, corners and
   sizes still land on the brushes' millimetre grid.
+- **Other brushes' corners and edges come first:** within a few pixels of the pointer the
+  first corner lands on a corner (a green dot) or on an edge (a red ring; along an edge
+  that runs along an axis, on the grid), the base's other corner on one as seen in the
+  base's plane, and the height on a corner's when the pointer is over it. The hint says
+  "on a corner" or "on an edge". So a new brush meets the old ones exactly.
+
+### Sizing a brush by its sides
+
+The active brush shows a small square in the middle of each side facing the camera. Drag
+one: that side follows the pointer along its normal and the opposite side stays (a room's
+sides are its inside's, its walls follow). Its size shows above the handle. Snapping as
+above: whole steps of the size with G (or Shift), Ctrl rounds the size to the step, free
+on the millimetres; never below a millimetre. One undo step per drag; Escape takes it back.
+The handles come before the gizmo's under the pointer.
 - **Stairs** get as many steps as make each about 0.2 m high.
 - The palette has them as "Blockout: Draw Brush", "Blockout: Draw Cut" and "Blockout: Room or
   Solid".

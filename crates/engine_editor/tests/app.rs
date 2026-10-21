@@ -6,7 +6,8 @@
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
 use engine_app::{
-    Assets, Brush, BrushOp, Game, MaterialFile, Model, Player, PlayerSettings, Window, builtin,
+    Assets, Brush, BrushGroup, BrushOp, BrushShape, Game, MaterialFile, Model, Player,
+    PlayerSettings, Window, builtin,
 };
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Transform, World};
@@ -939,6 +940,185 @@ fn b_draws_a_brush_on_the_floor_under_the_pointer() {
         (size - Vec3::new(2.0, 1.0, 1.0)).abs().max_element() < 0.05,
         "{size}"
     );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A crate brush selected shows its side handles (`ENGINE_EDITOR_HANDLES_PNG=<file>`); then
+/// B with the pointer a few pixels from its corner: the new brush's first corner lands on
+/// it exactly, through the real surface pick and projection (`ENGINE_EDITOR_LANDED_PNG`).
+#[test]
+fn a_brushs_handles_show_and_a_drawn_corner_lands_on_its_corner() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-land-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Floor"),
+        Transform::from_xyz(0.0, -0.05, 0.0).with_scale(Vec3::new(20.0, 0.1, 20.0)),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    let group = world.spawn((
+        SceneId::new(),
+        Name::new("Blockout"),
+        Transform::IDENTITY,
+        BrushGroup::default(),
+    ));
+    let crate_ = world.spawn((
+        SceneId::new(),
+        Name::new("Crate"),
+        Transform::IDENTITY,
+        Brush::new(BrushShape::Box, Vec3::new(2.0, 1.0, 2.0)),
+    ));
+    world.set_parent(crate_, Some(group)).unwrap();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Sun {
+            color: Vec3::splat(1.2),
+            ambient: Vec3::splat(0.04),
+        },
+    ));
+    let paths = Assets::new(dir.clone()).paths().clone();
+    let mut text = String::new();
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+    };
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("editor landing test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..20 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let crate_ = engine_scene::find_named(player.world_mut(), "Crate").unwrap();
+    game.select(Some(crate_));
+    for _ in 0..4 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let write = |player: &mut Player,
+                 game: &mut EditorGame<NoGame>,
+                 overlay: &mut EditorOverlay,
+                 var: &str| {
+        if let Ok(path) = std::env::var(var) {
+            let rgba = player
+                .capture_overlaid(game, Some(overlay))
+                .unwrap()
+                .unwrap();
+            let extent = player.extent();
+            let png = engine_render::png::encode_png(
+                extent.width,
+                extent.height,
+                engine_render::png::PngFormat::Rgba,
+                &rgba,
+            )
+            .unwrap();
+            std::fs::write(path, png).unwrap();
+        }
+    };
+    write(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        "ENGINE_EDITOR_HANDLES_PNG",
+    );
+    let point = |game: &mut EditorGame<NoGame>, p: Vec3, off: (i32, i32)| {
+        let [x, y] = game.on_screen(p).unwrap();
+        send(
+            game,
+            WindowEventKind::CursorMoved {
+                x: x.round() as i32 + off.0,
+                y: y.round() as i32 + off.1,
+            },
+        );
+    };
+    let click =
+        |player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay| {
+            for pressed in [true, false] {
+                send(
+                    game,
+                    WindowEventKind::MouseButton {
+                        button: MouseButton::Left,
+                        pressed,
+                    },
+                );
+                editor_frame(player, game, overlay);
+            }
+        };
+    for pressed in [true, false] {
+        send(
+            &mut game,
+            WindowEventKind::Key {
+                virtual_key: 0x42,
+                scancode: 0x30,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        );
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    // Three pixels off the crate's corner on the floor.
+    point(&mut game, Vec3::new(1.0, 0.0, 1.0), (3, -2));
+    for _ in 0..8 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    write(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        "ENGINE_EDITOR_LANDED_PNG",
+    );
+    click(&mut player, &mut game, &mut overlay);
+    point(&mut game, Vec3::new(3.0, 0.0, 2.5), (0, 0));
+    editor_frame(&mut player, &mut game, &mut overlay);
+    click(&mut player, &mut game, &mut overlay);
+    send(&mut game, WindowEventKind::Char('1'));
+    for _ in 0..3 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    click(&mut player, &mut game, &mut overlay);
+    let drawn = engine_scene::find_named(player.world_mut(), "Box Brush").unwrap();
+    let world = player.world_mut();
+    let size = world.get::<Brush>(drawn).unwrap().size;
+    let at = world.get::<Transform>(drawn).unwrap().translation;
+    println!("drawn at {at}, {size}");
+    // Its first corner, half its size back from its base's middle, is the crate's.
+    let first = Vec3::new(at.x - size.x * 0.5, at.y, at.z - size.z * 0.5);
+    assert!(first.distance(Vec3::new(1.0, 0.0, 1.0)) < 1e-4, "{first}");
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
