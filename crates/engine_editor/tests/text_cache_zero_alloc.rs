@@ -178,6 +178,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         bottom_tabs: &["Output", "Debugger"],
         active_bottom: None,
         playing: false,
+        paused: false,
         status: "engine 0.0.0",
         snap: true,
         steps: ["0.1 m", "45°", "0.1"],

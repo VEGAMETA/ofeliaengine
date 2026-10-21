@@ -95,7 +95,7 @@ pub use engine_save::{
     SlotInfo, Transient,
 };
 pub use entry::{Start, run};
-pub use game::{FrameParts, Game};
+pub use game::{FrameParts, Game, PlayFrom};
 pub use net::{
     HitCapsule, HostOptions, NetConfig, NetEvent, NetInput, NetState, Network, PlayerId, Predicted,
     SubTick, To,

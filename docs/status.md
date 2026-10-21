@@ -231,8 +231,12 @@ Last updated: 2026-10-20.
     forgotten). While editing the world stands (`Player::set_simulating`): a scene's
     tweens, timers and sounds no longer change it. A panic in the game's hooks stops Play
     and says its line.
-  - **Next:** E3-2, pause and step, play from the editor's camera, restart; then keeping
-    changes, the game's own window.
+  - **E3-2, Play's controls** (#301): F7 pauses (the world still, the game's frame hooks
+    not called), Shift+F7 steps one tick (`Player::step_tick`), Shift+F5 plays from the
+    editor's camera (the scene's camera put there, `PlayFrom` for the game's player),
+    Ctrl+F5 restarts, Shift+F8 ejects (the editor's camera and tools on the running game,
+    the game's keyboard and mouse off).
+  - **Next:** E3-3, keeping changes made while playing; then the game's own window.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

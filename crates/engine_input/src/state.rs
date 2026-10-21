@@ -527,6 +527,11 @@ impl Input {
         self.filter = filter;
     }
 
+    /// The devices this input listens to ([`Self::set_devices`]).
+    pub fn devices(&self) -> DeviceFilter {
+        self.filter
+    }
+
     /// Releases every key, button and stick: what the devices can no longer report once
     /// the window loses the focus (the player calls it then), so nothing stays held.
     /// Presses latched since the last sample are still seen by it.

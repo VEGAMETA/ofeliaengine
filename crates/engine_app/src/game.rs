@@ -102,6 +102,29 @@ pub trait Game {
     }
 }
 
+/// Where the editor's "Play from Here" starts the game (ADR 0107 E3): the editor's camera,
+/// in the world as a resource while the game's `start` runs and until Stop. A game puts
+/// its player there; the scene's main camera is already there.
+///
+/// ```ignore
+/// fn start(player: &mut Player) -> Result<MyGame, Box<dyn std::error::Error>> {
+///     let world = player.world_mut();
+///     let from = world.resource::<PlayFrom>().copied();
+///     let hero = find_named(world, "Hero").ok_or("no hero")?;
+///     if let (Some(from), Some(t)) = (from, world.get_mut::<Transform>(hero)) {
+///         t.translation = from.position;
+///     }
+///     Ok(MyGame { hero })
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayFrom {
+    /// Where the camera was.
+    pub position: engine_core::math::Vec3,
+    /// Which way it looked.
+    pub rotation: engine_core::math::Quat,
+}
+
 /// The parts of the player [`Game::animate`] works on.
 pub struct FrameParts<'a> {
     /// The runtime: its world, and which scene instance mirrors an entity

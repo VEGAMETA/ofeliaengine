@@ -320,6 +320,8 @@ pub struct ShellModel<'a> {
     pub active_bottom: Option<usize>,
     /// The game is running.
     pub playing: bool,
+    /// The game is paused.
+    pub paused: bool,
     /// Right end of the bottom bar.
     pub status: &'a str,
     /// Dragged values snap by default (the tool bar's grid button).
@@ -509,7 +511,7 @@ fn center(
         ui.row("scene tabs", bar(p, 30.0), |ui| {
             out.scene_tab = tabs(ui, model.scenes, Some(model.active_scene), p);
             ui.spacer("fill");
-            play_controls(ui, model.playing, p, out);
+            play_controls(ui, model.playing, model.paused, p, out);
         });
         ui.row("tool bar", bar(p, 30.0).background(p.dock), |ui| {
             for (i, tool) in model.tools.iter().enumerate() {
@@ -676,7 +678,7 @@ fn tabs(ui: &mut Ui, labels: &[&str], active: Option<usize>, p: &Palette) -> Opt
 
 /// Small monochrome play, pause and stop at the end of the tab row (not a colored group in
 /// the middle of the window).
-fn play_controls(ui: &mut Ui, playing: bool, p: &Palette, out: &mut ShellResponse) {
+fn play_controls(ui: &mut Ui, playing: bool, paused: bool, p: &Palette, out: &mut ShellResponse) {
     let button = Style {
         size: [Size::Fixed(24.0), Size::Fixed(22.0)],
         radius: 3.0,
@@ -689,8 +691,9 @@ fn play_controls(ui: &mut Ui, playing: bool, p: &Palette, out: &mut ShellRespons
         text(ui, "icon", icons::PLAY, ICON, play_color);
     });
     out.play = ui.sense(id, false).clicked;
+    let pause_color = if paused { p.playing } else { p.text_dim };
     let id = ui.container("pause", button, |ui| {
-        text(ui, "icon", icons::PAUSE, ICON, p.text_dim);
+        text(ui, "icon", icons::PAUSE, ICON, pause_color);
     });
     out.pause = ui.sense(id, false).clicked;
     let id = ui.container("stop", button, |ui| {
