@@ -146,7 +146,7 @@ Last updated: 2026-10-20.
     some left out, ids and depths of a 3 × 3 square: point and normal); Ctrl+Shift drags
     the selection over surfaces, its box's face on them; End drops each selected entity
     onto the surface below it, as one undo step.
-  - **E2-6, steps and pivots** (#PR): the position, angle and scale steps in the tool bar
+  - **E2-6, steps and pivots** (#283): the position, angle and scale steps in the tool bar
     beside the grid button, each a menu of values; pivots (the middle, each origin, the
     active entity) on the tool bar's right end and `.`; the session keeps both.
   - **Next:** the rest of E2 (ADR 0107 §7): overlays (lights' and cameras' icons to pick,
