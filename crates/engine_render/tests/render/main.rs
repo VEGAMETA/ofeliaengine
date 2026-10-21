@@ -27,6 +27,7 @@ mod motion;
 mod motion_blur;
 mod occlusion;
 mod particles;
+mod pick;
 mod post;
 mod rays;
 mod reflections;

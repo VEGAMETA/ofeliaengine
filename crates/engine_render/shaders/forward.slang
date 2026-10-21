@@ -2120,6 +2120,64 @@ void feedbackFragment(ShadowOut input)
     }
 }
 
+// Picking (ADR 0109, `pick.rs`): the view's visible instances drawn again into a small
+// square, each pixel keeping the nearest surface's instance: the index the vertex shaders
+// read it with (the persistent scene's slot), plus one, so 0 is none.
+struct PickOut
+{
+    float4 position : SV_Position;
+    nointerpolation uint instance : INSTANCE;
+};
+
+struct PickMaskedOut
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    nointerpolation uint material : MATERIAL;
+    nointerpolation uint instance : INSTANCE;
+};
+
+[shader("vertex")]
+PickOut pickVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+{
+    uint index = push.visible[slot];
+    Instance inst = read_instance(push.instances, index);
+    PickOut o;
+    o.position = clip_position(inst, load_position(vertex)).clip;
+    o.instance = index;
+    return o;
+}
+
+// Masked materials: texture coordinates for the alpha test.
+[shader("vertex")]
+PickMaskedOut pickVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+{
+    uint index = push.visible[slot];
+    Instance inst = read_instance(push.instances, index);
+    PickMaskedOut o;
+    o.position = clip_position(inst, load_position(vertex)).clip;
+    o.uv = read_attributes(vertex).uv;
+    o.material = inst.material;
+    o.instance = index;
+    return o;
+}
+
+[shader("fragment")]
+uint pickFragment(PickOut input) : SV_Target0
+{
+    return input.instance + 1u;
+}
+
+[shader("fragment")]
+uint pickFragmentMasked(PickMaskedOut input) : SV_Target0
+{
+    MaterialContext ctx = coverage_context(input.uv, input.material);
+    MATERIAL.Params p = MATERIAL::load(ctx);
+    if (MATERIAL::alpha(ctx, p) < MATERIAL::alpha_cutoff(p))
+        discard;
+    return input.instance + 1u;
+}
+
 static const float PI = 3.14159265;
 
 float distribution_ggx(float n_dot_h, float a)
