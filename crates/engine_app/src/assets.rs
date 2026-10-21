@@ -36,7 +36,7 @@ use engine_render::mesh::{GeometryPool, MeshId, OwnedMeshData};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_rhi::{Allocator, Bindless, Device, Wrap};
 use engine_runtime::MeshRenderer;
-use engine_scene::{AssetId, AssetPaths, AssetRef, LoadError, ValueReport};
+use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, LoadError, ValueReport};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -208,73 +208,6 @@ impl MaterialFile {
         let mut file = Self::default();
         let report = engine_scene::read_value(Self::KIND, Self::VERSION, text, &mut file)?;
         Ok((file, report))
-    }
-}
-
-/// The file beside a foreign asset (`<file>.meta`, ADR 0108): `[asset version=1 id=…]`, the
-/// asset's id, then its importer's settings (none yet).
-///
-/// ```text
-/// [asset version=1 id=5f2c0a3e9d2b47c88e51f0d4a7b3c912]
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
-pub struct AssetMeta;
-
-impl AssetMeta {
-    /// The header's kind.
-    pub const KIND: &'static str = "asset";
-    /// The format's version.
-    pub const VERSION: u32 = 1;
-
-    /// The `.meta` beside `file` (`yard.glb.meta`).
-    pub fn path(file: &Path) -> PathBuf {
-        let mut path = file.as_os_str().to_owned();
-        path.push(".meta");
-        PathBuf::from(path)
-    }
-
-    /// The file's text, with its id.
-    pub fn to_text(&self, id: AssetId) -> String {
-        let mut out = String::new();
-        engine_scene::write_value(Self::KIND, Self::VERSION, Some(id), self, None, &mut out);
-        out
-    }
-
-    /// A `.meta` from its text.
-    ///
-    /// # Errors
-    ///
-    /// Not a `.meta`, a newer one, or a bad line (with its number).
-    pub fn parse(text: &str) -> Result<(Self, ValueReport), LoadError> {
-        let mut meta = Self;
-        let report = engine_scene::read_value(Self::KIND, Self::VERSION, text, &mut meta)?;
-        Ok((meta, report))
-    }
-
-    /// The id of `file`: its `.meta`'s, or a new one written to a new `.meta` beside it
-    /// (what the editor does the first time it meets a file without one).
-    ///
-    /// # Errors
-    ///
-    /// The `.meta` cannot be read, is not one, or cannot be written.
-    pub fn ensure(file: &Path) -> Result<AssetId, String> {
-        let path = Self::path(file);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let (_, report) =
-                    Self::parse(&text).map_err(|e| format!("{}:{e}", path.display()))?;
-                report
-                    .id
-                    .ok_or_else(|| format!("{}: its header has no id", path.display()))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let id = AssetId::new();
-                std::fs::write(&path, Self.to_text(id))
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-                Ok(id)
-            }
-            Err(e) => Err(format!("{}: {e}", path.display())),
-        }
     }
 }
 

@@ -93,6 +93,35 @@ let handle = AssetRef::part(door, "Handle");
   one, a reference is written with the bare id and the part's hash (`#~…`); it still loads
   back to the same asset.
 
+### The asset database
+
+Every asset file under the game's folder has an id (`engine_scene::AssetDatabase`):
+- **Our own files carry it in their header:** scenes (`[scene version=3 id=…]`) and
+  material files.
+- **Foreign files** (glTF, images, sounds, videos, fonts, scripts) carry it in a `.meta`
+  beside them:
+
+  ```text
+  [asset version=1 id=5f2c0a3e9d2b47c88e51f0d4a7b3c912]
+  ```
+
+  The editor writes one the first time it meets a file without one, and so does
+  `ofeliaengine assets` (`--json` for tools). Commit them with their files.
+- **Moving files:**
+  - a file moved outside the editor with its `.meta` keeps its id;
+  - one moved without it, its old `.meta` deleted, gets its id back by its size and
+    content, for files whose `.meta` the database wrote;
+  - otherwise it gets a new id, and references to the old one show it missing, with
+    their paths.
+- **A copy with its `.meta`** gets a new id for the copy. A scene copied outside the
+  editor is reported: save it from the editor as a new file.
+- **The index** of ids and paths is a cache in `.ofelia/assets.index`, rebuilt from the
+  files at any time. The editor keeps it up to date while it runs: it watches the folder
+  and scans a change once the folder has been quiet for 0.15 s. Folders whose name starts
+  with `.` and `target/` are left out.
+- **Cost:** 10,000 files take 20 ms to scan when unchanged, and 3 ms to load from the
+  index. The first scan writes their `.meta` files: 1.3 s.
+
 ## In the player
 
 `PlayerSettings::scene` loads a scene file when the player starts, and

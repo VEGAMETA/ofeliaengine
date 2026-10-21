@@ -319,3 +319,39 @@ The player's `Assets` makes a `Model`'s mesh and material from a glTF file's par
 - **Read on first use** on the frame's thread, each file once per frame, dropped once its
   parts are made. Moving the reads to a loading thread and compressing textures through
   the derived data cache are E4's.
+
+## As built (E4-1, 2026-10-22): the asset database
+
+`engine_scene::AssetDatabase` (ADR 0107 §5's index, its form chosen by measurement):
+- **What it holds:** every asset file under the game's folder by kind (scene, material,
+  model, texture, sound, video, font, script), its id, path, size, modification time,
+  and the content's hash for files whose `.meta` it wrote.
+  - Ids come from our headers and from the `.meta` files (`AssetMeta`, moved here from
+    `engine_app`).
+  - A foreign file without a `.meta` gets one: the id of the file gone from the same path,
+    or of a file gone with the same size and content, else a new id.
+  - Two files with one id: the later path gets a new `.meta`; our own files are reported.
+- **The index:** `.ofelia/assets.index`, our own text format (a header, then a line per
+  file, tab-separated), gone files kept for their ids.
+- **Measured** (ref-1, release, `measure_ten_thousand_assets`, 10,000 files in 100
+  folders):
+
+  | Step | Time |
+  |---|---|
+  | First scan, every file read, its `.meta` written | 1,306 ms |
+  | Index written (986 KB) | 2.0 ms |
+  | Index read | 3.2 ms |
+  | Unchanged project scanned | 20 ms |
+
+  The unchanged scan takes the `.meta` files' presence from the folder listing, not from
+  a stat per file (167 ms before).
+- **Decided on that:** the cache is our own text file, not SQLite (a C dependency for
+  nothing at these sizes); at that rate a project of
+  100,000 files scans in about 0.2 s (not measured).
+- **In the editor:** opened, scanned and saved when the editor starts, every file's path
+  given to the player by id; the folder watched (`DirectoryWatcher`), a change scanned
+  after 0.15 s of quiet. `ofeliaengine assets [DIR] [--json]` does the same from the
+  command line.
+- **Left:** a file moved without its `.meta` is found by content only if the database
+  wrote that `.meta` (others' hashes come with background hashing); renames inside the
+  editor and the browser (E4-2).

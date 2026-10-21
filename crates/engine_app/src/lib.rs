@@ -77,7 +77,9 @@ mod sound;
 mod text;
 mod videos;
 
-pub use assets::{Alpha, AssetMeta, Assets, MaterialFile, Model, builtin};
+pub use assets::{Alpha, Assets, MaterialFile, Model, builtin};
+/// The file beside a foreign asset (ADR 0108), and the project's asset database.
+pub use engine_scene::{AssetDatabase, AssetMeta};
 pub use blockout::{
     BakedBrush, Blockout, Brush, BrushGroup, BrushOp, BrushPlane, BrushShape, grid_png,
 };

@@ -1196,3 +1196,9 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
   - F7 and F8 work in the game's window, its close button stops;
   - the game gets the events of the window it plays in;
   - "Play: In a Window or in the Viewport" chooses (in a window by default).
+
+## As built (E4-1, 2026-10-22): the local cache's index
+
+§5 left the index's form to a measurement: our own text file, read in 3.2 ms and an
+unchanged project of 10,000 files scanned in 20 ms (ADR 0108's as-built of the same day),
+so not SQLite. The editor opens it at its start and follows the folder.
