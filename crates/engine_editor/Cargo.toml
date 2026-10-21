@@ -40,3 +40,7 @@ engine_text.workspace = true
 engine_ui.workspace = true
 # Cargo's build messages, read as JSON (E1-5c; already in the tree through glTF import).
 serde_json = "1"
+
+[dev-dependencies]
+# The glTF a bake writes, read back by the engine's own importer.
+engine_assets.workspace = true

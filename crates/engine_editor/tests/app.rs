@@ -1119,6 +1119,18 @@ fn a_brushs_handles_show_and_a_drawn_corner_lands_on_its_corner() {
     // Its first corner, half its size back from its base's middle, is the crate's.
     let first = Vec3::new(at.x - size.x * 0.5, at.y, at.z - size.z * 0.5);
     assert!(first.distance(Vec3::new(1.0, 0.0, 1.0)) < 1e-4, "{first}");
+    // Blockout: Export to glTF writes the group beside the scene, as the player draws it.
+    assert!(game.run_command(player.world_mut(), "blockout.export"));
+    editor_frame(&mut player, &mut game, &mut overlay);
+    let bytes = std::fs::read(dir.join("blockout.glb")).expect("blockout.glb written");
+    let scene = engine_assets::import_gltf(&bytes, None).unwrap();
+    assert_eq!(scene.meshes.len(), 1);
+    let triangles: usize = scene.meshes[0]
+        .primitives
+        .iter()
+        .map(|p| p.indices.len() / 3)
+        .sum();
+    assert!(triangles >= 20, "both boxes' faces: {triangles}");
     // View: Colliders shows both brushes' pieces (`ENGINE_EDITOR_COLLIDERS_PNG`).
     assert!(game.run_command(player.world_mut(), "view.colliders"));
     for _ in 0..3 {

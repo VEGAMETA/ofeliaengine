@@ -229,6 +229,36 @@ impl Brush {
     }
 }
 
+/// One brush's share of a group's surface, for baking it (ADR 0110 E2b-6): its triangles
+/// in the group's space, metres, with the grid's texture coordinates (metres too) and the
+/// brush's tint.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BakedBrush {
+    /// Its tint, linear.
+    pub tint: [f32; 4],
+    /// Corners.
+    pub positions: Vec<[f32; 3]>,
+    /// Unit normals, one per corner.
+    pub normals: Vec<[f32; 3]>,
+    /// Texture coordinates: metres along the face's projection, as the grid is drawn.
+    pub uvs: Vec<[f32; 2]>,
+    /// Corners of the triangles, counter-clockwise from in front.
+    pub indices: Vec<u32>,
+}
+
+/// The blockout's grid as a PNG: a metre's cell 256 px wide, dark lines on its edges and
+/// lighter ones every 25 cm (sRGB). What a baked group's materials show.
+pub fn grid_png() -> Vec<u8> {
+    let t = grid_texture();
+    engine_render::png::encode_png(
+        t.width,
+        t.height,
+        engine_render::png::PngFormat::Rgba,
+        &t.levels[0],
+    )
+    .unwrap_or_default()
+}
+
 /// A group of brushes (ADR 0110, Godot's `CSGCombiner3D`): its descendant brushes act on
 /// each other in the tree's order; brushes of other groups do not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
@@ -344,6 +374,47 @@ impl Blockout {
             });
             points.dedup();
             out.push(points);
+        }
+    }
+
+    /// Group `group`'s visible surface for baking (ADR 0110 E2b-6) into `out` (cleared
+    /// first): a part per brush that shows any of it (a cut's the walls of its holes), in
+    /// the group's space, as the player draws it.
+    pub fn baked(&self, group: Entity, out: &mut Vec<BakedBrush>) {
+        out.clear();
+        let Some(state) = self.groups.get(&group) else {
+            return;
+        };
+        let mut polygons = Vec::new();
+        let mut t = Triangles::default();
+        for (i, input) in state.inputs.iter().enumerate() {
+            state.group.polygons_of(i, &mut polygons);
+            t.clear();
+            triangles(
+                polygons.iter().map(|(_, p)| p),
+                state.group.planes(),
+                GROW,
+                UNIT,
+                &mut t,
+            );
+            if t.indices.is_empty() {
+                continue;
+            }
+            out.push(BakedBrush {
+                tint: input.brush.tint,
+                positions: t
+                    .positions
+                    .iter()
+                    .map(|p| (*p * UNIT).as_vec3().to_array())
+                    .collect(),
+                normals: t.normals.iter().map(|n| n.as_vec3().to_array()).collect(),
+                uvs: t
+                    .uvs
+                    .iter()
+                    .map(|uv| [uv[0] as f32, uv[1] as f32])
+                    .collect(),
+                indices: t.indices.clone(),
+            });
         }
     }
 
