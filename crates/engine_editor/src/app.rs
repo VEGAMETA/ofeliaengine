@@ -45,7 +45,8 @@
 //!   Shift faster, and the wheel sets the speed (Godot's freelook).
 //! - **Picking** (ADR 0109): a click in the viewport selects the object under the pointer
 //!   (or the nearest within 3 pixels), Shift or Ctrl adds it or takes it out, a click on
-//!   nothing clears the selection.
+//!   nothing clears the selection. The selection is outlined (its children with it, the
+//!   active entity lighter), and so is the object under the pointer.
 //! - **The command palette** (Ctrl+Shift+P) finds and runs every command, the add menu's
 //!   kinds among them ("Add Cube"); after `@` (Ctrl+P) it finds the scene's objects by
 //!   name and selects the one picked.
@@ -79,6 +80,7 @@ use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, Wo
 use engine_input::Key;
 use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind};
 use engine_reflect::TypeKind;
+use engine_render::outline::{OutlineClass, OutlineItem, OutlineStyle, OutlineView, Outliner};
 use engine_render::pick::{PickPass, PickRequest, Picker};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, PointLight, SpotLight, Sun, look_rotation};
@@ -466,6 +468,7 @@ pub fn editor<G: Game>(
         setup.bindless,
         settings.frames_in_flight,
     )?;
+    let outliner = Outliner::new(setup.device, setup.bindless, output.format, output.white)?;
     let shared = Rc::new(RefCell::new(editor));
     Ok((
         EditorGame {
@@ -479,6 +482,7 @@ pub fn editor<G: Game>(
             glyphs,
             canvas: Canvas::new(),
             picker,
+            outliner,
         },
     ))
 }
@@ -1074,6 +1078,9 @@ struct Editor {
     /// A click waiting for the pick of its pixel: the pixel, whether it toggles (Shift or
     /// Ctrl), and the first frame whose pick can answer it.
     pending_click: Option<(PickRequest, bool, u64)>,
+    /// What the overlay outlines (ADR 0109): the GPU scene's slots of the selection, its
+    /// children and the hovered entity, as [`Editor::outline`] last found them.
+    outline_items: Vec<OutlineItem>,
     tools: [String; 4],
     active_tool: usize,
     status: String,
@@ -1334,6 +1341,7 @@ impl Editor {
             last_pick: None,
             press_at: None,
             pending_click: None,
+            outline_items: Vec::new(),
             tools: [
                 format!("{} Select", icons::TOOL_SELECT),
                 format!("{} Move", icons::TOOL_MOVE),
@@ -2716,6 +2724,38 @@ impl Editor {
                 self.selection_changed(before);
             }
             (None, true) => {}
+        }
+    }
+
+    /// What to outline (ADR 0109; `slot_of` gives an entity's slot): each selected entity
+    /// with its children, the active one's as the active class, then the hovered entity
+    /// when it is not among them.
+    fn outline(&mut self, world: &World, slot_of: impl Fn(Entity) -> Option<u32>) {
+        self.outline_items.clear();
+        let active = self.active();
+        let mut stack = Vec::new();
+        for &e in &self.selection {
+            let class = if Some(e) == active {
+                OutlineClass::Active
+            } else {
+                OutlineClass::Selected
+            };
+            stack.push(e);
+            while let Some(x) = stack.pop() {
+                if let Some(slot) = slot_of(x) {
+                    self.outline_items.push(OutlineItem { slot, class });
+                }
+                stack.extend(world.children(x));
+            }
+        }
+        if let Some((_, Some(hovered))) = self.hovered
+            && let Some(slot) = slot_of(hovered)
+            && self.outline_items.iter().all(|i| i.slot != slot)
+        {
+            self.outline_items.push(OutlineItem {
+                slot,
+                class: OutlineClass::Hovered,
+            });
         }
     }
 
@@ -4317,10 +4357,13 @@ impl<G> EditorGame<G> {
         if shared.assets.len() != paths.len() {
             shared.assets = paths.clone();
         }
-        // The newest pick's entity (ADR 0109), through the extraction's slots.
+        // The newest pick's entity, and what to outline (ADR 0109), through the
+        // extraction's slots.
         let runtime = player.runtime();
         let extract = runtime.extract();
-        shared.resolve_pick(&runtime.world, |e| extract.instance(e).map(|i| i.slot()));
+        let slot_of = |e: Entity| extract.instance(e).map(|i| i.slot());
+        shared.resolve_pick(&runtime.world, slot_of);
+        shared.outline(&runtime.world, slot_of);
     }
 
     /// Starts the session in the project's `.ofelia/` (ADR 0107 §4): takes the project's
@@ -4593,6 +4636,8 @@ pub struct EditorOverlay {
     canvas: Canvas,
     /// Picks in the scene's view (ADR 0109).
     picker: Picker,
+    /// Outlines the selection in it.
+    outliner: Outliner,
 }
 
 impl EditorOverlay {
@@ -4647,6 +4692,35 @@ impl Overlay for EditorOverlay {
                     if declared == PickPass::Empty {
                         editor.picked = Some((request, view.frame_number, None));
                     }
+                }
+                // The outlines, below the panels.
+                if let Some(scene) = view.scene
+                    && !editor.outline_items.is_empty()
+                {
+                    let rect = view.rect.unwrap_or(engine_rhi::ash::vk::Rect2D {
+                        offset: engine_rhi::ash::vk::Offset2D::default(),
+                        extent: pass.extent,
+                    });
+                    let aspect = rect.extent.width as f32 / rect.extent.height.max(1) as f32;
+                    self.outliner.add_passes(
+                        pass.fg,
+                        pass.ring,
+                        pass.bindless,
+                        view.geometry,
+                        view.materials,
+                        scene,
+                        &editor.outline_items,
+                        &OutlineView {
+                            target: pass.target,
+                            rect,
+                            clip_from_world: view.camera.clip_from_world(aspect),
+                            near: view.camera.near,
+                            far: view.camera.far,
+                            scene_depth: view.frame.depth,
+                            render: view.frame.render,
+                        },
+                        &OutlineStyle::default().scaled(editor.scale.max(0.5)),
+                    );
                 }
             }
             self.canvas.clear();
@@ -4715,6 +4789,9 @@ impl Overlay for EditorOverlay {
         )
         .map_err(AppError::at("the editor's panels"))?;
         renderer.set_white(output.white);
+        self.outliner
+            .set_output(setup.device, setup.bindless, output.format, output.white)
+            .map_err(AppError::at("the editor's outlines"))?;
         let mut old = core::mem::replace(&mut self.renderer, renderer);
         // SAFETY: the player calls this with the device idle: nothing uses the old
         // renderer's pipelines and buffers.
@@ -7126,6 +7203,52 @@ mod tests {
         // A plain click selects only what it saw.
         view_click(&mut ed, &mut world, at, false, Some(9), slots);
         assert_eq!(ed.selection, [lamp]);
+    }
+
+    #[test]
+    fn the_selection_its_children_and_the_hovered_entity_are_outlined() {
+        let mut world = World::new();
+        let parent = cube_at(&mut world, Transform::IDENTITY);
+        let child = cube_at(&mut world, Transform::from_xyz(1.0, 0.0, 0.0));
+        world.set_parent(child, Some(parent)).unwrap();
+        let other = cube_at(&mut world, Transform::from_xyz(3.0, 0.0, 0.0));
+        let third = cube_at(&mut world, Transform::from_xyz(6.0, 0.0, 0.0));
+        let slot = move |e: Entity| {
+            [parent, child, other, third]
+                .iter()
+                .position(|&x| x == e)
+                .map(|i| i as u32 + 10)
+        };
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder("outline-items"),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.selection = vec![parent, other];
+        let request = PickRequest {
+            x: 1,
+            y: 1,
+            transparent: true,
+        };
+        ed.hovered = Some((request, Some(third)));
+        ed.outline(&world, slot);
+        let item = |slot, class| OutlineItem { slot, class };
+        assert_eq!(
+            ed.outline_items,
+            [
+                item(10, OutlineClass::Selected),
+                item(11, OutlineClass::Selected),
+                item(12, OutlineClass::Active),
+                item(13, OutlineClass::Hovered),
+            ]
+        );
+        // Hovering a selected entity adds nothing.
+        ed.hovered = Some((request, Some(child)));
+        ed.outline(&world, slot);
+        assert_eq!(ed.outline_items.len(), 3);
     }
 
     #[test]
