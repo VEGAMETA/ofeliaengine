@@ -252,7 +252,8 @@ fn the_editor_draws_its_scene_in_the_viewport() {
 /// outlines it (`ENGINE_EDITOR_PICK_PNG=<file>` writes that frame), and a click on the
 /// empty sky clears the selection. Clicking the cube again cycles to a cube hidden inside
 /// it, then back. A box over the view takes the outer cube, with Alt both
-/// (`ENGINE_EDITOR_BOX_PNG=<file>` writes the frame of the first box being dragged).
+/// (`ENGINE_EDITOR_BOX_PNG=<file>` writes the frame of the first box being dragged); F
+/// then frames them.
 #[test]
 fn a_click_in_the_viewport_selects_what_is_drawn_there() {
     let dir = std::env::temp_dir().join(format!("ofelia-editor-pick-{}", std::process::id()));
@@ -449,6 +450,57 @@ fn a_click_in_the_viewport_selects_what_is_drawn_there() {
     assert_eq!(game.selection(), [cube], "what shows in the box");
     drag_box(&mut player, &mut game, &mut overlay, corners, true);
     assert_eq!(game.selection(), [inner, cube], "hidden ones too");
+    // F frames them: the cube in the view's middle, larger.
+    let red = |rgba: &[u8]| {
+        let (mut sum, mut n) = ((0u64, 0u64), 0u64);
+        for py in (y..y + h).step_by(2) {
+            for px in (x..x + w).step_by(2) {
+                let i = ((py * width + px) * 4) as usize;
+                let [r, g, b] = [rgba[i], rgba[i + 1], rgba[i + 2]].map(f32::from);
+                if r > 1.6 * g && r > 1.6 * b && r > 40.0 {
+                    sum = (sum.0 + u64::from(px), sum.1 + u64::from(py));
+                    n += 1;
+                }
+            }
+        }
+        ((sum.0 / n.max(1)) as i32, (sum.1 / n.max(1)) as i32, n)
+    };
+    let before = red(&player
+        .capture_overlaid(&mut game, Some(&mut overlay))
+        .unwrap()
+        .unwrap());
+    for pressed in [true, false] {
+        send(
+            &mut game,
+            WindowEventKind::Key {
+                virtual_key: 0x46,
+                scancode: 0x21,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        );
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    // Its move takes a fifth of a second.
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(400) {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let after = red(&player
+        .capture_overlaid(&mut game, Some(&mut overlay))
+        .unwrap()
+        .unwrap());
+    let middle = ((x + w / 2) as i32, (y + h / 2) as i32);
+    println!("framed: {before:?} -> {after:?}, the view's middle {middle:?}");
+    assert!(
+        (after.0 - middle.0).abs() <= 12 && (after.1 - middle.1).abs() <= 12,
+        "in the middle: {after:?} {middle:?}"
+    );
+    assert!(
+        after.2 > before.2 * 3 / 2,
+        "larger: {before:?} -> {after:?}"
+    );
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

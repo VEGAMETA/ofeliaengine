@@ -205,6 +205,9 @@ pub(crate) struct View {
     pub(crate) inspector_filter: String,
     /// The tool bar's tool (0: select).
     pub(crate) tool: usize,
+    /// The camera's bookmarks: each one's number (1 to 9), target, yaw, pitch and
+    /// distance.
+    pub(crate) bookmarks: Vec<(u8, [f32; 3], f32, f32, f32)>,
 }
 
 /// A scene the session had open.
@@ -314,6 +317,12 @@ impl SessionFile {
             let v = &d.view;
             if let Some(([x, y, z], yaw, pitch, distance)) = v.camera {
                 let _ = writeln!(out, "camera = ({x}, {y}, {z}, {yaw}, {pitch}, {distance})");
+            }
+            for &(n, [x, y, z], yaw, pitch, distance) in &v.bookmarks {
+                let _ = writeln!(
+                    out,
+                    "bookmark = ({n}, {x}, {y}, {z}, {yaw}, {pitch}, {distance})"
+                );
             }
             write_ids(&mut out, "selection", &v.selection);
             if let Some(anchor) = v.anchor {
@@ -478,6 +487,21 @@ fn read_document_key(doc: &mut Document, key: &str, value: &str) -> Result<(), S
                 return Err(format!("`{value}` is not (x, y, z, yaw, pitch, distance)"));
             };
             view.camera = Some((
+                [parse_number(x)?, parse_number(y)?, parse_number(z)?],
+                parse_number(yaw)?,
+                parse_number(pitch)?,
+                parse_number(distance)?,
+            ));
+        }
+        "bookmark" => {
+            let parts = items(value, '(', ')')?;
+            let [n, x, y, z, yaw, pitch, distance] = parts[..] else {
+                return Err(format!(
+                    "`{value}` is not (n, x, y, z, yaw, pitch, distance)"
+                ));
+            };
+            view.bookmarks.push((
+                parse_number(n)?,
                 [parse_number(x)?, parse_number(y)?, parse_number(z)?],
                 parse_number(yaw)?,
                 parse_number(pitch)?,
@@ -823,6 +847,10 @@ mod tests {
                         tree_filter: String::from("cu\"be"),
                         inspector_filter: String::new(),
                         tool: 2,
+                        bookmarks: vec![
+                            (1, [0.0, 1.0, 2.0], 0.5, 0.25, 6.0),
+                            (9, [-4.5, 0.0, 10.0], -2.0, 0.75, 120.0),
+                        ],
                     },
                 },
                 Document {
