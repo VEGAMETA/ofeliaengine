@@ -821,6 +821,7 @@ impl Sound {
         camera: Option<&ViewCamera>,
         physics: Option<&dyn PhysicsBackend>,
         dt: f64,
+        simulating: bool,
     ) {
         if self.audio.is_none() {
             return;
@@ -833,6 +834,15 @@ impl Sound {
         self.receive();
         self.watch_folder();
         self.apply_mixer(world);
+        // The world kept still (the editor while editing, a pause): its sources are silent,
+        // and where each one is stays as it was.
+        if !simulating {
+            if let Some(audio) = self.audio.as_mut() {
+                self.plain.clear(audio);
+                self.placed.clear(audio);
+            }
+            return;
+        }
         if self.queries.is_none() {
             self.queries = Some(Queries {
                 plain: QueryState::new(world),

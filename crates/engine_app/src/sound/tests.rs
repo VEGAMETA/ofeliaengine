@@ -56,6 +56,8 @@ struct Bed {
     camera: ViewCamera,
     folder: PathBuf,
     physics: Option<JoltBackend>,
+    /// The world's time runs (`Player::set_simulating`).
+    simulating: bool,
 }
 
 impl Bed {
@@ -82,6 +84,7 @@ impl Bed {
             camera: ViewCamera::from_rigid(Quat::IDENTITY, Vec3::ZERO, 1.0, 0.1, 100.0),
             folder,
             physics: None,
+            simulating: true,
         }
     }
 
@@ -93,6 +96,7 @@ impl Bed {
             Some(&self.camera),
             physics,
             f64::from(ms) / 1e3,
+            self.simulating,
         );
         let mut out = vec![0.0; (RATE * ms / 1000) as usize * 2];
         self.renderer.render(&mut out, 2);
@@ -104,8 +108,13 @@ impl Bed {
     fn until(&mut self, mut done: impl FnMut(&mut Self) -> bool) {
         for _ in 0..600 {
             let physics = self.physics.as_ref().map(|p| p as &dyn PhysicsBackend);
-            self.sound
-                .update(&mut self.world, Some(&self.camera), physics, 0.005);
+            self.sound.update(
+                &mut self.world,
+                Some(&self.camera),
+                physics,
+                0.005,
+                self.simulating,
+            );
             if done(self) {
                 return;
             }
@@ -179,6 +188,39 @@ fn a_source_plays_its_sound_and_writes_back_where_it_is() {
     );
     bed.frame(10);
     assert!((bed.source(e).position - 0.02).abs() < 1e-9);
+}
+
+#[test]
+fn a_still_world_keeps_its_sources_silent_where_they_are() {
+    let mut bed = Bed::new("still", AudioSettings::default());
+    write_wav(&bed.folder.join("tone.wav"), RATE as u64);
+    write_wav(&bed.folder.join("blip.wav"), 960);
+    let e = bed.world.spawn((AudioSource::new("tone.wav"),));
+    let gone = bed
+        .world
+        .spawn((AudioSource::new("blip.wav").despawned_at_end(),));
+    bed.until(|b| b.voice(e).is_some() && b.voice(gone).is_some());
+    bed.frame(10);
+    bed.frame(10);
+    let at = bed.source(e).position;
+    assert!(at > 0.0);
+    // The editor while editing, a pause: silent after the voices' fade (`FADE`, 20 ms),
+    // nothing moves on or despawns.
+    bed.simulating = false;
+    bed.frame(30);
+    for _ in 0..5 {
+        let out = bed.frame(10);
+        assert_eq!(energy(out.into_iter()), 0.0);
+    }
+    assert!(bed.voice(e).is_none());
+    assert_eq!(bed.source(e).position, at);
+    assert!(bed.source(e).playing && bed.world.contains(gone));
+    // Running again: on from where it was.
+    bed.simulating = true;
+    bed.until(|b| b.voice(e).is_some());
+    bed.frame(10);
+    bed.frame(10);
+    assert!(bed.source(e).position > at, "{}", bed.source(e).position);
 }
 
 #[test]
@@ -395,7 +437,7 @@ fn sound_off_opens_nothing() {
     assert!(sound.error().is_some());
     let mut world = World::new();
     world.spawn((AudioSource::new("tone.wav"),));
-    sound.update(&mut world, None, None, 0.016);
+    sound.update(&mut world, None, None, 0.016, true);
     assert!(sound.plain.list.is_empty());
 }
 
@@ -570,7 +612,7 @@ fn measure_sound() {
             let physics = bed.physics.as_ref().map(|p| p as &dyn PhysicsBackend);
             let start = std::time::Instant::now();
             bed.sound
-                .update(&mut bed.world, Some(&bed.camera), physics, 1.0 / 60.0);
+                .update(&mut bed.world, Some(&bed.camera), physics, 1.0 / 60.0, true);
             let updated = start.elapsed();
             let mut out = vec![0.0; 800 * 2];
             let start = std::time::Instant::now();

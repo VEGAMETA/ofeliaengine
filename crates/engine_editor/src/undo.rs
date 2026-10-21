@@ -235,6 +235,35 @@ pub struct History {
     codecs: Codecs,
     /// Components skipped because they are neither plain data nor saved by scenes.
     skipped_non_pod: usize,
+    /// While playing: the last step made before Play, below which undo does not go.
+    floor: Option<u64>,
+}
+
+/// The world as it was, kept to put it back (ADR 0107 E3: Play runs on the scene's world,
+/// and Stop puts it back): the scene's entities' recorded states, as an undo step keeps
+/// them, and every entity alive with the types of its components.
+pub struct WorldSnapshot {
+    states: Vec<Change>,
+    alive: HashMap<Entity, Box<[ComponentId]>>,
+}
+
+impl WorldSnapshot {
+    /// The scene's entities it holds (those with a scene id).
+    pub fn scene_entities(&self) -> usize {
+        self.states.len()
+    }
+
+    /// Bytes of recorded state.
+    pub fn bytes(&self) -> usize {
+        transaction_bytes(&self.states)
+    }
+}
+
+/// The history as Play found it ([`History::begin_play`]): its last step and the steps to
+/// redo, given back at Stop.
+pub struct PlayMark {
+    head: u64,
+    redo: Vec<Transaction>,
 }
 
 impl Default for History {
@@ -260,6 +289,7 @@ impl History {
             last_id: 0,
             codecs: Codecs::default(),
             skipped_non_pod: 0,
+            floor: None,
         }
     }
 
@@ -584,10 +614,16 @@ impl History {
         true
     }
 
-    /// Undoes the last step; returns its name.
+    /// Undoes the last step; returns its name. While playing, not the steps made before
+    /// Play ([`Self::begin_play`]).
     pub fn undo(&mut self, world: &mut World) -> Option<String> {
         engine_profiler::zone!("editor::undo");
         self.open = None;
+        if let Some(floor) = self.floor
+            && self.undo.back().is_some_and(|t| t.id <= floor)
+        {
+            return None;
+        }
         let t = self.undo.pop_back()?;
         self.bytes -= t.bytes;
         apply(world, &mut self.codecs, &t.changes, true);
@@ -610,7 +646,97 @@ impl History {
 
     /// Whether there is a step to undo.
     pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty()
+        self.undo
+            .back()
+            .is_some_and(|t| self.floor.is_none_or(|floor| t.id > floor))
+    }
+
+    /// Play begins (ADR 0107 E3): the steps made while playing are the play world's, so
+    /// undo stops at the last step before it and the steps to redo wait for Stop.
+    pub fn begin_play(&mut self) -> PlayMark {
+        self.open = None;
+        let head = self.head();
+        self.floor = Some(head);
+        PlayMark {
+            head,
+            redo: core::mem::take(&mut self.redo),
+        }
+    }
+
+    /// Play ends: the steps made while playing go (the world they were made in is gone),
+    /// and the history is as Play found it.
+    pub fn end_play(&mut self, mark: PlayMark) {
+        self.open = None;
+        self.floor = None;
+        while self.undo.back().is_some_and(|t| t.id > mark.head) {
+            if let Some(t) = self.undo.pop_back() {
+                self.bytes -= t.bytes;
+            }
+        }
+        self.redo = mark.redo;
+    }
+
+    /// The world as it is now, to put back with [`Self::restore_world`]: every scene
+    /// entity's state as undo records it, and every entity alive with its components'
+    /// types (entities without a scene id, the editor's own, are kept by handle).
+    pub fn snapshot_world(&mut self, world: &mut World) -> WorldSnapshot {
+        engine_profiler::zone!("editor::snapshot_world");
+        let mut q = QueryState::<Entity>::new(world);
+        let all: Vec<Entity> = q.iter_readonly(world).collect();
+        let mut states = Vec::new();
+        let mut alive = HashMap::with_capacity(all.len());
+        for e in all {
+            let types: Box<[ComponentId]> = world
+                .component_ids_of(e)
+                .map_or_else(Box::default, Box::from);
+            alive.insert(e, types);
+            if let Some(&id) = world.get::<SceneId>(e) {
+                let before = Some(self.snapshot(world, e));
+                states.push(Change {
+                    id,
+                    before,
+                    after: None,
+                });
+            }
+        }
+        WorldSnapshot { states, alive }
+    }
+
+    /// Puts the world back as `snapshot` found it: entities made since go; components
+    /// of types an entity did not have are taken off; the scene's entities get their
+    /// recorded state and place again, those despawned since coming back as new entities
+    /// with their scene ids. The open action, if any, is dropped.
+    pub fn restore_world(&mut self, world: &mut World, snapshot: &WorldSnapshot) {
+        engine_profiler::zone!("editor::restore_world");
+        self.open = None;
+        let mut q = QueryState::<Entity>::new(world);
+        let now: Vec<Entity> = q.iter_readonly(world).collect();
+        // Entities made since: gone, detached first so the hierarchy's lists stay right.
+        for &e in &now {
+            if snapshot.alive.contains_key(&e) {
+                continue;
+            }
+            let kids: Vec<Entity> = world.children(e).collect();
+            for k in kids {
+                let _ = world.set_parent(k, None);
+            }
+            let _ = world.set_parent(e, None);
+            world.despawn(e);
+        }
+        // Components of types added since (the game's own, runtime state) go; the links
+        // of the hierarchy are put back below.
+        let skip = Skip::of(world);
+        for (&e, types) in &snapshot.alive {
+            let Some(current) = world.component_ids_of(e).map(<[ComponentId]>::to_vec) else {
+                continue;
+            };
+            for cid in current {
+                if !types.contains(&cid) && Some(cid) != skip.parent && Some(cid) != skip.children {
+                    world.remove_raw(e, cid);
+                }
+            }
+        }
+        apply(world, &mut self.codecs, &snapshot.states, true);
     }
 
     /// Whether there is a step to redo.

@@ -73,7 +73,9 @@ use crate::shell::{
 };
 use crate::snap::{Quantity, Snapping};
 use crate::transform::{self, KeyTransform};
+use crate::undo::{PlayMark, WorldSnapshot};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
+use core::any::TypeId;
 use engine_app::{
     AppError, AssetMeta, Brush, BrushGroup, BrushOp, BrushShape, Game, Model, Overlay,
     OverlayOutput, OverlayPass, Player, PlayerSettings, Setup, Window, builtin,
@@ -294,7 +296,9 @@ fn run_inner<G: Game>(
                 }
             }
         }
-        // Nothing is asked at the exit: unsaved changes stay in the session.
+        // Nothing is asked at the exit: unsaved changes stay in the session (the scene's:
+        // Play stops first).
+        game.stop_playing(&mut player);
         game.note_window(player.window_placement());
         game.end_session(player.world_mut());
         let (Some((exe, artifact)), Some(run_dir)) = (game.restart_with(), &run_dir) else {
@@ -483,11 +487,16 @@ pub fn editor<G: Game>(
     )?;
     let outliner = Outliner::new(setup.device, setup.bindless, output.format, output.white)?;
     let shared = Rc::new(RefCell::new(editor));
+    // Editing: the world's time stands until Play (ADR 0107 E3), so a scene's tweens,
+    // timers and sounds do not change it.
+    player.set_simulating(false);
+    note_panics();
     Ok((
         EditorGame {
             shared: Rc::clone(&shared),
             game: None,
             start,
+            failed: None,
         },
         EditorOverlay {
             shared,
@@ -561,6 +570,9 @@ struct CommandIds {
     /// Blockout groups baked into glTF files drawn in their place, and back (E2b-6).
     bake: CommandId,
     unbake: CommandId,
+    /// Play and Stop (ADR 0107 E3).
+    play: CommandId,
+    stop: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
     /// the next pivot.
     steps: [CommandId; 3],
@@ -642,6 +654,8 @@ fn commands() -> (Commands, CommandIds) {
         export: c.register("blockout.export", "Blockout", "Export to glTF"),
         bake: c.register("blockout.bake", "Blockout", "Bake to Mesh"),
         unbake: c.register("blockout.unbake", "Blockout", "Unbake"),
+        play: c.register("play.play", "Play", "Play Scene"),
+        stop: c.register("play.stop", "Play", "Stop"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
             c.register("snap.angle_step", "Snapping", "Angle Step…"),
@@ -720,6 +734,9 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Shift+B", ids.draw_cut),
         ("Ctrl+H", ids.hollow),
         ("Tab", ids.edit_faces),
+        // Godot's keys (`docs/research/ux/play-mode.md` §5).
+        ("F5", ids.play),
+        ("F8", ids.stop),
     ];
     // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
     // - ours: Q, E, R at once and with Shift the gizmo's handles, the left hand beside
@@ -1349,6 +1366,10 @@ struct Editor {
     export_group: Option<Entity>,
     /// Blockout groups to bake once the player's frame is at hand (E2b-6).
     bake_groups: Vec<Entity>,
+    /// Playing (ADR 0107 E3): the scene's world as Play found it, put back at Stop.
+    play: Option<Playing>,
+    /// Play or Stop asked for, done once the player's frame is at hand.
+    play_request: Option<PlayRequest>,
     /// The active brush's side handles (ADR 0110 E2b-3c), the one under the pointer, and
     /// a side being dragged.
     handles: Handles,
@@ -1774,6 +1795,8 @@ impl Editor {
             face_edit: None,
             export_group: None,
             bake_groups: Vec::new(),
+            play: None,
+            play_request: None,
             handles: Handles::default(),
             hovered_side: None,
             side_drag: None,
@@ -2028,12 +2051,17 @@ impl Editor {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
-        self.tick_session(world);
+        let playing = self.play.is_some();
+        // The session keeps the scene, not the play world: no autosave while playing.
+        if !playing {
+            self.tick_session(world);
+        }
         self.tick_builds(world);
         if let Some(under) = self.under_pointer.take() {
             self.offer_under_pointer(world, under);
         }
-        let camera = self.camera(world);
+        // The editor's camera while editing; the game's cameras while playing.
+        let camera = (!playing).then(|| self.camera(world));
         self.collect_rows(world);
         self.frames += 1;
         let elapsed = self.since.elapsed().as_secs_f64();
@@ -2058,6 +2086,7 @@ impl Editor {
             })
         });
         if over_view
+            && !playing
             && self.ui.editing().is_none()
             && self.key_transform.is_none()
             && self
@@ -2283,6 +2312,10 @@ impl Editor {
         let step_items: [&[MenuItem<'_>]; 3] =
             core::array::from_fn(|k| &step_items[k][..STEP_VALUES[k].len()]);
         self.status.clear();
+        if playing {
+            self.status
+                .push_str("Playing: keys without Ctrl go to the game; F8 stops  ·  ");
+        }
         if self.key_transform.is_some() {
             let _ = write!(self.status, "{}  ·  ", transform::HELP);
         }
@@ -2459,7 +2492,7 @@ impl Editor {
                 "Profiler",
             ],
             active_bottom: None,
-            playing: false,
+            playing,
             status: &self.status,
             snap: self.snapping.on,
             steps: self.step_labels.each_ref().map(String::as_str),
@@ -2481,6 +2514,12 @@ impl Editor {
 
         if let Some(i) = response.tool {
             self.active_tool = i;
+        }
+        if response.play {
+            self.run(world, self.ids.play);
+        }
+        if response.stop {
+            self.run(world, self.ids.stop);
         }
         if response.snap {
             self.run(world, self.ids.snap);
@@ -2632,6 +2671,10 @@ impl Editor {
         };
         for i in 0..chords {
             let chord = self.input.chords()[i];
+            // While playing, the keys without Ctrl or Alt are the game's, but F1 to F12.
+            if playing && !chord.ctrl && !chord.alt && !is_function_key(chord.key) {
+                continue;
+            }
             if let Some(id) = self.keymap.lookup(chord, contexts)
                 && (!typing_text || id == self.ids.save)
             {
@@ -2644,6 +2687,19 @@ impl Editor {
             .ui
             .rect_of(response.viewport)
             .map(|r| [r.pos[0], r.pos[1], r.size[0], r.size[1]]);
+        // Playing: the viewport is the game's view, without the editor's tools.
+        if playing {
+            if let Some([x, y, w, h]) = rect {
+                self.view_rect = Some([
+                    (x * scale).round() as u32,
+                    (y * scale).round() as u32,
+                    ((w * scale).round() as u32).max(1),
+                    ((h * scale).round() as u32).max(1),
+                ]);
+            }
+            self.input.next_frame();
+            return;
+        }
         if let Some([x, y, w, h]) = rect {
             let over = self.input.cursor().is_some_and(|[cx, cy]| {
                 let (cx, cy) = (cx / scale, cy / scale);
@@ -2701,7 +2757,9 @@ impl Editor {
         self.drop_frame(world);
         self.input.next_frame();
         let eye = self.orbit.eye();
-        if let Some(t) = world.get_mut::<Transform>(camera) {
+        if let Some(camera) = camera
+            && let Some(t) = world.get_mut::<Transform>(camera)
+        {
             *t = Transform::from_translation(eye).with_rotation(look_rotation(
                 eye,
                 self.orbit.target,
@@ -5087,6 +5145,78 @@ impl Editor {
         }
     }
 
+    /// Play begins (ADR 0107 E3): the tools and gestures end, the editor's camera goes
+    /// (the game's cameras show the world), and the world is kept as it is: its scene
+    /// entities, its resources, the history's place and the selection.
+    fn prepare_play(&mut self, world: &mut World) -> Playing {
+        let started = Instant::now();
+        self.key_transform = None;
+        self.draw = None;
+        self.face_edit = None;
+        self.drag = None;
+        self.gizmo_drag = None;
+        self.side_drag = None;
+        self.box_drag = None;
+        self.camera_drag = false;
+        self.gizmo_shown = false;
+        self.outline_items.clear();
+        self.handles.clear();
+        if let Some(camera) = self.camera.take() {
+            world.despawn(camera);
+        }
+        let selection = self
+            .selection
+            .iter()
+            .filter_map(|&e| world.get::<SceneId>(e).copied())
+            .collect();
+        let resources = world.resource_types().collect();
+        let mark = self.history.begin_play();
+        let snapshot = self.history.snapshot_world(world);
+        Playing {
+            snapshot,
+            resources,
+            mark,
+            selection,
+            started,
+            entered: Duration::ZERO,
+        }
+    }
+
+    /// Play ends: the resources the game added go, the world is put back as Play found
+    /// it, the steps made while playing are forgotten and the selection comes back. What
+    /// to say.
+    fn finish_play(&mut self, world: &mut World, playing: Playing, why: Option<String>) -> String {
+        let t = Instant::now();
+        let now: Vec<TypeId> = world.resource_types().collect();
+        for kind in now {
+            if !playing.resources.contains(&kind) {
+                world.remove_resource_of(kind);
+            }
+        }
+        self.history.restore_world(world, &playing.snapshot);
+        self.history.end_play(playing.mark);
+        let ids = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
+        let index: HashMap<SceneId, Entity> =
+            ids.iter_readonly(world).map(|(e, id)| (*id, e)).collect();
+        self.selection = playing
+            .selection
+            .iter()
+            .filter_map(|id| index.get(id).copied())
+            .collect();
+        self.anchor = None;
+        let stopped = t.elapsed().as_secs_f64() * 1e3;
+        let played = playing.started.elapsed().as_secs_f64();
+        log::info!(
+            target: "engine_editor",
+            "play: entered in {:.1} ms, played {played:.1} s, the scene put back in {stopped:.1} ms",
+            playing.entered.as_secs_f64() * 1e3
+        );
+        match why {
+            Some(why) => format!("Play stopped: {why}"),
+            None => format!("Stopped after {played:.0} s: the scene is as it was"),
+        }
+    }
+
     /// The blockout groups the selection is in or, when it is in none, every group of the
     /// scene: what Bake to Mesh and Unbake act on.
     fn command_groups(&mut self, world: &mut World) -> Vec<Entity> {
@@ -5586,6 +5716,11 @@ impl Editor {
     fn run(&mut self, world: &mut World, id: CommandId) {
         self.commands.ran(id);
         let ids = self.ids;
+        // What writes the scene's files works on the scene, not on the play world.
+        if self.play.is_some() && [ids.save, ids.restart, ids.bake].contains(&id) {
+            self.say(String::from("The scene is playing: F8 stops it first"));
+            return;
+        }
         if id == ids.undo || id == ids.redo {
             self.drag = None;
             self.side_drag = None;
@@ -5685,6 +5820,16 @@ impl Editor {
             }
         } else if id == ids.unbake {
             self.unbake(world);
+        } else if id == ids.play {
+            if self.play.is_none() {
+                self.play_request = Some(PlayRequest::Play);
+            }
+        } else if id == ids.stop {
+            if self.play.is_some() {
+                self.play_request = Some(PlayRequest::Stop);
+            } else {
+                self.say(String::from("Nothing is playing (F5 plays the scene)"));
+            }
         } else if let Some(k) = ids.steps.iter().position(|&c| c == id) {
             self.pick_step(world, k);
         } else if id == ids.navigation {
@@ -6624,6 +6769,7 @@ impl Editor {
             && self.restart_with.is_none()
             && self.restarts_by_itself()
             && !self.gesture()
+            && self.play.is_none()
         {
             self.restart(world);
         }
@@ -6855,8 +7001,9 @@ pub struct EditorGame<G> {
     /// The game while playing.
     game: Option<G>,
     /// How the game is made when Play starts.
-    #[allow(dead_code)]
     start: Start<G>,
+    /// Why the game stopped by itself (a hook panicked): Play ends at the next frame.
+    failed: Option<String>,
 }
 
 impl<G> EditorGame<G> {
@@ -6864,6 +7011,117 @@ impl<G> EditorGame<G> {
     /// (`Player::set_view_rect`).
     pub fn view_rect(&self) -> Option<[u32; 4]> {
         self.shared.borrow().view_rect
+    }
+
+    /// Play's transitions once the frame is drawn (ADR 0107 E3): Play (the world kept,
+    /// the game made by its `start` on it, the world's time running) or Stop (the game
+    /// dropped, what it left in the player ended, the world put back).
+    fn play_frame(&mut self, player: &mut Player) {
+        let request = match self.failed.take() {
+            Some(why) => Some((PlayRequest::Stop, Some(why))),
+            None => self
+                .shared
+                .borrow_mut()
+                .play_request
+                .take()
+                .map(|r| (r, None)),
+        };
+        match request {
+            Some((PlayRequest::Play, _)) => self.begin_play(player),
+            Some((PlayRequest::Stop, why)) => self.end_play(player, why),
+            None => {}
+        }
+    }
+
+    fn begin_play(&mut self, player: &mut Player) {
+        if self.game.is_some() || self.shared.borrow().play.is_some() {
+            return;
+        }
+        let asked = Instant::now();
+        {
+            let mut shared = self.shared.borrow_mut();
+            // The scene as it is goes to the session first, as before a restart.
+            shared.save_session(player.world_mut());
+            let playing = shared.prepare_play(player.world_mut());
+            shared.play = Some(playing);
+        }
+        player.set_simulating(true);
+        let start = self.start;
+        let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start(player)));
+        let failed = match made {
+            Ok(Ok(game)) => {
+                self.game = Some(game);
+                None
+            }
+            Ok(Err(e)) => Some(format!("the game's start failed: {e}")),
+            Err(payload) => Some(format!(
+                "the game's start panicked: {}",
+                panic_note(&*payload)
+            )),
+        };
+        if let Some(why) = failed {
+            self.end_play(player, Some(why));
+            return;
+        }
+        let mut shared = self.shared.borrow_mut();
+        if let Some(p) = shared.play.as_mut() {
+            p.entered = asked.elapsed();
+            let ms = p.entered.as_secs_f64() * 1e3;
+            shared.say(format!("Play started in {ms:.1} ms"));
+        }
+    }
+
+    fn end_play(&mut self, player: &mut Player, why: Option<String>) {
+        self.game = None;
+        self.failed = None;
+        player.end_run();
+        player.set_simulating(false);
+        let mut shared = self.shared.borrow_mut();
+        if let Some(playing) = shared.play.take() {
+            let message = shared.finish_play(player.world_mut(), playing, why);
+            shared.say(message);
+        }
+    }
+
+    /// Ends Play, if the scene is playing: before the editor exits or restarts, so the
+    /// session keeps the scene, not the play world.
+    pub fn stop_playing(&mut self, player: &mut Player) {
+        if self.shared.borrow().play.is_some() {
+            self.end_play(player, None);
+        }
+    }
+
+    /// Whether the scene is playing (ADR 0107 E3).
+    pub fn playing(&self) -> bool {
+        self.shared.borrow().play.is_some()
+    }
+
+    /// What the status bar last said (a command's answer), for tests and tools.
+    pub fn message(&self) -> Option<String> {
+        self.shared
+            .borrow()
+            .message
+            .as_ref()
+            .map(|(m, _)| m.clone())
+    }
+
+    /// The game's hook `hook`, run on the game while playing, a panic in it caught: Play
+    /// then ends at the next frame and says where it happened.
+    fn guarded<R>(&mut self, hook: &str, f: impl FnOnce(&mut G) -> R) -> Option<R> {
+        if self.failed.is_some() {
+            return None;
+        }
+        let game = self.game.as_mut()?;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(game))) {
+            Ok(r) => Some(r),
+            Err(payload) => {
+                self.failed = Some(format!(
+                    "the game panicked in `{hook}`: {}",
+                    panic_note(&*payload)
+                ));
+                None
+            }
+        }
     }
 
     /// Whether the cursor is locked for the player's next frame (`Player::lock_cursor`):
@@ -6877,6 +7135,7 @@ impl<G> EditorGame<G> {
     /// player's again when they changed (a scene loaded since): the inspector shows
     /// references by path.
     pub fn sync_assets(&mut self, player: &mut Player) {
+        self.play_frame(player);
         let mut shared = self.shared.borrow_mut();
         if !shared.pending_assets.is_empty() {
             player.assets_mut().add_paths(&shared.pending_assets);
@@ -7124,22 +7383,59 @@ impl<G> EditorGame<G> {
 impl<G: Game> Game for EditorGame<G> {
     fn event(&mut self, event: &WindowEvent) {
         self.shared.borrow_mut().event(event);
-        if let Some(game) = &mut self.game {
-            game.event(event);
-        }
+        self.guarded("event", |game| game.event(event));
     }
 
     fn tick(&mut self, world: &mut World, dt: f32) {
-        if let Some(game) = &mut self.game {
-            game.tick(world, dt);
-        }
+        self.guarded("tick", |game| game.tick(world, dt));
+    }
+
+    fn before_save(&mut self, world: &World, image: &mut engine_save::SaveImage) {
+        self.guarded("before_save", |game| game.before_save(world, image));
+    }
+
+    fn before_load(&mut self, world: &mut World, save: &engine_save::LoadedSave) {
+        self.guarded("before_load", |game| game.before_load(world, save));
+    }
+
+    fn after_load(
+        &mut self,
+        world: &mut World,
+        save: &engine_save::LoadedSave,
+        report: &engine_save::LoadReport,
+    ) {
+        self.guarded("after_load", |game| game.after_load(world, save, report));
+    }
+
+    fn can_autosave(&self, world: &World) -> bool {
+        // Only while playing: a game's autosave is its own (never the scene's).
+        self.game.as_ref().is_some_and(|game| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| game.can_autosave(world)))
+                .unwrap_or(false)
+        })
+    }
+
+    fn net_input(&mut self, world: &mut World) {
+        self.guarded("net_input", |game| game.net_input(world));
+    }
+
+    fn acoustics(&self) -> Option<&dyn engine_physics::PhysicsBackend> {
+        self.game.as_ref().and_then(Game::acoustics)
     }
 
     fn present(&mut self, world: &mut World, alpha: f32) {
-        if let Some(game) = &mut self.game {
-            game.present(world, alpha);
-        }
+        self.guarded("present", |game| game.present(world, alpha));
         self.shared.borrow_mut().update(world);
+    }
+
+    fn animate(&mut self, parts: &mut engine_app::FrameParts<'_>, dt: f32) {
+        self.guarded("animate", |game| game.animate(parts, dt));
+    }
+
+    fn ui(&self, draw: &mut dyn FnMut(&[engine_frame::UiCanvas<'_>])) {
+        if let Some(game) = &self.game {
+            game.ui(draw);
+        }
     }
 }
 
@@ -7579,6 +7875,86 @@ fn blockout_key(blockout: &engine_app::Blockout, world: &World) -> BlockoutKey {
     key
 }
 
+/// What the Play controls asked for (ADR 0107 E3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayRequest {
+    Play,
+    Stop,
+}
+
+/// Playing (ADR 0107 E3): the scene's world as Play found it, to put back at Stop.
+struct Playing {
+    snapshot: WorldSnapshot,
+    /// The world's resources then: those the game adds go at Stop.
+    resources: Vec<TypeId>,
+    /// The history then.
+    mark: PlayMark,
+    /// The selection then, by scene id.
+    selection: Vec<SceneId>,
+    started: Instant,
+    /// How long entering took (the session saved, the world kept, the game made).
+    entered: Duration,
+}
+
+/// Whether `key` is one of F1 to F12 (the editor's keys while playing).
+fn is_function_key(key: Key) -> bool {
+    matches!(
+        key,
+        Key::F1
+            | Key::F2
+            | Key::F3
+            | Key::F4
+            | Key::F5
+            | Key::F6
+            | Key::F7
+            | Key::F8
+            | Key::F9
+            | Key::F10
+            | Key::F11
+            | Key::F12
+    )
+}
+
+thread_local! {
+    /// The last panic on this thread, with where it happened (`file:line`).
+    static LAST_PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Keeps every panic's place for [`panic_note`], before the panic hook in place (the
+/// crash reporter's, or the default) runs: a panic in the game's hooks during Play is
+/// said at its line.
+fn note_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let message = panic_text(info.payload());
+            let note = match info.location() {
+                Some(at) => format!("{message} ({}:{})", at.file(), at.line()),
+                None => message,
+            };
+            LAST_PANIC.with(|p| *p.borrow_mut() = Some(note));
+            previous(info);
+        }));
+    });
+}
+
+/// A panic's message.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| String::from("a panic"))
+}
+
+/// What to say about the panic just caught: its message with its place.
+fn panic_note(payload: &(dyn std::any::Any + Send)) -> String {
+    LAST_PANIC
+        .with(|p| p.borrow_mut().take())
+        .unwrap_or_else(|| panic_text(payload))
+}
+
 /// A group baked into a file (Blockout: Bake to Mesh): its name, the file it was baked
 /// into before (or none), the file's id and path, its meshes with their materials, and
 /// how many triangles they hold.
@@ -7990,9 +8366,10 @@ impl Overlay for EditorOverlay {
                         editor.picked = Some((request, view.frame_number, None));
                     }
                 }
-                // The outlines, below the panels.
+                // The outlines, below the panels (none while playing).
                 if let Some(scene) = view.scene
                     && !editor.outline_items.is_empty()
+                    && editor.play.is_none()
                 {
                     self.outliner.add_passes(
                         pass.fg,
@@ -8051,7 +8428,7 @@ impl Overlay for EditorOverlay {
                     &mut self.canvas,
                 );
             }
-            if let Some(rect) = editor.view_rect {
+            if let Some(rect) = editor.view_rect.filter(|_| editor.play.is_none()) {
                 draw_overlays(editor, rect, &self.glyphs, &mut self.canvas);
                 draw_navigation(editor, rect, &mut self.canvas);
                 draw_colliders(editor, rect, &mut self.canvas);

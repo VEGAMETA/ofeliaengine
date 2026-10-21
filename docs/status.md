@@ -224,7 +224,15 @@ Last updated: 2026-10-20.
     drawn from it by a model per tint under the group, as one undo step; its brushes, not
     drawn, keep colliding and making the navigation; Blockout: Unbake brings them back.
     E2b is done but for the cook's path, which waits for the one-button build (E14).
-  - **Next:** E3, Play on a copy of the world (ADR 0107).
+  - **E3-1, Play and Stop** (#PR, ADR 0107's addendum: Play runs on the scene's world and
+    Stop puts it back, measured 7.3 and 8.4 ms for 10,000 entities): F5 makes the game
+    with its `start` on the scene, F8 puts everything back (spawned entities, added
+    components and resources gone, changes and despawns undone, the play's undo steps
+    forgotten). While editing the world stands (`Player::set_simulating`): a scene's
+    tweens, timers and sounds no longer change it. A panic in the game's hooks stops Play
+    and says its line.
+  - **Next:** E3-2, pause and step, play from the editor's camera, restart; then keeping
+    changes, the game's own window.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

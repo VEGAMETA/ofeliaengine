@@ -1035,3 +1035,80 @@ W, A, S, D fly the camera as in Godot, the wheel sets the speed).
   - the game window's pacing beside the editor's;
   - the analysis library's build time;
   - the read-only world under a breakpoint that cannot suspend.
+
+## Addendum (E3-1, 2026-10-22): Play runs on the scene's world, put back at Stop
+
+§2 had the play world as a copy of the edit world, with a runtime of its own on the GPU.
+Building it showed what that copy costs.
+
+**What is bound to one world.** The player keeps its state per world, beside the world
+and keyed by its entities:
+- the runtime's extraction and the GPU scene;
+- `Assets`' and the blockout's queries and maps (groups and meshes by entity);
+- the probes' and the GI volume's queries;
+- the sound's sources (tracks by entity);
+- the frame's camera lookups.
+
+`engine_ecs` refuses a query on another world than its own (`world_id`), so a second world
+would double each of these or rebuild them at every Play and Stop.
+
+**The options:**
+
+1. **A copy** (§2): the saves' capture into a second world, and a second set of everything
+   above.
+   - Two worlds can be on screen at once.
+   - Every per-world piece of the player is doubled; the GPU scene and the models are made
+     again at each Play.
+2. **The scene's own world, kept and put back:**
+   - Play records every scene entity's state as an undo step records it (components,
+     with entity references by scene id, and the place in the tree).
+   - It also keeps every entity alive with its components' types, the world's resources,
+     the history's place and the selection.
+   - Stop drops the game and ends what it left in the player (videos, voices, the network
+     session: `Player::end_run`). Then:
+     - entities made since go, and components of types an entity did not have are taken
+       off (the game's own, runtime state);
+     - the resources the game added go;
+     - the scene's entities get their recorded state again, the despawned ones coming back;
+     - the steps made while playing are forgotten (undo stops at the last step before Play
+       while playing), and the selection comes back by scene id.
+
+**Measured** (ref-1, release, `measure_play_snapshot_and_restore`):
+
+| Phase | Time |
+|---|---|
+| Play: 10,000 scene entities recorded (a transform, a name, a tag with a string), 1.7 MB | 7.3 ms |
+| Stop: put back, half of them moved and 1,000 spawned | 8.4 ms |
+
+The budget is ≤ 1 s. The editor's test scene (five entities, no session to save) enters in
+0.1 ms, its game made.
+
+**Decision: 2.** What the developer sees is the UX note's (`play-mode.md`):
+- one tree and one inspector on the running world, edits applying at once;
+- the scene back at Stop.
+
+Two worlds on screen (co-op in one process) will need worlds of their own and come with it.
+
+**As built:**
+- **Play and Stop:** F5 and F8 (Godot's keys; "Play: Play Scene", "Play: Stop") and the
+  tab row's ▶ and ■.
+- **Entering:** Play saves the session first, ends the tools and gestures, takes the
+  editor's camera away (the scene's cameras show the game), keeps the world, and makes the
+  game with its `start` on it.
+- **While playing:**
+  - The viewport shows the game without the editor's tools, outlines or icons, inside the
+    `playing` edge.
+  - Keys without Ctrl or Alt are the game's, but F1 to F12.
+  - Saving, restarting and baking wait for Stop. So do the autosave and a build's restart.
+- **A panic in a game's hook** is caught (`catch_unwind`, the hooks forwarded through
+  `EditorGame`). Play stops, and the status bar says the message and the line (a panic
+  hook of the editor's notes the place before the crash reporter's runs; that one still
+  writes its report).
+- **The world stands while editing:** `Player::set_simulating(false)`.
+  - The ticks only place and extract; timers, tweens, the game's ticks and the sources'
+    sound wait.
+  - Before this, a scene's tween or sound changed the edit world without an undo step,
+    and a one-shot sound could despawn its entity.
+  - The same switch will be the pause.
+- **Left for E3's next steps:** pause and step, play from the editor's camera, restart,
+  keeping changes, the game's own window.

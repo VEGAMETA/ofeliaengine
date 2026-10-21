@@ -69,6 +69,10 @@ let mut player = Player::new(&PlayerSettings {
 - **`player.load_scene(path)`** adds another scene to the world (a level, a room).
 - **`player.reload_asset(id)`** reads a file again after you wrote it anew: the models
   that use it are made again in the next frame.
+- **`player.set_simulating(false)`** keeps the world still: it is drawn as it is, but the
+  timers, tweens, your game's ticks and the sources' sound wait (the editor while
+  editing; a pause). `player.end_run()` closes every video, stops every voice and ends the
+  network session (the editor's Stop).
 - **An asset the player cannot find** leaves its entity undrawn and says why once in the
   log; `player.assets().problem(asset)` tells you too.
 

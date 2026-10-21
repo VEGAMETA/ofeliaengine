@@ -392,6 +392,24 @@ impl World {
         value.downcast::<T>().ok().map(|b| *b)
     }
 
+    /// The types of the resources the world holds now: what an editor's Play compares
+    /// at its end to take away those the game added.
+    pub fn resource_types(&mut self) -> impl Iterator<Item = TypeId> + '_ {
+        self.resources
+            .slots
+            .iter_mut()
+            .filter_map(|s| s.value.get_mut().is_some().then_some(s.type_id))
+    }
+
+    /// Drops the resource of type `type_id`; whether there was one.
+    pub fn remove_resource_of(&mut self, type_id: TypeId) -> bool {
+        self.resources
+            .slots
+            .iter_mut()
+            .find(|s| s.type_id == type_id)
+            .is_some_and(|s| s.value.get_mut().take().is_some())
+    }
+
     /// Despawns every entity, in index order.
     pub fn clear(&mut self) {
         for arch in &mut self.archetypes {
