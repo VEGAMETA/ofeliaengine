@@ -8,7 +8,6 @@
 //! the project's `.ofelia/` folder (ADR 0107 §4).
 
 pub mod app;
-mod bake;
 mod build;
 pub mod camera;
 mod draw;

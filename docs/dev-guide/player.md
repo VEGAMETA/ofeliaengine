@@ -64,8 +64,11 @@ let mut player = Player::new(&PlayerSettings {
   is enough.
 - **Built-in meshes** are `builtin::CUBE`, `SPHERE`, `PLANE` and `CYLINDER`, each 1 across;
   the built-in material is `builtin::MATERIAL`. Your own materials are `.material` files
-  ([scenes.md](scenes.md#materials)).
+  ([scenes.md](scenes.md#materials)); meshes and materials can also be a glTF file's parts
+  (`models/crate.glb#Crate`, [scenes.md](scenes.md#meshes-and-materials-from-gltf-files)).
 - **`player.load_scene(path)`** adds another scene to the world (a level, a room).
+- **`player.reload_asset(id)`** reads a file again after you wrote it anew: the models
+  that use it are made again in the next frame.
 - **An asset the player cannot find** leaves its entity undrawn and says why once in the
   log; `player.assets().problem(asset)` tells you too.
 

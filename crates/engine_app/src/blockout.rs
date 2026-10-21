@@ -5,7 +5,7 @@
 //! ```text
 //! [entity 1d3c…]
 //! Name = "Blockout"
-//! BrushGroup.reserved = 0
+//! BrushGroup.baked = none
 //!
 //! [entity 6a0e…]
 //! Parent = @1d3c…
@@ -31,6 +31,7 @@ use engine_render::mesh::{GeometryPool, MeshData, MeshId};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_rhi::{Allocator, Device};
 use engine_runtime::MeshRenderer;
+use engine_scene::AssetRef;
 use std::collections::HashMap;
 
 /// A grid unit in metres: brushes' planes are held on a 1 mm grid.
@@ -263,8 +264,17 @@ pub fn grid_png() -> Vec<u8> {
 /// each other in the tree's order; brushes of other groups do not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 pub struct BrushGroup {
-    /// 0 (room for its settings).
-    pub reserved: u32,
+    /// The glTF file the group was baked into (the editor's Blockout: Bake to Mesh, ADR
+    /// 0110 E2b-6), `none` while it is live: models of the file's parts draw it, and its
+    /// brushes, not drawn, still collide and still make its navigation.
+    pub baked: AssetRef,
+}
+
+impl BrushGroup {
+    /// Whether the group was baked into a file.
+    pub fn is_baked(&self) -> bool {
+        !self.baked.is_none()
+    }
 }
 engine_ecs::reflect_component!(BrushGroup);
 
@@ -288,6 +298,8 @@ struct GroupState {
     inputs: Vec<Input>,
     /// Changes whenever its pieces may have: what colliders made from it follow.
     epoch: u64,
+    /// Baked: its brushes' meshes are not drawn.
+    baked: bool,
 }
 
 type Brushes = QueryState<Entity, With<Brush>>;
@@ -628,6 +640,20 @@ impl Blockout {
             for i in state.group.take_changed() {
                 changed_entities.push(state.entities[i as usize]);
             }
+            // Baked or live again: its brushes hidden or shown, their meshes kept.
+            let baked = world
+                .get::<BrushGroup>(key)
+                .is_some_and(BrushGroup::is_baked);
+            if state.baked != baked {
+                state.baked = baked;
+                for &e in &state.entities {
+                    if world.get::<FromBrush>(e).is_some()
+                        && let Some(r) = world.get_mut::<MeshRenderer>(e)
+                    {
+                        r.visible = u32::from(!baked);
+                    }
+                }
+            }
             seen.push(key);
         }
         // Groups whose brushes all went.
@@ -685,6 +711,7 @@ impl Blockout {
         );
         let input = &state.inputs[index];
         let tint = input.brush.tint;
+        let visible = u32::from(!state.baked);
         if self.triangles.indices.is_empty() {
             if world.remove::<FromBrush>(e).is_some() {
                 world.remove::<MeshRenderer>(e);
@@ -745,7 +772,14 @@ impl Blockout {
             .materials
             .entry(key)
             .or_insert_with(|| materials.add(material(key, grid)));
-        world.insert(e, MeshRenderer::new(mesh, material));
+        world.insert(
+            e,
+            MeshRenderer {
+                mesh,
+                material,
+                visible,
+            },
+        );
         if world.get::<FromBrush>(e).is_none() {
             world.insert(e, FromBrush);
             if world.get::<GlobalTransform>(e).is_none() {

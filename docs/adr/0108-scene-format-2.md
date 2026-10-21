@@ -301,3 +301,21 @@ them in was lost on the next load. The options put to the owner:
 - **The cache can be deleted at any time** and costs a re-import.
 - **Merges stay line-local:** an override is one line, an instance one block.
 - **Still to settle:** how components carry asset references in Rust (E1, E4).
+
+## As built (2026-10-21): models from glTF files
+
+The player's `Assets` makes a `Model`'s mesh and material from a glTF file's parts (ADR
+0110 E2b-6b, so a baked blockout draws from its file; the rest of E4 still to come):
+- **Parts** by name or `#index` (from 0), as the colliders' rules name meshes; a file of one
+  mesh named whole is that mesh. A mesh's primitives are merged into one mesh drawn with
+  the model's material, in the mesh's space (node transforms not applied).
+- **Materials:** the glTF material's factors, alpha mode and double-sidedness; its five
+  textures decoded with their levels (`build_mips` for their use, as the cooker filters
+  them), uncompressed (RGBA8), made where the device is at hand after the frame's
+  stages, in the same frame. Extension shading models are plain PBR in this path.
+- **`.meta`:** `AssetMeta` (`[asset version=1 id=…]`, no importer settings yet); the
+  player checks a file's `.meta` id against the reference's and accepts a file without
+  one by its path; `AssetMeta::ensure` gives a file one (the editor's first meeting).
+- **Read on first use** on the frame's thread, each file once per frame, dropped once its
+  parts are made. Moving the reads to a loading thread and compressing textures through
+  the derived data cache are E4's.

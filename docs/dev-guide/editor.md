@@ -414,6 +414,14 @@ it.
 `<group>.glb` beside the scene, a part per tint over the grid ([blockout.md](blockout.md#exporting-a-greybox)).
 The status bar says where and how many triangles.
 
+### Baking a group
+
+**Blockout: Bake to Mesh** (the palette; "bake", Enter) writes the selected groups (or
+every group) as glTF files beside the scene and puts a model of each file's meshes under
+its group, the brushes no longer drawn but still colliding, as one undo step. **Blockout:
+Unbake** brings the brushes back ([blockout.md](blockout.md#baking-a-group)). While a
+group is baked, Tab, Ctrl+H and the side handles leave its brushes alone and say so.
+
 ### Colliders
 
 **View: Colliders** (the palette) draws the edges of the brushes' pieces that collide,

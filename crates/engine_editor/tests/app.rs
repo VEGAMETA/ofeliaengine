@@ -10,10 +10,10 @@ use engine_app::{
     PlayerSettings, Window, builtin,
 };
 use engine_core::math::{Quat, Vec3};
-use engine_ecs::{Transform, World};
+use engine_ecs::{Entity, Transform, World};
 use engine_editor::{EditorGame, EditorOverlay};
 use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind, WindowId};
-use engine_runtime::{Camera, PointLight, SpotLight, Sun};
+use engine_runtime::{Camera, MeshRenderer, PointLight, SpotLight, Sun};
 use engine_scene::{AssetId, AssetRef, Name, SaveOptions, SceneId, SceneRegistry, save_with};
 
 struct NoGame;
@@ -1142,6 +1142,95 @@ fn a_brushs_handles_show_and_a_drawn_corner_lands_on_its_corner() {
         &mut overlay,
         "ENGINE_EDITOR_COLLIDERS_PNG",
     );
+    assert!(game.run_command(player.world_mut(), "view.colliders"));
+
+    // Blockout: Bake to Mesh puts the group's model in its place, from a file beside the
+    // scene, its brushes no longer drawn; undo, redo and Unbake take it back and forth
+    // (`ENGINE_EDITOR_BAKED_PNG`).
+    let group = engine_scene::find_named(player.world_mut(), "Blockout").unwrap();
+    // The group's models, and whether each of its brushes is drawn.
+    let baked = |player: &mut Player| {
+        let world = player.world_mut();
+        let children: Vec<Entity> = world.children(group).collect();
+        let models: Vec<Entity> = children
+            .iter()
+            .copied()
+            .filter(|&c| world.get::<Model>(c).is_some())
+            .collect();
+        let drawn: Vec<bool> = children
+            .iter()
+            .filter(|&&c| world.get::<Brush>(c).is_some())
+            .filter_map(|&c| world.get::<MeshRenderer>(c).map(|r| r.visible != 0))
+            .collect();
+        (models, drawn)
+    };
+    game.select(Some(group));
+    assert!(game.run_command(player.world_mut(), "blockout.bake"));
+    for _ in 0..3 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let meta = std::fs::read_to_string(dir.join("blockout.glb.meta")).expect("its .meta");
+    let id = engine_app::AssetMeta::parse(&meta).unwrap().1.id.unwrap();
+    assert_eq!(
+        player.world_mut().get::<BrushGroup>(group).unwrap().baked,
+        AssetRef::file(id)
+    );
+    let (models, drawn) = baked(&mut player);
+    assert_eq!(models.len(), 1, "both brushes of one tint: one model");
+    assert_eq!(drawn, [false, false], "the brushes hidden");
+    let model = *player.world_mut().get::<Model>(models[0]).unwrap();
+    assert_eq!(model.mesh, AssetRef::part(id, "Blockout 1"));
+    assert_eq!(player.assets().problem(model.mesh), None);
+    assert_eq!(player.assets().problem(model.material), None);
+    let renderer = player.world_mut().get::<MeshRenderer>(models[0]).copied();
+    assert!(renderer.is_some_and(|r| r.visible != 0), "the model drawn");
+    write(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        "ENGINE_EDITOR_BAKED_PNG",
+    );
+    // Undo: the brushes drawn again, the model gone; redo: baked again.
+    assert!(game.run_command(player.world_mut(), "edit.undo"));
+    editor_frame(&mut player, &mut game, &mut overlay);
+    assert!(
+        !player
+            .world_mut()
+            .get::<BrushGroup>(group)
+            .unwrap()
+            .is_baked()
+    );
+    assert_eq!(baked(&mut player), (Vec::new(), vec![true, true]));
+    assert!(game.run_command(player.world_mut(), "edit.redo"));
+    editor_frame(&mut player, &mut game, &mut overlay);
+    let (models, drawn) = baked(&mut player);
+    assert_eq!((models.len(), drawn), (1, vec![false, false]));
+    // Baked again over its file, with the same id: still one model, drawn.
+    assert!(game.run_command(player.world_mut(), "blockout.bake"));
+    for _ in 0..2 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let meta = std::fs::read_to_string(dir.join("blockout.glb.meta")).unwrap();
+    assert_eq!(engine_app::AssetMeta::parse(&meta).unwrap().1.id, Some(id));
+    let (models, _) = baked(&mut player);
+    assert_eq!(models.len(), 1);
+    let renderer = player.world_mut().get::<MeshRenderer>(models[0]).copied();
+    assert!(
+        renderer.is_some_and(|r| r.visible != 0),
+        "drawn from the new file"
+    );
+    // Unbake: live again, the file kept.
+    assert!(game.run_command(player.world_mut(), "blockout.unbake"));
+    editor_frame(&mut player, &mut game, &mut overlay);
+    assert!(
+        !player
+            .world_mut()
+            .get::<BrushGroup>(group)
+            .unwrap()
+            .is_baked()
+    );
+    assert_eq!(baked(&mut player), (Vec::new(), vec![true, true]));
+    assert!(dir.join("blockout.glb").exists());
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

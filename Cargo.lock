@@ -291,6 +291,7 @@ dependencies = [
  "engine_streaming",
  "engine_video",
  "log",
+ "serde_json",
 ]
 
 [[package]]

@@ -76,7 +76,32 @@ earlier one: its visible surface as the editor draws it, in the group's own spac
 y up). The brushes of one tint share a part and a material, the tint over the grid
 (embedded), so Blender shows the greybox as it looks here, ready for an artist to build
 over. From code: `player.blockout().baked(group, &mut brushes)` gives the triangles,
-`engine_app::grid_png()` the grid.
+`engine_app::grid_png()` the grid, `engine_app::bake::glb` the file.
+
+## Baking a group
+
+**Blockout: Bake to Mesh** (the palette) bakes the selected groups (or the groups of the
+selected brushes; with nothing selected in a group, every group of the scene) as one undo
+step:
+- **The file:** the group's surface written beside the scene as `<group>.glb`, as the
+  export writes it, with its `.meta` (the file's id, kept when the file is baked again).
+  Another group's bake of the same name gets `<group>-2.glb`.
+- **In the scene:** a model per tint under the group (`Blockout 1`, `Blockout 2`, … named
+  after the file's meshes), drawn from the file, and `BrushGroup.baked` naming the file:
+
+  ```text
+  BrushGroup.baked = asset("levels/blockout.glb", 5f2c0a3e9d2b47c88e51f0d4a7b3c912)
+  ```
+- **The brushes stay:** not drawn, but they still collide and still make the navigation
+  mesh, from their exact hulls (`ScenePhysics::sync_blockout`). The tools leave them alone
+  (Tab, Ctrl+H and the side handles say the group is baked); a new brush goes to a group
+  that is not.
+
+**Blockout: Unbake** brings the selected baked groups (or every one) back: the brushes
+drawn again, the bake's models gone; the file stays. **Bake to Mesh** on a baked group bakes
+it again from its brushes over the same file, with the same id, and the player reads the
+file again. An artist's version of the mesh belongs in a file of its own: a bake writes
+over its file. Undo puts the scene back, not the file (the next bake writes it again).
 
 ## Navigation
 
@@ -115,7 +140,6 @@ one undo step; the eye turns it off.
 
 ## Coming
 
-Sides of a room left open (a courtyard), radius handles for cylinders and spheres, a group
-baked into a mesh, faces and edges edited by hand,
-colliders and the navigation mesh made from them, and baking a group into a mesh: ADR
-0110's steps.
+Sides of a room left open (a courtyard), radius handles for cylinders and spheres, and
+the cook's path: a shipped game's blockout evaluated by the cook into meshes, hulls and
+navigation tiles, with the one-button build (ADR 0107 E14).

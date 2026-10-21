@@ -60,6 +60,7 @@
 //! runs the same executable.
 
 mod assets;
+pub mod bake;
 mod blockout;
 mod entry;
 mod game;
@@ -76,7 +77,7 @@ mod sound;
 mod text;
 mod videos;
 
-pub use assets::{Alpha, Assets, MaterialFile, Model, builtin};
+pub use assets::{Alpha, AssetMeta, Assets, MaterialFile, Model, builtin};
 pub use blockout::{
     BakedBrush, Blockout, Brush, BrushGroup, BrushOp, BrushPlane, BrushShape, grid_png,
 };

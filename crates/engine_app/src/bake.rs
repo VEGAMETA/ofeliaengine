@@ -1,14 +1,14 @@
-//! Baking blockout groups (ADR 0110 E2b-6; `docs/research/ux/blockout.md` §8): a group's
-//! visible surface written as a binary glTF (`.glb`), so Blender opens it and an artist
-//! builds over the greybox.
+//! A blockout group as a binary glTF (ADR 0110 E2b-6; `docs/research/ux/blockout.md` §8):
+//! its visible surface, so Blender opens the greybox and the player draws it baked.
 //!
-//! - **One mesh, a part per tint:** the brushes of one tint share a primitive and a
-//!   material, its base color the tint over the blockout's grid (embedded as a PNG, the
-//!   texture coordinates metres), so the file looks as the editor draws it.
+//! - **A mesh per tint:** the brushes of one tint share a mesh `"<name> <k>"` and its
+//!   material `"<name> <k> grid"`, its base color the tint over the blockout's grid
+//!   (embedded as a PNG, the texture coordinates metres), so the file looks as the editor
+//!   draws it, and each mesh is a [`crate::Model`] of one material.
 //! - **The group's space:** metres, y up, as glTF wants; the group's own placement stays in
 //!   the scene.
 
-use engine_app::BakedBrush;
+use crate::BakedBrush;
 use serde_json::json;
 
 /// glTF's component types and targets.
@@ -17,7 +17,16 @@ const UNSIGNED_INT: u32 = 5125;
 const ARRAY_BUFFER: u32 = 34962;
 const ELEMENT_ARRAY_BUFFER: u32 = 34963;
 
-/// The brushes of one tint, merged: what a primitive holds.
+/// A baked group: the file's bytes, and each of its meshes' name with its material's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Baked {
+    /// The binary glTF.
+    pub bytes: Vec<u8>,
+    /// A mesh's name and its material's, per tint, in the order the tints first come.
+    pub parts: Vec<(String, String)>,
+}
+
+/// The brushes of one tint, merged.
 #[derive(Debug, Default)]
 struct Part {
     tint: [f32; 4],
@@ -53,8 +62,8 @@ fn by_tint(brushes: &[BakedBrush]) -> Vec<Part> {
 }
 
 /// The binary glTF of a group called `name` made of `brushes`, its materials over the grid
-/// image `grid_png` (a PNG; none: plain colors).
-pub(crate) fn glb(name: &str, brushes: &[BakedBrush], grid_png: &[u8]) -> Vec<u8> {
+/// image `grid_png` (a PNG; empty: plain colors).
+pub fn glb(name: &str, brushes: &[BakedBrush], grid_png: &[u8]) -> Baked {
     let parts = by_tint(brushes);
     let mut bin: Vec<u8> = Vec::new();
     let mut views = Vec::new();
@@ -72,8 +81,10 @@ pub(crate) fn glb(name: &str, brushes: &[BakedBrush], grid_png: &[u8]) -> Vec<u8
         views.push(v);
         views.len() - 1
     };
-    let mut primitives = Vec::new();
+    let mut meshes = Vec::new();
     let mut materials = Vec::new();
+    let mut nodes = Vec::new();
+    let mut names = Vec::new();
     let texture = !grid_png.is_empty();
     for (k, p) in parts.iter().enumerate() {
         let floats = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
@@ -105,24 +116,33 @@ pub(crate) fn glb(name: &str, brushes: &[BakedBrush], grid_png: &[u8]) -> Vec<u8
             json!({ "bufferView": uvs, "componentType": FLOAT, "count": count, "type": "VEC2" }),
         );
         accessors.push(json!({ "bufferView": indices, "componentType": UNSIGNED_INT, "count": p.indices.len(), "type": "SCALAR" }));
-        primitives.push(json!({
-            "attributes": { "POSITION": first, "NORMAL": first + 1, "TEXCOORD_0": first + 2 },
-            "indices": first + 3,
-            "material": k,
+        let (mesh, material) = (
+            format!("{name} {}", k + 1),
+            format!("{name} {} grid", k + 1),
+        );
+        meshes.push(json!({
+            "name": mesh,
+            "primitives": [{
+                "attributes": { "POSITION": first, "NORMAL": first + 1, "TEXCOORD_0": first + 2 },
+                "indices": first + 3,
+                "material": k,
+            }],
         }));
         let mut pbr =
             json!({ "baseColorFactor": p.tint, "metallicFactor": 0.0, "roughnessFactor": 0.85 });
         if texture {
             pbr["baseColorTexture"] = json!({ "index": 0 });
         }
-        materials.push(json!({ "name": format!("{name} {}", k + 1), "pbrMetallicRoughness": pbr }));
+        materials.push(json!({ "name": material, "pbrMetallicRoughness": pbr }));
+        nodes.push(json!({ "name": mesh, "mesh": k }));
+        names.push((mesh, material));
     }
     let mut root = json!({
         "asset": { "version": "2.0", "generator": "ofeliaengine blockout" },
         "scene": 0,
-        "scenes": [{ "nodes": [0] }],
-        "nodes": [{ "name": name, "mesh": 0 }],
-        "meshes": [{ "name": name, "primitives": primitives }],
+        "scenes": [{ "name": name, "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
+        "nodes": nodes,
+        "meshes": meshes,
         "materials": materials,
     });
     if texture {
@@ -145,21 +165,24 @@ pub(crate) fn glb(name: &str, brushes: &[BakedBrush], grid_png: &[u8]) -> Vec<u8
     }
     // The container: its header, the JSON chunk, the binary chunk.
     let length = 12 + 8 + text.len() + 8 + bin.len();
-    let mut out = Vec::with_capacity(length);
-    out.extend_from_slice(b"glTF");
-    out.extend_from_slice(&2u32.to_le_bytes());
-    out.extend_from_slice(&(length as u32).to_le_bytes());
-    out.extend_from_slice(&(text.len() as u32).to_le_bytes());
-    out.extend_from_slice(b"JSON");
-    out.extend_from_slice(&text);
-    out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
-    out.extend_from_slice(b"BIN\0");
-    out.extend_from_slice(&bin);
-    out
+    let mut bytes = Vec::with_capacity(length);
+    bytes.extend_from_slice(b"glTF");
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&(length as u32).to_le_bytes());
+    bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(b"JSON");
+    bytes.extend_from_slice(&text);
+    bytes.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(b"BIN\0");
+    bytes.extend_from_slice(&bin);
+    Baked {
+        bytes,
+        parts: names,
+    }
 }
 
 /// A file name for a group called `name`: letters, digits and `-`, `_` kept, the rest `-`.
-pub(crate) fn file_name(name: &str) -> String {
+pub fn file_name(name: &str) -> String {
     let stem: String = name
         .chars()
         .map(|c| {
@@ -181,7 +204,7 @@ mod tests {
     use super::*;
 
     /// A quad of tint `tint` at height `y`, facing up.
-    fn quad(tint: [f32; 4], y: f32) -> BakedBrush {
+    pub(crate) fn quad(tint: [f32; 4], y: f32) -> BakedBrush {
         BakedBrush {
             tint,
             positions: vec![[0.0, y, 0.0], [0.0, y, 1.0], [1.0, y, 1.0], [1.0, y, 0.0]],
@@ -192,25 +215,31 @@ mod tests {
     }
 
     #[test]
-    fn a_group_bakes_to_a_glb_our_importer_reads_back_a_part_per_tint() {
+    fn a_group_bakes_to_a_glb_our_importer_reads_back_a_mesh_per_tint() {
         let grey = [0.72, 0.72, 0.72, 1.0];
         let red = [0.8, 0.1, 0.1, 1.0];
         let brushes = [quad(grey, 0.0), quad(red, 1.0), quad(grey, 2.0)];
-        let png = engine_app::grid_png();
+        let png = crate::grid_png();
         assert!(png.starts_with(b"\x89PNG"));
-        let bytes = glb("Blockout", &brushes, &png);
-        assert_eq!(&bytes[..4], b"glTF");
-        let scene = engine_assets::import_gltf(&bytes, None).unwrap();
-        assert_eq!(scene.meshes.len(), 1);
-        let mesh = &scene.meshes[0];
-        assert_eq!(mesh.name, "Blockout");
-        // Grey's two quads in one part, red's in another.
-        assert_eq!(mesh.primitives.len(), 2);
-        assert_eq!(mesh.primitives[0].indices.len(), 12);
-        assert_eq!(mesh.primitives[1].indices.len(), 6);
-        assert_eq!(mesh.primitives[0].positions[4], [0.0, 2.0, 0.0]);
-        assert_eq!(mesh.primitives[1].uvs[2], [1.0, 1.0]);
-        let red_material = &scene.materials[mesh.primitives[1].material.unwrap()];
+        let baked = glb("Blockout", &brushes, &png);
+        assert_eq!(&baked.bytes[..4], b"glTF");
+        assert_eq!(
+            baked.parts,
+            [
+                (String::from("Blockout 1"), String::from("Blockout 1 grid")),
+                (String::from("Blockout 2"), String::from("Blockout 2 grid")),
+            ]
+        );
+        let scene = engine_assets::import_gltf(&baked.bytes, None).unwrap();
+        // Grey's two quads in one mesh, red's in another, each one part.
+        assert_eq!(scene.meshes.len(), 2);
+        assert_eq!(scene.meshes[0].name, "Blockout 1");
+        assert_eq!(scene.meshes[0].primitives.len(), 1);
+        assert_eq!(scene.meshes[0].primitives[0].indices.len(), 12);
+        assert_eq!(scene.meshes[0].primitives[0].positions[4], [0.0, 2.0, 0.0]);
+        assert_eq!(scene.meshes[1].primitives[0].uvs[2], [1.0, 1.0]);
+        let red_material = &scene.materials[scene.meshes[1].primitives[0].material.unwrap()];
+        assert_eq!(red_material.name, "Blockout 2 grid");
         assert_eq!(red_material.base_color, red);
         assert!(red_material.base_color_texture.is_some(), "over the grid");
         assert_eq!(scene.textures.len(), 1);

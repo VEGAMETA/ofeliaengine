@@ -125,7 +125,31 @@ Model.hidden = false
 | a cylinder of diameter 1 and height 1 | `builtin::CYLINDER` (`builtin#cylinder`) |
 | a grey, half-rough material | `builtin::MATERIAL` (`builtin#default`) |
 
-Meshes from files (a glTF's parts) come with the editor's asset browser.
+#### Meshes and materials from glTF files
+
+A model can take its mesh and material from a glTF file (`.glb`, `.gltf`) in the game's
+folder, by part:
+
+```text
+Model.mesh = asset("models/yard.glb#Yard 2", 5f2c0a3e9d2b47c88e51f0d4a7b3c912)
+Model.material = asset("models/yard.glb#Yard 2 grid", 5f2c0a3e9d2b47c88e51f0d4a7b3c912)
+```
+
+- **A part** is a mesh or a material, by its name in the file or by `#index` (from 0:
+  `models/yard.glb##1`). A file of one mesh may be named whole, without a part.
+- **A mesh's primitives** are drawn as one mesh with the model's material, in the mesh's
+  own space: the file's node transforms are not applied. A mesh of several materials is
+  several models.
+- **Textures** (base color, metallic-roughness, normal, occlusion, emissive), embedded or
+  beside the file, are decoded the first time a material uses them and kept
+  uncompressed; the shipped game's cooked textures are compressed. Shading models from
+  extensions (unlit, clearcoat, sheen) are drawn as plain PBR here.
+- **The file's id** is in `<file>.meta` beside it (`[asset version=1 id=…]`, ADR 0108),
+  which the editor writes the first time it meets the file (`AssetMeta::ensure` in code).
+  A `.meta` naming another id is reported as the asset's problem; a file without one is
+  found by its path alone.
+- **Files are read on first use** on the frame's thread, so a scene with large textures
+  takes a moment on its first frame.
 
 ### Materials
 
@@ -155,7 +179,7 @@ double_sided = false
 - In code: `MaterialFile { base_color: [0.8, 0.15, 0.1, 1.0], ..MaterialFile::default() }`,
   written with `to_text(id)` and read with `MaterialFile::parse`.
 - A scene finds the file by the path written beside its id, relative to the game's folder.
-  Textures come with the asset browser.
+  A material file has no textures; a glTF's materials do (above).
 
 ## Changing components safely
 
