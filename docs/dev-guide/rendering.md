@@ -2601,6 +2601,10 @@ picker.add_list_pass(&mut fg, &mut ring, &bindless, &geo, &mats, &scene_frame, &
   in their current pose; blended ones too with `transparent`. An id is the index the view's
   vertex shaders read the instance with: the GPU scene's slot (`RenderExtract::instance`
   gives an entity's).
+- **The surface under a pixel:** `Picker::add_surface_pass` (with the slots to leave out:
+  what is being moved over it) and `poll_surface` give the nearest surface's instance,
+  point and normal (`SurfaceHit`), from the ids and depths of a 3 × 3 square. Through an
+  orthographic camera looking down, the floor under a point.
 - **Boxes:** a `ListRequest` with any `rect`. With `visible`, only what shows counts: the
   candidates' depth is drawn first, then each pixel's nearest surface keeps its depth (a
   box selection by visible pixels); without, every surface there.

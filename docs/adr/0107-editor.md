@@ -909,6 +909,28 @@ W, A, S, D fly the camera as in Godot, the wheel sets the speed).
   stopping; bookmarks set, gone to and kept by the session; on the player, both GPUs: F
   puts the cube in the view's middle, three times larger on the screen.
 
+## As built (E2-5, 2026-10-21)
+
+- **Ctrl+Shift with a move handle** (an arrow, a square, the middle): each frame the
+  overlay picks the surface under the pointer, the selection's instances left out
+  (ADR 0109's surface pass); the newest one found places the selection, its world box at
+  the press (the overlay keeps the selection's box every frame) touching the surface from
+  the normal's side (`GizmoDrag::on_surface`): on a floor its bottom, on a wall its side.
+  It runs a few frames behind the pointer.
+- **End drops** each selected entity no selected entity carries, one after the other as
+  one undo step: after a frame the entity's instances (with its children's) are named,
+  the overlay unites their world boxes (its place for an entity without one) and picks
+  the surface below the box's bottom's middle looking down, the selection and the entity
+  left out; the entity moves straight down by the distance to it. "Nothing below" leaves
+  it.
+- **Tested:** the box on a floor, under a ceiling and against a wall; End's steps, one
+  undo step, nothing below; Ctrl+Shift placing on a floor, then against a wall; on the
+  player, both GPUs: End puts a cube floating 3.5 m above a floor on it (its center at
+  0.5 above it, straight down), and Ctrl+Z puts it back.
+- **Not done:** aligning to the surface's normal while dragging (the UX note's option);
+  assets dropped from the file browser onto surfaces (with E4's browser); V's vertex
+  snapping.
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and
