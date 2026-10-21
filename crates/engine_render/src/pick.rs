@@ -11,10 +11,14 @@
 //!     at each mesh's finest resident level, with the camera without jitter;
 //!   - [`Picker::add_pass`]: the view's culled commands (the culling pass's visible lists,
 //!     early and late phases, with their detail levels), for a view that draws a list.
-//! - **What lies under a pixel** ([`Picker::add_list_pass`]): the candidates within a
-//!   radius of it, drawn without a depth test, each keeping its nearest depth there
-//!   (`pickListVertex`, `pickListFragment` and their masked twins): every surface front to
-//!   back, hidden ones too, to cycle through overlapping objects or list them.
+//! - **What lies in pixels** ([`Picker::add_list_pass`]): the candidates of a rectangle
+//!   (a pixel and a radius around it, or a box), each keeping its nearest depth there
+//!   (`pickListVertex` and `pickListFragment`, and their masked twins):
+//!   - every surface, hidden ones too, drawn without a depth test: what lies under the
+//!     pointer front to back, to cycle through overlapping objects or list them;
+//!   - or only what shows: the candidates' depth first (`depthVertex`, and
+//!     `depthVertexMasked` with `shadowFragmentMasked`), then the candidates again tested
+//!     against it before shading (`pickVisibleFragment`): a box's visible pixels.
 //! - **What an id is:** the index the view's vertex shaders read the instance with: the
 //!   persistent scene's slot ([`crate::gpu_scene::GpuScene`]), or a draw list's item.
 //! - **Cost.** Separate passes, so the view's pipelines carry no code for them (the
@@ -26,8 +30,9 @@
 //!   ([`Picker::poll`], [`Picker::poll_list`]).
 
 use crate::forward::{
-    BLENDED, BLENDED_STATES, DEPTH_STATES, DOUBLE_SIDED, DrawArea, ForwardPasses, MASKED, MIRRORED,
-    Push, TypedPipelines, faces, set_draw_area,
+    BLENDED, BLENDED_STATES, DEPTH_STATES, DEPTH_VERTEX, DEPTH_VERTEX_MASKED, DOUBLE_SIDED,
+    DrawArea, ForwardPasses, MASKED, MIRRORED, Push, SHADOW_FRAGMENT_MASKED, TypedPipelines, faces,
+    set_draw_area,
 };
 use crate::gpu_scene::SceneFrame;
 use crate::graph::{
@@ -52,6 +57,9 @@ const LIST_VERTEX: &[u8] = include_bytes!("../shaders/forward.pickListVertex.spv
 const LIST_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.pickListVertexMasked.spv");
 const LIST_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.pickListFragment.spv");
 const LIST_FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.pickListFragmentMasked.spv");
+const VISIBLE_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.pickVisibleFragment.spv");
+const VISIBLE_FRAGMENT_MASKED: &[u8] =
+    include_bytes!("../shaders/forward.pickVisibleFragmentMasked.spv");
 
 /// The side of the square a pick reads around its pixel, in the view's pixels.
 pub const SQUARE: u32 = 32;
@@ -61,9 +69,9 @@ const ID_FORMAT: vk::Format = vk::Format::R32_UINT;
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 /// Bytes of a square's ids.
 const BYTES: u64 = (SQUARE * SQUARE * 4) as u64;
-/// The most instances a list holds; more under its pixel are left out
+/// The most instances a list holds; more in its pixels are left out
 /// ([`ListResult::truncated`]).
-pub const MAX_LIST: u32 = 1024;
+pub const MAX_LIST: u32 = 65_536;
 /// Bytes of a list's depths, a word per instance.
 const LIST_BYTES: u64 = MAX_LIST as u64 * 4;
 /// Bytes of an indexed indirect draw.
@@ -125,31 +133,45 @@ pub struct PickView {
     pub size: (u32, u32),
 }
 
-/// A pick of what lies under a pixel of the view (at the view's size, as a
-/// [`PickRequest`]'s).
+/// A pick of what lies in pixels of the view (at the view's size, as a [`PickRequest`]'s).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ListRequest {
-    /// The pixel's column, from the view's left.
-    pub x: u32,
-    /// Its row, from the view's top.
-    pub y: u32,
-    /// How far from the pixel a surface still counts, in pixels (at most [`SQUARE`] / 2):
-    /// thin objects stay easy to list.
-    pub radius: u32,
-    /// Blended surfaces are listed too.
+    /// The pixels, `[x0, y0, x1, y1]` (the view's part of them counts).
+    pub rect: [u32; 4],
+    /// Only what shows there counts, each pixel's nearest surface (a box's visible
+    /// pixels); otherwise every surface, hidden ones too.
+    pub visible: bool,
+    /// Blended surfaces are listed too (and with `visible` hide what is behind them).
     pub transparent: bool,
 }
 
-/// What lay under a pixel.
+impl ListRequest {
+    /// Every surface within `radius` pixels of the pixel `(x, y)` (a square of side
+    /// `2 radius + 1`): what lies under the pointer, thin objects easy to list.
+    pub fn around(x: u32, y: u32, radius: u32, transparent: bool) -> Self {
+        Self {
+            rect: [
+                x.saturating_sub(radius),
+                y.saturating_sub(radius),
+                x.saturating_add(radius + 1),
+                y.saturating_add(radius + 1),
+            ],
+            visible: false,
+            transparent,
+        }
+    }
+}
+
+/// What lay in a list's pixels.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListResult {
     /// The frame that drew it.
     pub frame: u64,
     /// What was asked.
     pub request: ListRequest,
-    /// The instances with a surface within the radius, nearest first: each one's index
-    /// (the persistent scene's slot) and its nearest depth there (0 at the near plane, 1
-    /// at the far one).
+    /// The instances with a surface in the pixels (only shown ones, with
+    /// [`ListRequest::visible`]), nearest first: each one's index (the persistent scene's
+    /// slot) and its nearest depth there (0 at the near plane, 1 at the far one).
     pub hits: Vec<(u32, f32)>,
     /// More than [`MAX_LIST`] instances could be there: the others were left out.
     pub truncated: bool,
@@ -209,7 +231,8 @@ struct Candidates {
     slots: Vec<u32>,
     /// Each drawable one's state (the bits of its faces and alpha test), slot and draw.
     keyed: Vec<(u8, u32, vk::DrawIndexedIndirectCommand)>,
-    /// The drawn slots and their draws, in state order: a draw's instance is its item.
+    /// The drawn slots and their draws, in state order and by mesh: a draw's instances
+    /// are its items (consecutive candidates of one mesh are one instanced draw).
     visible: Vec<u32>,
     commands: Vec<vk::DrawIndexedIndirectCommand>,
     /// Runs of one state: the state, its first draw, their count.
@@ -271,21 +294,37 @@ impl Candidates {
                 },
             ));
         }
-        self.keyed
-            .sort_unstable_by_key(|&(state, slot, _)| (state, slot));
+        self.keyed.sort_unstable_by_key(|&(state, slot, c)| {
+            (state, c.first_index, c.vertex_offset, c.index_count, slot)
+        });
         self.visible.clear();
         self.commands.clear();
         self.groups.clear();
         for (item, &(state, slot, command)) in self.keyed.iter().enumerate() {
             let item = item as u32;
             self.visible.push(slot);
+            // The same mesh as the draw before, in the same state: one more instance of it.
+            let same_state = self.groups.last().is_some_and(|&(s, _, _)| s == state);
+            if let Some(last) = self.commands.last_mut()
+                && same_state
+                && (last.first_index, last.vertex_offset, last.index_count)
+                    == (
+                        command.first_index,
+                        command.vertex_offset,
+                        command.index_count,
+                    )
+            {
+                last.instance_count += 1;
+                continue;
+            }
             self.commands.push(vk::DrawIndexedIndirectCommand {
                 first_instance: item,
                 ..command
             });
+            let first = self.commands.len() as u32 - 1;
             match self.groups.last_mut() {
                 Some((s, _, count)) if *s == state => *count += 1,
-                _ => self.groups.push((state, item, 1)),
+                _ => self.groups.push((state, first, 1)),
             }
         }
     }
@@ -375,8 +414,11 @@ pub struct Picker {
     /// The nearest surfaces': opaque and masked (blended surfaces are drawn with them
     /// too).
     pipelines: [Pipeline; 2],
-    /// What lies under a pixel: opaque and masked.
+    /// What lies in pixels: every surface (opaque, masked); the candidates' depth, then
+    /// what shows over it.
     list_pipelines: [Pipeline; 2],
+    depth_pipelines: [Pipeline; 2],
+    visible_pipelines: [Pipeline; 2],
     readbacks: Vec<Readback<PickRequest>>,
     lists: Vec<Readback<ListRequest>>,
     frames_in_flight: u64,
@@ -407,74 +449,119 @@ impl Picker {
         let (list_vertex, list_vertex_masked) = (words(LIST_VERTEX)?, words(LIST_VERTEX_MASKED)?);
         let (list_fragment, list_fragment_masked) =
             (words(LIST_FRAGMENT)?, words(LIST_FRAGMENT_MASKED)?);
-        // With `targets`, ids over a depth; without, no attachments and no depth test.
+        let (depth_vertex, depth_vertex_masked) =
+            (words(DEPTH_VERTEX)?, words(DEPTH_VERTEX_MASKED)?);
+        let depth_fragment_masked = words(SHADOW_FRAGMENT_MASKED)?;
+        let (visible_fragment, visible_fragment_masked) =
+            (words(VISIBLE_FRAGMENT)?, words(VISIBLE_FRAGMENT_MASKED)?);
+        /// What a pipeline draws into.
+        #[derive(Clone, Copy)]
+        enum Into {
+            /// Ids over a depth (the nearest surfaces).
+            Ids,
+            /// Nothing: no attachments, no depth test (every surface).
+            Nothing,
+            /// A depth, written (the candidates' depth).
+            Depth,
+            /// A depth, tested (less or equal), not written (what shows over it).
+            OverDepth,
+        }
         fn desc<'a>(
             (vertex, v): (&'a [u32], &'static core::ffi::CStr),
-            (fragment, f): (&'a [u32], &'static core::ffi::CStr),
-            targets: bool,
+            fragment: Option<(&'a [u32], &'static core::ffi::CStr)>,
+            into: Into,
         ) -> PipelineDesc<'a> {
             let stages = GraphicsPipelineDesc::new(
                 ShaderStageDesc {
                     spirv: vertex,
                     entry: v,
                 },
-                Some(ShaderStageDesc {
-                    spirv: fragment,
-                    entry: f,
-                }),
+                fragment.map(|(spirv, entry)| ShaderStageDesc { spirv, entry }),
             );
-            PipelineDesc::Graphics(if targets {
-                GraphicsPipelineDesc {
+            let stages = GraphicsPipelineDesc {
+                dynamic_culling: true,
+                ..stages
+            };
+            PipelineDesc::Graphics(match into {
+                Into::Ids => GraphicsPipelineDesc {
                     color_formats: &[ID_FORMAT],
                     depth_format: DEPTH_FORMAT,
-                    dynamic_culling: true,
                     ..stages
-                }
-            } else {
-                GraphicsPipelineDesc {
+                },
+                Into::Nothing => GraphicsPipelineDesc {
                     color_formats: &[],
                     depth_format: vk::Format::UNDEFINED,
                     depth_test: false,
                     depth_write: false,
-                    dynamic_culling: true,
                     ..stages
-                }
+                },
+                Into::Depth => GraphicsPipelineDesc {
+                    color_formats: &[],
+                    depth_format: DEPTH_FORMAT,
+                    ..stages
+                },
+                Into::OverDepth => GraphicsPipelineDesc {
+                    color_formats: &[],
+                    depth_format: DEPTH_FORMAT,
+                    depth_write: false,
+                    depth_compare: vk::CompareOp::LESS_OR_EQUAL,
+                    ..stages
+                },
             })
         }
         let mut pipelines = Pipeline::create_many(
             device,
             bindless.pipeline_layout(),
             &[
-                desc((&vertex, c"pickVertex"), (&fragment, c"pickFragment"), true),
+                desc(
+                    (&vertex, c"pickVertex"),
+                    Some((&fragment, c"pickFragment")),
+                    Into::Ids,
+                ),
                 desc(
                     (&vertex_masked, c"pickVertexMasked"),
-                    (&fragment_masked, c"pickFragmentMasked"),
-                    true,
+                    Some((&fragment_masked, c"pickFragmentMasked")),
+                    Into::Ids,
                 ),
                 desc(
                     (&list_vertex, c"pickListVertex"),
-                    (&list_fragment, c"pickListFragment"),
-                    false,
+                    Some((&list_fragment, c"pickListFragment")),
+                    Into::Nothing,
                 ),
                 desc(
                     (&list_vertex_masked, c"pickListVertexMasked"),
-                    (&list_fragment_masked, c"pickListFragmentMasked"),
-                    false,
+                    Some((&list_fragment_masked, c"pickListFragmentMasked")),
+                    Into::Nothing,
+                ),
+                desc((&depth_vertex, c"depthVertex"), None, Into::Depth),
+                desc(
+                    (&depth_vertex_masked, c"depthVertexMasked"),
+                    Some((&depth_fragment_masked, c"shadowFragmentMasked")),
+                    Into::Depth,
+                ),
+                desc(
+                    (&list_vertex, c"pickListVertex"),
+                    Some((&visible_fragment, c"pickVisibleFragment")),
+                    Into::OverDepth,
+                ),
+                desc(
+                    (&list_vertex_masked, c"pickListVertexMasked"),
+                    Some((&visible_fragment_masked, c"pickVisibleFragmentMasked")),
+                    Into::OverDepth,
                 ),
             ],
         )?
         .into_iter();
-        let (Some(opaque), Some(masked), Some(list_opaque), Some(list_masked)) = (
-            pipelines.next(),
-            pipelines.next(),
-            pipelines.next(),
-            pipelines.next(),
-        ) else {
-            return Err(RhiError::Vulkan {
+        let mut next = || {
+            pipelines.next().ok_or(RhiError::Vulkan {
                 call: "pick pipelines (fewer than described)",
                 result: vk::Result::ERROR_UNKNOWN,
-            });
+            })
         };
+        let (opaque, masked) = (next()?, next()?);
+        let (list_opaque, list_masked) = (next()?, next()?);
+        let (depth_opaque, depth_masked) = (next()?, next()?);
+        let (visible_opaque, visible_masked) = (next()?, next()?);
         let frames_in_flight = frames_in_flight.max(1) as u64;
         // One more than the frames in flight in each ring: with a poll every frame, one is
         // free.
@@ -517,6 +604,8 @@ impl Picker {
         Ok(Self {
             pipelines: [opaque, masked],
             list_pipelines: [list_opaque, list_masked],
+            depth_pipelines: [depth_opaque, depth_masked],
+            visible_pipelines: [visible_opaque, visible_masked],
             readbacks,
             lists,
             frames_in_flight,
@@ -527,14 +616,16 @@ impl Picker {
     }
 
     /// The driver's statistics of the pipelines (registers, occupancy), when the device
-    /// captures them: the nearest surfaces' two, then the lists' two.
-    pub fn statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 4] {
-        [
-            self.pipelines[0].statistics(device),
-            self.pipelines[1].statistics(device),
-            self.list_pipelines[0].statistics(device),
-            self.list_pipelines[1].statistics(device),
-        ]
+    /// captures them: the nearest surfaces' two, the lists' two, the depth's two, and the
+    /// two of what shows over it.
+    pub fn statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 8] {
+        let all = [
+            &self.pipelines,
+            &self.list_pipelines,
+            &self.depth_pipelines,
+            &self.visible_pipelines,
+        ];
+        core::array::from_fn(|i| all[i / 2][i % 2].statistics(device))
     }
 
     /// Takes the newest pick whose frame has finished (call each frame before the `add_*`
@@ -801,11 +892,11 @@ impl Picker {
         PickPass::Declared
     }
 
-    /// Declares a pick of what lies under `request`'s pixel in a view of the persistent
-    /// scene drawn this frame: the candidates within its radius, drawn alone through
-    /// `view`'s camera without a depth test, each keeping its nearest depth there (the
-    /// first [`MAX_LIST`] in the scene's order). The picker must live until the frame has
-    /// executed.
+    /// Declares a pick of what lies in `request`'s pixels in a view of the persistent
+    /// scene drawn this frame: the candidates there (the first [`MAX_LIST`] in the scene's
+    /// order), drawn alone through `view`'s camera, each keeping its nearest depth there:
+    /// without a depth test, or over their own depth with [`ListRequest::visible`]. The
+    /// picker must live until the frame has executed.
     #[allow(clippy::too_many_arguments)]
     pub fn add_list_pass<'g>(
         &mut self,
@@ -820,8 +911,13 @@ impl Picker {
         frame_number: u64,
     ) -> PickPass {
         engine_profiler::zone!("render::Picker::add_list_pass");
-        let r = request.radius.min(CENTER);
-        let [x0, y0, x1, y1] = region(request.x, request.y, r, r + 1, view.size);
+        let (width, height) = view.size;
+        let [x0, y0, x1, y1] = [
+            request.rect[0].min(width),
+            request.rect[1].min(height),
+            request.rect[2].min(width),
+            request.rect[3].min(height),
+        ];
         if x0 >= x1 || y0 >= y1 {
             return PickPass::Empty;
         }
@@ -877,6 +973,10 @@ impl Picker {
             });
         // The view's pixel grid shifted so that the region's corner lands at the origin;
         // only the region is rasterized.
+        let extent = vk::Extent2D {
+            width: x1 - x0,
+            height: y1 - y0,
+        };
         let area = DrawArea {
             viewport: vk::Rect2D {
                 offset: vk::Offset2D {
@@ -890,10 +990,7 @@ impl Picker {
             },
             scissor: vk::Rect2D {
                 offset: vk::Offset2D::default(),
-                extent: vk::Extent2D {
-                    width: x1 - x0,
-                    height: y1 - y0,
-                },
+                extent,
             },
         };
         let base = Push {
@@ -905,37 +1002,94 @@ impl Picker {
             materials: materials.address(),
             ..bytemuck::Zeroable::zeroed()
         };
-        let pipelines = [self.list_pipelines[0].raw(), self.list_pipelines[1].raw()];
+        let raw = |p: &[Pipeline; 2]| [p[0].raw(), p[1].raw()];
         let (runs, count) = self.candidates.runs();
         let geometry_copy = *geometry;
-        materials
-            .read(geometry.read(fg.add_pass("pick list")))
-            .read(scene.current, Access::StorageRead(ShaderStages::VERTEX))
-            .write(depths, Access::StorageReadWrite(ShaderStages::FRAGMENT))
-            .execute(move |ctx| {
-                let push = Push {
-                    light_tiles: ctx.address(depths),
-                    ..base
-                };
-                // SAFETY: the pass has no attachments and no rendering is begun; it reads
-                // the pool, the material table and the scene's instances, writes only the
-                // depths it declared, the draws lie in the ring's slot for this frame, and
-                // the picker outlives the frame.
-                unsafe {
-                    ctx.begin_rendering_without_attachments(area.scissor.extent);
-                    draw_groups(
-                        ctx,
-                        bindless,
-                        &geometry_copy,
-                        pipelines,
-                        &push,
-                        &runs[..count],
-                        commands,
-                        area,
-                    );
-                    ctx.end_rendering();
-                }
-            });
+        if request.visible {
+            // The candidates' nearest surfaces first, then each keeps its depth where it is
+            // the nearest.
+            let depth = fg.create_texture(
+                "pick list depth",
+                TextureDesc::new_2d(DEPTH_FORMAT, extent.width, extent.height),
+            );
+            let pipelines = raw(&self.depth_pipelines);
+            materials
+                .read(geometry.read(fg.add_pass("pick list depth")))
+                .read(scene.current, Access::StorageRead(ShaderStages::VERTEX))
+                .depth(depth, LoadOp::Clear([1.0, 0.0, 0.0, 0.0]), StoreOp::Store)
+                .execute(move |ctx| {
+                    // SAFETY: recording inside the pass's rendering scope; the pass reads
+                    // the pool, the material table and the scene's instances, the draws lie
+                    // in the ring's slot for this frame, and the picker outlives the frame.
+                    unsafe {
+                        draw_groups(
+                            ctx,
+                            bindless,
+                            &geometry_copy,
+                            pipelines,
+                            &base,
+                            &runs[..count],
+                            commands,
+                            area,
+                        );
+                    }
+                });
+            let pipelines = raw(&self.visible_pipelines);
+            materials
+                .read(geometry.read(fg.add_pass("pick list")))
+                .read(scene.current, Access::StorageRead(ShaderStages::VERTEX))
+                .write(depths, Access::StorageReadWrite(ShaderStages::FRAGMENT))
+                .depth(depth, LoadOp::Load, StoreOp::DontCare)
+                .execute(move |ctx| {
+                    let push = Push {
+                        light_tiles: ctx.address(depths),
+                        ..base
+                    };
+                    // SAFETY: as the depth's pass; it writes only the depths it declared.
+                    unsafe {
+                        draw_groups(
+                            ctx,
+                            bindless,
+                            &geometry_copy,
+                            pipelines,
+                            &push,
+                            &runs[..count],
+                            commands,
+                            area,
+                        );
+                    }
+                });
+        } else {
+            let pipelines = raw(&self.list_pipelines);
+            materials
+                .read(geometry.read(fg.add_pass("pick list")))
+                .read(scene.current, Access::StorageRead(ShaderStages::VERTEX))
+                .write(depths, Access::StorageReadWrite(ShaderStages::FRAGMENT))
+                .execute(move |ctx| {
+                    let push = Push {
+                        light_tiles: ctx.address(depths),
+                        ..base
+                    };
+                    // SAFETY: the pass has no attachments and no rendering is begun; it
+                    // reads the pool, the material table and the scene's instances, writes
+                    // only the depths it declared, the draws lie in the ring's slot for
+                    // this frame, and the picker outlives the frame.
+                    unsafe {
+                        ctx.begin_rendering_without_attachments(extent);
+                        draw_groups(
+                            ctx,
+                            bindless,
+                            &geometry_copy,
+                            pipelines,
+                            &push,
+                            &runs[..count],
+                            commands,
+                            area,
+                        );
+                        ctx.end_rendering();
+                    }
+                });
+        }
         fg.add_pass("pick list copy")
             .read(depths, Access::TransferRead)
             .write(out, Access::TransferWrite)

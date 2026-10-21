@@ -2220,10 +2220,25 @@ PickListMaskedOut pickListVertexMasked(uint vertex : SV_VulkanVertexID, uint ite
 }
 
 // Depths run from 0 at the near plane to 1 at the far one, so as bits the nearest is the
-// least. (A helper lane's atomic does nothing.)
+// least. An object covering many pixels would make its word the target of all of them:
+// one atomic per wave when the wave shades one item, made by a lane that is not a helper
+// (helpers' atomics do nothing), and none when the word already holds a depth as near (it
+// only decreases, so an old value read here is never nearer than the true one).
 void keep_nearest(uint item, float depth)
 {
-    InterlockedMin(push.light_tiles[item], asuint(depth));
+    uint* word = push.light_tiles + item;
+    uint bits = asuint(depth);
+    bool real = !IsHelperLane();
+    if (WaveActiveAllEqual(item))
+    {
+        uint least = WaveActiveMin(real ? bits : 0xFFFFFFFFu);
+        if (real && WavePrefixCountBits(real) == 0 && least < *word)
+            InterlockedMin(*word, least);
+    }
+    else if (real && bits < *word)
+    {
+        InterlockedMin(*word, bits);
+    }
 }
 
 [shader("fragment")]
@@ -2234,6 +2249,27 @@ void pickListFragment(PickListOut input)
 
 [shader("fragment")]
 void pickListFragmentMasked(PickListMaskedOut input)
+{
+    MaterialContext ctx = coverage_context(input.uv, input.material);
+    MATERIAL.Params p = MATERIAL::load(ctx);
+    if (MATERIAL::alpha(ctx, p) < MATERIAL::alpha_cutoff(p))
+        discard;
+    keep_nearest(input.item, input.position.z);
+}
+
+// Only what shows (a box's visible pixels): drawn over the candidates' own depth and tested
+// against it (less or equal) before shading, so only each pixel's nearest surface keeps
+// its depth. The positions are `precise`, so the depth pass's and these match.
+[shader("fragment")]
+[earlydepthstencil]
+void pickVisibleFragment(PickListOut input)
+{
+    keep_nearest(input.item, input.position.z);
+}
+
+[shader("fragment")]
+[earlydepthstencil]
+void pickVisibleFragmentMasked(PickListMaskedOut input)
 {
     MaterialContext ctx = coverage_context(input.uv, input.material);
     MATERIAL.Params p = MATERIAL::load(ctx);

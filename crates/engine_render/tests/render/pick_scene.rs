@@ -7,6 +7,10 @@
 //! middle the square picks D while transparent surfaces count and A otherwise; the list
 //! holds D, A, C front to back (A and C without D when transparent surfaces do not count),
 //! never B or E; a pixel outside the view picks nothing.
+//!
+//! Boxes: over the whole view, what shows is D, C and E while transparent surfaces count
+//! (D covers A on the screen and hides it), A, C and E otherwise; every surface there is D,
+//! A, C and E; a box around E alone holds E.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -143,12 +147,7 @@ fn scene_picks_draw_the_candidates_under_the_pixel() {
         y: middle,
         transparent,
     };
-    let list = |transparent| ListRequest {
-        x: middle,
-        y: middle,
-        radius: 3,
-        transparent,
-    };
+    let list = |transparent| ListRequest::around(middle, middle, 3, transparent);
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
     // SAFETY: plain object creation.
@@ -174,7 +173,18 @@ fn scene_picks_draw_the_candidates_under_the_pixel() {
     // surfaces, without them, then outside the view).
     let mut squares = Vec::new();
     let mut lists = Vec::new();
-    for frame_number in 1..=4u64 {
+    let whole = |visible, transparent| ListRequest {
+        rect: [0, 0, SIZE, SIZE],
+        visible,
+        transparent,
+    };
+    // E's side of the view: its quad, none of the others'.
+    let around_e = ListRequest {
+        rect: [200, 100, SIZE, 156],
+        visible: true,
+        transparent: true,
+    };
+    for frame_number in 1..=8u64 {
         if let Some(r) = picker.poll(frame_number) {
             squares.push((r.request, r.nearest(0)));
         }
@@ -247,19 +257,20 @@ fn scene_picks_draw_the_candidates_under_the_pixel() {
                     },
                 )
                 .unwrap();
+            let outside = PickRequest {
+                x: SIZE + 10,
+                ..square(true)
+            };
             let (pick, listed) = match frame_number {
                 1 => (square(true), list(true)),
                 2 => (square(false), list(false)),
-                _ => (
-                    PickRequest {
-                        x: SIZE + 10,
-                        ..square(true)
-                    },
-                    ListRequest {
-                        x: SIZE + 10,
-                        ..list(true)
-                    },
-                ),
+                3 => (outside, ListRequest::around(SIZE + 10, middle, 3, true)),
+                4 => (outside, whole(true, true)),
+                5 => (outside, whole(true, false)),
+                6 => (outside, whole(false, true)),
+                7 => (outside, around_e),
+                // The last frame only takes the one before's.
+                _ => (outside, ListRequest::around(SIZE + 10, middle, 3, true)),
             };
             let picked = picker.add_scene_pass(
                 &mut fg,
@@ -283,14 +294,19 @@ fn scene_picks_draw_the_candidates_under_the_pixel() {
                 listed,
                 frame_number,
             );
-            let expected = if frame_number <= 2 {
-                PickPass::Declared
-            } else {
-                PickPass::Empty
+            let declared = |yes| {
+                if yes {
+                    PickPass::Declared
+                } else {
+                    PickPass::Empty
+                }
             };
             assert_eq!(
                 (picked, listed),
-                (expected, expected),
+                (
+                    declared(frame_number <= 2),
+                    declared(frame_number != 3 && frame_number < 8)
+                ),
                 "frame {frame_number}"
             );
             fg.execute_with_bindless(&mut allocator, Some(&bindless))
@@ -317,15 +333,36 @@ fn scene_picks_draw_the_candidates_under_the_pixel() {
         "the nearest surface, the blended one only while it counts"
     );
     assert_eq!(
-        lists,
+        lists[..2],
         [(list(true), vec![dd, a, c]), (list(false), vec![a, c])],
         "front to back, the hidden ones too; never the invisible one or the one aside"
     );
-    assert!(
-        ![b, e]
-            .iter()
-            .any(|s| lists.iter().any(|(_, l)| l.contains(s)))
+    // The boxes, as sets.
+    let boxes: Vec<(ListRequest, Vec<u32>)> = lists[2..]
+        .iter()
+        .map(|(r, l)| {
+            let mut l = l.clone();
+            l.sort_unstable();
+            (*r, l)
+        })
+        .collect();
+    let sorted = |mut v: Vec<u32>| {
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(
+        boxes,
+        [
+            (whole(true, true), sorted(vec![dd, c, e])),
+            (whole(true, false), sorted(vec![a, c, e])),
+            (whole(false, true), sorted(vec![dd, a, c, e])),
+            (around_e, vec![e]),
+        ],
+        "what shows in a box, or everything there"
     );
+    // The invisible one in none; the one aside only in boxes.
+    assert!(!lists.iter().any(|(_, l)| l.contains(&b)));
+    assert!(!lists[..2].iter().any(|(_, l)| l.contains(&e)));
 
     // SAFETY: the device is idle.
     unsafe {
