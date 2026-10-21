@@ -564,6 +564,8 @@ pub struct Player {
     timing: engine_runtime::Timing,
     /// The world's time runs ([`Player::set_simulating`]).
     simulating: bool,
+    /// Ticks to run while the world is kept still ([`Player::step_tick`]).
+    steps: u32,
 }
 
 /// One of the pack's instances as the level made it: what loading a save makes again
@@ -1124,6 +1126,7 @@ impl Player {
             first_present_ms: None,
             timing,
             simulating: true,
+            steps: 0,
             assets: crate::Assets::new(settings.project.clone().unwrap_or_default()),
             blockout: crate::Blockout::new(),
             view_rect: None,
@@ -1200,6 +1203,17 @@ impl Player {
     /// Whether the world's time runs ([`Self::set_simulating`]).
     pub fn simulating(&self) -> bool {
         self.simulating
+    }
+
+    /// While the world is kept still, runs its next tick as if it were not: the timers
+    /// and tweens move and the game's tick runs, once (the editor's step while paused).
+    pub fn step_tick(&mut self) {
+        self.steps += 1;
+    }
+
+    /// Steps asked for that have not run yet ([`Self::step_tick`]).
+    pub fn steps_pending(&self) -> u32 {
+        self.steps
     }
 
     /// Ends what a run of the game left in the player (ADR 0107 E3, the editor's Stop):
@@ -1974,6 +1988,7 @@ impl Player {
         }
         let joined = self.net.as_ref().is_some_and(|n| n.is_client());
         let simulating = self.simulating;
+        let mut steps = self.steps;
         let stages = {
             let game_cell = RefCell::new(&mut *game);
             let timing = &mut self.timing;
@@ -2023,9 +2038,13 @@ impl Player {
                         if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                             input.sample_tick(Instant::now());
                         }
-                        // Kept still: the tick only places and extracts what is there.
+                        // Kept still: the tick only places and extracts what is there, but
+                        // for a step asked for (`Player::step_tick`).
                         if !simulating {
-                            return;
+                            if steps == 0 {
+                                return;
+                            }
+                            steps -= 1;
                         }
                         // Hosting: the guests' inputs in, the host's input into its pawn.
                         if let Some(host) = net.as_mut() {
@@ -2043,6 +2062,7 @@ impl Player {
                 ),
             }
         };
+        self.steps = steps;
         report.ticks = stages.ticks;
         report.simulate = stages.simulate_us;
         report.propagate = stages.propagate_us;

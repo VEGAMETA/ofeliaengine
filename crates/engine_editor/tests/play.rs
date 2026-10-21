@@ -134,6 +134,8 @@ fn player(dir: &Path, title: &str) -> Option<(Player, PlayerSettings)> {
         process_setup: false,
         pipeline_cache: Some(None),
         warm_up: false,
+        // The game's input, which an eject takes the keyboard from.
+        input: Some(engine_input::InputMap::new()),
         ..PlayerSettings::default()
     };
     let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
@@ -295,6 +297,183 @@ fn a_panic_in_the_games_tick_stops_play_and_says_where() {
         frame(&mut player, &mut game, &mut overlay);
     }
     assert_eq!(cameras(player.world_mut()), [0, i32::MAX]);
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The scene's crate's x and the score.
+fn state(world: &mut World) -> (f32, u32) {
+    let crate_ = find_named(world, "Crate").unwrap();
+    let x = world.get::<Transform>(crate_).unwrap().translation.x;
+    (x, world.resource::<Score>().map_or(0, |s| s.0))
+}
+
+#[test]
+fn pause_stands_the_game_still_and_a_step_runs_one_tick() {
+    let dir = temp_dir("play-pause");
+    write_scene(&dir);
+    let Some((mut player, settings)) = player(&dir, "editor pause test") else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    // F7: the world stands, the game's hooks wait.
+    assert!(game.run_command(player.world_mut(), "play.pause"));
+    frame(&mut player, &mut game, &mut overlay);
+    let (x, score) = state(player.world_mut());
+    assert!(x > 0.1 && score > 5, "{x} {score}");
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(state(player.world_mut()), (x, score), "paused");
+    assert!(game.playing() && game.message().unwrap().starts_with("Paused"));
+    // Shift+F7: one tick, then paused again.
+    assert!(game.run_command(player.world_mut(), "play.step"));
+    for _ in 0..5 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let (stepped, after) = state(player.world_mut());
+    assert_eq!(after, score + 1, "one tick");
+    let dt = (1.0 / settings.tick_hz) as f32;
+    assert!((stepped - x - dt).abs() < 1e-4, "{stepped} after {x}");
+    // F7 again: on.
+    assert!(game.run_command(player.world_mut(), "play.pause"));
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let (on, later) = state(player.world_mut());
+    assert!(on > stepped && later > after + 5, "{on} {later}");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn restart_plays_again_from_the_scene() {
+    let dir = temp_dir("play-restart");
+    write_scene(&dir);
+    let Some((mut player, settings)) = player(&dir, "editor restart test") else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..30 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let (x, score) = state(player.world_mut());
+    assert!(x > 0.3 && score > 20);
+    // Ctrl+F5: stopped and played again, the game made anew on the scene.
+    assert!(game.run_command(player.world_mut(), "play.restart"));
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.playing());
+    frame(&mut player, &mut game, &mut overlay);
+    let (x, score) = state(player.world_mut());
+    assert!(x < 0.05 && score <= 2, "from the start: {x} {score}");
+    assert_eq!(unnamed(player.world_mut()), 1, "one shot, the new game's");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn play_from_here_starts_the_scenes_camera_at_the_editors() {
+    let dir = temp_dir("play-here");
+    write_scene(&dir);
+    let Some((mut player, settings)) = player(&dir, "editor play from here test") else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    // Where the editor's camera is (the camera above every other).
+    let world = player.world_mut();
+    let mut q = QueryState::<(&Camera, &Transform)>::new(world);
+    let editor_eye = q
+        .iter_readonly(world)
+        .find(|(c, _)| c.priority == i32::MAX)
+        .map(|(_, t)| t.translation)
+        .unwrap();
+    let camera = find_named(world, "Camera").unwrap();
+    let scene_eye = world.get::<Transform>(camera).unwrap().translation;
+    assert!(
+        editor_eye.distance(scene_eye) > 1.0,
+        "{editor_eye} {scene_eye}"
+    );
+    // Shift+F5: the scene's camera starts there, and the game is told where.
+    assert!(game.run_command(player.world_mut(), "play.from_here"));
+    frame(&mut player, &mut game, &mut overlay);
+    let world = player.world_mut();
+    let at = world.get::<Transform>(camera).unwrap().translation;
+    assert!(at.distance(editor_eye) < 1e-3, "{at} {editor_eye}");
+    let from = *world.resource::<engine_app::PlayFrom>().unwrap();
+    assert!(from.position.distance(editor_eye) < 1e-3);
+    // Stop: both as they were.
+    assert!(game.run_command(player.world_mut(), "play.stop"));
+    frame(&mut player, &mut game, &mut overlay);
+    let world = player.world_mut();
+    assert_eq!(
+        world.get::<Transform>(camera).unwrap().translation,
+        scene_eye
+    );
+    assert!(world.resource::<engine_app::PlayFrom>().is_none());
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn eject_gives_the_editor_its_camera_on_the_running_game() {
+    let dir = temp_dir("play-eject");
+    write_scene(&dir);
+    let Some((mut player, settings)) = player(&dir, "editor eject test") else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(cameras(player.world_mut()), [0]);
+    // Shift+F8: the editor's camera back, the game running on without the keyboard.
+    assert!(game.run_command(player.world_mut(), "play.eject"));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let world = player.world_mut();
+    assert_eq!(cameras(world), [0, i32::MAX]);
+    let input = world.resource::<engine_input::Input>().unwrap();
+    assert!(!input.devices().keyboard_mouse);
+    let (x, _) = state(world);
+    for _ in 0..5 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(state(player.world_mut()).0 > x, "the game runs on");
+    // Shift+F8 again: back in the game, its keyboard with it.
+    assert!(game.run_command(player.world_mut(), "play.eject"));
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let world = player.world_mut();
+    assert_eq!(cameras(world), [0]);
+    assert!(
+        world
+            .resource::<engine_input::Input>()
+            .unwrap()
+            .devices()
+            .keyboard_mouse
+    );
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

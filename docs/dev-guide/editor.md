@@ -141,6 +141,9 @@ editor = ["dep:engine_editor"]
 | Drag the selection over surfaces | Ctrl+Shift with a move handle |
 | What rotating and scaling turn about: the middle, each entity's own origin, the active entity | . (Period) |
 | Play the scene, stop ([playing](#playing)) | F5, F8 |
+| Play from the editor's camera; restart | Shift+F5; Ctrl+F5 |
+| Pause or go on; step one tick | F7; Shift+F7 |
+| Eject (the editor's camera and tools on the running game), return | Shift+F8 |
 
 These are our keys, the default (team decision, 2026-10-21): the left hand stays beside
 W, A, S, D, which fly the camera. **Editor: Key Map…** (Ctrl+Shift+P) takes another set,
@@ -502,6 +505,27 @@ Stop puts back everything the game changed or added:
 
 Keeping the scene and putting it back take milliseconds: 7 and 8 ms for 10,000 entities.
 
+### Pausing, stepping, playing from here
+
+- **F7** (or ⏸) pauses: the world's time stands (its timers, tweens and sounds), your
+  game's hooks are not called, and the frame shows where it stopped. F7 again goes on.
+- **Shift+F7** runs one tick while paused (pausing first): one `Game::tick`, timers and
+  tweens one tick on, then paused again.
+- **Shift+F5** plays from the editor's camera:
+  - the scene's main camera starts where the editor's camera is;
+  - `engine_app::PlayFrom` (its position and rotation) is in the world while the game's
+    `start` runs, for your game to put its player there.
+
+  Stop puts both back.
+- **Ctrl+F5** restarts: Stop and Play at once, from the camera again if the last Play
+  was from there.
+- **Shift+F8** ejects, Unreal's F8:
+  - the editor's camera and tools come back on the running game, so you can fly around
+    it, select and move things while it runs;
+  - the game's keyboard and mouse are off meanwhile.
+
+  Shift+F8 again returns to the game.
+
 **A panic in your game's code** stops Play instead of the editor. The status bar says the
 message and where it happened (`the game panicked in `tick`: … (src/game.rs:42)`), and the
 crash reporter still writes its report.
@@ -589,7 +613,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | Phase | What |
 |---|---|
 | E2b | blockout: brushes for greyboxing a level (box, wedge, stairs, cylinder; add, subtract), their colliders and navigation mesh |
-| E3 | Play: pause and step, play from the editor's camera, restart, keeping changes, the game's own window (Play and Stop are done) |
+| E3 | Play: keeping changes, the game's own window (Play and Stop, pause and step, play from here, restart and eject are done) |
 
 The whole plan is ADR 0107 §7.
 

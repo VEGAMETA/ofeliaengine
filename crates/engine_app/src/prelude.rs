@@ -8,7 +8,7 @@
 
 pub use crate::{
     AudioListener, AudioSource, AudioSource3D, FrameParts, Game, MaterialFile, Mixer, Model,
-    Network, Player, PlayerSettings, ReverbZone, Room, Saves, Setup, Window, builtin,
+    Network, PlayFrom, Player, PlayerSettings, ReverbZone, Room, Saves, Setup, Window, builtin,
 };
 pub use engine_core::math::{Affine3A, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use engine_ecs::{

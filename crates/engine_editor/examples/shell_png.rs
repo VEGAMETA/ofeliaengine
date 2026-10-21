@@ -408,6 +408,7 @@ fn main() {
         ],
         active_bottom: None,
         playing,
+        paused: false,
         status: &status,
         snap: false,
         steps: ["0.1 m", "45°", "0.1"],

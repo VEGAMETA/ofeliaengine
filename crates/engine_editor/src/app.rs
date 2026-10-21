@@ -497,6 +497,7 @@ pub fn editor<G: Game>(
             game: None,
             start,
             failed: None,
+            stepping: false,
         },
         EditorOverlay {
             shared,
@@ -570,9 +571,14 @@ struct CommandIds {
     /// Blockout groups baked into glTF files drawn in their place, and back (E2b-6).
     bake: CommandId,
     unbake: CommandId,
-    /// Play and Stop (ADR 0107 E3).
+    /// Play and Stop (ADR 0107 E3), and the controls while playing.
     play: CommandId,
     stop: CommandId,
+    play_from_here: CommandId,
+    restart_play: CommandId,
+    pause: CommandId,
+    step: CommandId,
+    eject: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
     /// the next pivot.
     steps: [CommandId; 3],
@@ -656,6 +662,11 @@ fn commands() -> (Commands, CommandIds) {
         unbake: c.register("blockout.unbake", "Blockout", "Unbake"),
         play: c.register("play.play", "Play", "Play Scene"),
         stop: c.register("play.stop", "Play", "Stop"),
+        play_from_here: c.register("play.from_here", "Play", "Play from Here"),
+        restart_play: c.register("play.restart", "Play", "Restart"),
+        pause: c.register("play.pause", "Play", "Pause or Go On"),
+        step: c.register("play.step", "Play", "Step One Tick"),
+        eject: c.register("play.eject", "Play", "Eject or Return to the Game"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
             c.register("snap.angle_step", "Snapping", "Angle Step…"),
@@ -734,9 +745,15 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Shift+B", ids.draw_cut),
         ("Ctrl+H", ids.hollow),
         ("Tab", ids.edit_faces),
-        // Godot's keys (`docs/research/ux/play-mode.md` §5).
+        // Godot's keys (`docs/research/ux/play-mode.md` §5), Unreal's "Play from Here" on
+        // Shift+F5 and its eject beside Stop; F9 to F11 stay free for the script debugger.
         ("F5", ids.play),
         ("F8", ids.stop),
+        ("Shift+F5", ids.play_from_here),
+        ("Ctrl+F5", ids.restart_play),
+        ("F7", ids.pause),
+        ("Shift+F7", ids.step),
+        ("Shift+F8", ids.eject),
     ];
     // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
     // - ours: Q, E, R at once and with Shift the gizmo's handles, the left hand beside
@@ -2060,8 +2077,13 @@ impl Editor {
         if let Some(under) = self.under_pointer.take() {
             self.offer_under_pointer(world, under);
         }
-        // The editor's camera while editing; the game's cameras while playing.
-        let camera = (!playing).then(|| self.camera(world));
+        // The editor's camera while editing or ejected; the game's cameras in the game's
+        // view.
+        let game_view = self.game_view();
+        if game_view && let Some(camera) = self.camera.take() {
+            world.despawn(camera);
+        }
+        let camera = (!game_view).then(|| self.camera(world));
         self.collect_rows(world);
         self.frames += 1;
         let elapsed = self.since.elapsed().as_secs_f64();
@@ -2086,7 +2108,7 @@ impl Editor {
             })
         });
         if over_view
-            && !playing
+            && !game_view
             && self.ui.editing().is_none()
             && self.key_transform.is_none()
             && self
@@ -2312,9 +2334,17 @@ impl Editor {
         let step_items: [&[MenuItem<'_>]; 3] =
             core::array::from_fn(|k| &step_items[k][..STEP_VALUES[k].len()]);
         self.status.clear();
-        if playing {
-            self.status
-                .push_str("Playing: keys without Ctrl go to the game; F8 stops  ·  ");
+        match &self.play {
+            Some(p) if p.ejected.is_some() => self.status.push_str(
+                "Ejected: the editor's camera on the running game; Shift+F8 returns, F8 stops  ·  ",
+            ),
+            Some(p) if p.paused => self
+                .status
+                .push_str("Paused: F7 goes on, Shift+F7 steps a tick, F8 stops  ·  "),
+            Some(_) => self.status.push_str(
+                "Playing: keys without Ctrl go to the game; F7 pauses, Shift+F8 ejects, F8 stops  ·  ",
+            ),
+            None => {}
         }
         if self.key_transform.is_some() {
             let _ = write!(self.status, "{}  ·  ", transform::HELP);
@@ -2493,6 +2523,7 @@ impl Editor {
             ],
             active_bottom: None,
             playing,
+            paused: self.play.as_ref().is_some_and(|p| p.paused),
             status: &self.status,
             snap: self.snapping.on,
             steps: self.step_labels.each_ref().map(String::as_str),
@@ -2517,6 +2548,9 @@ impl Editor {
         }
         if response.play {
             self.run(world, self.ids.play);
+        }
+        if response.pause {
+            self.run(world, self.ids.pause);
         }
         if response.stop {
             self.run(world, self.ids.stop);
@@ -2671,8 +2705,9 @@ impl Editor {
         };
         for i in 0..chords {
             let chord = self.input.chords()[i];
-            // While playing, the keys without Ctrl or Alt are the game's, but F1 to F12.
-            if playing && !chord.ctrl && !chord.alt && !is_function_key(chord.key) {
+            // In the game's view, the keys without Ctrl or Alt are the game's, but F1 to
+            // F12.
+            if game_view && !chord.ctrl && !chord.alt && !is_function_key(chord.key) {
                 continue;
             }
             if let Some(id) = self.keymap.lookup(chord, contexts)
@@ -2687,8 +2722,8 @@ impl Editor {
             .ui
             .rect_of(response.viewport)
             .map(|r| [r.pos[0], r.pos[1], r.size[0], r.size[1]]);
-        // Playing: the viewport is the game's view, without the editor's tools.
-        if playing {
+        // The game's view: the viewport without the editor's tools.
+        if game_view {
             if let Some([x, y, w, h]) = rect {
                 self.view_rect = Some([
                     (x * scale).round() as u32,
@@ -5148,7 +5183,7 @@ impl Editor {
     /// Play begins (ADR 0107 E3): the tools and gestures end, the editor's camera goes
     /// (the game's cameras show the world), and the world is kept as it is: its scene
     /// entities, its resources, the history's place and the selection.
-    fn prepare_play(&mut self, world: &mut World) -> Playing {
+    fn prepare_play(&mut self, world: &mut World, from_here: bool) -> Playing {
         let started = Instant::now();
         self.key_transform = None;
         self.draw = None;
@@ -5179,7 +5214,81 @@ impl Editor {
             selection,
             started,
             entered: Duration::ZERO,
+            from_here,
+            paused: false,
+            ejected: None,
         }
+    }
+
+    /// Whether the viewport is the game's: playing and not ejected.
+    fn game_view(&self) -> bool {
+        self.play.as_ref().is_some_and(|p| p.ejected.is_none())
+    }
+
+    /// "Play from Here": the editor's camera as the game's start (ADR 0107 E3): the
+    /// scene's main camera put there, and `PlayFrom` in the world for the game's player
+    /// (both put back at Stop, with the rest of the scene).
+    fn play_from_here(&mut self, world: &mut World) {
+        let eye = self.orbit.eye();
+        let rotation = look_rotation(eye, self.orbit.target, Vec3::Y);
+        world.insert_resource(engine_app::PlayFrom {
+            position: eye,
+            rotation,
+        });
+        let mut cameras = QueryState::<(Entity, &Camera), engine_ecs::With<SceneId>>::new(world);
+        let main = cameras
+            .iter_readonly(world)
+            .filter(|(_, c)| c.active != 0)
+            .max_by_key(|(_, c)| c.priority)
+            .map(|(e, _)| e);
+        let Some(main) = main else {
+            return;
+        };
+        // In its parent's space, so it lands at the editor's camera in the world.
+        let parent = world
+            .parent(main)
+            .and_then(|p| world.get::<GlobalTransform>(p))
+            .map_or(Affine3A::IDENTITY, |g| g.0);
+        let local = parent.inverse() * Affine3A::from_rotation_translation(rotation, eye);
+        let (_, rotation, translation) = local.to_scale_rotation_translation();
+        if let Some(t) = world.get_mut::<Transform>(main) {
+            t.translation = translation;
+            t.rotation = rotation;
+        }
+    }
+
+    /// Eject, or return to the game (Unreal's F8): the editor's camera and tools on the
+    /// running world, the game's keyboard and mouse off meanwhile.
+    fn eject(&mut self, world: &mut World) {
+        let Some(p) = self.play.as_mut() else {
+            self.say(String::from("Nothing is playing (F5 plays the scene)"));
+            return;
+        };
+        let message = match p.ejected.take() {
+            None => {
+                let input = world.resource_mut::<engine_input::Input>();
+                let devices = input.map(|input| {
+                    let devices = input.devices();
+                    input.set_devices(engine_input::DeviceFilter {
+                        keyboard_mouse: false,
+                        gamepads: 0,
+                    });
+                    input.release_all();
+                    devices
+                });
+                p.ejected = Some(devices);
+                "Ejected: the editor's camera and tools on the running game (Shift+F8 returns)"
+            }
+            Some(devices) => {
+                if let (Some(devices), Some(input)) =
+                    (devices, world.resource_mut::<engine_input::Input>())
+                {
+                    input.set_devices(devices);
+                }
+                "Back in the game"
+            }
+        };
+        self.say(String::from(message));
     }
 
     /// Play ends: the resources the game added go, the world is put back as Play found
@@ -5187,6 +5296,11 @@ impl Editor {
     /// to say.
     fn finish_play(&mut self, world: &mut World, playing: Playing, why: Option<String>) -> String {
         let t = Instant::now();
+        if let Some(Some(devices)) = playing.ejected
+            && let Some(input) = world.resource_mut::<engine_input::Input>()
+        {
+            input.set_devices(devices);
+        }
         let now: Vec<TypeId> = world.resource_types().collect();
         for kind in now {
             if !playing.resources.contains(&kind) {
@@ -5820,10 +5934,28 @@ impl Editor {
             }
         } else if id == ids.unbake {
             self.unbake(world);
-        } else if id == ids.play {
+        } else if id == ids.play || id == ids.play_from_here {
             if self.play.is_none() {
-                self.play_request = Some(PlayRequest::Play);
+                let from_here = id == ids.play_from_here;
+                self.play_request = Some(PlayRequest::Play { from_here });
             }
+        } else if id == ids.restart_play {
+            self.play_request = Some(match self.play {
+                Some(_) => PlayRequest::Restart,
+                None => PlayRequest::Play { from_here: false },
+            });
+        } else if id == ids.pause || id == ids.step {
+            if self.play.is_some() {
+                self.play_request = Some(if id == ids.pause {
+                    PlayRequest::Pause
+                } else {
+                    PlayRequest::Step
+                });
+            } else {
+                self.say(String::from("Nothing is playing (F5 plays the scene)"));
+            }
+        } else if id == ids.eject {
+            self.eject(world);
         } else if id == ids.stop {
             if self.play.is_some() {
                 self.play_request = Some(PlayRequest::Stop);
@@ -7004,6 +7136,8 @@ pub struct EditorGame<G> {
     start: Start<G>,
     /// Why the game stopped by itself (a hook panicked): Play ends at the next frame.
     failed: Option<String>,
+    /// A step runs while paused: the game's hooks are called for it.
+    stepping: bool,
 }
 
 impl<G> EditorGame<G> {
@@ -7026,14 +7160,58 @@ impl<G> EditorGame<G> {
                 .take()
                 .map(|r| (r, None)),
         };
+        // A step's tick has run: paused again.
+        if self.stepping && player.steps_pending() == 0 {
+            self.stepping = false;
+        }
         match request {
-            Some((PlayRequest::Play, _)) => self.begin_play(player),
+            Some((PlayRequest::Play { from_here }, _)) => self.begin_play(player, from_here),
             Some((PlayRequest::Stop, why)) => self.end_play(player, why),
+            Some((PlayRequest::Restart, _)) => {
+                let from_here = self
+                    .shared
+                    .borrow()
+                    .play
+                    .as_ref()
+                    .is_some_and(|p| p.from_here);
+                self.end_play(player, None);
+                self.begin_play(player, from_here);
+            }
+            Some((PlayRequest::Pause, _)) => {
+                let mut shared = self.shared.borrow_mut();
+                if let Some(p) = shared.play.as_mut() {
+                    p.paused = !p.paused;
+                    player.set_simulating(!p.paused);
+                    self.stepping = false;
+                    let message = if p.paused { "Paused" } else { "Going on" };
+                    shared.say(String::from(message));
+                }
+            }
+            Some((PlayRequest::Step, _)) => {
+                let mut shared = self.shared.borrow_mut();
+                if let Some(p) = shared.play.as_mut() {
+                    p.paused = true;
+                    player.set_simulating(false);
+                    player.step_tick();
+                    self.stepping = true;
+                }
+            }
             None => {}
         }
     }
 
-    fn begin_play(&mut self, player: &mut Player) {
+    /// Whether the game's hooks are called: playing and not paused, or a step running.
+    fn running(&self) -> bool {
+        self.stepping
+            || self
+                .shared
+                .borrow()
+                .play
+                .as_ref()
+                .is_some_and(|p| !p.paused)
+    }
+
+    fn begin_play(&mut self, player: &mut Player, from_here: bool) {
         if self.game.is_some() || self.shared.borrow().play.is_some() {
             return;
         }
@@ -7042,8 +7220,11 @@ impl<G> EditorGame<G> {
             let mut shared = self.shared.borrow_mut();
             // The scene as it is goes to the session first, as before a restart.
             shared.save_session(player.world_mut());
-            let playing = shared.prepare_play(player.world_mut());
+            let playing = shared.prepare_play(player.world_mut(), from_here);
             shared.play = Some(playing);
+            if from_here {
+                shared.play_from_here(player.world_mut());
+            }
         }
         player.set_simulating(true);
         let start = self.start;
@@ -7074,6 +7255,7 @@ impl<G> EditorGame<G> {
     fn end_play(&mut self, player: &mut Player, why: Option<String>) {
         self.game = None;
         self.failed = None;
+        self.stepping = false;
         player.end_run();
         player.set_simulating(false);
         let mut shared = self.shared.borrow_mut();
@@ -7383,7 +7565,9 @@ impl<G> EditorGame<G> {
 impl<G: Game> Game for EditorGame<G> {
     fn event(&mut self, event: &WindowEvent) {
         self.shared.borrow_mut().event(event);
-        self.guarded("event", |game| game.event(event));
+        if self.running() {
+            self.guarded("event", |game| game.event(event));
+        }
     }
 
     fn tick(&mut self, world: &mut World, dt: f32) {
@@ -7416,7 +7600,9 @@ impl<G: Game> Game for EditorGame<G> {
     }
 
     fn net_input(&mut self, world: &mut World) {
-        self.guarded("net_input", |game| game.net_input(world));
+        if self.running() {
+            self.guarded("net_input", |game| game.net_input(world));
+        }
     }
 
     fn acoustics(&self) -> Option<&dyn engine_physics::PhysicsBackend> {
@@ -7424,12 +7610,16 @@ impl<G: Game> Game for EditorGame<G> {
     }
 
     fn present(&mut self, world: &mut World, alpha: f32) {
-        self.guarded("present", |game| game.present(world, alpha));
+        if self.running() {
+            self.guarded("present", |game| game.present(world, alpha));
+        }
         self.shared.borrow_mut().update(world);
     }
 
     fn animate(&mut self, parts: &mut engine_app::FrameParts<'_>, dt: f32) {
-        self.guarded("animate", |game| game.animate(parts, dt));
+        if self.running() {
+            self.guarded("animate", |game| game.animate(parts, dt));
+        }
     }
 
     fn ui(&self, draw: &mut dyn FnMut(&[engine_frame::UiCanvas<'_>])) {
@@ -7878,8 +8068,17 @@ fn blockout_key(blockout: &engine_app::Blockout, world: &World) -> BlockoutKey {
 /// What the Play controls asked for (ADR 0107 E3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlayRequest {
-    Play,
+    /// Play, from the editor's camera with `from_here`.
+    Play {
+        from_here: bool,
+    },
     Stop,
+    /// Stop and play again, as the last Play did.
+    Restart,
+    /// Pause, or go on.
+    Pause,
+    /// One tick while paused (pausing first).
+    Step,
 }
 
 /// Playing (ADR 0107 E3): the scene's world as Play found it, to put back at Stop.
@@ -7894,6 +8093,13 @@ struct Playing {
     started: Instant,
     /// How long entering took (the session saved, the world kept, the game made).
     entered: Duration,
+    /// Played from the editor's camera ("Play from Here").
+    from_here: bool,
+    /// The world's time stands; the game's hooks are not called.
+    paused: bool,
+    /// The editor's camera and tools on the running world (Unreal's eject), with the
+    /// devices the game's input listened to before, given back on returning.
+    ejected: Option<Option<engine_input::DeviceFilter>>,
 }
 
 /// Whether `key` is one of F1 to F12 (the editor's keys while playing).
@@ -8366,10 +8572,10 @@ impl Overlay for EditorOverlay {
                         editor.picked = Some((request, view.frame_number, None));
                     }
                 }
-                // The outlines, below the panels (none while playing).
+                // The outlines, below the panels (none in the game's view).
                 if let Some(scene) = view.scene
                     && !editor.outline_items.is_empty()
-                    && editor.play.is_none()
+                    && !editor.game_view()
                 {
                     self.outliner.add_passes(
                         pass.fg,
@@ -8428,7 +8634,7 @@ impl Overlay for EditorOverlay {
                     &mut self.canvas,
                 );
             }
-            if let Some(rect) = editor.view_rect.filter(|_| editor.play.is_none()) {
+            if let Some(rect) = editor.view_rect.filter(|_| !editor.game_view()) {
                 draw_overlays(editor, rect, &self.glyphs, &mut self.canvas);
                 draw_navigation(editor, rect, &mut self.canvas);
                 draw_colliders(editor, rect, &mut self.canvas);

@@ -1112,3 +1112,29 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
   - The same switch will be the pause.
 - **Left for E3's next steps:** pause and step, play from the editor's camera, restart,
   keeping changes, the game's own window.
+
+## As built (E3-2, 2026-10-22): pause, step, play from here, restart, eject
+
+- **Pause (F7, ⏸ lit):**
+  - `Player::set_simulating(false)` on the running game;
+  - `EditorGame` calls none of the game's frame hooks (`event`, `net_input`, `present`,
+    `animate`; `ui` still draws), so the frame stays where it stopped.
+- **Step (Shift+F7):**
+  - `Player::step_tick` runs the next tick as if the world ran (timers, tweens, the
+    game's tick), once;
+  - the game's frame hooks are called until it has run.
+
+  F9 to F11 stay free for the script debugger's stepping (E9).
+- **Play from Here (Shift+F5):**
+  - the scene's main camera (the active scene camera of the highest priority) is put at
+    the editor's camera, in its parent's space;
+  - `engine_app::PlayFrom` (position and rotation) is in the world for the game's `start`;
+  - both are after the world was kept, so Stop puts them back. The engine has no player
+    pawn to place; the game places its own.
+- **Restart (Ctrl+F5):** Stop and Play in the same frame, from here again if the last
+  Play was.
+- **Eject (Shift+F8, Unreal's F8 beside our Stop):**
+  - the editor's camera, tools, outlines and keys come back on the running world, whose
+    ticks go on;
+  - the game's `engine_input::Input` listens to no device meanwhile (its filter kept and
+    given back on returning or at Stop).
