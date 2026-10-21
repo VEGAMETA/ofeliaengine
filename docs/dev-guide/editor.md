@@ -123,6 +123,7 @@ editor = ["dep:engine_editor"]
 | Set a camera bookmark, go to it | Ctrl+1..9, 1..9 |
 | Put the selection on the surface below it | End |
 | Drag the selection over surfaces | Ctrl+Shift with a move handle |
+| What rotating and scaling turn about: the middle, each entity's own origin, the active entity | . (Period) |
 
 These are our keys, the default (team decision, 2026-10-21): the left hand stays beside
 W, A, S, D, which fly the camera. **Editor: Key Map…** (Ctrl+Shift+P) takes another set,
@@ -175,6 +176,10 @@ keymap file and scripts use; `EditorGame::run_command` runs one by name.
   `#[reflect(step = …)]`), whole numbers 1.
 - The grid button in the tool bar (or Y) makes snapping the default; Shift then drags
   freely.
+- **The steps sit beside it** (as in Unreal's tool bar): position, angle and scale, each
+  a menu of values (0.01 to 5 m, 1° to 90°, 0.01 to 1), the current one checked; dim
+  while snapping is off. The palette has them too ("Snapping: Position Step…" and the
+  others), and the session keeps them.
 - The viewport's gizmo and keyboard transforms follow the same rules
   ([below](#moving-things-in-the-viewport)): a move in steps of 0.1 m, a turn of 45°, a
   scale of 0.1; with Ctrl, the selection's center lands on the grid. Typed values are
@@ -284,6 +289,10 @@ moving with its selected parent.
   first surface under the bottom's middle, the selection left out, as one undo step.
   "Nothing below" when there is none.
 - **Space** turns the gizmo to the active entity's axes, and back to the world's.
+- **The pivot** (the tool bar's right end, or `.`): rotating and scaling turn about the
+  selection's middle (the default), about each entity's own origin (the gizmo stays in
+  their middle; moves are the same), or about the active entity, where the gizmo then
+  sits. Keyboard transforms follow it too; the session keeps it.
 - **Exact values:** only what changes is written, from the entity's own values: a move
   sets the position, a turn the rotation, a scale the scale. The scene file gets no
   float dust (`0.99999994`). A scale goes along the entity's own axis nearest the
@@ -419,7 +428,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 
 | Phase | What |
 |---|---|
-| E2 | assets dropped onto surfaces, snapping steps in the tool bar, pivots, overlays (lights' and cameras' icons and ranges) |
+| E2 | overlays: lights' and cameras' icons to pick, their ranges; assets dropped onto surfaces with E4's browser |
 | E3 | Play on a copy of the world |
 
 The whole plan is ADR 0107 §7.

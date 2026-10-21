@@ -538,6 +538,10 @@ struct CommandIds {
     transforms: [CommandId; 3],
     /// Puts each selected entity on the surface below it.
     drop: CommandId,
+    /// The snapping steps (position, angle, scale), each a list of values in the palette;
+    /// the next pivot.
+    steps: [CommandId; 3],
+    pivot: CommandId,
     /// Which keys the editor uses: Blender's or Godot's.
     keys: CommandId,
     /// Whether clicks pick transparent surfaces or through them.
@@ -601,6 +605,12 @@ fn commands() -> (Commands, CommandIds) {
             c.register("transform.scale", "Transform", "Scale Selection"),
         ],
         drop: c.register("transform.drop", "Transform", "Drop to the Surface Below"),
+        steps: [
+            c.register("snap.position_step", "Snapping", "Position Step…"),
+            c.register("snap.angle_step", "Snapping", "Angle Step…"),
+            c.register("snap.scale_step", "Snapping", "Scale Step…"),
+        ],
+        pivot: c.register("transform.pivot", "Transform", "Next Pivot"),
         keys: c.register("editor.keys", "Editor", "Key Map…"),
         pick_transparent: c.register(
             "viewport.pick_transparent",
@@ -665,6 +675,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("F", ids.frame),
         ("Shift+F", ids.follow),
         ("End", ids.drop),
+        ("Period", ids.pivot),
     ];
     // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
     // - ours: Q, E, R at once and with Shift the gizmo's handles, the left hand beside
@@ -799,6 +810,8 @@ enum Pick {
     Keys(KeyPreset),
     /// Selects this entity (Alt+click's list of what lies under the pointer).
     Select(Entity),
+    /// Sets a snapping step (0 position, 1 angle, 2 scale) to this value.
+    Step(usize, f64),
 }
 
 /// What a list of what lies under the pointer is for (ADR 0109).
@@ -845,6 +858,77 @@ enum BoxMode {
 /// Frames a box's answer may take before it is asked again (a pick the GPU could not
 /// take).
 const BOX_PATIENCE: u64 = 8;
+
+/// What rotating and scaling turn about (ADR 0107 E2-6; the UX note's pivots).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Pivot {
+    /// The middle of the selected entities no selected entity carries.
+    #[default]
+    Median,
+    /// Each entity its own origin, the gizmo in their middle.
+    Origins,
+    /// The active entity's origin.
+    Active,
+}
+
+impl Pivot {
+    /// Its name in the session.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Median => "median",
+            Self::Origins => "origins",
+            Self::Active => "active",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        [Self::Median, Self::Origins, Self::Active]
+            .into_iter()
+            .find(|p| p.name() == name)
+    }
+
+    /// What the tool bar's button says.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Median => "Pivot: middle",
+            Self::Origins => "Pivot: own origins",
+            Self::Active => "Pivot: active",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Median => Self::Origins,
+            Self::Origins => Self::Active,
+            Self::Active => Self::Median,
+        }
+    }
+}
+
+/// The values each step's menu offers: positions (meters), angles (degrees), scales.
+const STEP_VALUES: [&[f64]; 3] = [
+    &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0],
+    &[1.0, 5.0, 10.0, 15.0, 22.5, 30.0, 45.0, 90.0],
+    &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0],
+];
+
+/// How a step reads (0 position, 1 angle, 2 scale).
+fn step_label(kind: usize, value: f64) -> String {
+    match kind {
+        0 => format!("{value} m"),
+        1 => format!("{value}°"),
+        _ => format!("{value}"),
+    }
+}
+
+/// The steps' menus' entries, as they read.
+const STEP_LABELS: [&[&str]; 3] = [
+    &[
+        "0.01 m", "0.05 m", "0.1 m", "0.25 m", "0.5 m", "1 m", "2 m", "5 m",
+    ],
+    &["1°", "5°", "10°", "15°", "22.5°", "30°", "45°", "90°"],
+    &["0.01", "0.05", "0.1", "0.25", "0.5", "1"],
+];
 
 /// End's drops (ADR 0107 E2-5): the entities still to drop, their shared undo step, and
 /// the one being dropped.
@@ -1238,6 +1322,11 @@ struct Editor {
     surfaced: Option<SurfaceResult>,
     selection_box: Option<(Vec3, Vec3)>,
     dropping: Option<Dropping>,
+    /// What rotating and scaling turn about; the snapping steps as the tool bar reads
+    /// them (kept: no text made each frame), and the step whose menu is open.
+    pivot: Pivot,
+    step_labels: [String; 3],
+    step_menu: Option<usize>,
     /// What the overlay outlines (ADR 0109): the GPU scene's slots of the selection, its
     /// children and the hovered entity, as [`Editor::outline`] last found them.
     outline_items: Vec<OutlineItem>,
@@ -1517,6 +1606,16 @@ impl Editor {
             surfaced: None,
             selection_box: None,
             dropping: None,
+            pivot: Pivot::default(),
+            step_labels: {
+                let d = Snapping::default();
+                [
+                    step_label(0, d.position),
+                    step_label(1, d.angle),
+                    step_label(2, d.scale),
+                ]
+            },
+            step_menu: None,
             outline_items: Vec::new(),
             tools: [
                 format!("{} Select", icons::TOOL_SELECT),
@@ -1889,6 +1988,25 @@ impl Editor {
             icon: ADD_ICONS[i],
             label: ADD[i],
         });
+        // The steps' menus: the current value marked.
+        let current = [
+            self.snapping.position,
+            self.snapping.angle,
+            self.snapping.scale,
+        ];
+        let step_items: [[MenuItem<'_>; 8]; 3] = core::array::from_fn(|k| {
+            core::array::from_fn(|i| MenuItem {
+                // A blank glyph keeps the check's column, so the values line up.
+                icon: if STEP_VALUES[k].get(i) == Some(&current[k]) {
+                    icons::CHECK
+                } else {
+                    " "
+                },
+                label: STEP_LABELS[k].get(i).copied().unwrap_or(""),
+            })
+        });
+        let step_items: [&[MenuItem<'_>]; 3] =
+            core::array::from_fn(|k| &step_items[k][..STEP_VALUES[k].len()]);
         self.status.clear();
         if self.key_transform.is_some() {
             let _ = write!(self.status, "{}  ·  ", transform::HELP);
@@ -2063,6 +2181,9 @@ impl Editor {
             playing: false,
             status: &self.status,
             snap: self.snapping.on,
+            steps: self.step_labels.each_ref().map(String::as_str),
+            step_menu: self.step_menu.map(|k| (k, step_items[k])),
+            pivot: self.pivot.label(),
             add_menu: self.add_open.then_some(&add_items[..]),
             reveal_row,
             tree_filter: &self.tree_filter,
@@ -2093,6 +2214,19 @@ impl Editor {
             self.add_open = false;
             self.open_choice = None;
             self.command_palette = None;
+            self.step_menu = None;
+        }
+        if let Some(k) = response.step {
+            self.step_menu = (self.step_menu != Some(k)).then_some(k);
+        }
+        if let Some(i) = response.step_item
+            && let Some(k) = self.step_menu.take()
+            && let Some(&value) = STEP_VALUES[k].get(i)
+        {
+            self.set_step(world, k, value);
+        }
+        if response.pivot {
+            self.run(world, self.ids.pivot);
         }
         if response.add {
             self.add_open = !self.add_open;
@@ -2682,6 +2816,7 @@ impl Editor {
                             Pick::Policy(p) => self.set_restart_policy(world, p),
                             Pick::Keys(p) => self.set_key_preset(world, p),
                             Pick::Select(e) => self.show(world, e),
+                            Pick::Step(k, value) => self.set_step(world, k, value),
                         }
                     }
                 } else if cp.finds_objects() {
@@ -3156,6 +3291,52 @@ impl Editor {
         self.dropping = Some(d);
     }
 
+    /// The tool bar's steps as they read, after one changed.
+    fn refresh_steps(&mut self) {
+        let values = [
+            self.snapping.position,
+            self.snapping.angle,
+            self.snapping.scale,
+        ];
+        for (k, value) in values.into_iter().enumerate() {
+            self.step_labels[k] = step_label(k, value);
+        }
+    }
+
+    /// Sets snapping step `kind` (0 position, 1 angle, 2 scale) to `value`; the session
+    /// keeps it.
+    fn set_step(&mut self, world: &World, kind: usize, value: f64) {
+        match kind {
+            0 => self.snapping.position = value,
+            1 => self.snapping.angle = value,
+            _ => self.snapping.scale = value,
+        }
+        self.refresh_steps();
+        self.write_session(world);
+        let what = ["Position", "Angle", "Scale"][kind.min(2)];
+        self.say(format!("{what} step {}", step_label(kind, value)));
+    }
+
+    /// "Snapping: Position Step…" and the others: the step's values in the palette.
+    fn pick_step(&mut self, world: &mut World, kind: usize) {
+        let current = [
+            self.snapping.position,
+            self.snapping.angle,
+            self.snapping.scale,
+        ][kind];
+        let items = STEP_VALUES[kind]
+            .iter()
+            .zip(STEP_LABELS[kind])
+            .map(|(&value, &label)| Choice {
+                label: String::from(label),
+                detail: String::from(if value == current { "now" } else { "" }),
+                pick: Pick::Step(kind, value),
+            })
+            .collect();
+        let hint = ["The position step", "The angle step", "The scale step"][kind];
+        self.open_list(world, hint, items);
+    }
+
     /// 1 to 9: flies to bookmark `n`; Ctrl with the digit sets it to the camera as it is.
     fn bookmark(&mut self, world: &World, n: usize, set: bool) {
         if set {
@@ -3461,6 +3642,11 @@ impl Editor {
     /// The selection's pivot: the middle of the selected entities that no selected entity
     /// carries; none without one.
     fn selection_pivot(&self, world: &World) -> Option<Vec3> {
+        if self.pivot == Pivot::Active
+            && let Some(g) = self.active().and_then(|e| world.get::<GlobalTransform>(e))
+        {
+            return Some(Vec3::from(g.0.translation));
+        }
         let mut sum = Vec3::ZERO;
         let mut n = 0u32;
         for &e in &self.selection {
@@ -3543,6 +3729,13 @@ impl Editor {
         self.history.begin(name, Some(merge));
         for t in targets {
             self.history.touch(world, t.entity);
+            // With own origins, each turns and scales about itself.
+            let pivot = match change {
+                Change::Turn(_) | Change::Scale(_) if self.pivot == Pivot::Origins => {
+                    Vec3::from(t.world.translation)
+                }
+                _ => pivot,
+            };
             let local = t.parent_inverse * gizmo::apply(change, t, pivot, axes);
             let (_, rotation, _) = t.world.to_scale_rotation_translation();
             // The parent's inverse turn: world to the parent's space.
@@ -3878,6 +4071,16 @@ impl Editor {
             self.pick_keys(world);
         } else if id == ids.drop {
             self.drop_selection(world);
+        } else if let Some(k) = ids.steps.iter().position(|&c| c == id) {
+            self.pick_step(world, k);
+        } else if id == ids.pivot {
+            self.pivot = self.pivot.next();
+            self.write_session(world);
+            self.say(String::from(match self.pivot {
+                Pivot::Median => "Rotating and scaling about the selection's middle",
+                Pivot::Origins => "Rotating and scaling each about its own origin",
+                Pivot::Active => "Rotating and scaling about the active entity",
+            }));
         } else if id == ids.frame {
             self.frame_selection(world);
         } else if id == ids.follow {
@@ -4330,6 +4533,10 @@ impl Editor {
         if let Some(on) = state.pick_transparent {
             self.pick_transparent = on;
         }
+        if let Some(pivot) = state.pivot.as_deref().and_then(Pivot::from_name) {
+            self.pivot = pivot;
+        }
+        self.refresh_steps();
     }
 
     /// A scene's view from a session: the camera, the selection by scene ids (those gone
@@ -4453,6 +4660,7 @@ impl Editor {
             keys: Some(String::from(self.key_preset.name())),
             fly: Some(f64::from(self.fly_speed)),
             pick_transparent: Some(self.pick_transparent),
+            pivot: Some(String::from(self.pivot.name())),
             window: self.window,
         };
         let view = self.view(world);
@@ -8616,6 +8824,89 @@ mod tests {
         mouse(&mut ed, [center.x + 32.0, center.y], Some(false));
         ed.update(&mut world);
         assert!(ed.gizmo_drag.is_none());
+    }
+
+    #[test]
+    fn snapping_steps_are_picked_from_their_values_and_kept() {
+        let dir = project("steps");
+        let (mut world, mut ed) = start(&dir);
+        assert_eq!(ed.step_labels, ["0.1 m", "45°", "0.1"]);
+        // The palette's list of the position step's values, the current one marked.
+        let position = ed.ids.steps[0];
+        ed.run(&mut world, position);
+        let choices = ed
+            .command_palette
+            .as_ref()
+            .unwrap()
+            .choices
+            .as_ref()
+            .unwrap();
+        let labels: Vec<&str> = choices.items.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, STEP_LABELS[0]);
+        assert_eq!(choices.items[2].detail, "now");
+        ed.palette_action(&mut world, PaletteAction::Run(3));
+        assert_eq!(ed.snapping.position, 0.25);
+        assert_eq!(ed.step_labels[0], "0.25 m");
+        // The tool bar's menu of the angle's.
+        ed.step_menu = Some(1);
+        ed.set_step(&world, 1, 22.5);
+        assert_eq!(ed.step_labels[1], "22.5°");
+        ed.end_session(&mut world);
+        let (_, ed) = start(&dir);
+        assert_eq!((ed.snapping.position, ed.snapping.angle), (0.25, 22.5));
+        assert_eq!(ed.step_labels, ["0.25 m", "22.5°", "0.1"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pivots_turn_about_the_middle_each_origin_or_the_active_entity() {
+        let dir = project("pivots");
+        let (mut world, mut ed) = start(&dir);
+        let a = cube_at(&mut world, Transform::IDENTITY);
+        let b = cube_at(&mut world, Transform::from_xyz(4.0, 0.0, 0.0));
+        ed.selection = vec![a, b];
+        let quarter = Quat::from_rotation_y(core::f32::consts::FRAC_PI_2);
+        let turn = |ed: &mut Editor, world: &mut World| {
+            let pivot = ed.selection_pivot(world).unwrap();
+            let targets = ed.transform_targets(world);
+            ed.gestures += 1;
+            let merge = ed.gestures;
+            ed.set_targets(
+                world,
+                "Rotate",
+                merge,
+                &targets,
+                Change::Turn(quarter),
+                (pivot, [Vec3::X, Vec3::Y, Vec3::Z]),
+            );
+            let at = |e| world.get::<Transform>(e).unwrap().translation;
+            let places = (at(a), at(b));
+            ed.history.undo(world);
+            places
+        };
+        let close = |p: Vec3, q: Vec3| (p - q).length() < 1e-4;
+        // The middle (2, 0, 0): both swing round it.
+        assert_eq!(ed.pivot, Pivot::Median);
+        let (pa, pb) = turn(&mut ed, &mut world);
+        assert!(close(pa, Vec3::new(2.0, 0.0, 2.0)) && close(pb, Vec3::new(2.0, 0.0, -2.0)));
+        // Their own origins: they stay where they are.
+        let next = ed.ids.pivot;
+        ed.run(&mut world, next);
+        assert_eq!(ed.pivot, Pivot::Origins);
+        let (pa, pb) = turn(&mut ed, &mut world);
+        assert!(close(pa, Vec3::ZERO) && close(pb, Vec3::new(4.0, 0.0, 0.0)));
+        // The active one (the last picked, at 4, 0, 0): it stays, the other swings.
+        ed.run(&mut world, next);
+        assert_eq!(ed.pivot, Pivot::Active);
+        assert_eq!(ed.selection_pivot(&world), Some(Vec3::new(4.0, 0.0, 0.0)));
+        let (pa, pb) = turn(&mut ed, &mut world);
+        assert!(close(pb, Vec3::new(4.0, 0.0, 0.0)) && close(pa, Vec3::new(4.0, 0.0, 4.0)));
+        assert_eq!(ed.shortcuts.get(&next).map(String::as_str), Some("Period"));
+        // Kept by the session.
+        ed.end_session(&mut world);
+        let (_, ed) = start(&dir);
+        assert_eq!(ed.pivot, Pivot::Active);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
