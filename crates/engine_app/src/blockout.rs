@@ -105,6 +105,12 @@ pub struct Brush {
     /// A cone's top, as a share of its base: 0 a point, between 0 and 1 truncated.
     #[reflect(min = 0.0, max = 1.0)]
     pub top: f32,
+    /// A room's walls, metres thick; 0 a solid brush. A room's size is its inside, its
+    /// walls stand around it, and rooms open into each other where one's inside overlaps
+    /// another's walls, whatever their order (team decision, 2026-10-21). Only an adding
+    /// brush is a room.
+    #[reflect(min = 0.0)]
+    pub hollow: f32,
     /// Its planes when [`BrushShape::Planes`].
     pub planes: Vec<BrushPlane>,
     /// Physics collides with it (made with the colliders, a later step).
@@ -138,6 +144,7 @@ impl Brush {
                 _ => 0,
             },
             top: 0.0,
+            hollow: 0.0,
             planes: Vec::new(),
             collides: true,
             tint: [0.72, 0.72, 0.72, 1.0],
@@ -154,9 +161,44 @@ impl Brush {
         Self { top, ..self }
     }
 
-    /// Its convex parts' planes in its own grid (millimetres); none when its size is not
-    /// positive or out of bounds.
+    /// The same as a room with walls `hollow` metres thick (0: solid).
+    pub fn with_hollow(self, hollow: f32) -> Self {
+        Self { hollow, ..self }
+    }
+
+    /// Whether it is a room: adding, with walls.
+    pub fn is_room(&self) -> bool {
+        self.walls().is_some()
+    }
+
+    /// Its convex parts' planes in its own grid (millimetres): a room's walls, its shape's
+    /// planes moved out by their thickness; none when its size is not positive or out of
+    /// bounds.
     pub fn parts(&self) -> Vec<Vec<Plane>> {
+        let parts = self.shape_parts();
+        match self.walls() {
+            Some(by) => engine_brush::shape::grown(&parts, by).unwrap_or_default(),
+            None => parts,
+        }
+    }
+
+    /// A room's inside in its own grid: its shape at its size; none for a solid brush.
+    pub fn inside(&self) -> Vec<Vec<Plane>> {
+        if self.is_room() {
+            self.shape_parts()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// A room's walls' thickness in its grid.
+    fn walls(&self) -> Option<i64> {
+        let by = (f64::from(self.hollow) / UNIT).round() as i64;
+        (by > 0 && self.op == BrushOp::Add).then_some(by)
+    }
+
+    /// Its shape's convex parts at its size, in its own grid.
+    fn shape_parts(&self) -> Vec<Vec<Plane>> {
         let size =
             [self.size.x, self.size.y, self.size.z].map(|s| (f64::from(s) / UNIT).round() as i64);
         let shape = match self.shape {
@@ -585,16 +627,18 @@ fn input(world: &World, group: Entity, e: Entity) -> Input {
 fn to_brush(input: &Input, planes: &mut engine_brush::Planes) -> engine_brush::Brush {
     let linear: DMat3 = Mat3::from_cols_array(&input.linear).as_dmat3();
     let offset: DVec3 = Vec3::from_array(input.offset).as_dvec3();
-    let parts = input
-        .brush
-        .parts()
-        .into_iter()
-        .filter_map(|part| {
-            part.iter()
-                .map(|p| p.transformed(linear, offset).map(|q| planes.add(q)))
-                .collect::<Option<Vec<_>>>()
-        })
-        .collect();
+    let mut placed = |parts: Vec<Vec<Plane>>| -> Vec<Vec<engine_brush::PlaneId>> {
+        parts
+            .into_iter()
+            .filter_map(|part| {
+                part.iter()
+                    .map(|p| p.transformed(linear, offset).map(|q| planes.add(q)))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .collect()
+    };
+    let parts = placed(input.brush.parts());
+    let inside = placed(input.brush.inside());
     engine_brush::Brush {
         op: match input.brush.op {
             BrushOp::Add => engine_brush::Op::Add,
@@ -602,6 +646,7 @@ fn to_brush(input: &Input, planes: &mut engine_brush::Planes) -> engine_brush::B
             BrushOp::Intersect => engine_brush::Op::Intersect,
         },
         parts,
+        inside,
     }
 }
 
@@ -669,5 +714,37 @@ fn grid_texture() -> TextureLevels {
         height: SIZE as u32,
         format: TextureFormat::Rgba8Srgb,
         levels,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn a_hollow_brush_is_walls_around_its_size_and_a_cut_never_is() {
+        let size = Vec3::new(4.0, 3.0, 4.0);
+        let room = Brush::new(BrushShape::Box, size).with_hollow(0.2);
+        assert!(room.is_room());
+        assert_eq!(room.inside(), Brush::new(BrushShape::Box, size).parts());
+        assert_eq!(
+            room.parts(),
+            engine_brush::shape::grown(&room.inside(), 200).unwrap()
+        );
+        let cut = room.clone().with_op(BrushOp::Cut);
+        assert!(!cut.is_room() && cut.inside().is_empty());
+        assert_eq!(cut.parts(), room.inside(), "a cut keeps its size");
+        // In its group's grid, moved 3 m: a room there too.
+        let mut planes = engine_brush::Planes::new();
+        let input = Input {
+            brush: room,
+            linear: Mat3::IDENTITY.to_cols_array(),
+            offset: [3000.0, 0.0, 0.0],
+        };
+        let b = to_brush(&input, &mut planes);
+        assert!(b.is_room());
+        assert_eq!((b.parts.len(), b.inside.len()), (1, 1));
     }
 }

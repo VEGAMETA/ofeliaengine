@@ -64,6 +64,8 @@ pub const TORUS: &str = "\u{F1896}";
 pub const WEDGE: &str = "\u{F0E00}";
 /// A stairs brush (`md-stairs`).
 pub const STAIRS: &str = "\u{F04CD}";
+/// A room, a hollow brush (`md-floor_plan`).
+pub const ROOM: &str = "\u{F0821}";
 /// A group of blockout brushes, and the add menu's blockout entries (`md-wall`).
 pub const BLOCKOUT: &str = "\u{F07FE}";
 /// Camera (`md-camera`).

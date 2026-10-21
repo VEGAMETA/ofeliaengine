@@ -2,12 +2,12 @@
 //! brushes it touches and the surface around them, nothing else:
 //!
 //! - each additive brush keeps its pieces: its parts cut and clipped by the brushes after
-//!   it that act on them;
+//!   it that act on them, a room's by every room's inside too;
 //! - each piece's face keeps what of it is visible, in tiles when the face is large (a
 //!   ground under a level), so only the tiles around an edit are clipped again;
 //! - a grid of cells finds the pieces near a place.
 
-use crate::csg::{Bounds, Brush, Op, brush_solids, remove};
+use crate::csg::{Bounds, Brush, Op, brush_solids, inside_solids, remove, subtract_all};
 use crate::exact::Plane;
 use crate::polygon::{Planes, Polygon, Split};
 use crate::solid::{Owner, Solid, SolidError};
@@ -53,6 +53,9 @@ struct PieceState {
 struct BrushState {
     solids: Vec<Solid>,
     bounds: Option<Bounds>,
+    /// A room's inside.
+    inside: Vec<Solid>,
+    inside_bounds: Option<Bounds>,
     errors: Vec<SolidError>,
     pieces: Vec<PieceState>,
 }
@@ -112,18 +115,24 @@ impl Group {
         self.state.push(BrushState::default());
         self.changed.push(true);
         self.solids(index);
-        let dirty = self.dirty(index, self.brushes[index].op, self.state[index].bounds);
+        let s = &self.state[index];
+        let mut dirty = self.dirty(index, self.brushes[index].op, s.bounds, s.inside_bounds);
+        dirty.sort_unstable();
+        dirty.dedup();
         self.redo(&dirty)
     }
 
     /// Replaces brush `index`.
     pub fn set(&mut self, index: usize, brush: Brush) -> Redone {
-        let (old_op, old_bounds) = (self.brushes[index].op, self.state[index].bounds);
+        let old = &self.state[index];
+        let (old_bounds, old_inside) = (old.bounds, old.inside_bounds);
+        let old_op = self.brushes[index].op;
         self.brushes[index] = brush;
         self.changed[index] = true;
         self.solids(index);
-        let mut dirty = self.dirty(index, old_op, old_bounds);
-        dirty.extend(self.dirty(index, self.brushes[index].op, self.state[index].bounds));
+        let mut dirty = self.dirty(index, old_op, old_bounds, old_inside);
+        let s = &self.state[index];
+        dirty.extend(self.dirty(index, self.brushes[index].op, s.bounds, s.inside_bounds));
         dirty.sort_unstable();
         dirty.dedup();
         self.redo(&dirty)
@@ -216,24 +225,44 @@ impl Group {
         &self.state[r.brush as usize].pieces[r.piece as usize]
     }
 
-    /// Makes brush `index`'s solids and bounds.
+    /// Makes brush `index`'s solids and bounds, and a room's inside.
     fn solids(&mut self, index: usize) {
         let mut invalid = Vec::new();
-        let solids = brush_solids(
-            index as u32,
-            &self.brushes[index],
-            &self.planes,
-            &mut invalid,
-        );
+        let brush = &self.brushes[index];
+        let solids = brush_solids(index as u32, brush, &self.planes, &mut invalid);
+        let inside = inside_solids(index as u32, brush, &self.planes, &mut invalid);
         let s = &mut self.state[index];
         s.bounds = Bounds::of(&solids);
         s.solids = solids;
+        s.inside_bounds = Bounds::of(&inside);
+        s.inside = inside;
         s.errors = invalid.into_iter().map(|(_, e)| e).collect();
     }
 
     /// The additive brushes whose pieces brush `index` acts on, doing `op` within
-    /// `bounds`.
-    fn dirty(&self, index: usize, op: Op, bounds: Option<Bounds>) -> Vec<usize> {
+    /// `bounds`, its inside (a room's) within `inside`: the rooms that inside touches.
+    fn dirty(
+        &self,
+        index: usize,
+        op: Op,
+        bounds: Option<Bounds>,
+        inside: Option<Bounds>,
+    ) -> Vec<usize> {
+        let mut out = self.acted_on(index, op, bounds);
+        if op == Op::Add
+            && let Some(b) = inside
+        {
+            out.extend((0..self.brushes.len()).filter(|&r| {
+                r != index
+                    && self.brushes[r].is_room()
+                    && self.state[r].bounds.is_some_and(|x| x.touches(&b))
+            }));
+        }
+        out
+    }
+
+    /// The additive brushes whose pieces brush `index` acts on, doing `op` within `bounds`.
+    fn acted_on(&self, index: usize, op: Op, bounds: Option<Bounds>) -> Vec<usize> {
         match op {
             Op::Add => vec![index],
             Op::Cut => {
@@ -370,6 +399,15 @@ impl Group {
         };
         let mut current = self.state[a].solids.clone();
         let mut next = Vec::new();
+        // A room: every room's inside first, wherever it is in the order.
+        if self.brushes[a].is_room() {
+            for r in 0..self.brushes.len() {
+                let s = &self.state[r];
+                if self.brushes[r].is_room() && s.inside_bounds.is_some_and(|b| b.touches(&own)) {
+                    subtract_all(&mut current, &s.inside, &self.planes, sides, &mut next);
+                }
+            }
+        }
         for j in a + 1..self.brushes.len() {
             let op = self.brushes[j].op;
             if op == Op::Add {
@@ -378,16 +416,8 @@ impl Group {
             let touches = self.state[j].bounds.is_some_and(|b| b.touches(&own));
             match op {
                 Op::Cut if touches => {
-                    for cut in &self.state[j].solids {
-                        next.clear();
-                        for p in current.drain(..) {
-                            match p.subtract(cut, &self.planes, sides) {
-                                None => next.push(p),
-                                Some(parts) => next.extend(parts),
-                            }
-                        }
-                        core::mem::swap(&mut current, &mut next);
-                    }
+                    let cuts = &self.state[j].solids;
+                    subtract_all(&mut current, cuts, &self.planes, sides, &mut next);
                 }
                 Op::Intersect if !touches => current.clear(),
                 Op::Intersect => {
@@ -579,6 +609,7 @@ mod tests {
         Brush {
             op,
             parts: vec![box_planes(lo, hi, planes).unwrap_or_else(|| panic!())],
+            inside: Vec::new(),
         }
     }
 
@@ -644,6 +675,81 @@ mod tests {
         out
     }
 
+    /// A room as `csg`'s tests make it: its inside from `lo` to `hi`, walls `wall` thick.
+    fn room(lo: [i64; 3], hi: [i64; 3], wall: i64, planes: &mut Planes) -> Brush {
+        let inside = crate::shape::cuboid(lo, hi).unwrap_or_else(|| panic!());
+        let walls =
+            crate::shape::grown(std::slice::from_ref(&inside), wall).unwrap_or_else(|| panic!());
+        Brush {
+            op: Op::Add,
+            parts: walls
+                .into_iter()
+                .map(|p| p.into_iter().map(|q| planes.add(q)).collect())
+                .collect(),
+            inside: vec![inside.into_iter().map(|q| planes.add(q)).collect()],
+        }
+    }
+
+    #[test]
+    fn rooms_moved_through_each_other_end_where_a_rebuild_does() {
+        let mut g = Group::new();
+        // A row of rooms 10 m apart on a ground, a crate in the first.
+        let mut brushes = vec![cuboid(
+            Op::Add,
+            [-5000, -500, -5000],
+            [60000, 0, 15000],
+            g.planes_mut(),
+        )];
+        for i in 0..5 {
+            let x = 10_000 * i;
+            brushes.push(room([x, 0, 0], [x + 8000, 3000, 8000], 200, g.planes_mut()));
+        }
+        brushes.push(cuboid(
+            Op::Add,
+            [1000, 0, 1000],
+            [2000, 1000, 2000],
+            g.planes_mut(),
+        ));
+        g.rebuild(brushes);
+        let check = |g: &Group, step: &str| {
+            let mut fresh = Group::new();
+            fresh.planes = g.planes().clone();
+            fresh.rebuild(g.brushes().to_vec());
+            assert_eq!(of_group(g), of_group(&fresh), "{step}");
+        };
+        check(&g, "built");
+        // A corridor drawn from the second room through the third's wall, step by step.
+        for (k, reach) in [9000, 11_000, 13_000, 15_000].into_iter().enumerate() {
+            let corridor = room(
+                [16_000, 0, 3000],
+                [16_000 + reach, 2500, 5000],
+                200,
+                g.planes_mut(),
+            );
+            if k == 0 {
+                g.push(corridor);
+            } else {
+                let last = g.brushes().len() - 1;
+                let redone = g.set(last, corridor);
+                assert!(
+                    redone.brushes <= 4,
+                    "the corridor and the rooms it reaches: {redone:?}"
+                );
+            }
+            check(&g, &format!("reach {reach}"));
+        }
+        // The third room made solid, then a room again.
+        let third = g.brushes()[3].clone();
+        let solid = Brush {
+            inside: Vec::new(),
+            ..third.clone()
+        };
+        g.set(3, solid);
+        check(&g, "solid");
+        g.set(3, third);
+        check(&g, "a room again");
+    }
+
     #[test]
     fn a_group_shows_what_evaluating_from_nothing_does() {
         let mut g = Group::new();
@@ -699,6 +805,7 @@ mod tests {
                 Brush {
                     op,
                     parts: vec![moved],
+                    inside: Vec::new(),
                 },
             );
             assert!(g.take_changed().contains(&(index as u32)));

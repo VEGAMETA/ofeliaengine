@@ -3,7 +3,7 @@
 //!
 //! ```ignore
 //! let mut physics = ScenePhysics::new(&PhysicsSettings::default())?;
-//! physics.load_scene(&mut player)?;      // after Player::new: the pack's bodies
+//! physics.load_pack(&pack, &jobs, world, &instances)?; // the pack's bodies
 //! // Game::tick:    physics.step(world, dt)?;
 //! // Game::present: physics.interpolate(world, alpha);
 //! ```
@@ -48,7 +48,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-/// What [`ScenePhysics::load_scene`] made.
+/// What [`ScenePhysics::load_pack`] made.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SceneBodies {
     /// Static bodies (level geometry).

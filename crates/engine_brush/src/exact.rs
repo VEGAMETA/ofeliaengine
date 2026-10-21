@@ -56,6 +56,14 @@ impl Plane {
         })
     }
 
+    /// The plane moved `by` grid units along its normal, its offset rounded: exact for
+    /// axis planes and diagonals moved whole units. `None` out of bounds.
+    pub fn offset(self, by: f64) -> Option<Self> {
+        let n = self.n.map(i64::from);
+        let length = ((n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) as f64).sqrt();
+        Self::new(n, self.d + (by * length).round() as i64)
+    }
+
     /// The plane through grid point `p` facing `normal` (any length): the normal scaled so
     /// that its largest component is [`MAX_NORMAL`] and rounded, unless it is a multiple of
     /// an axis or a diagonal, which stay exact. `None` for a zero or non-finite normal or a
