@@ -149,7 +149,7 @@ Last updated: 2026-10-20.
   - **E2-6, steps and pivots** (#283): the position, angle and scale steps in the tool bar
     beside the grid button, each a menu of values; pivots (the middle, each origin, the
     active entity) on the tool bar's right end and `.`; the session keeps both.
-  - **E2-7, overlays** (#PR): lights' and cameras' icons in the viewport, picked by a click
+  - **E2-7, overlays** (#284): lights' and cameras' icons in the viewport, picked by a click
     or a box before the scene (a click again goes through to what lies under one); the
     selected ones' reach (a point light's range, a spot's cone, a camera's pyramid, the
     sun's direction); "View: Overlays" hides them. E2 is done; drops of assets onto
