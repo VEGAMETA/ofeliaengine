@@ -180,7 +180,7 @@ Last updated: 2026-10-20.
     snapping with inference, the format as proposed): the add menu in groups (Point,
     Mesh, Blockout, Light, Camera; "Empty" is "Point"), brushes into the selection's or the
     scene's blockout group, cones (pointed, truncated) and tori; snapping on G.
-  - **Games share one build of the engine** (#PR, ADR 0111; the owner asked for the
+  - **Games share one build of the engine** (#290, ADR 0111; the owner asked for the
     engine compiled once, through a DLL): `ofeliaengine new` writes cargo's `build-dir`
     in the user's cargo folder and copies the engine's `Cargo.lock`. A second game's
     first build: 3.4 s, not 102 s; with the editor 4.0 s, not 20 s; its `target` 31 MB,
