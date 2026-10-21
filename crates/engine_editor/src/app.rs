@@ -81,7 +81,7 @@ use engine_input::Key;
 use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind};
 use engine_reflect::TypeKind;
 use engine_render::outline::{OutlineClass, OutlineItem, OutlineStyle, OutlineView, Outliner};
-use engine_render::pick::{PickPass, PickRequest, Picker};
+use engine_render::pick::{ListRequest, PickPass, PickRequest, PickView, Picker};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, PointLight, SpotLight, Sun, look_rotation};
 use engine_scene::{AssetId, AssetPaths, Name, RootOrder, SaveOptions, SceneId, SceneRegistry};
@@ -536,6 +536,8 @@ struct CommandIds {
     transforms: [CommandId; 3],
     /// Which keys the editor uses: Blender's or Godot's.
     keys: CommandId,
+    /// Whether clicks pick transparent surfaces or through them.
+    pick_transparent: CommandId,
     /// "Add Cube" and the rest: the add menu's kinds, in its order.
     add_kinds: [CommandId; ADD.len()],
 }
@@ -589,6 +591,11 @@ fn commands() -> (Commands, CommandIds) {
             c.register("transform.scale", "Transform", "Scale Selection"),
         ],
         keys: c.register("editor.keys", "Editor", "Key Map…"),
+        pick_transparent: c.register(
+            "viewport.pick_transparent",
+            "Viewport",
+            "Pick Transparent Surfaces",
+        ),
         add_kinds: ADD.map(|kind| {
             let name = format!("scene.add.{}", kind.to_lowercase().replace(' ', "_"));
             c.register(&name, "Scene", &format!("Add {kind}"))
@@ -745,7 +752,22 @@ enum Pick {
     Problem(usize),
     Policy(RestartPolicy),
     Keys(KeyPreset),
+    /// Selects this entity (Alt+click's list of what lies under the pointer).
+    Select(Entity),
 }
+
+/// What a list of what lies under the pointer is for (ADR 0109).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListUse {
+    /// A plain click where the last one was: the next object behind the active one.
+    Cycle,
+    /// Alt+click: every one of them, in the palette.
+    Offer,
+}
+
+/// How far from the pointer's pixel a pick still takes an object, in the view's pixels:
+/// thin objects stay easy to hit.
+const PICK_RADIUS: u32 = 3;
 
 /// What a new build does (team decision, 2026-10-20): by itself while the editor's window
 /// is in the background (the developer is in the code editor), offered while it is in
@@ -1078,6 +1100,20 @@ struct Editor {
     /// A click waiting for the pick of its pixel: the pixel, whether it toggles (Shift or
     /// Ctrl), and the first frame whose pick can answer it.
     pending_click: Option<(PickRequest, bool, u64)>,
+    /// What lies under a pixel: the list the overlay picks this frame; the newest one it
+    /// took (its request, its frame, the slots front to back) until
+    /// [`Editor::resolve_list`] names their entities; and a click waiting for one, what
+    /// for, and the first frame whose list can answer it.
+    list_request: Option<ListRequest>,
+    listed: Option<(ListRequest, u64, Vec<u32>)>,
+    pending_list: Option<(ListRequest, ListUse, u64)>,
+    /// Where the waiting click is, and where the last plain click was with the entity it
+    /// left active: a plain click there again cycles behind it.
+    click_at: Option<Vec2>,
+    last_view_click: Option<(Vec2, Entity)>,
+    /// Alt+click's list, nearest first, offered in the next frame (the palette needs the
+    /// world).
+    under_pointer: Option<Vec<Entity>>,
     /// What the overlay outlines (ADR 0109): the GPU scene's slots of the selection, its
     /// children and the hovered entity, as [`Editor::outline`] last found them.
     outline_items: Vec<OutlineItem>,
@@ -1341,6 +1377,12 @@ impl Editor {
             last_pick: None,
             press_at: None,
             pending_click: None,
+            list_request: None,
+            listed: None,
+            pending_list: None,
+            click_at: None,
+            last_view_click: None,
+            under_pointer: None,
             outline_items: Vec::new(),
             tools: [
                 format!("{} Select", icons::TOOL_SELECT),
@@ -1524,6 +1566,9 @@ impl Editor {
         self.last_frame = now;
         self.tick_session(world);
         self.tick_builds(world);
+        if let Some(under) = self.under_pointer.take() {
+            self.offer_under_pointer(world, under);
+        }
         let camera = self.camera(world);
         self.collect_rows(world);
         self.frames += 1;
@@ -2492,6 +2537,7 @@ impl Editor {
                             Pick::Problem(p) => self.open_problem(p),
                             Pick::Policy(p) => self.set_restart_policy(world, p),
                             Pick::Keys(p) => self.set_key_preset(world, p),
+                            Pick::Select(e) => self.show(world, e),
                         }
                     }
                 } else if cp.finds_objects() {
@@ -2625,9 +2671,11 @@ impl Editor {
     }
 
     /// The viewport's picking (ADR 0109): a press there, not on a handle, may become a
-    /// click, and a release near it clicks once the pick of its pixel answers; the
-    /// pointer's pixel is picked again whenever it, the camera or the scene changed.
-    /// `origin` is the view's top left corner (physical pixels).
+    /// click, and a release near it clicks once the pick of its pixel answers; a plain
+    /// click where the last one left the active entity cycles to the object behind it, and
+    /// Alt+click offers everything under the pointer. The pointer's pixel is picked again
+    /// whenever it, the camera or the scene changed. `origin` is the view's top left
+    /// corner (physical pixels).
     fn pick_frame(&mut self, over: bool, origin: Vec2) {
         let free = !self.camera_drag
             && self.command_palette.is_none()
@@ -2650,14 +2698,33 @@ impl Editor {
         if self.input.pressed(Button::Left) {
             self.press_at = cursor.filter(|_| request.is_some() && self.hovered_handle.is_none());
         }
+        let near = 4.0 * self.scale.max(0.5);
         if self.input.released(Button::Left)
             && let (Some(from), Some(at), Some(request)) = (self.press_at.take(), cursor, request)
-            && from.distance(at) <= 4.0 * self.scale.max(0.5)
+            && from.distance(at) <= near
         {
             let toggle = self.input.shift() || self.input.ctrl();
+            let list = ListRequest {
+                x: request.x,
+                y: request.y,
+                radius: PICK_RADIUS,
+                transparent: request.transparent,
+            };
+            let again = self
+                .last_view_click
+                .is_some_and(|(spot, e)| spot.distance(at) <= near && self.active() == Some(e));
             // Answered by a pick made from the next frame on: the scene as it is now.
-            self.pending_click = Some((request, toggle, self.frame_seen + 1));
+            let from = self.frame_seen + 1;
+            if self.input.alt() {
+                self.pending_list = Some((list, ListUse::Offer, from));
+            } else if again && !toggle {
+                self.pending_list = Some((list, ListUse::Cycle, from));
+            } else {
+                self.pending_click = Some((request, toggle, from));
+            }
+            self.click_at = Some(at);
         }
+        self.list_request = self.pending_list.map(|(r, _, _)| r);
         let Some(request) = request else {
             self.hovered = None;
             self.last_pick = None;
@@ -2699,7 +2766,77 @@ impl Editor {
         {
             self.pending_click = None;
             self.click_viewport(world, entity, toggle);
+            // Only a plain click starts cycling.
+            let at = self.click_at.take();
+            self.last_view_click = if toggle { None } else { at.zip(self.active()) };
         }
+    }
+
+    /// Names the entities of the newest list of what lies under a pixel, front to back
+    /// (`slot_of` gives an entity's slot), and answers a click waiting for it: a cycling
+    /// click selects the next one behind the active entity (the nearest when the active
+    /// one is not there, round to it after the farthest); Alt+click offers them all.
+    fn resolve_list(&mut self, world: &World, slot_of: impl Fn(Entity) -> Option<u32>) {
+        let Some((request, frame, slots)) = self.listed.take() else {
+            return;
+        };
+        let Some((wanted, used, from)) = self.pending_list else {
+            return;
+        };
+        if wanted != request || frame < from {
+            return;
+        }
+        self.pending_list = None;
+        let mut found: Vec<(usize, Entity)> = Vec::new();
+        if let Some(q) = self.scene_ids.as_mut() {
+            for (e, _) in q.iter_readonly(world) {
+                if let Some(k) = slot_of(e).and_then(|slot| slots.iter().position(|&s| s == slot)) {
+                    found.push((k, e));
+                }
+            }
+        }
+        found.sort_unstable_by_key(|&(k, _)| k);
+        let under: Vec<Entity> = found.into_iter().map(|(_, e)| e).collect();
+        let at = self.click_at.take();
+        match used {
+            ListUse::Cycle => {
+                let next = match self
+                    .active()
+                    .and_then(|a| under.iter().position(|&e| e == a))
+                {
+                    Some(i) => under.get((i + 1) % under.len()).copied(),
+                    None => under.first().copied(),
+                };
+                self.click_viewport(world, next, false);
+                self.last_view_click = at.zip(self.active());
+            }
+            ListUse::Offer => {
+                self.last_view_click = None;
+                if under.is_empty() {
+                    self.say(String::from("Nothing under the pointer"));
+                } else {
+                    self.under_pointer = Some(under);
+                }
+            }
+        }
+    }
+
+    /// Alt+click's list: the entities under the pointer, nearest first, in the palette;
+    /// picking one selects it.
+    fn offer_under_pointer(&mut self, world: &mut World, under: Vec<Entity>) {
+        let items = under
+            .into_iter()
+            .filter(|&e| world.contains(e))
+            .map(|e| {
+                let (_, kind) = kind_of(world, e);
+                Choice {
+                    label: String::from(world.get::<Name>(e).map_or(kind, Name::as_str)),
+                    detail: String::from(kind),
+                    pick: Pick::Select(e),
+                }
+            })
+            .collect();
+        self.open_list(world, "What lies under the pointer, nearest first", items);
     }
 
     /// A click in the viewport on `entity` (none: on nothing; ADR 0109). It selects it
@@ -3260,6 +3397,16 @@ impl Editor {
             self.start_key_transform(world, kinds[i]);
         } else if id == ids.keys {
             self.pick_keys(world);
+        } else if id == ids.pick_transparent {
+            self.pick_transparent = !self.pick_transparent;
+            // The pointer's pixel is picked again the new way.
+            self.last_pick = None;
+            self.write_session(world);
+            self.say(String::from(if self.pick_transparent {
+                "Clicks pick transparent surfaces"
+            } else {
+                "Clicks pick through transparent surfaces"
+            }));
         } else if id == ids.local_axes {
             self.local_axes = !self.local_axes;
             self.say(String::from(if self.local_axes {
@@ -3691,6 +3838,9 @@ impl Editor {
             let (low, high) = FLY_RANGE;
             self.fly_speed = (fly as f32).clamp(low, high);
         }
+        if let Some(on) = state.pick_transparent {
+            self.pick_transparent = on;
+        }
     }
 
     /// A scene's view from a session: the camera, the selection by scene ids (those gone
@@ -3793,6 +3943,7 @@ impl Editor {
             restart: Some(String::from(self.restart_policy.name())),
             keys: Some(String::from(self.key_preset.name())),
             fly: Some(f64::from(self.fly_speed)),
+            pick_transparent: Some(self.pick_transparent),
             window: self.window,
         };
         let view = self.view(world);
@@ -4363,6 +4514,7 @@ impl<G> EditorGame<G> {
         let extract = runtime.extract();
         let slot_of = |e: Entity| extract.instance(e).map(|i| i.slot());
         shared.resolve_pick(&runtime.world, slot_of);
+        shared.resolve_list(&runtime.world, slot_of);
         shared.outline(&runtime.world, slot_of);
     }
 
@@ -4675,20 +4827,72 @@ impl Overlay for EditorOverlay {
                 ];
                 editor.frame_seen = view.frame_number;
                 if let Some(result) = self.picker.poll(view.frame_number) {
-                    editor.picked = Some((result.request, result.frame, result.nearest(3)));
+                    editor.picked =
+                        Some((result.request, result.frame, result.nearest(PICK_RADIUS)));
+                }
+                if let Some(result) = self.picker.poll_list(view.frame_number) {
+                    editor.listed = Some((
+                        result.request,
+                        result.frame,
+                        result.hits.iter().map(|&(slot, _)| slot).collect(),
+                    ));
+                }
+                let rect = view.rect.unwrap_or(engine_rhi::ash::vk::Rect2D {
+                    offset: engine_rhi::ash::vk::Offset2D::default(),
+                    extent: pass.extent,
+                });
+                let aspect = rect.extent.width as f32 / rect.extent.height.max(1) as f32;
+                // The scene's picks draw its candidates through the camera without jitter,
+                // at the render size.
+                let pick_view = PickView {
+                    clip_from_world: view.camera.clip_from_world(aspect),
+                    size: render,
+                };
+                if let Some(request) = editor.list_request.take() {
+                    let declared = match view.scene {
+                        Some(scene) => self.picker.add_list_pass(
+                            pass.fg,
+                            pass.ring,
+                            pass.bindless,
+                            view.geometry,
+                            view.materials,
+                            scene,
+                            &pick_view,
+                            request,
+                            view.frame_number,
+                        ),
+                        None => PickPass::Empty,
+                    };
+                    // Nothing under the pixel: answered at once.
+                    if declared == PickPass::Empty {
+                        editor.listed = Some((request, view.frame_number, Vec::new()));
+                    }
                 }
                 if let Some(request) = editor.pick_request.take() {
-                    let declared = self.picker.add_pass(
-                        pass.fg,
-                        pass.bindless,
-                        view.geometry,
-                        view.materials,
-                        &view.frame.passes,
-                        render,
-                        request,
-                        view.frame_number,
-                    );
-                    // An empty view: nothing under any pixel, answered at once.
+                    let declared = match view.scene {
+                        Some(scene) => self.picker.add_scene_pass(
+                            pass.fg,
+                            pass.ring,
+                            pass.bindless,
+                            view.geometry,
+                            view.materials,
+                            scene,
+                            &pick_view,
+                            request,
+                            view.frame_number,
+                        ),
+                        None => self.picker.add_pass(
+                            pass.fg,
+                            pass.bindless,
+                            view.geometry,
+                            view.materials,
+                            &view.frame.passes,
+                            render,
+                            request,
+                            view.frame_number,
+                        ),
+                    };
+                    // Nothing under the pixel: answered at once.
                     if declared == PickPass::Empty {
                         editor.picked = Some((request, view.frame_number, None));
                     }
@@ -4697,11 +4901,6 @@ impl Overlay for EditorOverlay {
                 if let Some(scene) = view.scene
                     && !editor.outline_items.is_empty()
                 {
-                    let rect = view.rect.unwrap_or(engine_rhi::ash::vk::Rect2D {
-                        offset: engine_rhi::ash::vk::Offset2D::default(),
-                        extent: pass.extent,
-                    });
-                    let aspect = rect.extent.width as f32 / rect.extent.height.max(1) as f32;
                     self.outliner.add_passes(
                         pass.fg,
                         pass.ring,
@@ -7203,6 +7402,159 @@ mod tests {
         // A plain click selects only what it saw.
         view_click(&mut ed, &mut world, at, false, Some(9), slots);
         assert_eq!(ed.selection, [lamp]);
+    }
+
+    /// A press and a release at `at`, a frame each.
+    fn press_release(ed: &mut Editor, world: &mut World, at: [f32; 2]) {
+        mouse(ed, at, Some(true));
+        ed.update(world);
+        mouse(ed, at, Some(false));
+        ed.update(world);
+    }
+
+    /// Answers the list a waiting click asked for with `slots`, front to back (`slot_of`
+    /// gives the entities' slots, as the extraction does), and tells what it was for.
+    fn answer_list(
+        ed: &mut Editor,
+        world: &World,
+        slots: &[u32],
+        slot_of: impl Fn(Entity) -> Option<u32>,
+    ) -> ListUse {
+        let (request, used, from) = ed.pending_list.expect("a list asked for");
+        assert_eq!(ed.list_request, Some(request), "its pixel is listed");
+        assert_eq!(request.radius, PICK_RADIUS);
+        ed.listed = Some((request, from, slots.to_vec()));
+        ed.resolve_list(world, slot_of);
+        assert!(ed.pending_list.is_none(), "answered");
+        used
+    }
+
+    /// Three cubes under the same spot, nearest first, at slots 5, 6 and 7; an editor; the
+    /// spot, a quarter of the way into the view (away from the gizmo), hovered.
+    fn under_one_spot(name: &str) -> (World, Editor, [Entity; 3], [f32; 2]) {
+        let mut world = World::new();
+        let cubes = ["Front", "Middle", "Back"].map(|n| {
+            let e = cube_at(&mut world, Transform::IDENTITY);
+            world.insert(e, Name::new(n));
+            e
+        });
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder(name),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let [x, y, w, h] = ed.view_rect.unwrap();
+        let at = [(x + w / 4) as f32, (y + h / 4) as f32];
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        (world, ed, cubes, at)
+    }
+
+    #[test]
+    fn clicking_again_at_the_same_spot_cycles_through_what_lies_under_it() {
+        let (mut world, mut ed, [front, middle, back], at) = under_one_spot("pick-cycle");
+        let slots = move |e: Entity| {
+            [front, middle, back]
+                .iter()
+                .position(|&x| x == e)
+                .map(|i| i as u32 + 5)
+        };
+        // The first click takes the nearest surface's.
+        view_click(&mut ed, &mut world, at, false, Some(5), slots);
+        assert_eq!(ed.selection, [front]);
+        // Again there: the one behind, the farthest, then round to the nearest.
+        for expected in [middle, back, front] {
+            press_release(&mut ed, &mut world, at);
+            assert!(ed.pending_click.is_none(), "not a pick of the nearest");
+            assert_eq!(
+                answer_list(&mut ed, &world, &[5, 6, 7], slots),
+                ListUse::Cycle
+            );
+            assert_eq!(ed.selection, [expected]);
+        }
+        // An active entity no longer under the spot: the nearest.
+        press_release(&mut ed, &mut world, at);
+        answer_list(&mut ed, &world, &[6, 7], slots);
+        assert_eq!(ed.selection, [middle]);
+        // Elsewhere: a plain click.
+        let elsewhere = [at[0] + 40.0, at[1]];
+        mouse(&mut ed, elsewhere, None);
+        ed.update(&mut world);
+        view_click(&mut ed, &mut world, elsewhere, false, Some(7), slots);
+        assert_eq!(ed.selection, [back]);
+        // After a Shift+click a plain click does not cycle: it selects what it hits alone.
+        view_click(&mut ed, &mut world, elsewhere, true, Some(5), slots);
+        assert_eq!(ed.selection, [back, front]);
+        view_click(&mut ed, &mut world, elsewhere, false, Some(7), slots);
+        assert_eq!(ed.selection, [back]);
+    }
+
+    #[test]
+    fn alt_click_offers_what_lies_under_the_pointer_in_the_palette() {
+        let (mut world, mut ed, [front, middle, back], at) = under_one_spot("pick-offer");
+        let slots = move |e: Entity| {
+            [front, middle, back]
+                .iter()
+                .position(|&x| x == e)
+                .map(|i| i as u32 + 5)
+        };
+        const ALT: (u16, u16) = (0x12, 0x38);
+        key(&mut ed, ALT.0, ALT.1, true);
+        press_release(&mut ed, &mut world, at);
+        key(&mut ed, ALT.0, ALT.1, false);
+        assert!(ed.pending_click.is_none());
+        // The middle cube's surface is hidden by nothing here: the list's order is its own.
+        assert_eq!(answer_list(&mut ed, &world, &[7, 5], slots), ListUse::Offer);
+        assert!(ed.selection.is_empty(), "nothing picked yet");
+        ed.update(&mut world);
+        let cp = ed.command_palette.as_ref().expect("offered in the palette");
+        let labels: Vec<&str> = cp
+            .choices
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert_eq!(labels, ["Back", "Front"], "nearest first");
+        ed.palette_action(&mut world, PaletteAction::Run(1));
+        assert_eq!(ed.selection, [front]);
+        // Nothing there: said so, nothing offered.
+        key(&mut ed, ALT.0, ALT.1, true);
+        press_release(&mut ed, &mut world, at);
+        key(&mut ed, ALT.0, ALT.1, false);
+        answer_list(&mut ed, &world, &[], slots);
+        ed.update(&mut world);
+        assert!(ed.command_palette.is_none());
+        assert_eq!(ed.selection, [front]);
+    }
+
+    #[test]
+    fn picking_transparent_surfaces_is_a_switch_the_session_keeps() {
+        let dir = project("pick-transparent");
+        let (mut world, mut ed) = start(&dir);
+        assert!(ed.pick_transparent, "on by default");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let [x, y, w, h] = ed.view_rect.unwrap();
+        mouse(&mut ed, [(x + w / 4) as f32, (y + h / 4) as f32], None);
+        ed.update(&mut world);
+        assert!(ed.pick_request.unwrap().transparent);
+        let id = ed.ids.pick_transparent;
+        ed.run(&mut world, id);
+        assert!(!ed.pick_transparent);
+        // The pointer's pixel is picked again, through transparent surfaces.
+        ed.update(&mut world);
+        assert_eq!(ed.pick_request.map(|r| r.transparent), Some(false));
+        ed.end_session(&mut world);
+        let (_, ed) = start(&dir);
+        assert!(!ed.pick_transparent, "kept");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
