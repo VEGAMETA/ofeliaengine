@@ -165,7 +165,7 @@ Last updated: 2026-10-20.
     (3.4 ns), Godot's order over convex pieces, the surface each brush owns, a `Group`
     kept evaluated through edits (a door dragged among 2,001 brushes 0.58 ms on one
     thread; from nothing 57 ms).
-  - **E2b-2a, brushes in the player** (#PR): `Brush` and `BrushGroup` in scenes (the shape
+  - **E2b-2a, brushes in the player** (#287): `Brush` and `BrushGroup` in scenes (the shape
     and its size, the operation, the tint; edited brushes' planes in millimetres), the
     shapes (box, wedge, stairs, cylinder, sphere), each group evaluated in the player's
     frame where something changed, a mesh per brush with a grid texture (cracks at
