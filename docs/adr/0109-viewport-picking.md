@@ -235,9 +235,58 @@ occlusion culling dropped. So:
   - the outline under MSAA views (the mask is single-sampled, so it does not follow the
     view's own samples).
 
+## As built (E2-3c-1, 2026-10-21)
+
+- **Candidates for every pick of the GPU scene.** The scene keeps each slot's world box
+  (over its whole move for an instance moving between ticks) as six arrays; a pick's
+  pixels give six planes, and `SceneFrame::candidates` scans the boxes against them
+  sixteen at a time, each sixteen left at the first plane none of them reaches. The
+  candidates are drawn alone from commands written on the CPU (their meshes' finest
+  resident level), grouped by the faces' and the alpha test's state, through the camera
+  without jitter.
+- **The nearest surfaces from the candidates** (`Picker::add_scene_pass`): the 32 × 32
+  square of E2-3a with the same entry points, the region within the view. Measured
+  cheaper than drawing the view's culled commands again, so the editor uses it;
+  `add_pass` stays for views that draw a list.
+- **What lies under a pixel** (`Picker::add_list_pass`, `poll_list`): the candidates
+  within a radius (3 px in the editor), drawn without a depth test and without
+  attachments, each fragment an `atomicMin` of its depth into its item's word (new entry
+  points `pickListVertex`, `pickListFragment` and their masked twins); at most 1,024
+  items, sorted front to back on the CPU.
+- **The editor:**
+  - a plain click within 4 px of the last plain click, while the entity it left active
+    still is, asks for the list and selects the next entity behind the active one (the
+    nearest when the active one is not there, round to it after the farthest);
+  - Alt+click asks for the list and offers it in the palette, nearest first;
+  - "Viewport: Pick Transparent Surfaces" switches whether picks take blended surfaces
+    (on); the session keeps it.
+- **Measured** on Sponza, 1920 × 1080 (`scene_bench --scene-draws --rays --pick
+  view|scene|list`, the passes with their copies, medians), the RTX 4060 Ti, then the
+  Radeon iGPU:
+  - the view's commands drawn again: 18–20 µs, then 508–513 µs;
+  - the candidates' square: 7.0 µs, then 134 µs (2.6–3.8 times less), and 1.4–2.5 µs
+    on the CPU;
+  - the list (4 instances under the view's middle): 10 µs, then 107 µs.
+
+  The scan alone (release, ref-1's CPU): 0.9 µs for 1,000 boxes, 9.8 µs for 10,000,
+  111 µs for 100,000; written per box it took 3.4, 35 and 346.
+- **Tested:**
+  - on both GPUs, with synchronization validation: the square picks a blended quad
+    while transparent surfaces count and the opaque one behind it otherwise; the list
+    holds the quads under the pixel front to back, hidden ones too, never a masked quad
+    whose alpha is zero there or one beside it; a pixel outside the view is empty;
+  - the scan and the planes on the CPU;
+  - the editor's logic: cycling, round to the nearest, starting over elsewhere or after a
+    Shift+click; Alt+click's list in the palette and a pick from it; the switch kept by
+    the session;
+  - on the player, both GPUs: a click again on the cube selects a cube hidden inside it,
+    and another the outer one.
+- **Not done:** boxes (E2-3c-2). The select tool's middle handle sits at an object's
+  middle and takes a click there before cycling does.
+
 ## Steps
 
 - **E2-3a:** front-most picks (hover, click, Shift); the player's extension.
 - **E2-3b:** the outline (selection, active, hover).
-- **E2-3c:** boxes (visible, with Alt hidden too), cycling, Alt+click's list; "pick
-  transparent".
+- **E2-3c-1:** cycling, Alt+click's list, "pick transparent"; picks from candidates.
+- **E2-3c-2:** boxes (visible, with Alt hidden too).

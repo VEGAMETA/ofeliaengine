@@ -2559,35 +2559,50 @@ ofeliaengine cook level.gltf -o level.pack --pso game.pso.ron
 ## 23. Picking: which instance is under a pixel
 
 `engine_render::pick::Picker` (ADR 0109) answers what a view shows at a pixel on any GPU, as
-the editor's clicks do: it draws the view's culled commands again into a 32 × 32 square
-around the pixel and reads back each pixel's instance.
+the editor's clicks do: it draws the GPU scene's instances whose world box reaches the
+pixels around it, alone, and reads back each pixel's nearest instance; or every instance
+there, front to back.
 
 ```rust
-use engine_render::pick::{PickPass, PickRequest, Picker};
+use engine_render::pick::{ListRequest, PickPass, PickRequest, PickView, Picker};
 
 // Once:
 let mut picker = Picker::new(&device, &mut allocator, &bindless, frames_in_flight)?;
 
-// Every frame, after the view's passes (`passes`, at its `render` size):
+// Every frame, after the view's passes: what earlier frames picked.
 if let Some(result) = picker.poll(frame_number) {
     // The instance at the pixel, or the nearest within 3 pixels: the GPU scene's slot.
     let slot = result.nearest(3);
 }
-let request = PickRequest { x, y, transparent: true };
-match picker.add_pass(&mut fg, &bindless, &geo, &mats, &passes, render, request, frame_number) {
-    PickPass::Declared => {}            // its result comes `frames_in_flight` frames later
-    PickPass::Empty => { /* nothing is drawn: nothing to pick */ }
-    PickPass::Busy => { /* every readback waits to be polled */ }
+if let Some(list) = picker.poll_list(frame_number) {
+    // Every instance within the radius, nearest first, hidden ones too.
+    for &(slot, depth) in &list.hits { /* … */ }
 }
+// Then this frame's picks, through the view's camera without jitter, at its render size.
+let view = PickView { clip_from_world, size: render };
+let request = PickRequest { x, y, transparent: true };
+match picker.add_scene_pass(&mut fg, &mut ring, &bindless, &geo, &mats, &scene_frame, &view,
+    request, frame_number) {
+    PickPass::Declared => {}            // its result comes `frames_in_flight` frames later
+    PickPass::Empty => { /* nothing can be there: that is the answer */ }
+    PickPass::Busy => { /* every readback waits to be polled, or the ring is full */ }
+}
+let list = ListRequest { x, y, radius: 3, transparent: true };
+picker.add_list_pass(&mut fg, &mut ring, &bindless, &geo, &mats, &scene_frame, &view, list,
+    frame_number);
 ```
 
+- **What it draws:** the instances whose world box reaches the pixels, found by a scan of
+  the GPU scene's boxes on the CPU (about 1 µs per 1,000 instances), each mesh at its
+  finest resident level. For a view that draws a list instead of the GPU scene,
+  `add_pass` draws the view's own culled commands again.
 - **What it picks:** what the view draws: masked surfaces through their holes, skinned meshes
   in their current pose; blended ones too with `transparent`. An id is the index the view's
   vertex shaders read the instance with: the GPU scene's slot (`RenderExtract::instance`
   gives an entity's).
-- **What it costs:** the visible instances' vertex work. On Sponza at 1080p: 19–20 µs on an
-  RTX 4060 Ti, about 0.5 ms on the integrated Radeon. Pick when the pixel or the scene
-  changed, not every frame.
+- **What it costs** (Sponza at 1080p): the square 7.0 µs on an RTX 4060 Ti and 134 µs on
+  the integrated Radeon (the view's commands drawn again: 18–20 µs and 0.51 ms); the list
+  10 µs and 107 µs. Pick when the pixel or the scene changed, not every frame.
 - **Views that nobody picks in pay nothing:** the picker's pipelines are its own.
 
 **Outlines** of chosen instances, as the editor draws its selection:
