@@ -523,3 +523,24 @@ Proposed (question 3):
 - **Left for E2b-5b:** edges and corners moved (the brush's corners' hull made again,
   corners that meet merged, so an edge moved onto another makes a wedge), Q, E, R and typed
   values on faces, Ctrl+E.
+
+## As built (E2b-5b, 2026-10-21): edges and corners
+
+- **`engine_brush::shape::hull`:** the planes of the convex hull of grid points, exact (each
+  face's plane through three of its points, its normal's common factors gone; one beyond
+  the planes' bounds rounded through the face's first corner), points inside left out,
+  corners that meet merged; by brute force over triples, for the few corners a part has.
+  Tested: a box's corners give exactly its six planes, its top's back edge moved onto the
+  bottom's gives a wedge of five faces and half the volume, points in one plane give none.
+- **`engine_editor::faces`:** each part's corners on the millimetre grid and its edges;
+  a drag moves a corner, or an edge's two, in the plane of the brush's own axes that
+  faces the camera most, in steps by the owner's snapping rules along each axis, and the
+  part becomes the hull of its corners (refused when it makes no solid). A room's corners
+  are its walls': they are not shown, its faces are edited.
+- **The editor:** in Tab's editing the corners show as small squares; the pointer takes
+  a corner within 8 px, else an edge, else the face; each drag is one undo step.
+- **Tested:** a box's eight corners and twelve edges, a room's none; an edge dragged down
+  onto another making a wedge (unit, and in the editor as one undo step undone back to a
+  box); on both GPUs the corners shown; looked at.
+- **Left:** Q, E, R and typed values on what is picked, Ctrl+E, several corners picked
+  (Shift+click, a box), edges and corners of rooms.

@@ -7,6 +7,11 @@
 //!   go, and undo brings them back. A room keeps its walls: what moves is its inside's
 //!   plane, the wall following.
 //! - **A move that would leave a part of the brush empty stops** before it.
+//! - **Corners and edges** (E2b-5b): a drag moves a corner, or an edge's two, in the plane
+//!   of the brush's own axes that faces the camera most, and the part is made again as the
+//!   hull of its corners (`engine_brush::shape::hull`): corners that meet merge, so an edge
+//!   moved onto another makes a wedge; a corner dragged inside goes. A room's corners are its
+//!   walls', not moved: its faces are.
 //! - **The owner's snapping rules** ([`crate::Snapping`]): the distance in whole steps of the
 //!   position step with snapping on (G), or Shift with it off; Ctrl rounds it to the step.
 //!   Free, it lands on the brushes' millimetre grid.
@@ -119,6 +124,156 @@ pub(crate) fn pick(faces: &[Face], (o, d): (Vec3, Vec3)) -> Option<(usize, f32)>
         best
     };
     hit(true).or_else(|| hit(false))
+}
+
+/// A part's corners on the brushes' millimetre grid (each once) and its edges between them,
+/// for picking and moving them: the part's place among the brush's, each corner in the
+/// grid and in the world.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PartCorners {
+    pub(crate) part: usize,
+    pub(crate) grid: Vec<[i64; 3]>,
+    pub(crate) world: Vec<Vec3>,
+    pub(crate) edges: Vec<(usize, usize)>,
+}
+
+/// The corners and edges of each part of `brush` placed at `world`, into `out` (cleared
+/// first); none for a room (its faces are edited, its corners are its walls').
+pub(crate) fn corners(brush: &Brush, world: Affine3A, out: &mut Vec<PartCorners>) {
+    out.clear();
+    if brush.is_room() {
+        return;
+    }
+    let mut table = Planes::new();
+    for (p, part) in brush.parts().iter().enumerate() {
+        let Some(solid) = solid(part, &mut table) else {
+            continue;
+        };
+        let mut grid: Vec<[i64; 3]> = Vec::new();
+        let mut edges = Vec::new();
+        for f in &solid.faces {
+            let at: Vec<usize> = f
+                .polygon
+                .corners
+                .iter()
+                .map(|c| {
+                    let v = c.to_f64().round();
+                    let g = [v.x as i64, v.y as i64, v.z as i64];
+                    grid.iter().position(|&q| q == g).unwrap_or_else(|| {
+                        grid.push(g);
+                        grid.len() - 1
+                    })
+                })
+                .collect();
+            for k in 0..at.len() {
+                let (a, b) = (at[k], at[(k + 1) % at.len()]);
+                let edge = (a.min(b), a.max(b));
+                if a != b && !edges.contains(&edge) {
+                    edges.push(edge);
+                }
+            }
+        }
+        let world_points = grid
+            .iter()
+            .map(|g| {
+                let v = DVec3::new(g[0] as f64, g[1] as f64, g[2] as f64) * UNIT;
+                world.transform_point3(v.as_vec3())
+            })
+            .collect();
+        out.push(PartCorners {
+            part: p,
+            grid,
+            world: world_points,
+            edges,
+        });
+    }
+}
+
+/// Corners or an edge being dragged: moved together in the plane of the brush's own axes
+/// that faces the camera most, the part made again as the hull of its corners.
+#[derive(Debug, Clone)]
+pub(crate) struct CornerDrag {
+    pub(crate) part: usize,
+    /// The part's corners when the drag began, and which of them move.
+    corners: Vec<[i64; 3]>,
+    moving: Vec<usize>,
+    /// The brush's planes then.
+    start: Vec<Vec<Plane>>,
+    /// Where the pointer took them, the plane they move in, and the brush's placement.
+    grab: Vec3,
+    normal: Vec3,
+    world: Affine3A,
+    /// Its undo step; taken back (Escape).
+    pub(crate) merge: u64,
+    pub(crate) cancelled: bool,
+    /// How far they have gone in the brush's own space, metres, for the label.
+    pub(crate) moved: Vec3,
+}
+
+impl CornerDrag {
+    /// A drag of corners `moving` of part `points` of `brush` placed at `world`, taken at
+    /// `grab`, seen from `eye`, as undo step `merge`.
+    pub(crate) fn start(
+        brush: &Brush,
+        world: Affine3A,
+        points: &PartCorners,
+        moving: Vec<usize>,
+        grab: Vec3,
+        eye: Vec3,
+        merge: u64,
+    ) -> Self {
+        let toward = (eye - grab).normalize_or_zero();
+        let axes =
+            [Vec3::X, Vec3::Y, Vec3::Z].map(|a| world.transform_vector3(a).normalize_or_zero());
+        let normal = axes
+            .into_iter()
+            .max_by(|a, b| a.dot(toward).abs().total_cmp(&b.dot(toward).abs()))
+            .unwrap_or(Vec3::Y);
+        Self {
+            part: points.part,
+            corners: points.grid.clone(),
+            moving,
+            start: brush.parts(),
+            grab,
+            normal,
+            world,
+            merge,
+            cancelled: false,
+            moved: Vec3::ZERO,
+        }
+    }
+
+    /// The brush's planes with the corners moved where the pointer at `at` takes them, on
+    /// the grid of the position step along each of the brush's own axes as the rules say
+    /// (free: the millimetres), as its `planes`; none when they make no solid (the drag
+    /// keeps its last).
+    pub(crate) fn planes(
+        &mut self,
+        view: &ViewProj,
+        at: Vec2,
+        snap: &Snapping,
+        invert: bool,
+        round: bool,
+    ) -> Option<Vec<BrushPlane>> {
+        let hit = hit_plane(view.ray(at), self.grab, self.normal)?;
+        let own = self.world.inverse().transform_vector3(hit - self.grab);
+        let step = |v: f32| snap.snap(Quantity::Position, 0.0, f64::from(v), invert, round);
+        let by = [0, 1, 2].map(|i| (step(own[i]) / UNIT).round() as i64);
+        let mut corners = self.corners.clone();
+        for &k in &self.moving {
+            for i in 0..3 {
+                corners[k][i] += by[i];
+            }
+        }
+        let planes = engine_brush::shape::hull(&corners)?;
+        let mut parts = self.start.clone();
+        parts[self.part] = planes;
+        if !whole(&parts) {
+            return None;
+        }
+        self.moved = Vec3::new(by[0] as f32, by[1] as f32, by[2] as f32) * UNIT as f32;
+        Some(as_planes(&parts))
+    }
 }
 
 /// The planes of brush parts as a brush's `planes` field.
@@ -393,6 +548,60 @@ mod tests {
         faces(&moved, Affine3A::IDENTITY, &mut out);
         let x = out.iter().find(|f| f.normal.x > 0.9).unwrap().corners[0].x;
         assert!((x - 3.2).abs() < 1e-5, "{x}");
+    }
+
+    #[test]
+    fn a_boxs_corners_are_eight_and_its_edges_twelve_a_rooms_none() {
+        let brush = Brush::new(BrushShape::Box, Vec3::new(2.0, 1.0, 2.0));
+        let mut out = Vec::new();
+        corners(&brush, Affine3A::IDENTITY, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].grid.len(), out[0].edges.len()), (8, 12));
+        assert!(out[0].grid.contains(&[1000, 1000, -1000]));
+        let room = brush.clone().with_hollow(0.2);
+        corners(&room, Affine3A::IDENTITY, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn an_edge_dragged_down_onto_another_makes_a_wedge() {
+        let view = view();
+        let snap = Snapping {
+            on: true,
+            ..Snapping::default()
+        };
+        let brush = Brush::new(BrushShape::Box, Vec3::new(2.0, 1.0, 2.0));
+        let mut out = Vec::new();
+        corners(&brush, Affine3A::IDENTITY, &mut out);
+        let points = &out[0];
+        // The top's edge at z = +1 m, its two corners.
+        let moving: Vec<usize> = (0..points.grid.len())
+            .filter(|&k| points.grid[k][1] == 1000 && points.grid[k][2] == 1000)
+            .collect();
+        assert_eq!(moving.len(), 2);
+        let grab = Vec3::new(0.0, 1.0, 1.0);
+        let mut d = CornerDrag::start(
+            &brush,
+            Affine3A::IDENTITY,
+            points,
+            moving,
+            grab,
+            view.eye,
+            1,
+        );
+        // Seen from the front and above: it moves in the plane across z (x and y), down 1 m.
+        let at = view.screen(grab - Vec3::Y).unwrap();
+        let planes = d.planes(&view, at, &snap, false, false).unwrap();
+        let wedge = edited(&brush, planes);
+        let mut faces_now = Vec::new();
+        faces(&wedge, Affine3A::IDENTITY, &mut faces_now);
+        assert_eq!(faces_now.len(), 5, "a wedge");
+        assert!((volume(&wedge.planes) - 2.0 * 1.0 * 2.0 / 2.0).abs() < 1e-5);
+        assert!(
+            (d.moved - Vec3::new(0.0, -1.0, 0.0)).length() < 1e-6,
+            "{}",
+            d.moved
+        );
     }
 
     #[test]
