@@ -127,7 +127,7 @@ Last updated: 2026-10-20.
       lighter) and the hovered entity, drawn alone into a mask bounded by their boxes on
       the screen, then a 2 px line, hidden parts at 35 %; three small instances cost 6 +
       10 µs on the RTX, 63 + 108 µs on the iGPU;
-    - **E2-3c-1, what lies under the pointer** (#PR): picks draw only the GPU scene's
+    - **E2-3c-1, what lies under the pointer** (#277): picks draw only the GPU scene's
       instances whose world box reaches the pixels (the square 7 µs instead of 18–20 on the
       RTX, 134 µs instead of 0.51 ms on the iGPU); a list of every instance under a pixel,
       front to back; a click again at the same spot cycles behind the active entity,
