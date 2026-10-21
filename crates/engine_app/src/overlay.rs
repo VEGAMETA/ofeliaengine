@@ -3,11 +3,41 @@
 //! graph, over the finished frame, before it is presented ([`crate::Player::frame_overlaid`]).
 
 use crate::{AppError, Setup};
+use engine_frame::{ViewCamera, ViewFrame};
 use engine_render::graph::{FrameGraph, Texture};
+use engine_render::material::MaterialFrame;
+use engine_render::mesh::GeometryFrame;
 use engine_render::post::OutputLevels;
 use engine_render::upload::UploadRing;
 use engine_rhi::Bindless;
 use engine_rhi::ash::vk;
+
+/// The view the player drew under an overlay (ADR 0109): what an overlay needs to draw the
+/// scene's view again, as the editor's picking does.
+#[derive(Clone, Copy)]
+pub struct OverlayView<'a, 'g> {
+    /// What the view's passes declared: its culled commands, sizes and depth.
+    pub frame: &'a ViewFrame,
+    /// The camera it was drawn from.
+    pub camera: &'a ViewCamera,
+    /// Where the view is in the target, or `None` for all of it.
+    pub rect: Option<vk::Rect2D>,
+    /// This frame's geometry.
+    pub geometry: &'a GeometryFrame<'g>,
+    /// This frame's materials.
+    pub materials: &'a MaterialFrame<'g>,
+    /// The frame's number (readback rings poll with it).
+    pub frame_number: u64,
+}
+
+impl core::fmt::Debug for OverlayView<'_, '_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OverlayView")
+            .field("rect", &self.rect)
+            .field("frame_number", &self.frame_number)
+            .finish_non_exhaustive()
+    }
+}
 
 /// The frame an overlay draws over.
 pub struct OverlayPass<'a, 'g> {
@@ -22,6 +52,8 @@ pub struct OverlayPass<'a, 'g> {
     pub target: Texture,
     /// Its size in pixels.
     pub extent: vk::Extent2D,
+    /// The scene's view under it, when the player drew one.
+    pub view: Option<OverlayView<'a, 'g>>,
 }
 
 /// What an overlay draws into: [`crate::Player::output`], and given again to

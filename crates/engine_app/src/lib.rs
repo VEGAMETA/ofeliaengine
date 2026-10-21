@@ -95,7 +95,7 @@ pub use net::{
     HitCapsule, HostOptions, NetConfig, NetEvent, NetInput, NetState, Network, PlayerId, Predicted,
     SubTick, To,
 };
-pub use overlay::{Overlay, OverlayOutput, OverlayPass};
+pub use overlay::{Overlay, OverlayOutput, OverlayPass, OverlayView};
 pub use physics::{SceneBodies, ScenePhysics};
 pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Setup, UiLayer};
 pub use report::{FrameReport, Startup, StartupPipelines};
