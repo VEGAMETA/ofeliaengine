@@ -1116,7 +1116,7 @@ impl States {
 /// faces of single-sided geometry (fewer self-shadowing artifacts on closed meshes),
 /// except for subsurface materials (their front faces, where light enters, for thick
 /// transmission); the forward passes cull them.
-fn faces(state: usize, shadow: bool) -> (vk::CullModeFlags, vk::FrontFace) {
+pub(crate) fn faces(state: usize, shadow: bool) -> (vk::CullModeFlags, vk::FrontFace) {
     let cull = match (state & DOUBLE_SIDED != 0, shadow) {
         (true, _) => vk::CullModeFlags::NONE,
         // Subsurface materials cast from the faces towards the light: the shadow map then

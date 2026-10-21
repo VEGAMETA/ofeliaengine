@@ -29,6 +29,7 @@ mod occlusion;
 mod outline;
 mod particles;
 mod pick;
+mod pick_scene;
 mod post;
 mod rays;
 mod reflections;

@@ -101,7 +101,7 @@ use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, Tex
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, LodIndices, MeshData, MeshId};
 use engine_render::outline::{OutlineClass, OutlineItem, OutlineStyle, OutlineView, Outliner};
-use engine_render::pick::{PickRequest, Picker, SQUARE};
+use engine_render::pick::{ListRequest, PickRequest, PickView, Picker, SQUARE};
 use engine_render::png::{PngFormat, encode_png};
 use engine_render::post::{Composite, HDR_FORMAT, ToneCurve, Tonemap};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
@@ -334,8 +334,10 @@ fn main() {
     let mut meshlets = true;
     let mut meshlet_culling = false;
     let mut pipeline_stats = false;
-    // The editor's pick at the view's middle every frame (ADR 0109).
-    let mut pick = false;
+    // The editor's pick at the view's middle every frame (ADR 0109): from the view's culled
+    // commands (`view`, the default), from the GPU scene's candidates (`scene`, with
+    // `--scene-draws --rays`), or what lies under the pixel (`list`, the same way).
+    let mut pick: Option<String> = None;
     // The editor's outline of three instances (ADR 0109; with `--scene-draws --rays`): the
     // smallest by their world boxes (`small`, the default) or the largest (`large`).
     let mut outline: Option<String> = None;
@@ -430,7 +432,12 @@ fn main() {
             "--no-meshlets" => meshlets = false,
             "--meshlet-culling" => meshlet_culling = true,
             "--pipeline-stats" => pipeline_stats = true,
-            "--pick" => pick = true,
+            "--pick" => {
+                pick = Some(
+                    args.next_if(|a| !a.starts_with("--"))
+                        .unwrap_or_else(|| String::from("view")),
+                );
+            }
             "--outline" => {
                 outline = Some(
                     args.next_if(|a| !a.starts_with("--"))
@@ -1488,8 +1495,13 @@ fn main() {
         // The cached cascades' texels drawn per frame (ADR 0093).
         let mut cache_texels = Vec::new();
         let last = mode == "textured" && screenshot.is_some();
-        let mut picker = pick.then(|| Picker::new(&device, &mut allocator, &bindless, 1).unwrap());
+        let mut picker = pick
+            .is_some()
+            .then(|| Picker::new(&device, &mut allocator, &bindless, 1).unwrap());
         let mut pick_time = Vec::new();
+        // The CPU's part of a scene pick (the candidates' scan and draws), and their count.
+        let mut pick_cpu = Vec::new();
+        let mut pick_candidates = Vec::new();
         let mut outliner = outline
             .is_some()
             .then(|| Outliner::new(&device, &bindless, HDR_FORMAT, 1.0).unwrap());
@@ -1749,20 +1761,68 @@ fn main() {
                 if let Some(picker) = picker.as_mut() {
                     let number = frame as u64 + 1;
                     picker.poll(number);
-                    picker.add_pass(
-                        &mut fg,
-                        &bindless,
-                        &geo,
-                        &mats,
-                        &passes,
-                        (WIDTH, HEIGHT),
-                        PickRequest {
-                            x: WIDTH / 2,
-                            y: HEIGHT / 2,
-                            transparent: true,
-                        },
-                        number,
-                    );
+                    picker.poll_list(number);
+                    if let Some(list) = picker.latest_list() {
+                        pick_candidates.push(list.hits.len() as f64);
+                    }
+                    let request = PickRequest {
+                        x: WIDTH / 2,
+                        y: HEIGHT / 2,
+                        transparent: true,
+                    };
+                    let pick_view = PickView {
+                        clip_from_world: camera.clip_from_world,
+                        size: (WIDTH, HEIGHT),
+                    };
+                    match (pick.as_deref(), &ray_frames) {
+                        (Some("scene"), Some((scene_frame, _))) => {
+                            let start = Instant::now();
+                            picker.add_scene_pass(
+                                &mut fg,
+                                &mut ring,
+                                &bindless,
+                                &geo,
+                                &mats,
+                                scene_frame,
+                                &pick_view,
+                                request,
+                                number,
+                            );
+                            pick_cpu.push(start.elapsed().as_secs_f64() * 1e6);
+                        }
+                        (Some("list"), Some((scene_frame, _))) => {
+                            let start = Instant::now();
+                            picker.add_list_pass(
+                                &mut fg,
+                                &mut ring,
+                                &bindless,
+                                &geo,
+                                &mats,
+                                scene_frame,
+                                &pick_view,
+                                ListRequest {
+                                    x: request.x,
+                                    y: request.y,
+                                    radius: 3,
+                                    transparent: true,
+                                },
+                                number,
+                            );
+                            pick_cpu.push(start.elapsed().as_secs_f64() * 1e6);
+                        }
+                        _ => {
+                            picker.add_pass(
+                                &mut fg,
+                                &bindless,
+                                &geo,
+                                &mats,
+                                &passes,
+                                (WIDTH, HEIGHT),
+                                request,
+                                number,
+                            );
+                        }
+                    }
                 }
                 // `--outline`: the editor's outline of three instances (ADR 0109).
                 if let (Some(outliner), Some((scene_frame, _))) = (outliner.as_mut(), &ray_frames) {
@@ -2024,7 +2084,10 @@ fn main() {
                 let (mut mask_frame, mut edge_frame) = (0.0, 0.0);
                 for time in graph.gpu_pass_times() {
                     let us = f64::from(time.gpu_us);
-                    if matches!(time.name, "pick" | "pick copy") {
+                    if matches!(
+                        time.name,
+                        "pick" | "pick copy" | "pick list clear" | "pick list" | "pick list copy"
+                    ) {
                         pick_frame += us;
                     }
                     match time.name {
@@ -2217,9 +2280,18 @@ fn main() {
         }
         if let Some(mut picker) = picker.take() {
             println!(
-                "pick ({SQUARE} × {SQUARE} at the view's middle, its copy included): {:.1} µs",
+                "pick ({}, {SQUARE} × {SQUARE} at the view's middle, its copy included): {:.1} µs",
+                pick.as_deref().unwrap_or("view"),
                 median(&mut pick_time)
             );
+            if !pick_cpu.is_empty() {
+                println!(
+                    "pick on the CPU (candidates and draws): {:.1} µs; {} instances in the scene, {:.0} listed",
+                    median(&mut pick_cpu),
+                    draws.len(),
+                    median(&mut pick_candidates)
+                );
+            }
             // SAFETY: the GPU is idle after each frame.
             unsafe { picker.destroy(&mut allocator) };
         }
