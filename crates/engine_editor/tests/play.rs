@@ -8,6 +8,7 @@ use engine_app::{Assets, Game, Model, Player, PlayerSettings, Window, builtin};
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Entity, QueryState, Transform, World};
 use engine_editor::{EditorGame, EditorOverlay};
+use engine_platform::window::{WindowEvent, WindowEventKind, WindowId};
 use engine_runtime::{Camera, Sun, Tween, look_rotation};
 use engine_scene::{AssetId, Name, SaveOptions, SceneId, SceneRegistry, find_named, save_with};
 use std::path::{Path, PathBuf};
@@ -474,6 +475,117 @@ fn eject_gives_the_editor_its_camera_on_the_running_game() {
             .devices()
             .keyboard_mouse
     );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Enter pressed and released, as the window reports it.
+fn enter<G: Game>(game: &mut EditorGame<G>) {
+    for pressed in [true, false] {
+        game.event(&WindowEvent {
+            window: WindowId(0),
+            time: std::time::Instant::now(),
+            kind: WindowEventKind::Key {
+                virtual_key: 0x0D,
+                scancode: 0x1C,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        });
+    }
+}
+
+/// The scene's entities (with a scene id).
+fn scene_entities(world: &mut World) -> usize {
+    let mut q = QueryState::<&SceneId>::new(world);
+    q.iter_readonly(world).count()
+}
+
+#[test]
+fn changes_kept_while_playing_stay_after_stop() {
+    let dir = temp_dir("play-keep");
+    write_scene(&dir);
+    let Some((mut player, settings)) = player(&dir, "editor keep test") else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..20 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    // Ctrl+K on the crate: its changes stay at Stop.
+    let crate_ = find_named(player.world_mut(), "Crate").unwrap();
+    game.select(Some(crate_));
+    assert!(game.run_command(player.world_mut(), "play.keep"));
+    frame(&mut player, &mut game, &mut overlay);
+    let said = game.message().unwrap();
+    assert!(said.contains("kept at Stop"), "{said}");
+    // Paused, so the crate stays where Stop will find it.
+    assert!(game.run_command(player.world_mut(), "play.pause"));
+    frame(&mut player, &mut game, &mut overlay);
+    let (x, _) = state(player.world_mut());
+    assert!(x > 0.2, "{x}");
+    assert!(game.run_command(player.world_mut(), "play.stop"));
+    frame(&mut player, &mut game, &mut overlay);
+    let said = game.message().unwrap();
+    assert!(said.contains("kept the changes of 1 entity"), "{said}");
+    let world = player.world_mut();
+    let (kept, _) = state(world);
+    assert_eq!(kept, x, "the crate where it was");
+    let door = find_named(world, "Door").unwrap();
+    assert_eq!(
+        world.get::<Transform>(door).unwrap().translation.y,
+        0.0,
+        "the door was not kept"
+    );
+    assert!(game.unsaved(), "a change to the scene");
+    // One undo step takes it back.
+    assert!(game.run_command(player.world_mut(), "edit.undo"));
+    frame(&mut player, &mut game, &mut overlay);
+    assert_eq!(state(player.world_mut()).0, 0.0);
+    assert!(!game.unsaved());
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn keeping_every_change_keeps_what_the_game_made() {
+    let dir = temp_dir("play-keep-all");
+    write_scene(&dir);
+    let Some((mut player, settings)) = player(&dir, "editor keep all test") else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    frame(&mut player, &mut game, &mut overlay);
+    let before = scene_entities(player.world_mut());
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.run_command(player.world_mut(), "play.pause"));
+    frame(&mut player, &mut game, &mut overlay);
+    // "Keep Changes…": its first line keeps every change.
+    assert!(game.run_command(player.world_mut(), "play.keep_list"));
+    frame(&mut player, &mut game, &mut overlay);
+    enter(&mut game);
+    frame(&mut player, &mut game, &mut overlay);
+    let (x, _) = state(player.world_mut());
+    assert!(game.run_command(player.world_mut(), "play.stop"));
+    frame(&mut player, &mut game, &mut overlay);
+    let said = game.message().unwrap();
+    assert!(said.contains("kept the changes of 3 entities"), "{said}");
+    let world = player.world_mut();
+    // The crate's slide, the door's rise, and the shot, now a scene entity.
+    assert_eq!(state(world).0, x);
+    let door = find_named(world, "Door").unwrap();
+    assert!(world.get::<Transform>(door).unwrap().translation.y > 0.1);
+    assert_eq!(scene_entities(world), before + 1, "the shot kept");
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

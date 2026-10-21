@@ -144,6 +144,7 @@ editor = ["dep:engine_editor"]
 | Play from the editor's camera; restart | Shift+F5; Ctrl+F5 |
 | Pause or go on; step one tick | F7; Shift+F7 |
 | Eject (the editor's camera and tools on the running game), return | Shift+F8 |
+| While playing: keep the selection's changes at Stop; pick from what changed | Ctrl+K; Ctrl+Shift+K |
 
 These are our keys, the default (team decision, 2026-10-21): the left hand stays beside
 W, A, S, D, which fly the camera. **Editor: Key Map…** (Ctrl+Shift+P) takes another set,
@@ -526,6 +527,26 @@ Keeping the scene and putting it back take milliseconds: 7 and 8 ms for 10,000 e
 
   Shift+F8 again returns to the game.
 
+### Keeping changes
+
+What you change while playing goes away at Stop, unless you keep it. Changes the game
+made count too: a door it opened, a crate it pushed, the things it spawned.
+
+- **Ctrl+K** (Unreal's K) keeps the selection's changes: at Stop they go into the scene,
+  and the tree shows "Kept" beside them meanwhile. Ctrl+K again on the same selection: not
+  kept.
+- **Ctrl+Shift+K** ("Play: Keep Changes…") lists what changed since Play: the scene's
+  entities with the components that differ, the entities made while playing, and those
+  despawned. Enter on a line keeps it or not; the first line keeps every change.
+- **At Stop**, the scene is put back first; then the kept changes go in as one undo step,
+  "Keep Changes":
+  - a kept entity gets the values its saved components had (the game's own runtime
+    components are not the scene's and stay out);
+  - an entity made while playing becomes a new scene entity;
+  - a kept despawn deletes the entity.
+
+  Ctrl+Z takes the step back, and saving writes them.
+
 **A panic in your game's code** stops Play instead of the editor. The status bar says the
 message and where it happened (`the game panicked in `tick`: … (src/game.rs:42)`), and the
 crash reporter still writes its report.
@@ -613,7 +634,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | Phase | What |
 |---|---|
 | E2b | blockout: brushes for greyboxing a level (box, wedge, stairs, cylinder; add, subtract), their colliders and navigation mesh |
-| E3 | Play: keeping changes, the game's own window (Play and Stop, pause and step, play from here, restart and eject are done) |
+| E3 | Play: the game's own window, the tree's marks on what changed (Play and Stop, pause and step, play from here, restart, eject and keeping changes are done) |
 
 The whole plan is ADR 0107 §7.
 
