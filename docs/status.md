@@ -170,8 +170,14 @@ Last updated: 2026-10-20.
     shapes (box, wedge, stairs, cylinder, sphere), each group evaluated in the player's
     frame where something changed, a mesh per brush with a grid texture (cracks at
     T-junctions closed by growing each polygon 0.05 mm); `docs/dev-guide/blockout.md`.
-  - **Next:** E2b-2b, brushes in the editor (the add menu, the tree's icons, the
-    inspector, undo).
+  - **The owner's notes after trying the editor** (#288): the camera's drags lock and hide
+    the cursor; the tree's eye and H turn entities off with what is below them
+    (`Disabled`, saved; not drawn, lights dark, brushes out); a game's `dev` build has the
+    engine as in release and no validation layer (`ENGINE_VALIDATION=1`), and playing uses
+    it too (`cargo run`). Small changes now go in batches with targeted tests (the owner,
+    2026-10-21).
+  - **Next:** the engine as a DLL for games' development builds (the owner's choice:
+    measured against today's, then an ADR), then E2b-2b, brushes in the editor.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

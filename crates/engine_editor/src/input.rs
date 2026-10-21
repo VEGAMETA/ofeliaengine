@@ -141,6 +141,15 @@ impl InputCollector {
         self.cursor = Some([x, y]);
     }
 
+    /// The mouse moved by `(dx, dy)` physical pixels with the cursor locked (a camera
+    /// drag): a drag, the cursor where it is.
+    pub fn cursor_delta(&mut self, dx: f32, dy: f32) {
+        if self.held[Button::Right as usize] || self.held[Button::Middle as usize] {
+            self.drag[0] += dx;
+            self.drag[1] += dy;
+        }
+    }
+
     /// The cursor left the window.
     pub fn cursor_left(&mut self) {
         self.cursor = None;
@@ -389,6 +398,15 @@ mod tests {
         input.next_frame();
         assert_eq!(input.drag(), [0.0, 0.0]);
         assert!(input.held(Button::Right), "held across frames");
+        // The cursor locked: the moves' distances drag, the cursor stays.
+        input.cursor_delta(3.0, -2.0);
+        input.cursor_delta(1.0, 5.0);
+        assert_eq!(input.drag(), [4.0, 3.0]);
+        assert_eq!(input.cursor(), Some([30.0, 2.0]));
+        input.button(Button::Right, false);
+        input.next_frame();
+        input.cursor_delta(7.0, 7.0);
+        assert_eq!(input.drag(), [0.0, 0.0], "no button: nothing");
     }
 
     #[test]

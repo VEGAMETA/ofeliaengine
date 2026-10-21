@@ -41,10 +41,12 @@ cargo run --release -p engine_cli -- new ../mygame
 
 ```text
 cd ../mygame
-cargo run --release
+cargo run
 ```
 
 - **The first build compiles the engine:** 74 s on the reference machine (Ryzen 7 7700).
+  Playing and the editor use the same build of it (the `dev` profile, in `target/debug`):
+  your code builds fast with its checks, the engine runs as in a release build.
 - **After an edit,** your game rebuilds in about 2.5 s.
 
 ![The quick start's game](quick-start.png)
@@ -63,7 +65,7 @@ The same game in its editor (`ofeliaengine edit` starts it too). It opens
 - **Click the cube** in the scene tree, then drag its numbers in the inspector: it moves
   as you drag, and Ctrl+Z takes it back.
 - **Add** a light or another cube with **+** in the scene tree (or Ctrl+A).
-- **Ctrl+S** saves the scene; `cargo run --release` plays what you saved.
+- **Ctrl+S** saves the scene; `cargo run` plays what you saved.
 - **Change the code** (the cube's speed in `src/main.rs`) and save: the editor rebuilds the
   game in the background and restarts with it, the scene as it was.
 

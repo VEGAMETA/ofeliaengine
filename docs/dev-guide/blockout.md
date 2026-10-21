@@ -18,6 +18,8 @@ every machine.
   not what comes after it. Brushes of different groups do not touch each other: make a
   building one group, a door that will move another.
 - The faces a cut makes belong to the cut, so selecting a doorway's side selects the doorway.
+- A brush that is off (`Disabled`, or below a disabled entity; the eye in the editor's tree)
+  acts on nothing: a cut turned off leaves its wall whole, a group turned off shows nothing.
 
 ```rust
 let group = world.spawn((SceneId::new(), Name::new("Blockout"), Transform::IDENTITY, BrushGroup::default()));

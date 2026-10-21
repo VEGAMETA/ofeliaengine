@@ -1,5 +1,6 @@
 //! One frame of the game: input, ticks, presentation, interpolation.
 
+use crate::activity::ActivityPropagation;
 use crate::extract::{RenderExtract, SceneSink};
 use crate::lights::LightExtract;
 use crate::skinned::SkinnedQuery;
@@ -79,6 +80,8 @@ pub struct Runtime<Id = InstanceId> {
     /// The simulation clock.
     pub clock: FixedStep,
     propagation: TransformPropagation,
+    /// What is off ([`crate::Disabled`]), over the ticks, before the propagation.
+    activity: ActivityPropagation,
     pub(crate) extract: RenderExtract<Id>,
     /// The light components, mirrored after every tick (ADR 0099 step 3).
     lights: LightExtract,
@@ -108,6 +111,7 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
     /// ticks.
     pub fn new(mut world: World, hz: f64) -> Self {
         let propagation = TransformPropagation::new(&mut world);
+        let activity = ActivityPropagation::new(&mut world);
         let mut clock = FixedStep::new(hz);
         clock.max_steps = 4;
         let extract = RenderExtract::new(&mut world, true);
@@ -117,6 +121,7 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
             world,
             clock,
             propagation,
+            activity,
             extract,
             lights,
             skinned,
@@ -179,6 +184,7 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
             self.world.advance_sim_tick();
             stages.simulate_us += us(start);
             let start = Instant::now();
+            self.activity.run(&mut self.world);
             match &self.jobs {
                 Some(jobs) => self.propagation.run_parallel(&mut self.world, jobs),
                 None => self.propagation.run(&mut self.world),
@@ -230,6 +236,7 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
         let Self {
             world,
             propagation,
+            activity,
             extract,
             lights,
             jobs,
@@ -243,6 +250,7 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
                 stages.simulate_us += us(start);
                 stages.ticks += 1;
                 let start = Instant::now();
+                activity.run(world);
                 match jobs.as_ref() {
                     Some(jobs) => propagation.run_parallel(world, jobs),
                     None => propagation.run(world),
@@ -254,6 +262,7 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
         world.set_sim_tick(driven.tick);
         stages.alpha = driven.alpha;
         let start = Instant::now();
+        activity.run(world);
         match jobs.as_ref() {
             Some(jobs) => propagation.run_parallel(world, jobs),
             None => propagation.run(world),

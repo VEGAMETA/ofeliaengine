@@ -54,6 +54,8 @@ fn tree_item<'a>(
         selected,
         active: selected,
         renaming: false,
+        disabled: false,
+        off: false,
     }
 }
 

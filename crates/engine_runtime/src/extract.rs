@@ -1,5 +1,6 @@
 //! Extraction: the renderable entities of the ECS world, mirrored into a GPU scene.
 
+use crate::Inactive;
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4};
 use engine_core::sync::CachePadded;
@@ -193,7 +194,12 @@ struct Entry<Id> {
 }
 
 type Changes = QueryState<
-    (Entity, &'static GlobalTransform, &'static MeshRenderer),
+    (
+        Entity,
+        &'static GlobalTransform,
+        &'static MeshRenderer,
+        Option<&'static Inactive>,
+    ),
     Or<(Changed<GlobalTransform>, Changed<MeshRenderer>)>,
 >;
 
@@ -264,6 +270,8 @@ struct Run {
     globals: *const GlobalTransform,
     renderers: *const MeshRenderer,
     len: usize,
+    /// The chunk's entities are off ([`Inactive`]): drawn as hidden.
+    inactive: bool,
 }
 
 // SAFETY: the pointers are only read, while the sync borrows the world.
@@ -352,6 +360,7 @@ unsafe fn extract_run<Id: Copy + Eq>(
             Some(entry)
                 if entry.entity == entity
                     && renderer.is_visible()
+                    && !run.inactive
                     && entry.mesh == renderer.mesh
                     && entry.material == renderer.material =>
             {
@@ -369,6 +378,15 @@ unsafe fn extract_run<Id: Copy + Eq>(
                     entry.moved_tick = tick;
                 }
             }
+            // Off: as hidden.
+            _ if run.inactive => work.slow.push((
+                entity,
+                global,
+                MeshRenderer {
+                    visible: 0,
+                    ..*renderer
+                },
+            )),
             _ => work.slow.push((entity, global, *renderer)),
         }
     }
@@ -486,7 +504,7 @@ impl<Id: Copy + Eq> RenderExtract<Id> {
         let mut rows = 0;
         let world = &*world;
         self.changes
-            .for_each_chunk_readonly(world, |(entities, globals, renderers)| {
+            .for_each_chunk_readonly(world, |(entities, globals, renderers, inactive)| {
                 rows += entities.len();
                 for start in (0..entities.len()).step_by(RUN_ROWS) {
                     runs.push(Run {
@@ -494,6 +512,7 @@ impl<Id: Copy + Eq> RenderExtract<Id> {
                         globals: globals[start..].as_ptr(),
                         renderers: renderers[start..].as_ptr(),
                         len: (entities.len() - start).min(RUN_ROWS),
+                        inactive: inactive.is_some(),
                     });
                 }
             });

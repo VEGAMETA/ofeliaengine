@@ -101,6 +101,14 @@ fn brushes_in_a_scene_file_draw_their_group() {
             ambient: Vec3::splat(0.03),
         },
     ));
+    // A lamp turned off in the editor: saved off, loaded off.
+    world.spawn((
+        SceneId::new(),
+        Name::new("Spare lamp"),
+        Transform::from_xyz(0.0, 2.0, 5.0),
+        PointLight::new(Vec3::splat(5.0), 4.0),
+        Disabled {},
+    ));
     let eye = Vec3::new(0.0, 1.2, 9.0);
     world.spawn((
         SceneId::new(),
@@ -129,6 +137,7 @@ fn brushes_in_a_scene_file_draw_their_group() {
         "Brush.op = Cut",
         "Brush.shape = Stairs",
         "Brush.size = (6, 3, 6)",
+        "Disabled = {}",
     ] {
         assert!(text.contains(want), "{want} in {text}");
     }
@@ -163,6 +172,11 @@ fn brushes_in_a_scene_file_draw_their_group() {
     }
     // Every brush shows something: the room's walls, the cuts' insides, the shapes.
     assert_eq!(player.blockout().meshes(), 6);
+    let lamp = named(player.world_mut(), "Spare lamp");
+    assert!(
+        player.world_mut().get::<Disabled>(lamp).is_some(),
+        "loaded off"
+    );
     let rgba = player.capture(&mut game).unwrap().unwrap();
     if let Ok(path) = std::env::var("ENGINE_BLOCKOUT_PNG") {
         let png = engine_render::png::encode_png(
@@ -221,6 +235,20 @@ fn brushes_in_a_scene_file_draw_their_group() {
         player.frame(&mut game).unwrap();
     }
     assert!(player.world_mut().get::<MeshRenderer>(door_e).is_none());
+    assert_eq!(player.blockout().meshes(), 5);
+
+    // The group disabled: its brushes act on nothing and show nothing; enabled, back.
+    let world = player.world_mut();
+    let group = named(world, "Blockout");
+    world.insert(group, Disabled {});
+    for _ in 0..4 {
+        player.frame(&mut game).unwrap();
+    }
+    assert_eq!(player.blockout().meshes(), 0);
+    player.world_mut().remove::<Disabled>(group);
+    for _ in 0..4 {
+        player.frame(&mut game).unwrap();
+    }
     assert_eq!(player.blockout().meshes(), 5);
     let _ = std::fs::remove_dir_all(&dir);
 }

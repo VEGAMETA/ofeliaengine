@@ -102,6 +102,10 @@ let handle = AssetRef::part(door, "Handle");
   (`SceneRegistry::from_program()`).
 - **Types marked `hidden`** stay out of scenes: runtime data such as `MeshRenderer` (its
   mesh and material ids live only in memory) and the hierarchy's links.
+- **`Disabled = {}`** turns an entity and everything below it off (the editor's eye): not
+  drawn, its lights dark, its brushes out of their group. The engine keeps `Inactive` on
+  each entity that is off, a tick after the change; your systems can check it
+  (`engine_runtime::is_inactive`).
 
 ### Models
 

@@ -27,7 +27,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
-use windows_sys::Win32::Graphics::Gdi::ValidateRect;
+use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient, ValidateRect};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow,
@@ -208,6 +208,14 @@ pub enum WindowEventKind {
     },
     /// The cursor left the client area.
     CursorLeft,
+    /// The mouse moved while the cursor is locked ([`WindowSystem::lock_cursor`]): how far,
+    /// in physical pixels. The cursor stays where it was locked.
+    CursorDelta {
+        /// Along x.
+        dx: i32,
+        /// Along y (down).
+        dy: i32,
+    },
     /// A mouse button changed state over the window.
     MouseButton {
         /// Which button.
@@ -258,6 +266,7 @@ pub struct WindowEvent {
 enum Command {
     Create(WindowDesc, mpsc::Sender<io::Result<WindowHandle>>),
     SetTitle(WindowId, String),
+    LockCursor(WindowId, bool),
     SetMode(WindowId, WindowMode),
     SetCloaked(WindowId, bool),
     Foreground(WindowId),
@@ -371,6 +380,14 @@ impl WindowSystem {
         self.send(Command::Destroy(window))
     }
 
+    /// Locks the cursor where it is over a window and hides it (`true`), or lets it go: the
+    /// mouse's moves then arrive as [`WindowEventKind::CursorDelta`], each followed by the
+    /// cursor put back, as Godot's captured mouse does. It is let go when the window loses
+    /// the keyboard. For dragging a camera without the cursor reaching the screen's edge.
+    pub fn lock_cursor(&self, window: WindowId, locked: bool) -> io::Result<()> {
+        self.send(Command::LockCursor(window, locked))
+    }
+
     /// Calls `f` for every pending event, oldest first. Does not allocate.
     pub fn drain_events(&mut self, f: impl FnMut(WindowEvent)) -> usize {
         self.events.drain(f)
@@ -410,6 +427,8 @@ struct ThreadState {
     pending_surrogate: Cell<Option<u16>>,
     /// Windows for which `TrackMouseEvent(TME_LEAVE)` is armed.
     tracking_leave: RefCell<Vec<HWND>>,
+    /// Windows whose cursor is locked, and where (client coordinates).
+    locked: RefCell<Vec<(HWND, POINT)>>,
     /// Display queries; taken out while one runs.
     display: RefCell<Option<DisplayQuery>>,
     /// The display last reported for each window.
@@ -476,6 +495,7 @@ fn window_thread(
         next_id: Cell::new(1),
         pending_surrogate: Cell::new(None),
         tracking_leave: RefCell::new(Vec::new()),
+        locked: RefCell::new(Vec::new()),
         display: RefCell::new(Some(DisplayQuery::new())),
         displays: RefCell::new(Vec::new()),
         placements: RefCell::new(Vec::new()),
@@ -645,6 +665,15 @@ fn handle_command(state: &ThreadState, control: HWND, command: Command) {
             // which then overlaps the caller's own start-up.
             if let Some((id, hwnd)) = window {
                 check_display(state, id, hwnd);
+            }
+        }
+        Command::LockCursor(id, locked) => {
+            if let Some(hwnd) = state.hwnd_of(id) {
+                if locked {
+                    lock_cursor(state, hwnd);
+                } else {
+                    unlock_cursor(state, hwnd);
+                }
             }
         }
         Command::SetTitle(id, title) => {
@@ -1053,6 +1082,73 @@ fn hiword(v: usize) -> u16 {
     ((v >> 16) & 0xFFFF) as u16
 }
 
+/// Where `hwnd`'s cursor is locked, if it is (client coordinates).
+fn locked_at(state: &ThreadState, hwnd: HWND) -> Option<POINT> {
+    state
+        .locked
+        .borrow()
+        .iter()
+        .find(|(h, _)| *h == hwnd)
+        .map(|(_, p)| *p)
+}
+
+/// Locks `hwnd`'s cursor where it is, hidden, kept within the client area.
+fn lock_cursor(state: &ThreadState, hwnd: HWND) {
+    if locked_at(state, hwnd).is_some() {
+        return;
+    }
+    let mut at = POINT { x: 0, y: 0 };
+    let mut client = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: live window of this thread; valid out-pointers.
+    unsafe {
+        if GetCursorPos(&mut at) == 0 || GetClientRect(hwnd, &mut client) == 0 {
+            return;
+        }
+        let mut corners = [
+            POINT {
+                x: client.left,
+                y: client.top,
+            },
+            POINT {
+                x: client.right,
+                y: client.bottom,
+            },
+        ];
+        for c in &mut corners {
+            ClientToScreen(hwnd, c);
+        }
+        let clip = RECT {
+            left: corners[0].x,
+            top: corners[0].y,
+            right: corners[1].x,
+            bottom: corners[1].y,
+        };
+        ClipCursor(&clip);
+        ScreenToClient(hwnd, &mut at);
+        SetCursor(null_mut());
+    }
+    state.locked.borrow_mut().push((hwnd, at));
+}
+
+/// Lets `hwnd`'s cursor go, shown again where it was locked.
+fn unlock_cursor(state: &ThreadState, hwnd: HWND) {
+    let was = state.locked.borrow().iter().any(|(h, _)| *h == hwnd);
+    if !was {
+        return;
+    }
+    state.locked.borrow_mut().retain(|(h, _)| *h != hwnd);
+    // SAFETY: no clip, the arrow back.
+    unsafe {
+        ClipCursor(null());
+        SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
+    }
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     msg: u32,
@@ -1081,6 +1177,7 @@ unsafe extern "system" fn window_proc(
         WM_DESTROY => {
             state.windows.borrow_mut().retain(|(_, h)| *h != hwnd);
             state.tracking_leave.borrow_mut().retain(|h| *h != hwnd);
+            unlock_cursor(state, hwnd);
             state.displays.borrow_mut().retain(|(h, _)| *h != hwnd);
             state.placements.borrow_mut().retain(|(h, _)| *h != hwnd);
             state.push(id, WindowEventKind::Destroyed);
@@ -1158,7 +1255,29 @@ unsafe extern "system" fn window_proc(
             return 0;
         }
         WM_KILLFOCUS => {
+            unlock_cursor(state, hwnd);
             state.push(id, WindowEventKind::Focused(false));
+            return 0;
+        }
+        WM_SETCURSOR if loword(lp) as u32 == HTCLIENT && locked_at(state, hwnd).is_some() => {
+            // SAFETY: no cursor while it is locked.
+            unsafe { SetCursor(null_mut()) };
+            return 1;
+        }
+        WM_MOUSEMOVE if locked_at(state, hwnd).is_some() => {
+            let at = locked_at(state, hwnd).unwrap_or(POINT { x: 0, y: 0 });
+            let (x, y) = (i32::from(loword(lp) as i16), i32::from(hiword(lp) as i16));
+            let (dx, dy) = (x - at.x, y - at.y);
+            if dx != 0 || dy != 0 {
+                state.push(id, WindowEventKind::CursorDelta { dx, dy });
+                // Back where it was locked: the move this makes reports no distance.
+                let mut screen = at;
+                // SAFETY: live window of this thread; a valid point.
+                unsafe {
+                    ClientToScreen(hwnd, &mut screen);
+                    SetCursorPos(screen.x, screen.y);
+                }
+            }
             return 0;
         }
         WM_MOUSEMOVE => {

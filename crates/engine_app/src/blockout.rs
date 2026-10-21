@@ -215,6 +215,8 @@ pub struct Blockout {
     /// The grid could not be made: not tried again, the brushes stay plain.
     grid_failed: bool,
     count: usize,
+    /// The world's `ActivityEpoch` when last looked at: brushes turned off or on.
+    activity: u64,
     queries: Option<Queries>,
     triangles: Triangles,
     polygons: Vec<(engine_brush::Owner, engine_brush::Polygon)>,
@@ -262,6 +264,12 @@ impl Blockout {
             orphans: QueryState::new(world),
         });
         let count = q.brushes.iter_readonly(world).count();
+        // No brushes, and none before: nothing to look at (a scene without brushes pays
+        // for this count only). The other queries report what they missed when brushes
+        // come: everything, so the first scan takes it all.
+        if count == 0 && self.count == 0 {
+            return;
+        }
         // Every query runs, so that each forgets what it reported.
         let changed = [
             q.changed.iter_readonly(world).count(),
@@ -275,11 +283,20 @@ impl Blockout {
             world.remove::<FromBrush>(e);
             world.remove::<MeshRenderer>(e);
         }
-        if count == self.count && changed.iter().all(|&c| c == 0) {
+        let activity = world
+            .resource::<engine_runtime::ActivityEpoch>()
+            .map_or(0, |a| a.0);
+        if count == self.count && changed.iter().all(|&c| c == 0) && activity == self.activity {
             return;
         }
         self.count = count;
-        let all: Vec<Entity> = q.brushes.iter_readonly(world).collect();
+        self.activity = activity;
+        // A brush that is off (disabled, or below a disabled entity) acts on nothing.
+        let all: Vec<Entity> = q
+            .brushes
+            .iter_readonly(world)
+            .filter(|&e| !engine_runtime::is_inactive(world, e))
+            .collect();
         self.scan(world, &all, geometry, materials, frame);
     }
 
@@ -509,7 +526,7 @@ fn collect(world: &World, e: Entity, out: &mut Vec<Entity>) {
         if world.get::<BrushGroup>(child).is_some() {
             continue;
         }
-        if world.get::<Brush>(child).is_some() {
+        if world.get::<Brush>(child).is_some() && !engine_runtime::is_inactive(world, child) {
             out.push(child);
         }
         collect(world, child, out);

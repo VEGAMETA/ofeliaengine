@@ -29,8 +29,10 @@ log::error!("save failed: {e}");
   formatted line 40–120 ns on the calling thread; nothing is allocated and nothing waits
   for the disk (a separate thread writes the file). Logging every frame is fine; logging
   thousands of lines per frame loses the oldest lines (the log says how many).
-- **Vulkan validation** messages (debug builds, or `--validate` in the editor) arrive
-  under the target `vulkan`.
+- **Vulkan validation** messages arrive under the target `vulkan`. The layer runs in the
+  engine's own debug builds; a game made by `ofeliaengine new` builds without it (it slows
+  every frame's CPU side): `ENGINE_VALIDATION=1` turns it on, `sync` with synchronization
+  validation, `0` off; `PlayerSettings::validation` decides over both.
 - Lines longer than 3,480 bytes are cut with `...`.
 
 Your own program (not the editor or `ofeliaengine`) installs it once, early in `main`:

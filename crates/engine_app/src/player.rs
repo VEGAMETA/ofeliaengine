@@ -452,6 +452,8 @@ pub struct Player {
     /// The part of the output the scene covers ([`Player::set_view_rect`]); `None`: all of
     /// it.
     view_rect: Option<[u32; 4]>,
+    /// The cursor is locked over the window ([`Player::lock_cursor`]).
+    cursor_locked: bool,
     cameras: CameraView,
     scene_info: SceneInfo,
     // GPU objects destroyed in `Drop`.
@@ -1122,6 +1124,7 @@ impl Player {
             assets: crate::Assets::new(settings.project.clone().unwrap_or_default()),
             blockout: crate::Blockout::new(),
             view_rect: None,
+            cursor_locked: false,
             saves: SaveState {
                 folder: save_folder.clone(),
                 encoding: settings
@@ -1698,6 +1701,19 @@ impl Player {
     /// the overlay ([`Self::frame_overlaid`]).
     pub fn set_view_rect(&mut self, rect: Option<[u32; 4]>) {
         self.view_rect = rect;
+    }
+
+    /// Locks the cursor over the window where it is, hidden, the mouse's moves arriving as
+    /// `WindowEventKind::CursorDelta` (`true`), or lets it go: the editor's camera drags.
+    /// Windows lets it go when the window loses the keyboard.
+    pub fn lock_cursor(&mut self, locked: bool) {
+        if locked == self.cursor_locked {
+            return;
+        }
+        self.cursor_locked = locked;
+        if let (Some(windows), Some(window)) = (&self.windows, self.window) {
+            let _ = windows.lock_cursor(window.id, locked);
+        }
     }
 
     /// The part of the output the scene is drawn into ([`Self::set_view_rect`]).
@@ -3015,12 +3031,24 @@ fn start_gpu(
         })
         .flatten()
         .filter(Streamline::frame_generation);
-    // Validation in debug builds (`InstanceDesc::default`).
+    // Validation as the settings ask, else as `ENGINE_VALIDATION` does (`0`, `1`, `sync`),
+    // else in debug builds of `engine_rhi` (`InstanceDesc::default`; games made by
+    // `ofeliaengine new` build it without, ADR 0107).
+    let (validate, sync) = match (
+        validation,
+        std::env::var("ENGINE_VALIDATION").ok().as_deref(),
+    ) {
+        (Some(v), _) => (v, v),
+        (None, Some("0")) => (false, false),
+        (None, Some("sync")) => (true, true),
+        (None, Some(_)) => (true, false),
+        (None, None) => (InstanceDesc::default().validation, false),
+    };
     let instance = Instance::with_extensions(
         &InstanceDesc {
             app_name: app_name.to_owned(),
-            validation: validation.unwrap_or(InstanceDesc::default().validation),
-            sync_validation: validation == Some(true),
+            validation: validate,
+            sync_validation: sync,
             surface,
             ..InstanceDesc::default()
         },

@@ -97,6 +97,10 @@ pub struct TreeItem<'a> {
     pub active: bool,
     /// Its name is being edited in place (F2, a double click).
     pub renaming: bool,
+    /// It is disabled: its eye is shut.
+    pub disabled: bool,
+    /// It is off (disabled, or below a disabled entity): drawn dim.
+    pub off: bool,
 }
 
 /// An entry of a menu: an icon (see [`crate::icons`]; empty for none) and a label.
@@ -339,6 +343,8 @@ pub struct ShellResponse {
     pub tree_row: Option<usize>,
     /// A scene tree row's arrow was clicked: open or close it.
     pub tree_toggle: Option<usize>,
+    /// A scene tree row's eye was clicked: turn it off or on.
+    pub tree_eye: Option<usize>,
     /// The mouse is over the scene tree (where its keys go after a click).
     pub tree_hovered: bool,
     /// Renaming in the tree ended: committed (the name is `Ui::edited_text`) or cancelled.
@@ -818,6 +824,7 @@ fn filter(ui: &mut Ui, text_now: &str, hint: &str, p: &Palette) -> Option<TextFi
 struct RowsResponse {
     clicked: Option<usize>,
     toggled: Option<usize>,
+    eye: Option<usize>,
     rename: Option<bool>,
 }
 
@@ -883,14 +890,36 @@ fn tree_rows(
                         out.rename = Some(r.committed);
                     }
                 } else {
-                    text(ui, "name", item.name, TEXT, p.text);
+                    let color = if item.off { p.text_dim } else { p.text };
+                    text(ui, "name", item.name, TEXT, color);
                 }
                 if !item.kind.is_empty() {
                     text(ui, "kind", item.kind, SMALL, p.text_dim);
                 }
+                ui.spacer("fill");
+                // The eye: on or off, as Godot's.
+                let eye = ui.container(
+                    "eye",
+                    Style {
+                        size: [Size::Fixed(ICON + 4.0), Size::Fit],
+                        align_main: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        let glyph = if item.disabled {
+                            icons::EYE_OFF
+                        } else {
+                            icons::EYE
+                        };
+                        text(ui, "glyph", glyph, ICON, p.text_dim);
+                    },
+                );
+                if ui.sense(eye, false).clicked {
+                    out.eye = Some(i);
+                }
             },
         );
-        if ui.sense(id, false).clicked && out.toggled != Some(i) {
+        if ui.sense(id, false).clicked && out.toggled != Some(i) && out.eye != Some(i) {
             out.clicked = Some(i);
         }
         if reveal == Some(i) {
@@ -944,6 +973,7 @@ fn scene_dock(
             let rows = tree_rows(ui, model.tree, p, model.reveal_row);
             out.tree_row = rows.clicked;
             out.tree_toggle = rows.toggled;
+            out.tree_eye = rows.eye;
             out.rename = rows.rename;
         });
         ui.mark_region(tree);
