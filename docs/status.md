@@ -133,7 +133,7 @@ Last updated: 2026-10-20.
       front to back; a click again at the same spot cycles behind the active entity,
       Alt+click offers the list in the palette; "Pick Transparent Surfaces" kept by the
       session;
-    - **E2-3c-2, boxes** (#PR): a drag in the viewport draws a box that takes what shows
+    - **E2-3c-2, boxes** (#278): a drag in the viewport draws a box that takes what shows
       in it (two passes over the candidates), with Alt hidden objects too; Shift adds,
       Ctrl takes out, Escape takes it back; what it takes is outlined while dragging. A
       whole-view box on Sponza: RTX 110 µs, iGPU 2.2 ms (one atomic per wave: from 1 ms
