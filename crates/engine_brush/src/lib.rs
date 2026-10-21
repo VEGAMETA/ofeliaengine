@@ -9,7 +9,8 @@
 //! - [`csg`]: a group of brushes evaluated in order into convex pieces (the colliders)
 //!   and the surface left (the meshes, the navigation's input);
 //! - [`group`]: a group kept evaluated through edits, each redoing only what it touches;
-//! - [`shape`]: the planes of the shapes brushes start as.
+//! - [`shape`]: the shapes brushes start as (box, wedge, stairs, cylinder, sphere);
+//! - [`mesh`]: triangles of a brush's polygons, grown so T-junctions show no cracks.
 //!
 //! Written for this engine after the sources in `docs/research/blockout.md`; TrenchBroom
 //! and ericw-tools (GPL) were read for ideas only, and no code was carried over.
@@ -19,6 +20,7 @@
 pub mod csg;
 pub mod exact;
 pub mod group;
+pub mod mesh;
 pub mod polygon;
 pub mod shape;
 pub mod solid;
@@ -26,5 +28,7 @@ pub mod solid;
 pub use csg::{Brush, Evaluated, Op, Piece, evaluate};
 pub use exact::{Plane, Point};
 pub use group::{Group, Redone};
+pub use mesh::{Triangles, triangles};
 pub use polygon::{PlaneId, Planes, Polygon};
+pub use shape::Shape;
 pub use solid::{Owner, Solid, SolidError};

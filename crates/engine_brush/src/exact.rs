@@ -9,7 +9,7 @@
 //! Rounding happens only where an edit makes a plane ([`Plane::through`]).
 
 use core::cmp::Ordering;
-use engine_core::math::DVec3;
+use engine_core::math::{DMat3, DVec3};
 
 /// The largest normal component: 2^22. A normal rounded to it is within about 2·10⁻⁷ rad
 /// of the one asked for.
@@ -72,6 +72,49 @@ impl Plane {
         let n = [scaled.x, scaled.y, scaled.z].map(|c| c.round() as i64);
         let d = n[0] * p[0] + n[1] * p[1] + n[2] * p[2];
         Self::new(n, d)
+    }
+
+    /// The plane through `point` (grid units, any precision) facing `normal`: a normal of
+    /// whole numbers within [`MAX_NORMAL`] stays as it is (so moves and quarter turns of
+    /// integer planes are exact), any other is scaled so that its largest component is
+    /// [`MAX_NORMAL`] and rounded; the offset is rounded (the plane moves less than a
+    /// unit's 2^-22). `None` for a zero or non-finite normal or a point out of bounds.
+    pub fn from_f64(normal: DVec3, point: DVec3) -> Option<Self> {
+        let largest = normal.abs().max_element();
+        if !largest.is_finite() || largest == 0.0 || !point.is_finite() {
+            return None;
+        }
+        if point.abs().max_element() > MAX_COORD as f64 {
+            return None;
+        }
+        let whole = |c: f64| (c - c.round()).abs() <= 1e-6 * c.abs().max(1.0);
+        let n = if [normal.x, normal.y, normal.z].into_iter().all(whole)
+            && largest <= MAX_NORMAL as f64
+        {
+            normal.round()
+        } else {
+            // Components far below the largest are rounding of an exact zero.
+            let scaled = normal * (MAX_NORMAL as f64 / largest);
+            scaled.round()
+        };
+        let d = n.dot(point).round();
+        Self::new([n.x as i64, n.y as i64, n.z as i64], d as i64)
+    }
+
+    /// This plane of a part in its brush's grid, in its group's: `linear` and `offset` take
+    /// the brush's grid points to the group's (the brush's placement, in grid units).
+    pub fn transformed(&self, linear: DMat3, offset: DVec3) -> Option<Self> {
+        let n = DVec3::new(self.n[0] as f64, self.n[1] as f64, self.n[2] as f64);
+        // A point of the plane: the one nearest the brush's origin.
+        let on = n * (self.d as f64 / n.length_squared());
+        let normal = linear.inverse().transpose() * n;
+        // Normals of whole numbers keep their length through quarter turns.
+        let normal = if linear.determinant().abs() > 0.0 {
+            normal * (n.length() / normal.length())
+        } else {
+            return None;
+        };
+        Self::from_f64(normal, linear * on + offset)
     }
 
     /// The same plane facing the other way: what lies in front of this one is behind it.
