@@ -211,7 +211,7 @@ Last updated: 2026-10-20.
   - **E2b-5a, editing faces** (#296): Tab over the viewport; a drag moves a face along its
     normal (the brush becomes planes, undo brings its shape back), Alt+drag pulls a brush
     out of it or pushes a cut in; rooms keep their walls.
-  - **E2b-5b, edges and corners** (#PR): in Tab's editing a drag moves a corner or an edge,
+  - **E2b-5b, edges and corners** (#297): in Tab's editing a drag moves a corner or an edge,
     the part made again as the exact hull of its corners (`shape::hull`): a box's edge
     dragged onto another makes a wedge.
   - **Next:** E2b-6, baking a group into a mesh; or E3, Play (asked the owner which
