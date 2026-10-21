@@ -120,7 +120,7 @@ Last updated: 2026-10-20.
     `docs/research/viewport-picking.md`; team decisions 2026-10-21: hover, transparent
     pickable behind a switch, hidden parts of the outline dimmed, boxes by visible pixels
     with Alt for hidden ones, 2 px, Shift+click toggles in the viewport):
-    - **E2-3a, a click picks** (#PR): the view's culled commands drawn again into a
+    - **E2-3a, a click picks** (#274): the view's culled commands drawn again into a
       32 × 32 square, slot ids read back; hover, click, Shift; 19–20 µs on the RTX,
       about 0.5 ms on the iGPU (Sponza);
     - then E2-3b the outline, E2-3c boxes, cycling and Alt+click's list.
