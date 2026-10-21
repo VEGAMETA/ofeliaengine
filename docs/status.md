@@ -200,7 +200,7 @@ Last updated: 2026-10-20.
     sides dragged by handles, the opposite side staying; while drawing, corners land on
     other brushes' corners and edges within 8 px (a green dot, a red ring), before the
     grid.
-  - **E2b-4a, colliders** (#PR): a static compound per brush group, its pieces as sharp
+  - **E2b-4a, colliders** (#294): a static compound per brush group, its pieces as sharp
     hulls (`ScenePhysics::sync_blockout`); moving bodies with `BodyDesc::internal_edges`
     roll on over the seams (measured: 0.00 mm, where rounded hulls or separate bodies knock
     3-8 mm); View: Colliders in the editor.
