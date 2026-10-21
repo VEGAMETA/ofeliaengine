@@ -10,7 +10,10 @@ every machine.
 - A **`Brush`** is a shape of a size (metres, along x, its height y, z), its origin the middle
   of its base, placed by its entity's `Transform`:
   - `BrushShape::Box`, `Wedge` (a ramp rising towards +z), `Stairs` (`segments` steps rising
-    towards +z), `Cylinder` (`segments` sides around y), `Sphere` (`segments` sides around y);
+    towards +z), `Cylinder` (`segments` sides around y), `Cone` (`segments` sides; `top`, the
+    top's share of the base: 0 pointed, 0.5 a truncated cone), `Sphere` (`segments` sides
+    around y), `Torus` (lying on its base: x and z its outer diameters, y the tube's;
+    `segments` convex parts around, the tube of half as many sides);
   - `op`: `Add`, `Cut` (takes itself out) or `Intersect` (keeps only what lies inside it);
   - `tint`: its color under the grid.
 - A **`BrushGroup`** holds brushes: its descendants act on each other in the scene tree's
@@ -41,8 +44,15 @@ for e in [room, inside, door] {
   and allocates nothing.
 - Each brush is one mesh; scenes without brushes pay nothing.
 
+## In the editor
+
+**+** → **Blockout** adds each shape where the camera looks, into the selection's group (or
+the scene's first, or a new "Blockout" group), at its end. The tree shows each brush's shape
+and what it does ("Brush", "Cut", "Intersect"); the inspector edits its fields, every change
+one undo step; the eye turns it off.
+
 ## Coming
 
-The editor's tools (adding brushes from the add menu, drawing them on surfaces with B,
-editing faces), colliders and the navigation mesh made from them, and baking a group into a
-mesh: ADR 0110's steps.
+Drawing brushes on surfaces with B, rooms (hollow boxes that open into each other), faces
+and edges edited by hand, colliders and the navigation mesh made from them, and baking a
+group into a mesh: ADR 0110's steps.

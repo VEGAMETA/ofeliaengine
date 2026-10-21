@@ -38,6 +38,12 @@ pub enum Shape {
     Cylinder(u32),
     /// A polyhedron of this many sides around y, of half as many rings.
     Sphere(u32),
+    /// A cone of this many sides around y, its top this many thousandths of its base (0:
+    /// pointed; between: truncated).
+    Cone(u32, u32),
+    /// A ring around y of this many convex parts, its tube of this many sides, lying on its
+    /// base: the size's x and z its outer diameters, its y the tube's.
+    Torus(u32, u32),
 }
 
 /// The convex parts of `shape` of `size`, each its planes; `None` when the size is not
@@ -123,6 +129,72 @@ pub fn parts(shape: Shape, size: [i64; 3]) -> Option<Vec<Vec<Plane>>> {
             }
             Some(vec![planes])
         }
+        Shape::Cone(sides, top) => {
+            let n = sides.max(3);
+            let t = f64::from(top.min(1000)) / 1000.0;
+            let (a, b) = (sx as f64 / 2.0, sz as f64 / 2.0);
+            let corner = |k: u32, scale: f64, y: f64| {
+                let u = TAU * f64::from(k) / f64::from(n) + PI / f64::from(n);
+                DVec3::new(a * scale * u.cos(), y, b * scale * u.sin())
+            };
+            let h = sy as f64;
+            let inside = DVec3::new(0.0, h / 4.0, 0.0);
+            let mut planes = vec![Plane::new([0, -1, 0], 0)?];
+            if t > 0.0 {
+                planes.push(Plane::new([0, 1, 0], sy)?);
+            }
+            for k in 0..n {
+                let (p, q) = (corner(k, 1.0, 0.0), corner(k + 1, 1.0, 0.0));
+                // The side through the base's edge and the top's (or the apex).
+                let up = corner(k, t, h);
+                let mut normal = (q - p).cross(up - p);
+                if normal.dot(p - inside) < 0.0 {
+                    normal = -normal;
+                }
+                planes.push(Plane::from_f64(normal, p)?);
+            }
+            Some(vec![planes])
+        }
+        Shape::Torus(around, tube) => {
+            let (n, m) = (around.max(3), tube.max(3));
+            let r = sy as f64 / 2.0;
+            let (a, b) = (sx as f64 / 2.0 - r, sz as f64 / 2.0 - r);
+            if a <= 0.0 || b <= 0.0 {
+                return None;
+            }
+            // The tube's centre line: a polygon on the ellipse, at its middle height.
+            let point = |k: u32| {
+                let u = TAU * f64::from(k % n) / f64::from(n);
+                DVec3::new(a * u.cos(), r, b * u.sin())
+            };
+            let along = |k: u32| (point(k + 1) - point(k)).normalize();
+            let mut parts = Vec::with_capacity(n as usize);
+            for k in 0..n {
+                let (p0, p1) = (point(k), point(k + 1));
+                let d = along(k);
+                // Across the segment, outwards (away from the ring's axis).
+                let mid = (p0 + p1) / 2.0;
+                let mut out = DVec3::new(d.z, 0.0, -d.x);
+                if out.dot(DVec3::new(mid.x, 0.0, mid.z)) < 0.0 {
+                    out = -out;
+                }
+                let mut planes = Vec::with_capacity(m as usize + 2);
+                for j in 0..m {
+                    // The tube's sides around the segment, the first flat on the ground.
+                    let beta = TAU * f64::from(j) / f64::from(m) - PI / 2.0;
+                    let normal = out * beta.cos() + DVec3::Y * beta.sin();
+                    planes.push(Plane::from_f64(normal, mid + normal * r)?);
+                }
+                // The ends: the planes halfway between this segment and its neighbours',
+                // the same plane both share (turned around), so their faces there go.
+                let before = along(k + n - 1) + d;
+                let after = d + along(k + 1);
+                planes.push(Plane::from_f64(-before, p0)?);
+                planes.push(Plane::from_f64(after, p1)?);
+                parts.push(planes);
+            }
+            Some(parts)
+        }
     }
 }
 
@@ -186,6 +258,82 @@ mod tests {
             "{sphere} against {ellipsoid}"
         );
         assert!(parts(Shape::Box, [0, 1, 1]).is_none());
+    }
+
+    #[test]
+    fn cones_pointed_and_truncated_have_their_volumes() {
+        let id = (DMat3::IDENTITY, DVec3::ZERO);
+        let size = [2000, 1500, 2000];
+        // A 16-gon inscribed in a circle of radius 1000.
+        let n = 16.0;
+        let base = n / 2.0 * 1000.0 * 1000.0 * (TAU / n).sin();
+        let pointed = volume(
+            &parts(Shape::Cone(16, 0), size).unwrap_or_else(|| panic!()),
+            id.0,
+            id.1,
+        );
+        let want = base * 1500.0 / 3.0;
+        assert!(
+            (pointed / want - 1.0).abs() < 1e-5,
+            "{pointed} against {want}"
+        );
+        // Half the base's size on top: a frustum.
+        let half = volume(
+            &parts(Shape::Cone(16, 500), size).unwrap_or_else(|| panic!()),
+            id.0,
+            id.1,
+        );
+        let top = base / 4.0;
+        let want = 1500.0 / 3.0 * (base + top + (base * top).sqrt());
+        assert!((half / want - 1.0).abs() < 1e-5, "{half} against {want}");
+        // The whole base on top: the cylinder.
+        let full = volume(
+            &parts(Shape::Cone(16, 1000), size).unwrap_or_else(|| panic!()),
+            id.0,
+            id.1,
+        );
+        let cylinder = volume(
+            &parts(Shape::Cylinder(16), size).unwrap_or_else(|| panic!()),
+            id.0,
+            id.1,
+        );
+        assert!(
+            (full / cylinder - 1.0).abs() < 1e-5,
+            "{full} against {cylinder}"
+        );
+    }
+
+    #[test]
+    fn a_torus_is_its_convex_segments_closed_into_one_ring() {
+        let id = (DMat3::IDENTITY, DVec3::ZERO);
+        // Outer diameter 4 m, tube 1 m: the ring's radius 1.5 m.
+        let ring = parts(Shape::Torus(24, 12), [4000, 1000, 4000]).unwrap_or_else(|| panic!());
+        assert_eq!(ring.len(), 24);
+        let v = volume(&ring, id.0, id.1);
+        let want = 2.0 * PI * PI * 1500.0 * 500.0 * 500.0;
+        assert!((v / want - 1.0).abs() < 0.03, "{v} against {want}");
+        // Only the tube's sides show: the segments' ends, shared, both go (all but strips
+        // nanometres wide where the rounded sides meet them, which make no triangles).
+        let mut table = Planes::new();
+        let brush = Brush {
+            op: Op::Add,
+            parts: ring
+                .iter()
+                .map(|p| p.iter().map(|q| table.add(*q)).collect())
+                .collect(),
+        };
+        let e = evaluate(&[brush], &table);
+        let shown = e
+            .surface
+            .iter()
+            .filter(|(_, p)| {
+                let c: Vec<DVec3> = p.corners.iter().map(|c| c.to_f64()).collect();
+                !crate::mesh::is_sliver(&c)
+            })
+            .count();
+        assert_eq!(shown, 24 * 12);
+        // No hole left: refused.
+        assert!(parts(Shape::Torus(24, 12), [1000, 1000, 1000]).is_none());
     }
 
     #[test]

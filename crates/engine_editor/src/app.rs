@@ -65,15 +65,15 @@ use crate::inspector::{self, Defaults, Inspector, Kind, Property};
 use crate::paint::{UiText, paint};
 use crate::session::{self, Base, Document, EditorState, LastRun, Lock, SessionFile, View, Writer};
 use crate::shell::{
-    Field, FieldAction, FieldEvent, MenuItem, Palette, PaletteAction, PaletteRow, PaletteView,
-    Section, ShellModel, TreeItem, Widget, build, dismissed,
+    Field, FieldAction, FieldEvent, MenuEntry, MenuItem, Palette, PaletteAction, PaletteRow,
+    PaletteView, Section, ShellModel, TreeItem, Widget, build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
 use crate::transform::{self, KeyTransform};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
 use engine_app::{
-    AppError, Game, Model, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup,
-    Window, builtin,
+    AppError, Brush, BrushGroup, BrushOp, BrushShape, Game, Model, Overlay, OverlayOutput,
+    OverlayPass, Player, PlayerSettings, Setup, Window, builtin,
 };
 use engine_core::math::{Affine3A, Quat, Vec2, Vec3, Vec4, look_at, vulkan_orthographic};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
@@ -101,32 +101,37 @@ type Error = Box<dyn std::error::Error>;
 /// scene loaded.
 pub type Start<G> = fn(&mut Player) -> Result<G, Error>;
 
-/// What the scene dock's add menu offers, in order.
-const ADD: [&str; 9] = [
-    "Empty",
-    "Cube",
-    "Sphere",
-    "Plane",
-    "Cylinder",
-    "Sun",
-    "Point Light",
-    "Spot Light",
-    "Camera",
+/// What the scene dock's add menu offers: each kind's name (its command, "Add …", and a new
+/// entity's name), its label in its group, and its icon, the same in the menu, the tree and
+/// the palette. The menu groups them ([`ADD_MESHES`], [`ADD_BLOCKOUT`], [`ADD_LIGHTS`]).
+const ADD: [(&str, &str, &str); 17] = [
+    ("Point", "Point", icons::NODE_3D),
+    ("Cube", "Cube", icons::CUBE),
+    ("Sphere", "Sphere", icons::SPHERE),
+    ("Plane", "Plane", icons::PLANE),
+    ("Cylinder", "Cylinder", icons::CYLINDER),
+    ("Sun", "Sun", icons::SUN),
+    ("Point Light", "Point Light", icons::LIGHT),
+    ("Spot Light", "Spot Light", icons::SPOT_LIGHT),
+    ("Camera", "Camera", icons::CAMERA),
+    ("Box Brush", "Box", icons::CUBE),
+    ("Wedge Brush", "Wedge", icons::WEDGE),
+    ("Stairs Brush", "Stairs", icons::STAIRS),
+    ("Cylinder Brush", "Cylinder", icons::CYLINDER),
+    ("Cone Brush", "Cone", icons::CONE),
+    ("Truncated Cone Brush", "Truncated Cone", icons::CONE),
+    ("Sphere Brush", "Sphere", icons::SPHERE),
+    ("Torus Brush", "Torus", icons::TORUS),
 ];
 
-/// The add menu's kinds' icons, in its order: the same in the menu, the tree and the
-/// palette.
-const ADD_ICONS: [&str; 9] = [
-    icons::NODE_3D,
-    icons::CUBE,
-    icons::SPHERE,
-    icons::PLANE,
-    icons::CYLINDER,
-    icons::SUN,
-    icons::LIGHT,
-    icons::SPOT_LIGHT,
-    icons::CAMERA,
-];
+/// The add menu's groups: its meshes, its blockout brushes, its lights (the owner,
+/// 2026-10-21: grouped, brushes too).
+const ADD_MESHES: [usize; 4] = [1, 2, 3, 4];
+const ADD_BLOCKOUT: [usize; 8] = [9, 10, 11, 12, 13, 14, 15, 16];
+const ADD_LIGHTS: [usize; 3] = [5, 6, 7];
+
+/// The first of the add menu's brushes.
+const FIRST_BRUSH: usize = 9;
 
 /// Where the scene tree's keys apply: after a click in it.
 const TREE_KEYS: KeyContext = KeyContext::Panel(1);
@@ -641,7 +646,7 @@ fn commands() -> (Commands, CommandIds) {
                 &format!("Set Bookmark {n}"),
             )
         }),
-        add_kinds: ADD.map(|kind| {
+        add_kinds: ADD.map(|(kind, _, _)| {
             let name = format!("scene.add.{}", kind.to_lowercase().replace(' ', "_"));
             c.register(&name, "Scene", &format!("Add {kind}"))
         }),
@@ -673,7 +678,6 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("H", ids.disable),
         ("Ctrl+D", ids.duplicate),
         ("Ctrl+A", ids.add),
-        ("Y", ids.snap),
         ("F2", ids.rename),
         ("Ctrl+Shift+P", ids.palette),
         ("Ctrl+P", ids.find),
@@ -692,6 +696,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
     //   `Editor::key_transform_frame`).
     let preset_keys: &[(&str, CommandId)] = match preset {
         KeyPreset::Ofelia => &[
+            // G for the grid: Y is an axis in a keyboard transform (the owner, 2026-10-21).
+            ("G", ids.snap),
             ("Q", ids.transforms[0]),
             ("R", ids.transforms[1]),
             ("E", ids.transforms[2]),
@@ -700,6 +706,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
             ("Shift+E", ids.tools[3]),
         ],
         KeyPreset::Blender => &[
+            ("Shift+Tab", ids.snap),
             ("G", ids.transforms[0]),
             ("R", ids.transforms[1]),
             ("S", ids.transforms[2]),
@@ -709,6 +716,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
             ("T", ids.tools[3]),
         ],
         KeyPreset::Godot => &[
+            ("Y", ids.snap),
             ("G", ids.transforms[0]),
             ("Q", ids.tools[0]),
             ("W", ids.tools[1]),
@@ -1294,6 +1302,8 @@ struct Editor {
     open_choice: Option<(ComponentId, usize)>,
     /// The add menu is open.
     add_open: bool,
+    /// The add menu's group opened beside it.
+    add_group: Option<usize>,
     /// Drag gestures so far (each its own undo step).
     gestures: u64,
     /// The viewport's transform gizmo (ADR 0107 E2), laid out this frame when shown.
@@ -1452,6 +1462,17 @@ fn kind_of(world: &World, e: Entity) -> (&'static str, &'static str) {
         (icons::LIGHT, "Light")
     } else if let Some(model) = world.get::<Model>(e) {
         (model_icon(model), "Model")
+    } else if let Some(brush) = world.get::<Brush>(e) {
+        (
+            brush_icon(brush),
+            match brush.op {
+                BrushOp::Add => "Brush",
+                BrushOp::Cut => "Cut",
+                BrushOp::Intersect => "Intersect",
+            },
+        )
+    } else if world.get::<BrushGroup>(e).is_some() {
+        (icons::BLOCKOUT, "Blockout")
     } else {
         (icons::NODE_3D, "Entity")
     }
@@ -1486,6 +1507,20 @@ fn model_icon(model: &Model) -> &'static str {
         m if m == builtin::PLANE => icons::PLANE,
         m if m == builtin::CYLINDER => icons::CYLINDER,
         _ => icons::MODEL,
+    }
+}
+
+/// A brush's icon: its shape's.
+fn brush_icon(brush: &Brush) -> &'static str {
+    match brush.shape {
+        BrushShape::Box => icons::CUBE,
+        BrushShape::Wedge => icons::WEDGE,
+        BrushShape::Stairs => icons::STAIRS,
+        BrushShape::Cylinder => icons::CYLINDER,
+        BrushShape::Cone => icons::CONE,
+        BrushShape::Sphere => icons::SPHERE,
+        BrushShape::Torus => icons::TORUS,
+        BrushShape::Planes => icons::MODEL,
     }
 }
 
@@ -1543,6 +1578,19 @@ fn spawn(world: &mut World, what: usize, name: &str, at: Vec3) -> Entity {
         }
         8 => {
             world.insert(e, Camera::perspective(60f32.to_radians(), 0.1, 500.0));
+        }
+        9.. => {
+            let brush = match what {
+                9 => Brush::new(BrushShape::Box, Vec3::splat(2.0)),
+                10 => Brush::new(BrushShape::Wedge, Vec3::new(2.0, 1.0, 3.0)),
+                11 => Brush::new(BrushShape::Stairs, Vec3::new(2.0, 1.6, 3.0)),
+                12 => Brush::new(BrushShape::Cylinder, Vec3::splat(2.0)),
+                13 => Brush::new(BrushShape::Cone, Vec3::splat(2.0)),
+                14 => Brush::new(BrushShape::Cone, Vec3::splat(2.0)).with_top(0.5),
+                15 => Brush::new(BrushShape::Sphere, Vec3::splat(2.0)),
+                _ => Brush::new(BrushShape::Torus, Vec3::new(3.0, 0.8, 3.0)),
+            };
+            world.insert(e, brush);
         }
         _ => {}
     }
@@ -1639,6 +1687,7 @@ impl Editor {
             shown_sections: Vec::new(),
             open_choice: None,
             add_open: false,
+            add_group: None,
             gestures: 0,
             gizmo: Gizmo::default(),
             gizmo_shown: false,
@@ -2061,10 +2110,28 @@ impl Editor {
             .reveal
             .take()
             .and_then(|e| self.rows.iter().position(|r| r.entity == e));
-        let add_items: [MenuItem<'_>; ADD.len()] = core::array::from_fn(|i| MenuItem {
-            icon: ADD_ICONS[i],
-            label: ADD[i],
-        });
+        let leaf = |k: usize| MenuEntry {
+            icon: ADD[k].2,
+            label: ADD[k].1,
+            kind: k,
+            children: &[],
+        };
+        let meshes = ADD_MESHES.map(leaf);
+        let blockout = ADD_BLOCKOUT.map(leaf);
+        let lights = ADD_LIGHTS.map(leaf);
+        let group = |icon, label, children| MenuEntry {
+            icon,
+            label,
+            kind: usize::MAX,
+            children,
+        };
+        let add_items = [
+            leaf(0),
+            group(icons::MODEL, "Mesh", &meshes[..]),
+            group(icons::BLOCKOUT, "Blockout", &blockout[..]),
+            group(icons::LIGHT, "Light", &lights[..]),
+            leaf(8),
+        ];
         // The steps' menus: the current value marked.
         let current = [
             self.snapping.position,
@@ -2197,7 +2264,7 @@ impl Editor {
                             .add_kinds
                             .iter()
                             .position(|&k| k == m.id)
-                            .map_or("", |i| ADD_ICONS[i]),
+                            .map_or("", |i| ADD[i].2),
                         label: info.label(),
                         matched: self.commands.highlights(m),
                         // "Scene: " is dimmed.
@@ -2261,7 +2328,7 @@ impl Editor {
             steps: self.step_labels.each_ref().map(String::as_str),
             step_menu: self.step_menu.map(|k| (k, step_items[k])),
             pivot: self.pivot.label(),
-            add_menu: self.add_open.then_some(&add_items[..]),
+            add_menu: self.add_open.then_some((&add_items[..], self.add_group)),
             reveal_row,
             tree_filter: &self.tree_filter,
             inspector_filter: &self.inspector_filter,
@@ -2289,6 +2356,7 @@ impl Editor {
         }
         if dismissed(&self.ui, &response) {
             self.add_open = false;
+            self.add_group = None;
             self.open_choice = None;
             self.command_palette = None;
             self.step_menu = None;
@@ -2307,6 +2375,10 @@ impl Editor {
         }
         if response.add {
             self.add_open = !self.add_open;
+            self.add_group = None;
+        }
+        if response.add_group.is_some() {
+            self.add_group = response.add_group;
         }
         if let Some(i) = response.add_item {
             self.add(world, i);
@@ -4239,19 +4311,71 @@ impl Editor {
     }
 
     /// Adds an entity of the add menu's kind `what` where the camera looks (on the grid),
-    /// and selects it.
+    /// and selects it. A brush goes to the end of the selection's blockout group, or of the
+    /// scene's first, or of a new "Blockout" group (ADR 0110).
     fn add(&mut self, world: &mut World, what: usize) {
         self.add_open = false;
+        self.add_group = None;
         let step = self.snapping.position as f32;
         let at = (self.orbit.target / step).round() * step;
-        let name = self.sibling_name(world, None, ADD[what], None);
-        let order = self.last_root_order(world);
-        self.history.begin(&format!("Add {}", ADD[what]), None);
-        let e = spawn(world, what, &name, at);
-        world.insert(e, RootOrder(order));
+        let kind = ADD[what].0;
+        self.history.begin(&format!("Add {kind}"), None);
+        let e = if what >= FIRST_BRUSH {
+            let group = match self.brush_group(world) {
+                Some(g) => {
+                    self.history.touch(world, g);
+                    g
+                }
+                None => {
+                    let name = self.sibling_name(world, None, "Blockout", None);
+                    let order = self.last_root_order(world);
+                    let g = world.spawn((
+                        SceneId::new(),
+                        Name::new(&name),
+                        Transform::IDENTITY,
+                        GlobalTransform::default(),
+                        BrushGroup::default(),
+                        RootOrder(order),
+                    ));
+                    self.history.touch_new(world, g);
+                    g
+                }
+            };
+            // Where the camera looks, in the group's space.
+            let inverse = world
+                .get::<GlobalTransform>(group)
+                .map_or(Affine3A::IDENTITY, |g| g.0.inverse());
+            let local = inverse.transform_point3(at);
+            let name = self.sibling_name(world, Some(group), kind, None);
+            let e = spawn(world, what, &name, local);
+            let _ = world.set_parent(e, Some(group));
+            self.collapsed.remove(&group);
+            e
+        } else {
+            let name = self.sibling_name(world, None, kind, None);
+            let order = self.last_root_order(world);
+            let e = spawn(world, what, &name, at);
+            world.insert(e, RootOrder(order));
+            e
+        };
         self.history.touch_new(world, e);
         self.history.commit(world);
         self.select_only(e);
+    }
+
+    /// The blockout group a new brush joins: the active entity's (itself, or the group
+    /// above it), else the scene's first.
+    fn brush_group(&mut self, world: &mut World) -> Option<Entity> {
+        let mut at = self.active();
+        while let Some(e) = at {
+            if world.get::<BrushGroup>(e).is_some() {
+                return Some(e);
+            }
+            at = world.parent(e);
+        }
+        self.roots(world, None)
+            .into_iter()
+            .find(|&r| world.get::<BrushGroup>(r).is_some())
     }
 
     /// Runs a command.
@@ -5657,8 +5781,9 @@ impl<G> EditorGame<G> {
         true
     }
 
-    /// Adds an entity of the add menu's `index`-th kind (`Empty`, `Cube`, `Sphere`,
-    /// `Plane`, `Cylinder`, `Sun`, `Point Light`, `Spot Light`, `Camera`), as the menu does.
+    /// Adds an entity of the add menu's `index`-th kind (`Point`, `Cube`, `Sphere`, `Plane`,
+    /// `Cylinder`, `Sun`, `Point Light`, `Spot Light`, `Camera`, then the brushes: box,
+    /// wedge, stairs, cylinder, cone, truncated cone, sphere, torus), as the menu does.
     pub fn add(&mut self, world: &mut World, index: usize) {
         if index < ADD.len() {
             self.shared.borrow_mut().add(world, index);
@@ -7228,6 +7353,83 @@ mod tests {
     }
 
     #[test]
+    fn brushes_from_the_add_menu_join_a_blockout_group() {
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            std::env::temp_dir(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        // The menu's groups: the pointer over "Blockout" opens its brushes beside it.
+        ed.add_open = true;
+        ed.update(&mut world);
+        assert!(
+            texts(&ed, "Torus").is_empty(),
+            "closed until the pointer comes"
+        );
+        let group = texts(&ed, "Blockout")[0];
+        let over = [group.pos[0] + 4.0, group.pos[1] + group.size[1] / 2.0];
+        mouse(&mut ed, over, None);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let torus = texts(&ed, "Torus");
+        assert!(!torus.is_empty(), "opened beside the menu");
+        assert!(torus[0].pos[0] > group.pos[0] + 100.0, "to its right");
+        // A click on it: a torus brush in a new "Blockout" group.
+        let at = [
+            torus[0].pos[0] + 4.0,
+            torus[0].pos[1] + torus[0].size[1] / 2.0,
+        ];
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        press_release(&mut ed, &mut world, at);
+        assert!(!ed.add_open, "the menu closed");
+        assert_eq!(names(&mut world), ["Blockout", "Torus Brush"]);
+        let torus = ed.active().unwrap();
+        let group = world.parent(torus).unwrap();
+        assert!(world.get::<BrushGroup>(group).is_some());
+        assert_eq!(world.get::<Brush>(torus).unwrap().shape, BrushShape::Torus);
+        // The next brush, the torus selected, joins its group; a cut too.
+        ed.add(&mut world, 13);
+        let cone = ed.active().unwrap();
+        assert_eq!(world.parent(cone), Some(group));
+        assert_eq!(world.get::<Brush>(cone).unwrap().shape, BrushShape::Cone);
+        // The tree names their kinds: a brush, a cut.
+        world.get_mut::<Brush>(cone).unwrap().op = BrushOp::Cut;
+        assert_eq!(kind_of(&world, cone).1, "Cut");
+        assert_eq!(kind_of(&world, torus).1, "Brush");
+        assert_eq!(kind_of(&world, group), (icons::BLOCKOUT, "Blockout"));
+        // Undone, the cone goes; again, the torus and the group it made.
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(names(&mut world), ["Blockout", "Torus Brush"]);
+        ed.run(&mut world, ed.ids.undo);
+        assert!(names(&mut world).is_empty());
+    }
+
+    #[test]
+    fn g_switches_snapping_in_our_keys_and_y_is_free() {
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            std::env::temp_dir(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        let before = ed.snapping.on;
+        chord(&mut ed, &mut world, &[G]);
+        assert_ne!(ed.snapping.on, before, "G switches it");
+        chord(&mut ed, &mut world, &[Y]);
+        assert_ne!(ed.snapping.on, before, "Y leaves it");
+    }
+
+    #[test]
     fn kinds_have_their_icons_in_the_menu_and_the_tree() {
         let mut world = World::new();
         let mut ed = Editor::new(
@@ -7242,7 +7444,15 @@ mod tests {
         // The add menu shows every kind's icon.
         ed.add_open = true;
         ed.update(&mut world);
-        for glyph in ADD_ICONS {
+        // The menu shows its kinds' icons and its groups' (each group's opens beside it on
+        // hover).
+        for glyph in [
+            icons::NODE_3D,
+            icons::MODEL,
+            icons::BLOCKOUT,
+            icons::LIGHT,
+            icons::CAMERA,
+        ] {
             assert!(!texts(&ed, glyph).is_empty(), "{glyph:?} in the menu");
         }
         // A sphere's row has the sphere's icon, a spot light's the spot's.

@@ -176,8 +176,12 @@ Last updated: 2026-10-20.
     engine as in release and no validation layer (`ENGINE_VALIDATION=1`), and playing uses
     it too (`cargo run`). Small changes now go in batches with targeted tests (the owner,
     2026-10-21).
+  - **E2b-2b, brushes in the editor** (#PR, ADR 0110 accepted: rooms merge, the owner's
+    snapping with inference, the format as proposed): the add menu in groups (Point,
+    Mesh, Blockout, Light, Camera; "Empty" is "Point"), brushes into the selection's or the
+    scene's blockout group, cones (pointed, truncated) and tori; snapping on G.
   - **Next:** the engine as a DLL for games' development builds (the owner's choice:
-    measured against today's, then an ADR), then E2b-2b, brushes in the editor.
+    measured against today's, then an ADR), then E2b-3, drawing brushes.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
@@ -1325,6 +1329,10 @@ grown, divide and conquer); the old labels stay in parentheses.
       compensation, the plugins' state and windows, an effect baked in the editor.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
+
+- **Frame pacing (the owner, 2026-10-21, for later):** a release build's player capped at
+  the display's refresh rate by default (CLAUDE.md §7's limiter just below it under VRR),
+  not uncapped.
 
 - **Rendering:**
   - **the meshlet draws' order follows the GPU's scheduling** (atomic appends). A meshlet

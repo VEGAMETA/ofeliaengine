@@ -244,6 +244,10 @@ counts are estimates.
 
 ## Questions for the team
 
+Answered on 2026-10-21 (team decisions, ADR 0110): 1 b as the coordinator recommended (the
+owner's rule with inference), 2 a (rooms merge), 3 for E3; the shapes the owner wants:
+box, cylinder, sphere, torus, cone and truncated cone, besides the wedge and stairs.
+
 1. **Should brushes snap by default?** The owner's rule for everything else is free by
    default, with Shift for steps and Y to change the default.
    - a) Brushes snap to the grid by default; Shift frees them (TrenchBroom, Hammer,

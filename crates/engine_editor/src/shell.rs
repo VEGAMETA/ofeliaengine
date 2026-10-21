@@ -103,6 +103,20 @@ pub struct TreeItem<'a> {
     pub off: bool,
 }
 
+/// An entry of a menu of groups (the add menu): a kind to pick, or a group of them opened
+/// beside it on hover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MenuEntry<'a> {
+    /// Glyph before the label.
+    pub icon: &'a str,
+    /// What the entry says.
+    pub label: &'a str,
+    /// What a click on it reports (an entry without `children`).
+    pub kind: usize,
+    /// A group's entries; empty for a kind.
+    pub children: &'a [MenuEntry<'a>],
+}
+
 /// An entry of a menu: an icon (see [`crate::icons`]; empty for none) and a label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuItem<'a> {
@@ -316,8 +330,8 @@ pub struct ShellModel<'a> {
     pub step_menu: Option<(usize, &'a [MenuItem<'a>])>,
     /// What rotating and scaling turn about (the tool bar's pivot button).
     pub pivot: &'a str,
-    /// The scene dock's add menu, while open: what it offers.
-    pub add_menu: Option<&'a [MenuItem<'a>]>,
+    /// The scene dock's add menu, while open: what it offers, and the group open beside it.
+    pub add_menu: Option<(&'a [MenuEntry<'a>], Option<usize>)>,
     /// The scene tree's row to scroll into view.
     pub reveal_row: Option<usize>,
     /// What the scene tree is filtered by.
@@ -374,8 +388,10 @@ pub struct ShellResponse {
     pub field: Option<FieldEvent>,
     /// The scene dock's add button.
     pub add: bool,
-    /// An item of the open add menu.
+    /// A kind picked in the open add menu.
     pub add_item: Option<usize>,
+    /// The add menu's group the pointer is over: opened beside it.
+    pub add_group: Option<usize>,
     /// The tool bar's snapping button.
     pub snap: bool,
     /// A step beside it (0 position, 1 angle, 2 scale): open or close its menu.
@@ -387,6 +403,8 @@ pub struct ShellResponse {
     /// The popup open this frame (the add menu, a choice's list) and its opener, for
     /// [`dismissed`].
     pub popup: Option<(u64, u64)>,
+    /// A menu opened beside the popup (the add menu's group), part of it for [`dismissed`].
+    pub popup_beside: Option<u64>,
 }
 
 /// UI text size in pixels.
@@ -451,6 +469,7 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
         }
     });
     out.popup = popups.open;
+    out.popup_beside = popups.beside;
     out
 }
 
@@ -459,14 +478,18 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
 /// layout.
 pub fn dismissed(ui: &Ui, response: &ShellResponse) -> bool {
     response.popup.is_some_and(|(popup, opener)| {
-        ui.input().mouse_pressed && !ui.hovers(popup) && !ui.hovers(opener)
+        ui.input().mouse_pressed
+            && !ui.hovers(popup)
+            && !ui.hovers(opener)
+            && !response.popup_beside.is_some_and(|b| ui.hovers(b))
     })
 }
 
-/// The popup open this frame, if any: its id and its opener's.
+/// The popup open this frame, if any: its id and its opener's, and a menu opened beside it.
 #[derive(Default)]
 struct Popups {
     open: Option<(u64, u64)>,
+    beside: Option<u64>,
 }
 
 /// Scene tabs with the play controls, tool bar, viewport and file browser.
@@ -687,7 +710,7 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
         dock_column(ui, "folders", Size::Fixed(220.0), p, |ui| {
             dock_title(ui, "FileSystem", p);
             ui.scroll_column("tree", |ui| {
-                out.folder = tree_rows(ui, model.folders, p, None).clicked;
+                out.folder = tree_rows(ui, model.folders, p, None, false).clicked;
             });
         });
         dock_column(ui, "listing", Size::Grow(1.0), p, |ui| {
@@ -828,12 +851,14 @@ struct RowsResponse {
     rename: Option<bool>,
 }
 
-/// Tree rows: a click on a row, on its arrow, and renaming in place.
+/// Tree rows: a click on a row, on its arrow, on its eye (`eyes`: the scene tree's rows
+/// end in one), and renaming in place.
 fn tree_rows(
     ui: &mut Ui,
     rows: &[TreeItem<'_>],
     p: &Palette,
     reveal: Option<usize>,
+    eyes: bool,
 ) -> RowsResponse {
     let mut out = RowsResponse::default();
     for (i, item) in rows.iter().enumerate() {
@@ -896,6 +921,9 @@ fn tree_rows(
                 if !item.kind.is_empty() {
                     text(ui, "kind", item.kind, SMALL, p.text_dim);
                 }
+                if !eyes {
+                    return;
+                }
                 ui.spacer("fill");
                 // The eye: on or off, as Godot's.
                 let eye = ui.container(
@@ -954,10 +982,18 @@ fn scene_dock(
                 },
                 |ui| {
                     text(ui, "icon", icons::PLUS, ICON, p.text);
-                    if let Some(items) = model.add_menu {
-                        let items = items.iter().map(|m| (m.icon, m.label));
-                        let popup = menu(ui, items, p, [-150.0, 24.0], &mut out.add_item);
+                    if let Some((entries, open)) = model.add_menu {
+                        let (popup, beside) = group_menu(
+                            ui,
+                            entries,
+                            open,
+                            p,
+                            [-150.0, 24.0],
+                            &mut out.add_item,
+                            &mut out.add_group,
+                        );
                         popups.open = Some((popup, ui.id("add")));
+                        popups.beside = beside;
                     }
                 },
             );
@@ -970,7 +1006,7 @@ fn scene_dock(
         });
         out.tree_filter = filter(ui, model.tree_filter, "Filter nodes", p);
         let tree = ui.scroll_column("tree", |ui| {
-            let rows = tree_rows(ui, model.tree, p, model.reveal_row);
+            let rows = tree_rows(ui, model.tree, p, model.reveal_row, true);
             out.tree_row = rows.clicked;
             out.tree_toggle = rows.toggled;
             out.tree_eye = rows.eye;
@@ -1212,6 +1248,91 @@ fn menu<'a>(
             }
         },
     )
+}
+
+/// The width of a menu.
+const MENU_WIDTH: f32 = 174.0;
+
+/// A menu of kinds and groups at `at`: a group's entries open beside it while the pointer
+/// is over it (`open`, reported through `hovered`). Returns the menu's id and the open
+/// group's.
+fn group_menu(
+    ui: &mut Ui,
+    entries: &[MenuEntry<'_>],
+    open: Option<usize>,
+    p: &Palette,
+    at: [f32; 2],
+    clicked: &mut Option<usize>,
+    hovered: &mut Option<usize>,
+) -> (u64, Option<u64>) {
+    let mut beside = None;
+    let id = ui.column(
+        "menu",
+        Style {
+            floating: Some(at),
+            size: [Size::Fixed(MENU_WIDTH), Size::Fit],
+            padding: [0.0, 4.0, 0.0, 4.0],
+            radius: 4.0,
+            background: Some(p.header),
+            border: Some((p.field_hover, 1.0)),
+            ..Style::default()
+        },
+        |ui| {
+            for (i, entry) in entries.iter().enumerate() {
+                ui.push_id(i as u64);
+                let item = ui.id("item");
+                let is_open = open == Some(i) && !entry.children.is_empty();
+                let lit = ui.is_hovered(item) || is_open;
+                ui.row(
+                    "item",
+                    Style {
+                        size: [Size::Grow(1.0), Size::Fixed(24.0)],
+                        padding: [10.0, 0.0, 8.0, 0.0],
+                        align_cross: Align::Center,
+                        background: lit.then_some(p.selection),
+                        gap: 8.0,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        if !entry.icon.is_empty() {
+                            icon(ui, "icon", entry.icon, p.text_dim);
+                        }
+                        text(ui, "label", entry.label, TEXT, p.text);
+                        if !entry.children.is_empty() {
+                            ui.spacer("fill");
+                            text(ui, "more", icons::COLLAPSED, ICON, p.text_dim);
+                        }
+                        if is_open {
+                            let mut picked = None;
+                            let sub = menu(
+                                ui,
+                                entry.children.iter().map(|c| (c.icon, c.label)),
+                                p,
+                                [MENU_WIDTH, -4.0],
+                                &mut picked,
+                            );
+                            beside = Some(sub);
+                            if let Some(k) = picked {
+                                *clicked = Some(entry.children[k].kind);
+                            }
+                        }
+                    },
+                );
+                if ui.is_hovered(item) && !entry.children.is_empty() {
+                    *hovered = Some(i);
+                }
+                if ui.sense(item, false).clicked {
+                    if entry.children.is_empty() {
+                        *clicked = Some(entry.kind);
+                    } else {
+                        *hovered = Some(i);
+                    }
+                }
+                ui.pop_id();
+            }
+        },
+    );
+    (id, beside)
 }
 
 /// A field's numbers, dragged sideways; reports the drag. The part being typed is a

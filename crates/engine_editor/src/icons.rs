@@ -56,6 +56,16 @@ pub const LIGHT: &str = "\u{F0336}";
 pub const SUN: &str = "\u{F05A8}";
 /// Environment (`md-earth`).
 pub const ENVIRONMENT: &str = "\u{F01E7}";
+/// A cone brush (`md-cone`).
+pub const CONE: &str = "\u{F194C}";
+/// A torus brush (`md-tire`).
+pub const TORUS: &str = "\u{F1896}";
+/// A wedge brush, a ramp (`md-slope_uphill`).
+pub const WEDGE: &str = "\u{F0E00}";
+/// A stairs brush (`md-stairs`).
+pub const STAIRS: &str = "\u{F04CD}";
+/// A group of blockout brushes, and the add menu's blockout entries (`md-wall`).
+pub const BLOCKOUT: &str = "\u{F07FE}";
 /// Camera (`md-camera`).
 pub const CAMERA: &str = "\u{F0100}";
 /// Character (`md-account`).
