@@ -58,7 +58,7 @@ use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
 use crate::camera::OrbitCamera;
-use crate::draw::{self, Draw, Made, Stage};
+use crate::draw::{self, Draw, Made, ROOM_WALLS, Stage};
 use crate::gizmo::{self, COLORS, Change, Gizmo, GizmoDrag, Handle, Mode, Target, ViewProj};
 use crate::icons;
 use crate::input::{Button, InputCollector};
@@ -546,9 +546,10 @@ struct CommandIds {
     transforms: [CommandId; 3],
     /// Puts each selected entity on the surface below it.
     drop: CommandId,
-    /// B and Shift+B: drawing a brush, a cut (ADR 0110 E2b-3).
+    /// B and Shift+B: drawing a brush, a cut (ADR 0110 E2b-3); Ctrl+H rooms.
     draw: CommandId,
     draw_cut: CommandId,
+    hollow: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
     /// the next pivot.
     steps: [CommandId; 3],
@@ -621,6 +622,7 @@ fn commands() -> (Commands, CommandIds) {
         drop: c.register("transform.drop", "Transform", "Drop to the Surface Below"),
         draw: c.register("blockout.draw", "Blockout", "Draw Brush"),
         draw_cut: c.register("blockout.draw_cut", "Blockout", "Draw Cut"),
+        hollow: c.register("blockout.hollow", "Blockout", "Room or Solid"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
             c.register("snap.angle_step", "Snapping", "Angle Step…"),
@@ -695,6 +697,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Period", ids.pivot),
         ("B", ids.draw),
         ("Shift+B", ids.draw_cut),
+        ("Ctrl+H", ids.hollow),
     ];
     // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
     // - ours: Q, E, R at once and with Shift the gizmo's handles, the left hand beside
@@ -1480,6 +1483,9 @@ fn kind_of(world: &World, e: Entity) -> (&'static str, &'static str) {
     } else if let Some(model) = world.get::<Model>(e) {
         (model_icon(model), "Model")
     } else if let Some(brush) = world.get::<Brush>(e) {
+        if brush.is_room() {
+            return (icons::ROOM, "Room");
+        }
         (
             brush_icon(brush),
             match brush.op {
@@ -4401,6 +4407,39 @@ impl Editor {
         g
     }
 
+    /// Ctrl+H: the selected adding brushes become rooms with walls [`ROOM_WALLS`] thick
+    /// or, when they all are, solid again, as one undo step.
+    fn toggle_rooms(&mut self, world: &mut World) {
+        let brushes: Vec<Entity> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&e| world.get::<Brush>(e).is_some_and(|b| b.op == BrushOp::Add))
+            .collect();
+        if brushes.is_empty() {
+            self.say(String::from(
+                "Select brushes that add to make them rooms, or solid again (Ctrl+H)",
+            ));
+            return;
+        }
+        let rooms = brushes
+            .iter()
+            .all(|&e| world.get::<Brush>(e).is_some_and(Brush::is_room));
+        let (hollow, name) = if rooms {
+            (0.0, "Make Solid")
+        } else {
+            (ROOM_WALLS, "Make Room")
+        };
+        self.history.begin(name, None);
+        for &e in &brushes {
+            self.history.touch(world, e);
+            if let Some(b) = world.get_mut::<Brush>(e) {
+                b.hollow = hollow;
+            }
+        }
+        self.history.commit(world);
+    }
+
     /// B or Shift+B (`op`): a drawing starts with a box, or the one running takes the next
     /// shape or the other operation ([`Draw::again`]).
     fn start_draw(&mut self, op: BrushOp) {
@@ -4435,6 +4474,7 @@ impl Editor {
         const RETURN: u16 = 0x0D;
         const ESCAPE: u16 = 0x1B;
         const B: u16 = 0x42;
+        const H: u16 = 0x48;
         const R: u16 = 0x52;
         let Some(rect) = self.view_rect else {
             return;
@@ -4460,6 +4500,7 @@ impl Editor {
                         BrushOp::Add
                     }),
                     R if plain => d.turn(),
+                    H if self.input.ctrl() && !self.input.alt() => d.toggle_room(),
                     _ => {}
                 }
             }
@@ -4534,9 +4575,14 @@ impl Editor {
         match (made, self.drawn) {
             (Some(m), Some((_, last))) if m == last => {}
             (Some(m), drawn) => {
-                let name = if m.op == BrushOp::Cut { "Cut" } else { "Brush" };
-                self.history
-                    .begin(&format!("Draw {} {name}", m.shape.name), Some(merge));
+                // "Box Brush", "Stairs Cut", "Room", "Cylinder Room".
+                let kind = match (m.op, m.hollow > 0.0, m.shape.name) {
+                    (BrushOp::Cut, _, shape) => format!("{shape} Cut"),
+                    (_, true, "Box") => String::from("Room"),
+                    (_, true, shape) => format!("{shape} Room"),
+                    (_, false, shape) => format!("{shape} Brush"),
+                };
+                self.history.begin(&format!("Draw {kind}"), Some(merge));
                 let e = match drawn {
                     Some((e, _)) => {
                         self.history.touch(world, e);
@@ -4544,7 +4590,6 @@ impl Editor {
                     }
                     None => {
                         let group = self.brush_group_or_new(world);
-                        let kind = format!("{} {name}", m.shape.name);
                         let name = self.sibling_name(world, Some(group), &kind, None);
                         let e = world.spawn((
                             SceneId::new(),
@@ -4567,7 +4612,8 @@ impl Editor {
                 let (scale, rotation, translation) = local.to_scale_rotation_translation();
                 let mut brush = Brush::new(m.shape.shape, m.size)
                     .with_op(m.op)
-                    .with_top(m.shape.top);
+                    .with_top(m.shape.top)
+                    .with_hollow(m.hollow);
                 if let Some(steps) = m.steps {
                     brush.segments = steps;
                 }
@@ -4725,6 +4771,8 @@ impl Editor {
                 BrushOp::Cut
             };
             self.start_draw(op);
+        } else if id == ids.hollow {
+            self.toggle_rooms(world);
         } else if let Some(k) = ids.steps.iter().position(|&c| c == id) {
             self.pick_step(world, k);
         } else if id == ids.overlays {
@@ -7917,6 +7965,42 @@ mod tests {
         chord(&mut ed, &mut world, &[B]);
         chord(&mut ed, &mut world, &[ESCAPE]);
         assert!(ed.draw.is_none());
+    }
+
+    const H: (u16, u16) = (0x48, 0x23);
+
+    #[test]
+    fn ctrl_h_makes_brushes_rooms_and_solid_again_and_draws_rooms() {
+        let mut world = World::new();
+        let mut ed = draw_editor("rooms", &mut world);
+        ed.add(&mut world, FIRST_BRUSH);
+        let e = ed.active().unwrap();
+        chord(&mut ed, &mut world, &[CTRL, H]);
+        assert_eq!(world.get::<Brush>(e).unwrap().hollow, ROOM_WALLS);
+        assert_eq!(kind_of(&world, e), (icons::ROOM, "Room"));
+        chord(&mut ed, &mut world, &[CTRL, H]);
+        assert_eq!(world.get::<Brush>(e).unwrap().hollow, 0.0, "solid again");
+        ed.run(&mut world, ed.ids.undo);
+        assert!(world.get::<Brush>(e).unwrap().is_room(), "undone: a room");
+        // Drawn: B, Ctrl+H, a base and a height make a room called so.
+        chord(&mut ed, &mut world, &[B]);
+        chord(&mut ed, &mut world, &[CTRL, H]);
+        let first = on_view(&ed, Vec3::new(3.0, 0.0, 0.0));
+        mouse(&mut ed, first, None);
+        ed.update(&mut world);
+        press_release(&mut ed, &mut world, first);
+        let second = on_view(&ed, Vec3::new(7.0, 0.0, 3.0));
+        mouse(&mut ed, second, None);
+        ed.update(&mut world);
+        press_release(&mut ed, &mut world, second);
+        type_chars(&mut ed, "3");
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[ENTER]);
+        let room = ed.active().unwrap();
+        assert_eq!(world.get::<Name>(room).unwrap().as_str(), "Room");
+        let brush = world.get::<Brush>(room).unwrap();
+        assert_eq!(brush.hollow, ROOM_WALLS);
+        assert!((brush.size - Vec3::new(4.0, 3.0, 3.0)).length() < 1e-4);
     }
 
     #[test]

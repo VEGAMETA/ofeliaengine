@@ -191,8 +191,12 @@ Last updated: 2026-10-20.
     selection's too), Shift+B a cut; the first corner, the base, the height by clicks or
     typed sizes; R turns stairs and wedges; the brush live in its undo step, so a doorway
     opens as it is drawn; edges and sizes over it.
-  - **Next:** E2b-3b, hollow rooms that merge, then the face handles and corners that
-    land on other brushes'.
+  - **E2b-3b, rooms** (#PR; the team's answer: rooms merge): `Brush::hollow`, walls the
+    shape's planes moved out; every room's inside takes itself out of every room in the
+    group, whatever the order, so a corridor opens a hall's wall with no doorway cut;
+    Ctrl+H for the selection and while drawing. 400 rooms and 380 corridors: 121 ms from
+    nothing, a corridor dragged 1.45 ms.
+  - **Next:** E2b-3c, the face handles and corners that land on other brushes'.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

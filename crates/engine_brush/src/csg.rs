@@ -1,6 +1,12 @@
 //! A brush group's CSG (ADR 0110): Godot's order, each brush acting on what the brushes
 //! before it made, evaluated over convex pieces; then the surface left, each polygon owned
 //! by the brush face whose plane it lies on.
+//!
+//! Rooms are the exception (team decision, 2026-10-21): an additive brush with an inside
+//! is a room, and every room's inside takes itself out of every room of the group,
+//! wherever the two are in its order, and out of nothing else. So rooms open into each
+//! other where an inside overlaps another's wall, and a corridor drawn into a room needs
+//! no doorway cut; a pillar or a crate inside a room stays.
 
 use crate::polygon::{PlaneId, Planes, Polygon, Split};
 use crate::solid::{Owner, Solid, SolidError};
@@ -20,13 +26,23 @@ pub enum Op {
 
 /// A brush as the CSG sees it: what it does, and its convex parts, each the planes that
 /// bound it in the group's grid.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Brush {
     /// What it does.
     pub op: Op,
     /// Its convex parts (stairs have one per step). Its faces are numbered through them,
     /// in order.
     pub parts: Vec<Vec<PlaneId>>,
+    /// A room's inside, as convex parts (empty: not a room). Its faces are numbered after
+    /// the parts'. Only an additive brush is a room.
+    pub inside: Vec<Vec<PlaneId>>,
+}
+
+impl Brush {
+    /// Whether it is a room: additive, with an inside.
+    pub fn is_room(&self) -> bool {
+        self.op == Op::Add && !self.inside.is_empty()
+    }
 }
 
 /// A convex piece of the group's solid: what is left of an additive brush's part.
@@ -53,7 +69,8 @@ pub struct Evaluated {
 ///
 /// Each additive brush's pieces are its parts cut and clipped by the brushes after it that
 /// act on them: the cuts whose bounds touch its own, and every intersect (one that misses
-/// it leaves nothing of it). So an edit redoes only the additive brushes it touches.
+/// it leaves nothing of it); a room's are first cut by every room's inside that touches
+/// it. So an edit redoes only the additive brushes it touches.
 pub fn evaluate(brushes: &[Brush], table: &Planes) -> Evaluated {
     engine_profiler::zone!("brush::evaluate");
     let mut out = Evaluated::default();
@@ -61,6 +78,16 @@ pub fn evaluate(brushes: &[Brush], table: &Planes) -> Evaluated {
         .iter()
         .enumerate()
         .map(|(b, brush)| brush_solids(b as u32, brush, table, &mut out.invalid))
+        .collect();
+    let insides: Vec<Vec<Solid>> = brushes
+        .iter()
+        .enumerate()
+        .map(|(b, brush)| inside_solids(b as u32, brush, table, &mut out.invalid))
+        .collect();
+    // The rooms' insides, with their bounds.
+    let rooms: Vec<(usize, Bounds)> = (0..brushes.len())
+        .filter(|&r| brushes[r].is_room())
+        .filter_map(|r| Bounds::of(&insides[r]).map(|b| (r, b)))
         .collect();
     let bounds: Vec<Option<Bounds>> = solids.iter().map(|s| Bounds::of(s)).collect();
     let near = touching(&bounds);
@@ -87,21 +114,17 @@ pub fn evaluate(brushes: &[Brush], table: &Planes) -> Evaluated {
         later.sort_unstable();
         let mut current = solids[a].clone();
         let mut next = Vec::new();
+        if brush.is_room() {
+            for &(r, inside) in &rooms {
+                if inside.touches(&own) {
+                    subtract_all(&mut current, &insides[r], table, &mut sides, &mut next);
+                }
+            }
+        }
         for &j in &later {
             let j = j as usize;
             match brushes[j].op {
-                Op::Cut => {
-                    for cut in &solids[j] {
-                        next.clear();
-                        for p in current.drain(..) {
-                            match p.subtract(cut, table, &mut sides) {
-                                None => next.push(p),
-                                Some(parts) => next.extend(parts),
-                            }
-                        }
-                        core::mem::swap(&mut current, &mut next);
-                    }
-                }
+                Op::Cut => subtract_all(&mut current, &solids[j], table, &mut sides, &mut next),
                 Op::Intersect => {
                     if !bounds[j].is_some_and(|b| b.touches(&own)) {
                         current.clear();
@@ -132,6 +155,26 @@ pub fn evaluate(brushes: &[Brush], table: &Planes) -> Evaluated {
     out
 }
 
+/// `current` less each of `cuts` in turn, in place (`next` for storage).
+pub(crate) fn subtract_all(
+    current: &mut Vec<Solid>,
+    cuts: &[Solid],
+    table: &Planes,
+    sides: &mut Vec<Ordering>,
+    next: &mut Vec<Solid>,
+) {
+    for cut in cuts {
+        next.clear();
+        for p in current.drain(..) {
+            match p.subtract(cut, table, sides) {
+                None => next.push(p),
+                Some(parts) => next.extend(parts),
+            }
+        }
+        core::mem::swap(current, next);
+    }
+}
+
 /// The solids of `brush`'s parts, its faces numbered through them; the parts that make
 /// none go to `invalid`.
 pub(crate) fn brush_solids(
@@ -140,9 +183,34 @@ pub(crate) fn brush_solids(
     table: &Planes,
     invalid: &mut Vec<(u32, SolidError)>,
 ) -> Vec<Solid> {
-    let mut face = 0;
-    let mut solids = Vec::with_capacity(brush.parts.len());
-    for part in &brush.parts {
+    solids_of(b, &brush.parts, 0, table, invalid)
+}
+
+/// The solids of a room's inside, its faces numbered after its parts'; none for a brush
+/// that is not a room.
+pub(crate) fn inside_solids(
+    b: u32,
+    brush: &Brush,
+    table: &Planes,
+    invalid: &mut Vec<(u32, SolidError)>,
+) -> Vec<Solid> {
+    if !brush.is_room() {
+        return Vec::new();
+    }
+    let first: usize = brush.parts.iter().map(Vec::len).sum();
+    solids_of(b, &brush.inside, first as u32, table, invalid)
+}
+
+/// The solids of brush `b`'s convex `parts`, its faces numbered from `face`.
+fn solids_of(
+    b: u32,
+    parts: &[Vec<PlaneId>],
+    mut face: u32,
+    table: &Planes,
+    invalid: &mut Vec<(u32, SolidError)>,
+) -> Vec<Solid> {
+    let mut solids = Vec::with_capacity(parts.len());
+    for part in parts {
         let planes: Vec<(PlaneId, Owner)> = part
             .iter()
             .enumerate()
@@ -394,6 +462,7 @@ mod tests {
         Brush {
             op,
             parts: vec![box_planes(lo, hi, table).unwrap_or_else(|| panic!())],
+            inside: Vec::new(),
         }
     }
 
@@ -536,6 +605,7 @@ mod tests {
             Brush {
                 op: Op::Cut,
                 parts: vec![tilted],
+                inside: Vec::new(),
             },
         ];
         let (v, _, e) = closed(&b, &t);
@@ -558,6 +628,83 @@ mod tests {
         assert!((pieces - v).abs() < 1e-6 * v, "{pieces} against {v}");
     }
 
+    /// A room: its inside from `lo` to `hi`, its walls `wall` thick around it (the inside's
+    /// planes moved out).
+    fn room(lo: [i64; 3], hi: [i64; 3], wall: i64, table: &mut Planes) -> Brush {
+        let inside = crate::shape::cuboid(lo, hi).unwrap_or_else(|| panic!());
+        let walls =
+            crate::shape::grown(std::slice::from_ref(&inside), wall).unwrap_or_else(|| panic!());
+        Brush {
+            op: Op::Add,
+            parts: walls
+                .into_iter()
+                .map(|p| p.into_iter().map(|q| table.add(q)).collect())
+                .collect(),
+            inside: vec![inside.into_iter().map(|q| table.add(q)).collect()],
+        }
+    }
+
+    /// Whether `p` lies inside one of the evaluated pieces (not on a face).
+    fn solid_at(e: &Evaluated, p: [i64; 3], table: &Planes) -> bool {
+        e.pieces.iter().any(|piece| {
+            piece
+                .solid
+                .faces
+                .iter()
+                .all(|f| table.get(f.polygon.on).side_of_grid(p) == Ordering::Less)
+        })
+    }
+
+    #[test]
+    fn a_room_is_its_walls_around_its_inside_and_owns_both_sides() {
+        let mut t = Planes::new();
+        let r = [room([0, 0, 0], [40, 30, 40], 2, &mut t)];
+        let (v, a, e) = closed(&r, &t);
+        assert_eq!(v, 44.0 * 34.0 * 44.0 - 40.0 * 30.0 * 40.0);
+        let outside = 2.0 * (44.0 * 34.0 + 34.0 * 44.0 + 44.0 * 44.0);
+        let inside = 2.0 * (40.0 * 30.0 + 30.0 * 40.0 + 40.0 * 40.0);
+        assert_eq!(a, outside + inside);
+        assert!(e.surface.iter().all(|(o, _)| o.brush == 0));
+        assert!(!solid_at(&e, [20, 15, 20], &t) && solid_at(&e, [-1, 15, 20], &t));
+    }
+
+    #[test]
+    fn rooms_open_into_each_other_whichever_comes_first() {
+        let mut t = Planes::new();
+        // A room, and a corridor whose inside runs from the room's inside out through its
+        // +x wall: no doorway cut.
+        let r = room([0, 0, 0], [40, 30, 40], 2, &mut t);
+        let c = room([30, 0, 15], [80, 25, 25], 2, &mut t);
+        let mut seen = Vec::new();
+        for brushes in [[r.clone(), c.clone()], [c, r]] {
+            let (v, a, e) = closed(&brushes, &t);
+            seen.push((v, a));
+            // The wall is open where the corridor's inside crosses it, and stands beside.
+            assert!(!solid_at(&e, [41, 12, 20], &t), "the opening");
+            assert!(solid_at(&e, [41, 12, 5], &t), "the wall beside it");
+            // The corridor's end wall inside the room is gone; its floor outside stays.
+            assert!(!solid_at(&e, [29, 12, 20], &t));
+            assert!(solid_at(&e, [60, -1, 20], &t));
+        }
+        assert_eq!(seen[0], seen[1], "the same either way");
+    }
+
+    #[test]
+    fn a_crate_in_a_room_stays_and_a_later_cut_cuts_its_wall() {
+        let mut t = Planes::new();
+        let brushes = [
+            cuboid(Op::Add, [10, 0, 10], [14, 4, 14], &mut t),
+            room([0, 0, 0], [40, 30, 40], 2, &mut t),
+            cuboid(Op::Cut, [-5, 0, 18], [5, 21, 22], &mut t),
+        ];
+        let (v, _, e) = closed(&brushes, &t);
+        let shell = 44.0 * 34.0 * 44.0 - 40.0 * 30.0 * 40.0;
+        // The crate is not the room's to take out; the doorway is 2 × 21 × 4 of wall.
+        assert_eq!(v, shell + 64.0 - 2.0 * 21.0 * 4.0);
+        assert!(solid_at(&e, [12, 2, 12], &t));
+        assert!(!solid_at(&e, [-1, 10, 20], &t));
+    }
+
     #[test]
     fn open_or_empty_planes_make_no_brush() {
         let mut t = Planes::new();
@@ -566,12 +713,14 @@ mod tests {
         let open = Brush {
             op: Op::Add,
             parts: vec![vec![x, y]],
+            inside: Vec::new(),
         };
         let e = evaluate(&[open], &t);
         assert_eq!(e.invalid, [(0, SolidError::Open)]);
         let slab = Brush {
             op: Op::Add,
             parts: vec![vec![x, x.flip(), y]],
+            inside: Vec::new(),
         };
         assert_eq!(evaluate(&[slab], &t).invalid, [(0, SolidError::Empty)]);
     }

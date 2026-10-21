@@ -136,6 +136,7 @@ editor = ["dep:engine_editor"]
 | Set a camera bookmark, go to it | Ctrl+1..9, 1..9 |
 | Put the selection on the surface below it | End |
 | Draw a brush, a cut ([drawing brushes](#drawing-brushes)) | B, Shift+B |
+| Make the selected brushes rooms (walls 0.2 m thick), or solid again | Ctrl+H |
 | Drag the selection over surfaces | Ctrl+Shift with a move handle |
 | What rotating and scaling turn about: the middle, each entity's own origin, the active entity | . (Period) |
 
@@ -363,6 +364,7 @@ names the shape and its sizes ("Stairs 1 × 1.8 × [1.2] m, 6 steps of 0.2 m").
 | the pointer, then | the height follows it along the surface's normal, either way; a click keeps it and makes the brush |
 | a typed size | the base's first side, Tab, the second, Enter; the height, Enter. Metres and expressions, as in keyboard transforms. A cut's typed height goes into the surface, a brush's out of it |
 | R | turns the shape a quarter about the normal: wedges and stairs rise away from the first corner along the second side, until turned |
+| Ctrl+H | makes it a room: what you draw is its inside, its walls 0.2 m thick around it, and it opens into the rooms it reaches ([blockout.md](blockout.md#rooms)) |
 | Escape, a right click | drops it (leaving the window does too) |
 
 - **The brush is there as you draw it,** cutting and cut as it will be: a doorway opens
@@ -375,7 +377,8 @@ names the shape and its sizes ("Stairs 1 × 1.8 × [1.2] m, 6 steps of 0.2 m").
   in whole steps; Ctrl rounds the corner under the pointer to the grid. Free, corners and
   sizes still land on the brushes' millimetre grid.
 - **Stairs** get as many steps as make each about 0.2 m high.
-- The palette has them as "Blockout: Draw Brush" and "Blockout: Draw Cut".
+- The palette has them as "Blockout: Draw Brush", "Blockout: Draw Cut" and "Blockout: Room or
+  Solid".
 
 ## Viewport navigation
 

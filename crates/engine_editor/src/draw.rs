@@ -14,6 +14,8 @@
 //!   cut's typed height goes into the surface, a brush's out of it.
 //! - **R** turns the shape a quarter about the base's normal: where wedges and stairs rise
 //!   (away from the first corner along the second side, until turned).
+//! - **Ctrl+H** makes it a room: what is drawn is its inside, its walls [`ROOM_WALLS`]
+//!   thick around it, and rooms open into each other (ADR 0110).
 //! - **The owner's snapping rules** ([`crate::Snapping`]): with snapping on (G), or Shift
 //!   with it off, the first corner lands on the grid of the tool bar's position step in the
 //!   surface's plane and sizes go in whole steps from it; Ctrl rounds the corner under the
@@ -33,7 +35,11 @@ use engine_core::math::{Mat3, Quat, Vec2, Vec3};
 /// The keys while drawing, for the status bar.
 pub(crate) const HELP: &str = "click: the first corner, the base, the height  ·  type a size, \
                                Tab: the other side  ·  Enter: next  ·  B: next shape  ·  R: \
-                               turn  ·  Esc or right click: cancel";
+                               turn  ·  Ctrl+H: room  ·  Esc or right click: cancel";
+
+/// A room's walls, metres thick: drawn with Ctrl+H, or a brush made one (a guess of the UX
+/// note's, `docs/research/ux/blockout.md` §1).
+pub(crate) const ROOM_WALLS: f32 = 0.2;
 
 /// A brush's grid, metres: corners and sizes land on it, and sizes below it are none.
 const LEAST: f32 = 0.001;
@@ -158,7 +164,8 @@ pub(crate) struct Pointer<'a> {
 }
 
 /// What a drawing makes: the shape and its operation, where its base's middle is and how
-/// it turns in the world, its size (x, height, z) and, for stairs, its steps.
+/// it turns in the world, its size (x, height, z), for stairs its steps, and a room's
+/// walls (0: solid).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Made {
     pub(crate) shape: DrawShape,
@@ -167,6 +174,7 @@ pub(crate) struct Made {
     pub(crate) rotation: Quat,
     pub(crate) size: Vec3,
     pub(crate) steps: Option<u32>,
+    pub(crate) hollow: f32,
 }
 
 /// A brush being drawn.
@@ -178,6 +186,8 @@ pub(crate) struct Draw {
     pub(crate) stage: Stage,
     /// Quarter turns about the base's normal (R).
     pub(crate) turns: u8,
+    /// A room (Ctrl+H); a cut never is one.
+    pub(crate) room: bool,
     /// Where the first corner lands now, and the normal of its surface.
     pub(crate) mark: Option<(Vec3, Vec3)>,
     /// What is typed for the first side, the second and the height.
@@ -198,6 +208,7 @@ impl Draw {
             op,
             stage: Stage::Aim,
             turns: 0,
+            room: false,
             mark: None,
             typed: Default::default(),
             field: 0,
@@ -219,6 +230,16 @@ impl Draw {
     /// R: a quarter turn about the base's normal.
     pub(crate) fn turn(&mut self) {
         self.turns = (self.turns + 1) % 4;
+    }
+
+    /// Ctrl+H: a room, or solid again.
+    pub(crate) fn toggle_room(&mut self) {
+        self.room = !self.room;
+    }
+
+    /// Whether it makes a room now.
+    fn is_room(&self) -> bool {
+        self.room && self.op == BrushOp::Add
     }
 
     /// Tab: the base's other side.
@@ -381,6 +402,7 @@ impl Draw {
             rotation: rotation.normalize(),
             size: Vec3::new(across, height.abs(), along),
             steps,
+            hollow: if self.is_room() { ROOM_WALLS } else { 0.0 },
         })
     }
 
@@ -431,6 +453,8 @@ impl Draw {
         out.push_str(shape.name);
         if self.op == BrushOp::Cut {
             out.push_str(" cut");
+        } else if self.room {
+            out.push_str(" room");
         }
         let sizes: [f32; 3] = match self.stage {
             Stage::Aim => {
@@ -753,6 +777,31 @@ mod tests {
         let mut hint = String::new();
         d.hint(&mut hint);
         assert_eq!(hint, "Box cut: click the first corner  ·  B: next shape");
+    }
+
+    #[test]
+    fn ctrl_h_draws_a_room_and_a_cut_is_never_one() {
+        let (view, snap) = (view(), Snapping::default());
+        let mut d = Draw::new(BrushOp::Add, 0, 1);
+        d.toggle_room();
+        let mut p = pointer(&view, &snap, Vec3::ZERO);
+        p.press = true;
+        d.pointer(&p);
+        d.pointer(&pointer(&view, &snap, Vec3::new(4.0, 0.0, 3.0)));
+        d.enter();
+        d.type_text("3");
+        d.pointer(&pointer(&view, &snap, Vec3::ZERO));
+        let made = d.made().unwrap();
+        assert_eq!(made.hollow, ROOM_WALLS);
+        assert!(
+            near(made.size, Vec3::new(4.0, 3.0, 3.0)),
+            "the drawn size is its inside"
+        );
+        let mut hint = String::new();
+        d.hint(&mut hint);
+        assert!(hint.starts_with("Box room 4 × 3 × [3] m"), "{hint}");
+        d.again(BrushOp::Cut);
+        assert_eq!(d.made().unwrap().hollow, 0.0);
     }
 
     #[test]

@@ -6,6 +6,16 @@ use crate::polygon::{PlaneId, Planes};
 use core::f64::consts::{PI, TAU};
 use engine_core::math::DVec3;
 
+/// `parts` with every plane moved `by` grid units out along its normal: each convex part
+/// grown by `by` on every side, as a room's walls stand around its inside (ADR 0110).
+/// `None` when a plane leaves the grid's bounds.
+pub fn grown(parts: &[Vec<Plane>], by: i64) -> Option<Vec<Vec<Plane>>> {
+    parts
+        .iter()
+        .map(|part| part.iter().map(|p| p.offset(by as f64)).collect())
+        .collect()
+}
+
 /// The six planes of the box from `lo` to `hi` (+x, -x, +y, -y, +z, -z); `None` when a
 /// side is out of bounds.
 pub fn box_planes(lo: [i64; 3], hi: [i64; 3], table: &mut Planes) -> Option<Vec<PlaneId>> {
@@ -219,6 +229,7 @@ mod tests {
                         .collect()
                 })
                 .collect(),
+            inside: Vec::new(),
         };
         let e = evaluate(&[brush], &table);
         assert!(e.invalid.is_empty(), "{:?}", e.invalid);
@@ -321,6 +332,7 @@ mod tests {
                 .iter()
                 .map(|p| p.iter().map(|q| table.add(*q)).collect())
                 .collect(),
+            inside: Vec::new(),
         };
         let e = evaluate(&[brush], &table);
         let shown = e

@@ -358,3 +358,40 @@ Proposed (question 3):
 - **Left for E2b-3b and after:** hollow rooms that merge (Ctrl+H), the face handles,
   corners landing on other brushes' corners and edges, a cut "through the brush it was
   drawn on" with no height given, the stamp (B, Enter), the walkability hint.
+
+## As built (E2b-3b, 2026-10-21): rooms
+
+- **`engine_brush::csg::Brush::inside`:** a room's inside as convex parts, its faces
+  numbered after the parts'. An additive brush with one is a room (`is_room`).
+- **The team's answer 1 (rooms merge), as evaluated:** a room's pieces are its parts less
+  every room's inside whose bounds touch it, its own included and wherever the rooms are
+  in the group's order; then the cuts and intersects after it, as for any additive brush.
+  Insides take out only rooms. The walls of an opening one room's inside makes in
+  another's belong to the room that made it, and a room's inner faces to the room.
+  `Group` keeps it through edits: a room's change redoes it and the rooms its old and new
+  inside touch.
+- **Walls:** `shape::grown` moves every plane of a shape out by the walls' thickness
+  (`Plane::offset`, exact for axis planes), so a box's walls, floor and ceiling and a
+  cylinder's round wall are all that thick; the inside is the shape at its size.
+- **`Brush::hollow`** (metres, 0 solid; scenes without it load solid): `parts()` gives the
+  walls, `inside()` the inside; a cut is never a room.
+- **The editor:** Ctrl+H makes the selected adding brushes rooms with walls 0.2 m thick, or
+  solid again, as one undo step; while drawing, Ctrl+H draws a room, its drawn size its
+  inside ("Room", "Cylinder Room"). The tree shows a room as a floor plan, "Room".
+- **Measured** (ref-1, one thread, `cargo bench -p engine_brush --bench csg`): 400 rooms of
+  10 × 8 × 3 m and 380 corridors between them (781 brushes) evaluate in 121 ms from
+  nothing, 248 ms as a `Group` with its tiles; dragging a corridor redoes 3 brushes and
+  294 tiles in 1.45 ms, a room 3 brushes and 216 tiles in 1.25 ms. The other numbers
+  above are unchanged (a door dragged among 2,001 brushes 0.587 ms).
+- **Tested:**
+  - a room's volume and area exact, both sides its own;
+  - a hall and a corridor opening into each other the same in either order (the opening,
+    the wall beside it, the corridor's end gone inside the hall, its floor outside);
+  - a crate inside a room staying, and a later cut cutting the room's wall;
+  - rooms kept through a corridor moved through them, a room made solid and a room again,
+    each step as a rebuild from nothing;
+  - in the player, on both GPUs: a scene file's hall and corridor drawn, the hall lit
+    through the corridor's door; looked at from inside the hall, the opening;
+  - in the editor: Ctrl+H, undo, a room drawn.
+- **Left:** sides of a room left open (a courtyard), a room's walls of another thickness
+  from the editor (the inspector sets `hollow`), arches.

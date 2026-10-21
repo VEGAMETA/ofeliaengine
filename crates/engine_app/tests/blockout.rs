@@ -3,7 +3,8 @@
 //! it, saved as the editor saves it and loaded through `PlayerSettings::scene`, rendered
 //! offscreen. The room's inside shows dark through the door, the lit wall beside it shows
 //! the grid's lines; moving the door moves the hole, and a cut taken out takes its walls.
-//! `ENGINE_BLOCKOUT_PNG=<file>` writes the frame.
+//! `ENGINE_BLOCKOUT_PNG=<file>` writes the frame. Rooms: a hall and a corridor drawn into
+//! it open into each other with no doorway cut (`ENGINE_ROOMS_PNG=<file>`).
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -250,5 +251,166 @@ fn brushes_in_a_scene_file_draw_their_group() {
         player.frame(&mut game).unwrap();
     }
     assert_eq!(player.blockout().meshes(), 5);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rooms_open_into_each_other_with_no_doorway_cut() {
+    let dir = std::env::temp_dir().join(format!("ofelia-rooms-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("scenes")).unwrap();
+    let mut world = World::new();
+    let group = world.spawn((
+        SceneId::new(),
+        Name::new("Blockout"),
+        Transform::IDENTITY,
+        BrushGroup::default(),
+    ));
+    let brush = |world: &mut World, name: &str, at: Vec3, b: Brush| {
+        let e = world.spawn((
+            SceneId::new(),
+            Name::new(name),
+            Transform::from_translation(at),
+            b,
+        ));
+        world.set_parent(e, Some(group)).unwrap();
+    };
+    // A hall 6 × 3 × 6 m inside, and a corridor 2 m wide whose inside runs from the hall's
+    // inside out through its +z wall, walls 0.2 m; a door at the corridor's far end.
+    let room = |size| Brush::new(BrushShape::Box, size).with_hollow(0.2);
+    brush(
+        &mut world,
+        "Hall",
+        Vec3::ZERO,
+        room(Vec3::new(6.0, 3.0, 6.0)),
+    );
+    brush(
+        &mut world,
+        "Corridor",
+        Vec3::new(0.0, 0.0, 5.0),
+        room(Vec3::new(2.0, 2.4, 6.0)),
+    );
+    brush(
+        &mut world,
+        "Door",
+        Vec3::new(0.0, 0.0, 8.1),
+        Brush::new(BrushShape::Box, Vec3::new(1.2, 2.0, 0.6)).with_op(BrushOp::Cut),
+    );
+    world.spawn((
+        SceneId::new(),
+        Name::new("Ground"),
+        Transform::from_xyz(0.0, -0.25, 0.0).with_scale(Vec3::new(40.0, 0.1, 40.0)),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-0.7)),
+        Sun {
+            color: Vec3::splat(1.5),
+            ambient: Vec3::splat(0.03),
+        },
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Lamp"),
+        Transform::from_xyz(0.0, 2.2, -1.0),
+        PointLight::new(Vec3::splat(12.0), 9.0),
+    ));
+    let eye = Vec3::new(0.0, 1.1, 13.0);
+    world.spawn((
+        SceneId::new(),
+        Name::new("Camera"),
+        Transform::from_translation(eye).with_rotation(look_rotation(
+            eye,
+            Vec3::new(0.0, 1.1, 0.0),
+            Vec3::Y,
+        )),
+        Camera::perspective(0.8, 0.05, 200.0),
+    ));
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    assert!(text.contains("Brush.hollow = 0.2"), "{text}");
+    std::fs::write(dir.join("scenes/main.scene"), &text).unwrap();
+
+    let (width, height) = (640u32, 360u32);
+    let settings = PlayerSettings {
+        title: String::from("rooms test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("scenes/main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..30 {
+        player.frame(&mut game).unwrap();
+    }
+    // Both rooms show, and the door's hole walls.
+    assert_eq!(player.blockout().meshes(), 3);
+    let rgba = player.capture(&mut game).unwrap().unwrap();
+    if let Ok(path) = std::env::var("ENGINE_ROOMS_PNG") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    let lum = |x: u32, y: u32| {
+        let i = ((y * width + x) * 4) as usize;
+        (f32::from(rgba[i]) + f32::from(rgba[i + 1]) + f32::from(rgba[i + 2])) / 3.0
+    };
+    // Down the corridor and through the opening, the hall's far wall under its lamp.
+    let far = lum(width / 2, height / 2);
+    println!("the hall's far wall: {far}");
+    assert!(far > 20.0, "the hall lit through the corridor: {far}");
+    // From inside the hall, its +z wall is open where the corridor meets it: through the
+    // opening, down the corridor and out of its door, the daylit ground
+    // (`ENGINE_ROOMS_PNG2=<file>`).
+    let world = player.world_mut();
+    let camera = named(world, "Camera");
+    let eye = Vec3::new(0.0, 1.5, -2.6);
+    *world.get_mut::<Transform>(camera).unwrap() = Transform::from_translation(eye)
+        .with_rotation(look_rotation(eye, Vec3::new(0.0, 1.2, 8.0), Vec3::Y));
+    for _ in 0..4 {
+        player.frame(&mut game).unwrap();
+    }
+    let rgba = player.capture(&mut game).unwrap().unwrap();
+    if let Ok(path) = std::env::var("ENGINE_ROOMS_PNG2") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

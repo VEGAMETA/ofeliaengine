@@ -1,5 +1,6 @@
 //! Brush CSG (ADR 0110): what an exact side costs, and a greybox of rooms evaluated from
-//! nothing and around one room (what an edit redoes). Prints Markdown.
+//! nothing and around one room (what an edit redoes); then hollow rooms joined by
+//! corridors that open into them. Prints Markdown.
 //!
 //! ```text
 //! cargo bench -p engine_brush --bench csg
@@ -8,7 +9,7 @@
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
 use engine_brush::csg::surface;
-use engine_brush::shape::box_planes;
+use engine_brush::shape::{box_planes, cuboid, grown};
 use engine_brush::{Brush, Group, Op, Plane, Planes, Point, evaluate};
 use engine_core::math::DVec3;
 use std::hint::black_box;
@@ -56,6 +57,7 @@ fn rooms(n: i64, table: &mut Planes) -> Vec<Brush> {
         out.push(Brush {
             op,
             parts: vec![planes],
+            inside: Vec::new(),
         });
     };
     let (w, d) = (12.0 * n as f64, 10.0 * n as f64);
@@ -91,6 +93,72 @@ fn rooms(n: i64, table: &mut Planes) -> Vec<Brush> {
         }
     }
     out
+}
+
+/// Hollow rooms (team decision, 2026-10-21): 10 × 8 m inside, 3 m high, walls 0.2 m, every
+/// 12 m along x and 10 m along z on one ground, and from each room a corridor 2 m wide into
+/// its neighbour along x, no doorway cut: their insides open the walls.
+fn hollow_rooms(n: i64, table: &mut Planes) -> Vec<Brush> {
+    let mm = |v: f64| (v * 1000.0) as i64;
+    let mut out = Vec::new();
+    let (w, d) = (12.0 * n as f64, 10.0 * n as f64);
+    out.push(Brush {
+        op: Op::Add,
+        parts: vec![
+            box_planes(
+                [-1.0, -0.5, -1.0].map(mm),
+                [w + 1.0, -0.2, d + 1.0].map(mm),
+                table,
+            )
+            .unwrap(),
+        ],
+        inside: Vec::new(),
+    });
+    let mut room = |lo: [f64; 3], hi: [f64; 3], table: &mut Planes| {
+        let inside = cuboid(lo.map(mm), hi.map(mm)).unwrap();
+        let walls = grown(std::slice::from_ref(&inside), 200).unwrap();
+        out.push(Brush {
+            op: Op::Add,
+            parts: walls
+                .into_iter()
+                .map(|p| p.into_iter().map(|q| table.add(q)).collect())
+                .collect(),
+            inside: vec![inside.into_iter().map(|q| table.add(q)).collect()],
+        });
+    };
+    for i in 0..n {
+        for j in 0..n {
+            let (x, z) = (12.0 * i as f64, 10.0 * j as f64);
+            room([x, 0.0, z], [x + 10.0, 3.0, z + 8.0], table);
+            if i + 1 < n {
+                room([x + 9.0, 0.0, z + 3.0], [x + 13.0, 2.4, z + 5.0], table);
+            }
+        }
+    }
+    out
+}
+
+/// `brush` moved `dx` grid units along x, its inside too.
+fn moved_x(group: &mut Group, brush: &Brush, dx: i64) -> Brush {
+    let mut shift = |parts: &[Vec<engine_brush::PlaneId>]| -> Vec<Vec<engine_brush::PlaneId>> {
+        parts
+            .iter()
+            .map(|part| {
+                part.iter()
+                    .map(|&id| {
+                        let p = *group.planes().get(id);
+                        let q = Plane::new(p.n.map(i64::from), p.d + i64::from(p.n[0]) * dx);
+                        group.planes_mut().add(q.unwrap())
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    Brush {
+        op: brush.op,
+        parts: shift(&brush.parts),
+        inside: shift(&brush.inside),
+    }
 }
 
 fn main() {
@@ -203,9 +271,53 @@ fn main() {
                 Brush {
                     op,
                     parts: vec![moved],
+                    inside: Vec::new(),
                 },
             );
             // What the meshes would be made from.
+            let mut n = 0;
+            for b in group.take_changed() {
+                group.polygons_of(b as usize, &mut polygons);
+                n += polygons.len();
+            }
+            n
+        }) / 1e3;
+        println!(
+            "| {what}: {} brushes and {} tiles redone, changed polygons gathered | {ms:.3} |",
+            redone.brushes, redone.tiles
+        );
+    }
+
+    // Hollow rooms and their corridors: from nothing, and a corridor and a room dragged a
+    // millimetre along x and back.
+    println!();
+    let mut group = Group::new();
+    let brushes = hollow_rooms(20, group.planes_mut());
+    let count = brushes.len();
+    println!("| 400 hollow rooms, 380 corridors ({count} brushes) | ms |");
+    println!("|---|---|");
+    let fresh_ms = median_us(3, || evaluate(&brushes, group.planes()).surface.len()) / 1e3;
+    println!("| evaluated from nothing | {fresh_ms:.2} |");
+    let rebuild_ms = median_us(3, || {
+        let mut g = Group::new();
+        *g.planes_mut() = group.planes().clone();
+        g.rebuild(brushes.clone());
+        g.pieces().count()
+    }) / 1e3;
+    group.rebuild(brushes);
+    println!("| rebuilt from nothing (tiles kept) | {rebuild_ms:.2} |");
+    // Room (10, 10) and the corridor from it: a room is brush 1 + 40 i + 2 j (each column
+    // of rooms but the last has a corridor per room).
+    let room = 1 + 40 * 10 + 2 * 10;
+    let mut polygons = Vec::new();
+    for (what, index) in [("a corridor dragged", room + 1), ("a room dragged", room)] {
+        let start = group.brushes()[index].clone();
+        let mut step = 0i64;
+        let mut redone = Default::default();
+        let ms = median_us(31, || {
+            step = 1 - step;
+            let b = moved_x(&mut group, &start, step);
+            redone = group.set(index, b);
             let mut n = 0;
             for b in group.take_changed() {
                 group.polygons_of(b as usize, &mut polygons);
