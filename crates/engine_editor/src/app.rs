@@ -43,6 +43,9 @@
 //!   Godot's.
 //! - **Flying:** with the right button held, W, A, S, D fly the camera, Q down, E up,
 //!   Shift faster, and the wheel sets the speed (Godot's freelook).
+//! - **Picking** (ADR 0109): a click in the viewport selects the object under the pointer
+//!   (or the nearest within 3 pixels), Shift or Ctrl adds it or takes it out, a click on
+//!   nothing clears the selection.
 //! - **The command palette** (Ctrl+Shift+P) finds and runs every command, the add menu's
 //!   kinds among them ("Add Cube"); after `@` (Ctrl+P) it finds the scene's objects by
 //!   name and selects the one picked.
@@ -76,6 +79,7 @@ use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, Wo
 use engine_input::Key;
 use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind};
 use engine_reflect::TypeKind;
+use engine_render::pick::{PickPass, PickRequest, Picker};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, PointLight, SpotLight, Sun, look_rotation};
 use engine_scene::{AssetId, AssetPaths, Name, RootOrder, SaveOptions, SceneId, SceneRegistry};
@@ -456,6 +460,12 @@ pub fn editor<G: Game>(
         setup.bindless,
         &editor.text.atlas,
     )?;
+    let picker = Picker::new(
+        setup.device,
+        setup.allocator,
+        setup.bindless,
+        settings.frames_in_flight,
+    )?;
     let shared = Rc::new(RefCell::new(editor));
     Ok((
         EditorGame {
@@ -468,6 +478,7 @@ pub fn editor<G: Game>(
             renderer,
             glyphs,
             canvas: Canvas::new(),
+            picker,
         },
     ))
 }
@@ -1040,6 +1051,29 @@ struct Editor {
     fly_speed: f32,
     /// When the last frame was: flying moves by the time since.
     last_frame: Instant,
+    /// Picking in the viewport (ADR 0109): the pixel the overlay picks at this frame (at the
+    /// view's render size), and whether blended surfaces can be picked.
+    pick_request: Option<PickRequest>,
+    pick_transparent: bool,
+    /// The view's render size over its output size, and the frame's number, as the overlay
+    /// last saw them.
+    view_scale: [f32; 2],
+    frame_seen: u64,
+    /// The newest pick the overlay took (its pixel, its frame, the instance there or
+    /// nearest), until [`Editor::resolve_pick`] names its entity.
+    picked: Option<(PickRequest, u64, Option<u32>)>,
+    /// The entity under the pointer as the newest pick saw it (none: nothing), and that
+    /// pick's pixel.
+    hovered: Option<(PickRequest, Option<Entity>)>,
+    /// What the last hover pick saw: the pixel, the camera, the history's head (when none
+    /// of them changes, the pick is not made again).
+    last_pick: Option<(PickRequest, [f32; 6], u64)>,
+    /// Where the left button went down in the viewport, not on a handle: a release near it
+    /// is a click.
+    press_at: Option<Vec2>,
+    /// A click waiting for the pick of its pixel: the pixel, whether it toggles (Shift or
+    /// Ctrl), and the first frame whose pick can answer it.
+    pending_click: Option<(PickRequest, bool, u64)>,
     tools: [String; 4],
     active_tool: usize,
     status: String,
@@ -1291,6 +1325,15 @@ impl Editor {
             hint: String::new(),
             fly_speed: FLY_SPEED,
             last_frame: Instant::now(),
+            pick_request: None,
+            pick_transparent: true,
+            view_scale: [1.0, 1.0],
+            frame_seen: 0,
+            picked: None,
+            hovered: None,
+            last_pick: None,
+            press_at: None,
+            pending_click: None,
             tools: [
                 format!("{} Select", icons::TOOL_SELECT),
                 format!("{} Move", icons::TOOL_MOVE),
@@ -2033,6 +2076,7 @@ impl Editor {
                 ((w * scale).round() as u32).max(1),
                 ((h * scale).round() as u32).max(1),
             ]);
+            self.pick_frame(over, Vec2::new(x * scale, y * scale));
         }
         self.gizmo_frame(world, scale);
         self.input.next_frame();
@@ -2570,6 +2614,109 @@ impl Editor {
             at = world.parent(p);
         }
         false
+    }
+
+    /// The viewport's picking (ADR 0109): a press there, not on a handle, may become a
+    /// click, and a release near it clicks once the pick of its pixel answers; the
+    /// pointer's pixel is picked again whenever it, the camera or the scene changed.
+    /// `origin` is the view's top left corner (physical pixels).
+    fn pick_frame(&mut self, over: bool, origin: Vec2) {
+        let free = !self.camera_drag
+            && self.command_palette.is_none()
+            && !self.add_open
+            && self.open_choice.is_none()
+            && self.renaming.is_none()
+            && self.gizmo_drag.is_none()
+            && self.key_transform.is_none()
+            && self.drag.is_none();
+        let cursor = self.input.cursor().map(|[x, y]| Vec2::new(x, y));
+        // The pointer's pixel at the view's render size.
+        let request = cursor.filter(|_| over && free).map(|at| {
+            let local = (at - origin).max(Vec2::ZERO);
+            PickRequest {
+                x: (local.x * self.view_scale[0]) as u32,
+                y: (local.y * self.view_scale[1]) as u32,
+                transparent: self.pick_transparent,
+            }
+        });
+        if self.input.pressed(Button::Left) {
+            self.press_at = cursor.filter(|_| request.is_some() && self.hovered_handle.is_none());
+        }
+        if self.input.released(Button::Left)
+            && let (Some(from), Some(at), Some(request)) = (self.press_at.take(), cursor, request)
+            && from.distance(at) <= 4.0 * self.scale.max(0.5)
+        {
+            let toggle = self.input.shift() || self.input.ctrl();
+            // Answered by a pick made from the next frame on: the scene as it is now.
+            self.pending_click = Some((request, toggle, self.frame_seen + 1));
+        }
+        let Some(request) = request else {
+            self.hovered = None;
+            self.last_pick = None;
+            self.pick_request = self.pending_click.map(|(r, _, _)| r);
+            return;
+        };
+        let (eye, target) = (self.orbit.eye(), self.orbit.target);
+        let seen = (
+            request,
+            [eye.x, eye.y, eye.z, target.x, target.y, target.z],
+            self.history.head(),
+        );
+        self.pick_request = if let Some((r, _, _)) = self.pending_click {
+            Some(r)
+        } else if self.last_pick != Some(seen) {
+            self.last_pick = Some(seen);
+            Some(request)
+        } else {
+            None
+        };
+    }
+
+    /// Names the entity of the newest pick's instance (`slot_of` gives an entity's), as
+    /// the entity under the pointer, and answers a click waiting for that pixel.
+    fn resolve_pick(&mut self, world: &World, slot_of: impl Fn(Entity) -> Option<u32>) {
+        let Some((request, frame, instance)) = self.picked.take() else {
+            return;
+        };
+        let entity = instance.and_then(|slot| {
+            let q = self.scene_ids.as_mut()?;
+            q.iter_readonly(world)
+                .map(|(e, _)| e)
+                .find(|&e| slot_of(e) == Some(slot))
+        });
+        self.hovered = Some((request, entity));
+        if let Some((click, toggle, from)) = self.pending_click
+            && click == request
+            && frame >= from
+        {
+            self.pending_click = None;
+            self.click_viewport(world, entity, toggle);
+        }
+    }
+
+    /// A click in the viewport on `entity` (none: on nothing; ADR 0109). It selects it
+    /// alone; with Shift or Ctrl (`toggle`) it adds it, or takes it out when it is
+    /// selected. A click on nothing clears the selection, unless it toggles. The tree opens
+    /// to show what was picked.
+    fn click_viewport(&mut self, world: &World, entity: Option<Entity>, toggle: bool) {
+        match (entity, toggle) {
+            (Some(e), false) => self.show(world, e),
+            (Some(e), true) => {
+                self.toggle(e);
+                let mut at = world.parent(e);
+                while let Some(p) = at {
+                    self.collapsed.remove(&p);
+                    at = world.parent(p);
+                }
+            }
+            (None, false) => {
+                let before = self.active();
+                self.selection.clear();
+                self.anchor = None;
+                self.selection_changed(before);
+            }
+            (None, true) => {}
+        }
     }
 
     /// The gizmo's part of the frame (ADR 0107 E2): a drag in progress goes on, is taken
@@ -4170,6 +4317,10 @@ impl<G> EditorGame<G> {
         if shared.assets.len() != paths.len() {
             shared.assets = paths.clone();
         }
+        // The newest pick's entity (ADR 0109), through the extraction's slots.
+        let runtime = player.runtime();
+        let extract = runtime.extract();
+        shared.resolve_pick(&runtime.world, |e| extract.instance(e).map(|i| i.slot()));
     }
 
     /// Starts the session in the project's `.ofelia/` (ADR 0107 §4): takes the project's
@@ -4255,6 +4406,11 @@ impl<G> EditorGame<G> {
     /// The selected entities, in the order they were picked (the active one last).
     pub fn selection(&self) -> Vec<Entity> {
         self.shared.borrow().selection.clone()
+    }
+
+    /// The entity under the pointer in the viewport, as the newest pick saw it (ADR 0109).
+    pub fn hovered(&self) -> Option<Entity> {
+        self.shared.borrow().hovered.and_then(|(_, e)| e)
     }
 
     /// Selects an entity alone (or nothing), as a click in the tree does.
@@ -4435,6 +4591,8 @@ pub struct EditorOverlay {
     renderer: Renderer2d,
     glyphs: GlyphTexture,
     canvas: Canvas,
+    /// Picks in the scene's view (ADR 0109).
+    picker: Picker,
 }
 
 impl EditorOverlay {
@@ -4452,6 +4610,7 @@ impl EditorOverlay {
             self.glyphs
                 .texture_mut()
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
+            self.picker.destroy(setup.allocator);
         }
         Ok(())
     }
@@ -4462,6 +4621,34 @@ impl Overlay for EditorOverlay {
         {
             let mut shared = self.shared.borrow_mut();
             let editor = &mut *shared;
+            // Picking (ADR 0109): the newest pick's result, then this frame's pick.
+            if let Some(view) = pass.view {
+                let (render, output) = (view.frame.render, view.frame.output);
+                editor.view_scale = [
+                    render.0 as f32 / output.0.max(1) as f32,
+                    render.1 as f32 / output.1.max(1) as f32,
+                ];
+                editor.frame_seen = view.frame_number;
+                if let Some(result) = self.picker.poll(view.frame_number) {
+                    editor.picked = Some((result.request, result.frame, result.nearest(3)));
+                }
+                if let Some(request) = editor.pick_request.take() {
+                    let declared = self.picker.add_pass(
+                        pass.fg,
+                        pass.bindless,
+                        view.geometry,
+                        view.materials,
+                        &view.frame.passes,
+                        render,
+                        request,
+                        view.frame_number,
+                    );
+                    // An empty view: nothing under any pixel, answered at once.
+                    if declared == PickPass::Empty {
+                        editor.picked = Some((request, view.frame_number, None));
+                    }
+                }
+            }
             self.canvas.clear();
             if editor.key_transform.is_some()
                 && let Some(rect) = editor.view_rect
@@ -6845,6 +7032,130 @@ mod tests {
         event(&mut ed, WindowEventKind::Wheel { x: 0.0, y: 1.0 });
         ed.update(&mut world);
         assert!(ed.orbit.distance < distance, "the wheel zooms");
+    }
+
+    /// A click at `at` (with Shift held, `shift`), answered by a pick that saw `slot`:
+    /// `slots` gives the entities' slots, as the extraction does.
+    fn view_click(
+        ed: &mut Editor,
+        world: &mut World,
+        at: [f32; 2],
+        shift: bool,
+        slot: Option<u32>,
+        slots: impl Fn(Entity) -> Option<u32>,
+    ) {
+        if shift {
+            key(ed, SHIFT.0, SHIFT.1, true);
+        }
+        mouse(ed, at, Some(true));
+        ed.update(world);
+        mouse(ed, at, Some(false));
+        ed.update(world);
+        if shift {
+            key(ed, SHIFT.0, SHIFT.1, false);
+        }
+        let (request, toggle, from) = ed.pending_click.expect("a click");
+        assert_eq!(toggle, shift);
+        assert_eq!(ed.pick_request, Some(request), "its pixel is picked");
+        ed.picked = Some((request, from, slot));
+        ed.resolve_pick(world, slots);
+        assert!(ed.pending_click.is_none(), "answered");
+    }
+
+    #[test]
+    fn a_click_in_the_viewport_selects_what_its_pick_saw() {
+        let mut world = World::new();
+        let cube = cube_at(&mut world, Transform::IDENTITY);
+        let lamp = cube_at(&mut world, Transform::from_xyz(3.0, 0.0, 0.0));
+        let slots = move |e: Entity| (e == cube).then_some(7).or((e == lamp).then_some(9));
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder("pick-click"),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let [x, y, w, h] = ed.view_rect.unwrap();
+        // A quarter of the way in: away from the gizmo, which sits in the middle.
+        let at = [(x + w / 4) as f32, (y + h / 4) as f32];
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        let request = ed.pick_request.expect("the pointer's pixel is picked");
+        assert_eq!(
+            (request.x, request.y),
+            (w / 4, h / 4),
+            "in the view's pixels"
+        );
+        // The overlay drew it; its pick saw the cube.
+        ed.picked = Some((request, 1, Some(7)));
+        ed.resolve_pick(&world, slots);
+        assert_eq!(ed.hovered, Some((request, Some(cube))), "hovered");
+        ed.update(&mut world);
+        assert!(
+            ed.pick_request.is_none(),
+            "nothing changed: not picked again"
+        );
+        // A click: answered only by a pick from the frame after it.
+        mouse(&mut ed, at, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, at, Some(false));
+        ed.update(&mut world);
+        let (request, _, from) = ed.pending_click.unwrap();
+        ed.picked = Some((request, from - 1, Some(9)));
+        ed.resolve_pick(&world, slots);
+        assert!(
+            ed.pending_click.is_some(),
+            "an older pick does not answer it"
+        );
+        ed.picked = Some((request, from, Some(7)));
+        ed.resolve_pick(&world, slots);
+        assert_eq!(ed.selection, [cube]);
+        // Shift: the lamp added, then the cube taken out.
+        view_click(&mut ed, &mut world, at, true, Some(9), slots);
+        assert_eq!(ed.selection, [cube, lamp]);
+        view_click(&mut ed, &mut world, at, true, Some(7), slots);
+        assert_eq!(ed.selection, [lamp]);
+        // On nothing: with Shift the selection stays, without it goes.
+        view_click(&mut ed, &mut world, at, true, None, slots);
+        assert_eq!(ed.selection, [lamp]);
+        view_click(&mut ed, &mut world, at, false, None, slots);
+        assert!(ed.selection.is_empty());
+        // A plain click selects only what it saw.
+        view_click(&mut ed, &mut world, at, false, Some(9), slots);
+        assert_eq!(ed.selection, [lamp]);
+    }
+
+    #[test]
+    fn a_press_on_a_handle_or_a_drag_is_no_click() {
+        let mut world = World::new();
+        let cube = cube_at(&mut world, Transform::IDENTITY);
+        let mut ed = gizmo_editor("pick-handle", &mut world, cube);
+        // On the gizmo's x arrow: its drag, no click.
+        let (grab, _) = x_arrow(&ed);
+        mouse(&mut ed, grab.to_array(), None);
+        ed.update(&mut world);
+        mouse(&mut ed, grab.to_array(), Some(true));
+        ed.update(&mut world);
+        assert!(ed.gizmo_drag.is_some());
+        mouse(&mut ed, grab.to_array(), Some(false));
+        ed.update(&mut world);
+        assert!(ed.pending_click.is_none(), "the handle had the press");
+        // Away from it, moved more than 4 pixels: a drag, no click.
+        let [x, y, w, h] = ed.view_rect.unwrap();
+        let at = [(x + w / 4) as f32, (y + h / 4) as f32];
+        mouse(&mut ed, at, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, [at[0] + 12.0, at[1]], Some(false));
+        ed.update(&mut world);
+        assert!(ed.pending_click.is_none(), "a drag");
+        assert_eq!(ed.selection, [cube]);
+        // The pointer outside the viewport: nothing picked or hovered.
+        mouse(&mut ed, [2.0, 2.0], None);
+        ed.update(&mut world);
+        assert!(ed.pick_request.is_none() && ed.hovered.is_none());
     }
 
     /// The editor's frame on the CPU (`Editor::update`, 1600 × 900) with 200 entities:
