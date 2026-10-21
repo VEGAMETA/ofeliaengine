@@ -224,7 +224,7 @@ Last updated: 2026-10-20.
     drawn from it by a model per tint under the group, as one undo step; its brushes, not
     drawn, keep colliding and making the navigation; Blockout: Unbake brings them back.
     E2b is done but for the cook's path, which waits for the one-button build (E14).
-  - **E3-1, Play and Stop** (#PR, ADR 0107's addendum: Play runs on the scene's world and
+  - **E3-1, Play and Stop** (#300, ADR 0107's addendum: Play runs on the scene's world and
     Stop puts it back, measured 7.3 and 8.4 ms for 10,000 entities): F5 makes the game
     with its `start` on the scene, F8 puts everything back (spawned entities, added
     components and resources gone, changes and despawns undone, the play's undo steps
