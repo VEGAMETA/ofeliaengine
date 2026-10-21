@@ -75,7 +75,7 @@ use engine_app::{
     AppError, Game, Model, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup,
     Window, builtin,
 };
-use engine_core::math::{Affine3A, Quat, Vec2, Vec3};
+use engine_core::math::{Affine3A, Quat, Vec2, Vec3, Vec4};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
 use engine_input::Key;
 use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind};
@@ -769,6 +769,38 @@ enum ListUse {
 /// thin objects stay easy to hit.
 const PICK_RADIUS: u32 = 3;
 
+/// A box dragged in the viewport (ADR 0109): from where the left button went down to the
+/// pointer, in the window's pixels.
+#[derive(Debug, Clone)]
+struct BoxDrag {
+    from: Vec2,
+    to: Vec2,
+    /// The last box asked for, and the frame it was asked in while its answer is to come:
+    /// one at a time, so a slow GPU draws a box every few frames, not every frame.
+    asked: Option<ListRequest>,
+    waiting: Option<u64>,
+    /// What its newest answer takes, front to back (outlined while dragging).
+    taken: Vec<Entity>,
+    /// Released: how it changes the selection, once the answer for its last box, drawn
+    /// from the frame given on, arrives.
+    released: Option<(BoxMode, u64)>,
+}
+
+/// What a box does to the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoxMode {
+    /// Alone: it becomes the selection.
+    Replace,
+    /// With Shift: added.
+    Add,
+    /// With Ctrl: taken out.
+    Remove,
+}
+
+/// Frames a box's answer may take before it is asked again (a pick the GPU could not
+/// take).
+const BOX_PATIENCE: u64 = 8;
+
 /// What a new build does (team decision, 2026-10-20): by itself while the editor's window
 /// is in the background (the developer is in the code editor), offered while it is in
 /// front; or always by itself, or always asked.
@@ -1114,6 +1146,8 @@ struct Editor {
     /// Alt+click's list, nearest first, offered in the next frame (the palette needs the
     /// world).
     under_pointer: Option<Vec<Entity>>,
+    /// A box being dragged.
+    box_drag: Option<BoxDrag>,
     /// What the overlay outlines (ADR 0109): the GPU scene's slots of the selection, its
     /// children and the hovered entity, as [`Editor::outline`] last found them.
     outline_items: Vec<OutlineItem>,
@@ -1383,6 +1417,7 @@ impl Editor {
             click_at: None,
             last_view_click: None,
             under_pointer: None,
+            box_drag: None,
             outline_items: Vec::new(),
             tools: [
                 format!("{} Select", icons::TOOL_SELECT),
@@ -2704,12 +2739,7 @@ impl Editor {
             && from.distance(at) <= near
         {
             let toggle = self.input.shift() || self.input.ctrl();
-            let list = ListRequest {
-                x: request.x,
-                y: request.y,
-                radius: PICK_RADIUS,
-                transparent: request.transparent,
-            };
+            let list = ListRequest::around(request.x, request.y, PICK_RADIUS, request.transparent);
             let again = self
                 .last_view_click
                 .is_some_and(|(spot, e)| spot.distance(at) <= near && self.active() == Some(e));
@@ -2725,6 +2755,7 @@ impl Editor {
             self.click_at = Some(at);
         }
         self.list_request = self.pending_list.map(|(r, _, _)| r);
+        self.box_frame(origin, near, cursor);
         let Some(request) = request else {
             self.hovered = None;
             self.last_pick = None;
@@ -2745,6 +2776,133 @@ impl Editor {
         } else {
             None
         };
+    }
+
+    /// A box in the viewport (ADR 0109): a press there, not on a handle, dragged past
+    /// `near` draws one (Escape takes it back). While it is dragged, what it would take is
+    /// asked for whenever it changed, one box at a time; at the release its last box is
+    /// asked again and changes the selection once answered: alone it replaces it, with
+    /// Shift it adds, with Ctrl it takes out. It takes what shows in it, with Alt hidden
+    /// objects too. `origin` is the view's top left corner (physical pixels).
+    fn box_frame(&mut self, origin: Vec2, near: f32, cursor: Option<Vec2>) {
+        if self.box_drag.is_none()
+            && self.input.held(Button::Left)
+            && let (Some(from), Some(at)) = (self.press_at, cursor)
+            && from.distance(at) > near
+        {
+            // No click at the release.
+            self.press_at = None;
+            self.box_drag = Some(BoxDrag {
+                from,
+                to: at,
+                asked: None,
+                waiting: None,
+                taken: Vec::new(),
+                released: None,
+            });
+        }
+        let escape = self.ui.input().keys.contains(&UiKey::Escape);
+        let released = self.input.released(Button::Left);
+        let mode = if self.input.ctrl() {
+            BoxMode::Remove
+        } else if self.input.shift() {
+            BoxMode::Add
+        } else {
+            BoxMode::Replace
+        };
+        let (scale, frame) = (self.view_scale, self.frame_seen);
+        let (visible, transparent) = (!self.input.alt(), self.pick_transparent);
+        let Some(b) = &mut self.box_drag else {
+            return;
+        };
+        if b.released.is_some() {
+            return;
+        }
+        if escape {
+            self.box_drag = None;
+            return;
+        }
+        if let Some(at) = cursor {
+            b.to = at;
+        }
+        // The box at the view's render size, the pointer's pixel in it.
+        let lo = (b.from.min(b.to) - origin).max(Vec2::ZERO);
+        let hi = (b.from.max(b.to) - origin).max(Vec2::ZERO);
+        let request = ListRequest {
+            rect: [
+                (lo.x * scale[0]) as u32,
+                (lo.y * scale[1]) as u32,
+                (hi.x * scale[0]) as u32 + 1,
+                (hi.y * scale[1]) as u32 + 1,
+            ],
+            visible,
+            transparent,
+        };
+        if released {
+            // Its last box, asked again: answered by a list drawn from the next frame on.
+            b.asked = Some(request);
+            b.waiting = Some(frame);
+            b.released = Some((mode, frame + 1));
+            self.list_request = Some(request);
+            return;
+        }
+        let late = b.waiting.is_some_and(|asked| frame > asked + BOX_PATIENCE);
+        if (b.waiting.is_none() && b.asked != Some(request)) || late {
+            b.asked = Some(request);
+            b.waiting = Some(frame);
+            self.list_request = Some(request);
+        }
+    }
+
+    /// The selection after a box: `taken` (front to back) becomes it, is added to it, or is
+    /// taken out of it; the nearest one taken ends active, and the tree opens to the active
+    /// one.
+    fn apply_box(&mut self, world: &World, taken: &[Entity], mode: BoxMode) {
+        let before = self.active();
+        match mode {
+            BoxMode::Replace => self.selection = taken.iter().rev().copied().collect(),
+            BoxMode::Add => {
+                for &e in taken.iter().rev() {
+                    if !self.selection.contains(&e) {
+                        self.selection.push(e);
+                    }
+                }
+            }
+            BoxMode::Remove => self.selection.retain(|e| !taken.contains(e)),
+        }
+        self.anchor = self.active();
+        if let Some(active) = self.active() {
+            let mut at = world.parent(active);
+            while let Some(p) = at {
+                self.collapsed.remove(&p);
+                at = world.parent(p);
+            }
+        }
+        self.selection_changed(before);
+    }
+
+    /// The scene's entities whose slots `slots` holds (`slot_of` gives an entity's), in its
+    /// order.
+    fn entities_in(
+        &mut self,
+        world: &World,
+        slots: &[u32],
+        slot_of: impl Fn(Entity) -> Option<u32>,
+    ) -> Vec<Entity> {
+        let mut order: Vec<(u32, usize)> = slots.iter().enumerate().map(|(k, &s)| (s, k)).collect();
+        order.sort_unstable();
+        let mut found: Vec<(usize, Entity)> = Vec::new();
+        if let Some(q) = self.scene_ids.as_mut() {
+            for (e, _) in q.iter_readonly(world) {
+                if let Some(slot) = slot_of(e)
+                    && let Ok(i) = order.binary_search_by_key(&slot, |&(s, _)| s)
+                {
+                    found.push((order[i].1, e));
+                }
+            }
+        }
+        found.sort_unstable_by_key(|&(k, _)| k);
+        found.into_iter().map(|(_, e)| e).collect()
     }
 
     /// Names the entity of the newest pick's instance (`slot_of` gives an entity's), as
@@ -2780,23 +2938,32 @@ impl Editor {
         let Some((request, frame, slots)) = self.listed.take() else {
             return;
         };
-        let Some((wanted, used, from)) = self.pending_list else {
+        let answers = self
+            .pending_list
+            .is_some_and(|(wanted, _, from)| wanted == request && frame >= from);
+        if self.box_drag.is_none() && !answers {
+            return;
+        }
+        let under = self.entities_in(world, &slots, slot_of);
+        // A box's: what it takes, and the selection once its last box is answered.
+        if let Some(b) = &mut self.box_drag {
+            if b.asked == Some(request) {
+                b.waiting = None;
+            }
+            b.taken = under;
+            if let Some((mode, from)) = b.released
+                && b.asked == Some(request)
+                && frame >= from
+            {
+                let taken = core::mem::take(&mut b.taken);
+                self.box_drag = None;
+                self.apply_box(world, &taken, mode);
+            }
+            return;
+        }
+        let Some((_, used, _)) = self.pending_list.take() else {
             return;
         };
-        if wanted != request || frame < from {
-            return;
-        }
-        self.pending_list = None;
-        let mut found: Vec<(usize, Entity)> = Vec::new();
-        if let Some(q) = self.scene_ids.as_mut() {
-            for (e, _) in q.iter_readonly(world) {
-                if let Some(k) = slot_of(e).and_then(|slot| slots.iter().position(|&s| s == slot)) {
-                    found.push((k, e));
-                }
-            }
-        }
-        found.sort_unstable_by_key(|&(k, _)| k);
-        let under: Vec<Entity> = found.into_iter().map(|(_, e)| e).collect();
         let at = self.click_at.take();
         match used {
             ListUse::Cycle => {
@@ -2870,8 +3037,17 @@ impl Editor {
     fn outline(&mut self, world: &World, slot_of: impl Fn(Entity) -> Option<u32>) {
         self.outline_items.clear();
         let active = self.active();
+        // While a box is dragged, what it takes in the hovered one's line; with Ctrl the
+        // selected ones it would take out lose their own.
+        let (boxed, removing): (&[Entity], bool) = match &self.box_drag {
+            Some(b) => (&b.taken, self.input.ctrl()),
+            None => (&[], false),
+        };
         let mut stack = Vec::new();
         for &e in &self.selection {
+            if removing && boxed.contains(&e) {
+                continue;
+            }
             let class = if Some(e) == active {
                 OutlineClass::Active
             } else {
@@ -2885,7 +3061,18 @@ impl Editor {
                 stack.extend(world.children(x));
             }
         }
-        if let Some((_, Some(hovered))) = self.hovered
+        if self.box_drag.is_some() {
+            for &e in boxed {
+                if let Some(slot) = slot_of(e)
+                    && self.outline_items.iter().all(|i| i.slot != slot)
+                {
+                    self.outline_items.push(OutlineItem {
+                        slot,
+                        class: OutlineClass::Hovered,
+                    });
+                }
+            }
+        } else if let Some((_, Some(hovered))) = self.hovered
             && let Some(slot) = slot_of(hovered)
             && self.outline_items.iter().all(|i| i.slot != slot)
         {
@@ -4753,6 +4940,50 @@ fn draw_gizmo(gizmo: &Gizmo, lit: Option<Handle>, rect: [u32; 4], scale: f32, ca
 
 /// Draws a keyboard transform's guides below the UI, clipped to the viewport: an axis'
 /// line in its color, the pivot's line to the pointer dashed.
+/// The box being dragged in the viewport (ADR 0109): a light frame over a faint fill,
+/// dashed while it takes hidden objects too (Alt).
+fn draw_box(
+    (from, to): (Vec2, Vec2),
+    hidden: bool,
+    rect: [u32; 4],
+    scale: f32,
+    canvas: &mut Canvas,
+) {
+    canvas.set_clip(Some(clip_of(rect)));
+    let order = Order::layer(-1);
+    let (lo, hi) = (from.min(to), from.max(to));
+    let (center, size) = ((lo + hi) * 0.5, hi - lo);
+    let light = |alpha| Vec4::new(0.85, 0.85, 0.85, alpha);
+    canvas.draw(&Quad::rect(center, size).color(light(0.08)).order(order));
+    if hidden {
+        let corners = [lo, Vec2::new(hi.x, lo.y), hi, Vec2::new(lo.x, hi.y)];
+        let (dash, gap) = (6.0 * scale, 4.0 * scale);
+        for k in 0..4 {
+            let (a, b) = (corners[k], corners[(k + 1) % 4]);
+            let length = a.distance(b);
+            let along = (b - a) / length.max(1e-3);
+            let mut s = 0.0;
+            while s < length {
+                let e = (s + dash).min(length);
+                canvas.draw(
+                    &Quad::line(a + along * s, a + along * e, scale)
+                        .color(light(0.8))
+                        .order(order),
+                );
+                s += dash + gap;
+            }
+        }
+    } else {
+        canvas.draw(
+            &Quad::rect(center, size)
+                .outline(scale)
+                .color(light(0.8))
+                .order(order),
+        );
+    }
+    canvas.set_clip(None);
+}
+
 fn draw_guides(guides: &[(Vec2, Vec2, usize)], rect: [u32; 4], scale: f32, canvas: &mut Canvas) {
     canvas.set_clip(Some(clip_of(rect)));
     let order = Order::layer(-1);
@@ -4944,6 +5175,18 @@ impl Overlay for EditorOverlay {
                 draw_gizmo(
                     &editor.gizmo,
                     lit,
+                    rect,
+                    editor.scale.max(0.5),
+                    &mut self.canvas,
+                );
+            }
+            if let Some(b) = &editor.box_drag
+                && b.released.is_none()
+                && let Some(rect) = editor.view_rect
+            {
+                draw_box(
+                    (b.from, b.to),
+                    editor.input.alt(),
                     rect,
                     editor.scale.max(0.5),
                     &mut self.canvas,
@@ -7422,7 +7665,15 @@ mod tests {
     ) -> ListUse {
         let (request, used, from) = ed.pending_list.expect("a list asked for");
         assert_eq!(ed.list_request, Some(request), "its pixel is listed");
-        assert_eq!(request.radius, PICK_RADIUS);
+        assert_eq!(
+            request,
+            ListRequest::around(
+                request.rect[0] + PICK_RADIUS,
+                request.rect[1] + PICK_RADIUS,
+                PICK_RADIUS,
+                request.transparent
+            )
+        );
         ed.listed = Some((request, from, slots.to_vec()));
         ed.resolve_list(world, slot_of);
         assert!(ed.pending_list.is_none(), "answered");
@@ -7532,6 +7783,115 @@ mod tests {
         ed.update(&mut world);
         assert!(ed.command_palette.is_none());
         assert_eq!(ed.selection, [front]);
+    }
+
+    /// A box dragged from `from` to `to` with `keys` held (virtual key and scan code),
+    /// released, and its last box answered with `slots`, front to back (`slot_of` gives the
+    /// entities' slots): the box asked for.
+    fn boxed(
+        ed: &mut Editor,
+        world: &mut World,
+        (from, to): ([f32; 2], [f32; 2]),
+        keys: &[(u16, u16)],
+        slots: &[u32],
+        slot_of: impl Fn(Entity) -> Option<u32>,
+    ) -> ListRequest {
+        for &(vk, sc) in keys {
+            key(ed, vk, sc, true);
+        }
+        mouse(ed, from, Some(true));
+        ed.update(world);
+        mouse(ed, to, None);
+        ed.update(world);
+        mouse(ed, to, Some(false));
+        ed.update(world);
+        let request = ed.list_request.expect("the last box asked for");
+        let (_, after) = ed.box_drag.as_ref().unwrap().released.expect("released");
+        ed.listed = Some((request, after, slots.to_vec()));
+        ed.resolve_list(world, slot_of);
+        assert!(ed.box_drag.is_none(), "applied");
+        for &(vk, sc) in keys {
+            key(ed, vk, sc, false);
+        }
+        request
+    }
+
+    #[test]
+    fn a_box_takes_what_shows_in_it_by_its_modifiers() {
+        let (mut world, mut ed, [front, middle, back], at) = under_one_spot("pick-box");
+        let slots = move |e: Entity| {
+            [front, middle, back]
+                .iter()
+                .position(|&x| x == e)
+                .map(|i| i as u32 + 5)
+        };
+        let to = [at[0] + 60.0, at[1] + 40.0];
+        // A press, then the pointer past 4 pixels: a box.
+        mouse(&mut ed, at, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, to, None);
+        ed.update(&mut world);
+        let asked = ed.list_request.expect("what it takes is asked for");
+        assert!(asked.visible, "what shows in it");
+        assert!(asked.rect[0] < asked.rect[2] && asked.rect[1] < asked.rect[3]);
+        // One box at a time: moved again before the answer, nothing asked.
+        let further = [to[0] + 5.0, to[1]];
+        mouse(&mut ed, further, None);
+        ed.update(&mut world);
+        assert!(
+            ed.list_request.is_none(),
+            "the first one's answer is to come"
+        );
+        // Its answer is outlined as the box would take it; then the box as it is is asked.
+        ed.listed = Some((asked, 0, vec![6, 5]));
+        ed.resolve_list(&world, slots);
+        assert_eq!(ed.box_drag.as_ref().unwrap().taken, [middle, front]);
+        ed.outline(&world, slots);
+        let item = |slot| OutlineItem {
+            slot,
+            class: OutlineClass::Hovered,
+        };
+        assert_eq!(ed.outline_items, [item(6), item(5)]);
+        ed.update(&mut world);
+        assert!(
+            ed.list_request.is_some_and(|r| r != asked),
+            "the box as it is now"
+        );
+        // Released: its last box is asked again, and its answer replaces the selection,
+        // the nearest active.
+        mouse(&mut ed, further, Some(false));
+        ed.update(&mut world);
+        let last = ed.list_request.expect("the last box");
+        let (mode, after) = ed.box_drag.as_ref().unwrap().released.unwrap();
+        assert_eq!(mode, BoxMode::Replace);
+        ed.listed = Some((last, after, vec![6, 5]));
+        ed.resolve_list(&world, slots);
+        assert!(ed.box_drag.is_none());
+        assert!(ed.pending_click.is_none(), "no click");
+        assert_eq!(ed.selection, [front, middle]);
+        // Shift adds, Ctrl takes out, Alt takes hidden objects too.
+        boxed(&mut ed, &mut world, (at, to), &[SHIFT], &[7], slots);
+        assert_eq!(ed.selection, [front, middle, back]);
+        boxed(&mut ed, &mut world, (at, to), &[CTRL], &[5, 7], slots);
+        assert_eq!(ed.selection, [middle]);
+        const ALT: (u16, u16) = (0x12, 0x38);
+        let hidden = boxed(&mut ed, &mut world, (at, to), &[ALT], &[5, 6, 7], slots);
+        assert!(!hidden.visible);
+        assert_eq!(ed.selection, [back, middle, front]);
+        // Escape takes a box back: nothing changes, and no click.
+        mouse(&mut ed, at, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, to, None);
+        ed.update(&mut world);
+        assert!(ed.box_drag.is_some());
+        key(&mut ed, 0x1B, 0x01, true);
+        ed.update(&mut world);
+        key(&mut ed, 0x1B, 0x01, false);
+        assert!(ed.box_drag.is_none(), "taken back");
+        mouse(&mut ed, to, Some(false));
+        ed.update(&mut world);
+        assert!(ed.box_drag.is_none() && ed.pending_click.is_none());
+        assert_eq!(ed.selection, [back, middle, front]);
     }
 
     #[test]
