@@ -283,3 +283,26 @@ times slower on the CPU and passed every gate for a day.
 
   Run again, every stage was within 8 % and 0 slower. With ADR 0071's bound removed:
   `compose` 28 → 313 µs, `cpu frame` +124 %, both reported.
+
+## Addendum (2026-10-21, team decision): when `-Perf` runs
+
+The time gate, the register check and the CPU check measure what the perf scenes run.
+E2-3b's outline (ADR 0109) added two shaders, entry points in `forward.slang` and a module
+in `engine_render`: no existing `.spv` changed (the diff held new ones only), and no perf
+scene draws an outline or makes its pipelines. Its perf step took 16 minutes of the
+gate's 22 and could not move a pass, a register or a CPU stage.
+
+- **`-Perf` runs when a change can move the perf scenes:**
+  - an existing `.spv` changed. A new one cannot: the scenes' pipelines are made from the
+    same bytes, so the driver compiles the same code;
+  - or code the scenes run changed, added lines included: the render graph, the passes
+    they draw, the frame renderer, the player's frame.
+- **Otherwise `-Gpu` alone,** and the PR says "existing SPIR-V unchanged" with the diff's
+  stat as the evidence. When unsure, `-Perf` runs.
+- **Scripts, examples and docs** get light checks: `-Affected`, or the touched crates' fmt,
+  clippy and tests (team decision, 2026-10-15).
+
+Consequences: a PR that only adds rendering code merges about 16 minutes sooner. A
+change misjudged as out of the scenes' reach goes unmeasured until the next PR that runs
+`-Perf`, whose gate then reports it against the baselines; the diff's stat in the PR lets a
+reviewer check the call.
