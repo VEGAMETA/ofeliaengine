@@ -948,6 +948,30 @@ W, A, S, D fly the camera as in Godot, the wheel sets the speed).
   entities about their middle, their own origins and the active one, and the pivot kept.
 - **Not done:** typing a step not in the menus (the palette's list could take a number).
 
+## As built (E2-7, 2026-10-21)
+
+- **Icons** (the UX note's §7): the scene's lights and cameras (not the editor's own
+  camera) show on the editor's canvas under the panels, clipped to the viewport: their
+  kind's glyph (laid out by the UI's text cache, `UiText::draw_centered`) on a dark
+  translucent disk at their place on the screen; the selected ones orange (the active one
+  lighter), the one under the pointer white.
+- **Picking icons:** they are above the scene, so the pointer within 12 px of one takes
+  it before the GPU's picks: hover, a click (Shift and Ctrl toggle), and boxes (the icons
+  inside a box join what it takes). A plain click again on the icon it selected goes
+  through to the geometry under it (the cycling list), for a sun added where a cube is.
+- **Reach:** the selected entities' as thin lines: a point light's range as three great
+  circles, a spot light's cone (its base circle and four edges), a camera's pyramid (to
+  2 m), the sun's direction (1.5 m).
+- **"View: Overlays"** hides both; the session keeps it.
+- **Tested:** icons for lights only, the editor's camera left out, at the orbit's target in
+  the view's middle; hover, click, a click again going through, a box taking an icon;
+  overlays off; each kind's reach lines; the session; on the player, both GPUs: a point
+  light's, a camera's and the sun's icons drawn (a disk darker than around it, a light
+  glyph), the selected spot light's cone (`ENGINE_EDITOR_OVERLAYS_PNG` writes the frame).
+- **Not done:** sound sources' and reverb zones' gizmos (with E11), colliders and the
+  navigation mesh (with physics and navigation in the editor); a viewport menu for
+  overlays one by one.
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and
