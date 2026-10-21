@@ -306,6 +306,12 @@ pub struct ShellModel<'a> {
     pub status: &'a str,
     /// Dragged values snap by default (the tool bar's grid button).
     pub snap: bool,
+    /// The steps beside it: position, angle and scale, as they read.
+    pub steps: [&'a str; 3],
+    /// A step's menu of values, while open: which step, and the values.
+    pub step_menu: Option<(usize, &'a [MenuItem<'a>])>,
+    /// What rotating and scaling turn about (the tool bar's pivot button).
+    pub pivot: &'a str,
     /// The scene dock's add menu, while open: what it offers.
     pub add_menu: Option<&'a [MenuItem<'a>]>,
     /// The scene tree's row to scroll into view.
@@ -366,6 +372,12 @@ pub struct ShellResponse {
     pub add_item: Option<usize>,
     /// The tool bar's snapping button.
     pub snap: bool,
+    /// A step beside it (0 position, 1 angle, 2 scale): open or close its menu.
+    pub step: Option<usize>,
+    /// A value of the open step's menu.
+    pub step_item: Option<usize>,
+    /// The tool bar's pivot button: the next pivot.
+    pub pivot: bool,
     /// The popup open this frame (the add menu, a choice's list) and its opener, for
     /// [`dismissed`].
     pub popup: Option<(u64, u64)>,
@@ -419,7 +431,7 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
                 ..Style::fill()
             },
             |ui| {
-                center(ui, model, p, &mut out);
+                center(ui, model, p, &mut out, &mut popups);
                 scene_dock(ui, model, p, &mut out, &mut popups);
                 inspector_dock(ui, model, p, &mut out, &mut popups);
             },
@@ -452,7 +464,13 @@ struct Popups {
 }
 
 /// Scene tabs with the play controls, tool bar, viewport and file browser.
-fn center(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellResponse) {
+fn center(
+    ui: &mut Ui,
+    model: &ShellModel<'_>,
+    p: &Palette,
+    out: &mut ShellResponse,
+    popups: &mut Popups,
+) {
     let column = Style {
         direction: Direction::Column,
         gap: 1.0,
@@ -505,6 +523,59 @@ fn center(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellRespo
             );
             if ui.sense(id, false).clicked {
                 out.snap = true;
+            }
+            // The steps it snaps to, each a menu of values (Unreal's tool bar), dim while
+            // snapping is off.
+            let glyphs = [icons::TOOL_MOVE, icons::TOOL_ROTATE, icons::TOOL_SCALE];
+            for (i, (&glyph, &label)) in glyphs.iter().zip(&model.steps).enumerate() {
+                ui.push_id(i as u64);
+                let open = model.step_menu.filter(|&(k, _)| k == i);
+                let opener = ui.container(
+                    "step",
+                    Style {
+                        padding: [6.0, 4.0, 6.0, 4.0],
+                        gap: 3.0,
+                        radius: 3.0,
+                        background: open.is_some().then_some(p.selection),
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        text(ui, "icon", glyph, ICON, p.text_dim);
+                        let color = if model.snap { p.text } else { p.text_dim };
+                        text(ui, "label", label, TEXT, color);
+                        if let Some((_, items)) = open {
+                            let items = items.iter().map(|m| (m.icon, m.label));
+                            let popup = menu(ui, items, p, [0.0, 26.0], &mut out.step_item);
+                            popups.open = Some((popup, 0));
+                        }
+                    },
+                );
+                if open.is_some()
+                    && let Some((popup, _)) = popups.open
+                {
+                    popups.open = Some((popup, opener));
+                }
+                if ui.sense(opener, false).clicked {
+                    out.step = Some(i);
+                }
+                ui.pop_id();
+            }
+            ui.spacer("fill");
+            let id = ui.container(
+                "pivot",
+                Style {
+                    padding: [8.0, 4.0, 8.0, 4.0],
+                    radius: 3.0,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    text(ui, "label", model.pivot, TEXT, p.text_dim);
+                },
+            );
+            if ui.sense(id, false).clicked {
+                out.pivot = true;
             }
         });
         let edge = model.playing.then_some((p.playing, 2.0));

@@ -240,6 +240,8 @@ pub(crate) struct EditorState {
     pub(crate) fly: Option<f64>,
     /// Whether clicks in the viewport pick transparent surfaces (ADR 0109).
     pub(crate) pick_transparent: Option<bool>,
+    /// What rotating and scaling turn about (`median`, `origins`, `active`).
+    pub(crate) pivot: Option<String>,
     /// Where the editor's window was.
     pub(crate) window: Option<WindowPlacement>,
 }
@@ -290,6 +292,11 @@ impl SessionFile {
         }
         if let Some(on) = self.editor.pick_transparent {
             let _ = writeln!(out, "pick_transparent = {on}");
+        }
+        if let Some(pivot) = &self.editor.pivot {
+            out.push_str("pivot = ");
+            quote_into(&mut out, pivot);
+            out.push('\n');
         }
         if let Some(w) = self.editor.window {
             let _ = writeln!(
@@ -424,6 +431,7 @@ impl SessionFile {
                     }
                     "restart" => file.editor.restart = Some(unquote(value).map_err(at)?),
                     "keys" => file.editor.keys = Some(unquote(value).map_err(at)?),
+                    "pivot" => file.editor.pivot = Some(unquote(value).map_err(at)?),
                     "fly" => file.editor.fly = Some(parse_number(value).map_err(at)?),
                     "pick_transparent" => {
                         file.editor.pick_transparent = Some(match value {
@@ -868,6 +876,7 @@ mod tests {
                 keys: Some(String::from("godot")),
                 fly: Some(7.5),
                 pick_transparent: Some(false),
+                pivot: Some(String::from("origins")),
                 window: Some(WindowPlacement {
                     left: -7,
                     top: 0,
