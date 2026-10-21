@@ -5,7 +5,9 @@
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
-use engine_app::{Assets, Game, MaterialFile, Model, Player, PlayerSettings, Window, builtin};
+use engine_app::{
+    Assets, Brush, BrushOp, Game, MaterialFile, Model, Player, PlayerSettings, Window, builtin,
+};
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Transform, World};
 use engine_editor::{EditorGame, EditorOverlay};
@@ -785,6 +787,162 @@ fn lights_and_cameras_show_as_icons() {
 }
 
 /// The editor's loop: a frame, the view's rectangle, then the pick's entity.
+/// Drawing (ADR 0110 E2b-3): B, the pointer over a floor 0.5 m below the ground, three
+/// clicks with the height typed between. The first corner lands on the floor that the
+/// surface pick finds, not on the ground, and the brush is meshed as it is drawn.
+/// `ENGINE_EDITOR_DRAW_PNG=<file>` writes a frame of it being drawn.
+#[test]
+fn b_draws_a_brush_on_the_floor_under_the_pointer() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-draw-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Floor"),
+        Transform::from_xyz(0.0, -0.55, 0.0).with_scale(Vec3::new(20.0, 0.1, 20.0)),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Sun {
+            color: Vec3::splat(1.2),
+            ambient: Vec3::splat(0.04),
+        },
+    ));
+    let paths = Assets::new(dir.clone()).paths().clone();
+    let mut text = String::new();
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+    };
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("editor draw test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..20 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let point = |game: &mut EditorGame<NoGame>, p: Vec3| {
+        let [x, y] = game.on_screen(p).unwrap();
+        send(
+            game,
+            WindowEventKind::CursorMoved {
+                x: x.round() as i32,
+                y: y.round() as i32,
+            },
+        );
+    };
+    let click =
+        |player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay| {
+            for pressed in [true, false] {
+                send(
+                    game,
+                    WindowEventKind::MouseButton {
+                        button: MouseButton::Left,
+                        pressed,
+                    },
+                );
+                editor_frame(player, game, overlay);
+            }
+        };
+    // B, and the pointer over the floor until its surface is found.
+    for pressed in [true, false] {
+        send(
+            &mut game,
+            WindowEventKind::Key {
+                virtual_key: 0x42,
+                scancode: 0x30,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        );
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    point(&mut game, Vec3::new(0.5, -0.5, 0.5));
+    for _ in 0..8 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    click(&mut player, &mut game, &mut overlay);
+    point(&mut game, Vec3::new(2.5, -0.5, 1.5));
+    editor_frame(&mut player, &mut game, &mut overlay);
+    click(&mut player, &mut game, &mut overlay);
+    send(&mut game, WindowEventKind::Char('1'));
+    for _ in 0..4 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(player.blockout().meshes(), 1, "meshed as it is drawn");
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_DRAW_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let extent = player.extent();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    click(&mut player, &mut game, &mut overlay);
+    let brush = engine_scene::find_named(player.world_mut(), "Box Brush").unwrap();
+    assert_eq!(game.selected(), Some(brush), "made and selected");
+    let world = player.world_mut();
+    let (op, size) = {
+        let b = world.get::<Brush>(brush).unwrap();
+        (b.op, b.size)
+    };
+    let at = world.get::<Transform>(brush).unwrap().translation;
+    println!("drawn: {at}, {size}");
+    assert_eq!(op, BrushOp::Add);
+    assert!(
+        (at.y - -0.5).abs() < 1e-3,
+        "on the floor, not the ground: {at}"
+    );
+    assert!(
+        (size - Vec3::new(2.0, 1.0, 1.0)).abs().max_element() < 0.05,
+        "{size}"
+    );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn editor_frame(player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay) {
     player.frame_overlaid(game, Some(overlay)).unwrap();
     player.set_view_rect(game.view_rect());

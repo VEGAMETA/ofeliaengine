@@ -308,6 +308,20 @@ impl InputCollector {
         self.letters.clear();
     }
 
+    /// Takes this frame's keys and text (a tool's), leaving the buttons and the wheel.
+    pub fn consume_keys(&mut self) {
+        self.ui.keys.clear();
+        self.ui.text.clear();
+        self.ui.paste.clear();
+        self.chords.clear();
+        self.letters.clear();
+    }
+
+    /// Takes `button`'s press this frame (a tool's click).
+    pub fn consume_press(&mut self, button: Button) {
+        self.pressed[button as usize] = false;
+    }
+
     /// Whether Control is held.
     pub fn ctrl(&self) -> bool {
         self.ctrl

@@ -10,6 +10,7 @@
 pub mod app;
 mod build;
 pub mod camera;
+mod draw;
 pub mod expr;
 mod gizmo;
 pub mod icons;

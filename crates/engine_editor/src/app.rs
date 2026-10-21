@@ -58,6 +58,7 @@ use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
 use crate::camera::OrbitCamera;
+use crate::draw::{self, Draw, Made, Stage};
 use crate::gizmo::{self, COLORS, Change, Gizmo, GizmoDrag, Handle, Mode, Target, ViewProj};
 use crate::icons;
 use crate::input::{Button, InputCollector};
@@ -545,6 +546,9 @@ struct CommandIds {
     transforms: [CommandId; 3],
     /// Puts each selected entity on the surface below it.
     drop: CommandId,
+    /// B and Shift+B: drawing a brush, a cut (ADR 0110 E2b-3).
+    draw: CommandId,
+    draw_cut: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
     /// the next pivot.
     steps: [CommandId; 3],
@@ -615,6 +619,8 @@ fn commands() -> (Commands, CommandIds) {
             c.register("transform.scale", "Transform", "Scale Selection"),
         ],
         drop: c.register("transform.drop", "Transform", "Drop to the Surface Below"),
+        draw: c.register("blockout.draw", "Blockout", "Draw Brush"),
+        draw_cut: c.register("blockout.draw_cut", "Blockout", "Draw Cut"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
             c.register("snap.angle_step", "Snapping", "Angle Step…"),
@@ -687,6 +693,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Shift+F", ids.follow),
         ("End", ids.drop),
         ("Period", ids.pivot),
+        ("B", ids.draw),
+        ("Shift+B", ids.draw_cut),
     ];
     // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
     // - ours: Q, E, R at once and with Shift the gizmo's handles, the left hand beside
@@ -1322,6 +1330,15 @@ struct Editor {
     /// pivot's line to the pointer) and its hint by the pointer.
     guides: Vec<(Vec2, Vec2, usize)>,
     hint: String,
+    /// A brush being drawn (B, Shift+B), and its brush once it has a size, as last made.
+    draw: Option<Draw>,
+    drawn: Option<(Entity, Made)>,
+    /// What the overlay shows of it this frame: lines (the mark, the box's edges) and
+    /// sizes on the screen; the edges and sizes in the world, kept for their storage.
+    draw_lines: Vec<(Vec2, Vec2)>,
+    draw_labels: Vec<(Vec2, String)>,
+    draw_edges: Vec<(Vec3, Vec3)>,
+    draw_sizes: Vec<(Vec3, f32)>,
     /// The camera's flight speed (the wheel while flying), meters per second.
     fly_speed: f32,
     /// When the last frame was: flying moves by the time since.
@@ -1698,6 +1715,12 @@ impl Editor {
             key_transform: None,
             guides: Vec::new(),
             hint: String::new(),
+            draw: None,
+            drawn: None,
+            draw_lines: Vec::new(),
+            draw_labels: Vec::new(),
+            draw_edges: Vec::new(),
+            draw_sizes: Vec::new(),
             fly_speed: FLY_SPEED,
             last_frame: Instant::now(),
             pick_request: None,
@@ -1769,6 +1792,9 @@ impl Editor {
                     input.focus_lost();
                     if let Some(t) = &mut self.key_transform {
                         t.cancel = true;
+                    }
+                    if let Some(d) = &mut self.draw {
+                        d.cancel = true;
                     }
                 }
                 self.focused = focused;
@@ -1938,6 +1964,10 @@ impl Editor {
         // A keyboard transform has the frame's keys and clicks while it runs.
         if self.key_transform.is_some() {
             self.key_transform_frame(world);
+        }
+        // So does a brush being drawn.
+        if self.draw.is_some() {
+            self.draw_frame(world);
         }
 
         // The inspector: the active entity's components, field by field.
@@ -2155,6 +2185,9 @@ impl Editor {
         if self.key_transform.is_some() {
             let _ = write!(self.status, "{}  ·  ", transform::HELP);
         }
+        if self.draw.is_some() {
+            let _ = write!(self.status, "{}  ·  ", draw::HELP);
+        }
         if self.flying() {
             let _ = write!(
                 self.status,
@@ -2333,10 +2366,8 @@ impl Editor {
             tree_filter: &self.tree_filter,
             inspector_filter: &self.inspector_filter,
             palette,
-            hint: self
-                .key_transform
-                .as_ref()
-                .map(|_| (self.hint.as_str(), hint_at)),
+            hint: (self.key_transform.is_some() || self.draw.is_some())
+                .then_some((self.hint.as_str(), hint_at)),
         };
         let scale = self.scale.max(0.5);
         let logical = [self.size[0] as f32 / scale, self.size[1] as f32 / scale];
@@ -3117,6 +3148,7 @@ impl Editor {
             && self.renaming.is_none()
             && self.gizmo_drag.is_none()
             && self.key_transform.is_none()
+            && self.draw.is_none()
             && self.drag.is_none();
         let cursor = self.input.cursor().map(|[x, y]| Vec2::new(x, y));
         // The pointer's pixel at the view's render size.
@@ -3846,6 +3878,10 @@ impl Editor {
             self.hovered_handle = None;
             return;
         }
+        if self.draw.is_some() {
+            self.hovered_handle = None;
+            return;
+        }
         if let Some(mut drag) = self.gizmo_drag.take()
             && self.input.held(Button::Left)
         {
@@ -4321,26 +4357,7 @@ impl Editor {
         let kind = ADD[what].0;
         self.history.begin(&format!("Add {kind}"), None);
         let e = if what >= FIRST_BRUSH {
-            let group = match self.brush_group(world) {
-                Some(g) => {
-                    self.history.touch(world, g);
-                    g
-                }
-                None => {
-                    let name = self.sibling_name(world, None, "Blockout", None);
-                    let order = self.last_root_order(world);
-                    let g = world.spawn((
-                        SceneId::new(),
-                        Name::new(&name),
-                        Transform::IDENTITY,
-                        GlobalTransform::default(),
-                        BrushGroup::default(),
-                        RootOrder(order),
-                    ));
-                    self.history.touch_new(world, g);
-                    g
-                }
-            };
+            let group = self.brush_group_or_new(world);
             // Where the camera looks, in the group's space.
             let inverse = world
                 .get::<GlobalTransform>(group)
@@ -4361,6 +4378,258 @@ impl Editor {
         self.history.touch_new(world, e);
         self.history.commit(world);
         self.select_only(e);
+    }
+
+    /// The blockout group a new brush joins, as [`Editor::brush_group`] finds it or, when the
+    /// scene has none, a new one after the roots: in the open history step.
+    fn brush_group_or_new(&mut self, world: &mut World) -> Entity {
+        if let Some(g) = self.brush_group(world) {
+            self.history.touch(world, g);
+            return g;
+        }
+        let name = self.sibling_name(world, None, "Blockout", None);
+        let order = self.last_root_order(world);
+        let g = world.spawn((
+            SceneId::new(),
+            Name::new(&name),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            BrushGroup::default(),
+            RootOrder(order),
+        ));
+        self.history.touch_new(world, g);
+        g
+    }
+
+    /// B or Shift+B (`op`): a drawing starts with a box, or the one running takes the next
+    /// shape or the other operation ([`Draw::again`]).
+    fn start_draw(&mut self, op: BrushOp) {
+        if let Some(d) = &mut self.draw {
+            d.again(op);
+            return;
+        }
+        if self.key_transform.is_some()
+            || self.gizmo_drag.is_some()
+            || self.drag.is_some()
+            || self.camera_drag
+        {
+            return;
+        }
+        self.gestures += 1;
+        self.draw = Some(Draw::new(op, 0, self.gestures));
+        // The surface under the pointer is asked for again, all of the scene this time.
+        self.surfaced = None;
+        self.add_open = false;
+        self.open_choice = None;
+    }
+
+    /// A drawing's frame ([`crate::draw`]): its keys (B, R, Tab, Backspace, Enter, Escape)
+    /// and typed sizes, unless the right button flies the camera; the pointer's mark, base
+    /// or height, and the clicks in the view; the brush as it now is, in its undo step.
+    /// The camera keeps the middle button, the wheel and, before the first click, the
+    /// right one; clicks outside the view stay the panels' until then.
+    fn draw_frame(&mut self, world: &mut World) {
+        /// Win32 virtual-key codes.
+        const BACK: u16 = 0x08;
+        const TAB: u16 = 0x09;
+        const RETURN: u16 = 0x0D;
+        const ESCAPE: u16 = 0x1B;
+        const B: u16 = 0x42;
+        const R: u16 = 0x52;
+        let Some(rect) = self.view_rect else {
+            return;
+        };
+        let Some(mut d) = self.draw.take() else {
+            return;
+        };
+        let view = ViewProj::new(&self.orbit, rect);
+        let aiming = d.stage == Stage::Aim;
+        let mut make = false;
+        let mut cancel = d.cancel || (!aiming && self.input.pressed(Button::Right));
+        if !self.flying() {
+            let plain = !self.input.ctrl() && !self.input.alt();
+            for i in 0..self.input.letters().len() {
+                match self.input.letters()[i] {
+                    BACK => d.backspace(),
+                    TAB => d.tab(),
+                    RETURN => make |= d.enter(),
+                    ESCAPE => cancel = true,
+                    B if plain => d.again(if self.input.shift() {
+                        BrushOp::Cut
+                    } else {
+                        BrushOp::Add
+                    }),
+                    R if plain => d.turn(),
+                    _ => {}
+                }
+            }
+            d.type_text(self.input.text());
+        }
+        let cursor = self.input.cursor().map(|[x, y]| Vec2::new(x, y));
+        let over = cursor.is_some_and(|at| view.contains(at));
+        if let Some(at) = cursor
+            && !cancel
+        {
+            let pointer = draw::Pointer {
+                view: &view,
+                at,
+                surface: self
+                    .surfaced
+                    .and_then(|r| r.hit)
+                    .map(|h| (h.point, h.normal)),
+                press: self.input.pressed(Button::Left) && (over || !aiming),
+                release: self.input.released(Button::Left),
+                snap: &self.snapping,
+                invert: self.input.shift(),
+                round: self.input.ctrl(),
+            };
+            make |= d.pointer(&pointer);
+            // The surface under the pointer for the mark, a few frames on.
+            if d.stage == Stage::Aim && over {
+                let local = (at - Vec2::new(rect[0] as f32, rect[1] as f32)).max(Vec2::ZERO);
+                self.surface_request = Some(SurfaceRequest {
+                    x: (local.x * self.view_scale[0]) as u32,
+                    y: (local.y * self.view_scale[1]) as u32,
+                    transparent: self.pick_transparent,
+                });
+            }
+        }
+        // The keys were the drawing's, and so are the clicks in the view, or all of them
+        // once it has a corner; the camera keeps the rest.
+        self.input.consume_keys();
+        if over || !aiming {
+            self.input.consume_press(Button::Left);
+        }
+        if !aiming {
+            self.input.consume_press(Button::Right);
+        }
+        if cancel {
+            self.history.revert(world, d.merge);
+            self.drawn = None;
+            return;
+        }
+        let made = d.made();
+        self.set_drawn(world, d.merge, made);
+        d.hint(&mut self.hint);
+        self.draw_overlay(&d, &view);
+        if make {
+            match self.drawn {
+                Some((e, _)) => {
+                    self.drawn = None;
+                    self.select_only(e);
+                    return;
+                }
+                None => self.say(String::from(
+                    "A brush needs a size on every side: move the pointer, or type it",
+                )),
+            }
+        }
+        self.draw = Some(d);
+    }
+
+    /// The brush being drawn as `made`, in its drawing's undo step `merge`: spawned in its
+    /// group (made too when the scene has none) once it has a size, changed as it changes,
+    /// and gone again while it has none.
+    fn set_drawn(&mut self, world: &mut World, merge: u64, made: Option<Made>) {
+        match (made, self.drawn) {
+            (Some(m), Some((_, last))) if m == last => {}
+            (Some(m), drawn) => {
+                let name = if m.op == BrushOp::Cut { "Cut" } else { "Brush" };
+                self.history
+                    .begin(&format!("Draw {} {name}", m.shape.name), Some(merge));
+                let e = match drawn {
+                    Some((e, _)) => {
+                        self.history.touch(world, e);
+                        e
+                    }
+                    None => {
+                        let group = self.brush_group_or_new(world);
+                        let kind = format!("{} {name}", m.shape.name);
+                        let name = self.sibling_name(world, Some(group), &kind, None);
+                        let e = world.spawn((
+                            SceneId::new(),
+                            Name::new(&name),
+                            Transform::IDENTITY,
+                            GlobalTransform::default(),
+                        ));
+                        let _ = world.set_parent(e, Some(group));
+                        self.history.touch_new(world, e);
+                        self.collapsed.remove(&group);
+                        e
+                    }
+                };
+                // Its place in its group's space.
+                let inverse = world
+                    .parent(e)
+                    .and_then(|g| world.get::<GlobalTransform>(g))
+                    .map_or(Affine3A::IDENTITY, |g| g.0.inverse());
+                let local = inverse * Affine3A::from_rotation_translation(m.rotation, m.at);
+                let (scale, rotation, translation) = local.to_scale_rotation_translation();
+                let mut brush = Brush::new(m.shape.shape, m.size)
+                    .with_op(m.op)
+                    .with_top(m.shape.top);
+                if let Some(steps) = m.steps {
+                    brush.segments = steps;
+                }
+                let mut transform = Transform::from_translation(translation);
+                transform.rotation = rotation;
+                transform.scale = scale;
+                world.insert(e, transform);
+                world.insert(e, brush);
+                self.history.commit(world);
+                self.drawn = Some((e, m));
+            }
+            (None, Some(_)) => {
+                self.history.revert(world, merge);
+                self.drawn = None;
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// What the overlay shows of drawing `d` this frame: before the first click its mark,
+    /// a square on the surface's plane around the corner with the plane's two directions
+    /// through it; then the box's edges and its sizes.
+    fn draw_overlay(&mut self, d: &Draw, view: &ViewProj) {
+        self.draw_lines.clear();
+        let mut labels = core::mem::take(&mut self.draw_labels);
+        let mut shown = 0;
+        if let (Stage::Aim, Some((corner, normal))) = (d.stage, d.mark) {
+            let plane = draw::BasePlane::new(corner, normal);
+            let r = view.per_pixel(corner) * 7.0 * self.scale.max(0.5);
+            let square = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                .map(|(a, b): (f32, f32)| corner + (plane.u * a + plane.v * b) * r);
+            for i in 0..4 {
+                self.draw_edges.push((square[i], square[(i + 1) % 4]));
+            }
+            self.draw_edges
+                .push((corner - plane.u * r * 2.0, corner + plane.u * r * 2.0));
+            self.draw_edges
+                .push((corner - plane.v * r * 2.0, corner + plane.v * r * 2.0));
+        } else {
+            d.edges(&mut self.draw_edges);
+            d.labels(&mut self.draw_sizes);
+            for &(p, size) in &self.draw_sizes {
+                if let Some(at) = view.screen(p) {
+                    if shown == labels.len() {
+                        labels.push((at, String::new()));
+                    }
+                    let (place, text) = &mut labels[shown];
+                    *place = at;
+                    text.clear();
+                    let _ = write!(text, "{} m", transform::short(size));
+                    shown += 1;
+                }
+            }
+        }
+        for &(a, b) in &self.draw_edges {
+            if let (Some(a), Some(b)) = (view.screen(a), view.screen(b)) {
+                self.draw_lines.push((a, b));
+            }
+        }
+        self.draw_edges.clear();
+        labels.truncate(shown);
+        self.draw_labels = labels;
     }
 
     /// The blockout group a new brush joins: the active entity's (itself, or the group
@@ -4449,6 +4718,13 @@ impl Editor {
             self.pick_keys(world);
         } else if id == ids.drop {
             self.drop_selection(world);
+        } else if id == ids.draw || id == ids.draw_cut {
+            let op = if id == ids.draw {
+                BrushOp::Add
+            } else {
+                BrushOp::Cut
+            };
+            self.start_draw(op);
         } else if let Some(k) = ids.steps.iter().position(|&c| c == id) {
             self.pick_step(world, k);
         } else if id == ids.overlays {
@@ -5091,6 +5367,7 @@ impl Editor {
         self.drag.is_some()
             || self.gizmo_drag.is_some()
             || self.key_transform.is_some()
+            || self.draw.is_some()
             || self.typing.is_some()
             || self.renaming.is_some()
             || self.camera_drag
@@ -5750,6 +6027,15 @@ impl<G> EditorGame<G> {
             .collect()
     }
 
+    /// Where world point `p` shows in the viewport through the editor's camera (physical
+    /// pixels); none behind it or before the viewport is laid out. For tests and tools
+    /// that point at the scene.
+    pub fn on_screen(&self, p: Vec3) -> Option<[f32; 2]> {
+        let shared = self.shared.borrow();
+        let view = ViewProj::new(&shared.orbit, shared.view_rect?);
+        view.screen(p).map(|p| p.to_array())
+    }
+
     /// The entity under the pointer in the viewport, as the newest pick saw it (ADR 0109).
     pub fn hovered(&self) -> Option<Entity> {
         self.shared.borrow().hovered.and_then(|(_, e)| e)
@@ -6033,19 +6319,61 @@ fn draw_guides(guides: &[(Vec2, Vec2, usize)], rect: [u32; 4], scale: f32, canva
             continue;
         }
         color.w = 0.7;
-        let length = a.distance(b);
-        let along = (b - a) / length.max(1e-3);
-        let (dash, gap) = (6.0 * scale, 5.0 * scale);
-        let mut s = 0.0;
-        while s < length {
-            let e = (s + dash).min(length);
-            canvas.draw(
-                &Quad::line(a + along * s, a + along * e, scale)
-                    .color(color)
-                    .order(order),
+        dashed_line(canvas, (a, b), scale, color, order);
+    }
+    canvas.set_clip(None);
+}
+
+/// A dashed line `scale` pixels wide.
+fn dashed_line(canvas: &mut Canvas, (a, b): (Vec2, Vec2), scale: f32, color: Vec4, order: Order) {
+    let length = a.distance(b);
+    let along = (b - a) / length.max(1e-3);
+    let (dash, gap) = (6.0 * scale, 5.0 * scale);
+    let mut s = 0.0;
+    while s < length {
+        let e = (s + dash).min(length);
+        canvas.draw(
+            &Quad::line(a + along * s, a + along * e, scale)
+                .color(color)
+                .order(order),
+        );
+        s += dash + gap;
+    }
+}
+
+/// The brush being drawn (ADR 0110 E2b-3), under the panels: its mark or its box's edges,
+/// a brush's light and solid, a cut's orange and dashed (as cuts show in the UX note),
+/// and its sizes on dark labels.
+fn draw_drawing(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canvas: &mut Canvas) {
+    let scale = editor.scale.max(0.5);
+    canvas.set_clip(Some(clip_of(rect)));
+    let order = Order::layer(-1);
+    let cut = editor.draw.as_ref().is_some_and(|d| d.op == BrushOp::Cut);
+    for &(a, b) in &editor.draw_lines {
+        if cut {
+            dashed_line(
+                canvas,
+                (a, b),
+                1.5 * scale,
+                Vec4::new(1.0, 0.55, 0.15, 0.95),
+                order,
             );
-            s += dash + gap;
+        } else {
+            let color = Vec4::new(0.85, 0.95, 1.0, 0.95);
+            canvas.draw(&Quad::line(a, b, 1.5 * scale).color(color).order(order));
         }
+    }
+    let size = 13.0 * scale;
+    for (at, text) in &editor.draw_labels {
+        let width = text.chars().count() as f32 * size * 0.55 + 10.0 * scale;
+        canvas.draw(
+            &Quad::rounded_rect(*at, Vec2::new(width, size + 6.0 * scale), 4.0 * scale)
+                .color(Vec4::new(0.08, 0.08, 0.1, 0.8))
+                .order(order),
+        );
+        editor
+            .text
+            .draw_centered(canvas, glyphs, text, size, *at, Vec4::ONE, order);
     }
     canvas.set_clip(None);
 }
@@ -6162,6 +6490,12 @@ impl Overlay for EditorOverlay {
                     }
                     // Under the pointer, through the view's camera.
                     if let Some(request) = editor.surface_request.take() {
+                        // A drawing lands on the selection too; a drag leaves it out.
+                        let exclude: &[u32] = if editor.draw.is_some() {
+                            &[]
+                        } else {
+                            &selected
+                        };
                         self.picker.add_surface_pass(
                             pass.fg,
                             pass.ring,
@@ -6171,7 +6505,7 @@ impl Overlay for EditorOverlay {
                             scene,
                             &pick_view,
                             request,
-                            &selected,
+                            exclude,
                             view.frame_number,
                         );
                     }
@@ -6338,6 +6672,9 @@ impl Overlay for EditorOverlay {
             }
             if let Some(rect) = editor.view_rect {
                 draw_overlays(editor, rect, &self.glyphs, &mut self.canvas);
+                if editor.draw.is_some() {
+                    draw_drawing(editor, rect, &self.glyphs, &mut self.canvas);
+                }
             }
             if let Some(b) = &editor.box_drag
                 && b.released.is_none()
@@ -7408,6 +7745,178 @@ mod tests {
         assert_eq!(names(&mut world), ["Blockout", "Torus Brush"]);
         ed.run(&mut world, ed.ids.undo);
         assert!(names(&mut world).is_empty());
+    }
+
+    const B: (u16, u16) = (0x42, 0x30);
+    const TAB: (u16, u16) = (0x09, 0x0F);
+
+    /// An editor looking steeply down at the origin, snapping on (0.1 m steps), so that
+    /// whole pixels land on exact corners.
+    fn draw_editor(name: &str, world: &mut World) -> Editor {
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder(name),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.orbit.pitch = 1.2;
+        ed.orbit.distance = 10.0;
+        ed.snapping.on = true;
+        ed.update(world);
+        ed
+    }
+
+    /// Where world point `p` is in the editor's view, physical pixels.
+    fn on_view(ed: &Editor, p: Vec3) -> [f32; 2] {
+        ViewProj::new(&ed.orbit, ed.view_rect.unwrap())
+            .screen(p)
+            .unwrap()
+            .to_array()
+    }
+
+    #[test]
+    fn b_draws_a_box_on_the_ground_in_three_clicks_as_one_step() {
+        let mut world = World::new();
+        let mut ed = draw_editor("draw-box", &mut world);
+        chord(&mut ed, &mut world, &[B]);
+        assert!(ed.draw.is_some(), "B starts drawing");
+        // Over nothing the mark is on the ground: the first corner there.
+        let first = on_view(&ed, Vec3::new(1.0, 0.0, 1.0));
+        mouse(&mut ed, first, None);
+        ed.update(&mut world);
+        assert!(ed.status.starts_with(draw::HELP), "{}", ed.status);
+        assert_eq!(ed.hint, "Box: click the first corner  ·  B: next shape");
+        assert_eq!(ed.draw_lines.len(), 6, "the mark: a square and a cross");
+        assert!(!ed.gizmo_shown);
+        press_release(&mut ed, &mut world, first);
+        // The base follows the pointer, its sides' sizes shown.
+        let second = on_view(&ed, Vec3::new(3.0, 0.0, 2.5));
+        mouse(&mut ed, second, None);
+        ed.update(&mut world);
+        assert_eq!(ed.draw_labels.len(), 2);
+        assert_eq!(ed.draw_labels[0].1, "2 m");
+        assert!(names(&mut world).is_empty(), "no brush without a height");
+        press_release(&mut ed, &mut world, second);
+        // Its height typed: the brush is there as it is drawn, in a new group.
+        type_chars(&mut ed, "3");
+        ed.update(&mut world);
+        assert_eq!(names(&mut world), ["Blockout", "Box Brush"]);
+        let (e, _) = ed.drawn.unwrap();
+        let brush = world.get::<Brush>(e).unwrap();
+        assert_eq!((brush.shape, brush.op), (BrushShape::Box, BrushOp::Add));
+        assert!(
+            (brush.size - Vec3::new(2.0, 3.0, 1.5)).length() < 1e-4,
+            "{}",
+            brush.size
+        );
+        let t = *world.get::<Transform>(e).unwrap();
+        assert!(t.translation.distance(Vec3::new(2.0, 0.0, 1.75)) < 1e-4);
+        assert!((t.rotation * Vec3::Y).distance(Vec3::Y) < 1e-4, "upright");
+        assert!(world.get::<BrushGroup>(world.parent(e).unwrap()).is_some());
+        assert_eq!(ed.draw_lines.len(), 12, "its edges");
+        assert_eq!(ed.hint, "Box 2 × 1.5 × [3] m");
+        // The third click keeps it, selected; one undo step takes it and its group back.
+        press_release(&mut ed, &mut world, second);
+        assert!(ed.draw.is_none());
+        assert_eq!(ed.selection, [e]);
+        assert_eq!(ed.history.steps().count(), 1, "one step");
+        ed.run(&mut world, ed.ids.undo);
+        assert!(names(&mut world).is_empty());
+    }
+
+    #[test]
+    fn shift_b_cuts_a_doorway_into_the_wall_under_the_pointer_in_its_group() {
+        let mut world = World::new();
+        let mut ed = draw_editor("draw-cut", &mut world);
+        ed.add(&mut world, FIRST_BRUSH);
+        let wall = ed.active().unwrap();
+        let group = world.parent(wall).unwrap();
+        chord(&mut ed, &mut world, &[SHIFT, B]);
+        assert_eq!(ed.draw.as_ref().map(|d| d.op), Some(BrushOp::Cut));
+        // The wall's face toward +z under the pointer, a little off the grid.
+        let at = on_view(&ed, Vec3::new(-0.5, 0.0, 1.0));
+        ed.surfaced = Some(engine_render::pick::SurfaceResult {
+            frame: 0,
+            request: SurfaceRequest {
+                x: 0,
+                y: 0,
+                transparent: false,
+            },
+            hit: Some(hit(Vec3::new(-0.52, 0.01, 1.0), Vec3::Z)),
+        });
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        assert!(
+            ed.surface_request.is_some(),
+            "the surface under the pointer is asked for"
+        );
+        press_release(&mut ed, &mut world, at);
+        // The pointer up the wall and along it to −x (its first direction there): 1 m
+        // across, Tab, 2.1 m up, Enter; 0.3 m into the wall, Enter.
+        let up = on_view(&ed, Vec3::new(-1.0, 1.0, 1.0));
+        mouse(&mut ed, up, None);
+        type_chars(&mut ed, "1");
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[TAB]);
+        type_chars(&mut ed, "2.1");
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[ENTER]);
+        type_chars(&mut ed, "0.3");
+        ed.update(&mut world);
+        assert_eq!(ed.hint, "Box cut 1 × 2.1 × [0.3] m");
+        chord(&mut ed, &mut world, &[ENTER]);
+        assert!(ed.draw.is_none(), "Enter makes it");
+        let cut = ed.active().unwrap();
+        assert_eq!(world.parent(cut), Some(group), "in the wall's group");
+        assert_eq!(world.get::<Name>(cut).unwrap().as_str(), "Box Cut");
+        let brush = world.get::<Brush>(cut).unwrap();
+        assert_eq!(brush.op, BrushOp::Cut);
+        assert!((brush.size - Vec3::new(1.0, 0.3, 2.1)).length() < 1e-4);
+        let t = *world.get::<Transform>(cut).unwrap();
+        // Into the wall (its +y along −z), from the corner on the grid at (−0.5, 0, 1).
+        assert!((t.rotation * Vec3::Y).distance(Vec3::NEG_Z) < 1e-4);
+        assert!(
+            t.translation.distance(Vec3::new(-1.0, 1.05, 1.0)) < 1e-4,
+            "{}",
+            t.translation
+        );
+    }
+
+    #[test]
+    fn escape_or_a_right_click_drops_a_drawing_and_the_right_button_flies_before_it() {
+        let mut world = World::new();
+        let mut ed = draw_editor("draw-cancel", &mut world);
+        chord(&mut ed, &mut world, &[B]);
+        // Before the first click the right button flies the camera; the drawing waits.
+        let first = on_view(&ed, Vec3::ZERO);
+        mouse(&mut ed, first, None);
+        right_button(&mut ed, true);
+        ed.update(&mut world);
+        assert!(ed.camera_drag && ed.draw.is_some());
+        right_button(&mut ed, false);
+        ed.update(&mut world);
+        // A brush drawn up to its height, then a right click: gone, nothing to undo.
+        press_release(&mut ed, &mut world, first);
+        let second = on_view(&ed, Vec3::new(2.0, 0.0, 2.0));
+        mouse(&mut ed, second, None);
+        ed.update(&mut world);
+        press_release(&mut ed, &mut world, second);
+        type_chars(&mut ed, "2");
+        ed.update(&mut world);
+        assert_eq!(names(&mut world).len(), 2);
+        right_button(&mut ed, true);
+        ed.update(&mut world);
+        right_button(&mut ed, false);
+        assert!(ed.draw.is_none());
+        assert!(names(&mut world).is_empty());
+        assert_eq!(ed.history.steps().count(), 0);
+        // Escape before the first click ends it too.
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[B]);
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert!(ed.draw.is_none());
     }
 
     #[test]

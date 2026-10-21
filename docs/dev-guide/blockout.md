@@ -46,13 +46,17 @@ for e in [room, inside, door] {
 
 ## In the editor
 
-**+** → **Blockout** adds each shape where the camera looks, into the selection's group (or
-the scene's first, or a new "Blockout" group), at its end. The tree shows each brush's shape
+**B** draws a brush on the surface under the pointer, **Shift+B** a cut: a click for the
+first corner, one for the base, one for the height, or the sizes typed (`editor.md`,
+"Drawing brushes"). A doorway: Shift+B over the wall, a click, `1` Tab `2.1` Enter `0.3`
+Enter. **+** → **Blockout** adds each shape where the camera looks. Both go into the
+selection's group (or the scene's first, or a new "Blockout" group), at its end. The tree shows each brush's shape
 and what it does ("Brush", "Cut", "Intersect"); the inspector edits its fields, every change
 one undo step; the eye turns it off.
 
 ## Coming
 
-Drawing brushes on surfaces with B, rooms (hollow boxes that open into each other), faces
-and edges edited by hand, colliders and the navigation mesh made from them, and baking a
-group into a mesh: ADR 0110's steps.
+Rooms (hollow boxes that open into each other), a brush's faces dragged by handles,
+corners landing on other brushes' corners and edges, faces and edges edited by hand,
+colliders and the navigation mesh made from them, and baking a group into a mesh: ADR
+0110's steps.
