@@ -1124,7 +1124,12 @@ fn a_brushs_handles_show_and_a_drawn_corner_lands_on_its_corner() {
     for _ in 0..3 {
         editor_frame(&mut player, &mut game, &mut overlay);
     }
-    write(&mut player, &mut game, &mut overlay, "ENGINE_EDITOR_COLLIDERS_PNG");
+    write(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        "ENGINE_EDITOR_COLLIDERS_PNG",
+    );
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
