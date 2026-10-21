@@ -1134,6 +1134,169 @@ fn a_brushs_handles_show_and_a_drawn_corner_lands_on_its_corner() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// View: Navigation (ADR 0110 E2b-4b): a floor brush and a wall brush with a gap at its
+/// end, baked in the background a moment after the overlay turns on; the mesh lies on the
+/// floor and goes round the wall. Then the wall moved: baked again
+/// (`ENGINE_EDITOR_NAVIGATION_PNG=<file>`).
+#[test]
+fn view_navigation_bakes_the_brushes_in_the_background() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-nav-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut world = World::new();
+    let group = world.spawn((
+        SceneId::new(),
+        Name::new("Blockout"),
+        Transform::IDENTITY,
+        BrushGroup::default(),
+    ));
+    for (name, at, size) in [
+        (
+            "Floor",
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(12.0, 1.0, 12.0),
+        ),
+        ("Wall", Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.4, 2.5, 8.0)),
+    ] {
+        let e = world.spawn((
+            SceneId::new(),
+            Name::new(name),
+            Transform::from_translation(at),
+            Brush::new(BrushShape::Box, size),
+        ));
+        world.set_parent(e, Some(group)).unwrap();
+    }
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Sun {
+            color: Vec3::splat(1.2),
+            ambient: Vec3::splat(0.04),
+        },
+    ));
+    let paths = Assets::new(dir.clone()).paths().clone();
+    let mut text = String::new();
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+    };
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("editor navigation test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..10 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.navigation_edges().is_empty(), "off at first");
+    assert!(game.run_command(player.world_mut(), "view.navigation"));
+    // Frames until the bake answers (it waits 0.3 s after the brushes last changed).
+    let baked =
+        |player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay| {
+            let start = std::time::Instant::now();
+            while start.elapsed() < std::time::Duration::from_secs(20) {
+                editor_frame(player, game, overlay);
+                let edges = game.navigation_edges();
+                if !edges.is_empty() {
+                    return edges;
+                }
+            }
+            panic!("no navigation baked");
+        };
+    let edges = baked(&mut player, &mut game, &mut overlay);
+    println!("{} navigation edges", edges.len());
+    // On the floor's top (y = 0, within a voxel or two), and round the wall: edges on both
+    // its sides, beside it within the agent's radius and a cell.
+    assert!(edges.iter().all(|e| e.0.y.abs() < 0.3 && e.1.y.abs() < 0.3));
+    // A boundary along the wall: both ends beside it, running most of its 8 m.
+    let along = |edges: &[(Vec3, Vec3, bool)], side: f32| {
+        edges.iter().any(|e| {
+            e.2 && (e.0.x - side).abs() < 0.3
+                && (e.1.x - side).abs() < 0.3
+                && (e.0.z - e.1.z).abs() > 6.0
+        })
+    };
+    assert!(
+        along(&edges, -0.7) && along(&edges, 0.7),
+        "boundaries on both sides of the wall"
+    );
+    for _ in 0..3 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_NAVIGATION_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let extent = player.extent();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    // The wall moved 3 m along x: baked again, the boundaries follow it.
+    let wall = engine_scene::find_named(player.world_mut(), "Wall").unwrap();
+    player
+        .world_mut()
+        .get_mut::<Transform>(wall)
+        .unwrap()
+        .translation
+        .x = 3.0;
+    let before = edges;
+    let start = std::time::Instant::now();
+    let edges = loop {
+        editor_frame(&mut player, &mut game, &mut overlay);
+        let edges = game.navigation_edges();
+        if edges != before {
+            break edges;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "baked again"
+        );
+    };
+    assert!(
+        along(&edges, 2.3) && along(&edges, 3.7),
+        "the boundaries moved with it"
+    );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn editor_frame(player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay) {
     player.frame_overlaid(game, Some(overlay)).unwrap();
     player.set_view_rect(game.view_rect());

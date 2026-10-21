@@ -179,3 +179,91 @@ fn nothing_walkable_bakes_to_no_tiles() {
     .unwrap();
     assert!(data.tiles.is_empty(), "{} tiles", data.tiles.len());
 }
+
+#[test]
+fn a_floors_edges_lie_on_it_and_its_rim_is_a_boundary_all_round() {
+    let mut level = Level::default();
+    level.floor([0.0, 10.0], [0.0, 10.0], 0.0);
+    let mesh = level.mesh(None);
+    let mut edges = Vec::new();
+    mesh.edges(&mut edges);
+    assert!(edges.iter().any(|e| e.2), "{edges:?}");
+    // On the floor, kept the agent's radius (0.4 m) in from its rim.
+    for &(a, b, _) in &edges {
+        for p in [a, b] {
+            assert!(p.y.abs() < 0.2, "{p}");
+            assert!(p.x > 0.2 && p.x < 9.8 && p.z > 0.2 && p.z < 9.8, "{p}");
+        }
+    }
+    // The boundary runs all round: about the eroded floor's perimeter (4 × 8.85 m, Recast
+    // keeping the radius and a cell or so in).
+    let rim: f32 = edges
+        .iter()
+        .filter(|e| e.2)
+        .map(|e| e.0.distance(e.1))
+        .sum();
+    assert!(rim > 33.0 && rim < 38.0, "{rim}");
+    // A wall across the middle with a gap: its sides are boundaries too, and the floor
+    // around it is more than one polygon, their shared edges inner ones.
+    let mut walled = Level::default();
+    walled.floor([0.0, 10.0], [0.0, 10.0], 0.0);
+    walled.block(Vec3::new(4.8, 0.0, 0.0), Vec3::new(5.2, 2.0, 8.0));
+    let mut edges = Vec::new();
+    walled.mesh(None).edges(&mut edges);
+    assert!(edges.iter().any(|e| !e.2), "inner edges");
+    let rim: f32 = edges
+        .iter()
+        .filter(|e| e.2)
+        .map(|e| e.0.distance(e.1))
+        .sum();
+    assert!(rim > 45.0, "around the wall too: {rim}");
+}
+
+/// How long a large blockout bakes (ADR 0110 E2b-4b): 400 rooms of 10.4 × 8.4 m, walls 3 m
+/// high and a ceiling each, on a ground of 240 × 200 m; on one thread and on pools of 2, 4
+/// and 8 workers. Run it with `--ignored --nocapture` (release).
+#[test]
+#[ignore = "a measurement"]
+fn four_hundred_rooms_bake_on_one_thread_and_on_pools() {
+    let mut level = Level::default();
+    level.floor([-1.0, 241.0], [-1.0, 201.0], 0.0);
+    for i in 0..20 {
+        for j in 0..20 {
+            let (x, z) = (12.0 * i as f32, 10.0 * j as f32);
+            for (lo, hi) in [
+                (Vec3::new(x, 0.0, z), Vec3::new(x + 10.4, 3.0, z + 0.2)),
+                (
+                    Vec3::new(x, 0.0, z + 8.2),
+                    Vec3::new(x + 10.4, 3.0, z + 8.4),
+                ),
+                (Vec3::new(x, 0.0, z), Vec3::new(x + 0.2, 3.0, z + 8.4)),
+                (
+                    Vec3::new(x + 10.2, 0.0, z),
+                    Vec3::new(x + 10.4, 3.0, z + 8.4),
+                ),
+            ] {
+                level.block(lo, hi);
+            }
+            level.floor([x, x + 10.4], [z, z + 8.4], 3.2);
+        }
+    }
+    let settings = BakeSettings::default();
+    let start = std::time::Instant::now();
+    let one = bake(&level.vertices, &level.triangles, &settings, None).unwrap();
+    let single = start.elapsed().as_secs_f64() * 1e3;
+    println!(
+        "{} triangles, {} tiles: one thread {single:.0} ms",
+        level.triangles.len(),
+        one.tiles.len()
+    );
+    for workers in [2, 4, 8] {
+        let pool = ThreadPool::builder().workers(workers).build().unwrap();
+        let start = std::time::Instant::now();
+        let data = pool
+            .install(|| bake(&level.vertices, &level.triangles, &settings, Some(&pool)))
+            .unwrap();
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        println!("{workers} workers: {ms:.0} ms");
+        assert_eq!(data.tiles.len(), one.tiles.len());
+    }
+}

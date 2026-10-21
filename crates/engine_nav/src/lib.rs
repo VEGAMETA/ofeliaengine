@@ -68,6 +68,12 @@ mod ffi {
             max_nodes: i32,
         ) -> *mut EngineNavMesh;
         pub(crate) fn engine_nav_destroy(nav: *mut EngineNavMesh);
+        pub(crate) fn engine_nav_edges(
+            nav: *const EngineNavMesh,
+            out: *mut f32,
+            boundary: *mut u8,
+            max: i32,
+        ) -> i32;
         pub(crate) fn engine_nav_add_tile(
             nav: *mut EngineNavMesh,
             bytes: *const u8,
@@ -442,6 +448,40 @@ impl NavMesh {
     /// Tiles loaded.
     pub fn tiles(&self) -> usize {
         self.tiles
+    }
+
+    /// The polygons' edges, for drawing, into `out` (cleared first): each edge's two ends
+    /// and whether it is a boundary (a wall or a drop, no polygon beyond) rather than
+    /// between two polygons; each inner edge once.
+    pub fn edges(&self, out: &mut Vec<(Vec3, Vec3, bool)>) {
+        out.clear();
+        let mut room = 1024usize;
+        loop {
+            let mut ends = vec![0.0f32; room * 6];
+            let mut boundary = vec![0u8; room];
+            // SAFETY: the buffers hold `room` edges; the mesh is alive and only read.
+            let n = unsafe {
+                ffi::engine_nav_edges(
+                    self.raw,
+                    ends.as_mut_ptr(),
+                    boundary.as_mut_ptr(),
+                    room as i32,
+                )
+            } as usize;
+            if n > room {
+                room = n;
+                continue;
+            }
+            out.extend((0..n).map(|k| {
+                let e = &ends[k * 6..k * 6 + 6];
+                (
+                    Vec3::new(e[0], e[1], e[2]),
+                    Vec3::new(e[3], e[4], e[5]),
+                    boundary[k] != 0,
+                )
+            }));
+            return;
+        }
     }
 
     /// The walkable point nearest `point`, within `extent` of it on each axis.

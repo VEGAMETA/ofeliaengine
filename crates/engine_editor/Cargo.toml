@@ -20,6 +20,8 @@ engine_crash.workspace = true
 engine_ecs.workspace = true
 engine_log.workspace = true
 log = "0.4"
+# The blockout's navigation mesh, baked in the background for the overlay (ADR 0110 E2b-4b).
+engine_nav.workspace = true
 engine_input.workspace = true
 # The window, the 3D viewport, the device and frame pacing: the editor application
 # (`src/bin/editor.rs`).

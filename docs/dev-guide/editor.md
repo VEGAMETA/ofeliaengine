@@ -388,6 +388,15 @@ names the shape and its sizes ("Stairs 1 × 1.8 × [1.2] m, 6 steps of 0.2 m").
 thin and cyan over the viewport: what the game's physics gets from them
 ([blockout.md](blockout.md#colliders)).
 
+### Navigation
+
+**View: Navigation** (the palette) bakes the navigation mesh of the brushes that collide
+and draws it: its boundaries (walls, drops) bright green, the edges between its polygons
+faint, for a human-sized agent (1.8 m tall, 0.4 m wide-radius, 0.4 m steps, 45° slopes;
+[navigation.md](navigation.md)). It bakes in the background on workers of its own, a third
+of a second after the brushes last changed, so editing never waits for it; the status bar
+says how long it took ("Navigation: 357 tiles from 16,802 triangles in 158 ms").
+
 ### Sizing a brush by its sides
 
 The active brush shows a small square in the middle of each side facing the camera. Drag
