@@ -538,6 +538,12 @@ struct CommandIds {
     keys: CommandId,
     /// Whether clicks pick transparent surfaces or through them.
     pick_transparent: CommandId,
+    /// The camera: frame the selection (or the scene), follow the active entity, and the
+    /// bookmarks' nine places, gone to and set.
+    frame: CommandId,
+    follow: CommandId,
+    go_bookmark: [CommandId; 9],
+    set_bookmark: [CommandId; 9],
     /// "Add Cube" and the rest: the add menu's kinds, in its order.
     add_kinds: [CommandId; ADD.len()],
 }
@@ -596,6 +602,24 @@ fn commands() -> (Commands, CommandIds) {
             "Viewport",
             "Pick Transparent Surfaces",
         ),
+        frame: c.register("view.frame", "View", "Frame Selection"),
+        follow: c.register("view.follow", "View", "Follow Selection"),
+        go_bookmark: core::array::from_fn(|i| {
+            let n = i + 1;
+            c.register(
+                &format!("view.bookmark.{n}"),
+                "View",
+                &format!("Go to Bookmark {n}"),
+            )
+        }),
+        set_bookmark: core::array::from_fn(|i| {
+            let n = i + 1;
+            c.register(
+                &format!("view.set_bookmark.{n}"),
+                "View",
+                &format!("Set Bookmark {n}"),
+            )
+        }),
         add_kinds: ADD.map(|kind| {
             let name = format!("scene.add.{}", kind.to_lowercase().replace(' ', "_"));
             c.register(&name, "Scene", &format!("Add {kind}"))
@@ -633,6 +657,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+P", ids.find),
         ("Ctrl+R", ids.restart),
         ("Space", ids.local_axes),
+        ("F", ids.frame),
+        ("Shift+F", ids.follow),
     ];
     // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
     // - ours: Q, E, R at once and with Shift the gizmo's handles, the left hand beside
@@ -674,6 +700,19 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         if let Some(chord) = Chord::parse(chord) {
             let _ = keymap.bind(chord, context, id);
             shortcuts.entry(id).or_insert_with(|| chord.to_string());
+        }
+    }
+    // The camera's bookmarks, as Unreal has them: Ctrl and a digit sets one, the digit
+    // goes there.
+    for n in 1..=9 {
+        for (chord, id) in [
+            (format!("{n}"), ids.go_bookmark[n - 1]),
+            (format!("Ctrl+{n}"), ids.set_bookmark[n - 1]),
+        ] {
+            if let Some(chord) = Chord::parse(&chord) {
+                let _ = keymap.bind(chord, KeyContext::Global, id);
+                shortcuts.entry(id).or_insert_with(|| chord.to_string());
+            }
         }
     }
     (keymap, shortcuts)
@@ -800,6 +839,12 @@ enum BoxMode {
 /// Frames a box's answer may take before it is asked again (a pick the GPU could not
 /// take).
 const BOX_PATIENCE: u64 = 8;
+
+/// How long the camera takes to fly to a framing or a bookmark, in seconds.
+const CAMERA_MOVE: f32 = 0.2;
+/// The least radius a framing keeps around what it frames: a light or an empty entity is
+/// a point.
+const FRAME_RADIUS: f32 = 0.5;
 
 /// What a new build does (team decision, 2026-10-20): by itself while the editor's window
 /// is in the background (the developer is in the code editor), offered while it is in
@@ -1148,6 +1193,16 @@ struct Editor {
     under_pointer: Option<Vec<Entity>>,
     /// A box being dragged.
     box_drag: Option<BoxDrag>,
+    /// Framing (F): asked for, with the bounds of the selected entities' places (none:
+    /// frame the scene); the bounds the overlay found with their world boxes; the camera's
+    /// move toward a framing or a bookmark (from, to, since).
+    frame_asked: Option<Option<(Vec3, Vec3)>>,
+    framed: Option<(Vec3, Vec3)>,
+    camera_move: Option<(OrbitCamera, OrbitCamera, Instant)>,
+    /// Shift+F: the entity the camera follows and where it last was.
+    follow: Option<(Entity, Vec3)>,
+    /// The camera's bookmarks, 1 to 9 (the document's; the session keeps them).
+    bookmarks: [Option<OrbitCamera>; 9],
     /// What the overlay outlines (ADR 0109): the GPU scene's slots of the selection, its
     /// children and the hovered entity, as [`Editor::outline`] last found them.
     outline_items: Vec<OutlineItem>,
@@ -1418,6 +1473,11 @@ impl Editor {
             last_view_click: None,
             under_pointer: None,
             box_drag: None,
+            frame_asked: None,
+            framed: None,
+            camera_move: None,
+            follow: None,
+            bookmarks: [None; 9],
             outline_items: Vec::new(),
             tools: [
                 format!("{} Select", icons::TOOL_SELECT),
@@ -2131,18 +2191,24 @@ impl Editor {
             if (self.input.pressed(Button::Right) || self.input.pressed(Button::Middle)) && over {
                 self.camera_drag = true;
             }
+            self.camera_frame(world, w / h.max(1.0));
             if !self.input.held(Button::Right) && !self.input.held(Button::Middle) {
                 self.camera_drag = false;
             }
             if self.camera_drag {
+                // The hand takes the camera: no move toward a framing; panning, looking
+                // around and flying move the target, so they end following too.
+                self.camera_move = None;
                 let [dx, dy] = self.input.drag();
                 if self.input.held(Button::Middle) {
                     if self.input.shift() {
+                        self.follow = None;
                         self.orbit.pan(dx, dy, h * scale);
                     } else {
                         self.orbit.orbit(dx, dy);
                     }
                 } else {
+                    self.follow = None;
                     self.orbit.look(dx, dy);
                     self.fly(dt);
                 }
@@ -2156,6 +2222,9 @@ impl Editor {
                     self.say(format!("Flight speed {:.1} m/s", self.fly_speed));
                 }
             } else if over {
+                if notches != 0.0 {
+                    self.camera_move = None;
+                }
                 self.orbit.zoom(notches);
             }
             self.view_rect = Some([
@@ -2905,6 +2974,92 @@ impl Editor {
         found.into_iter().map(|(_, e)| e).collect()
     }
 
+    /// The camera's part of the frame (ADR 0107 E2-4): a framing the overlay answered
+    /// starts a move toward it; a move goes on (eased, `CAMERA_MOVE` long); a followed
+    /// entity's motion carries the target with it. `aspect` is the viewport's.
+    fn camera_frame(&mut self, world: &World, aspect: f32) {
+        if let Some((lo, hi)) = self.framed.take() {
+            let center = (lo + hi) * 0.5;
+            let radius = ((hi - lo).length() * 0.5).max(FRAME_RADIUS);
+            let to = self.orbit.framing(center, radius, aspect);
+            self.camera_move = Some((self.orbit, to, Instant::now()));
+        }
+        if let Some((from, to, since)) = self.camera_move {
+            let t = (since.elapsed().as_secs_f32() / CAMERA_MOVE).min(1.0);
+            // Fast at first, settling at the end.
+            self.orbit = from.toward(&to, 1.0 - (1.0 - t).powi(3));
+            if t >= 1.0 {
+                self.camera_move = None;
+            }
+        }
+        if let Some((e, last)) = self.follow {
+            match world.get::<GlobalTransform>(e) {
+                Some(g) => {
+                    let at = Vec3::from(g.0.translation);
+                    self.orbit.target += at - last;
+                    if let Some((_, to, _)) = &mut self.camera_move {
+                        to.target += at - last;
+                    }
+                    self.follow = Some((e, at));
+                }
+                None => self.follow = None,
+            }
+        }
+    }
+
+    /// F: frames the selection with its children (their world boxes, which the overlay
+    /// unites, and their places), or the whole scene when nothing is selected.
+    fn frame_selection(&mut self, world: &World) {
+        let mut points: Option<(Vec3, Vec3)> = None;
+        let mut stack: Vec<Entity> = self.selection.clone();
+        while let Some(e) = stack.pop() {
+            if let Some(g) = world.get::<GlobalTransform>(e) {
+                let at = Vec3::from(g.0.translation);
+                points = Some(points.map_or((at, at), |(lo, hi)| (lo.min(at), hi.max(at))));
+            }
+            stack.extend(world.children(e));
+        }
+        self.frame_asked = Some(points);
+        self.say(String::from(if self.selection.is_empty() {
+            "Framing the scene"
+        } else {
+            "Framing the selection"
+        }));
+    }
+
+    /// Shift+F: the camera follows the active entity as it moves, until the camera is
+    /// panned or flown; again, it stops.
+    fn toggle_follow(&mut self, world: &World) {
+        if self.follow.take().is_some() {
+            self.say(String::from("Not following"));
+            return;
+        }
+        let Some(e) = self.active() else {
+            self.say(String::from("Nothing selected to follow"));
+            return;
+        };
+        let Some(g) = world.get::<GlobalTransform>(e) else {
+            return;
+        };
+        self.follow = Some((e, Vec3::from(g.0.translation)));
+        let name = world.get::<Name>(e).map_or("the selection", Name::as_str);
+        self.say(format!("Following {name} (Shift+F again: stop)"));
+    }
+
+    /// 1 to 9: flies to bookmark `n`; Ctrl with the digit sets it to the camera as it is.
+    fn bookmark(&mut self, world: &World, n: usize, set: bool) {
+        if set {
+            self.bookmarks[n] = Some(self.orbit);
+            self.write_session(world);
+            self.say(format!("Bookmark {} set (Ctrl+{0}; {0} goes there)", n + 1));
+        } else if let Some(to) = self.bookmarks[n] {
+            self.follow = None;
+            self.camera_move = Some((self.orbit, to, Instant::now()));
+        } else {
+            self.say(format!("No bookmark {} yet: Ctrl+{0} sets it", n + 1));
+        }
+    }
+
     /// Names the entity of the newest pick's instance (`slot_of` gives an entity's), as
     /// the entity under the pointer, and answers a click waiting for that pixel.
     fn resolve_pick(&mut self, world: &World, slot_of: impl Fn(Entity) -> Option<u32>) {
@@ -3584,6 +3739,14 @@ impl Editor {
             self.start_key_transform(world, kinds[i]);
         } else if id == ids.keys {
             self.pick_keys(world);
+        } else if id == ids.frame {
+            self.frame_selection(world);
+        } else if id == ids.follow {
+            self.toggle_follow(world);
+        } else if let Some(n) = ids.go_bookmark.iter().position(|&b| b == id) {
+            self.bookmark(world, n, false);
+        } else if let Some(n) = ids.set_bookmark.iter().position(|&b| b == id) {
+            self.bookmark(world, n, true);
         } else if id == ids.pick_transparent {
             self.pick_transparent = !self.pick_transparent;
             // The pointer's pixel is picked again the new way.
@@ -4039,6 +4202,18 @@ impl Editor {
             self.orbit.pitch = pitch;
             self.orbit.distance = distance;
         }
+        self.bookmarks = [None; 9];
+        for &(n, [x, y, z], yaw, pitch, distance) in &view.bookmarks {
+            if let Some(b) = self.bookmarks.get_mut(usize::from(n).wrapping_sub(1)) {
+                *b = Some(OrbitCamera {
+                    target: Vec3::new(x, y, z),
+                    yaw,
+                    pitch,
+                    distance,
+                    ..self.orbit
+                });
+            }
+        }
         let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
         let index: HashMap<SceneId, Entity> =
             q.iter_readonly(world).map(|(e, &id)| (id, e)).collect();
@@ -4082,6 +4257,14 @@ impl Editor {
             tree_filter: self.tree_filter.clone(),
             inspector_filter: self.inspector_filter.clone(),
             tool: self.active_tool,
+            bookmarks: self
+                .bookmarks
+                .iter()
+                .enumerate()
+                .filter_map(|(n, b)| {
+                    b.map(|c| (n as u8 + 1, c.target.to_array(), c.yaw, c.pitch, c.distance))
+                })
+                .collect(),
         }
     }
 
@@ -5161,6 +5344,28 @@ impl Overlay for EditorOverlay {
                     if declared == PickPass::Empty {
                         editor.picked = Some((request, view.frame_number, None));
                     }
+                }
+                // Framing (F): the selection's world boxes (its outline's items but the
+                // hovered one) with its places, or the scene's bounds.
+                if let Some(points) = editor.frame_asked.take() {
+                    let mut bounds = points;
+                    if let Some(scene) = view.scene {
+                        if points.is_none() {
+                            let (lo, hi) = scene.bounds();
+                            bounds = (lo.cmple(hi).all()).then_some((lo, hi));
+                        } else {
+                            for item in &editor.outline_items {
+                                if item.class != OutlineClass::Hovered
+                                    && let Some((lo, hi)) = scene.slot_box(item.slot)
+                                {
+                                    bounds = Some(
+                                        bounds.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    editor.framed = bounds;
                 }
                 // The outlines, below the panels.
                 if let Some(scene) = view.scene
@@ -7935,6 +8140,136 @@ mod tests {
         ed.update(&mut world);
         assert!(ed.box_drag.is_none() && ed.pending_click.is_none());
         assert_eq!(ed.selection, [back, middle, front]);
+    }
+
+    /// Ends the camera's move at once: the next update puts the camera where it goes.
+    fn settle(ed: &mut Editor, world: &mut World) {
+        if let Some((_, _, since)) = &mut ed.camera_move {
+            *since -= std::time::Duration::from_secs(1);
+        }
+        ed.update(world);
+        assert!(ed.camera_move.is_none(), "settled");
+    }
+
+    #[test]
+    fn f_frames_the_selection_or_the_scene() {
+        let mut world = World::new();
+        let near = cube_at(&mut world, Transform::from_xyz(1.0, 0.0, 0.0));
+        let child = cube_at(&mut world, Transform::from_xyz(3.0, 2.0, 0.0));
+        world.set_parent(child, Some(near)).unwrap();
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder("frame"),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        ed.update(&mut world);
+        // Nothing selected: the scene's bounds, which the overlay knows.
+        let frame = ed.ids.frame;
+        ed.run(&mut world, frame);
+        assert_eq!(ed.frame_asked, Some(None));
+        assert_eq!(ed.shortcuts.get(&frame).map(String::as_str), Some("F"));
+        // Selected: its places and its child's.
+        ed.selection = vec![near];
+        ed.run(&mut world, frame);
+        assert_eq!(
+            ed.frame_asked,
+            Some(Some((Vec3::new(1.0, 0.0, 0.0), Vec3::new(3.0, 2.0, 0.0))))
+        );
+        // The overlay's answer (with the meshes' boxes): the camera flies there, looking
+        // the same way, near enough for the box to fill the view.
+        let (yaw, pitch) = (ed.orbit.yaw, ed.orbit.pitch);
+        ed.framed = Some((Vec3::new(0.5, -0.5, -0.5), Vec3::new(3.5, 2.5, 0.5)));
+        ed.update(&mut world);
+        assert!(ed.camera_move.is_some(), "a move");
+        settle(&mut ed, &mut world);
+        assert!((ed.orbit.target - Vec3::new(2.0, 1.0, 0.0)).length() < 1e-4);
+        assert_eq!((ed.orbit.yaw, ed.orbit.pitch), (yaw, pitch));
+        let radius = Vec3::new(3.0, 3.0, 1.0).length() * 0.5;
+        assert!(ed.orbit.distance > radius && ed.orbit.distance < radius * 4.0);
+        // A point (a light) gets a little room.
+        ed.framed = Some((Vec3::splat(5.0), Vec3::splat(5.0)));
+        ed.update(&mut world);
+        settle(&mut ed, &mut world);
+        assert!(ed.orbit.distance > FRAME_RADIUS);
+    }
+
+    #[test]
+    fn shift_f_follows_the_active_entity_until_it_is_asked_again() {
+        let mut world = World::new();
+        let cube = cube_at(&mut world, Transform::IDENTITY);
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder("follow"),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        let follow = ed.ids.follow;
+        ed.run(&mut world, follow);
+        assert!(ed.follow.is_none(), "nothing to follow");
+        ed.selection = vec![cube];
+        ed.run(&mut world, follow);
+        assert!(ed.follow.is_some());
+        assert_eq!(
+            ed.shortcuts.get(&follow).map(String::as_str),
+            Some("Shift+F")
+        );
+        let target = ed.orbit.target;
+        world.insert(
+            cube,
+            GlobalTransform(Transform::from_xyz(2.0, 0.0, -1.0).to_affine()),
+        );
+        ed.update(&mut world);
+        assert!((ed.orbit.target - (target + Vec3::new(2.0, 0.0, -1.0))).length() < 1e-5);
+        ed.run(&mut world, follow);
+        assert!(ed.follow.is_none(), "again: it stops");
+        world.insert(cube, GlobalTransform(Transform::IDENTITY.to_affine()));
+        ed.update(&mut world);
+        assert!((ed.orbit.target - (target + Vec3::new(2.0, 0.0, -1.0))).length() < 1e-5);
+    }
+
+    #[test]
+    fn bookmarks_are_set_with_ctrl_gone_to_and_kept() {
+        let dir = project("bookmarks");
+        let (mut world, mut ed) = start(&dir);
+        ed.update(&mut world);
+        let (go, set) = (ed.ids.go_bookmark[2], ed.ids.set_bookmark[2]);
+        assert_eq!(ed.shortcuts.get(&go).map(String::as_str), Some("3"));
+        assert_eq!(ed.shortcuts.get(&set).map(String::as_str), Some("Ctrl+3"));
+        ed.run(&mut world, go);
+        assert!(ed.camera_move.is_none(), "none set yet");
+        ed.orbit.target = Vec3::new(4.0, 1.0, -2.0);
+        ed.orbit.yaw = 2.0;
+        ed.orbit.distance = 7.0;
+        let marked = ed.orbit;
+        ed.run(&mut world, set);
+        // Elsewhere, then back: the camera flies there.
+        ed.orbit.target = Vec3::ZERO;
+        ed.orbit.yaw = -1.0;
+        ed.orbit.distance = 30.0;
+        ed.run(&mut world, go);
+        settle(&mut ed, &mut world);
+        assert!((ed.orbit.target - marked.target).length() < 1e-4);
+        assert!((ed.orbit.yaw - marked.yaw).abs() < 1e-4);
+        assert!((ed.orbit.distance - marked.distance).abs() < 1e-3);
+        // The session keeps them with the scene's view.
+        ed.end_session(&mut world);
+        let (_, ed) = start(&dir);
+        let kept = ed.bookmarks[2].expect("kept");
+        assert!((kept.target - marked.target).length() < 1e-5);
+        assert!(
+            ed.bookmarks
+                .iter()
+                .enumerate()
+                .all(|(n, b)| (n == 2) == b.is_some())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

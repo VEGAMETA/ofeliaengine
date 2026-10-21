@@ -138,8 +138,12 @@ Last updated: 2026-10-20.
       Ctrl takes out, Escape takes it back; what it takes is outlined while dragging. A
       whole-view box on Sponza: RTX 110 µs, iGPU 2.2 ms (one atomic per wave: from 1 ms
       and 3.4 ms on the RTX).
-  - **Next:** the rest of E2 (ADR 0107 §7): placement on surfaces, frame, bookmarks,
-    overlays.
+  - **E2-4, framing** (#280): F frames the selection (its world boxes from the GPU scene)
+    or the scene, the camera flying there in 0.2 s; Shift+F follows the active entity;
+    Ctrl+1..9 keeps a camera bookmark, 1..9 goes back, kept by the session. The gaps
+    between docks are the window's color (#279: they showed the output's old memory).
+  - **Next:** the rest of E2 (ADR 0107 §7): placement on surfaces (End, Ctrl+Shift
+    drag, drops), snapping steps in the tool bar, pivots, overlays.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

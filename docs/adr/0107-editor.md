@@ -887,6 +887,28 @@ W, A, S, D fly the camera as in Godot, the wheel sets the speed).
 - **Not done:** acceleration while a key is held; flying with the middle button; focusing
   the selection (F).
 
+## As built (E2-4, 2026-10-21)
+
+- **F frames the selection** (with its children; nothing selected, the scene):
+  - the command takes the entities' places; the overlay unites them with their world
+    boxes from the GPU scene's frame (`SceneFrame::slot_box`, now public), or takes the
+    scene's bounds;
+  - the camera flies there in 0.2 s, easing out (`OrbitCamera::toward`: the target along
+    a line, the turn the short way round, the distance in proportion), keeping its turn
+    and elevation, from as far as fits the bounds' sphere in the view's narrower side
+    with a tenth to spare (`OrbitCamera::framing`); a point gets half a meter;
+  - a drag or the wheel on the camera takes it back from the move.
+- **Shift+F follows** the active entity: its motion carries the target (and a move's
+  end); a pan, a look around or a flight ends it, as does Shift+F again.
+- **Bookmarks:** Ctrl+1..9 keeps the camera's place, 1..9 flies there (Unreal's keys, in
+  every key map; digits run no shortcut while a field is typed in or a keyboard
+  transform runs). The session keeps them in the scene's view (`bookmark = (n, x, y, z,
+  yaw, pitch, distance)`).
+- **Tested:** the framing's fit and the move's short way round; F asking for the
+  selection's places or the scene, then flying to the overlay's bounds; following and
+  stopping; bookmarks set, gone to and kept by the session; on the player, both GPUs: F
+  puts the cube in the view's middle, three times larger on the screen.
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and

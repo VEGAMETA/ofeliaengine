@@ -2414,8 +2414,9 @@ impl SceneFrame<'_> {
     }
 
     /// A live slot's world box (its minimum and maximum corners) from its transform as
-    /// last uploaded, for passes that bound chosen instances on the screen (outlines).
-    pub(crate) fn slot_box(&self, slot: u32) -> Option<(Vec3, Vec3)> {
+    /// last uploaded: what passes that bound chosen instances on the screen use (outlines),
+    /// and what the editor frames.
+    pub fn slot_box(&self, slot: u32) -> Option<(Vec3, Vec3)> {
         let s = self.scene.slots.get(slot as usize).filter(|s| s.alive)?;
         let d = self.scene.data.get(slot as usize)?;
         let (c, e) =
