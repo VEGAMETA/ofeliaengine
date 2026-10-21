@@ -142,7 +142,7 @@ Last updated: 2026-10-20.
     or the scene, the camera flying there in 0.2 s; Shift+F follows the active entity;
     Ctrl+1..9 keeps a camera bookmark, 1..9 goes back, kept by the session. The gaps
     between docks are the window's color (#279: they showed the output's old memory).
-  - **E2-5, surfaces** (#PR): a surface pick (ADR 0109: the candidates under a pixel but
+  - **E2-5, surfaces** (#281): a surface pick (ADR 0109: the candidates under a pixel but
     some left out, ids and depths of a 3 × 3 square: point and normal); Ctrl+Shift drags
     the selection over surfaces, its box's face on them; End drops each selected entity
     onto the surface below it, as one undo step.
