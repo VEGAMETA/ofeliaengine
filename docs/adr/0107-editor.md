@@ -931,6 +931,23 @@ W, A, S, D fly the camera as in Godot, the wheel sets the speed).
   assets dropped from the file browser onto surfaces (with E4's browser); V's vertex
   snapping.
 
+## As built (E2-6, 2026-10-21)
+
+- **Steps in the tool bar** (the UX note's §3, Unreal's way): beside the grid button the
+  position, angle and scale steps, each opening a menu of values (positions 0.01 to 5 m,
+  angles 1° to 90°, scales 0.01 to 1; the current one checked), dim while snapping is
+  off. Their labels are kept and made again only when a step changes (no text made each
+  frame). "Snapping: Position Step…", "Angle Step…" and "Scale Step…" offer the same
+  values in the palette; the session keeps them.
+- **Pivots:** the middle of the selected entities no selected entity carries (the
+  default), each entity's own origin (turns and scales about itself, the gizmo in their
+  middle), or the active entity's origin (the gizmo there). The tool bar's right end and
+  `.` (`Transform: Next Pivot`) cycle them; gizmo drags and keyboard transforms both
+  follow (`Editor::set_targets`); the session keeps it.
+- **Tested:** the steps' values in the palette, set and kept; a quarter turn of two
+  entities about their middle, their own origins and the active one, and the pivot kept.
+- **Not done:** typing a step not in the menus (the palette's list could take a number).
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and
