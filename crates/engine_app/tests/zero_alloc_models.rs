@@ -1,7 +1,8 @@
 //! CLAUDE.md §5: zero heap allocations per frame in steady state with models (ADR 0108):
 //! entities drawn by asset, built-in meshes and material files, their models shown and
-//! hidden in turn every tick, so the player keeps their renderers in step every frame. One
-//! test per file, so nothing else allocates concurrently.
+//! hidden in turn every tick, so the player keeps their renderers in step every frame; and
+//! a group of blockout brushes (ADR 0110), which costs nothing while it stays as it is.
+//! One test per file, so nothing else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -9,7 +10,7 @@ mod common;
 #[path = "common/counting.rs"]
 mod counting;
 
-use engine_app::{MaterialFile, Model, builtin};
+use engine_app::{Brush, BrushGroup, BrushOp, BrushShape, MaterialFile, Model, builtin};
 use engine_core::math::Vec3;
 use engine_ecs::Transform;
 use engine_scene::{AssetId, AssetPaths, AssetRef};
@@ -51,7 +52,16 @@ fn frames_with_models_do_not_allocate() {
         Transform::from_xyz(0.0, 0.8, -1.0).with_scale(Vec3::splat(0.4)),
         Model::new(builtin::CUBE, builtin::MATERIAL),
     ));
+    let group = world.spawn((Transform::IDENTITY, BrushGroup::default()));
+    for b in [
+        Brush::new(BrushShape::Box, Vec3::new(3.0, 0.2, 2.0)),
+        Brush::new(BrushShape::Box, Vec3::new(1.0, 0.4, 1.0)).with_op(BrushOp::Cut),
+    ] {
+        let e = world.spawn((Transform::from_xyz(0.0, -1.0, -2.0), b));
+        world.set_parent(e, Some(group)).unwrap();
+    }
     counting::assert_steady_state(&mut player, &mut game);
     assert_eq!(player.assets().problem(AssetRef::file(id)), None);
+    assert_eq!(player.blockout().meshes(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }

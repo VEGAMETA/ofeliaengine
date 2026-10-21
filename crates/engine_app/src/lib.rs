@@ -60,6 +60,7 @@
 //! runs the same executable.
 
 mod assets;
+mod blockout;
 mod entry;
 mod game;
 mod net;
@@ -76,6 +77,7 @@ mod text;
 mod videos;
 
 pub use assets::{Alpha, Assets, MaterialFile, Model, builtin};
+pub use blockout::{Blockout, Brush, BrushGroup, BrushOp, BrushPlane, BrushShape};
 /// Networking's replication (ADR 0074): the schema, `Replicated`, lag compensation.
 pub use engine_net as netcode;
 pub use engine_platform::display::DisplayInfo;

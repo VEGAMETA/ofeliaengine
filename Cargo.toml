@@ -20,6 +20,7 @@ engine_brixelizer = { path = "crates/engine_brixelizer" }
 engine_anim = { path = "crates/engine_anim" }
 engine_core = { path = "crates/engine_core" }
 engine_collision = { path = "crates/engine_collision" }
+engine_brush = { path = "crates/engine_brush" }
 engine_text = { path = "crates/engine_text" }
 engine_loc = { path = "crates/engine_loc" }
 engine_ecs = { path = "crates/engine_ecs" }

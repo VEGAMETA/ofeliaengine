@@ -447,6 +447,8 @@ pub struct Player {
     runtime: Runtime<InstanceId>,
     /// The meshes and materials scenes name (ADR 0108), and the models drawn with them.
     assets: crate::Assets,
+    /// Blockout brushes' meshes (ADR 0110).
+    blockout: crate::Blockout,
     /// The part of the output the scene covers ([`Player::set_view_rect`]); `None`: all of
     /// it.
     view_rect: Option<[u32; 4]>,
@@ -1118,6 +1120,7 @@ impl Player {
             first_present_ms: None,
             timing,
             assets: crate::Assets::new(settings.project.clone().unwrap_or_default()),
+            blockout: crate::Blockout::new(),
             view_rect: None,
             saves: SaveState {
                 folder: save_folder.clone(),
@@ -1178,6 +1181,11 @@ impl Player {
     /// The same, to learn asset paths or make an asset ahead of its first use.
     pub fn assets_mut(&mut self) -> &mut crate::Assets {
         &mut self.assets
+    }
+
+    /// The blockout brushes' meshes (ADR 0110).
+    pub fn blockout(&self) -> &crate::Blockout {
+        &self.blockout
     }
 
     /// Frame generation and latency control over the swapchain (again after it is made
@@ -1922,8 +1930,10 @@ impl Player {
             let timing = &mut self.timing;
             let mut net = self.net.as_deref_mut();
             let assets = &mut self.assets;
+            let blockout = &mut self.blockout;
             let geometry = &mut self.geometry;
             let materials = &mut self.materials;
+            let frame_number = frame.number;
             let present = |world: &mut World, (): &(), alpha: f32| {
                 if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                     input.sample_frame(Instant::now());
@@ -1932,6 +1942,8 @@ impl Player {
                 // Models (ADR 0108): their meshes and materials reach the GPU this frame,
                 // the pools beginning theirs after the simulation.
                 assets.sync(world, geometry, materials);
+                // Brushes (ADR 0110): their groups evaluated again where they changed.
+                blockout.sync(world, geometry, materials, frame_number);
             };
             match net.as_mut() {
                 // Joined: the client runs the frame's ticks (its predictions, and past ones
@@ -1981,6 +1993,13 @@ impl Player {
         report.propagate = stages.propagate_us;
         report.extract = stages.extract_us;
         report.interpolate = stages.interpolate_us + stages.present_us;
+        // The brushes' grid texture, once a brush is drawn.
+        self.blockout.make_grid(
+            &self.device,
+            &mut self.allocator,
+            &mut self.textures,
+            &mut self.materials,
+        );
         // Saves asked for during the ticks: taken now, at the tick boundary.
         self.process_saves(game, elapsed);
         let t = Instant::now();
