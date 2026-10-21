@@ -34,7 +34,8 @@ cargo run --release -p engine_cli -- new ../mygame
 | `scenes/main.scene` | the scene: a floor, a cube, the sun, a camera ([scenes.md](scenes.md)) |
 | `materials/` | the scene's materials: the floor's grey, the cube's red |
 | `Cargo.toml` | the game's crate, depending on the engine's player (`engine_app`), with the editor behind its `editor` feature |
-| `.cargo/config.toml`, `rust-toolchain.toml` | the engine's linker, instruction set and Rust version |
+| `.cargo/config.toml`, `rust-toolchain.toml` | the engine's linker, instruction set and Rust version, and its build that every game on this machine shares |
+| `Cargo.lock` | the engine's dependencies at the versions it is tested with |
 | `sounds/` | your sound files ([audio.md](audio.md)) |
 
 ## 3. Run it
@@ -44,10 +45,17 @@ cd ../mygame
 cargo run
 ```
 
-- **The first build compiles the engine:** 74 s on the reference machine (Ryzen 7 7700).
-  Playing and the editor use the same build of it (the `dev` profile, in `target/debug`):
-  your code builds fast with its checks, the engine runs as in a release build.
-- **After an edit,** your game rebuilds in about 2.5 s.
+- **The first build compiles the engine, once for every game on this machine:** about
+  100 s on the reference machine (Ryzen 7 7700), and about 20 s more for the editor. Every
+  later game builds only its own code: about 4 s.
+  - **Where it goes:** the engine's build is in your cargo folder
+    (`%USERPROFILE%\.cargo\ofeliaengine\build`), the game's program in its
+    `target/debug`.
+  - **One build for playing and editing:** both use the `dev` profile. Your code builds
+    fast with its checks; the engine runs as in a release build.
+- **After an edit,** your game rebuilds in about 1.5 s.
+- **Cleaning:** `cargo clean -p mygame` cleans the game's files. A bare `cargo clean`
+  removes the engine's build too, and the next build makes it again.
 
 ![The quick start's game](quick-start.png)
 
@@ -69,7 +77,8 @@ The same game in its editor (`ofeliaengine edit` starts it too). It opens
 - **Change the code** (the cube's speed in `src/main.rs`) and save: the editor rebuilds the
   game in the background and restarts with it, the scene as it was.
 
-The first build with the editor compiles it too. Its keys and tools:
+The first build with the editor compiles it too, once for every game. Its keys and
+tools:
 [editor.md](editor.md).
 
 ## 5. The code

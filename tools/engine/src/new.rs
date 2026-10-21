@@ -145,7 +145,7 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
     });
     let mut files: Vec<(&str, String)> = vec![
         ("Cargo.toml", manifest(&name, &engine)),
-        (".cargo/config.toml", String::from(CONFIG)),
+        (".cargo/config.toml", config(&name)),
         ("src/main.rs", MAIN.replace("pub(crate) ", "")),
         ("sounds/README.md", String::from(SOUNDS)),
         ("rust-toolchain.toml", String::from(TOOLCHAIN)),
@@ -154,6 +154,11 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
         ("README.md", readme(&name, &engine)),
     ];
     files.extend(assets()?);
+    // The engine's dependencies at the versions it is tested with, which every game on it
+    // then shares: a lock of the game's own would take the newest ones (ADR 0111).
+    if let Ok(lock) = std::fs::read_to_string(engine.join("Cargo.lock")) {
+        files.push(("Cargo.lock", lock));
+    }
     for (path, text) in &files {
         let path = dir.join(path);
         if let Some(parent) = path.parent() {
@@ -169,8 +174,14 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
     println!(
         "next:\n  cd {}\n  cargo run                      play it\n  \
          cargo run --features editor    edit it; a code change rebuilds and restarts it \
-         (`ofeliaengine edit`)",
-        dir.display()
+         (`ofeliaengine edit`)\n\
+         the engine builds once for every game on this machine (in {}): the first \
+         game's first build takes a couple of minutes, every other game's seconds",
+        dir.display(),
+        shared_build().map_or_else(
+            || String::from("your cargo folder"),
+            |p| p.display().to_string()
+        )
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -236,13 +247,38 @@ panic = "abort"
     )
 }
 
-/// The engine's linker and instruction set (CLAUDE.md §5: the Windows 11 24H2 minimum).
-const CONFIG: &str = r#"[target.x86_64-pc-windows-msvc]
+/// Where every game's build of the engine is, as `.cargo/config.toml` writes it.
+const SHARED_BUILD: &str = "{cargo-cache-home}/ofeliaengine/build";
+
+/// [`SHARED_BUILD`] on this machine: cargo's home is `CARGO_HOME`, else `.cargo` in the
+/// user's folder.
+fn shared_build() -> Option<PathBuf> {
+    let home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join(".cargo")))?;
+    Some(home.join("ofeliaengine").join("build"))
+}
+
+/// The engine's linker and instruction set (CLAUDE.md §5: the Windows 11 24H2 minimum),
+/// and the build of the engine every game shares (ADR 0111).
+fn config(name: &str) -> String {
+    format!(
+        r#"[target.x86_64-pc-windows-msvc]
 # `rust-lld` ships with rustup; nothing else to install.
 linker = "rust-lld.exe"
 # The instruction set every Windows 11 24H2 machine has.
 rustflags = ["-C", "target-cpu=x86-64-v2"]
-"#;
+
+[build]
+# The engine's build, shared by every game on this machine, in your cargo folder
+# (`%USERPROFILE%\.cargo` unless CARGO_HOME says otherwise): the engine compiles once, and a
+# new game builds only its own code. The game's program still lands in its `target`.
+# `cargo clean -p {name}` cleans this game's files; a bare `cargo clean` removes the
+# engine's build too, which the next build makes again.
+build-dir = "{SHARED_BUILD}"
+"#
+    )
+}
 
 const SOUNDS: &str = "# Sounds\n\nYour game's sound files (WAV, Ogg Vorbis, Opus, FLAC), by their paths from here:\n`AudioSource::new(\"music/theme.ogg\")`. While you develop the game plays a changed file at\nonce; for a release, `ofeliaengine sounds build sounds -o sounds.pack`.\n";
 
@@ -258,6 +294,9 @@ fn readme(name: &str, engine: &Path) -> String {
          A red cube turns on a floor; fly around it with WASD and the mouse.\n\
          `src/main.rs` is the game's code, `scenes/main.scene` its scene (what the editor\n\
          edits) and `materials/` the scene's materials.\n\n\
+         The engine builds once for every game on this machine, in your cargo folder\n\
+         (`.cargo/config.toml`), so a new game builds only its own code. `cargo clean -p {name}`\n\
+         cleans this game's files; a bare `cargo clean` removes the engine's build too.\n\n\
          Next: the guides in `{docs}`:\n\
          `quick-start.md` first, then `editor.md`, `player.md`, `input.md`, `scenes.md` and\n\
          the rest.\n"
@@ -311,7 +350,16 @@ mod tests {
             main.contains("engine_app::main!(settings, start);") && !main.contains("pub(crate)")
         );
         assert!(read(".gitignore").lines().any(|l| l == "/.ofelia/"));
-        assert!(game.join(".cargo/config.toml").is_file());
+        // The engine's build, shared, and its dependencies' versions.
+        let config = read(".cargo/config.toml");
+        assert!(
+            config
+                .lines()
+                .any(|l| l == "build-dir = \"{cargo-cache-home}/ofeliaengine/build\"")
+        );
+        assert!(config.contains("`cargo clean -p my_game`"));
+        let engine_lock = std::fs::read_to_string(this_engine().join("Cargo.lock")).unwrap();
+        assert_eq!(read("Cargo.lock"), engine_lock);
         assert!(game.join("sounds/README.md").is_file());
         assert!(game.join("rust-toolchain.toml").is_file());
 
