@@ -187,7 +187,7 @@ Last updated: 2026-10-20.
     not 1.9 GB. The DLL, measured: 0.03 s of a 1.5 s rebuild, and the game's own
     components lost (the reflected registry is a linkme slice per module); it waits for
     hot reload of game code.
-  - **E2b-3a, drawing brushes** (#PR): B on the surface under the pointer (the
+  - **E2b-3a, drawing brushes** (#291): B on the surface under the pointer (the
     selection's too), Shift+B a cut; the first corner, the base, the height by clicks or
     typed sizes; R turns stairs and wedges; the brush live in its undo step, so a doorway
     opens as it is drawn; edges and sizes over it.
