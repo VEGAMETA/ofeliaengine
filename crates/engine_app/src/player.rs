@@ -1186,6 +1186,12 @@ impl Player {
         &mut self.assets
     }
 
+    /// Reads asset file `file` again on its next use, and makes the models that use it
+    /// again ([`crate::Assets::reload`]): after the file was written anew.
+    pub fn reload_asset(&mut self, file: engine_scene::AssetId) {
+        self.assets.reload(&mut self.runtime.world, file);
+    }
+
     /// The blockout brushes' meshes (ADR 0110).
     pub fn blockout(&self) -> &crate::Blockout {
         &self.blockout
@@ -1957,7 +1963,7 @@ impl Player {
                 game_cell.borrow_mut().present(world, alpha);
                 // Models (ADR 0108): their meshes and materials reach the GPU this frame,
                 // the pools beginning theirs after the simulation.
-                assets.sync(world, geometry, materials);
+                assets.sync(world, geometry, materials, frame_number);
                 // Brushes (ADR 0110): their groups evaluated again where they changed.
                 blockout.sync(world, geometry, materials, frame_number);
             };
@@ -2022,6 +2028,7 @@ impl Player {
             &mut self.allocator,
             &mut self.textures,
             &mut self.materials,
+            (&self.bindless, frame.number),
         );
         // Saves asked for during the ticks: taken now, at the tick boundary.
         self.process_saves(game, elapsed);

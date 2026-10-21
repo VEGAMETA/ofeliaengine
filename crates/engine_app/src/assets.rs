@@ -34,7 +34,7 @@ use engine_reflect::Reflect;
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
 use engine_render::mesh::{GeometryPool, MeshId, OwnedMeshData};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
-use engine_rhi::{Allocator, Device, Wrap};
+use engine_rhi::{Allocator, Bindless, Device, Wrap};
 use engine_runtime::MeshRenderer;
 use engine_scene::{AssetId, AssetPaths, AssetRef, LoadError, ValueReport};
 use std::collections::HashMap;
@@ -572,6 +572,11 @@ pub struct Assets {
     pending_textures: Vec<PendingTexture>,
     /// glTF materials waiting for their textures.
     pending_materials: Vec<PendingMaterial>,
+    /// Parts of files read again ([`Self::reload`]), freed in the next frame: meshes and
+    /// materials in [`Self::sync`], textures in [`Self::make_textures`].
+    retired_meshes: Vec<MeshId>,
+    retired_materials: Vec<MaterialId>,
+    retired_textures: Vec<TextureId>,
     /// Why an asset could not be made, said once.
     problems: HashMap<AssetRef, String>,
     changes: Option<Changes>,
@@ -596,6 +601,9 @@ impl Assets {
             textures: HashMap::new(),
             pending_textures: Vec::new(),
             pending_materials: Vec::new(),
+            retired_meshes: Vec::new(),
+            retired_materials: Vec::new(),
+            retired_textures: Vec::new(),
             problems: HashMap::new(),
             changes: None,
             orphans: None,
@@ -624,6 +632,46 @@ impl Assets {
     /// Why an asset could not be made, if it could not.
     pub fn problem(&self, asset: AssetRef) -> Option<&str> {
         self.problems.get(&asset).map(String::as_str)
+    }
+
+    /// Reads file `file` again on its next use: its meshes, materials and textures made
+    /// so far are forgotten (and freed in the next frame), what could not be made is tried
+    /// again, and every model in `world` that uses the file is made again. What the editor
+    /// does after writing the file (a bake over an earlier one).
+    pub fn reload(&mut self, world: &mut World, file: AssetId) {
+        self.meshes.retain(|asset, &mut mesh| {
+            let keep = asset.file != file;
+            if !keep {
+                self.retired_meshes.push(mesh);
+            }
+            keep
+        });
+        self.materials.retain(|asset, &mut material| {
+            let keep = asset.file != file;
+            if !keep {
+                self.retired_materials.push(material);
+            }
+            keep
+        });
+        self.textures.retain(|key, made| {
+            let keep = key.file != file;
+            if !keep && let Some(texture) = made {
+                self.retired_textures.push(*texture);
+            }
+            keep
+        });
+        self.pending_textures.retain(|t| t.key.file != file);
+        self.problems.retain(|asset, _| asset.file != file);
+        self.files.remove(&file);
+        let mut models = QueryState::<(Entity, &Model)>::new(world);
+        let using: Vec<Entity> = models
+            .iter_readonly(world)
+            .filter(|(_, m)| m.mesh.file == file || m.material.file == file)
+            .map(|(e, _)| e)
+            .collect();
+        for e in using {
+            world.mark_changed::<Model>(e);
+        }
     }
 
     fn fail(&mut self, asset: AssetRef, why: String) {
@@ -763,7 +811,11 @@ impl Assets {
         allocator: &mut Allocator,
         textures: &mut TexturePool,
         materials: &mut MaterialTable,
+        retire: (&Bindless, u64),
     ) {
+        for texture in self.retired_textures.drain(..) {
+            textures.remove(texture, retire.1, retire.0);
+        }
         if self.pending_materials.is_empty() && self.pending_textures.is_empty() {
             return;
         }
@@ -852,7 +904,14 @@ impl Assets {
         world: &mut World,
         geometry: &mut GeometryPool,
         materials: &mut MaterialTable,
+        frame: u64,
     ) {
+        for mesh in self.retired_meshes.drain(..) {
+            geometry.remove_mesh(mesh, frame);
+        }
+        for material in self.retired_materials.drain(..) {
+            materials.remove(material);
+        }
         let changes = self.changes.get_or_insert_with(|| QueryState::new(world));
         self.changed.clear();
         self.changed
@@ -1062,6 +1121,60 @@ mod tests {
         assert_eq!(data.uvs[0], [0.5, 0.5]);
         assert_eq!(data.uvs[5], [0.0, 0.0]);
         assert!(data.tangents.is_empty());
+    }
+
+    /// What a baked level's file costs on the frame's thread the first time its parts are
+    /// used: 4,000 boxes (48,000 triangles) in two tints, over the grid. Run with
+    /// `--ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement"]
+    fn measure_a_baked_files_first_use() {
+        let mut brushes = Vec::new();
+        for i in 0..4000 {
+            let (x, z) = ((i % 64) as f32 * 2.0, (i / 64) as f32 * 2.0);
+            let tint = if i % 2 == 0 {
+                [0.72; 4]
+            } else {
+                [0.8, 0.1, 0.1, 1.0]
+            };
+            let mut q = quad(tint, 0.0);
+            for p in &mut q.positions {
+                p[0] += x;
+                p[2] += z;
+            }
+            // A box's worth of triangles: the quad six times.
+            let mut b = q.clone();
+            for _ in 1..6 {
+                let first = b.positions.len() as u32;
+                b.positions.extend_from_slice(&q.positions);
+                b.normals.extend_from_slice(&q.normals);
+                b.uvs.extend_from_slice(&q.uvs);
+                b.indices.extend(q.indices.iter().map(|i| i + first));
+            }
+            brushes.push(b);
+        }
+        let png = crate::grid_png();
+        let t = std::time::Instant::now();
+        let baked = crate::bake::glb("Level", &brushes, &png);
+        let write = t.elapsed();
+        let t = std::time::Instant::now();
+        let scene = engine_assets::import_gltf(&baked.bytes, None).unwrap();
+        let import = t.elapsed();
+        let t = std::time::Instant::now();
+        let meshes: Vec<OwnedMeshData> = scene.meshes.iter().map(gltf_mesh).collect();
+        let merge = t.elapsed();
+        let t = std::time::Instant::now();
+        let image = decode_image(&png).unwrap();
+        let levels = build_mips(&image, TextureUsage::Color);
+        let texture = t.elapsed();
+        let triangles: usize = meshes.iter().map(|m| m.indices.len() / 3).sum();
+        println!(
+            "{} KB, {triangles} triangles: written {write:?}, imported {import:?}, merged {merge:?}, grid {}x{} decoded with {} levels {texture:?}",
+            baked.bytes.len() / 1024,
+            levels.width,
+            levels.height,
+            levels.levels.len()
+        );
     }
 
     #[test]

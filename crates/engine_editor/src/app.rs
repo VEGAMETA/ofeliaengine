@@ -75,8 +75,8 @@ use crate::snap::{Quantity, Snapping};
 use crate::transform::{self, KeyTransform};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
 use engine_app::{
-    AppError, Brush, BrushGroup, BrushOp, BrushShape, Game, Model, Overlay, OverlayOutput,
-    OverlayPass, Player, PlayerSettings, Setup, Window, builtin,
+    AppError, AssetMeta, Brush, BrushGroup, BrushOp, BrushShape, Game, Model, Overlay,
+    OverlayOutput, OverlayPass, Player, PlayerSettings, Setup, Window, builtin,
 };
 use engine_core::math::{Affine3A, Quat, Vec2, Vec3, Vec4, look_at, vulkan_orthographic};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
@@ -89,7 +89,9 @@ use engine_render::pick::{
 };
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, Disabled, PointLight, SpotLight, Sun, look_rotation};
-use engine_scene::{AssetId, AssetPaths, Name, RootOrder, SaveOptions, SceneId, SceneRegistry};
+use engine_scene::{
+    AssetId, AssetPaths, AssetRef, Name, RootOrder, SaveOptions, SceneId, SceneRegistry,
+};
 use engine_ui::{Theme, Ui, UiKey};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -556,6 +558,9 @@ struct CommandIds {
     edit_faces: CommandId,
     /// A blockout group written as a glTF beside the scene (E2b-6).
     export: CommandId,
+    /// Blockout groups baked into glTF files drawn in their place, and back (E2b-6).
+    bake: CommandId,
+    unbake: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
     /// the next pivot.
     steps: [CommandId; 3],
@@ -635,6 +640,8 @@ fn commands() -> (Commands, CommandIds) {
         hollow: c.register("blockout.hollow", "Blockout", "Room or Solid"),
         edit_faces: c.register("blockout.edit_faces", "Blockout", "Edit Faces"),
         export: c.register("blockout.export", "Blockout", "Export to glTF"),
+        bake: c.register("blockout.bake", "Blockout", "Bake to Mesh"),
+        unbake: c.register("blockout.unbake", "Blockout", "Unbake"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
             c.register("snap.angle_step", "Snapping", "Angle Step…"),
@@ -1340,6 +1347,8 @@ struct Editor {
     face_edit: Option<FaceEdit>,
     /// A blockout group to write as a glTF once the player's frame is at hand (E2b-6).
     export_group: Option<Entity>,
+    /// Blockout groups to bake once the player's frame is at hand (E2b-6).
+    bake_groups: Vec<Entity>,
     /// The active brush's side handles (ADR 0110 E2b-3c), the one under the pointer, and
     /// a side being dragged.
     handles: Handles,
@@ -1764,6 +1773,7 @@ impl Editor {
             gizmo_drag: None,
             face_edit: None,
             export_group: None,
+            bake_groups: Vec::new(),
             handles: Handles::default(),
             hovered_side: None,
             side_drag: None,
@@ -4168,6 +4178,10 @@ impl Editor {
             .copied()
             .filter(|&e| world.get::<Brush>(e).is_some())
             .collect();
+        if let Some(group) = brushes.iter().find_map(|&e| baked_group(world, e)) {
+            self.say(baked_message(world, group));
+            return;
+        }
         if brushes.is_empty() {
             self.say(String::from("Select brushes to edit their faces (Tab)"));
             return;
@@ -4472,7 +4486,9 @@ impl Editor {
 
     /// The active brush's handles, alone in the selection or not; none for anything else.
     fn layout_sides(&mut self, world: &World, view: &ViewProj) {
-        let active = self.active().and_then(|e| {
+        // A baked group's brushes are not drawn: no handles on them.
+        let active = self.active().filter(|&e| baked_group(world, e).is_none());
+        let active = active.and_then(|e| {
             // An edited brush's size is not its planes': its faces are edited instead (Tab).
             let size = world
                 .get::<Brush>(e)
@@ -4833,12 +4849,32 @@ impl Editor {
         self.select_only(e);
     }
 
-    /// The blockout group a new brush joins, as [`Editor::brush_group`] finds it or, when the
-    /// scene has none, a new one after the roots: in the open history step.
+    /// The blockout group a new brush joins, as [`Editor::brush_group`] finds it, or the
+    /// scene's first that is not baked, or, when there is none, a new one after the roots:
+    /// in the open history step.
     fn brush_group_or_new(&mut self, world: &mut World) -> Entity {
-        if let Some(g) = self.brush_group(world) {
+        let live =
+            |world: &World, g: Entity| world.get::<BrushGroup>(g).is_some_and(|b| !b.is_baked());
+        let found = self.brush_group(world);
+        let group = match found {
+            Some(g) if live(world, g) => Some(g),
+            Some(_) => self
+                .roots(world, None)
+                .into_iter()
+                .find(|&r| live(world, r)),
+            None => None,
+        };
+        if let Some(g) = group {
             self.history.touch(world, g);
             return g;
+        }
+        if let Some(baked) = found {
+            let name = world
+                .get::<Name>(baked)
+                .map_or_else(|| String::from("The group"), |n| n.as_str().to_owned());
+            self.say(format!(
+                "{name} is baked: the new brush starts a group of its own"
+            ));
         }
         let name = self.sibling_name(world, None, "Blockout", None);
         let order = self.last_root_order(world);
@@ -4863,6 +4899,10 @@ impl Editor {
             .copied()
             .filter(|&e| world.get::<Brush>(e).is_some_and(|b| b.op == BrushOp::Add))
             .collect();
+        if let Some(group) = brushes.iter().find_map(|&e| baked_group(world, e)) {
+            self.say(baked_message(world, group));
+            return;
+        }
         if brushes.is_empty() {
             self.say(String::from(
                 "Select brushes that add to make them rooms, or solid again (Ctrl+H)",
@@ -5045,6 +5085,234 @@ impl Editor {
             ),
             Err(e) => format!("{name} not exported: {}: {e}", path.display()),
         }
+    }
+
+    /// The blockout groups the selection is in or, when it is in none, every group of the
+    /// scene: what Bake to Mesh and Unbake act on.
+    fn command_groups(&mut self, world: &mut World) -> Vec<Entity> {
+        let mut groups: Vec<Entity> = Vec::new();
+        for &e in &self.selection {
+            if let Some(g) = group_of(world, e)
+                && !groups.contains(&g)
+            {
+                groups.push(g);
+            }
+        }
+        if groups.is_empty() {
+            let mut stack = self.roots(world, None);
+            stack.reverse();
+            while let Some(e) = stack.pop() {
+                if world.get::<BrushGroup>(e).is_some() {
+                    groups.push(e);
+                }
+                let children: Vec<Entity> = world.children(e).collect();
+                stack.extend(children.into_iter().rev());
+            }
+        }
+        groups
+    }
+
+    /// Blockout: Bake to Mesh (ADR 0110 E2b-6): each of `groups` written as a glTF beside
+    /// the scene (named after it, or the file it was baked into before), a model of each
+    /// of the file's meshes put in it and its brushes no longer drawn, as one undo step;
+    /// the player reads the files again. What to say.
+    fn bake(&mut self, player: &mut Player, groups: &[Entity]) -> String {
+        let dir = self
+            .scene_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let mut brushes = Vec::new();
+        let mut made: Vec<Baked> = Vec::new();
+        let mut said: Vec<String> = Vec::new();
+        for &group in groups {
+            let world = &player.runtime().world;
+            let name = world
+                .get::<Name>(group)
+                .map_or_else(|| String::from("Blockout"), |n| n.as_str().to_owned());
+            player.blockout().baked(group, &mut brushes);
+            if brushes.is_empty() {
+                said.push(format!("{name} shows nothing to bake"));
+                continue;
+            }
+            let before = world
+                .get::<BrushGroup>(group)
+                .map_or(AssetRef::NONE, |b| b.baked);
+            // The file it was baked into, else one named after it that no other group's
+            // bake holds.
+            let taken: Vec<AssetId> = player
+                .blockout()
+                .groups()
+                .filter(|&(g, _)| g != group)
+                .filter_map(|(g, _)| world.get::<BrushGroup>(g).map(|b| b.baked.file))
+                .chain(made.iter().map(|m| m.file))
+                .filter(|f| !f.is_none())
+                .collect();
+            let file = self
+                .assets
+                .get(before)
+                .filter(|_| !before.is_none())
+                .map(str::to_owned)
+                .unwrap_or_else(|| self.bake_path(&dir, &name, &taken, &made));
+            let full = self.root.join(&file);
+            let baked = engine_app::bake::glb(&name, &brushes, &engine_app::grid_png());
+            let id = std::fs::write(&full, &baked.bytes)
+                .map_err(|e| format!("{}: {e}", full.display()))
+                .and_then(|()| AssetMeta::ensure(&full));
+            match id {
+                Ok(id) => {
+                    let triangles = brushes.iter().map(|b| b.indices.len() / 3).sum();
+                    made.push(Baked {
+                        group,
+                        name,
+                        before: before.file,
+                        file: id,
+                        path: file,
+                        parts: baked.parts,
+                        triangles,
+                    });
+                }
+                Err(e) => said.push(format!("{name} not baked: {e}")),
+            }
+        }
+        if made.is_empty() {
+            return said.join("; ");
+        }
+        // The files' paths known, their parts read anew, then the scene's step.
+        let mut paths = AssetPaths::new();
+        for m in &made {
+            paths.insert(AssetRef::file(m.file), m.path.clone());
+            for (mesh, material) in &m.parts {
+                paths.insert(AssetRef::part(m.file, mesh), format!("{}#{mesh}", m.path));
+                paths.insert(
+                    AssetRef::part(m.file, material),
+                    format!("{}#{material}", m.path),
+                );
+            }
+        }
+        player.assets_mut().add_paths(&paths);
+        self.assets.extend(&paths);
+        for m in &made {
+            player.reload_asset(m.file);
+        }
+        let world = player.world_mut();
+        self.history.begin("Bake to Mesh", None);
+        for m in &made {
+            self.history.touch(world, m.group);
+            // Its models from an earlier bake go.
+            for c in baked_models(world, m.group, &[m.before, m.file]) {
+                self.history.delete_subtree(world, c);
+            }
+            if let Some(b) = world.get_mut::<BrushGroup>(m.group) {
+                b.baked = AssetRef::file(m.file);
+            }
+            for (mesh, material) in &m.parts {
+                let e = world.spawn((
+                    SceneId::new(),
+                    Name::new(mesh),
+                    Transform::IDENTITY,
+                    GlobalTransform::default(),
+                    Model::new(
+                        AssetRef::part(m.file, mesh),
+                        AssetRef::part(m.file, material),
+                    ),
+                ));
+                let _ = world.set_parent(e, Some(m.group));
+                self.history.touch_new(world, e);
+            }
+        }
+        self.history.commit(world);
+        self.selection.retain(|&e| world.contains(e));
+        let models: usize = made.iter().map(|m| m.parts.len()).sum();
+        let triangles: usize = made.iter().map(|m| m.triangles).sum();
+        let (what, its) = match made.as_slice() {
+            [m] => (format!("{} into {}", m.name, m.path), "its"),
+            _ => (format!("{} groups", made.len()), "their"),
+        };
+        let s = if models == 1 { "" } else { "s" };
+        said.insert(
+            0,
+            format!(
+                "Baked {what}: {models} model{s}, {triangles} triangles; {its} brushes still collide (Blockout: Unbake to edit them)"
+            ),
+        );
+        said.join("; ")
+    }
+
+    /// A file for group `name`'s bake in folder `dir` (relative to the game's): named after
+    /// it, or with `-2`, `-3`… when another group's bake (`taken`, `made`) holds that name.
+    fn bake_path(&self, dir: &str, name: &str, taken: &[AssetId], made: &[Baked]) -> String {
+        let file = engine_app::bake::file_name(name);
+        let stem = file.trim_end_matches(".glb");
+        let join = |f: &str| {
+            if dir.is_empty() {
+                f.to_owned()
+            } else {
+                format!("{dir}/{f}")
+            }
+        };
+        let held = |path: &str| {
+            if made.iter().any(|m| m.path == path) {
+                return true;
+            }
+            let meta = AssetMeta::path(&self.root.join(path));
+            std::fs::read_to_string(meta)
+                .ok()
+                .and_then(|text| AssetMeta::parse(&text).ok())
+                .and_then(|(_, report)| report.id)
+                .is_some_and(|id| taken.contains(&id))
+        };
+        let mut path = join(&file);
+        let mut k = 2;
+        while held(&path) {
+            path = join(&format!("{stem}-{k}.glb"));
+            k += 1;
+        }
+        path
+    }
+
+    /// Blockout: Unbake (ADR 0110 E2b-6): the selection's baked groups (or every baked
+    /// group) live again, their brushes drawn and their bakes' models gone, as one undo
+    /// step. The files stay.
+    fn unbake(&mut self, world: &mut World) {
+        let groups: Vec<Entity> = self
+            .command_groups(world)
+            .into_iter()
+            .filter(|&g| world.get::<BrushGroup>(g).is_some_and(BrushGroup::is_baked))
+            .collect();
+        if groups.is_empty() {
+            self.say(String::from("No baked blockout groups to unbake"));
+            return;
+        }
+        self.history.begin("Unbake", None);
+        for &g in &groups {
+            let file = world
+                .get::<BrushGroup>(g)
+                .map_or(AssetId::NONE, |b| b.baked.file);
+            self.history.touch(world, g);
+            for c in baked_models(world, g, &[file]) {
+                self.history.delete_subtree(world, c);
+            }
+            if let Some(b) = world.get_mut::<BrushGroup>(g) {
+                b.baked = AssetRef::NONE;
+            }
+        }
+        self.history.commit(world);
+        self.selection.retain(|&e| world.contains(e));
+        let message = match groups.as_slice() {
+            [g] => {
+                let name = world
+                    .get::<Name>(*g)
+                    .map_or_else(|| String::from("The group"), |n| n.as_str().to_owned());
+                format!("Unbaked {name}: its brushes are drawn again")
+            }
+            _ => format!(
+                "Unbaked {} groups: their brushes are drawn again",
+                groups.len()
+            ),
+        };
+        self.say(message);
     }
 
     /// The navigation's frame (ADR 0110 E2b-4b): a bake's answer taken; a bake started in
@@ -5408,6 +5676,15 @@ impl Editor {
                     "Select a blockout group, or a brush in one, to export it",
                 )),
             }
+        } else if id == ids.bake {
+            let groups = self.command_groups(world);
+            if groups.is_empty() {
+                self.say(String::from("The scene has no blockout groups to bake"));
+            } else {
+                self.bake_groups = groups;
+            }
+        } else if id == ids.unbake {
+            self.unbake(world);
         } else if let Some(k) = ids.steps.iter().position(|&c| c == id) {
             self.pick_step(world, k);
         } else if id == ids.navigation {
@@ -6609,6 +6886,12 @@ impl<G> EditorGame<G> {
         if shared.assets.len() != paths.len() {
             shared.assets = paths.clone();
         }
+        // Groups baked (E2b-6): their files written and read, their models in place.
+        if !shared.bake_groups.is_empty() {
+            let groups = core::mem::take(&mut shared.bake_groups);
+            let message = shared.bake(player, &groups);
+            shared.say(message);
+        }
         // The newest pick's entity, and what to outline (ADR 0109), through the
         // extraction's slots.
         let runtime = player.runtime();
@@ -7294,6 +7577,58 @@ fn blockout_key(blockout: &engine_app::Blockout, world: &World) -> BlockoutKey {
         .collect();
     key.sort_unstable_by_key(|k| k.0.to_bits());
     key
+}
+
+/// A group baked into a file (Blockout: Bake to Mesh): its name, the file it was baked
+/// into before (or none), the file's id and path, its meshes with their materials, and
+/// how many triangles they hold.
+struct Baked {
+    group: Entity,
+    name: String,
+    before: AssetId,
+    file: AssetId,
+    path: String,
+    parts: Vec<(String, String)>,
+    triangles: usize,
+}
+
+/// The blockout group `e` is in: itself, or its nearest ancestor with a [`BrushGroup`].
+fn group_of(world: &World, e: Entity) -> Option<Entity> {
+    let mut at = Some(e);
+    while let Some(x) = at {
+        if world.get::<BrushGroup>(x).is_some() {
+            return Some(x);
+        }
+        at = world.parent(x);
+    }
+    None
+}
+
+/// The baked group `e` is in, if it is in one: its brushes are not drawn, and the tools
+/// leave them alone until it is unbaked.
+fn baked_group(world: &World, e: Entity) -> Option<Entity> {
+    group_of(world, e).filter(|&g| world.get::<BrushGroup>(g).is_some_and(BrushGroup::is_baked))
+}
+
+/// What to say when a tool meets the brushes of baked group `group`.
+fn baked_message(world: &World, group: Entity) -> String {
+    let name = world
+        .get::<Name>(group)
+        .map_or_else(|| String::from("The group"), |n| n.as_str().to_owned());
+    format!("{name} is baked: Blockout: Unbake to edit its brushes")
+}
+
+/// Group `group`'s children that are models of files `files` (a bake's), not brushes.
+fn baked_models(world: &World, group: Entity, files: &[AssetId]) -> Vec<Entity> {
+    world
+        .children(group)
+        .filter(|&c| {
+            world.get::<Brush>(c).is_none()
+                && world
+                    .get::<Model>(c)
+                    .is_some_and(|m| !m.mesh.file.is_none() && files.contains(&m.mesh.file))
+        })
+        .collect()
 }
 
 /// A navigation mesh baked in the background: its edges (ends, a boundary or not), how

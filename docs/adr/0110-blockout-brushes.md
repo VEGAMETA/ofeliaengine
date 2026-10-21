@@ -560,3 +560,32 @@ Proposed (question 3):
 - **Left for E2b-6b and E2b-6c:** models made from glTF files in the player (meshes and
   their materials with textures; ADR 0107 E4's piece of it), then Bake to Mesh putting the
   group's model in its place (the brushes kept, off) and Unbake.
+
+## As built (E2b-6b and E2b-6c, 2026-10-21): models from the file, and the bake
+
+- **E2b-6b, models from glTF files** (ADR 0108's as-built of the same day): the player's
+  `Assets` makes a model's mesh and material from a glTF file's parts, its textures with
+  their levels; `AssetMeta` reads and writes the `.meta` beside a foreign file. The glb
+  writer moved to `engine_app::bake`, a mesh and a material per tint (`"<group> <k>"`,
+  `"<group> <k> grid"`), so a model is one mesh with one material.
+- **E2b-6c, Blockout: Bake to Mesh:** the selection's groups (or all) written beside the
+  scene with their `.meta` (an earlier bake's file and id kept; `-2`, `-3`… where another
+  group's bake holds the name), a model per tint put under the group, `BrushGroup.baked`
+  naming the file, as one undo step; the player reads the file again
+  (`Player::reload_asset`: the file's parts forgotten, freed a frame later, its models
+  made again). **Blockout: Unbake** takes the models away and clears `baked`.
+- **Decided on the way: a baked group's brushes keep colliding.** The research note had
+  them switched off (CSG Blockout's freeze), the model bringing a collider. Scenes have no
+  collider component yet (packs' colliders come from the cook, ADR 0101), so a baked
+  level would have none; instead its brushes are only not drawn (`MeshRenderer.visible`
+  0, their meshes kept for an unbake), and their exact hulls stay the colliders and the
+  navigation's source. The tools leave a baked group's brushes alone; a new brush goes to
+  a live group. `BrushGroup.reserved` gave its place to `baked` (an old scene's
+  `reserved` line is a warning once).
+- **Measured** (ref-1, release, `measure_a_baked_files_first_use`): a level of 4,000
+  boxes in two tints, 48,000 triangles, 3.5 MB: written in 3.0 ms; on its first use in
+  the player imported in 2.9 ms, its meshes merged in 0.5 ms, the grid (256², 9 levels)
+  decoded in 1.4 ms: about 5 ms of the first frame that draws it, then nothing.
+- **Left:** the cook's path (a shipped game's groups evaluated by the cook, with the
+  one-button build, ADR 0107 E14), colliders for models from scenes (with E4 and ADR
+  0101), reading files off the frame's thread and compressing their textures (E4).
