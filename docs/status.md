@@ -236,7 +236,7 @@ Last updated: 2026-10-20.
     editor's camera (the scene's camera put there, `PlayFrom` for the game's player),
     Ctrl+F5 restarts, Shift+F8 ejects (the editor's camera and tools on the running game,
     the game's keyboard and mouse off).
-  - **E3-3, keeping changes** (#PR): Ctrl+K keeps the selection's changes made while
+  - **E3-3, keeping changes** (#302): Ctrl+K keeps the selection's changes made while
     playing ("Kept" in the tree), Ctrl+Shift+K lists everything changed since Play (by
     component, made, despawned) to pick from; at Stop they go into the scene as one undo
     step, the game's runtime components left out, what it made becoming scene entities.
