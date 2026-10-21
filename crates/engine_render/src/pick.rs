@@ -19,6 +19,10 @@
 //!   - or only what shows: the candidates' depth first (`depthVertex`, and
 //!     `depthVertexMasked` with `shadowFragmentMasked`), then the candidates again tested
 //!     against it before shading (`pickVisibleFragment`): a box's visible pixels.
+//! - **The surface under a pixel** ([`Picker::add_surface_pass`]): the candidates but the
+//!   ones left out (what is being moved over it) drawn into a 3 × 3 square, ids and depths
+//!   read back: the nearest surface's point, and its normal from the depths around it, for
+//!   placing things on surfaces. Through a camera looking down, the floor under a point.
 //! - **What an id is:** the index the view's vertex shaders read the instance with: the
 //!   persistent scene's slot ([`crate::gpu_scene::GpuScene`]), or a draw list's item.
 //! - **Cost.** Separate passes, so the view's pipelines carry no code for them (the
@@ -42,7 +46,7 @@ use crate::graph::{
 use crate::material::MaterialFrame;
 use crate::mesh::GeometryFrame;
 use crate::upload::{Staged, UploadRing};
-use engine_core::math::{Mat4, Vec4};
+use engine_core::math::{Mat4, Vec3, Vec4};
 use engine_rhi::ash::vk;
 use engine_rhi::{
     Allocation, Allocator, Bindless, Device, GraphicsPipelineDesc, MemoryLocation, Pipeline,
@@ -76,6 +80,13 @@ pub const MAX_LIST: u32 = 65_536;
 const LIST_BYTES: u64 = MAX_LIST as u64 * 4;
 /// Bytes of an indexed indirect draw.
 const COMMAND_BYTES: u32 = core::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32;
+/// The side of the square a surface pick reads around its pixel: the pixel and its four
+/// neighbours give the surface's point and normal.
+const SURFACE: u32 = 3;
+/// Its texels.
+const SURFACE_TEXELS: usize = (SURFACE * SURFACE) as usize;
+/// Bytes of a surface pick's readback: its square's ids, then its depths.
+const SURFACE_BYTES: u64 = (SURFACE * SURFACE * 8) as u64;
 
 /// A pick: a pixel of the view, at the view's size (its render size under upscaling).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +188,45 @@ pub struct ListResult {
     pub truncated: bool,
 }
 
+/// A pick of the surface under a pixel of the view (at the view's size, as a
+/// [`PickRequest`]'s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceRequest {
+    /// The pixel's column, from the view's left.
+    pub x: u32,
+    /// Its row, from the view's top.
+    pub y: u32,
+    /// Blended surfaces count too.
+    pub transparent: bool,
+}
+
+/// A surface a pick found.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceHit {
+    /// The instance (the persistent scene's slot).
+    pub instance: u32,
+    /// The surface's point under the pixel.
+    pub point: Vec3,
+    /// Its normal, facing the view: from the depths of the pixels around it on the same
+    /// instance, or back along the view where they do not give one.
+    pub normal: Vec3,
+}
+
+/// What a surface pick found.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceResult {
+    /// The frame that drew it.
+    pub frame: u64,
+    /// What was asked.
+    pub request: SurfaceRequest,
+    /// The nearest surface under the pixel; none over nothing.
+    pub hit: Option<SurfaceHit>,
+}
+
+/// What a surface pick needs to read its result: the request, the view's world from clip
+/// and its size.
+type SurfaceAsk = (SurfaceRequest, Mat4, (u32, u32));
+
 /// What a pick's `add_*` call did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickPass {
@@ -239,6 +289,8 @@ struct Candidates {
     groups: Vec<(u8, u32, u32)>,
     /// More could be drawn than were kept.
     truncated: bool,
+    /// The slots left out, sorted.
+    excluded: Vec<u32>,
 }
 
 /// The runs of pipeline states a pass draws (the state, its first draw, their count): at
@@ -255,7 +307,8 @@ impl Candidates {
     }
 
     /// Finds the instances of `scene` that `planes` reach and that can be drawn (a resident
-    /// mesh; blended surfaces only with `transparent`), at most `limit` of them.
+    /// mesh; blended surfaces only with `transparent`), at most `limit` of them, but the
+    /// slots `exclude` holds.
     fn find(
         &mut self,
         scene: &SceneFrame<'_>,
@@ -263,12 +316,19 @@ impl Candidates {
         planes: &[Vec4],
         transparent: bool,
         limit: usize,
+        exclude: &[u32],
     ) {
         self.slots.clear();
         scene.candidates(planes, &mut self.slots);
+        self.excluded.clear();
+        self.excluded.extend_from_slice(exclude);
+        self.excluded.sort_unstable();
         self.keyed.clear();
         self.truncated = false;
         for &slot in &self.slots {
+            if self.excluded.binary_search(&slot).is_ok() {
+                continue;
+            }
             let Some((mesh, state)) = scene.slot_draw(slot) else {
                 continue;
             };
@@ -421,9 +481,11 @@ pub struct Picker {
     visible_pipelines: [Pipeline; 2],
     readbacks: Vec<Readback<PickRequest>>,
     lists: Vec<Readback<ListRequest>>,
+    surfaces: Vec<Readback<SurfaceAsk>>,
     frames_in_flight: u64,
     latest: Option<PickResult>,
     latest_list: Option<ListResult>,
+    latest_surface: Option<SurfaceResult>,
     candidates: Candidates,
 }
 
@@ -589,15 +651,27 @@ impl Picker {
             Ok(ring)
         }
         let readbacks = ring(allocator, frames_in_flight, BYTES)?;
+        // A ring that could not be made frees the ones made before it.
+        fn free<R>(allocator: &mut Allocator, ring: Vec<Readback<R>>) {
+            for r in ring {
+                if let Some(allocation) = r.allocation {
+                    // SAFETY: just made, never used by the GPU.
+                    unsafe { allocator.destroy_buffer(r.buffer, allocation) };
+                }
+            }
+        }
         let lists = match ring(allocator, frames_in_flight, LIST_BYTES) {
             Ok(lists) => lists,
             Err(e) => {
-                for r in readbacks {
-                    if let Some(allocation) = r.allocation {
-                        // SAFETY: just made, never used by the GPU.
-                        unsafe { allocator.destroy_buffer(r.buffer, allocation) };
-                    }
-                }
+                free(allocator, readbacks);
+                return Err(e);
+            }
+        };
+        let surfaces = match ring(allocator, frames_in_flight, SURFACE_BYTES) {
+            Ok(surfaces) => surfaces,
+            Err(e) => {
+                free(allocator, readbacks);
+                free(allocator, lists);
                 return Err(e);
             }
         };
@@ -608,9 +682,11 @@ impl Picker {
             visible_pipelines: [visible_opaque, visible_masked],
             readbacks,
             lists,
+            surfaces,
             frames_in_flight,
             latest: None,
             latest_list: None,
+            latest_surface: None,
             candidates: Candidates::default(),
         })
     }
@@ -658,6 +734,78 @@ impl Picker {
     /// The latest result [`Self::poll`] took.
     pub fn latest(&self) -> Option<&PickResult> {
         self.latest.as_ref()
+    }
+
+    /// Takes the newest surface pick whose frame has finished, as [`Self::poll`] does picks.
+    pub fn poll_surface(&mut self, frame_number: u64) -> Option<&SurfaceResult> {
+        let completed = frame_number.saturating_sub(self.frames_in_flight);
+        let (i, frame, (request, world_from_clip, (width, height))) =
+            newest(&mut self.surfaces, completed)?;
+        let ptr = self.surfaces[i]
+            .allocation
+            .as_ref()
+            .and_then(Allocation::mapped_ptr)?;
+        // SAFETY: the frame that wrote it has finished (its graph made the copies visible
+        // to the host); the mapping holds the square's ids, then its depths.
+        let words =
+            unsafe { core::slice::from_raw_parts(ptr.as_ptr().cast::<u32>(), 2 * SURFACE_TEXELS) };
+        let (ids, depths) = words.split_at(SURFACE_TEXELS);
+        let center = SURFACE_TEXELS / 2;
+        // A texel's point in the world, when it shows the center's instance.
+        let unproject = |k: usize, depth: f32| {
+            let half = (SURFACE / 2) as f32;
+            let x = request.x as f32 - half + (k as u32 % SURFACE) as f32 + 0.5;
+            let y = request.y as f32 - half + (k as u32 / SURFACE) as f32 + 0.5;
+            let ndc = Vec4::new(
+                x / width.max(1) as f32 * 2.0 - 1.0,
+                y / height.max(1) as f32 * 2.0 - 1.0,
+                depth,
+                1.0,
+            );
+            let p = world_from_clip * ndc;
+            p.truncate() / p.w
+        };
+        let at = |k: usize| {
+            let depth = f32::from_bits(depths[k]);
+            (ids[k] != 0 && ids[k] == ids[center] && depth < 1.0).then(|| unproject(k, depth))
+        };
+        let hit = at(center).map(|point| {
+            // Back along the view at the pixel.
+            let toward = (unproject(center, 0.0) - unproject(center, 1.0)).normalize_or_zero();
+            // Across and down from the neighbours on its instance (one side may be missing).
+            let side = |a: usize, b: usize| match (at(a), at(b)) {
+                (Some(p), Some(q)) => Some(q - p),
+                (Some(p), None) => Some(point - p),
+                (None, Some(q)) => Some(q - point),
+                (None, None) => None,
+            };
+            let row = SURFACE as usize;
+            let normal = match (
+                side(center - 1, center + 1),
+                side(center - row, center + row),
+            ) {
+                (Some(across), Some(down)) => across.cross(down).normalize_or_zero(),
+                _ => Vec3::ZERO,
+            };
+            let normal = if normal == Vec3::ZERO {
+                toward
+            } else if normal.dot(toward) < 0.0 {
+                -normal
+            } else {
+                normal
+            };
+            SurfaceHit {
+                instance: ids[center] - 1,
+                point,
+                normal,
+            }
+        });
+        self.latest_surface = Some(SurfaceResult {
+            frame,
+            request,
+            hit,
+        });
+        self.latest_surface.as_ref()
     }
 
     /// The latest list [`Self::poll_list`] took.
@@ -732,7 +880,7 @@ impl Picker {
             "pick depth",
             TextureDesc::new_2d(DEPTH_FORMAT, SQUARE, SQUARE),
         );
-        let area = square_area(request, (width, height));
+        let area = square_area((request.x, request.y), SQUARE, (width, height));
         let mask = if request.transparent {
             DEPTH_STATES | BLENDED_STATES
         } else {
@@ -827,8 +975,14 @@ impl Picker {
             [x0, y0, x1, y1].map(|v| v as f32),
             view.size,
         );
-        self.candidates
-            .find(scene, geometry, &planes, request.transparent, usize::MAX);
+        self.candidates.find(
+            scene,
+            geometry,
+            &planes,
+            request.transparent,
+            usize::MAX,
+            &[],
+        );
         if self.candidates.commands.is_empty() {
             return PickPass::Empty;
         }
@@ -849,7 +1003,7 @@ impl Picker {
             "pick depth",
             TextureDesc::new_2d(DEPTH_FORMAT, SQUARE, SQUARE),
         );
-        let area = square_area(request, view.size);
+        let area = square_area((request.x, request.y), SQUARE, view.size);
         let push = Push {
             frame,
             instances: scene.current_address,
@@ -932,6 +1086,7 @@ impl Picker {
             &planes,
             request.transparent,
             MAX_LIST as usize,
+            &[],
         );
         if self.candidates.commands.is_empty() {
             return PickPass::Empty;
@@ -1111,6 +1266,156 @@ impl Picker {
         PickPass::Declared
     }
 
+    /// Declares a pick of the surface under `request`'s pixel in a view of the persistent
+    /// scene drawn this frame: the candidates there but the slots `exclude` holds (what is
+    /// being moved over the surface), drawn alone through `view`'s camera into a 3 × 3
+    /// square around the pixel, its ids and depths read back. [`PickPass::Empty`] when
+    /// nothing can be there: no surface. The picker must live until the frame has executed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_surface_pass<'g>(
+        &mut self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        bindless: &'g Bindless,
+        geometry: &GeometryFrame<'g>,
+        materials: &MaterialFrame<'g>,
+        scene: &SceneFrame<'g>,
+        view: &PickView,
+        request: SurfaceRequest,
+        exclude: &[u32],
+        frame_number: u64,
+    ) -> PickPass {
+        engine_profiler::zone!("render::Picker::add_surface_pass");
+        if request.x >= view.size.0 || request.y >= view.size.1 {
+            return PickPass::Empty;
+        }
+        let half = SURFACE / 2;
+        let [x0, y0, x1, y1] = region(request.x, request.y, half, SURFACE - half, view.size);
+        let planes = region_planes(
+            &view.clip_from_world,
+            [x0, y0, x1, y1].map(|v| v as f32),
+            view.size,
+        );
+        self.candidates.find(
+            scene,
+            geometry,
+            &planes,
+            request.transparent,
+            usize::MAX,
+            exclude,
+        );
+        if self.candidates.commands.is_empty() {
+            return PickPass::Empty;
+        }
+        let Some(readback) = self.surfaces.iter_mut().find(|r| r.written.is_none()) else {
+            return PickPass::Busy;
+        };
+        let (Some(frame), Some(visible), Some(commands)) = (
+            ring.push(&[view.clip_from_world.to_cols_array()]),
+            ring.push(&self.candidates.visible),
+            ring.stage(&self.candidates.commands),
+        ) else {
+            return PickPass::Busy;
+        };
+        readback.written = Some((
+            frame_number,
+            (request, view.clip_from_world.inverse(), view.size),
+        ));
+        let out = fg.import_buffer(
+            "pick surface readback",
+            ImportedBuffer {
+                buffer: readback.buffer,
+                size: SURFACE_BYTES,
+                address: 0,
+                initial: BufferState::idle(),
+                final_state: Some(BufferState::host_read()),
+            },
+        );
+        let ids = fg.create_texture(
+            "pick surface ids",
+            TextureDesc::new_2d(ID_FORMAT, SURFACE, SURFACE),
+        );
+        let depth = fg.create_texture(
+            "pick surface depth",
+            TextureDesc::new_2d(DEPTH_FORMAT, SURFACE, SURFACE),
+        );
+        let area = square_area((request.x, request.y), SURFACE, view.size);
+        let push = Push {
+            frame,
+            instances: scene.current_address,
+            visible,
+            positions: geometry.position_address(),
+            attributes: geometry.attribute_address(),
+            materials: materials.address(),
+            ..bytemuck::Zeroable::zeroed()
+        };
+        let pipelines = [self.pipelines[0].raw(), self.pipelines[1].raw()];
+        let (runs, count) = self.candidates.runs();
+        let geometry_copy = *geometry;
+        materials
+            .read(geometry.read(fg.add_pass("pick surface")))
+            .read(scene.current, Access::StorageRead(ShaderStages::VERTEX))
+            .color(ids, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+            .depth(depth, LoadOp::Clear([1.0, 0.0, 0.0, 0.0]), StoreOp::Store)
+            .execute(move |ctx| {
+                // SAFETY: recording inside the pass's rendering scope; the pass reads the
+                // pool, the material table and the scene's instances, the draws lie in the
+                // ring's slot for this frame, and the picker outlives the frame.
+                unsafe {
+                    draw_groups(
+                        ctx,
+                        bindless,
+                        &geometry_copy,
+                        pipelines,
+                        &push,
+                        &runs[..count],
+                        commands,
+                        area,
+                    );
+                }
+            });
+        fg.add_pass("pick surface copy")
+            .read(ids, Access::TransferRead)
+            .read(depth, Access::TransferRead)
+            .write(out, Access::TransferWrite)
+            .execute(move |ctx| {
+                let copy = |aspect_mask, offset| vk::BufferImageCopy {
+                    buffer_offset: offset,
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_extent: vk::Extent3D {
+                        width: SURFACE,
+                        height: SURFACE,
+                        depth: 1,
+                    },
+                    ..Default::default()
+                };
+                // SAFETY: recording outside a rendering scope; both images are in
+                // TRANSFER_SRC layout for this pass, the buffer holds their texels.
+                unsafe {
+                    ctx.device.cmd_copy_image_to_buffer(
+                        ctx.cmd,
+                        ctx.image(ids),
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        ctx.buffer(out),
+                        &[copy(vk::ImageAspectFlags::COLOR, 0)],
+                    );
+                    ctx.device.cmd_copy_image_to_buffer(
+                        ctx.cmd,
+                        ctx.image(depth),
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        ctx.buffer(out),
+                        &[copy(vk::ImageAspectFlags::DEPTH, SURFACE_BYTES / 2)],
+                    );
+                }
+            });
+        PickPass::Declared
+    }
+
     /// Frees the readback buffers (the pipelines go when it is dropped).
     ///
     /// # Safety
@@ -1122,7 +1427,11 @@ impl Picker {
             .readbacks
             .iter_mut()
             .map(|r| (r.buffer, &mut r.allocation));
-        for (buffer, allocation) in squares.chain(lists) {
+        let surfaces = self
+            .surfaces
+            .iter_mut()
+            .map(|r| (r.buffer, &mut r.allocation));
+        for (buffer, allocation) in squares.chain(lists).chain(surfaces) {
             if let Some(allocation) = allocation.take() {
                 // SAFETY: guaranteed by the caller; the pair comes from `create_buffer`.
                 unsafe { allocator.destroy_buffer(buffer, allocation) };
@@ -1142,16 +1451,14 @@ fn region(x: u32, y: u32, before: u32, after: u32, (width, height): (u32, u32)) 
     ]
 }
 
-/// The draw area of a square pick at `request`'s pixel in a view of `size` pixels: the
-/// view's pixel grid shifted so that the pixel lands at the square's center; only the
-/// view's part of the square is rasterized.
-fn square_area(request: PickRequest, size: (u32, u32)) -> DrawArea {
-    let [x0, y0, x1, y1] = region(request.x, request.y, CENTER, CENTER, size);
-    // The square's origin is the view's pixel (x - CENTER, y - CENTER).
-    let (dx, dy) = (
-        CENTER as i32 - request.x as i32,
-        CENTER as i32 - request.y as i32,
-    );
+/// The draw area of a square of `side` pixels around the pixel `(x, y)` in a view of
+/// `size` pixels: the view's pixel grid shifted so that the pixel lands at the square's
+/// center; only the view's part of the square is rasterized.
+fn square_area((x, y): (u32, u32), side: u32, size: (u32, u32)) -> DrawArea {
+    let half = side / 2;
+    let [x0, y0, x1, y1] = region(x, y, half, side - half, size);
+    // The square's origin is the view's pixel (x - half, y - half).
+    let (dx, dy) = (half as i32 - x as i32, half as i32 - y as i32);
     DrawArea {
         viewport: vk::Rect2D {
             offset: vk::Offset2D { x: dx, y: dy },

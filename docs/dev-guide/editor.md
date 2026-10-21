@@ -121,6 +121,8 @@ editor = ["dep:engine_editor"]
 | Frame the selection (nothing selected: the scene) | F |
 | Follow the active entity as it moves (again: stop) | Shift+F |
 | Set a camera bookmark, go to it | Ctrl+1..9, 1..9 |
+| Put the selection on the surface below it | End |
+| Drag the selection over surfaces | Ctrl+Shift with a move handle |
 
 These are our keys, the default (team decision, 2026-10-21): the left hand stays beside
 W, A, S, D, which fly the camera. **Editor: Key Map…** (Ctrl+Shift+P) takes another set,
@@ -274,6 +276,13 @@ moving with its selected parent.
 - **Snapping** follows the rules above: Shift for steps, Ctrl for the grid, Y to make
   steps the default.
 - **Escape** during a drag puts everything back. Each drag is one undo step.
+- **On surfaces:** hold **Ctrl+Shift** while dragging an arrow, a square or the middle:
+  the selection slides over the surface under the pointer, its box's face on it (a crate
+  on a shelf stands on it, against a wall it leans on it). What is selected is left out
+  of what it can stand on.
+- **End** puts each selected entity on the surface below it: its box's bottom on the
+  first surface under the bottom's middle, the selection left out, as one undo step.
+  "Nothing below" when there is none.
 - **Space** turns the gizmo to the active entity's axes, and back to the world's.
 - **Exact values:** only what changes is written, from the entity's own values: a move
   sets the position, a turn the rotation, a scale the scale. The scene file gets no
@@ -410,7 +419,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 
 | Phase | What |
 |---|---|
-| E2 | placement on surfaces, snapping steps in the tool bar, pivots, overlays (lights' and cameras' icons and ranges) |
+| E2 | assets dropped onto surfaces, snapping steps in the tool bar, pivots, overlays (lights' and cameras' icons and ranges) |
 | E3 | Play on a copy of the world |
 
 The whole plan is ADR 0107 §7.

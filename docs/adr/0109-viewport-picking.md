@@ -334,6 +334,22 @@ occlusion culling dropped. So:
 - **Not done:** a box's cost on the iGPU over a whole heavy view (2–3 ms while dragging);
   coarser detail levels or a lower resolution for the box would cut it.
 
+## As built (E2-5, 2026-10-21): the surface under a pixel
+
+- **`Picker::add_surface_pass`:** the candidates under a pixel but the slots it is told to
+  leave out (what is being moved over the surface), drawn by the square's entry points
+  into a 3 × 3 square whose ids and depths are read back (72 bytes). `poll_surface` gives
+  the center's instance and point (its depth unprojected through the view's inverse) and
+  the normal across and down from the neighbours on the same instance (one side when the
+  other is not on it), facing the view; back along the view where they give none.
+- **Below a point:** the same pass through an orthographic camera looking down from the
+  point, a centimeter a pixel: the first surface under it.
+- **Tested** on both GPUs, with synchronization validation: a crate's face with its normal;
+  with the crate left out, the floor behind it where the pixel's ray meets it; the floor
+  under a point from above; nothing in the sky (a huge floor's box still reaches the
+  sky's pixel's planes one by one, so it is drawn and covers no pixel).
+- **The editor** (ADR 0107 E2-5) places on surfaces with it: Ctrl+Shift drags and End.
+
 ## Steps
 
 - **E2-3a:** front-most picks (hover, click, Shift); the player's extension.

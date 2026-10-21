@@ -505,6 +505,134 @@ fn a_click_in_the_viewport_selects_what_is_drawn_there() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// End on the player (ADR 0107 E2-5): a cube floating above a floor drops onto it, its
+/// bottom on the floor, through the GPU's surface pick looking down; Ctrl+Z puts it back.
+#[test]
+fn end_drops_the_selection_onto_the_floor() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-drop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Floor"),
+        Transform::from_xyz(0.0, -1.0, 0.0).with_scale(Vec3::splat(10.0)),
+        Model::new(builtin::PLANE, builtin::MATERIAL),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Cube"),
+        Transform::from_xyz(0.5, 3.0, -0.5),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Sun {
+            color: Vec3::splat(1.2),
+            ambient: Vec3::splat(0.04),
+        },
+    ));
+    let paths = Assets::new(dir.clone()).paths().clone();
+    let mut text = String::new();
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+    };
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("editor drop test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..20 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let cube = engine_scene::find_named(player.world_mut(), "Cube").unwrap();
+    game.select(Some(cube));
+    let key = |game: &mut EditorGame<NoGame>, virtual_key, scancode, extended, pressed| {
+        send(
+            game,
+            WindowEventKind::Key {
+                virtual_key,
+                scancode,
+                extended,
+                pressed,
+                repeat: false,
+            },
+        );
+    };
+    for _ in 0..3 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    // End.
+    for pressed in [true, false] {
+        key(&mut game, 0x23, 0x4F, true, pressed);
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    for _ in 0..12 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let y = |player: &mut Player| {
+        player
+            .world_mut()
+            .get::<Transform>(cube)
+            .unwrap()
+            .translation
+    };
+    let at = y(&mut player);
+    println!("dropped to {at}");
+    assert!((at.y - -0.5).abs() < 0.02, "its bottom on the floor: {at}");
+    assert!(
+        (at.x - 0.5).abs() < 1e-4 && (at.z - -0.5).abs() < 1e-4,
+        "straight down: {at}"
+    );
+    // Ctrl+Z.
+    key(&mut game, 0x11, 0x1D, false, true);
+    for pressed in [true, false] {
+        key(&mut game, 0x5A, 0x2C, false, pressed);
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    key(&mut game, 0x11, 0x1D, false, false);
+    editor_frame(&mut player, &mut game, &mut overlay);
+    assert!(
+        (y(&mut player).y - 3.0).abs() < 1e-4,
+        "undone: {}",
+        y(&mut player)
+    );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The editor's loop: a frame, the view's rectangle, then the pick's entity.
 fn editor_frame(player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay) {
     player.frame_overlaid(game, Some(overlay)).unwrap();
