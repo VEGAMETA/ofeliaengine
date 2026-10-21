@@ -1297,6 +1297,163 @@ fn view_navigation_bakes_the_brushes_in_the_background() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Tab over the viewport edits the selected brush's faces (ADR 0110 E2b-5): the face under
+/// the pointer lights (`ENGINE_EDITOR_FACES_PNG=<file>`), a drag moves it, and the player
+/// meshes the brush's planes.
+#[test]
+fn tab_edits_a_brushs_faces_and_the_player_meshes_them() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-faces-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Floor"),
+        Transform::from_xyz(0.0, -0.05, 0.0).with_scale(Vec3::new(20.0, 0.1, 20.0)),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    let group = world.spawn((
+        SceneId::new(),
+        Name::new("Blockout"),
+        Transform::IDENTITY,
+        BrushGroup::default(),
+    ));
+    let crate_ = world.spawn((
+        SceneId::new(),
+        Name::new("Crate"),
+        Transform::IDENTITY,
+        Brush::new(BrushShape::Box, Vec3::new(2.0, 1.0, 2.0)),
+    ));
+    world.set_parent(crate_, Some(group)).unwrap();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Sun {
+            color: Vec3::splat(1.2),
+            ambient: Vec3::splat(0.04),
+        },
+    ));
+    let paths = Assets::new(dir.clone()).paths().clone();
+    let mut text = String::new();
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+    };
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("editor faces test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..20 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let crate_ = engine_scene::find_named(player.world_mut(), "Crate").unwrap();
+    game.select(Some(crate_));
+    let point = |game: &mut EditorGame<NoGame>, p: Vec3| {
+        let [x, y] = game.on_screen(p).unwrap();
+        send(
+            game,
+            WindowEventKind::CursorMoved {
+                x: x.round() as i32,
+                y: y.round() as i32,
+            },
+        );
+    };
+    let on_top = Vec3::new(0.4, 1.0, 0.3);
+    point(&mut game, on_top);
+    for _ in 0..3 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    for pressed in [true, false] {
+        send(
+            &mut game,
+            WindowEventKind::Key {
+                virtual_key: 0x09,
+                scancode: 0x0F,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        );
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    for _ in 0..2 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_FACES_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let extent = player.extent();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    // The top dragged up a metre.
+    let button = |pressed| WindowEventKind::MouseButton {
+        button: MouseButton::Left,
+        pressed,
+    };
+    send(&mut game, button(true));
+    editor_frame(&mut player, &mut game, &mut overlay);
+    point(&mut game, on_top + Vec3::Y);
+    editor_frame(&mut player, &mut game, &mut overlay);
+    send(&mut game, button(false));
+    for _ in 0..3 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let world = player.world_mut();
+    let b = world.get::<Brush>(crate_).unwrap();
+    assert_eq!(b.shape, BrushShape::Planes);
+    let top = b
+        .planes
+        .iter()
+        .find(|q| q.normal == [0, 1, 0])
+        .map(|q| q.offset)
+        .unwrap();
+    println!("the top at {top} mm");
+    assert!((top - 2000).abs() <= 30, "{top}");
+    assert_eq!(player.blockout().meshes(), 1, "meshed from its planes");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn editor_frame(player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay) {
     player.frame_overlaid(game, Some(overlay)).unwrap();
     player.set_view_rect(game.view_rect());

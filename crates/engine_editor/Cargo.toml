@@ -14,6 +14,8 @@ workspace = true
 # The player the editor runs inside of (ADR 0107): the game's world, its renderer, the
 # window.
 engine_app.workspace = true
+# Brushes' planes, solids and faces, for editing them (ADR 0110 E2b-5).
+engine_brush.workspace = true
 engine_core.workspace = true
 # Logging and crash reports of the editor application (ADR 0061).
 engine_crash.workspace = true

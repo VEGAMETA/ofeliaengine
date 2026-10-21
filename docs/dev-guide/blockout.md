@@ -97,13 +97,14 @@ the scene's first, or a new "Blockout" group), at its end. **Ctrl+H** makes the 
 brushes rooms with walls 0.2 m thick, or solid again. While drawing, corners land on other
 brushes' corners and edges near the pointer, so brushes meet exactly; the active brush's
 side handles size it afterwards, the opposite side staying (`editor.md`, "Sizing a brush by
-its sides"). The tree shows each brush's shape
+its sides"). **Tab** edits the selected brushes' faces: a drag moves one, Alt+drag pulls a
+new brush out of it or pushes a cut into it (`editor.md`, "Editing faces"). The tree shows each brush's shape
 and what it does ("Brush", "Cut", "Intersect"); the inspector edits its fields, every change
 one undo step; the eye turns it off.
 
 ## Coming
 
-Sides of a room left open (a courtyard), radius handles for cylinders and spheres, a face pulled out into a new brush
-(Alt+drag), faces and edges edited by hand,
+Edges and corners moved by hand (a box made a wedge), sides of a room left open (a
+courtyard), radius handles for cylinders and spheres, faces and edges edited by hand,
 colliders and the navigation mesh made from them, and baking a group into a mesh: ADR
 0110's steps.

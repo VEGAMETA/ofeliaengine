@@ -59,6 +59,7 @@ use crate::build::{
 };
 use crate::camera::OrbitCamera;
 use crate::draw::{self, Draw, Landed, Made, ROOM_WALLS, Stage};
+use crate::faces::{self, Face, FaceDrag};
 use crate::gizmo::{self, COLORS, Change, Gizmo, GizmoDrag, Handle, Mode, Target, ViewProj};
 use crate::handles::{Handles, Side, SideDrag};
 use crate::icons;
@@ -551,6 +552,8 @@ struct CommandIds {
     draw: CommandId,
     draw_cut: CommandId,
     hollow: CommandId,
+    /// Tab: editing the selected brushes' faces (E2b-5).
+    edit_faces: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
     /// the next pivot.
     steps: [CommandId; 3],
@@ -628,6 +631,7 @@ fn commands() -> (Commands, CommandIds) {
         draw: c.register("blockout.draw", "Blockout", "Draw Brush"),
         draw_cut: c.register("blockout.draw_cut", "Blockout", "Draw Cut"),
         hollow: c.register("blockout.hollow", "Blockout", "Room or Solid"),
+        edit_faces: c.register("blockout.edit_faces", "Blockout", "Edit Faces"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
             c.register("snap.angle_step", "Snapping", "Angle Step…"),
@@ -705,6 +709,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("B", ids.draw),
         ("Shift+B", ids.draw_cut),
         ("Ctrl+H", ids.hollow),
+        ("Tab", ids.edit_faces),
     ];
     // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
     // - ours: Q, E, R at once and with Shift the gizmo's handles, the left hand beside
@@ -1328,6 +1333,8 @@ struct Editor {
     gizmo: Gizmo,
     gizmo_shown: bool,
     gizmo_drag: Option<GizmoDrag>,
+    /// Editing brushes' faces (Tab, ADR 0110 E2b-5).
+    face_edit: Option<FaceEdit>,
     /// The active brush's side handles (ADR 0110 E2b-3c), the one under the pointer, and
     /// a side being dragged.
     handles: Handles,
@@ -1750,6 +1757,7 @@ impl Editor {
             gizmo: Gizmo::default(),
             gizmo_shown: false,
             gizmo_drag: None,
+            face_edit: None,
             handles: Handles::default(),
             hovered_side: None,
             side_drag: None,
@@ -2026,6 +2034,26 @@ impl Editor {
         if self.draw.is_some() {
             self.draw_frame(world);
         }
+        // Tab over the viewport edits faces, as in Blender; over the panels, or while a
+        // field is typed in, it goes to the next field.
+        let over_view = self.view_rect.is_some_and(|[x, y, w, h]| {
+            self.input.cursor().is_some_and(|[cx, cy]| {
+                cx >= x as f32 && cy >= y as f32 && cx < (x + w) as f32 && cy < (y + h) as f32
+            })
+        });
+        if over_view
+            && self.ui.editing().is_none()
+            && self.key_transform.is_none()
+            && self
+                .input
+                .chords()
+                .iter()
+                .any(|c| c.key == Key::Tab && !c.ctrl && !c.shift && !c.alt)
+        {
+            self.input.consume_keys();
+            let id = self.ids.edit_faces;
+            self.run(world, id);
+        }
 
         // The inspector: the active entity's components, field by field.
         self.selection
@@ -2244,6 +2272,9 @@ impl Editor {
         }
         if self.draw.is_some() {
             let _ = write!(self.status, "{}  ·  ", draw::HELP);
+        }
+        if self.face_edit.is_some() {
+            let _ = write!(self.status, "{FACES_HELP}  ·  ");
         }
         if self.flying() {
             let _ = write!(
@@ -3205,6 +3236,7 @@ impl Editor {
             && self.renaming.is_none()
             && self.gizmo_drag.is_none()
             && self.side_drag.is_none()
+            && self.face_edit.as_ref().is_none_or(|f| f.drag.is_none())
             && self.key_transform.is_none()
             && self.draw.is_none()
             && self.drag.is_none();
@@ -3219,8 +3251,12 @@ impl Editor {
             }
         });
         if self.input.pressed(Button::Left) {
+            let on_face = self.face_edit.as_ref().is_some_and(|f| f.hovered.is_some());
             self.press_at = cursor.filter(|_| {
-                request.is_some() && self.hovered_handle.is_none() && self.hovered_side.is_none()
+                request.is_some()
+                    && self.hovered_handle.is_none()
+                    && self.hovered_side.is_none()
+                    && !on_face
             });
         }
         let near = 4.0 * self.scale.max(0.5);
@@ -3946,6 +3982,14 @@ impl Editor {
             self.hovered_side = None;
             return;
         }
+        // Editing faces: the faces have the pointer, the gizmo and the handles hide.
+        if self.face_edit.is_some() {
+            self.faces_frame(world, &view, cursor);
+            self.hovered_handle = None;
+            self.handles.clear();
+            self.hovered_side = None;
+            return;
+        }
         // The active brush's side handles take the pointer before the gizmo's; the gizmo
         // hides while a side is dragged.
         if self.sides_frame(world, &view, cursor, scale) {
@@ -4107,6 +4151,187 @@ impl Editor {
             .collect()
     }
 
+    /// Tab: editing the selected brushes' faces, or the editing ended.
+    fn toggle_face_edit(&mut self, world: &World) {
+        if self.face_edit.take().is_some() {
+            return;
+        }
+        let brushes: Vec<Entity> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&e| world.get::<Brush>(e).is_some())
+            .collect();
+        if brushes.is_empty() {
+            self.say(String::from("Select brushes to edit their faces (Tab)"));
+            return;
+        }
+        self.face_edit = Some(FaceEdit {
+            brushes,
+            faces: Vec::new(),
+            owners: Vec::new(),
+            hovered: None,
+            drag: None,
+        });
+    }
+
+    /// Editing faces' frame (Tab, ADR 0110 E2b-5): the brushes' faces laid out and the one
+    /// under the pointer lit; a press on it starts a drag (with Alt a pull), which moves the
+    /// face, or pulls a brush out of it, until the release, as one undo step. Escape takes a
+    /// drag back, or ends the editing; a press on no face ends it, the click selecting.
+    fn faces_frame(&mut self, world: &mut World, view: &ViewProj, cursor: Option<Vec2>) {
+        let Some(mut edit) = self.face_edit.take() else {
+            return;
+        };
+        let escape = self.ui.input().keys.contains(&UiKey::Escape);
+        if let Some(mut dragging) = edit.drag.take() {
+            if self.input.held(Button::Left) {
+                if escape && !dragging.face.cancelled {
+                    dragging.face.cancelled = true;
+                    self.history.revert(world, dragging.face.merge);
+                    dragging.pulled = None;
+                } else if !dragging.face.cancelled
+                    && let Some(at) = cursor
+                    && let Some(d) = dragging.face.travel(
+                        view,
+                        at,
+                        &self.snapping,
+                        self.input.shift(),
+                        self.input.ctrl(),
+                    )
+                {
+                    if dragging.face.extrude {
+                        self.set_pulled(world, &mut dragging, d);
+                    } else {
+                        self.set_moved(world, &mut dragging, d);
+                    }
+                }
+                edit.drag = Some(dragging);
+            } else if let Some(p) = dragging.pulled
+                && !edit.brushes.contains(&p)
+            {
+                // A pulled brush's faces are edited next too.
+                edit.brushes.push(p);
+            }
+        }
+        edit.faces.clear();
+        edit.owners.clear();
+        let mut scratch = Vec::new();
+        for &e in &edit.brushes {
+            if let (Some(b), Some(g)) = (world.get::<Brush>(e), world.get::<GlobalTransform>(e)) {
+                faces::faces(b, g.0, &mut scratch);
+                edit.owners.extend(scratch.iter().map(|_| e));
+                edit.faces.append(&mut scratch);
+            }
+        }
+        if edit.drag.is_none() {
+            let free = !self.camera_drag && self.command_palette.is_none() && !self.add_open;
+            edit.hovered = cursor
+                .filter(|&at| free && view.contains(at))
+                .and_then(|at| faces::pick(&edit.faces, view.ray(at)).map(|(i, _)| i));
+            if escape {
+                return;
+            }
+            if self.input.pressed(Button::Left) {
+                let Some(i) = edit.hovered else {
+                    // A press on no face: the editing ends, the click selects.
+                    return;
+                };
+                let e = edit.owners[i];
+                let ray = cursor.map(|at| view.ray(at));
+                let grab = ray
+                    .and_then(|(o, d)| {
+                        faces::pick(&edit.faces[i..=i], (o, d)).map(|(_, t)| o + d * t)
+                    })
+                    .unwrap_or_else(|| edit.faces[i].middle());
+                if let (Some(b), Some(g)) = (world.get::<Brush>(e), world.get::<GlobalTransform>(e))
+                {
+                    self.gestures += 1;
+                    let start = b.clone();
+                    if let Some(face) = FaceDrag::start(
+                        b,
+                        g.0,
+                        &edit.faces[i],
+                        grab,
+                        self.input.alt(),
+                        self.gestures,
+                    ) {
+                        edit.drag = Some(FaceDragging {
+                            entity: e,
+                            start,
+                            face,
+                            pulled: None,
+                        });
+                    }
+                }
+            }
+        }
+        self.face_edit = Some(edit);
+    }
+
+    /// A face moved `d` metres: its brush's planes as they then are, as one undo step per
+    /// drag (a move that would leave a part empty is not taken).
+    fn set_moved(&mut self, world: &mut World, dragging: &mut FaceDragging, d: f32) {
+        let Some(planes) = dragging.face.moved(d) else {
+            return;
+        };
+        self.history.begin("Move Face", Some(dragging.face.merge));
+        self.history.touch(world, dragging.entity);
+        world.insert(dragging.entity, faces::edited(&dragging.start, planes));
+        self.history.commit(world);
+    }
+
+    /// A face pulled `d` metres: the brush it makes (out, an adding brush; in, a cut), made
+    /// beside the dragged one the first time, changed after, gone again at no distance;
+    /// one undo step per drag.
+    fn set_pulled(&mut self, world: &mut World, dragging: &mut FaceDragging, d: f32) {
+        let merge = dragging.face.merge;
+        let Some((op, planes)) = dragging.face.pulled(d) else {
+            if dragging.pulled.take().is_some() {
+                self.history.revert(world, merge);
+            }
+            return;
+        };
+        let brush = Brush {
+            op,
+            hollow: 0.0,
+            ..faces::edited(&dragging.start, planes)
+        };
+        let (step, kind) = if op == BrushOp::Cut {
+            ("Push Face In", "Cut")
+        } else {
+            ("Pull Face Out", "Extrusion")
+        };
+        self.history.begin(step, Some(merge));
+        let e = match dragging.pulled {
+            Some(e) => {
+                self.history.touch(world, e);
+                world.insert(e, brush);
+                e
+            }
+            None => {
+                let parent = world.parent(dragging.entity);
+                let place = world
+                    .get::<Transform>(dragging.entity)
+                    .copied()
+                    .unwrap_or(Transform::IDENTITY);
+                let name = self.sibling_name(world, parent, kind, None);
+                let e = world.spawn((
+                    SceneId::new(),
+                    Name::new(&name),
+                    place,
+                    GlobalTransform::default(),
+                    brush,
+                ));
+                let _ = world.set_parent(e, parent);
+                self.history.touch_new(world, e);
+                e
+            }
+        };
+        self.history.commit(world);
+        dragging.pulled = Some(e);
+    }
+
     /// The active brush's side handles (ADR 0110 E2b-3c): laid out where they face the
     /// camera; a press on one starts a drag of its side, which follows the pointer until the
     /// release (Escape takes it back), one undo step. True while a side is dragged.
@@ -4187,7 +4412,11 @@ impl Editor {
     /// The active brush's handles, alone in the selection or not; none for anything else.
     fn layout_sides(&mut self, world: &World, view: &ViewProj) {
         let active = self.active().and_then(|e| {
-            let size = world.get::<Brush>(e)?.size;
+            // An edited brush's size is not its planes': its faces are edited instead (Tab).
+            let size = world
+                .get::<Brush>(e)
+                .filter(|b| b.shape != BrushShape::Planes)?
+                .size;
             Some((e, size, world.get::<GlobalTransform>(e)?.0))
         });
         match active {
@@ -5003,6 +5232,9 @@ impl Editor {
         if id == ids.undo || id == ids.redo {
             self.drag = None;
             self.side_drag = None;
+            if let Some(f) = &mut self.face_edit {
+                f.drag = None;
+            }
             self.open_choice = None;
             let selected: Vec<SceneId> = self
                 .selection
@@ -5077,6 +5309,8 @@ impl Editor {
             self.start_draw(op);
         } else if id == ids.hollow {
             self.toggle_rooms(world);
+        } else if id == ids.edit_faces {
+            self.toggle_face_edit(world);
         } else if let Some(k) = ids.steps.iter().position(|&c| c == id) {
             self.pick_step(world, k);
         } else if id == ids.navigation {
@@ -5735,6 +5969,7 @@ impl Editor {
         self.drag.is_some()
             || self.gizmo_drag.is_some()
             || self.side_drag.is_some()
+            || self.face_edit.as_ref().is_some_and(|f| f.drag.is_some())
             || self.key_transform.is_some()
             || self.draw.is_some()
             || self.typing.is_some()
@@ -6778,6 +7013,79 @@ fn draw_drawing(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canv
     canvas.set_clip(None);
 }
 
+/// The keys while editing faces, for the status bar.
+const FACES_HELP: &str = "drag a face: move it  ·  Alt+drag: pull a brush out of it (pushed in: a \
+                          cut)  ·  Tab or Esc: done";
+
+/// Editing brushes' faces (Tab, ADR 0110 E2b-5): the brushes; their faces this frame, each
+/// with its brush; the one under the pointer; a face being dragged.
+#[derive(Debug)]
+struct FaceEdit {
+    brushes: Vec<Entity>,
+    faces: Vec<Face>,
+    owners: Vec<Entity>,
+    hovered: Option<usize>,
+    drag: Option<FaceDragging>,
+}
+
+/// A face being dragged: its brush as it was, the drag, and the brush a pull made.
+#[derive(Debug)]
+struct FaceDragging {
+    entity: Entity,
+    start: Brush,
+    face: FaceDrag,
+    pulled: Option<Entity>,
+}
+
+/// The faces being edited (ADR 0110 E2b-5), under the panels: their edges thin and light,
+/// the face under the pointer or dragged light blue and thicker (the selection's outline is
+/// orange); while one is dragged, how far on a label.
+fn draw_faces(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canvas: &mut Canvas) {
+    let Some(edit) = &editor.face_edit else {
+        return;
+    };
+    let scale = editor.scale.max(0.5);
+    let view = ViewProj::new(&editor.orbit, rect);
+    canvas.set_clip(Some(clip_of(rect)));
+    let order = Order::layer(-1);
+    for (i, f) in edit.faces.iter().enumerate() {
+        if edit.hovered == Some(i) {
+            continue;
+        }
+        for k in 0..f.corners.len() {
+            let (a, b) = (f.corners[k], f.corners[(k + 1) % f.corners.len()]);
+            if let (Some(a), Some(b)) = (view.screen(a), view.screen(b)) {
+                let color = Vec4::new(0.9, 0.95, 1.0, 0.45);
+                canvas.draw(&Quad::line(a, b, scale).color(color).order(order));
+            }
+        }
+    }
+    let lit = edit.hovered.and_then(|i| edit.faces.get(i));
+    if let Some(f) = lit {
+        for k in 0..f.corners.len() {
+            let (a, b) = (f.corners[k], f.corners[(k + 1) % f.corners.len()]);
+            if let (Some(a), Some(b)) = (view.screen(a), view.screen(b)) {
+                // Not the selection's orange: light blue, thicker.
+                let color = Vec4::new(0.45, 0.85, 1.0, 1.0);
+                canvas.draw(&Quad::line(a, b, 2.5 * scale).color(color).order(order));
+            }
+        }
+    }
+    let label_at = lit.and_then(|f| view.screen(f.middle()));
+    let distance = edit.drag.as_ref().map(|d| d.face.distance);
+    if let (Some(at), Some(d)) = (label_at, distance) {
+        let mut text = if d > 0.0 {
+            String::from("+")
+        } else {
+            String::new()
+        };
+        text.push_str(&transform::short(d));
+        text.push_str(" m");
+        label(&mut editor.text, glyphs, canvas, at, &text, scale);
+    }
+    canvas.set_clip(None);
+}
+
 /// What the blockout's groups are: each group, its epoch and its place, by group.
 type BlockoutKey = Vec<(Entity, u64, [f32; 12])>;
 
@@ -7222,6 +7530,7 @@ impl Overlay for EditorOverlay {
                 draw_navigation(editor, rect, &mut self.canvas);
                 draw_colliders(editor, rect, &mut self.canvas);
                 draw_sides(editor, rect, &self.glyphs, &mut self.canvas);
+                draw_faces(editor, rect, &self.glyphs, &mut self.canvas);
                 if editor.draw.is_some() {
                     draw_drawing(editor, rect, &self.glyphs, &mut self.canvas);
                 }
@@ -8595,6 +8904,96 @@ mod tests {
         );
         ed.run(&mut world, id);
         assert!(!ed.show_colliders);
+    }
+
+    const ALT: (u16, u16) = (0x12, 0x38);
+
+    /// A drag with the left button from world point `from` to `to` in the editor's view, a
+    /// frame for each of the press, the move and the release.
+    fn drag_world(ed: &mut Editor, world: &mut World, from: Vec3, to: Vec3) {
+        let a = on_view(ed, from);
+        mouse(ed, a, None);
+        ed.update(world);
+        mouse(ed, a, Some(true));
+        ed.update(world);
+        let b = on_view(ed, to);
+        mouse(ed, b, None);
+        ed.update(world);
+        mouse(ed, b, Some(false));
+        ed.update(world);
+    }
+
+    #[test]
+    fn tab_edits_faces_a_drag_moves_one_and_alt_pulls_a_brush_out_or_pushes_a_cut_in() {
+        let mut world = World::new();
+        let mut ed = draw_editor("faces", &mut world);
+        ed.add(&mut world, FIRST_BRUSH);
+        let e = ed.active().unwrap();
+        let placed = world.get::<Transform>(e).unwrap().to_affine();
+        world.insert(e, GlobalTransform(placed));
+        // Tab over the viewport (over the panels it goes from field to field).
+        let over = on_view(&ed, Vec3::new(0.3, 2.0, 0.2));
+        mouse(&mut ed, over, None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[TAB]);
+        assert!(ed.face_edit.is_some(), "Tab edits the selection's faces");
+        // The pointer over the 2 m box's top.
+        let on_top = Vec3::new(0.3, 2.0, 0.2);
+        let over = on_view(&ed, on_top);
+        mouse(&mut ed, over, None);
+        ed.update(&mut world);
+        let edit = ed.face_edit.as_ref().unwrap();
+        let lit = edit.hovered.expect("the top lights");
+        assert!(edit.faces[lit].normal.y > 0.9);
+        assert!(ed.status.contains(FACES_HELP), "{}", ed.status);
+        assert!(
+            !ed.gizmo_shown && ed.handles.at.is_empty(),
+            "the gizmo and handles hide"
+        );
+        // Dragged 1 m up (snapping on, 0.1 m steps): planes now, 3 m high, one step.
+        drag_world(&mut ed, &mut world, on_top, on_top + Vec3::Y);
+        let b = world.get::<Brush>(e).unwrap();
+        assert_eq!(b.shape, BrushShape::Planes);
+        assert!(
+            b.planes
+                .iter()
+                .any(|q| q.normal == [0, 1, 0] && q.offset == 3000),
+            "{:?}",
+            b.planes
+        );
+        assert_eq!(ed.history.steps().count(), 2, "the add and the move");
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(
+            world.get::<Brush>(e).unwrap().shape,
+            BrushShape::Box,
+            "undone: a box"
+        );
+        // Alt+drag: a brush pulled out of the top, 0.5 m.
+        key(&mut ed, ALT.0, ALT.1, true);
+        drag_world(&mut ed, &mut world, on_top, on_top + Vec3::Y * 0.5);
+        key(&mut ed, ALT.0, ALT.1, false);
+        let pulled = engine_scene::find_named(&mut world, "Extrusion").unwrap();
+        let b = world.get::<Brush>(pulled).unwrap();
+        assert_eq!((b.op, b.shape), (BrushOp::Add, BrushShape::Planes));
+        assert!(
+            b.planes
+                .iter()
+                .any(|q| q.normal == [0, 1, 0] && q.offset == 2500)
+        );
+        assert_eq!(world.parent(pulled), world.parent(e), "in the same group");
+        assert!(
+            ed.face_edit.as_ref().unwrap().brushes.contains(&pulled),
+            "edited too"
+        );
+        // Pushed in 0.3 m: a cut of the top's outline.
+        key(&mut ed, ALT.0, ALT.1, true);
+        drag_world(&mut ed, &mut world, on_top, on_top - Vec3::Y * 0.3);
+        key(&mut ed, ALT.0, ALT.1, false);
+        let cut = engine_scene::find_named(&mut world, "Cut").unwrap();
+        assert_eq!(world.get::<Brush>(cut).unwrap().op, BrushOp::Cut);
+        // Escape ends the editing.
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert!(ed.face_edit.is_none());
     }
 
     #[test]

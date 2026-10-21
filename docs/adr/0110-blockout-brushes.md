@@ -489,3 +489,37 @@ Proposed (question 3):
   floor and a wall with a gap baked a moment after View: Navigation turns on, the mesh on
   the floor and its boundaries along both sides of the wall, then the wall moved and baked
   again, the boundaries with it; looked at.
+
+## As built (E2b-5a, 2026-10-21): editing faces
+
+- **`engine_editor::faces`:** a brush's faces in the world from its parts' solids (each
+  face its part and its plane's place among the part's planes); the face a ray meets
+  first (the nearest turned towards it, or from inside the one it leaves through).
+  - **A move:** the face's plane offset along its normal (`Plane::offset`, exact for axis
+    planes), the distance by the owner's snapping rules, refused when a part would be
+    left empty.
+  - **A pull:** a new brush between the face (as it shows: a room's wall's outside) and
+    its plane moved out, its sides the planes through the face's edges across it (exact
+    for a box's faces). Pushed in, a cut of the face's outline that deep, a millimetre
+    proud of the face so it opens it.
+  - **An edited brush is `BrushShape::Planes`:** a room's planes are its inside's, so it
+    stays a room, the walls growing from them.
+- **The editor:** Tab with the pointer over the viewport (over the panels Tab stays the
+  fields') edits the selected brushes' faces. The gizmo and the side handles hide; the
+  faces' edges show, the one under the pointer light blue. A drag moves a face, Alt+drag
+  pulls or pushes; each is one undo step, Escape taking it back. Tab, Escape or a click on
+  no face ends the editing. A pulled brush goes into the same group and is edited next too.
+  Edited brushes show no side handles (their size is not their planes').
+- **Tested:**
+  - unit tests: a box's six faces and picks from outside and inside; a move along the
+    normal, exact, refused through the base; the snapped travel; a room's face moving its
+    inside and its wall; a pull out of a room starting at its wall's outside; a pull's
+    volume and a push's cut;
+  - in the editor: Tab, the top lit, a drag 1 m up making planes as one step and undo
+    bringing the box back; Alt+drag pulling an extrusion into the group; a push making a
+    cut; Escape ending it;
+  - on both GPUs: Tab over a crate, its top lit, dragged up and meshed from its planes;
+    looked at.
+- **Left for E2b-5b:** edges and corners moved (the brush's corners' hull made again,
+  corners that meet merged, so an edge moved onto another makes a wedge), Q, E, R and typed
+  values on faces, Ctrl+E.

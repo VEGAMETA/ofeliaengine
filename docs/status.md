@@ -208,8 +208,11 @@ Last updated: 2026-10-20.
     the background a moment after each edit, on a pool of the editor's own, and draws the
     mesh; 400 rooms (357 tiles) in 158 ms on four workers. Games bake it from
     `Blockout::surface_triangles`.
-  - **Next:** E2b-5, editing faces, edges and corners (Tab), then E2b-6, baking a group into
-    a mesh; or E3, Play.
+  - **E2b-5a, editing faces** (#296): Tab over the viewport; a drag moves a face along its
+    normal (the brush becomes planes, undo brings its shape back), Alt+drag pulls a brush
+    out of it or pushes a cut in; rooms keep their walls.
+  - **Next:** E2b-5b, edges and corners; then E2b-6, baking a group into a mesh; or E3,
+    Play (asked the owner which first).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
