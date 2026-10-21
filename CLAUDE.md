@@ -233,9 +233,11 @@ version must include the date it was checked.
   GPUs and compares every pass with the vendor's baseline (`tests/golden/perf`); 3 % and more
   than max(5 µs, 0.5 % of the frame) is a regression; uniform shifts (clocks, other work) are
   reported as such. Advisory on ref-1 until a dedicated machine exists. Every merge that can
-  move it checks it: one that changes an existing SPIR-V, or code the gate's scenes run (the
-  render graph, their passes, the frame renderer, the player's frame). New entry points and
-  code those scenes never run get `-Gpu` alone (team decision, 2026-10-21; ADR 0062).
+  move it checks it: one that changes a SPIR-V the gate's scenes build their pipelines from
+  (the stages `tests/golden/perf/<vendor>.registers.tsv` names), or code those scenes run
+  (the render graph, their passes, the frame renderer, the player's frame). New entry
+  points, the SPIR-V of pipelines no perf scene makes, and code those scenes never run get
+  `-Gpu` alone (team decisions, 2026-10-21; ADR 0062).
 - **A feature costs nothing where it is not used — not even shader registers.** On the AMD
   driver, dead code under a specialization constant still raised forward shading from 64 to 72
   VGPRs (9–13 % slower). Use separate entry points with literal arguments and lazily created

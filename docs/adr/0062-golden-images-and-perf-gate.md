@@ -293,8 +293,12 @@ scene draws an outline or makes its pipelines. Its perf step took 16 minutes of 
 gate's 22 and could not move a pass, a register or a CPU stage.
 
 - **`-Perf` runs when a change can move the perf scenes:**
-  - an existing `.spv` changed. A new one cannot: the scenes' pipelines are made from the
-    same bytes, so the driver compiles the same code;
+  - a `.spv` the scenes' pipelines are made from changed: the stages
+    `tests/golden/perf/<vendor>.registers.tsv` names. A new one cannot move them (their
+    pipelines are made from the same bytes, so the driver compiles the same code), nor
+    one of a pipeline no perf scene makes (team decision, the same day: #278's perf step
+    ran because the picker's list fragments changed, which no scene draws, and found
+    nothing in 943 s);
   - or code the scenes run changed, added lines included: the render graph, the passes
     they draw, the frame renderer, the player's frame.
 - **Otherwise `-Gpu` alone,** and the PR says "existing SPIR-V unchanged" with the diff's
