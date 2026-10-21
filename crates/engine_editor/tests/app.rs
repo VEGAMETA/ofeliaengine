@@ -250,7 +250,8 @@ fn the_editor_draws_its_scene_in_the_viewport() {
 /// Picking on the player (ADR 0109): the pointer over the red cube drawn in the
 /// viewport hovers it, a click there selects it through the pick of its pixel and
 /// outlines it (`ENGINE_EDITOR_PICK_PNG=<file>` writes that frame), and a click on the
-/// empty sky clears the selection.
+/// empty sky clears the selection. Clicking the cube again cycles to a cube hidden inside
+/// it, then back.
 #[test]
 fn a_click_in_the_viewport_selects_what_is_drawn_there() {
     let dir = std::env::temp_dir().join(format!("ofelia-editor-pick-{}", std::process::id()));
@@ -267,6 +268,13 @@ fn a_click_in_the_viewport_selects_what_is_drawn_there() {
         SceneId::new(),
         Name::new("Cube"),
         Transform::from_scale(Vec3::splat(2.0)),
+        Model::new(builtin::CUBE, AssetRef::file(red_id)),
+    ));
+    // Inside it, hidden by it from every side.
+    world.spawn((
+        SceneId::new(),
+        Name::new("Inner"),
+        Transform::from_scale(Vec3::splat(0.5)),
         Model::new(builtin::CUBE, AssetRef::file(red_id)),
     ));
     world.spawn((
@@ -321,6 +329,7 @@ fn a_click_in_the_viewport_selects_what_is_drawn_there() {
         editor_frame(&mut player, &mut game, &mut overlay);
     }
     let cube = engine_scene::find_named(player.world_mut(), "Cube").unwrap();
+    let inner = engine_scene::find_named(player.world_mut(), "Inner").unwrap();
     // The red cube's middle on the screen.
     let rgba = player
         .capture_overlaid(&mut game, Some(&mut overlay))
@@ -380,6 +389,31 @@ fn a_click_in_the_viewport_selects_what_is_drawn_there() {
         }
     }
     assert!(outline > 100, "outlined pixels: {outline}");
+    // A click there again: the cube inside, which the outer one hides; then round to the
+    // outer one. (With the rotate tool: the select tool's gizmo, at the cube's middle, would
+    // take the press.)
+    for (virtual_key, scancode, pressed) in [
+        (0x10, 0x2A, true),
+        (0x52, 0x13, true),
+        (0x52, 0x13, false),
+        (0x10, 0x2A, false),
+    ] {
+        send(
+            &mut game,
+            WindowEventKind::Key {
+                virtual_key,
+                scancode,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        );
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    left_click(&mut player, &mut game, &mut overlay);
+    assert_eq!(game.selection(), [inner], "cycled to the one behind");
+    left_click(&mut player, &mut game, &mut overlay);
+    assert_eq!(game.selection(), [cube], "round to the nearest");
     // The sky: the viewport's top left, away from the cube.
     send(
         &mut game,

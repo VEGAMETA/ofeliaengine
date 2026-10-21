@@ -2178,6 +2178,70 @@ uint pickFragmentMasked(PickMaskedOut input) : SV_Target0
     return input.instance + 1u;
 }
 
+// What lies under a pick's pixels (ADR 0109, `pick.rs`): candidate instances drawn alone,
+// without a depth test, each fragment keeping its item's nearest depth. An item is the
+// instance index of the draw: `push.visible` holds the items' slots, `push.light_tiles` a
+// word per item, cleared to 0xFFFFFFFF.
+struct PickListOut
+{
+    float4 position : SV_Position;
+    nointerpolation uint item : ITEM;
+};
+
+struct PickListMaskedOut
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    nointerpolation uint material : MATERIAL;
+    nointerpolation uint item : ITEM;
+};
+
+[shader("vertex")]
+PickListOut pickListVertex(uint vertex : SV_VulkanVertexID, uint item : SV_VulkanInstanceID)
+{
+    Instance inst = read_instance(push.instances, push.visible[item]);
+    PickListOut o;
+    o.position = clip_position(inst, load_position(vertex)).clip;
+    o.item = item;
+    return o;
+}
+
+// Masked materials: texture coordinates for the alpha test.
+[shader("vertex")]
+PickListMaskedOut pickListVertexMasked(uint vertex : SV_VulkanVertexID, uint item : SV_VulkanInstanceID)
+{
+    Instance inst = read_instance(push.instances, push.visible[item]);
+    PickListMaskedOut o;
+    o.position = clip_position(inst, load_position(vertex)).clip;
+    o.uv = read_attributes(vertex).uv;
+    o.material = inst.material;
+    o.item = item;
+    return o;
+}
+
+// Depths run from 0 at the near plane to 1 at the far one, so as bits the nearest is the
+// least. (A helper lane's atomic does nothing.)
+void keep_nearest(uint item, float depth)
+{
+    InterlockedMin(push.light_tiles[item], asuint(depth));
+}
+
+[shader("fragment")]
+void pickListFragment(PickListOut input)
+{
+    keep_nearest(input.item, input.position.z);
+}
+
+[shader("fragment")]
+void pickListFragmentMasked(PickListMaskedOut input)
+{
+    MaterialContext ctx = coverage_context(input.uv, input.material);
+    MATERIAL.Params p = MATERIAL::load(ctx);
+    if (MATERIAL::alpha(ctx, p) < MATERIAL::alpha_cutoff(p))
+        discard;
+    keep_nearest(input.item, input.position.z);
+}
+
 // Outlines (ADR 0109, `outline.rs`): chosen instances drawn alone into a mask, each pixel
 // its item's class and number, `(class + 1) << 24 | (item + 1)` (0 where none is), over a
 // depth of its own. An item is the instance index of the draw: `push.visible` holds the

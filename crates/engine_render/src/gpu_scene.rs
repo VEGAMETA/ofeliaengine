@@ -474,6 +474,60 @@ impl Boxes {
         }
     }
 
+    /// Appends the indices of the first `n` boxes that reach the inner side of every one of
+    /// `planes` (`xyz · p + w ≥ 0` at the box's corner farthest along `xyz`): the boxes that
+    /// may show in the region the planes bound. [`NO_BOX`] reaches none. Sixteen boxes at a
+    /// time, vectorized, each sixteen left at the first plane none of them reaches (put the
+    /// planes that keep the fewest first).
+    fn reaching(&self, n: usize, planes: &[Vec4], out: &mut Vec<u32>) {
+        let [lx, ly, lz] = [0, 1, 2].map(|k| self.lo[k][..n].as_chunks::<16>());
+        let [hx, hy, hz] = [0, 1, 2].map(|k| self.hi[k][..n].as_chunks::<16>());
+        let lows = lx.0.iter().zip(ly.0).zip(lz.0);
+        let highs = hx.0.iter().zip(hy.0).zip(hz.0);
+        for (c, (((lx, ly), lz), ((hx, hy), hz))) in lows.zip(highs).enumerate() {
+            // Each box's least distance inside a plane so far.
+            let mut least = [f32::MAX; 16];
+            for p in planes {
+                // The farthest corner along the normal: the maximum where it is not
+                // negative, the minimum where it is.
+                let xs = if p.x >= 0.0 { hx } else { lx };
+                let ys = if p.y >= 0.0 { hy } else { ly };
+                let zs = if p.z >= 0.0 { hz } else { lz };
+                for lane in 0..16 {
+                    let d = p.x * xs[lane] + p.y * ys[lane] + p.z * zs[lane] + p.w;
+                    least[lane] = least[lane].min(d);
+                }
+                if least.iter().all(|&d| d < 0.0) {
+                    break;
+                }
+            }
+            for (lane, &d) in least.iter().enumerate() {
+                if d >= 0.0 {
+                    out.push((c * 16 + lane) as u32);
+                }
+            }
+        }
+        // The rest, one by one.
+        let first = n - lx.1.len();
+        for (i, (((&lx, &ly), &lz), ((&hx, &hy), &hz))) in
+            lx.1.iter()
+                .zip(ly.1)
+                .zip(lz.1)
+                .zip(hx.1.iter().zip(hy.1).zip(hz.1))
+                .enumerate()
+        {
+            let reaches = planes.iter().all(|p| {
+                let x = if p.x >= 0.0 { hx } else { lx };
+                let y = if p.y >= 0.0 { hy } else { ly };
+                let z = if p.z >= 0.0 { hz } else { lz };
+                p.x * x + p.y * y + p.z * z + p.w >= 0.0
+            });
+            if reaches {
+                out.push((first + i) as u32);
+            }
+        }
+    }
+
     /// The union of the first `n` boxes.
     fn union(&self, n: usize) -> (Vec3, Vec3) {
         let lo = core::array::from_fn(|k| {
@@ -2369,6 +2423,16 @@ impl SceneFrame<'_> {
         Some((c - e, c + e))
     }
 
+    /// Appends the slots whose world box (over its whole move, for an instance moving
+    /// between ticks) reaches the inner side of every one of `planes`: the instances that
+    /// may show in the region they bound, for passes that draw only those (picks, ADR
+    /// 0109). See [`crate::pick`] for planes bounding pixels of a view.
+    pub(crate) fn candidates(&self, planes: &[Vec4], out: &mut Vec<u32>) {
+        self.scene
+            .boxes
+            .reaching(self.scene.high_water as usize, planes, out);
+    }
+
     /// The upload this frame's data comes from: consecutive frames that uploaded have
     /// consecutive serials.
     pub(crate) fn serial(&self) -> u64 {
@@ -2389,5 +2453,50 @@ impl SceneFrame<'_> {
     /// Where batch `id` is, for ordering batches by distance.
     pub(crate) fn batch_center(&self, id: u32) -> Vec3 {
         self.scene.batches[id as usize].center(self.scene)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boxes_reaching_every_plane_are_found_sixteen_at_a_time() {
+        // The region x ≥ 0, x ≤ 10 (planes facing inward), any y and z.
+        let planes = [
+            Vec4::new(1.0, 0.0, 0.0, 0.0),
+            Vec4::new(-1.0, 0.0, 0.0, 10.0),
+        ];
+        let mut boxes = Boxes::with_capacity(40);
+        for k in 0..40 {
+            let x = k as f32;
+            boxes.push(match k % 4 {
+                // Wholly inside while x ≤ 9, then beyond the far side.
+                0 => [
+                    Vec3::new(x * 0.25, 0.0, 0.0),
+                    Vec3::new(x * 0.25 + 1.0, 1.0, 1.0),
+                ],
+                // Straddling the near side: reaches.
+                1 => [Vec3::new(-5.0, 0.0, 0.0), Vec3::new(0.5, 1.0, 1.0)],
+                // Wholly behind the near side.
+                2 => [Vec3::new(-5.0, 0.0, 0.0), Vec3::new(-0.5, 1.0, 1.0)],
+                // A dead slot.
+                _ => NO_BOX,
+            });
+        }
+        let mut found = Vec::new();
+        boxes.reaching(40, &planes, &mut found);
+        let expected: Vec<u32> = (0..40u32)
+            .filter(|k| match k % 4 {
+                0 => *k as f32 * 0.25 <= 10.0,
+                1 => true,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(found, expected);
+        // Only the first `n`, the tail of a sixteen included.
+        found.clear();
+        boxes.reaching(18, &planes, &mut found);
+        assert_eq!(found, [0, 1, 4, 5, 8, 9, 12, 13, 16, 17]);
     }
 }

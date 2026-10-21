@@ -1,25 +1,43 @@
-//! Picking in a view (ADR 0109): which instance is under a pixel, for the editor.
+//! Picking in a view (ADR 0109): which instances are under pixels, for the editor.
 //!
-//! - **How.** After the view's forward passes, [`Picker::add_pass`] draws the same culled
-//!   commands (the culling pass's visible lists, early and late phases, with their detail
-//!   levels) again into a [`SQUARE`] × [`SQUARE`] square centred on the pixel, at the
-//!   view's size: the viewport shifts the view's pixel grid onto the square, so only it is
-//!   rasterized. Each pixel keeps the nearest surface's instance over a depth of its own
+//! - **The nearest surfaces** in a [`SQUARE`] × [`SQUARE`] square centred on a pixel, at
+//!   the view's size: the viewport shifts the view's pixel grid onto the square, so only it
+//!   is rasterized. Each pixel keeps the nearest surface's instance over a depth of its own
 //!   (`pickVertex`, `pickFragment` in `forward.slang`); masked materials are alpha-tested
 //!   (`pickVertexMasked`, `pickFragmentMasked`), and blended surfaces are drawn too, with
-//!   depth writes, unless the pick leaves them out.
+//!   depth writes, unless the pick leaves them out. What is drawn:
+//!   - [`Picker::add_scene_pass`]: the persistent scene's candidates, the instances whose
+//!     world box reaches the square (the planes bounding its pixels), from commands written on the CPU
+//!     at each mesh's finest resident level, with the camera without jitter;
+//!   - [`Picker::add_pass`]: the view's culled commands (the culling pass's visible lists,
+//!     early and late phases, with their detail levels), for a view that draws a list.
+//! - **What lies under a pixel** ([`Picker::add_list_pass`]): the candidates within a
+//!   radius of it, drawn without a depth test, each keeping its nearest depth there
+//!   (`pickListVertex`, `pickListFragment` and their masked twins): every surface front to
+//!   back, hidden ones too, to cycle through overlapping objects or list them.
 //! - **What an id is:** the index the view's vertex shaders read the instance with: the
 //!   persistent scene's slot ([`crate::gpu_scene::GpuScene`]), or a draw list's item.
-//! - **Cost.** A separate pass, so the view's pipelines carry no code for it (the register
-//!   rule, CLAUDE.md §5): views nobody picks in pay nothing. Its own cost is the visible
-//!   instances' vertex work, as texture feedback's ([`crate::feedback`]).
-//! - **Results** reach the CPU through a readback ring, `frames_in_flight` frames later
-//!   ([`Picker::poll`]).
+//! - **Cost.** Separate passes, so the view's pipelines carry no code for them (the
+//!   register rule, CLAUDE.md §5): views nobody picks in pay nothing. A scene pick costs
+//!   the candidates' vertex work and a scan of the scene's world boxes on the CPU; a pick of
+//!   the view's commands the visible instances' vertex work, as texture feedback's
+//!   ([`crate::feedback`]).
+//! - **Results** reach the CPU through readback rings, `frames_in_flight` frames later
+//!   ([`Picker::poll`], [`Picker::poll_list`]).
 
-use crate::forward::{BLENDED_STATES, DEPTH_STATES, DrawArea, ForwardPasses, Push, TypedPipelines};
-use crate::graph::{Access, BufferState, FrameGraph, ImportedBuffer, LoadOp, StoreOp, TextureDesc};
+use crate::forward::{
+    BLENDED, BLENDED_STATES, DEPTH_STATES, DOUBLE_SIDED, DrawArea, ForwardPasses, MASKED, MIRRORED,
+    Push, TypedPipelines, faces, set_draw_area,
+};
+use crate::gpu_scene::SceneFrame;
+use crate::graph::{
+    Access, BufferDesc, BufferState, FrameGraph, ImportedBuffer, LoadOp, PassContext, ShaderStages,
+    StoreOp, TextureDesc,
+};
 use crate::material::MaterialFrame;
 use crate::mesh::GeometryFrame;
+use crate::upload::{Staged, UploadRing};
+use engine_core::math::{Mat4, Vec4};
 use engine_rhi::ash::vk;
 use engine_rhi::{
     Allocation, Allocator, Bindless, Device, GraphicsPipelineDesc, MemoryLocation, Pipeline,
@@ -30,6 +48,10 @@ const VERTEX: &[u8] = include_bytes!("../shaders/forward.pickVertex.spv");
 const VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.pickVertexMasked.spv");
 const FRAGMENT: &[u8] = include_bytes!("../shaders/forward.pickFragment.spv");
 const FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.pickFragmentMasked.spv");
+const LIST_VERTEX: &[u8] = include_bytes!("../shaders/forward.pickListVertex.spv");
+const LIST_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.pickListVertexMasked.spv");
+const LIST_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.pickListFragment.spv");
+const LIST_FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.pickListFragmentMasked.spv");
 
 /// The side of the square a pick reads around its pixel, in the view's pixels.
 pub const SQUARE: u32 = 32;
@@ -39,6 +61,13 @@ const ID_FORMAT: vk::Format = vk::Format::R32_UINT;
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 /// Bytes of a square's ids.
 const BYTES: u64 = (SQUARE * SQUARE * 4) as u64;
+/// The most instances a list holds; more under its pixel are left out
+/// ([`ListResult::truncated`]).
+pub const MAX_LIST: u32 = 1024;
+/// Bytes of a list's depths, a word per instance.
+const LIST_BYTES: u64 = MAX_LIST as u64 * 4;
+/// Bytes of an indexed indirect draw.
+const COMMAND_BYTES: u32 = core::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32;
 
 /// A pick: a pixel of the view, at the view's size (its render size under upscaling).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,37 +115,278 @@ impl PickResult {
     }
 }
 
-/// What [`Picker::add_pass`] did.
+/// The view a scene pick draws in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PickView {
+    /// Its camera, without jitter.
+    pub clip_from_world: Mat4,
+    /// Its size in pixels (the render size under upscaling): what the picks' pixels are
+    /// in.
+    pub size: (u32, u32),
+}
+
+/// A pick of what lies under a pixel of the view (at the view's size, as a
+/// [`PickRequest`]'s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListRequest {
+    /// The pixel's column, from the view's left.
+    pub x: u32,
+    /// Its row, from the view's top.
+    pub y: u32,
+    /// How far from the pixel a surface still counts, in pixels (at most [`SQUARE`] / 2):
+    /// thin objects stay easy to list.
+    pub radius: u32,
+    /// Blended surfaces are listed too.
+    pub transparent: bool,
+}
+
+/// What lay under a pixel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListResult {
+    /// The frame that drew it.
+    pub frame: u64,
+    /// What was asked.
+    pub request: ListRequest,
+    /// The instances with a surface within the radius, nearest first: each one's index
+    /// (the persistent scene's slot) and its nearest depth there (0 at the near plane, 1
+    /// at the far one).
+    pub hits: Vec<(u32, f32)>,
+    /// More than [`MAX_LIST`] instances could be there: the others were left out.
+    pub truncated: bool,
+}
+
+/// What a pick's `add_*` call did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickPass {
-    /// The pick is declared: its result comes with [`Picker::poll`].
+    /// The pick is declared: its result comes with [`Picker::poll`] (or
+    /// [`Picker::poll_list`]).
     Declared,
-    /// The view drew nothing, so nothing is under any pixel: nothing was declared.
+    /// Nothing can be under the pixels (the view drew nothing, or no instance reaches
+    /// them): nothing was declared, and that is the answer.
     Empty,
-    /// Every readback holds a pick not yet polled: nothing was declared.
+    /// Every readback holds a pick not yet polled, or the upload ring is full: nothing
+    /// was declared.
     Busy,
 }
 
-/// A readback of the ring: its host buffer, and the pick it holds until polled.
+/// A readback of a ring: its host buffer, and the request it holds until polled, with a
+/// list's items' slots.
 #[derive(Debug)]
-struct Readback {
+struct Readback<R> {
     buffer: vk::Buffer,
     allocation: Option<Allocation>,
-    written: Option<(u64, PickRequest)>,
+    written: Option<(u64, R)>,
+    /// A list's items' slots, and whether candidates were left out.
+    slots: Vec<u32>,
+    truncated: bool,
+}
+
+/// The newest of `ring`'s picks whose frame is `completed` or older (its index, frame and
+/// request): it and the older ones are done with.
+fn newest<R: Copy>(ring: &mut [Readback<R>], completed: u64) -> Option<(usize, u64, R)> {
+    let mut newest: Option<(usize, u64, R)> = None;
+    for (i, r) in ring.iter().enumerate() {
+        if let Some((frame, request)) = r.written
+            && frame <= completed
+            && newest.is_none_or(|(_, f, _)| frame > f)
+        {
+            newest = Some((i, frame, request));
+        }
+    }
+    for r in ring.iter_mut() {
+        if r.written.is_some_and(|(frame, _)| frame <= completed) {
+            r.written = None;
+        }
+    }
+    newest
+}
+
+/// The candidates of a scene pick: the instances a region's planes reach, each mesh at its
+/// finest resident level, by pipeline state.
+#[derive(Debug, Default)]
+struct Candidates {
+    /// The scan's slots.
+    slots: Vec<u32>,
+    /// Each drawable one's state (the bits of its faces and alpha test), slot and draw.
+    keyed: Vec<(u8, u32, vk::DrawIndexedIndirectCommand)>,
+    /// The drawn slots and their draws, in state order: a draw's instance is its item.
+    visible: Vec<u32>,
+    commands: Vec<vk::DrawIndexedIndirectCommand>,
+    /// Runs of one state: the state, its first draw, their count.
+    groups: Vec<(u8, u32, u32)>,
+    /// More could be drawn than were kept.
+    truncated: bool,
+}
+
+/// The runs of pipeline states a pass draws (the state, its first draw, their count): at
+/// most one per state of the faces' and the alpha test's bits, and how many there are.
+type Runs = ([(u8, u32, u32); 8], usize);
+
+impl Candidates {
+    /// The runs, copied for a pass's recording.
+    fn runs(&self) -> Runs {
+        let mut runs = [(0, 0, 0); 8];
+        let n = self.groups.len().min(runs.len());
+        runs[..n].copy_from_slice(&self.groups[..n]);
+        (runs, n)
+    }
+
+    /// Finds the instances of `scene` that `planes` reach and that can be drawn (a resident
+    /// mesh; blended surfaces only with `transparent`), at most `limit` of them.
+    fn find(
+        &mut self,
+        scene: &SceneFrame<'_>,
+        geometry: &GeometryFrame<'_>,
+        planes: &[Vec4],
+        transparent: bool,
+        limit: usize,
+    ) {
+        self.slots.clear();
+        scene.candidates(planes, &mut self.slots);
+        self.keyed.clear();
+        self.truncated = false;
+        for &slot in &self.slots {
+            let Some((mesh, state)) = scene.slot_draw(slot) else {
+                continue;
+            };
+            if usize::from(state) & BLENDED != 0 && !transparent {
+                continue;
+            }
+            let Some((first_index, index_count, first_vertex)) = geometry.finest_draw(mesh) else {
+                continue;
+            };
+            if self.keyed.len() == limit {
+                self.truncated = true;
+                break;
+            }
+            self.keyed.push((
+                state & (MASKED | DOUBLE_SIDED | MIRRORED) as u8,
+                slot,
+                vk::DrawIndexedIndirectCommand {
+                    index_count,
+                    instance_count: 1,
+                    first_index,
+                    vertex_offset: first_vertex as i32,
+                    first_instance: 0,
+                },
+            ));
+        }
+        self.keyed
+            .sort_unstable_by_key(|&(state, slot, _)| (state, slot));
+        self.visible.clear();
+        self.commands.clear();
+        self.groups.clear();
+        for (item, &(state, slot, command)) in self.keyed.iter().enumerate() {
+            let item = item as u32;
+            self.visible.push(slot);
+            self.commands.push(vk::DrawIndexedIndirectCommand {
+                first_instance: item,
+                ..command
+            });
+            match self.groups.last_mut() {
+                Some((s, _, count)) if *s == state => *count += 1,
+                _ => self.groups.push((state, item, 1)),
+            }
+        }
+    }
+}
+
+/// The planes bounding the pixels `[x0, y0, x1, y1]` of a view of `size` pixels through
+/// `clip_from_world`, in world space and facing inward (`xyz · p + w ≥ 0` inside): the four
+/// sides, then the near and far planes. A world box that reaches every one may show in
+/// those pixels.
+pub(crate) fn region_planes(
+    clip_from_world: &Mat4,
+    [x0, y0, x1, y1]: [f32; 4],
+    (width, height): (u32, u32),
+) -> [Vec4; 6] {
+    // The rows of clip_from_world: a point's clip coordinates are its dot products with
+    // them.
+    let rows = clip_from_world.transpose();
+    let (rx, ry, rz, rw) = (rows.x_axis, rows.y_axis, rows.z_axis, rows.w_axis);
+    let ndc = |p: f32, size: u32| p / size.max(1) as f32 * 2.0 - 1.0;
+    let (left, right) = (ndc(x0, width), ndc(x1, width));
+    let (top, bottom) = (ndc(y0, height), ndc(y1, height));
+    // Inside: left ≤ x / w ≤ right and top ≤ y / w ≤ bottom (w > 0 in front of the
+    // camera), and 0 ≤ z ≤ w.
+    [
+        rx - rw * left,
+        rw * right - rx,
+        ry - rw * top,
+        rw * bottom - ry,
+        rz,
+        rw - rz,
+    ]
+}
+
+/// Records the candidates' draws: one indirect draw per run of a pipeline state, with
+/// `pipelines` (opaque, masked) into `area`.
+///
+/// # Safety
+///
+/// `ctx` records inside a rendering scope of a pass that reads the geometry pool, the
+/// material table and the scene's instances; `commands` holds `groups`' draws in the
+/// ring's slot of this frame; the pipelines live until the frame has executed.
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_groups(
+    ctx: &PassContext<'_>,
+    bindless: &Bindless,
+    geometry: &GeometryFrame<'_>,
+    pipelines: [vk::Pipeline; 2],
+    push: &Push,
+    groups: &[(u8, u32, u32)],
+    commands: Staged,
+    area: DrawArea,
+) {
+    let mut bound: Option<vk::Pipeline> = None;
+    for &(state, first, count) in groups {
+        let state = usize::from(state);
+        let pipeline = pipelines[usize::from(state & MASKED != 0)];
+        let (cull, front) = faces(state, false);
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            if bound != Some(pipeline) {
+                ctx.device
+                    .cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                if bound.is_none() {
+                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
+                    set_draw_area(ctx.device, ctx.cmd, area);
+                    bindless.push_constants(ctx.cmd, bytemuck::bytes_of(push));
+                    geometry.bind_indices(ctx);
+                }
+                bound = Some(pipeline);
+            }
+            ctx.device.cmd_set_cull_mode(ctx.cmd, cull);
+            ctx.device.cmd_set_front_face(ctx.cmd, front);
+            ctx.device.cmd_draw_indexed_indirect(
+                ctx.cmd,
+                commands.buffer,
+                commands.offset + u64::from(first * COMMAND_BYTES),
+                count,
+                COMMAND_BYTES,
+            );
+        }
+    }
 }
 
 /// Picks in one view (see the module documentation).
 #[derive(Debug)]
 pub struct Picker {
-    /// Opaque and masked: blended surfaces are drawn with them too.
+    /// The nearest surfaces': opaque and masked (blended surfaces are drawn with them
+    /// too).
     pipelines: [Pipeline; 2],
-    readbacks: Vec<Readback>,
+    /// What lies under a pixel: opaque and masked.
+    list_pipelines: [Pipeline; 2],
+    readbacks: Vec<Readback<PickRequest>>,
+    lists: Vec<Readback<ListRequest>>,
     frames_in_flight: u64,
     latest: Option<PickResult>,
+    latest_list: Option<ListResult>,
+    candidates: Candidates,
 }
 
 impl Picker {
-    /// A picker for one view; `frames_in_flight` sizes the readback ring.
+    /// A picker for one view; `frames_in_flight` sizes the readback rings.
     ///
     /// # Errors
     ///
@@ -134,95 +404,145 @@ impl Picker {
         let words = |bytes| spirv_words(bytes).ok_or_else(invalid);
         let (vertex, vertex_masked) = (words(VERTEX)?, words(VERTEX_MASKED)?);
         let (fragment, fragment_masked) = (words(FRAGMENT)?, words(FRAGMENT_MASKED)?);
+        let (list_vertex, list_vertex_masked) = (words(LIST_VERTEX)?, words(LIST_VERTEX_MASKED)?);
+        let (list_fragment, list_fragment_masked) =
+            (words(LIST_FRAGMENT)?, words(LIST_FRAGMENT_MASKED)?);
+        // With `targets`, ids over a depth; without, no attachments and no depth test.
         fn desc<'a>(
             (vertex, v): (&'a [u32], &'static core::ffi::CStr),
             (fragment, f): (&'a [u32], &'static core::ffi::CStr),
+            targets: bool,
         ) -> PipelineDesc<'a> {
-            PipelineDesc::Graphics(GraphicsPipelineDesc {
-                color_formats: &[ID_FORMAT],
-                depth_format: DEPTH_FORMAT,
-                dynamic_culling: true,
-                ..GraphicsPipelineDesc::new(
-                    ShaderStageDesc {
-                        spirv: vertex,
-                        entry: v,
-                    },
-                    Some(ShaderStageDesc {
-                        spirv: fragment,
-                        entry: f,
-                    }),
-                )
+            let stages = GraphicsPipelineDesc::new(
+                ShaderStageDesc {
+                    spirv: vertex,
+                    entry: v,
+                },
+                Some(ShaderStageDesc {
+                    spirv: fragment,
+                    entry: f,
+                }),
+            );
+            PipelineDesc::Graphics(if targets {
+                GraphicsPipelineDesc {
+                    color_formats: &[ID_FORMAT],
+                    depth_format: DEPTH_FORMAT,
+                    dynamic_culling: true,
+                    ..stages
+                }
+            } else {
+                GraphicsPipelineDesc {
+                    color_formats: &[],
+                    depth_format: vk::Format::UNDEFINED,
+                    depth_test: false,
+                    depth_write: false,
+                    dynamic_culling: true,
+                    ..stages
+                }
             })
         }
         let mut pipelines = Pipeline::create_many(
             device,
             bindless.pipeline_layout(),
             &[
-                desc((&vertex, c"pickVertex"), (&fragment, c"pickFragment")),
+                desc((&vertex, c"pickVertex"), (&fragment, c"pickFragment"), true),
                 desc(
                     (&vertex_masked, c"pickVertexMasked"),
                     (&fragment_masked, c"pickFragmentMasked"),
+                    true,
+                ),
+                desc(
+                    (&list_vertex, c"pickListVertex"),
+                    (&list_fragment, c"pickListFragment"),
+                    false,
+                ),
+                desc(
+                    (&list_vertex_masked, c"pickListVertexMasked"),
+                    (&list_fragment_masked, c"pickListFragmentMasked"),
+                    false,
                 ),
             ],
         )?
         .into_iter();
-        let (Some(opaque), Some(masked)) = (pipelines.next(), pipelines.next()) else {
+        let (Some(opaque), Some(masked), Some(list_opaque), Some(list_masked)) = (
+            pipelines.next(),
+            pipelines.next(),
+            pipelines.next(),
+            pipelines.next(),
+        ) else {
             return Err(RhiError::Vulkan {
                 call: "pick pipelines (fewer than described)",
                 result: vk::Result::ERROR_UNKNOWN,
             });
         };
         let frames_in_flight = frames_in_flight.max(1) as u64;
-        let mut readbacks = Vec::new();
-        // One more than the frames in flight: with `poll` every frame, one is free.
-        for _ in 0..=frames_in_flight {
-            let (buffer, allocation) = allocator.create_buffer(
-                &vk::BufferCreateInfo::default()
-                    .size(BYTES)
-                    .usage(vk::BufferUsageFlags::TRANSFER_DST),
-                MemoryLocation::Readback,
-            )?;
-            readbacks.push(Readback {
-                buffer,
-                allocation: Some(allocation),
-                written: None,
-            });
+        // One more than the frames in flight in each ring: with a poll every frame, one is
+        // free.
+        fn ring<R>(
+            allocator: &mut Allocator,
+            frames_in_flight: u64,
+            bytes: u64,
+        ) -> Result<Vec<Readback<R>>, RhiError> {
+            let mut ring = Vec::new();
+            for _ in 0..=frames_in_flight {
+                let (buffer, allocation) = allocator.create_buffer(
+                    &vk::BufferCreateInfo::default()
+                        .size(bytes)
+                        .usage(vk::BufferUsageFlags::TRANSFER_DST),
+                    MemoryLocation::Readback,
+                )?;
+                ring.push(Readback {
+                    buffer,
+                    allocation: Some(allocation),
+                    written: None,
+                    slots: Vec::new(),
+                    truncated: false,
+                });
+            }
+            Ok(ring)
         }
+        let readbacks = ring(allocator, frames_in_flight, BYTES)?;
+        let lists = match ring(allocator, frames_in_flight, LIST_BYTES) {
+            Ok(lists) => lists,
+            Err(e) => {
+                for r in readbacks {
+                    if let Some(allocation) = r.allocation {
+                        // SAFETY: just made, never used by the GPU.
+                        unsafe { allocator.destroy_buffer(r.buffer, allocation) };
+                    }
+                }
+                return Err(e);
+            }
+        };
         Ok(Self {
             pipelines: [opaque, masked],
+            list_pipelines: [list_opaque, list_masked],
             readbacks,
+            lists,
             frames_in_flight,
             latest: None,
+            latest_list: None,
+            candidates: Candidates::default(),
         })
     }
 
-    /// The driver's statistics of the pick pipelines (registers, occupancy), when the
-    /// device captures them.
-    pub fn statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 2] {
-        self.pipelines.each_ref().map(|p| p.statistics(device))
+    /// The driver's statistics of the pipelines (registers, occupancy), when the device
+    /// captures them: the nearest surfaces' two, then the lists' two.
+    pub fn statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 4] {
+        [
+            self.pipelines[0].statistics(device),
+            self.pipelines[1].statistics(device),
+            self.list_pipelines[0].statistics(device),
+            self.list_pipelines[1].statistics(device),
+        ]
     }
 
-    /// Takes the newest pick whose frame has finished (call each frame before
-    /// [`Self::add_pass`], with the same frame numbers): the latest result, when one
-    /// arrived since the last call.
+    /// Takes the newest pick whose frame has finished (call each frame before the `add_*`
+    /// calls, with the same frame numbers): the latest result, when one arrived since the
+    /// last call.
     pub fn poll(&mut self, frame_number: u64) -> Option<&PickResult> {
         let completed = frame_number.saturating_sub(self.frames_in_flight);
-        let mut newest: Option<(usize, u64, PickRequest)> = None;
-        for (i, r) in self.readbacks.iter().enumerate() {
-            if let Some((frame, request)) = r.written
-                && frame <= completed
-                && newest.is_none_or(|(_, f, _)| frame > f)
-            {
-                newest = Some((i, frame, request));
-            }
-        }
-        // Older ones are done with: the newest replaces them.
-        for r in &mut self.readbacks {
-            if r.written.is_some_and(|(frame, _)| frame <= completed) {
-                r.written = None;
-            }
-        }
-        let (i, frame, request) = newest?;
+        let (i, frame, request) = newest(&mut self.readbacks, completed)?;
         let ptr = self.readbacks[i]
             .allocation
             .as_ref()
@@ -249,8 +569,52 @@ impl Picker {
         self.latest.as_ref()
     }
 
+    /// The latest list [`Self::poll_list`] took.
+    pub fn latest_list(&self) -> Option<&ListResult> {
+        self.latest_list.as_ref()
+    }
+
+    /// Takes the newest list whose frame has finished, as [`Self::poll`] does picks.
+    pub fn poll_list(&mut self, frame_number: u64) -> Option<&ListResult> {
+        let completed = frame_number.saturating_sub(self.frames_in_flight);
+        let (i, frame, request) = newest(&mut self.lists, completed)?;
+        let readback = &self.lists[i];
+        let ptr = readback
+            .allocation
+            .as_ref()
+            .and_then(Allocation::mapped_ptr)?;
+        // SAFETY: the frame that wrote it has finished (its graph made the copy visible to
+        // the host); the mapping holds a word for each of the list's items.
+        let depths = unsafe {
+            core::slice::from_raw_parts(ptr.as_ptr().cast::<u32>(), readback.slots.len())
+        };
+        let latest = self.latest_list.get_or_insert_with(|| ListResult {
+            frame,
+            request,
+            hits: Vec::new(),
+            truncated: false,
+        });
+        latest.frame = frame;
+        latest.request = request;
+        latest.truncated = readback.truncated;
+        latest.hits.clear();
+        latest.hits.extend(
+            readback
+                .slots
+                .iter()
+                .zip(depths)
+                .filter(|&(_, &depth)| depth != u32::MAX)
+                .map(|(&slot, &depth)| (slot, f32::from_bits(depth))),
+        );
+        latest
+            .hits
+            .sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        self.latest_list.as_ref()
+    }
+
     /// Declares a pick of `request` in a view drawn this frame (`passes`, from its
-    /// [`crate::forward::ForwardRenderer::add_passes`]) of `width × height` pixels.
+    /// [`crate::forward::ForwardRenderer::add_passes`]) of `width × height` pixels, from
+    /// the view's culled commands.
     #[allow(clippy::too_many_arguments)]
     pub fn add_pass<'g>(
         &'g mut self,
@@ -271,39 +635,13 @@ impl Picker {
             return PickPass::Busy;
         };
         readback.written = Some((frame_number, request));
-        let out = fg.import_buffer(
-            "pick readback",
-            ImportedBuffer {
-                buffer: readback.buffer,
-                size: BYTES,
-                address: 0,
-                initial: BufferState::idle(),
-                final_state: Some(BufferState::host_read()),
-            },
-        );
+        let readback = readback.buffer;
         let ids = fg.create_texture("pick ids", TextureDesc::new_2d(ID_FORMAT, SQUARE, SQUARE));
         let depth = fg.create_texture(
             "pick depth",
             TextureDesc::new_2d(DEPTH_FORMAT, SQUARE, SQUARE),
         );
-        // The view's pixel grid shifted so that the pick's pixel lands at the square's
-        // center; only the square is rasterized.
-        let area = DrawArea {
-            viewport: vk::Rect2D {
-                offset: vk::Offset2D {
-                    x: CENTER as i32 - request.x as i32,
-                    y: CENTER as i32 - request.y as i32,
-                },
-                extent: vk::Extent2D { width, height },
-            },
-            scissor: vk::Rect2D {
-                offset: vk::Offset2D::default(),
-                extent: vk::Extent2D {
-                    width: SQUARE,
-                    height: SQUARE,
-                },
-            },
-        };
+        let area = square_area(request, (width, height));
         let mask = if request.transparent {
             DEPTH_STATES | BLENDED_STATES
         } else {
@@ -314,14 +652,8 @@ impl Picker {
         materials
             .read(geometry.read(fg.add_pass("pick")))
             .read(draws.commands, Access::Indirect)
-            .read(
-                draws.visible,
-                Access::StorageRead(crate::graph::ShaderStages::VERTEX),
-            )
-            .maybe_read(
-                draws.instances,
-                Access::StorageRead(crate::graph::ShaderStages::VERTEX),
-            )
+            .read(draws.visible, Access::StorageRead(ShaderStages::VERTEX))
+            .maybe_read(draws.instances, Access::StorageRead(ShaderStages::VERTEX))
             .color(ids, LoadOp::Clear([0.0; 4]), StoreOp::Store)
             .depth(
                 depth,
@@ -372,31 +704,252 @@ impl Picker {
                     }
                 }
             });
-        fg.add_pass("pick copy")
-            .read(ids, Access::TransferRead)
+        copy_square(fg, ids, readback);
+        PickPass::Declared
+    }
+
+    /// Declares a pick of `request` in a view of the persistent scene drawn this frame,
+    /// from its candidates: the instances whose world box reaches the square, drawn alone
+    /// through `view`'s camera. The picker must live until the frame has executed (its
+    /// pipelines are recorded).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_scene_pass<'g>(
+        &mut self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        bindless: &'g Bindless,
+        geometry: &GeometryFrame<'g>,
+        materials: &MaterialFrame<'g>,
+        scene: &SceneFrame<'g>,
+        view: &PickView,
+        request: PickRequest,
+        frame_number: u64,
+    ) -> PickPass {
+        engine_profiler::zone!("render::Picker::add_scene_pass");
+        // A pixel outside the view has nothing under it.
+        if request.x >= view.size.0 || request.y >= view.size.1 {
+            return PickPass::Empty;
+        }
+        let [x0, y0, x1, y1] = region(request.x, request.y, CENTER, CENTER, view.size);
+        let planes = region_planes(
+            &view.clip_from_world,
+            [x0, y0, x1, y1].map(|v| v as f32),
+            view.size,
+        );
+        self.candidates
+            .find(scene, geometry, &planes, request.transparent, usize::MAX);
+        if self.candidates.commands.is_empty() {
+            return PickPass::Empty;
+        }
+        let Some(readback) = self.readbacks.iter_mut().find(|r| r.written.is_none()) else {
+            return PickPass::Busy;
+        };
+        let (Some(frame), Some(visible), Some(commands)) = (
+            ring.push(&[view.clip_from_world.to_cols_array()]),
+            ring.push(&self.candidates.visible),
+            ring.stage(&self.candidates.commands),
+        ) else {
+            return PickPass::Busy;
+        };
+        readback.written = Some((frame_number, request));
+        let readback = readback.buffer;
+        let ids = fg.create_texture("pick ids", TextureDesc::new_2d(ID_FORMAT, SQUARE, SQUARE));
+        let depth = fg.create_texture(
+            "pick depth",
+            TextureDesc::new_2d(DEPTH_FORMAT, SQUARE, SQUARE),
+        );
+        let area = square_area(request, view.size);
+        let push = Push {
+            frame,
+            instances: scene.current_address,
+            visible,
+            positions: geometry.position_address(),
+            attributes: geometry.attribute_address(),
+            materials: materials.address(),
+            ..bytemuck::Zeroable::zeroed()
+        };
+        let pipelines = [self.pipelines[0].raw(), self.pipelines[1].raw()];
+        let (runs, count) = self.candidates.runs();
+        let geometry_copy = *geometry;
+        materials
+            .read(geometry.read(fg.add_pass("pick")))
+            .read(scene.current, Access::StorageRead(ShaderStages::VERTEX))
+            .color(ids, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+            .depth(
+                depth,
+                LoadOp::Clear([1.0, 0.0, 0.0, 0.0]),
+                StoreOp::DontCare,
+            )
+            .execute(move |ctx| {
+                // SAFETY: recording inside the pass's rendering scope; the pass reads the
+                // pool, the material table and the scene's instances, the draws lie in the
+                // ring's slot for this frame, and the picker outlives the frame.
+                unsafe {
+                    draw_groups(
+                        ctx,
+                        bindless,
+                        &geometry_copy,
+                        pipelines,
+                        &push,
+                        &runs[..count],
+                        commands,
+                        area,
+                    );
+                }
+            });
+        copy_square(fg, ids, readback);
+        PickPass::Declared
+    }
+
+    /// Declares a pick of what lies under `request`'s pixel in a view of the persistent
+    /// scene drawn this frame: the candidates within its radius, drawn alone through
+    /// `view`'s camera without a depth test, each keeping its nearest depth there (the
+    /// first [`MAX_LIST`] in the scene's order). The picker must live until the frame has
+    /// executed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_list_pass<'g>(
+        &mut self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        bindless: &'g Bindless,
+        geometry: &GeometryFrame<'g>,
+        materials: &MaterialFrame<'g>,
+        scene: &SceneFrame<'g>,
+        view: &PickView,
+        request: ListRequest,
+        frame_number: u64,
+    ) -> PickPass {
+        engine_profiler::zone!("render::Picker::add_list_pass");
+        let r = request.radius.min(CENTER);
+        let [x0, y0, x1, y1] = region(request.x, request.y, r, r + 1, view.size);
+        if x0 >= x1 || y0 >= y1 {
+            return PickPass::Empty;
+        }
+        let planes = region_planes(
+            &view.clip_from_world,
+            [x0, y0, x1, y1].map(|v| v as f32),
+            view.size,
+        );
+        self.candidates.find(
+            scene,
+            geometry,
+            &planes,
+            request.transparent,
+            MAX_LIST as usize,
+        );
+        if self.candidates.commands.is_empty() {
+            return PickPass::Empty;
+        }
+        let Some(readback) = self.lists.iter_mut().find(|r| r.written.is_none()) else {
+            return PickPass::Busy;
+        };
+        let (Some(frame), Some(visible), Some(commands)) = (
+            ring.push(&[view.clip_from_world.to_cols_array()]),
+            ring.push(&self.candidates.visible),
+            ring.stage(&self.candidates.commands),
+        ) else {
+            return PickPass::Busy;
+        };
+        readback.written = Some((frame_number, request));
+        readback.slots.clear();
+        readback.slots.extend_from_slice(&self.candidates.visible);
+        readback.truncated = self.candidates.truncated;
+        let bytes = readback.slots.len() as u64 * 4;
+        let out = fg.import_buffer(
+            "pick list readback",
+            ImportedBuffer {
+                buffer: readback.buffer,
+                size: LIST_BYTES,
+                address: 0,
+                initial: BufferState::idle(),
+                final_state: Some(BufferState::host_read()),
+            },
+        );
+        let depths = fg.create_buffer("pick list", BufferDesc { size: LIST_BYTES });
+        fg.add_pass("pick list clear")
+            .write(depths, Access::TransferWrite)
+            .execute(move |ctx| {
+                // SAFETY: recording outside a rendering scope; within the buffer.
+                unsafe {
+                    ctx.device
+                        .cmd_fill_buffer(ctx.cmd, ctx.buffer(depths), 0, bytes, u32::MAX);
+                }
+            });
+        // The view's pixel grid shifted so that the region's corner lands at the origin;
+        // only the region is rasterized.
+        let area = DrawArea {
+            viewport: vk::Rect2D {
+                offset: vk::Offset2D {
+                    x: -(x0 as i32),
+                    y: -(y0 as i32),
+                },
+                extent: vk::Extent2D {
+                    width: view.size.0,
+                    height: view.size.1,
+                },
+            },
+            scissor: vk::Rect2D {
+                offset: vk::Offset2D::default(),
+                extent: vk::Extent2D {
+                    width: x1 - x0,
+                    height: y1 - y0,
+                },
+            },
+        };
+        let base = Push {
+            frame,
+            instances: scene.current_address,
+            visible,
+            positions: geometry.position_address(),
+            attributes: geometry.attribute_address(),
+            materials: materials.address(),
+            ..bytemuck::Zeroable::zeroed()
+        };
+        let pipelines = [self.list_pipelines[0].raw(), self.list_pipelines[1].raw()];
+        let (runs, count) = self.candidates.runs();
+        let geometry_copy = *geometry;
+        materials
+            .read(geometry.read(fg.add_pass("pick list")))
+            .read(scene.current, Access::StorageRead(ShaderStages::VERTEX))
+            .write(depths, Access::StorageReadWrite(ShaderStages::FRAGMENT))
+            .execute(move |ctx| {
+                let push = Push {
+                    light_tiles: ctx.address(depths),
+                    ..base
+                };
+                // SAFETY: the pass has no attachments and no rendering is begun; it reads
+                // the pool, the material table and the scene's instances, writes only the
+                // depths it declared, the draws lie in the ring's slot for this frame, and
+                // the picker outlives the frame.
+                unsafe {
+                    ctx.begin_rendering_without_attachments(area.scissor.extent);
+                    draw_groups(
+                        ctx,
+                        bindless,
+                        &geometry_copy,
+                        pipelines,
+                        &push,
+                        &runs[..count],
+                        commands,
+                        area,
+                    );
+                    ctx.end_rendering();
+                }
+            });
+        fg.add_pass("pick list copy")
+            .read(depths, Access::TransferRead)
             .write(out, Access::TransferWrite)
             .execute(move |ctx| {
-                // SAFETY: recording outside a rendering scope; the image is in
-                // TRANSFER_SRC layout for this pass, the buffer holds a square.
+                // SAFETY: recording outside a rendering scope; both buffers hold `bytes`.
                 unsafe {
-                    ctx.device.cmd_copy_image_to_buffer(
+                    ctx.device.cmd_copy_buffer(
                         ctx.cmd,
-                        ctx.image(ids),
-                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        ctx.buffer(depths),
                         ctx.buffer(out),
-                        &[vk::BufferImageCopy {
-                            image_subresource: vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                mip_level: 0,
-                                base_array_layer: 0,
-                                layer_count: 1,
-                            },
-                            image_extent: vk::Extent3D {
-                                width: SQUARE,
-                                height: SQUARE,
-                                depth: 1,
-                            },
-                            ..Default::default()
+                        &[vk::BufferCopy {
+                            src_offset: 0,
+                            dst_offset: 0,
+                            size: bytes,
                         }],
                     );
                 }
@@ -410,18 +963,109 @@ impl Picker {
     ///
     /// The GPU no longer uses them (the device is idle).
     pub unsafe fn destroy(&mut self, allocator: &mut Allocator) {
-        for r in &mut self.readbacks {
-            if let Some(allocation) = r.allocation.take() {
+        let lists = self.lists.iter_mut().map(|r| (r.buffer, &mut r.allocation));
+        let squares = self
+            .readbacks
+            .iter_mut()
+            .map(|r| (r.buffer, &mut r.allocation));
+        for (buffer, allocation) in squares.chain(lists) {
+            if let Some(allocation) = allocation.take() {
                 // SAFETY: guaranteed by the caller; the pair comes from `create_buffer`.
-                unsafe { allocator.destroy_buffer(r.buffer, allocation) };
+                unsafe { allocator.destroy_buffer(buffer, allocation) };
             }
         }
     }
 }
 
+/// A pick's region: the view's pixels `[x0, y0, x1, y1]` from `before` pixels before
+/// `(x, y)` to `after` pixels after it in each direction, within a view of `size`.
+fn region(x: u32, y: u32, before: u32, after: u32, (width, height): (u32, u32)) -> [u32; 4] {
+    [
+        x.saturating_sub(before).min(width),
+        y.saturating_sub(before).min(height),
+        x.saturating_add(after).min(width),
+        y.saturating_add(after).min(height),
+    ]
+}
+
+/// The draw area of a square pick at `request`'s pixel in a view of `size` pixels: the
+/// view's pixel grid shifted so that the pixel lands at the square's center; only the
+/// view's part of the square is rasterized.
+fn square_area(request: PickRequest, size: (u32, u32)) -> DrawArea {
+    let [x0, y0, x1, y1] = region(request.x, request.y, CENTER, CENTER, size);
+    // The square's origin is the view's pixel (x - CENTER, y - CENTER).
+    let (dx, dy) = (
+        CENTER as i32 - request.x as i32,
+        CENTER as i32 - request.y as i32,
+    );
+    DrawArea {
+        viewport: vk::Rect2D {
+            offset: vk::Offset2D { x: dx, y: dy },
+            extent: vk::Extent2D {
+                width: size.0,
+                height: size.1,
+            },
+        },
+        scissor: vk::Rect2D {
+            offset: vk::Offset2D {
+                x: x0 as i32 + dx,
+                y: y0 as i32 + dy,
+            },
+            extent: vk::Extent2D {
+                width: x1.saturating_sub(x0),
+                height: y1.saturating_sub(y0),
+            },
+        },
+    }
+}
+
+/// Copies a square's ids into a readback buffer.
+fn copy_square<'g>(fg: &mut FrameGraph<'g>, ids: crate::graph::Texture, readback: vk::Buffer) {
+    let out = fg.import_buffer(
+        "pick readback",
+        ImportedBuffer {
+            buffer: readback,
+            size: BYTES,
+            address: 0,
+            initial: BufferState::idle(),
+            final_state: Some(BufferState::host_read()),
+        },
+    );
+    fg.add_pass("pick copy")
+        .read(ids, Access::TransferRead)
+        .write(out, Access::TransferWrite)
+        .execute(move |ctx| {
+            // SAFETY: recording outside a rendering scope; the image is in
+            // TRANSFER_SRC layout for this pass, the buffer holds a square.
+            unsafe {
+                ctx.device.cmd_copy_image_to_buffer(
+                    ctx.cmd,
+                    ctx.image(ids),
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    ctx.buffer(out),
+                    &[vk::BufferImageCopy {
+                        image_subresource: vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: 0,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        },
+                        image_extent: vk::Extent3D {
+                            width: SQUARE,
+                            height: SQUARE,
+                            depth: 1,
+                        },
+                        ..Default::default()
+                    }],
+                );
+            }
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_core::math::{Vec3, look_at, vulkan_perspective};
 
     fn result(at: &[(u32, u32, u32)]) -> PickResult {
         let mut ids = vec![0; (SQUARE * SQUARE) as usize];
@@ -450,5 +1094,42 @@ mod tests {
         let r = result(&[(CENTER + 3, CENTER + 3, 2)]);
         assert_eq!(r.nearest(3), None, "outside the circle");
         assert_eq!(r.nearest(5), Some(1));
+    }
+
+    #[test]
+    fn region_planes_bound_the_pixels_seen_through_the_camera() {
+        // A camera at z = 5 looking down -z, 90° vertically, square pixels of a 200 × 100
+        // view.
+        let clip_from_world = vulkan_perspective(core::f32::consts::FRAC_PI_2, 2.0, 0.1, 100.0)
+            * look_at(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO, Vec3::Y);
+        let size = (200, 100);
+        let inside =
+            |planes: &[Vec4; 6], p: Vec3| planes.iter().all(|q| q.dot(p.extend(1.0)) >= 0.0);
+        // Where a point lands in the view's pixels.
+        let pixel = |p: Vec3| {
+            let c = clip_from_world * p.extend(1.0);
+            (
+                (c.x / c.w * 0.5 + 0.5) * 200.0,
+                (c.y / c.w * 0.5 + 0.5) * 100.0,
+            )
+        };
+        let (px, py) = pixel(Vec3::new(1.0, 0.5, 0.0));
+        let planes = region_planes(
+            &clip_from_world,
+            [px - 2.0, py - 2.0, px + 2.0, py + 2.0],
+            size,
+        );
+        assert!(
+            inside(&planes, Vec3::new(1.0, 0.5, 0.0)),
+            "the point itself"
+        );
+        // Along the same ray, nearer and farther.
+        assert!(inside(&planes, Vec3::new(0.8, 0.4, 1.0)));
+        assert!(inside(&planes, Vec3::new(2.0, 1.0, -5.0)));
+        // Beside it, behind the camera, beyond the far plane.
+        assert!(!inside(&planes, Vec3::new(1.5, 0.5, 0.0)));
+        assert!(!inside(&planes, Vec3::new(1.0, 0.0, 0.0)));
+        assert!(!inside(&planes, Vec3::new(-1.0, -0.5, 10.0)));
+        assert!(!inside(&planes, Vec3::new(40.0, 20.0, -195.0)));
     }
 }

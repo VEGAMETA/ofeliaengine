@@ -235,6 +235,8 @@ pub(crate) struct EditorState {
     pub(crate) keys: Option<String>,
     /// The camera's flight speed, meters per second.
     pub(crate) fly: Option<f64>,
+    /// Whether clicks in the viewport pick transparent surfaces (ADR 0109).
+    pub(crate) pick_transparent: Option<bool>,
     /// Where the editor's window was.
     pub(crate) window: Option<WindowPlacement>,
 }
@@ -282,6 +284,9 @@ impl SessionFile {
         }
         if let Some(fly) = self.editor.fly {
             let _ = writeln!(out, "fly = {fly}");
+        }
+        if let Some(on) = self.editor.pick_transparent {
+            let _ = writeln!(out, "pick_transparent = {on}");
         }
         if let Some(w) = self.editor.window {
             let _ = writeln!(
@@ -411,6 +416,13 @@ impl SessionFile {
                     "restart" => file.editor.restart = Some(unquote(value).map_err(at)?),
                     "keys" => file.editor.keys = Some(unquote(value).map_err(at)?),
                     "fly" => file.editor.fly = Some(parse_number(value).map_err(at)?),
+                    "pick_transparent" => {
+                        file.editor.pick_transparent = Some(match value {
+                            "true" => true,
+                            "false" => false,
+                            other => return Err(at(format!("`{other}` is not true or false"))),
+                        });
+                    }
                     "window" => {
                         let parts = items(value, '(', ')').map_err(at)?;
                         let [left, top, right, bottom, maximized] = parts[..] else {
@@ -827,6 +839,7 @@ mod tests {
                 restart: Some(String::from("ask")),
                 keys: Some(String::from("godot")),
                 fly: Some(7.5),
+                pick_transparent: Some(false),
                 window: Some(WindowPlacement {
                     left: -7,
                     top: 0,

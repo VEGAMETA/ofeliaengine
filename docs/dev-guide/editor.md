@@ -227,14 +227,22 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   is already selected. In the scene tree Shift selects a range and Ctrl one row, as in
   every list.
 - **A click on nothing** clears the selection; with Shift or Ctrl it keeps it.
+- **Clicking again at the same spot** selects the object behind the active one, then the
+  one behind that, and round to the nearest: what a nearer object hides is a click away. A
+  Shift or Ctrl click, or a click elsewhere, starts over.
+- **Alt+click** lists everything under the pointer in the palette, nearest first, hidden
+  objects too: pick one to select it, or type to narrow the list.
 - A press on one of the gizmo's handles drags it instead, and a press that moves more than
-  4 pixels is not a click.
+  4 pixels is not a click. The select tool's middle handle sits at the object's middle: to
+  click there again, click beside it, or use a tool without it (rotate).
 - What is picked is what is drawn: masked surfaces through their holes, skinned meshes in
-  their current pose, transparent ones too. Lights, cameras and empty entities have no
-  geometry: pick them in the tree until their icons come.
-- A click answers a frame or two later: the editor draws the pixels around it once more,
-  each with the object it shows (ADR 0109). The pointer's pixel is drawn again whenever the
-  pointer, the camera or the scene moves.
+  their current pose, transparent ones too. **Viewport: Pick Transparent Surfaces** in the
+  palette turns the last off, so clicks go through glass; the session keeps it. Lights,
+  cameras and empty entities have no geometry: pick them in the tree until their icons
+  come.
+- A click answers a frame or two later: the editor draws the objects whose bounds reach the
+  pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
+  pixel is drawn again whenever the pointer, the camera or the scene moves.
 - **Outlines:** the selection is outlined in orange, 2 pixels wide, the active entity in a
   lighter orange; an entity's children are outlined with it. The object under the pointer
   gets a thin light line, so you see what a click will take. Where something else hides an

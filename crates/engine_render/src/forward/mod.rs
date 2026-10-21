@@ -156,7 +156,7 @@ mod shadow_atlas;
 mod vsm_shading;
 
 use layout::{Changes, Layout, MESHLET_ARGS, MESHLET_HEADER_BYTES, Source, local_box};
-pub(crate) use layout::{States, TypedPipelines, mirrored, state};
+pub(crate) use layout::{States, TypedPipelines, faces, mirrored, state};
 pub use material_types::{
     ENGINE_SHADER_DIR, MaterialTypeDesc, RELOAD_QUIET, material_type_options,
     reflect_material_params,
@@ -3693,7 +3693,11 @@ impl From<vk::Rect2D> for DrawAreas {
 /// # Safety
 ///
 /// `cmd` is recording.
-unsafe fn set_draw_area(device: &engine_rhi::ash::Device, cmd: vk::CommandBuffer, area: DrawArea) {
+pub(crate) unsafe fn set_draw_area(
+    device: &engine_rhi::ash::Device,
+    cmd: vk::CommandBuffer,
+    area: DrawArea,
+) {
     let v = area.viewport;
     // SAFETY: guaranteed by the caller.
     unsafe {
