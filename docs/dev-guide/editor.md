@@ -137,7 +137,7 @@ editor = ["dep:engine_editor"]
 | Put the selection on the surface below it | End |
 | Draw a brush, a cut ([drawing brushes](#drawing-brushes)) | B, Shift+B |
 | Make the selected brushes rooms (walls 0.2 m thick), or solid again | Ctrl+H |
-| Edit the selected brushes' faces ([editing faces](#editing-faces)), with the pointer over the viewport | Tab |
+| Edit the selected brushes' faces, edges and corners ([editing faces](#editing-faces)), with the pointer over the viewport | Tab |
 | Drag the selection over surfaces | Ctrl+Shift with a move handle |
 | What rotating and scaling turn about: the middle, each entity's own origin, the active entity | . (Period) |
 
@@ -385,20 +385,24 @@ names the shape and its sizes ("Stairs 1 × 1.8 × [1.2] m, 6 steps of 0.2 m").
 
 ### Editing faces
 
-**Tab** with the pointer over the viewport edits the selected brushes' faces (Blender's Tab;
-over the panels, Tab goes from field to field). The gizmo and the handles hide; every face's
-edges show thin, and the face under the pointer lights blue.
+**Tab** with the pointer over the viewport edits the selected brushes' faces, edges and
+corners (Blender's Tab; over the panels, Tab goes from field to field). The gizmo and the
+handles hide; every face's edges show thin, the corners as small squares. What the pointer
+takes lights blue: a corner within a few pixels of it, else an edge, else the face under
+it.
 
 | While editing | What happens |
 |---|---|
 | a drag on a face | moves it along its normal; the brush keeps its other faces. A move that would leave nothing of the brush stops before it |
+| a drag on a corner or an edge | moves it (an edge's two corners together) in the plane of the brush's own axes that faces the camera most. The part is made again from its corners: corners that meet merge, so a box's top edge dragged down onto the bottom's makes a wedge, and a corner dragged inside goes |
 | Alt+drag on a face | pulls a new brush out of it, as far as the pointer goes; pushed in, a cut of the face's outline that deep (a doorway pushed into a wall). It goes into the same group, and its faces are edited next too |
 | Tab, Escape, a click on no face | ends the editing (the click selects what it hits) |
 | Escape during a drag | takes the drag back |
 
 - **An edited brush keeps its planes:** its shape (box, wedge, cylinder…) becomes plain
   planes (`BrushShape::Planes`), and its side handles go. Undo brings the shape back. A
-  room stays a room: what moves is its inside's plane, the wall following.
+  room stays a room: what moves is its inside's plane, the wall following; its corners
+  are its walls', so they do not show.
 - **Snapping** follows the rules above: the distance in whole steps with snapping on (G),
   Shift the other way, Ctrl rounds it; free, millimetres. The distance shows on the face
   while it is dragged.

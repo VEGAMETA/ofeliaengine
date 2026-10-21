@@ -59,7 +59,7 @@ use crate::build::{
 };
 use crate::camera::OrbitCamera;
 use crate::draw::{self, Draw, Landed, Made, ROOM_WALLS, Stage};
-use crate::faces::{self, Face, FaceDrag};
+use crate::faces::{self, CornerDrag, Face, FaceDrag, PartCorners};
 use crate::gizmo::{self, COLORS, Change, Gizmo, GizmoDrag, Handle, Mode, Target, ViewProj};
 use crate::handles::{Handles, Side, SideDrag};
 use crate::icons;
@@ -3236,7 +3236,7 @@ impl Editor {
             && self.renaming.is_none()
             && self.gizmo_drag.is_none()
             && self.side_drag.is_none()
-            && self.face_edit.as_ref().is_none_or(|f| f.drag.is_none())
+            && self.face_edit.as_ref().is_none_or(|f| !f.dragging())
             && self.key_transform.is_none()
             && self.draw.is_none()
             && self.drag.is_none();
@@ -4170,8 +4170,11 @@ impl Editor {
             brushes,
             faces: Vec::new(),
             owners: Vec::new(),
+            points: Vec::new(),
+            point_owners: Vec::new(),
             hovered: None,
             drag: None,
+            corner_drag: None,
         });
     }
 
@@ -4214,27 +4217,79 @@ impl Editor {
                 edit.brushes.push(p);
             }
         }
+        if let Some((e, start, mut drag)) = edit.corner_drag.take()
+            && self.input.held(Button::Left)
+        {
+            if escape && !drag.cancelled {
+                drag.cancelled = true;
+                self.history.revert(world, drag.merge);
+            } else if !drag.cancelled
+                && let Some(at) = cursor
+                && let Some(planes) = drag.planes(
+                    view,
+                    at,
+                    &self.snapping,
+                    self.input.shift(),
+                    self.input.ctrl(),
+                )
+            {
+                self.history.begin("Move Corners", Some(drag.merge));
+                self.history.touch(world, e);
+                world.insert(e, faces::edited(&start, planes));
+                self.history.commit(world);
+            }
+            edit.corner_drag = Some((e, start, drag));
+        }
         edit.faces.clear();
         edit.owners.clear();
+        edit.points.clear();
+        edit.point_owners.clear();
         let mut scratch = Vec::new();
+        let mut parts = Vec::new();
         for &e in &edit.brushes {
             if let (Some(b), Some(g)) = (world.get::<Brush>(e), world.get::<GlobalTransform>(e)) {
                 faces::faces(b, g.0, &mut scratch);
                 edit.owners.extend(scratch.iter().map(|_| e));
                 edit.faces.append(&mut scratch);
+                faces::corners(b, g.0, &mut parts);
+                edit.point_owners.extend(parts.iter().map(|_| e));
+                edit.points.append(&mut parts);
             }
         }
-        if edit.drag.is_none() {
+        if !edit.dragging() {
             let free = !self.camera_drag && self.command_palette.is_none() && !self.add_open;
+            let reach = 8.0 * self.scale.max(0.5);
             edit.hovered = cursor
                 .filter(|&at| free && view.contains(at))
-                .and_then(|at| faces::pick(&edit.faces, view.ray(at)).map(|(i, _)| i));
+                .and_then(|at| hover(&edit, view, at, reach));
             if escape {
                 return;
             }
+            if self.input.pressed(Button::Left)
+                && let Some(Hover::Corner(p, _) | Hover::Edge(p, _)) = edit.hovered
+            {
+                let e = edit.point_owners[p];
+                let pc = &edit.points[p];
+                let (moving, grab) = match edit.hovered {
+                    Some(Hover::Corner(_, k)) => (vec![k], pc.world[k]),
+                    Some(Hover::Edge(_, k)) => {
+                        let (a, b) = pc.edges[k];
+                        (vec![a, b], (pc.world[a] + pc.world[b]) * 0.5)
+                    }
+                    _ => (Vec::new(), Vec3::ZERO),
+                };
+                if let (Some(b), Some(g)) = (world.get::<Brush>(e), world.get::<GlobalTransform>(e))
+                {
+                    self.gestures += 1;
+                    let drag = CornerDrag::start(b, g.0, pc, moving, grab, view.eye, self.gestures);
+                    edit.corner_drag = Some((e, b.clone(), drag));
+                }
+                self.face_edit = Some(edit);
+                return;
+            }
             if self.input.pressed(Button::Left) {
-                let Some(i) = edit.hovered else {
-                    // A press on no face: the editing ends, the click selects.
+                let Some(Hover::Face(i)) = edit.hovered else {
+                    // A press on nothing of the brushes: the editing ends, the click selects.
                     return;
                 };
                 let e = edit.owners[i];
@@ -5234,6 +5289,7 @@ impl Editor {
             self.side_drag = None;
             if let Some(f) = &mut self.face_edit {
                 f.drag = None;
+                f.corner_drag = None;
             }
             self.open_choice = None;
             let selected: Vec<SceneId> = self
@@ -5969,7 +6025,7 @@ impl Editor {
         self.drag.is_some()
             || self.gizmo_drag.is_some()
             || self.side_drag.is_some()
-            || self.face_edit.as_ref().is_some_and(|f| f.drag.is_some())
+            || self.face_edit.as_ref().is_some_and(FaceEdit::dragging)
             || self.key_transform.is_some()
             || self.draw.is_some()
             || self.typing.is_some()
@@ -7014,18 +7070,38 @@ fn draw_drawing(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canv
 }
 
 /// The keys while editing faces, for the status bar.
-const FACES_HELP: &str = "drag a face: move it  ·  Alt+drag: pull a brush out of it (pushed in: a \
-                          cut)  ·  Tab or Esc: done";
+const FACES_HELP: &str = "drag a face, an edge or a corner: move it  ·  Alt+drag a face: pull a \
+                          brush out of it (pushed in: a cut)  ·  Tab or Esc: done";
 
-/// Editing brushes' faces (Tab, ADR 0110 E2b-5): the brushes; their faces this frame, each
-/// with its brush; the one under the pointer; a face being dragged.
+/// Editing brushes' faces, edges and corners (Tab, ADR 0110 E2b-5): the brushes; their faces
+/// and their parts' corners this frame, each with its brush; what is under the pointer; a
+/// face or corners being dragged.
 #[derive(Debug)]
 struct FaceEdit {
     brushes: Vec<Entity>,
     faces: Vec<Face>,
     owners: Vec<Entity>,
-    hovered: Option<usize>,
+    points: Vec<PartCorners>,
+    point_owners: Vec<Entity>,
+    hovered: Option<Hover>,
     drag: Option<FaceDragging>,
+    corner_drag: Option<(Entity, Brush, CornerDrag)>,
+}
+
+impl FaceEdit {
+    /// Whether a face or corners are being dragged.
+    fn dragging(&self) -> bool {
+        self.drag.is_some() || self.corner_drag.is_some()
+    }
+}
+
+/// What the pointer is over while editing faces: a face (its place in the faces), a
+/// corner or an edge (its part's place in the corners, and its own).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hover {
+    Face(usize),
+    Corner(usize, usize),
+    Edge(usize, usize),
 }
 
 /// A face being dragged: its brush as it was, the drag, and the brush a pull made.
@@ -7037,9 +7113,44 @@ struct FaceDragging {
     pulled: Option<Entity>,
 }
 
+/// What is under the pointer at `at` while editing: a corner within `reach` (physical
+/// pixels), else an edge within it, else the face the pointer's ray meets first.
+fn hover(edit: &FaceEdit, view: &ViewProj, at: Vec2, reach: f32) -> Option<Hover> {
+    let mut best: Option<(f32, Hover)> = None;
+    for (p, pc) in edit.points.iter().enumerate() {
+        for (k, &w) in pc.world.iter().enumerate() {
+            if let Some(d) = view.screen(w).map(|s| s.distance(at))
+                && d <= reach
+                && best.is_none_or(|(b, _)| d < b)
+            {
+                best = Some((d, Hover::Corner(p, k)));
+            }
+        }
+    }
+    if best.is_none() {
+        for (p, pc) in edit.points.iter().enumerate() {
+            for (k, &(a, b)) in pc.edges.iter().enumerate() {
+                let (Some(a), Some(b)) = (view.screen(pc.world[a]), view.screen(pc.world[b]))
+                else {
+                    continue;
+                };
+                let ab = b - a;
+                let t = ((at - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+                let d = (a + ab * t).distance(at);
+                if d <= reach && best.is_none_or(|(b, _)| d < b) {
+                    best = Some((d, Hover::Edge(p, k)));
+                }
+            }
+        }
+    }
+    best.map(|(_, h)| h)
+        .or_else(|| faces::pick(&edit.faces, view.ray(at)).map(|(i, _)| Hover::Face(i)))
+}
+
 /// The faces being edited (ADR 0110 E2b-5), under the panels: their edges thin and light,
-/// the face under the pointer or dragged light blue and thicker (the selection's outline is
-/// orange); while one is dragged, how far on a label.
+/// the parts' corners as small squares, the face, edge or corner under the pointer or
+/// dragged light blue (the selection's outline is orange); while a face is dragged, how
+/// far on a label.
 fn draw_faces(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canvas: &mut Canvas) {
     let Some(edit) = &editor.face_edit else {
         return;
@@ -7049,7 +7160,7 @@ fn draw_faces(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canvas
     canvas.set_clip(Some(clip_of(rect)));
     let order = Order::layer(-1);
     for (i, f) in edit.faces.iter().enumerate() {
-        if edit.hovered == Some(i) {
+        if edit.hovered == Some(Hover::Face(i)) {
             continue;
         }
         for k in 0..f.corners.len() {
@@ -7060,7 +7171,41 @@ fn draw_faces(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canvas
             }
         }
     }
-    let lit = edit.hovered.and_then(|i| edit.faces.get(i));
+    let blue = Vec4::new(0.45, 0.85, 1.0, 1.0);
+    for (p, pc) in edit.points.iter().enumerate() {
+        for (k, &w) in pc.world.iter().enumerate() {
+            let Some(at) = view.screen(w) else {
+                continue;
+            };
+            let lit = edit.hovered == Some(Hover::Corner(p, k));
+            let (size, color) = if lit {
+                (9.0, blue)
+            } else {
+                (6.0, Vec4::new(0.95, 0.97, 1.0, 1.0))
+            };
+            canvas.draw(
+                &Quad::solid(at, Vec2::splat((size + 3.0) * scale))
+                    .color(Vec4::new(0.08, 0.08, 0.1, 0.85))
+                    .order(order),
+            );
+            canvas.draw(
+                &Quad::solid(at, Vec2::splat(size * scale))
+                    .color(color)
+                    .order(order),
+            );
+        }
+        for (k, &(a, b)) in pc.edges.iter().enumerate() {
+            if edit.hovered == Some(Hover::Edge(p, k))
+                && let (Some(a), Some(b)) = (view.screen(pc.world[a]), view.screen(pc.world[b]))
+            {
+                canvas.draw(&Quad::line(a, b, 3.0 * scale).color(blue).order(order));
+            }
+        }
+    }
+    let lit = match edit.hovered {
+        Some(Hover::Face(i)) => edit.faces.get(i),
+        _ => None,
+    };
     if let Some(f) = lit {
         for k in 0..f.corners.len() {
             let (a, b) = (f.corners[k], f.corners[(k + 1) % f.corners.len()]);
@@ -8943,7 +9088,9 @@ mod tests {
         mouse(&mut ed, over, None);
         ed.update(&mut world);
         let edit = ed.face_edit.as_ref().unwrap();
-        let lit = edit.hovered.expect("the top lights");
+        let Some(Hover::Face(lit)) = edit.hovered else {
+            panic!("the top lights: {:?}", edit.hovered)
+        };
         assert!(edit.faces[lit].normal.y > 0.9);
         assert!(ed.status.contains(FACES_HELP), "{}", ed.status);
         assert!(
@@ -8994,6 +9141,42 @@ mod tests {
         // Escape ends the editing.
         chord(&mut ed, &mut world, &[ESCAPE]);
         assert!(ed.face_edit.is_none());
+    }
+
+    #[test]
+    fn an_edge_dragged_onto_another_makes_a_wedge_as_one_step() {
+        let mut world = World::new();
+        let mut ed = draw_editor("edges", &mut world);
+        // Looking from the front and a little above: an edge moves in the plane across z.
+        ed.orbit.pitch = 0.3;
+        ed.add(&mut world, FIRST_BRUSH);
+        let e = ed.active().unwrap();
+        let placed = world.get::<Transform>(e).unwrap().to_affine();
+        world.insert(e, GlobalTransform(placed));
+        let over = on_view(&ed, Vec3::new(0.3, 1.0, 1.0));
+        mouse(&mut ed, over, None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[TAB]);
+        // The top's front edge (y = 2 m, z = +1 m): lit.
+        let edge = Vec3::new(0.0, 2.0, 1.0);
+        let at = on_view(&ed, edge);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        let edit = ed.face_edit.as_ref().unwrap();
+        assert!(
+            matches!(edit.hovered, Some(Hover::Edge(..))),
+            "{:?}",
+            edit.hovered
+        );
+        assert_eq!(edit.points[0].grid.len(), 8, "its corners show");
+        // Down 2 m onto the bottom's front edge: a wedge, five faces, one step.
+        drag_world(&mut ed, &mut world, edge, edge - Vec3::Y * 2.0);
+        let b = world.get::<Brush>(e).unwrap();
+        assert_eq!(b.shape, BrushShape::Planes);
+        assert_eq!(b.planes.len(), 5, "{:?}", b.planes);
+        assert_eq!(ed.history.steps().count(), 2, "the add and the move");
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(world.get::<Brush>(e).unwrap().shape, BrushShape::Box);
     }
 
     #[test]

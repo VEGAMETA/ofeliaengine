@@ -16,6 +16,95 @@ pub fn grown(parts: &[Vec<Plane>], by: i64) -> Option<Vec<Vec<Plane>>> {
         .collect()
 }
 
+/// The planes of the convex hull of grid points `points`, each face's once, facing out
+/// (ADR 0110: a brush's part made again from its corners when a corner or an edge of it
+/// moves). Points that end up inside go, and corners that meet merge: a box's edge moved
+/// onto another makes a wedge.
+///
+/// Exact when a face's normal, its common factors gone, is within the planes' bounds (a
+/// brush's own faces, faces through grid points less than a few metres apart); a larger one
+/// is rounded, the plane through the face's first corner. `None` when the points span no
+/// volume. Brute force over triples of points, for the few corners a part has.
+pub fn hull(points: &[[i64; 3]]) -> Option<Vec<Plane>> {
+    let mut points = points.to_vec();
+    points.sort_unstable();
+    points.dedup();
+    let n = points.len();
+    let sub = |a: [i64; 3], b: [i64; 3]| [0, 1, 2].map(|i| i128::from(a[i] - b[i]));
+    let dot = |n: [i128; 3], p: [i64; 3]| (0..3).map(|i| n[i] * i128::from(p[i])).sum::<i128>();
+    let mut out: Vec<Plane> = Vec::new();
+    for i in 0..n {
+        for j in i + 1..n {
+            for k in j + 1..n {
+                let (a, b, c) = (points[i], points[j], points[k]);
+                let (u, v) = (sub(b, a), sub(c, a));
+                let normal = [
+                    u[1] * v[2] - u[2] * v[1],
+                    u[2] * v[0] - u[0] * v[2],
+                    u[0] * v[1] - u[1] * v[0],
+                ];
+                if normal == [0; 3] {
+                    continue;
+                }
+                let d = dot(normal, a);
+                let (mut front, mut back) = (false, false);
+                for &p in &points {
+                    match dot(normal, p).cmp(&d) {
+                        core::cmp::Ordering::Greater => front = true,
+                        core::cmp::Ordering::Less => back = true,
+                        core::cmp::Ordering::Equal => {}
+                    }
+                    if front && back {
+                        break;
+                    }
+                }
+                if front == back {
+                    // Points on both sides: not a face. On neither: all in one plane.
+                    continue;
+                }
+                // Facing out: the other points behind it.
+                let (normal, d) = if front {
+                    (normal.map(|c| -c), -d)
+                } else {
+                    (normal, d)
+                };
+                let plane = hull_plane(normal, d, a)?;
+                if !out.contains(&plane) {
+                    out.push(plane);
+                }
+            }
+        }
+    }
+    (out.len() >= 4).then_some(out)
+}
+
+/// The plane `normal · x = d` through grid point `a`, reduced, or rounded when it is beyond
+/// the planes' bounds.
+fn hull_plane(normal: [i128; 3], d: i128, a: [i64; 3]) -> Option<Plane> {
+    let gcd = |mut x: u128, mut y: u128| {
+        while y != 0 {
+            (x, y) = (y, x % y);
+        }
+        x
+    };
+    let g = normal
+        .iter()
+        .chain(core::iter::once(&d))
+        .fold(0u128, |g, &c| gcd(g, c.unsigned_abs()))
+        .max(1) as i128;
+    let (n, d) = (normal.map(|c| c / g), d / g);
+    let fits = n
+        .iter()
+        .all(|c| c.abs() <= i128::from(crate::exact::MAX_NORMAL))
+        && d.abs() <= i128::from(crate::exact::MAX_OFFSET);
+    if fits {
+        Plane::new(n.map(|c| c as i64), d as i64)
+    } else {
+        let a = DVec3::new(a[0] as f64, a[1] as f64, a[2] as f64);
+        Plane::from_f64(DVec3::new(n[0] as f64, n[1] as f64, n[2] as f64), a)
+    }
+}
+
 /// The six planes of the box from `lo` to `hi` (+x, -x, +y, -y, +z, -z); `None` when a
 /// side is out of bounds.
 pub fn box_planes(lo: [i64; 3], hi: [i64; 3], table: &mut Planes) -> Option<Vec<PlaneId>> {
@@ -242,6 +331,47 @@ mod tests {
         }
         // The corners are exact; only the sum rounds.
         (v * 1e3).round() / 1e3
+    }
+
+    #[test]
+    fn a_hull_of_a_boxs_corners_is_the_box_and_an_edge_moved_onto_another_makes_a_wedge() {
+        let corner = |i: usize, top_back: Option<[i64; 3]>| {
+            let p = [
+                if i & 1 != 0 { 2000 } else { 0 },
+                if i & 2 != 0 { 1000 } else { 0 },
+                if i & 4 != 0 { 3000 } else { 0 },
+            ];
+            // The top's back edge (y = 1000, z = 3000) moved.
+            match top_back {
+                Some(to) if i & 6 == 6 => [p[0] + to[0], p[1] + to[1], p[2] + to[2]],
+                _ => p,
+            }
+        };
+        let id = (DMat3::IDENTITY, DVec3::ZERO);
+        let mut points: Vec<[i64; 3]> = (0..8).map(|i| corner(i, None)).collect();
+        // A point inside and a corner twice change nothing.
+        points.push([1000, 500, 1500]);
+        points.push(points[3]);
+        let planes = hull(&points).unwrap_or_else(|| panic!());
+        let mut want = cuboid([0, 0, 0], [2000, 1000, 3000]).unwrap_or_else(|| panic!());
+        let mut got = planes.clone();
+        let key = |p: &Plane| (p.n, p.d);
+        want.sort_by_key(key);
+        got.sort_by_key(key);
+        assert_eq!(got, want);
+        // The top's back edge down onto the bottom's: a wedge, five faces, half the volume.
+        let points: Vec<[i64; 3]> = (0..8).map(|i| corner(i, Some([0, -1000, 0]))).collect();
+        let wedge = hull(&points).unwrap_or_else(|| panic!());
+        assert_eq!(wedge.len(), 5);
+        let v = volume(&[wedge], id.0, id.1);
+        assert_eq!(v, 2000.0 * 1000.0 * 3000.0 / 2.0);
+        // Moved out and up a little: a sloped back, still closed, the volume between.
+        let points: Vec<[i64; 3]> = (0..8).map(|i| corner(i, Some([0, 250, 700]))).collect();
+        let sloped = hull(&points).unwrap_or_else(|| panic!());
+        let v = volume(&[sloped], id.0, id.1);
+        assert!(v > 2000.0 * 1000.0 * 3000.0, "{v}");
+        // All in one plane: no hull.
+        assert!(hull(&[[0, 0, 0], [1000, 0, 0], [0, 0, 1000], [1000, 0, 1000]]).is_none());
     }
 
     #[test]
