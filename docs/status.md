@@ -214,7 +214,7 @@ Last updated: 2026-10-20.
   - **E2b-5b, edges and corners** (#297): in Tab's editing a drag moves a corner or an edge,
     the part made again as the exact hull of its corners (`shape::hull`): a box's edge
     dragged onto another makes a wedge.
-  - **E2b-6a, exporting a group** (#PR; the owner chose E2b-6 before E3): Blockout: Export
+  - **E2b-6a, exporting a group** (#298; the owner chose E2b-6 before E3): Blockout: Export
     to glTF writes a group's surface as a `.glb` beside the scene, a part per tint over the
     embedded grid, so Blender opens the greybox as it looks.
   - **Next:** E2b-6b, models made from glTF files in the player; E2b-6c, Bake to Mesh in
