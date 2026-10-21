@@ -408,6 +408,12 @@ it.
   while it is dragged.
 - **Every drag is one undo step.**
 
+### Exporting a greybox
+
+**Blockout: Export to glTF** (the palette) writes the selected brush's group as
+`<group>.glb` beside the scene, a part per tint over the grid ([blockout.md](blockout.md#exporting-a-greybox)).
+The status bar says where and how many triangles.
+
 ### Colliders
 
 **View: Colliders** (the palette) draws the edges of the brushes' pieces that collide,

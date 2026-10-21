@@ -77,7 +77,9 @@ mod text;
 mod videos;
 
 pub use assets::{Alpha, Assets, MaterialFile, Model, builtin};
-pub use blockout::{Blockout, Brush, BrushGroup, BrushOp, BrushPlane, BrushShape};
+pub use blockout::{
+    BakedBrush, Blockout, Brush, BrushGroup, BrushOp, BrushPlane, BrushShape, grid_png,
+};
 /// Networking's replication (ADR 0074): the schema, `Replicated`, lag compensation.
 pub use engine_net as netcode;
 pub use engine_platform::display::DisplayInfo;

@@ -544,3 +544,19 @@ Proposed (question 3):
   box); on both GPUs the corners shown; looked at.
 - **Left:** Q, E, R and typed values on what is picked, Ctrl+E, several corners picked
   (Shift+click, a box), edges and corners of rooms.
+
+## As built (E2b-6a, 2026-10-21): exporting a group
+
+- **`Blockout::baked(group)`:** the group's visible surface as the player meshes it (the
+  0.05 mm growth closing T-junctions included), a part per brush with its tint, in the
+  group's space, metres; **`engine_app::grid_png`**, the grid's top level as a PNG.
+- **`engine_editor::bake::glb`:** a binary glTF of one node and one mesh, the brushes of a
+  tint merged into a primitive with a material (the tint as its base color over the
+  embedded grid, roughness 0.85, a repeating sampler: the texture coordinates are
+  metres, a cell each). Written by hand with `serde_json`; read back by the engine's own
+  importer in the tests.
+- **Blockout: Export to glTF** writes the active entity's group beside the scene, named
+  after it (`blockout.glb`), over an earlier export; the status bar says where.
+- **Left for E2b-6b and E2b-6c:** models made from glTF files in the player (meshes and
+  their materials with textures; ADR 0107 E4's piece of it), then Bake to Mesh putting the
+  group's model in its place (the brushes kept, off) and Unbake.

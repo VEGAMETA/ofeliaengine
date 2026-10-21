@@ -68,6 +68,16 @@ hulls, when the game asks its physics for them (`ScenePhysics::sync_blockout`, p
 blockout set `internal_edges`, and the seams between pieces are as smooth as one floor.
 In the editor, **View: Colliders** (the palette) draws the pieces that collide.
 
+## Exporting a greybox
+
+**Blockout: Export to glTF** (the palette) writes the selected group (or the group of the
+selected brush) beside the scene as a binary glTF named after it (`blockout.glb`), over an
+earlier one: its visible surface as the editor draws it, in the group's own space (metres,
+y up). The brushes of one tint share a part and a material, the tint over the grid
+(embedded), so Blender shows the greybox as it looks here, ready for an artist to build
+over. From code: `player.blockout().baked(group, &mut brushes)` gives the triangles,
+`engine_app::grid_png()` the grid.
+
 ## Navigation
 
 The visible surface of the brushes that collide bakes into a navigation mesh

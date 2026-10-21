@@ -54,6 +54,7 @@
 //!   Ctrl+Y or Ctrl+Shift+Z redo, Ctrl+S save, Delete, Ctrl+D duplicate, Ctrl+A add, Y
 //!   snapping by default, F2 rename.
 
+use crate::bake;
 use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
@@ -554,6 +555,8 @@ struct CommandIds {
     hollow: CommandId,
     /// Tab: editing the selected brushes' faces (E2b-5).
     edit_faces: CommandId,
+    /// A blockout group written as a glTF beside the scene (E2b-6).
+    export: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
     /// the next pivot.
     steps: [CommandId; 3],
@@ -632,6 +635,7 @@ fn commands() -> (Commands, CommandIds) {
         draw_cut: c.register("blockout.draw_cut", "Blockout", "Draw Cut"),
         hollow: c.register("blockout.hollow", "Blockout", "Room or Solid"),
         edit_faces: c.register("blockout.edit_faces", "Blockout", "Edit Faces"),
+        export: c.register("blockout.export", "Blockout", "Export to glTF"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
             c.register("snap.angle_step", "Snapping", "Angle Step…"),
@@ -1335,6 +1339,8 @@ struct Editor {
     gizmo_drag: Option<GizmoDrag>,
     /// Editing brushes' faces (Tab, ADR 0110 E2b-5).
     face_edit: Option<FaceEdit>,
+    /// A blockout group to write as a glTF once the player's frame is at hand (E2b-6).
+    export_group: Option<Entity>,
     /// The active brush's side handles (ADR 0110 E2b-3c), the one under the pointer, and
     /// a side being dragged.
     handles: Handles,
@@ -1758,6 +1764,7 @@ impl Editor {
             gizmo_shown: false,
             gizmo_drag: None,
             face_edit: None,
+            export_group: None,
             handles: Handles::default(),
             hovered_side: None,
             side_drag: None,
@@ -5013,6 +5020,34 @@ impl Editor {
         self.draw = Some(d);
     }
 
+    /// Blockout group `group` written as a binary glTF beside the scene (ADR 0110 E2b-6),
+    /// named after the group (`blockout.glb`), over the file of that name: what to say.
+    fn export(&self, blockout: &engine_app::Blockout, world: &World, group: Entity) -> String {
+        let mut brushes = Vec::new();
+        blockout.baked(group, &mut brushes);
+        let name = world
+            .get::<Name>(group)
+            .map_or_else(|| String::from("Blockout"), |n| n.as_str().to_owned());
+        if brushes.is_empty() {
+            return format!("{name} shows nothing to export");
+        }
+        let dir = self
+            .scene_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map_or_else(|| self.root.clone(), |d| self.root.join(d));
+        let path = dir.join(bake::file_name(&name));
+        let bytes = bake::glb(&name, &brushes, &engine_app::grid_png());
+        let triangles: usize = brushes.iter().map(|b| b.indices.len() / 3).sum();
+        match std::fs::write(&path, bytes) {
+            Ok(()) => format!(
+                "Exported {name} to {} ({triangles} triangles)",
+                path.display()
+            ),
+            Err(e) => format!("{name} not exported: {}: {e}", path.display()),
+        }
+    }
+
     /// The navigation's frame (ADR 0110 E2b-4b): a bake's answer taken; a bake started in
     /// the background once the brushes have stayed as they are for [`NAV_WAIT`] and no
     /// gesture runs, from the visible surface of the brushes that collide, for a human-sized
@@ -5367,6 +5402,13 @@ impl Editor {
             self.toggle_rooms(world);
         } else if id == ids.edit_faces {
             self.toggle_face_edit(world);
+        } else if id == ids.export {
+            match self.brush_group(world) {
+                Some(group) => self.export_group = Some(group),
+                None => self.say(String::from(
+                    "Select a blockout group, or a brush in one, to export it",
+                )),
+            }
         } else if let Some(k) = ids.steps.iter().position(|&c| c == id) {
             self.pick_step(world, k);
         } else if id == ids.navigation {
@@ -6571,6 +6613,11 @@ impl<G> EditorGame<G> {
         // The newest pick's entity, and what to outline (ADR 0109), through the
         // extraction's slots.
         let runtime = player.runtime();
+        // A group exported (E2b-6): its surface as the player draws it, beside the scene.
+        if let Some(group) = shared.export_group.take() {
+            let message = shared.export(player.blockout(), &runtime.world, group);
+            shared.say(message);
+        }
         // The navigation's overlay (E2b-4b): baked in the background a moment after the
         // brushes last changed.
         if shared.show_nav {
