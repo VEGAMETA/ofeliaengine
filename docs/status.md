@@ -240,7 +240,7 @@ Last updated: 2026-10-20.
     playing ("Kept" in the tree), Ctrl+Shift+K lists everything changed since Play (by
     component, made, despawned) to pick from; at Stop they go into the scene as one undo
     step, the game's runtime components left out, what it made becoming scene entities.
-  - **E3-4, the game's own window** (#PR): Play shows the game in a window of its own, the
+  - **E3-4, the game's own window** (#303): Play shows the game in a window of its own, the
     scene drawn once, there (`Player::open_view_window`: a second swapchain in the same
     submission), the viewport saying where; F7 and F8 work in it, closing it stops, eject
     brings the view into the viewport; "Play: In a Window or in the Viewport". Latency
