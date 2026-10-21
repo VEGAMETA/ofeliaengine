@@ -69,7 +69,8 @@ CLAUDE.md §12: keyboard-first, immediate feedback, drag and drop where natural.
    - an asset dragged in lands on the surface under the cursor, aligned to its normal,
      previewed while dragging;
    - Alt+drag duplicates (Unreal), Ctrl+D duplicates in place;
-   - Shift+R repeats the last command with its values (Blender's "Repeat Last").
+   - a key repeats the last command with its values (Blender's "Repeat Last", Shift+R;
+     ours picks the rotate gizmo's handles since E2-2b, so its key comes with it).
 5. **The last operation stays adjustable** (Blender): after a command, its values sit in
    a small panel by the cursor until the next one; changing them redoes it.
 6. **Frame and follow:** F frames the selection, Shift+F follows it. Bookmarks are on
