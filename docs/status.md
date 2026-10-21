@@ -154,8 +154,13 @@ Last updated: 2026-10-20.
     selected ones' reach (a point light's range, a spot's cone, a camera's pyramid, the
     sun's direction); "View: Overlays" hides them. E2 is done; drops of assets onto
     surfaces come with E4's browser.
-  - **Next:** E2b, the blockout (ADR 0107 §7: brushes for greyboxing a level, their
-    colliders and navigation mesh), after its UX note and ADR.
+  - **E2b, the blockout** (ADR 0107 §7: brushes for greyboxing a level, their colliders
+    and navigation mesh): the research notes (#285), `docs/research/blockout.md` (convex
+    brushes as integer planes, exact predicates in `i128`, Godot's order over convex
+    pieces, the pieces as hulls, the visible surface for navigation) and
+    `docs/research/ux/blockout.md` (drawn on surfaces with B, typed sizes, face handles,
+    Tab for faces, edges and corners, cuts shown dashed, Play at once, bake to a mesh).
+  - **Next:** the blockout's ADR, with the exact core prototyped and measured.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

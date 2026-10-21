@@ -140,8 +140,9 @@ Where the game's Rust code runs, as put to the owner:
   - the automation interface: an MCP server and the command line's JSON output (queue
     5a). An agent can do whatever a person can.
 - **A command that changes the world** runs inside one `History` transaction.
-- **Commands keep their arguments,** so "Repeat last" (Shift+R) and the "last operation"
-  panel (Blender's "Adjust Last Operation") run them again with changed values.
+- **Commands keep their arguments,** so "Repeat last" and the "last operation" panel
+  (Blender's "Adjust Last Operation") run them again with changed values. Its key comes
+  with it: Shift+R, Blender's, picks the rotate gizmo's handles since E2-2b.
 - **Selection is not an undo step by itself.** Each step stores the selection before and
   after, and undo and redo restore it.
 
