@@ -208,7 +208,7 @@ Last updated: 2026-10-20.
     the background a moment after each edit, on a pool of the editor's own, and draws the
     mesh; 400 rooms (357 tiles) in 158 ms on four workers. Games bake it from
     `Blockout::surface_triangles`.
-  - **E2b-5a, editing faces** (#PR): Tab over the viewport; a drag moves a face along its
+  - **E2b-5a, editing faces** (#296): Tab over the viewport; a drag moves a face along its
     normal (the brush becomes planes, undo brings its shape back), Alt+drag pulls a brush
     out of it or pushes a cut in; rooms keep their walls.
   - **Next:** E2b-5b, edges and corners; then E2b-6, baking a group into a mesh; or E3,
