@@ -605,7 +605,7 @@ enum ViewImage {
 enum ViewOutput {
     Window {
         handle: WindowHandle,
-        swapchain: Swapchain,
+        swapchain: Box<Swapchain>,
         /// Its surface, kept until the swapchain made on it goes.
         surface: Arc<Surface>,
         /// Per frame slot: the semaphore its image's acquisition signals.
@@ -1750,7 +1750,7 @@ impl Player {
                     }
                     Ok(ViewOutput::Window {
                         handle,
-                        swapchain,
+                        swapchain: Box::new(swapchain),
                         surface,
                         acquired,
                     })

@@ -482,6 +482,17 @@ half a meter around them; nothing selected, it frames the whole scene.
 game on the scene's world, and its ticks run. **F8** (■) stops, and the scene is as it was
 before Play.
 
+**The game plays in a window of its own**, as large as the viewport, titled "main.scene
+(playing)":
+- the editor's viewport says where it is;
+- F7 and F8 work in the game's window too, and closing it stops;
+- the game gets its window's keys and mouse only while that window has the keyboard.
+
+**"Play: In a Window or in the Viewport"** (the palette) plays it in the viewport instead.
+The game plays there anyway beside frame generation or an HDR10 output, which a second
+window cannot follow. While a game window is open, latency control (Reflex, Anti-Lag) is
+off, until the next start (NVIDIA's driver crashed with Reflex beside a second window).
+
 When Play starts:
 - the session is saved first;
 - the editor's camera steps aside, so the scene's own cameras show the game.
@@ -523,7 +534,9 @@ Keeping the scene and putting it back take milliseconds: 7 and 8 ms for 10,000 e
 - **Shift+F8** ejects, Unreal's F8:
   - the editor's camera and tools come back on the running game, so you can fly around
     it, select and move things while it runs;
-  - the game's keyboard and mouse are off meanwhile.
+  - the game's keyboard and mouse are off meanwhile;
+  - playing in its window, the view comes into the viewport, the game's window keeping its
+    last frame.
 
   Shift+F8 again returns to the game.
 
@@ -634,7 +647,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | Phase | What |
 |---|---|
 | E2b | blockout: brushes for greyboxing a level (box, wedge, stairs, cylinder; add, subtract), their colliders and navigation mesh |
-| E3 | Play: the game's own window, the tree's marks on what changed (Play and Stop, pause and step, play from here, restart, eject and keeping changes are done) |
+| E3 | Play: the tree's marks on what changed (Play and Stop, the game's own window, pause and step, play from here, restart, eject and keeping changes are done) |
 
 The whole plan is ADR 0107 §7.
 
