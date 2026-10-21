@@ -1,7 +1,7 @@
 # Blockout: convex brushes held as planes, CSG, colliders and navigation
 
-Checked: 2026-10-21 (every fact; sources at the end, cited as [G1] etc.). Input for the
-blockout's ADR and phase E2b of [ADR 0107](../adr/0107-editor.md) §7. The tools' UX:
+Checked: 2026-10-21 (every fact; sources at the end, cited as [G1] etc.). Input for
+[ADR 0110](../adr/0110-blockout-brushes.md) and phase E2b of [ADR 0107](../adr/0107-editor.md) §7. The tools' UX:
 [ux/blockout.md](ux/blockout.md).
 
 - **The phase** (ADR 0107 §7, the owner, 2026-10-17): brushes for greyboxing a level, like
