@@ -69,6 +69,11 @@ let mut player = Player::new(&PlayerSettings {
 - **`player.load_scene(path)`** adds another scene to the world (a level, a room).
 - **`player.reload_asset(id)`** reads a file again after you wrote it anew: the models
   that use it are made again in the next frame.
+- **`player.open_view_window(title, width, height)`** draws the scene in a window of its own
+  (offscreen: an image, `capture_view_window`), the main output then left to overlays;
+  `show_view_in_window(false)` brings it back, `close_view_window` ends it. It turns latency
+  control off for the rest of the run, and refuses beside frame generation or an HDR10
+  output.
 - **`player.set_simulating(false)`** keeps the world still: it is drawn as it is, but the
   timers, tweens, your game's ticks and the sources' sound wait (the editor while
   editing; a pause). `player.end_run()` closes every video, stops every voice and ends the

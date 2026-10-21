@@ -337,3 +337,108 @@ fn a_scene_file_draws_models_from_a_baked_glb() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The view in a window of its own (ADR 0107 E3-4), offscreen: the scene drawn into it at
+/// its size, then, closed, into the main output again.
+#[test]
+fn the_view_draws_into_a_window_of_its_own() {
+    let dir = std::env::temp_dir().join(format!("ofelia-view-window-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let red_id = AssetId::new();
+    let red = MaterialFile {
+        base_color: [0.8, 0.15, 0.1, 1.0],
+        ..MaterialFile::default()
+    };
+    std::fs::write(dir.join("red.material"), red.to_text(red_id)).unwrap();
+    let red_ref = AssetRef::file(red_id);
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Transform::IDENTITY,
+        Model::new(builtin::CUBE, red_ref),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Sun {
+            color: Vec3::splat(1.2),
+            ambient: Vec3::splat(0.04),
+        },
+    ));
+    let eye = Vec3::new(2.0, 1.2, 3.0);
+    world.spawn((
+        SceneId::new(),
+        Transform::from_translation(eye).with_rotation(look_rotation(eye, Vec3::ZERO, Vec3::Y)),
+        Camera::perspective(1.0, 0.05, 200.0),
+    ));
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(red_ref, "red.material");
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &SaveOptions {
+            id: Some(AssetId::new()),
+            assets: Some(&paths),
+        },
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let (width, height) = (640u32, 360u32);
+    let settings = PlayerSettings {
+        title: String::from("view window test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let (w, h) = (320u32, 180u32);
+    player.open_view_window("the view", w, h).unwrap();
+    assert!(player.has_view_window());
+    for _ in 0..20 {
+        player.frame(&mut game).unwrap();
+    }
+    let rgba = player
+        .capture_view_window(&mut game, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rgba.len(), (w * h * 4) as usize);
+    let red_at = |rgba: &[u8], width: u32, x: u32, y: u32| {
+        let i = ((y * width + x) * 4) as usize;
+        let [r, g, b] = [rgba[i], rgba[i + 1], rgba[i + 2]].map(f32::from);
+        r > 1.5 * g && r > 1.5 * b
+    };
+    assert!(
+        red_at(&rgba, w, w / 2, h / 2),
+        "the cube in the view's window"
+    );
+    // Closed: the view draws into the main output again.
+    player.close_view_window();
+    assert!(!player.has_view_window());
+    for _ in 0..3 {
+        player.frame(&mut game).unwrap();
+    }
+    let rgba = player.capture(&mut game).unwrap().unwrap();
+    assert!(
+        red_at(&rgba, width, width / 2, height / 2),
+        "the cube in the main output"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

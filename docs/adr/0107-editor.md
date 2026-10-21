@@ -1158,3 +1158,41 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
   3. the kept states go in as one undo step, "Keep Changes" (`History::keep`): saved
      components set or removed to match, runtime components left alone, the missing
      ones spawned, kept despawns deleted.
+
+## As built (E3-4, 2026-10-22): the game's own window
+
+- **The options, as the rendering sees them:**
+  - **A:** the scene drawn once, into the game's window, the editor's viewport saying where
+    it is; a frame costs what it costs embedded.
+  - **B:** both views every frame, the game's window and the editor's camera in the
+    viewport; twice the scene's GPU time while playing.
+
+  **Chosen: A.** Eject brings the view into the viewport (the game's window keeping its
+  last frame). B can come later as a setting.
+- **The player** (`Player::open_view_window`, `show_view_in_window`,
+  `close_view_window`):
+  - a second window, surface and swapchain (offscreen: an image of its own, read back
+    by `capture_view_window`); the scene and the game's UI drawn into its image at its
+    size; the main output cleared for the overlays;
+  - one submission waits for both images and signals both presents
+    (`Frames::submit_presenting`), and both are presented;
+  - the view window's size, focus and close button kept apart from the main window's;
+    the game's input released while it does not have the keyboard;
+  - refused beside frame generation or an HDR10 output (the view stays in the main
+    output).
+- **NVIDIA (617.42):**
+  - a submission drawing into a second swapchain crashed the driver
+    (an access violation in `vkQueueSubmit2`) while the main swapchain was in Reflex's
+    low-latency mode;
+  - so did the frame after turning Reflex back on.
+
+  Opening a view window therefore turns latency control off for the player's life, the
+  main swapchain made again from nothing without the mode
+  (`Swapchain::recreate_with_low_latency`: as a successor it kept the mode). The editor is
+  not where latency is measured; the game's next start has it again.
+- **The editor:**
+  - Play opens the window as large as the viewport, titled "<scene> (playing)";
+  - the viewport shows a word on where the game is;
+  - F7 and F8 work in the game's window, its close button stops;
+  - the game gets the events of the window it plays in;
+  - "Play: In a Window or in the Viewport" chooses (in a window by default).

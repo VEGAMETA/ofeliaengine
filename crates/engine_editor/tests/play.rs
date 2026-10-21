@@ -589,3 +589,58 @@ fn keeping_every_change_keeps_what_the_game_made() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_game_plays_in_a_window_of_its_own_or_in_the_viewport() {
+    let dir = temp_dir("play-window");
+    write_scene(&dir);
+    let Some((mut player, settings)) = player(&dir, "editor play window test") else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    frame(&mut player, &mut game, &mut overlay);
+    // Play: a window of its own (offscreen here: an image), the game's camera in it.
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(player.has_view_window());
+    let extent = player.view_window_extent().unwrap();
+    assert!(extent.width >= 640 && extent.height >= 360, "{extent:?}");
+    let rgba = player
+        .capture_view_window(&mut game, Some(&mut overlay))
+        .unwrap()
+        .unwrap();
+    // The game's picture: the sky's blue above, the floor's grey below (no panels).
+    let at = |x: u32, y: u32| {
+        let i = ((y * extent.width + x) * 4) as usize;
+        [rgba[i], rgba[i + 1], rgba[i + 2]].map(f32::from)
+    };
+    let [r, g, b] = at(extent.width / 2, 4);
+    assert!(b > r && b > 60.0, "sky {r} {g} {b}");
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_PLAY_WINDOW_PNG") {
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    // Stop: the window goes.
+    assert!(game.run_command(player.world_mut(), "play.stop"));
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(!player.has_view_window());
+    // In the viewport instead: no window.
+    assert!(game.run_command(player.world_mut(), "play.where"));
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.playing() && !player.has_view_window());
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

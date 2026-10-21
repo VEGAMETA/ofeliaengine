@@ -591,6 +591,32 @@ impl Swapchain {
         self.build(device, surface, width, height)
     }
 
+    /// Recreates the swapchain with NVIDIA's low-latency mode on or off
+    /// ([`SwapchainDesc::low_latency`]): off while another swapchain is drawn in the same
+    /// submissions (on NVIDIA's driver such a submission crashed beside a low-latency
+    /// swapchain). Turned off, it is made from nothing, not as the old one's successor:
+    /// NVIDIA's driver keeps a replaced swapchain's ways, its low-latency mode with them.
+    /// The device must be idle.
+    pub fn recreate_with_low_latency(
+        &mut self,
+        device: &Device,
+        surface: &Surface,
+        width: u32,
+        height: u32,
+        low_latency: bool,
+    ) -> Result<(), RhiError> {
+        self.desc.low_latency = low_latency;
+        if !low_latency {
+            // SAFETY: the device is idle (the caller's word): no image of it is in use.
+            unsafe {
+                self.destroy_views();
+                self.loader.destroy_swapchain(self.raw, None);
+            }
+            self.raw = vk::SwapchainKHR::null();
+        }
+        self.build(device, surface, width, height)
+    }
+
     fn build(
         &mut self,
         device: &Device,

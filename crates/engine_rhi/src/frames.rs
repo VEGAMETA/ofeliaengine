@@ -187,36 +187,74 @@ impl Frames {
         signal: Option<vk::Semaphore>,
         present_id: Option<u64>,
     ) -> Result<(), RhiError> {
+        self.submit_presenting(
+            queue,
+            frame,
+            waits_for_image,
+            wait,
+            signal,
+            None,
+            present_id,
+        )
+    }
+
+    /// Like [`Frames::submit_waiting`], drawing into a second swapchain's image too:
+    /// `second` is that image's acquire semaphore, waited for before color attachments
+    /// are written, and the semaphore its presentation waits for, signaled when the work
+    /// completes (a view in a window of its own beside the main output).
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_presenting(
+        &mut self,
+        queue: Queue,
+        frame: Frame,
+        waits_for_image: bool,
+        wait: Option<(vk::Semaphore, u64)>,
+        signal: Option<vk::Semaphore>,
+        second: Option<(vk::Semaphore, vk::Semaphore)>,
+        present_id: Option<u64>,
+    ) -> Result<(), RhiError> {
         engine_profiler::zone!("rhi::Frames::submit");
         let value = self.submitted + 1;
-        let mut waits = [
+        let image_wait = |semaphore: vk::Semaphore| {
             vk::SemaphoreSubmitInfo::default()
-                .semaphore(frame.image_available)
-                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
-            vk::SemaphoreSubmitInfo::default().stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-        ];
+                .semaphore(semaphore)
+                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+        };
+        let mut waits = [vk::SemaphoreSubmitInfo::default(); 3];
         let mut wait_count = 0;
         if waits_for_image {
-            wait_count = 1;
-        }
-        if let Some((semaphore, at)) = wait {
-            waits[wait_count] = waits[1].semaphore(semaphore).value(at);
+            waits[wait_count] = image_wait(frame.image_available);
             wait_count += 1;
         }
+        if let Some((semaphore, at)) = wait {
+            waits[wait_count] = vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore)
+                .value(at)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
+            wait_count += 1;
+        }
+        if let Some((acquired, _)) = second {
+            waits[wait_count] = image_wait(acquired);
+            wait_count += 1;
+        }
+        let binary = |semaphore: vk::Semaphore| {
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+        };
         let mut signals = [
             vk::SemaphoreSubmitInfo::default()
                 .semaphore(self.timeline)
                 .value(value)
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            vk::SemaphoreSubmitInfo::default().stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+            vk::SemaphoreSubmitInfo::default(),
+            vk::SemaphoreSubmitInfo::default(),
         ];
-        let signal_count = match signal {
-            Some(semaphore) => {
-                signals[1] = signals[1].semaphore(semaphore);
-                2
-            }
-            None => 1,
-        };
+        let mut signal_count = 1;
+        for semaphore in [signal, second.map(|(_, done)| done)].into_iter().flatten() {
+            signals[signal_count] = binary(semaphore);
+            signal_count += 1;
+        }
         let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(frame.cmd)];
         let mut latency =
             vk::LatencySubmissionPresentIdNV::default().present_id(present_id.unwrap_or(0));

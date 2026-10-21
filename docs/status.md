@@ -240,8 +240,13 @@ Last updated: 2026-10-20.
     playing ("Kept" in the tree), Ctrl+Shift+K lists everything changed since Play (by
     component, made, despawned) to pick from; at Stop they go into the scene as one undo
     step, the game's runtime components left out, what it made becoming scene entities.
-  - **Next:** E3-4, the game's own window during Play (the UX note's default); then E4,
-    assets.
+  - **E3-4, the game's own window** (#303): Play shows the game in a window of its own, the
+    scene drawn once, there (`Player::open_view_window`: a second swapchain in the same
+    submission), the viewport saying where; F7 and F8 work in it, closing it stops, eject
+    brings the view into the viewport; "Play: In a Window or in the Viewport". Latency
+    control goes off while one has been open (NVIDIA's driver crashed with Reflex beside
+    a second swapchain). E3 is done but for the tree's marks on what changed.
+  - **Next:** E4, assets (ids, the cache, import, the browser; ADR 0107).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

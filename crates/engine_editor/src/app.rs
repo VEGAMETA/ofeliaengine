@@ -582,6 +582,8 @@ struct CommandIds {
     /// Keeping changes made while playing (E3-3).
     keep: CommandId,
     keep_list: CommandId,
+    /// Where Play shows the game (E3-4).
+    play_where: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
     /// the next pivot.
     steps: [CommandId; 3],
@@ -672,6 +674,7 @@ fn commands() -> (Commands, CommandIds) {
         eject: c.register("play.eject", "Play", "Eject or Return to the Game"),
         keep: c.register("play.keep", "Play", "Keep the Selection's Changes"),
         keep_list: c.register("play.keep_list", "Play", "Keep Changes…"),
+        play_where: c.register("play.where", "Play", "In a Window or in the Viewport"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
             c.register("snap.angle_step", "Snapping", "Angle Step…"),
@@ -1406,6 +1409,13 @@ struct Editor {
     bake_groups: Vec<Entity>,
     /// Playing (ADR 0107 E3): the scene's world as Play found it, put back at Stop.
     play: Option<Playing>,
+    /// Play shows the game in a window of its own (the UX note's default), else in the
+    /// viewport ("Play: In a Window or in the Viewport").
+    play_in_window: bool,
+    /// The game plays in a window of its own, and that window (none offscreen): its events
+    /// are told apart by it.
+    in_view_window: bool,
+    view_window: Option<engine_platform::window::WindowId>,
     /// Play or Stop asked for, done once the player's frame is at hand.
     play_request: Option<PlayRequest>,
     /// The active brush's side handles (ADR 0110 E2b-3c), the one under the pointer, and
@@ -1834,6 +1844,9 @@ impl Editor {
             export_group: None,
             bake_groups: Vec::new(),
             play: None,
+            play_in_window: true,
+            in_view_window: false,
+            view_window: None,
             play_request: None,
             handles: Handles::default(),
             hovered_side: None,
@@ -1923,6 +1936,23 @@ impl Editor {
     }
 
     fn event(&mut self, event: &WindowEvent) {
+        // The game's window: its F7 and F8 are Play's; the rest is the game's.
+        if self.view_window.is_some() && Some(event.window) == self.view_window {
+            if let WindowEventKind::Key {
+                virtual_key,
+                pressed: true,
+                repeat: false,
+                ..
+            } = event.kind
+            {
+                match virtual_key {
+                    0x76 => self.play_request = Some(PlayRequest::Pause),
+                    0x77 => self.play_request = Some(PlayRequest::Stop),
+                    _ => {}
+                }
+            }
+            return;
+        }
         let input = &mut self.input;
         match event.kind {
             WindowEventKind::Resized { width, height } if width > 0 && height > 0 => {
@@ -2366,6 +2396,9 @@ impl Editor {
             Some(p) if p.paused => self
                 .status
                 .push_str("Paused: F7 goes on, Shift+F7 steps a tick, F8 stops  ·  "),
+            Some(_) if self.in_view_window => self.status.push_str(
+                "Playing in its window: F7 pauses, F8 stops (there too), Shift+F8 ejects here  ·  ",
+            ),
             Some(_) => self.status.push_str(
                 "Playing: keys without Ctrl go to the game; F7 pauses, Shift+F8 ejects, F8 stops  ·  ",
             ),
@@ -6141,6 +6174,13 @@ impl Editor {
             }
         } else if id == ids.eject {
             self.eject(world);
+        } else if id == ids.play_where {
+            self.play_in_window = !self.play_in_window;
+            self.say(String::from(if self.play_in_window {
+                "Play shows the game in a window of its own"
+            } else {
+                "Play shows the game in the viewport"
+            }));
         } else if id == ids.keep {
             self.keep_selection(world);
         } else if id == ids.keep_list {
@@ -7340,6 +7380,15 @@ impl<G> EditorGame<G> {
     /// the game made by its `start` on it, the world's time running) or Stop (the game
     /// dropped, what it left in the player ended, the world put back).
     fn play_frame(&mut self, player: &mut Player) {
+        // The game's window: closed by its button, Stop; ejected or not, the view there
+        // or in the viewport.
+        if player.view_window_close_requested() {
+            self.shared.borrow_mut().play_request = Some(PlayRequest::Stop);
+        }
+        if player.has_view_window() {
+            let in_window = self.shared.borrow().game_view();
+            player.show_view_in_window(in_window);
+        }
         let request = match self.failed.take() {
             Some(why) => Some((PlayRequest::Stop, Some(why))),
             None => self
@@ -7415,6 +7464,24 @@ impl<G> EditorGame<G> {
                 shared.play_from_here(player.world_mut());
             }
         }
+        // The game's own window (the UX note's default), as large as the viewport.
+        {
+            let mut shared = self.shared.borrow_mut();
+            if shared.play_in_window {
+                let scale = shared.scale.max(0.5);
+                let [w, h] = shared.view_rect.map_or([1280.0, 720.0], |[_, _, w, h]| {
+                    [w as f32 / scale, h as f32 / scale]
+                });
+                let title = format!("{} (playing)", shared.file_name());
+                match player.open_view_window(&title, (w as u32).max(640), (h as u32).max(360)) {
+                    Ok(()) => {
+                        shared.in_view_window = true;
+                        shared.view_window = player.view_window_id();
+                    }
+                    Err(e) => shared.say(format!("Playing in the viewport: {e}")),
+                }
+            }
+        }
         player.set_simulating(true);
         let start = self.start;
         let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start(player)));
@@ -7445,6 +7512,12 @@ impl<G> EditorGame<G> {
         self.game = None;
         self.failed = None;
         self.stepping = false;
+        player.close_view_window();
+        {
+            let mut shared = self.shared.borrow_mut();
+            shared.in_view_window = false;
+            shared.view_window = None;
+        }
         player.end_run();
         player.set_simulating(false);
         let mut shared = self.shared.borrow_mut();
@@ -7754,7 +7827,15 @@ impl<G> EditorGame<G> {
 impl<G: Game> Game for EditorGame<G> {
     fn event(&mut self, event: &WindowEvent) {
         self.shared.borrow_mut().event(event);
-        if self.running() {
+        // The game sees the events of the window it plays in.
+        let theirs = {
+            let shared = self.shared.borrow();
+            match shared.view_window {
+                Some(view) => event.window == view,
+                None => true,
+            }
+        };
+        if theirs && self.running() {
             self.guarded("event", |game| game.event(event));
         }
     }
@@ -8496,6 +8577,32 @@ fn label(
     text_cache.draw_centered(canvas, glyphs, text, size, at, Vec4::ONE, order);
 }
 
+/// The viewport while the game plays in a window of its own: the dock's color and a word
+/// on where the game is.
+fn draw_playing_elsewhere(
+    editor: &mut Editor,
+    rect: [u32; 4],
+    glyphs: &GlyphTexture,
+    canvas: &mut Canvas,
+) {
+    let [x, y, w, h] = rect.map(|v| v as f32);
+    let (min, max) = (Vec2::new(x, y), Vec2::new(x + w, y + h));
+    canvas.draw(
+        &Quad::solid((min + max) * 0.5, max - min)
+            .color(Vec4::from_array(editor.palette.dock))
+            .order(Order::layer(-1)),
+    );
+    let scale = editor.scale.max(0.5);
+    label(
+        &mut editor.text,
+        glyphs,
+        canvas,
+        (min + max) * 0.5,
+        "The game plays in its window: Shift+F8 brings it here, F8 stops",
+        scale,
+    );
+}
+
 /// The active brush's side handles (ADR 0110 E2b-3c), under the panels: light squares on
 /// dark rims, the one under the pointer or dragged orange; while a side is dragged, its
 /// size on a label above it.
@@ -8833,6 +8940,12 @@ impl Overlay for EditorOverlay {
                     editor.scale.max(0.5),
                     &mut self.canvas,
                 );
+            }
+            if let Some(rect) = editor
+                .view_rect
+                .filter(|_| editor.in_view_window && editor.game_view())
+            {
+                draw_playing_elsewhere(editor, rect, &self.glyphs, &mut self.canvas);
             }
             if let Some(rect) = editor.view_rect.filter(|_| !editor.game_view()) {
                 draw_overlays(editor, rect, &self.glyphs, &mut self.canvas);
