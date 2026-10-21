@@ -38,6 +38,41 @@ pub struct UiText {
     pub atlas: GlyphAtlas,
 }
 
+impl UiText {
+    /// Draws `s` at `size` pixels with its laid-out box centered on `center` (an icon over
+    /// the viewport, outside the UI's layout): the glyphs drawn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_centered(
+        &mut self,
+        canvas: &mut Canvas,
+        texture: &GlyphTexture,
+        s: &str,
+        size: f32,
+        center: Vec2,
+        color: Vec4,
+        order: Order,
+    ) -> usize {
+        let laid_out = self.cache.get(
+            (&mut self.fonts, &self.stack, &mut self.layout),
+            s,
+            size,
+            None,
+        );
+        let origin = center - Vec2::new(laid_out.extent[0], laid_out.extent[1]) * 0.5;
+        draw_glyphs(
+            canvas,
+            &laid_out.glyphs,
+            &self.fonts,
+            &mut self.atlas,
+            texture,
+            origin,
+            size,
+            color,
+            order,
+        )
+    }
+}
+
 impl core::fmt::Debug for UiText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("UiText")

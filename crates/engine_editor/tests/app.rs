@@ -10,7 +10,7 @@ use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Transform, World};
 use engine_editor::{EditorGame, EditorOverlay};
 use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind, WindowId};
-use engine_runtime::Sun;
+use engine_runtime::{Camera, PointLight, SpotLight, Sun};
 use engine_scene::{AssetId, AssetRef, Name, SaveOptions, SceneId, SceneRegistry, save_with};
 
 struct NoGame;
@@ -279,10 +279,11 @@ fn a_click_in_the_viewport_selects_what_is_drawn_there() {
         Transform::from_scale(Vec3::splat(0.5)),
         Model::new(builtin::CUBE, AssetRef::file(red_id)),
     ));
+    // The sun away from the cube: its icon takes a click over it.
     world.spawn((
         SceneId::new(),
         Name::new("Sun"),
-        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Transform::from_xyz(4.0, 3.0, -4.0).with_rotation(Quat::from_rotation_x(-1.0)),
         Sun {
             color: Vec3::splat(1.2),
             ambient: Vec3::splat(0.04),
@@ -629,6 +630,156 @@ fn end_drops_the_selection_onto_the_floor() {
         "undone: {}",
         y(&mut player)
     );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Overlays on the player (ADR 0107 E2-7): a point light, a spot light and a camera show as
+/// icons (dark disks with their glyphs) where they are; the selected spot light's cone is
+/// drawn too. `ENGINE_EDITOR_OVERLAYS_PNG=<file>` writes the frame.
+#[test]
+fn lights_and_cameras_show_as_icons() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-icons-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Floor"),
+        Transform::from_xyz(0.0, -1.0, 0.0).with_scale(Vec3::splat(10.0)),
+        Model::new(builtin::PLANE, builtin::MATERIAL),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Lamp"),
+        Transform::from_xyz(-2.0, 0.5, 0.0),
+        PointLight::new(Vec3::new(4.0, 3.0, 2.0), 3.0),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Spot"),
+        Transform::from_xyz(2.0, 2.0, 0.0).with_rotation(Quat::from_rotation_x(-1.2)),
+        SpotLight::new(Vec3::new(2.0, 3.0, 5.0), 4.0, 0.3, 0.5),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Camera"),
+        Transform::from_xyz(0.0, 1.0, 3.0),
+        Camera::perspective(1.0, 0.1, 100.0),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Sun {
+            color: Vec3::splat(1.2),
+            ambient: Vec3::splat(0.04),
+        },
+    ));
+    let paths = Assets::new(dir.clone()).paths().clone();
+    let mut text = String::new();
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+    };
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor icons test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..20 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let world = player.world_mut();
+    let named: Vec<_> = ["Lamp", "Spot", "Camera", "Sun"]
+        .map(|n| engine_scene::find_named(world, n).unwrap())
+        .into();
+    let spot = named[1];
+    game.select(Some(spot));
+    for _ in 0..3 {
+        editor_frame(&mut player, &mut game, &mut overlay);
+    }
+    let icons = game.view_icons();
+    println!("icons {icons:?}");
+    for e in &named {
+        assert!(icons.iter().any(|(i, _)| i == e), "{e:?} has an icon");
+    }
+    let rgba = player
+        .capture_overlaid(&mut game, Some(&mut overlay))
+        .unwrap()
+        .unwrap();
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_OVERLAYS_PNG") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    // Each icon: its disk darker than what is around it (it is translucent), its glyph
+    // light within a few pixels of its middle.
+    let lum = |px: i32, py: i32| {
+        let i = ((py as u32 * width + px as u32) * 4) as usize;
+        (f32::from(rgba[i]) + f32::from(rgba[i + 1]) + f32::from(rgba[i + 2])) / 3.0
+    };
+    // The mean brightness between radii `r0` and `r1` around `(x, y)`, and the brightest
+    // pixel within `r0`.
+    let ring = |x: f32, y: f32, r0: f32, r1: f32| {
+        let (mut sum, mut n, mut top) = (0.0, 0.0, 0.0f32);
+        for dy in -16..=16 {
+            for dx in -16..=16 {
+                let d = ((dx * dx + dy * dy) as f32).sqrt();
+                let l = lum(x as i32 + dx, y as i32 + dy);
+                if d >= r0 && d <= r1 {
+                    sum += l;
+                    n += 1.0;
+                }
+                if d < r0 {
+                    top = top.max(l);
+                }
+            }
+        }
+        (sum / n, top)
+    };
+    for (e, [x, y]) in &icons {
+        // The selected one sits under the gizmo's middle.
+        if *e == spot {
+            continue;
+        }
+        let (disk, glyph) = ring(*x, *y, 8.0, 10.0);
+        let (around, _) = ring(*x, *y, 14.0, 16.0);
+        assert!(disk < around * 0.8, "{e:?}'s disk {disk} against {around}");
+        assert!(glyph > 170.0, "{e:?}'s glyph {glyph}");
+    }
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -253,9 +253,15 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   (rotate).
 - What is picked is what is drawn: masked surfaces through their holes, skinned meshes in
   their current pose, transparent ones too. **Viewport: Pick Transparent Surfaces** in the
-  palette turns the last off, so clicks go through glass; the session keeps it. Lights,
-  cameras and empty entities have no geometry: pick them in the tree until their icons
-  come.
+  palette turns the last off, so clicks go through glass; the session keeps it.
+- **Lights and cameras** show as icons in the viewport (a bulb, a spot, a sun, a camera on
+  a dark disk), above the scene: a click on one selects it, a box takes the icons in it,
+  and the one under the pointer turns white (the selected ones orange). A plain click
+  again on the icon it selected goes through to what lies under it, as cycling does.
+  Empty entities have nothing to show: pick them in the tree.
+- **Their reach:** a selected point light shows its range as three circles, a spot light
+  its cone, a camera its view's pyramid (2 m deep), the sun its direction.
+  **View: Overlays** in the palette hides icons and reach; the session keeps it.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.
@@ -428,7 +434,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 
 | Phase | What |
 |---|---|
-| E2 | overlays: lights' and cameras' icons to pick, their ranges; assets dropped onto surfaces with E4's browser |
+| E2b | blockout: brushes for greyboxing a level (box, wedge, stairs, cylinder; add, subtract), their colliders and navigation mesh |
 | E3 | Play on a copy of the world |
 
 The whole plan is ADR 0107 §7.

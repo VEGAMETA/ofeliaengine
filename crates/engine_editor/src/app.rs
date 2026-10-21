@@ -542,6 +542,8 @@ struct CommandIds {
     /// the next pivot.
     steps: [CommandId; 3],
     pivot: CommandId,
+    /// The viewport's overlays: icons of lights and cameras, and the selected ones' reach.
+    overlays: CommandId,
     /// Which keys the editor uses: Blender's or Godot's.
     keys: CommandId,
     /// Whether clicks pick transparent surfaces or through them.
@@ -611,6 +613,7 @@ fn commands() -> (Commands, CommandIds) {
             c.register("snap.scale_step", "Snapping", "Scale Step…"),
         ],
         pivot: c.register("transform.pivot", "Transform", "Next Pivot"),
+        overlays: c.register("view.overlays", "View", "Overlays"),
         keys: c.register("editor.keys", "Editor", "Key Map…"),
         pick_transparent: c.register(
             "viewport.pick_transparent",
@@ -858,6 +861,49 @@ enum BoxMode {
 /// Frames a box's answer may take before it is asked again (a pick the GPU could not
 /// take).
 const BOX_PATIENCE: u64 = 8;
+
+/// An entity without geometry the viewport shows as an icon (ADR 0107 E2-7): a light or a
+/// camera, at its place on the screen (physical pixels).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ViewIcon {
+    entity: Entity,
+    glyph: &'static str,
+    at: Vec2,
+}
+
+/// How far from an icon's middle the pointer takes it, in logical pixels.
+const ICON_REACH: f32 = 12.0;
+/// How far a camera's pyramid reaches, in meters (its far plane is often a kilometer off).
+const CAMERA_REACH: f32 = 2.0;
+/// The sun's direction's length, in meters.
+const SUN_REACH: f32 = 1.5;
+
+/// The icon of an entity the viewport shows as one: a camera's or a light's; none for the
+/// others (they have geometry, or nothing to show).
+fn icon_of(world: &World, e: Entity) -> Option<&'static str> {
+    let (glyph, kind) = kind_of(world, e);
+    matches!(kind, "Camera" | "Sun" | "Light").then_some(glyph)
+}
+
+/// A world segment's part in front of the eye, on the screen.
+fn segment_on_screen(view: &ViewProj, a: Vec3, b: Vec3) -> Option<(Vec2, Vec2)> {
+    let near = 1e-2;
+    let (da, db) = (
+        (a - view.eye).dot(view.forward),
+        (b - view.eye).dot(view.forward),
+    );
+    if da < near && db < near {
+        return None;
+    }
+    let (mut a, mut b) = (a, b);
+    if da < near {
+        a += (b - a) * ((near - da) / (db - da));
+    }
+    if db < near {
+        b += (a - b) * ((near - db) / (da - db));
+    }
+    Some((view.screen(a)?, view.screen(b)?))
+}
 
 /// What rotating and scaling turn about (ADR 0107 E2-6; the UX note's pivots).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1327,6 +1373,13 @@ struct Editor {
     pivot: Pivot,
     step_labels: [String; 3],
     step_menu: Option<usize>,
+    /// The viewport's overlays (E2-7): shown or not (the session keeps it); the icons of
+    /// this frame and the one under the pointer; the selected lights' and cameras' reach as
+    /// lines on the screen (physical pixels: from, to, and whether a camera's).
+    overlays: bool,
+    view_icons: Vec<ViewIcon>,
+    icon_hover: Option<Entity>,
+    reach_lines: Vec<(Vec2, Vec2, bool)>,
     /// What the overlay outlines (ADR 0109): the GPU scene's slots of the selection, its
     /// children and the hovered entity, as [`Editor::outline`] last found them.
     outline_items: Vec<OutlineItem>,
@@ -1607,6 +1660,10 @@ impl Editor {
             selection_box: None,
             dropping: None,
             pivot: Pivot::default(),
+            overlays: true,
+            view_icons: Vec::new(),
+            icon_hover: None,
+            reach_lines: Vec::new(),
             step_labels: {
                 let d = Snapping::default();
                 [
@@ -2406,9 +2463,10 @@ impl Editor {
                 ((w * scale).round() as u32).max(1),
                 ((h * scale).round() as u32).max(1),
             ]);
-            self.pick_frame(over, Vec2::new(x * scale, y * scale));
+            self.pick_frame(world, over, Vec2::new(x * scale, y * scale));
         }
         self.gizmo_frame(world, scale);
+        self.overlay_frame(world);
         self.drop_frame(world);
         self.input.next_frame();
         let eye = self.orbit.eye();
@@ -2955,7 +3013,7 @@ impl Editor {
     /// Alt+click offers everything under the pointer. The pointer's pixel is picked again
     /// whenever it, the camera or the scene changed. `origin` is the view's top left
     /// corner (physical pixels).
-    fn pick_frame(&mut self, over: bool, origin: Vec2) {
+    fn pick_frame(&mut self, world: &World, over: bool, origin: Vec2) {
         let free = !self.camera_drag
             && self.command_palette.is_none()
             && !self.add_open
@@ -2978,6 +3036,28 @@ impl Editor {
             self.press_at = cursor.filter(|_| request.is_some() && self.hovered_handle.is_none());
         }
         let near = 4.0 * self.scale.max(0.5);
+        // An icon (a light, a camera) is above the scene: it takes the pointer first.
+        self.icon_hover = cursor
+            .filter(|_| request.is_some())
+            .and_then(|at| self.icon_at(at));
+        if self.input.released(Button::Left)
+            && let Some(e) = self.icon_hover
+            && let (Some(from), Some(at)) = (self.press_at, cursor)
+            && from.distance(at) <= near
+        {
+            let toggle = self.input.shift() || self.input.ctrl();
+            // A plain click again on the icon it selected goes through to what lies under
+            // it (a sun added where a cube is), as cycling.
+            let again = self
+                .last_view_click
+                .is_some_and(|(spot, x)| x == e && spot.distance(at) <= near)
+                && self.active() == Some(e);
+            if toggle || !again {
+                self.press_at = None;
+                self.click_viewport(world, Some(e), toggle);
+                self.last_view_click = (!toggle).then_some((at, e));
+            }
+        }
         if self.input.released(Button::Left)
             && let (Some(from), Some(at), Some(request)) = (self.press_at.take(), cursor, request)
             && from.distance(at) <= near
@@ -3291,6 +3371,119 @@ impl Editor {
         self.dropping = Some(d);
     }
 
+    /// The viewport's overlays' part of the frame (ADR 0107 E2-7): the icons of the scene's
+    /// lights and cameras on the screen (not the editor's own camera), and the reach of the
+    /// selected ones: a point light's sphere as three circles, a spot light's cone, a
+    /// camera's pyramid, the sun's direction.
+    fn overlay_frame(&mut self, world: &World) {
+        self.view_icons.clear();
+        self.reach_lines.clear();
+        let Some(rect) = self.view_rect.filter(|_| self.overlays) else {
+            return;
+        };
+        let view = ViewProj::new(&self.orbit, rect);
+        if let Some(q) = self.scene_ids.as_mut() {
+            for (e, _) in q.iter_readonly(world) {
+                if Some(e) == self.camera {
+                    continue;
+                }
+                let Some(glyph) = icon_of(world, e) else {
+                    continue;
+                };
+                let Some(g) = world.get::<GlobalTransform>(e) else {
+                    continue;
+                };
+                if let Some(at) = view.screen(Vec3::from(g.0.translation))
+                    && view.contains(at)
+                    && (Vec3::from(g.0.translation) - view.eye).dot(view.forward) > 0.0
+                {
+                    self.view_icons.push(ViewIcon {
+                        entity: e,
+                        glyph,
+                        at,
+                    });
+                }
+            }
+        }
+        for &e in &self.selection {
+            let Some(g) = world.get::<GlobalTransform>(e) else {
+                continue;
+            };
+            let at = Vec3::from(g.0.translation);
+            let (right, up, back) = (
+                Vec3::from(g.0.matrix3.x_axis).normalize_or_zero(),
+                Vec3::from(g.0.matrix3.y_axis).normalize_or_zero(),
+                Vec3::from(g.0.matrix3.z_axis).normalize_or_zero(),
+            );
+            let mut line = |a: Vec3, b: Vec3, camera: bool| {
+                if let Some((a, b)) = segment_on_screen(&view, a, b) {
+                    self.reach_lines.push((a, b, camera));
+                }
+            };
+            // A circle of `radius` about `center` across `u` and `v`.
+            let circle = |center: Vec3,
+                          u: Vec3,
+                          v: Vec3,
+                          radius: f32,
+                          line: &mut dyn FnMut(Vec3, Vec3, bool)| {
+                const SEGMENTS: usize = 48;
+                let point = |k: usize| {
+                    let t = k as f32 / SEGMENTS as f32 * core::f32::consts::TAU;
+                    center + (u * t.cos() + v * t.sin()) * radius
+                };
+                for k in 0..SEGMENTS {
+                    line(point(k), point(k + 1), false);
+                }
+            };
+            if let Some(light) = world.get::<engine_runtime::PointLight>(e) {
+                for (u, v) in [(Vec3::X, Vec3::Y), (Vec3::Y, Vec3::Z), (Vec3::Z, Vec3::X)] {
+                    circle(at, u, v, light.range, &mut line);
+                }
+            } else if let Some(light) = world.get::<engine_runtime::SpotLight>(e) {
+                // Down its −Z: the cone's base where the range ends.
+                let (sin, cos) = light.outer.sin_cos();
+                let base = at - back * (light.range * cos);
+                let radius = light.range * sin;
+                circle(base, right, up, radius, &mut line);
+                for dir in [right, -right, up, -up] {
+                    line(at, base + dir * radius, false);
+                }
+            } else if let Some(camera) = world.get::<engine_runtime::Camera>(e) {
+                let aspect = rect[2] as f32 / rect[3].max(1) as f32;
+                let corners = |depth: f32| {
+                    let h = depth * (camera.fov_y * 0.5).tan();
+                    let w = h * aspect;
+                    let center = at - back * depth;
+                    [
+                        center - right * w - up * h,
+                        center + right * w - up * h,
+                        center + right * w + up * h,
+                        center - right * w + up * h,
+                    ]
+                };
+                let (near, far) = (corners(camera.near), corners(CAMERA_REACH.min(camera.far)));
+                for k in 0..4 {
+                    line(near[k], near[(k + 1) % 4], true);
+                    line(far[k], far[(k + 1) % 4], true);
+                    line(near[k], far[k], true);
+                }
+            } else if world.get::<engine_runtime::Sun>(e).is_some() {
+                line(at, at - back * SUN_REACH, false);
+            }
+        }
+    }
+
+    /// The icon under `at` (physical pixels), the nearest within reach.
+    fn icon_at(&self, at: Vec2) -> Option<Entity> {
+        let reach = ICON_REACH * self.scale.max(0.5);
+        self.view_icons
+            .iter()
+            .map(|i| (i.at.distance(at), i.entity))
+            .filter(|&(d, _)| d <= reach)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, e)| e)
+    }
+
     /// The tool bar's steps as they read, after one changed.
     fn refresh_steps(&mut self) {
         let values = [
@@ -3390,9 +3583,19 @@ impl Editor {
         if self.box_drag.is_none() && !answers {
             return;
         }
-        let under = self.entities_in(world, &slots, slot_of);
-        // A box's: what it takes, and the selection once its last box is answered.
+        let mut under = self.entities_in(world, &slots, slot_of);
+        // A box's: what it takes (the icons in it too), and the selection once its last
+        // box is answered.
         if let Some(b) = &mut self.box_drag {
+            let (lo, hi) = (b.from.min(b.to), b.from.max(b.to));
+            for icon in &self.view_icons {
+                if icon.at.cmpge(lo).all()
+                    && icon.at.cmple(hi).all()
+                    && !under.contains(&icon.entity)
+                {
+                    under.push(icon.entity);
+                }
+            }
             if b.asked == Some(request) {
                 b.waiting = None;
             }
@@ -4073,6 +4276,14 @@ impl Editor {
             self.drop_selection(world);
         } else if let Some(k) = ids.steps.iter().position(|&c| c == id) {
             self.pick_step(world, k);
+        } else if id == ids.overlays {
+            self.overlays = !self.overlays;
+            self.write_session(world);
+            self.say(String::from(if self.overlays {
+                "Overlays shown: lights' and cameras' icons, the selected ones' reach"
+            } else {
+                "Overlays hidden"
+            }));
         } else if id == ids.pivot {
             self.pivot = self.pivot.next();
             self.write_session(world);
@@ -4536,6 +4747,9 @@ impl Editor {
         if let Some(pivot) = state.pivot.as_deref().and_then(Pivot::from_name) {
             self.pivot = pivot;
         }
+        if let Some(on) = state.overlays {
+            self.overlays = on;
+        }
         self.refresh_steps();
     }
 
@@ -4661,6 +4875,7 @@ impl Editor {
             fly: Some(f64::from(self.fly_speed)),
             pick_transparent: Some(self.pick_transparent),
             pivot: Some(String::from(self.pivot.name())),
+            overlays: Some(self.overlays),
             window: self.window,
         };
         let view = self.view(world);
@@ -5333,6 +5548,17 @@ impl<G> EditorGame<G> {
         self.shared.borrow().selection.clone()
     }
 
+    /// The viewport's icons this frame (ADR 0107 E2-7): each light's and camera's entity and
+    /// its place on the screen (physical pixels).
+    pub fn view_icons(&self) -> Vec<(Entity, [f32; 2])> {
+        let shared = self.shared.borrow();
+        shared
+            .view_icons
+            .iter()
+            .map(|i| (i.entity, i.at.to_array()))
+            .collect()
+    }
+
     /// The entity under the pointer in the viewport, as the newest pick saw it (ADR 0109).
     pub fn hovered(&self) -> Option<Entity> {
         self.shared.borrow().hovered.and_then(|(_, e)| e)
@@ -5483,6 +5709,50 @@ fn draw_gizmo(gizmo: &Gizmo, lit: Option<Handle>, rect: [u32; 4], scale: f32, ca
 
 /// Draws a keyboard transform's guides below the UI, clipped to the viewport: an axis'
 /// line in its color, the pivot's line to the pointer dashed.
+/// The viewport's overlays (ADR 0107 E2-7), under the panels: the selected lights' and
+/// cameras' reach as thin lines, then the icons on dark disks, the selected ones' orange
+/// (the active one lighter), the one under the pointer white.
+fn draw_overlays(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canvas: &mut Canvas) {
+    let scale = editor.scale.max(0.5);
+    canvas.set_clip(Some(clip_of(rect)));
+    let order = Order::layer(-1);
+    for &(a, b, camera) in &editor.reach_lines {
+        let color = if camera {
+            Vec4::new(0.55, 0.75, 1.0, 0.8)
+        } else {
+            Vec4::new(1.0, 0.85, 0.45, 0.8)
+        };
+        canvas.draw(&Quad::line(a, b, scale).color(color).order(order));
+    }
+    let active = editor.active();
+    for icon in &editor.view_icons {
+        let color = if Some(icon.entity) == editor.icon_hover {
+            Vec4::ONE
+        } else if Some(icon.entity) == active {
+            Vec4::new(1.0, 0.62, 0.18, 1.0)
+        } else if editor.selection.contains(&icon.entity) {
+            Vec4::new(1.0, 0.32, 0.02, 1.0)
+        } else {
+            Vec4::new(0.85, 0.85, 0.85, 1.0)
+        };
+        canvas.draw(
+            &Quad::circle(icon.at, 11.0 * scale)
+                .color(Vec4::new(0.08, 0.08, 0.1, 0.75))
+                .order(order),
+        );
+        editor.text.draw_centered(
+            canvas,
+            glyphs,
+            icon.glyph,
+            15.0 * scale,
+            icon.at,
+            color,
+            order,
+        );
+    }
+    canvas.set_clip(None);
+}
+
 /// The window's color everywhere but the viewport `view` (`[x, y, width, height]` in the
 /// output's pixels), under everything else: what shows in the gaps between docks.
 fn draw_window(
@@ -5873,6 +6143,9 @@ impl Overlay for EditorOverlay {
                     editor.scale.max(0.5),
                     &mut self.canvas,
                 );
+            }
+            if let Some(rect) = editor.view_rect {
+                draw_overlays(editor, rect, &self.glyphs, &mut self.canvas);
             }
             if let Some(b) = &editor.box_drag
                 && b.released.is_none()
@@ -8906,6 +9179,147 @@ mod tests {
         ed.end_session(&mut world);
         let (_, ed) = start(&dir);
         assert_eq!(ed.pivot, Pivot::Active);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An entity with `component` at `at`, as a scene file gives it.
+    fn thing_at(
+        world: &mut World,
+        name: &str,
+        at: Vec3,
+        component: impl engine_ecs::Component,
+    ) -> Entity {
+        let t = Transform::from_xyz(at.x, at.y, at.z);
+        world.spawn((
+            SceneId::new(),
+            Name::new(name),
+            t,
+            GlobalTransform(t.to_affine()),
+            component,
+        ))
+    }
+
+    #[test]
+    fn lights_and_cameras_show_as_icons_a_click_selects_them() {
+        let mut world = World::new();
+        let lamp = thing_at(
+            &mut world,
+            "Lamp",
+            Vec3::ZERO,
+            PointLight::new(Vec3::ONE, 3.0),
+        );
+        let _crate = cube_at(&mut world, Transform::from_xyz(2.0, 0.0, 0.0));
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder("icons"),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        ed.update(&mut world);
+        // The lamp only: the crate has nothing to show, the editor's camera is its own.
+        let icons: Vec<Entity> = ed.view_icons.iter().map(|i| i.entity).collect();
+        assert_eq!(icons, [lamp]);
+        let at = ed.view_icons[0].at;
+        let [x, y, w, h] = ed.view_rect.unwrap();
+        let middle = Vec2::new((x + w / 2) as f32, (y + h / 2) as f32);
+        assert!(
+            at.distance(middle) < 2.0,
+            "the orbit's target is the lamp: {at} {middle}"
+        );
+        // Hovered, then clicked beside its middle: selected.
+        let beside = [at.x + 6.0, at.y - 5.0];
+        mouse(&mut ed, beside, None);
+        ed.update(&mut world);
+        assert_eq!(ed.icon_hover, Some(lamp));
+        press_release(&mut ed, &mut world, beside);
+        assert_eq!(ed.selection, [lamp]);
+        assert!(ed.pending_click.is_none(), "no pick needed");
+        // Again there: through to what lies under it (with the rotate tool: the select
+        // tool's gizmo, at the lamp, would take the press).
+        ed.active_tool = 2;
+        ed.update(&mut world);
+        press_release(&mut ed, &mut world, beside);
+        assert!(
+            ed.pending_list
+                .is_some_and(|(_, used, _)| used == ListUse::Cycle),
+            "cycles to the geometry under the icon"
+        );
+        ed.pending_list = None;
+        // Overlays off: no icons, nothing to click.
+        let overlays = ed.ids.overlays;
+        ed.run(&mut world, overlays);
+        ed.update(&mut world);
+        assert!(ed.view_icons.is_empty() && ed.reach_lines.is_empty());
+        ed.run(&mut world, overlays);
+        // A box around it takes it (nothing selected: no gizmo under the press).
+        ed.selection.clear();
+        ed.update(&mut world);
+        mouse(&mut ed, [at.x - 30.0, at.y - 30.0], Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, [at.x + 30.0, at.y + 30.0], None);
+        ed.update(&mut world);
+        mouse(&mut ed, [at.x + 30.0, at.y + 30.0], Some(false));
+        ed.update(&mut world);
+        let request = ed.list_request.expect("the box asked for");
+        let (_, after) = ed.box_drag.as_ref().unwrap().released.unwrap();
+        ed.listed = Some((request, after, Vec::new()));
+        ed.resolve_list(&world, |_| None);
+        assert_eq!(ed.selection, [lamp], "the box took the icon");
+    }
+
+    #[test]
+    fn the_selected_lights_and_cameras_show_their_reach() {
+        let mut world = World::new();
+        let point = thing_at(
+            &mut world,
+            "Point",
+            Vec3::ZERO,
+            PointLight::new(Vec3::ONE, 3.0),
+        );
+        let spot = thing_at(
+            &mut world,
+            "Spot",
+            Vec3::new(1.0, 2.0, 0.0),
+            SpotLight::new(Vec3::ONE, 4.0, 0.3, 0.5),
+        );
+        let camera = thing_at(
+            &mut world,
+            "Camera",
+            Vec3::new(-2.0, 1.0, 1.0),
+            Camera::perspective(1.0, 0.1, 100.0),
+        );
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder("reach"),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(ed.reach_lines.is_empty(), "nothing selected");
+        for (e, lines, of_camera) in [
+            (point, 3 * 48, false),
+            (spot, 48 + 4, false),
+            (camera, 12, true),
+        ] {
+            ed.selection = vec![e];
+            ed.update(&mut world);
+            assert_eq!(ed.reach_lines.len(), lines, "{:?}", world.get::<Name>(e));
+            assert!(ed.reach_lines.iter().all(|l| l.2 == of_camera));
+        }
+        // The session keeps the overlays off.
+        let dir = project("overlays-kept");
+        let (mut world, mut ed) = start(&dir);
+        let overlays = ed.ids.overlays;
+        ed.run(&mut world, overlays);
+        ed.end_session(&mut world);
+        let (_, ed) = start(&dir);
+        assert!(!ed.overlays);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
