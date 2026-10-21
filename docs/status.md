@@ -155,7 +155,7 @@ Last updated: 2026-10-20.
     sun's direction); "View: Overlays" hides them. E2 is done; drops of assets onto
     surfaces come with E4's browser.
   - **E2b, the blockout** (ADR 0107 §7: brushes for greyboxing a level, their colliders
-    and navigation mesh): the research notes (#PR), `docs/research/blockout.md` (convex
+    and navigation mesh): the research notes (#285), `docs/research/blockout.md` (convex
     brushes as integer planes, exact predicates in `i128`, Godot's order over convex
     pieces, the pieces as hulls, the visible surface for navigation) and
     `docs/research/ux/blockout.md` (drawn on surfaces with B, typed sizes, face handles,
