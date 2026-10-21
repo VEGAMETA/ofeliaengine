@@ -500,6 +500,8 @@ pub struct Player {
     surface: Option<Arc<Surface>>,
     /// The offscreen image's readback ([`Window::Offscreen`]).
     offscreen: Option<Offscreen>,
+    /// The view in a window of its own ([`Player::open_view_window`]).
+    view_window: Option<ViewWindow>,
     latency: Option<Latency>,
     dlss: Option<DlssFrameGeneration>,
     streamline: Option<Streamline>,
@@ -566,6 +568,63 @@ pub struct Player {
     simulating: bool,
     /// Ticks to run while the world is kept still ([`Player::step_tick`]).
     steps: u32,
+}
+
+/// The view in a window of its own (ADR 0107 E3-4: the editor's Play): the scene drawn
+/// there instead of into the main output, which then shows only what overlays draw.
+struct ViewWindow {
+    output: ViewOutput,
+    /// The view draws here; else into the main output as before, the window keeping its
+    /// last frame ([`Player::show_view_in_window`]).
+    shown: bool,
+    /// Its close button was pressed ([`Player::view_window_close_requested`]).
+    close_requested: bool,
+    /// It has the keyboard: the game's input listens only then.
+    focused: bool,
+    resized: bool,
+    minimized: bool,
+}
+
+/// The offscreen view window's readback, if the view window is offscreen.
+fn view_offscreen(view: &mut Option<ViewWindow>) -> Option<&mut Offscreen> {
+    match view.as_mut().map(|v| &mut v.output) {
+        Some(ViewOutput::Offscreen(o)) => Some(o),
+        _ => None,
+    }
+}
+
+/// The view window's image this frame.
+enum ViewImage {
+    /// Its swapchain's image `index`, acquired with `acquired`.
+    Window { index: u32, acquired: vk::Semaphore },
+    /// Its offscreen image (made in the frame's graph).
+    Offscreen,
+}
+
+/// Where a [`ViewWindow`] shows.
+enum ViewOutput {
+    Window {
+        handle: WindowHandle,
+        swapchain: Swapchain,
+        /// Its surface, kept until the swapchain made on it goes.
+        surface: Arc<Surface>,
+        /// Per frame slot: the semaphore its image's acquisition signals.
+        acquired: Vec<vk::Semaphore>,
+    },
+    /// Offscreen: an image of its own, read back by [`Player::capture_view_window`].
+    Offscreen(Offscreen),
+}
+
+impl ViewOutput {
+    fn extent(&self) -> vk::Extent2D {
+        match self {
+            Self::Window { swapchain, .. } => swapchain.extent(),
+            Self::Offscreen(o) => vk::Extent2D {
+                width: o.width,
+                height: o.height,
+            },
+        }
+    }
 }
 
 /// One of the pack's instances as the level made it: what loading a save makes again
@@ -1078,6 +1137,7 @@ impl Player {
             swapchain,
             surface,
             offscreen,
+            view_window: None,
             latency: None,
             dlss: None,
             streamline,
@@ -1612,6 +1672,264 @@ impl Player {
         self.window
     }
 
+    /// Opens a window of its own for the view (ADR 0107 E3-4: the editor plays the game
+    /// there): `width` × `height` logical pixels, titled `title`, the scene drawn into it
+    /// from the next frame and the main output left to the overlays. Offscreen, an image
+    /// of that size instead ([`Self::capture_view_window`]). Nothing when one is open.
+    ///
+    /// # Errors
+    ///
+    /// The window, its surface or swapchain cannot be made, or the main output draws in a
+    /// way a second one cannot follow (frame generation, HDR10): the view stays in the
+    /// main output then.
+    pub fn open_view_window(
+        &mut self,
+        title: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<(), AppError> {
+        if self.view_window.is_some() {
+            return Ok(());
+        }
+        let refuse = |why: &str| Err(AppError::message("the view's window", String::from(why)));
+        if self.paced.is_some() || self.dlss.is_some() {
+            return refuse("not beside frame generation");
+        }
+        if self.encode.is_some() {
+            return refuse("not beside an HDR10 output");
+        }
+        // Latency control (Reflex, Anti-Lag) follows one swapchain: off from now on, and
+        // the main swapchain made again without NVIDIA's low-latency mode (beside it, a
+        // submission drawing into another swapchain's image crashed NVIDIA's driver).
+        self.stop_low_latency()?;
+        let output = match (&self.windows, &self.swapchain, &self.offscreen) {
+            (Some(windows), Some(main), _) => {
+                let handle = windows
+                    .create_window(&WindowDesc {
+                        title: title.to_owned(),
+                        width: width.max(1),
+                        height: height.max(1),
+                        resizable: true,
+                        visible: true,
+                        ..WindowDesc::default()
+                    })
+                    .map_err(AppError::at("the view's window"))?;
+                let made = (|| {
+                    let surface = Arc::new(
+                        Surface::from_win32(&self.instance, handle.hinstance, handle.hwnd)
+                            .map_err(AppError::at("the view window's surface"))?,
+                    );
+                    let desc = SwapchainDesc {
+                        width,
+                        height,
+                        present_mode: PresentMode::Fifo,
+                        srgb: true,
+                        color: main.color(),
+                        ..SwapchainDesc::default()
+                    };
+                    let swapchain = Swapchain::new(&self.device, &surface, &desc)
+                        .map_err(AppError::at("the view window's swapchain"))?;
+                    if swapchain.format() != main.format() {
+                        return Err(AppError::message(
+                            "the view's window",
+                            String::from("its format differs from the main output's"),
+                        ));
+                    }
+                    let mut acquired = Vec::with_capacity(self.frames.in_flight());
+                    for _ in 0..self.frames.in_flight() {
+                        // SAFETY: valid create info; destroyed with the window.
+                        let semaphore = unsafe {
+                            self.device
+                                .raw()
+                                .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                        }
+                        .map_err(|e| {
+                            AppError::message("the view window's semaphores", e.to_string())
+                        })?;
+                        acquired.push(semaphore);
+                    }
+                    Ok(ViewOutput::Window {
+                        handle,
+                        swapchain,
+                        surface,
+                        acquired,
+                    })
+                })();
+                match made {
+                    Ok(output) => output,
+                    Err(e) => {
+                        let _ = windows.destroy_window(handle.id);
+                        return Err(e);
+                    }
+                }
+            }
+            (None, None, Some(_)) => {
+                let mut offscreen = Offscreen {
+                    width: width.max(1),
+                    height: height.max(1),
+                    pixel: 0,
+                    buffer: vk::Buffer::null(),
+                    memory: None,
+                    requested: false,
+                    captured: None,
+                };
+                offscreen.set_format(self.present_format, &mut self.allocator)?;
+                ViewOutput::Offscreen(offscreen)
+            }
+            _ => return refuse("the player presents through no swapchain"),
+        };
+        self.view_window = Some(ViewWindow {
+            output,
+            shown: true,
+            close_requested: false,
+            focused: true,
+            resized: false,
+            minimized: false,
+        });
+        Ok(())
+    }
+
+    /// Closes the view's window: the view draws into the main output again.
+    pub fn close_view_window(&mut self) {
+        let Some(view) = self.view_window.take() else {
+            return;
+        };
+        let _ = self.wait_idle();
+        match view.output {
+            ViewOutput::Window {
+                handle,
+                swapchain,
+                surface,
+                acquired,
+            } => {
+                drop(swapchain);
+                drop(surface);
+                for semaphore in acquired {
+                    // SAFETY: the device is idle: no acquisition or submission uses it.
+                    unsafe { self.device.raw().destroy_semaphore(semaphore, None) };
+                }
+                if let Some(windows) = &self.windows {
+                    let _ = windows.destroy_window(handle.id);
+                }
+            }
+            ViewOutput::Offscreen(mut offscreen) => {
+                if let Some(memory) = offscreen.memory.take() {
+                    // SAFETY: the device is idle: no copy writes the buffer.
+                    unsafe { self.allocator.destroy_buffer(offscreen.buffer, memory) };
+                }
+            }
+        }
+        // Latency control stays off: on NVIDIA's driver (617.42) the frame after Reflex was
+        // turned back on crashed; the player's next start has it again.
+    }
+
+    /// Latency control off for the rest of the player's life, the main swapchain made
+    /// again without NVIDIA's low-latency mode if it had it.
+    fn stop_low_latency(&mut self) -> Result<(), AppError> {
+        if self.latency.is_some() {
+            self.wait_idle()?;
+            self.latency = None;
+        }
+        if let (Some(swapchain), Some(surface)) = (&mut self.swapchain, &self.surface)
+            && swapchain.low_latency()
+        {
+            self.frames
+                .wait_idle()
+                .map_err(AppError::at("waiting for the GPU"))?;
+            let extent = swapchain.extent();
+            swapchain
+                .recreate_with_low_latency(
+                    &self.device,
+                    surface,
+                    extent.width,
+                    extent.height,
+                    false,
+                )
+                .map_err(AppError::at("the swapchain"))?;
+        }
+        Ok(())
+    }
+
+    /// Whether the view draws into its window (`true`, as it opens) or into the main
+    /// output again (the editor's eject), the window keeping its last frame.
+    pub fn show_view_in_window(&mut self, shown: bool) {
+        if let Some(view) = &mut self.view_window {
+            view.shown = shown;
+        }
+    }
+
+    /// Whether the view has a window of its own ([`Self::open_view_window`]).
+    pub fn has_view_window(&self) -> bool {
+        self.view_window.is_some()
+    }
+
+    /// Whether the view window's close button was pressed since it opened.
+    pub fn view_window_close_requested(&self) -> bool {
+        self.view_window.as_ref().is_some_and(|v| v.close_requested)
+    }
+
+    /// The view window's id, for telling its events from the main window's.
+    pub fn view_window_id(&self) -> Option<engine_platform::window::WindowId> {
+        match &self.view_window.as_ref()?.output {
+            ViewOutput::Window { handle, .. } => Some(handle.id),
+            ViewOutput::Offscreen(_) => None,
+        }
+    }
+
+    /// The view window's size in pixels.
+    pub fn view_window_extent(&self) -> Option<vk::Extent2D> {
+        self.view_window.as_ref().map(|v| v.output.extent())
+    }
+
+    /// Renders a frame and returns the offscreen view window's pixels, as
+    /// [`Self::capture_overlaid`] does the main output's.
+    ///
+    /// # Errors
+    ///
+    /// Without an offscreen view window, or as [`Self::frame_overlaid`].
+    pub fn capture_view_window(
+        &mut self,
+        game: &mut impl Game,
+        overlay: Option<&mut dyn Overlay>,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        let Some(o) = view_offscreen(&mut self.view_window) else {
+            return Err(AppError::message(
+                "capturing the view's window",
+                String::from("only an offscreen view window captures"),
+            ));
+        };
+        o.requested = true;
+        o.captured = None;
+        let rendered = self.frame_overlaid(game, overlay)?;
+        let Some(o) = view_offscreen(&mut self.view_window) else {
+            return Ok(None);
+        };
+        o.requested = false;
+        let Some(number) = o.captured.take().filter(|_| rendered.is_some()) else {
+            return Ok(None);
+        };
+        self.frames
+            .wait_for_frame(number)
+            .map_err(AppError::at("waiting for the captured frame"))?;
+        let Some(o) = view_offscreen(&mut self.view_window) else {
+            return Ok(None);
+        };
+        let bytes = o.bytes() as usize;
+        let mapped = o
+            .memory
+            .as_ref()
+            .and_then(Allocation::mapped_ptr)
+            .ok_or_else(|| {
+                AppError::message(
+                    "capturing the view's window",
+                    String::from("the readback is not mapped"),
+                )
+            })?;
+        // SAFETY: the frame that wrote the buffer has finished; the mapping covers `bytes`.
+        let pixels = unsafe { core::slice::from_raw_parts(mapped.as_ptr(), bytes) };
+        Ok(Some(pixels.to_vec()))
+    }
+
     /// Where the window is now, to open it there next time
     /// ([`PlayerSettings::window_placement`]); none offscreen.
     pub fn window_placement(&self) -> Option<engine_platform::window::WindowPlacement> {
@@ -1837,8 +2155,33 @@ impl Player {
                 &mut self.display_changed,
             );
             let mut focus_lost = false;
+            let view_id = match self.view_window.as_ref().map(|v| &v.output) {
+                Some(ViewOutput::Window { handle, .. }) => Some(handle.id),
+                _ => None,
+            };
+            let view = &mut self.view_window;
             if let Some(windows) = &mut self.windows {
                 windows.drain_events(|event| {
+                    // The view's window: its own size, focus and close button.
+                    if Some(event.window) == view_id
+                        && let Some(view) = view.as_mut()
+                    {
+                        match event.kind {
+                            WindowEventKind::CloseRequested => view.close_requested = true,
+                            WindowEventKind::Resized { width, height } => {
+                                view.resized = true;
+                                view.minimized = width == 0 || height == 0;
+                            }
+                            WindowEventKind::Minimized => view.minimized = true,
+                            WindowEventKind::Focused(f) => {
+                                view.focused = f;
+                                focus_lost |= !f;
+                            }
+                            _ => {}
+                        }
+                        game.event(&event);
+                        return;
+                    }
                     match event.kind {
                         WindowEventKind::CloseRequested => *closing = true,
                         WindowEventKind::Resized { width, height } => {
@@ -1875,6 +2218,25 @@ impl Player {
         if core::mem::take(&mut self.resized) && self.needs_new_swapchain() {
             self.recreate_presentation()?;
             return Ok(None);
+        }
+        // The view's window resized: its swapchain made again at its new size.
+        if self
+            .view_window
+            .as_ref()
+            .is_some_and(|v| v.resized && !v.minimized)
+        {
+            self.wait_idle()?;
+            if let Some(view) = &mut self.view_window
+                && let ViewOutput::Window {
+                    swapchain, surface, ..
+                } = &mut view.output
+            {
+                view.resized = false;
+                let extent = swapchain.extent();
+                swapchain
+                    .recreate(&self.device, surface, extent.width, extent.height)
+                    .map_err(AppError::at("the view window's swapchain"))?;
+            }
         }
         // The display changed (HDR on or off, the SDR white level, another monitor): the
         // output follows it before this frame is drawn (ADR 0038).
@@ -1947,6 +2309,31 @@ impl Player {
             None => None,
         };
         let paced_images = self.paced.as_ref().map(PacedPresenter::next_images);
+        // The view's window: its image, when the view draws there this frame.
+        let view_image = match self.view_window.as_mut() {
+            Some(view) if view.shown && !view.minimized => match &mut view.output {
+                ViewOutput::Window {
+                    swapchain,
+                    acquired,
+                    ..
+                } => {
+                    let semaphore = acquired[frame.slot() % acquired.len()];
+                    match swapchain.acquire(semaphore, u64::MAX) {
+                        Ok(a) => Some(ViewImage::Window {
+                            index: a.index,
+                            acquired: semaphore,
+                        }),
+                        Err(e) if e.is_out_of_date() => {
+                            view.resized = true;
+                            None
+                        }
+                        Err(e) => return Err(AppError::at("the view window's image")(e)),
+                    }
+                }
+                ViewOutput::Offscreen(_) => Some(ViewImage::Offscreen),
+            },
+            _ => None,
+        };
         report.acquire = us(t);
         let marker = |latency: &mut Option<Latency>,
                       swapchain: &Option<Swapchain>,
@@ -1972,10 +2359,19 @@ impl Player {
         );
 
         // The input since the last frame, then sampled before each tick and presentation.
+        let away = self
+            .view_window
+            .as_ref()
+            .is_some_and(|v| v.shown && !v.focused);
         let sample = match &mut self.input {
             Some(devices) => {
                 if let Some(input) = self.runtime.world.resource_mut::<engine_input::Input>() {
                     devices.feed(input);
+                    // The view plays in its window: what is typed elsewhere is not the
+                    // game's.
+                    if away {
+                        input.release_all();
+                    }
                 }
                 true
             }
@@ -2145,9 +2541,13 @@ impl Player {
             ),
         };
         let extent = self.extent();
-        // The scene's part of the output (`set_view_rect`): the whole of it by default.
+        // The scene's part of the output (`set_view_rect`): the whole of it by default; all
+        // of its own window's while it draws there.
         let view_rect = self.view_rect.map(|r| clamp_rect(r, extent));
-        let view_extent = view_rect.map_or(extent, |r| r.extent);
+        let view_extent = match (&view_image, &self.view_window) {
+            (Some(_), Some(view)) => view.output.extent(),
+            _ => view_rect.map_or(extent, |r| r.extent),
+        };
         let aspect = view_extent.width as f32 / view_extent.height.max(1) as f32;
         let clip_from_world = camera.clip_from_world(aspect);
 
@@ -2447,9 +2847,60 @@ impl Player {
                     rays: ray_frame.filter(|_| scene_ready),
                 }),
             };
+            // The view's own window: its image (or offscreen, one of its own), the whole of
+            // it; the main output then holds what the overlays draw.
+            let view_present = match (&view_image, self.view_window.as_ref().map(|v| &v.output)) {
+                (
+                    Some(ViewImage::Window { index, .. }),
+                    Some(ViewOutput::Window { swapchain, .. }),
+                ) => Some(PresentTarget::import(&mut fg, swapchain, *index)),
+                _ => None,
+            };
+            let view_texture = match (&view_image, &view_present) {
+                (Some(ViewImage::Window { .. }), Some(present)) => Some(present.texture),
+                (Some(ViewImage::Offscreen), _) => {
+                    let e = view_extent;
+                    Some(fg.create_texture(
+                        "view window",
+                        TextureDesc::new_2d(self.present_format, e.width, e.height),
+                    ))
+                }
+                _ => None,
+            };
+            let scene_target = view_texture.unwrap_or(target);
+            // The view draws into its window: the main output cleared, for the overlays to
+            // draw over (and for a copy to the swapchain to read something written).
+            if view_texture.is_some() {
+                fg.add_pass("main output clear")
+                    .write(target, Access::TransferWrite)
+                    .execute(move |ctx| {
+                        let range = vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        };
+                        // SAFETY: recording; the graph made the output a transfer
+                        // destination.
+                        unsafe {
+                            ctx.device.cmd_clear_color_image(
+                                ctx.cmd,
+                                ctx.image(target),
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                &vk::ClearColorValue::default(),
+                                &[range],
+                            );
+                        }
+                    });
+            }
             let view_target = ViewTarget {
-                texture: target,
-                rect: view_rect,
+                texture: scene_target,
+                rect: if view_texture.is_some() {
+                    None
+                } else {
+                    view_rect
+                },
                 load: LoadOp::DontCare,
             };
             let view_frame = match generated {
@@ -2520,7 +2971,7 @@ impl Player {
                         &mut self.ring,
                         &self.bindless,
                         layer,
-                        ui_target.unwrap_or(target),
+                        ui_target.unwrap_or(scene_target),
                         &camera,
                         &view_frame,
                     )
@@ -2551,7 +3002,11 @@ impl Player {
                     view: Some(OverlayView {
                         frame: &view_frame,
                         camera: &camera,
-                        rect: view_rect,
+                        rect: if view_texture.is_some() {
+                            None
+                        } else {
+                            view_rect
+                        },
                         geometry: &geo,
                         materials: &mats,
                         scene: scene_frame.as_ref(),
@@ -2575,6 +3030,16 @@ impl Player {
             let backbuffer = present.as_ref().map(PresentTarget::swapchain_texture);
             if let Some(present) = present {
                 present.finish(&mut fg);
+            }
+            // The view's window: its image ready to present, or read back offscreen.
+            if let Some(view_present) = view_present {
+                view_present.finish(&mut fg);
+            }
+            if let (Some(ViewImage::Offscreen), Some(texture), Some(view)) =
+                (&view_image, view_texture, self.view_window.as_mut())
+                && let ViewOutput::Offscreen(offscreen) = &mut view.output
+            {
+                offscreen.add_pass(&mut fg, texture, frame.number);
             }
             if let (Some(ui), Some(_), Some(backbuffer)) = (&self.ui, ui_target, backbuffer) {
                 ui.renderer
@@ -2631,12 +3096,21 @@ impl Player {
         match (&self.swapchain, paced_images) {
             (Some(swapchain), _) => {
                 let index = acquired.map_or(0, |a| a.index);
+                let second = match (&view_image, self.view_window.as_ref().map(|v| &v.output)) {
+                    (
+                        Some(ViewImage::Window { index, acquired }),
+                        Some(ViewOutput::Window { swapchain, .. }),
+                    ) => Some((*acquired, swapchain.render_finished(*index))),
+                    _ => None,
+                };
                 self.frames
-                    .submit_tagged(
+                    .submit_presenting(
                         self.device.graphics,
                         frame,
                         true,
+                        None,
                         Some(swapchain.render_finished(index)),
+                        second,
                         submit_id,
                     )
                     .map_err(AppError::at("submitting the frame"))?;
@@ -2702,6 +3176,16 @@ impl Player {
             }
             // Offscreen: nothing is presented.
             (None, None) => {}
+        }
+        if let (Some(ViewImage::Window { index, .. }), Some(view)) =
+            (&view_image, self.view_window.as_mut())
+            && let ViewOutput::Window { swapchain, .. } = &view.output
+        {
+            match swapchain.present(self.device.graphics, *index) {
+                Ok(suboptimal) => view.resized |= suboptimal,
+                Err(e) if e.is_out_of_date() => view.resized = true,
+                Err(e) => return Err(AppError::at("presenting the view's window")(e)),
+            }
         }
         marker(
             &mut self.latency,
@@ -3050,6 +3534,7 @@ impl Drop for Player {
                 self.allocator.destroy_buffer(offscreen.buffer, memory);
             }
         }
+        self.close_view_window();
         // Streamline before the device it is attached to (its shutdown releases what it
         // made on it); the rest drops in field order.
         self.latency = None;
