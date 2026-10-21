@@ -123,8 +123,12 @@ Last updated: 2026-10-20.
     - **E2-3a, a click picks** (#274): the view's culled commands drawn again into a
       32 × 32 square, slot ids read back; hover, click, Shift; 19–20 µs on the RTX,
       about 0.5 ms on the iGPU (Sponza);
-    - then E2-3b the outline, E2-3c boxes, cycling and Alt+click's list.
-  - **Next:** E2-3b; then the rest of E2 (ADR 0107 §7): placement on surfaces, frame,
+    - **E2-3b, the outline** (#PR): the selection (with its children; the active entity
+      lighter) and the hovered entity, drawn alone into a mask bounded by their boxes on
+      the screen, then a 2 px line, hidden parts at 35 %; three small instances cost 6 +
+      10 µs on the RTX, 63 + 108 µs on the iGPU;
+    - then E2-3c boxes, cycling and Alt+click's list.
+  - **Next:** E2-3c; then the rest of E2 (ADR 0107 §7): placement on surfaces, frame,
     bookmarks, overlays.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
