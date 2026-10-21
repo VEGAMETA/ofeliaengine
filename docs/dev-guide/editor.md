@@ -118,6 +118,9 @@ editor = ["dep:engine_editor"]
 | The gizmo's handles: move, scale, rotate (the same again: all of them) | Shift+Q, Shift+E, Shift+R |
 | The gizmo along the active entity's axes, or the world's | Space |
 | Fly the camera ([viewport navigation](#viewport-navigation)) | the right button held + W, A, S, D |
+| Frame the selection (nothing selected: the scene) | F |
+| Follow the active entity as it moves (again: stop) | Shift+F |
+| Set a camera bookmark, go to it | Ctrl+1..9, 1..9 |
 
 These are our keys, the default (team decision, 2026-10-21): the left hand stays beside
 W, A, S, D, which fly the camera. **Editor: Key Map…** (Ctrl+Shift+P) takes another set,
@@ -318,11 +321,15 @@ the keys.
 | Look around (the pivot follows) | right drag |
 | Fly | the right button held + W, A, S, D along and across the view; Q down, E up; Shift three times faster |
 | The flight's speed | the wheel while flying: 5 m/s at first, ×1.2 a notch |
+| Frame the selection | F: the camera flies in a fifth of a second to look at it (with its children) the same way, filling the view |
+| Follow it | Shift+F: the camera moves with the active entity until you pan, look around or fly |
+| Bookmarks | Ctrl+1..9 keeps the camera's place as bookmark 1..9, the digit flies back there (as in Unreal); the session keeps them with the scene |
 
 The bindings follow Godot (`docs/research/ux/viewport-navigation.md`). While the right
 button flies the camera, the letters are the flight's: no shortcut runs. W, A, S, D, Q and
-E go by their place on the keyboard (Z, Q, S, D on AZERTY). Focusing the selection comes
-later.
+E go by their place on the keyboard (Z, Q, S, D on AZERTY). Framing takes each object's
+bounds as the renderer has them, and lights, cameras and empty entities as points with
+half a meter around them; nothing selected, it frames the whole scene.
 
 ## Autosave and the session
 
@@ -403,7 +410,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 
 | Phase | What |
 |---|---|
-| E2 | the selection's outline and the one under the pointer, boxes, cycling through what is under the pointer and its list (Alt+click), frame and bookmarks, placement on surfaces, overlays |
+| E2 | placement on surfaces, snapping steps in the tool bar, pivots, overlays (lights' and cameras' icons and ranges) |
 | E3 | Play on a copy of the world |
 
 The whole plan is ADR 0107 §7.

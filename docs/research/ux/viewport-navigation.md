@@ -49,9 +49,13 @@ Common to all four:
   - the keys go by their place on the keyboard (the input collector keeps the held ones),
     and no shortcut runs while flying.
 
+- **Framing and bookmarks** (ADR 0107 E2-4): F flies the camera (a fifth of a second,
+  easing out) to look at the selection's bounds the same way, filling the view's
+  narrower side less a tenth; Shift+F follows the active entity until a pan, a look or a
+  flight; Ctrl+1..9 keeps the camera's place, 1..9 flies back (Unreal's keys).
+
 ## Not yet (next steps)
 
-- Focus selection (F): move the pivot to the selection's bounds.
 - Zoom that passes through the pivot (dolly when close), orbit around the point under
   the cursor.
 - Rebindable bindings through the keymap (the command palette's `Keymap`), and an
