@@ -13,7 +13,7 @@ use engine_core::math::{Mat4, Quat, Vec2, Vec3, look_at};
 use engine_editor::icons;
 use engine_editor::paint::{UiText, paint};
 use engine_editor::shell::{
-    Field, FileItem, FileKind, MenuItem, Palette, PaletteRow, PaletteView, Section, ShellModel,
+    Field, FileItem, FileKind, MenuEntry, Palette, PaletteRow, PaletteView, Section, ShellModel,
     TreeItem, Widget, build,
 };
 use engine_render::forward::{
@@ -354,21 +354,38 @@ fn main() {
         row("Scene: Add Cube", ""),
         row("Scene: Add Camera", ""),
         row("Scene: Add Cylinder", ""),
-        row("Scene: Add Empty", ""),
+        row("Scene: Add Point", ""),
         row("Scene: Add Plane", ""),
         row("Scene: Add Point Light", ""),
     ];
-    let item = |icon, label| MenuItem { icon, label };
+    let leaf = |icon, label| MenuEntry {
+        icon,
+        label,
+        kind: 0,
+        children: &[],
+    };
+    let meshes = [
+        leaf(icons::CUBE, "Cube"),
+        leaf(icons::SPHERE, "Sphere"),
+        leaf(icons::PLANE, "Plane"),
+        leaf(icons::CYLINDER, "Cylinder"),
+    ];
+    let lights = [
+        leaf(icons::SUN, "Sun"),
+        leaf(icons::LIGHT, "Point Light"),
+        leaf(icons::SPOT_LIGHT, "Spot Light"),
+    ];
+    let group = |icon, label, children| MenuEntry {
+        icon,
+        label,
+        kind: usize::MAX,
+        children,
+    };
     let add_menu = [
-        item(icons::NODE_3D, "Empty"),
-        item(icons::CUBE, "Cube"),
-        item(icons::SPHERE, "Sphere"),
-        item(icons::PLANE, "Plane"),
-        item(icons::CYLINDER, "Cylinder"),
-        item(icons::SUN, "Sun"),
-        item(icons::LIGHT, "Point Light"),
-        item(icons::SPOT_LIGHT, "Spot Light"),
-        item(icons::CAMERA, "Camera"),
+        leaf(icons::NODE_3D, "Point"),
+        group(icons::MODEL, "Mesh", &meshes[..]),
+        group(icons::LIGHT, "Light", &lights[..]),
+        leaf(icons::CAMERA, "Camera"),
     ];
     let model = ShellModel {
         scenes: &["main.scene", "level_01.scene*", "меню.scene"],
@@ -396,7 +413,7 @@ fn main() {
         steps: ["0.1 m", "45°", "0.1"],
         step_menu: None,
         pivot: "Median",
-        add_menu: show_menu.then_some(&add_menu[..]),
+        add_menu: show_menu.then_some((&add_menu[..], Some(1))),
         reveal_row: None,
         tree_filter: "",
         inspector_filter: "",

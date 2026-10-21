@@ -1,7 +1,7 @@
 # 0110. Blockout: convex brushes held as integer planes, evaluated in Godot's order over convex pieces
 
-- Status: Proposed (2026-10-21): the core is built (E2b-1); three questions to the team
-  (below)
+- Status: Accepted (team decisions, 2026-10-21: the three questions below answered a;
+  the shapes the owner asked for: box, cylinder, sphere, torus, cone and truncated cone)
 - Date: 2026-10-21
 - Related:
   - [ADR 0107](0107-editor.md) §7, phase E2b (the owner, 2026-10-17): brushes for
@@ -199,16 +199,19 @@ Proposed (question 3):
    moves and extrusions, refused when a part would stop being closed.
 6. **E2b-6, bake to a mesh,** and the cook's path.
 
-### Questions to the team
+### The team's answers (2026-10-21)
 
-1. **Rooms merging** (`ux/blockout.md`, question 2): a room (a hollow box) whose inside
+1. **Rooms merge** (`ux/blockout.md`, question 2: a): a room (a hollow box) whose inside
    overlaps another room's wall opens into it, so a corridor drawn to a room needs no
-   doorway cut; other brushes keep the tree's order. Or every opening is cut by hand.
-2. **Snapping for brushes** (`ux/blockout.md`, question 1): the owner's rule as for
-   everything else, with corners drawn or moved landing on other brushes' corners and
-   edges (the coordinator's recommendation), or snapped to the grid by default.
-3. **The format above:** the shape's parameters, and integer planes in millimetres once
+   doorway cut; other brushes keep the tree's order (E2b-3).
+2. **Snapping for brushes** (`ux/blockout.md`'s question 1: b, the coordinator's
+   recommendation): the owner's rule as for everything else, and
+   corners drawn or moved land on other brushes' corners and edges within a few pixels
+   (SketchUp's inference) (E2b-3).
+3. **The format above** (a): the shape's parameters, and integer planes in millimetres once
    edited.
+4. **The shapes** (the owner): besides the box, the cylinder, sphere, torus, and the cone,
+   pointed and truncated; the wedge and stairs stay.
 
 ## Consequences
 
@@ -294,3 +297,28 @@ Proposed (question 3):
     the frame);
   - no allocation in frames with a group of brushes that stays as it is
     (`zero_alloc_models`).
+
+## As built (E2b-2b, 2026-10-21): brushes in the editor, cones and tori
+
+- **`engine_brush::shape`:** `Shape::Cone(sides, top)` (the top as thousandths of the base:
+  0 pointed, between truncated, 1000 the cylinder), its sides through the base's edges and
+  the top's; `Shape::Torus(around, tube)`, lying on its base: a convex prism per segment
+  around the ring (the tube's sides parallel to the segment's chord, the first flat on the
+  ground), its ends the planes halfway between it and its neighbours', shared turned
+  around, so the faces there go.
+- **`mesh::triangles` leaves slivers out:** polygons thinner than 1 µm (twice their area
+  over their perimeter). Where rounded planes meet (a torus's segments: their sides,
+  rounded to 2^22, meet the shared ends some 25 nm apart) the exact surface keeps strips
+  nanometres wide that no pixel would show and growing by 0.05 mm would.
+- **`Brush`:** `BrushShape::Cone` and `Torus`; `top` (a cone's top, 0 to 1).
+- **The editor** (ADR 0107's notes of the same day): **+** → **Blockout** adds a box, wedge,
+  stairs, cylinder, cone, truncated cone, sphere or torus where the camera looks, into the
+  active entity's group (itself, or the group above it), else the scene's first, else a
+  new "Blockout" group, at its end, all one undo step; the tree shows each brush's shape
+  (cube, slope, stairs, cylinder, cone, tire, sphere) and its operation ("Brush", "Cut",
+  "Intersect"), a group with a wall.
+- **Tested:** cones' volumes (pointed, truncated, full as the cylinder) within 10⁻⁵; a
+  torus of 24 parts within 3 % of its volume showing exactly its 288 tube sides; a refused
+  torus with no hole; the add menu's Blockout group opened beside it by the pointer, a click
+  on Torus making a group and the brush, the next brush joining it, the tree's kinds, undo
+  taking both back.

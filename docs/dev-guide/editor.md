@@ -63,9 +63,17 @@ editor = ["dep:engine_editor"]
     for the selection (any of it on: all off; all off: all on), one undo step;
   - **F2** or a double click renames it in place (Enter keeps, Escape drops);
   - the filter box keeps the rows whose names match, with their parents;
-  - **`+`** (or Ctrl+A) adds an entity where the camera looks, on the grid: an empty
-    entity, a cube, sphere, plane or cylinder, a sun, a point or spot light, a camera. It
-    is named after its kind, numbered when a sibling has that name ("Cube 2");
+  - **`+`** (or Ctrl+A) adds an entity where the camera looks, on the grid. Its menu
+    groups the kinds; a group opens beside it under the pointer:
+    - **Point** (an entity with a place and nothing else), **Camera**;
+    - **Mesh:** a cube, sphere, plane or cylinder;
+    - **Blockout:** brushes ([blockout.md](blockout.md)): a box, wedge, stairs, cylinder,
+      cone, truncated cone, sphere or torus. A brush joins the selection's blockout group
+      (or the scene's first), or a new "Blockout" group, at its end;
+    - **Light:** a sun, a point light or a spot light.
+
+    It is named after its kind, numbered when a sibling has that name ("Cube 2"); the
+    palette has every kind ("Scene: Add Torus Brush");
   - Delete and Ctrl+D act on the whole selection (a child goes with its selected
     parent), as one undo step; each copy comes right after its original, numbered, and
     the copies are selected.
@@ -115,7 +123,7 @@ editor = ["dep:engine_editor"]
 | Turn the selection off, or on (with its children) | H |
 | Duplicate the selection (with its children) | Ctrl+D |
 | Add an entity | Ctrl+A |
-| Snap by default, or not | Y |
+| Snap by default, or not (Y is an axis in a keyboard transform) | G (Blender's keys: Shift+Tab; Godot's: Y) |
 | Rename the active entity | F2 |
 | The command palette | Ctrl+Shift+P |
 | Go to a scene object (the palette with `@`) | Ctrl+P |
@@ -158,7 +166,7 @@ With the mouse over an inspector field that is not being typed in:
 | Ctrl+C | copy its value |
 | Ctrl+V | paste a value into it |
 
-While a field is typed in, the keys are the field's: Delete, Y or Ctrl+A edit the text,
+While a field is typed in, the keys are the field's: Delete, G or Ctrl+A edit the text,
 and only Ctrl+S still saves. Text fields work as Windows' own: Shift and Ctrl with the
 arrows, Home and End, Ctrl+A, Ctrl+C, Ctrl+X and Ctrl+V with the clipboard.
 
@@ -179,7 +187,7 @@ keymap file and scripts use; `EditorGame::run_command` runs one by name.
 
 - Steps: position 0.1, scale 0.1, rotation 45°, other numbers 0.1 (or their field's own
   `#[reflect(step = …)]`), whole numbers 1.
-- The grid button in the tool bar (or Y) makes snapping the default; Shift then drags
+- The grid button in the tool bar (or G) makes snapping the default; Shift then drags
   freely.
 - **The steps sit beside it** (as in Unreal's tool bar): position, angle and scale, each
   a menu of values (0.01 to 5 m, 1° to 90°, 0.01 to 1), the current one checked; dim
@@ -289,7 +297,7 @@ moving with its selected parent.
 
 - **Drag a handle** with the left button. The handle under the pointer is drawn yellow,
   and the status bar shows the change ("Move (0.3, 0, 0)", "Rotate 45°").
-- **Snapping** follows the rules above: Shift for steps, Ctrl for the grid, Y to make
+- **Snapping** follows the rules above: Shift for steps, Ctrl for the grid, G to make
   steps the default.
 - **Escape** during a drag puts everything back. Each drag is one undo step.
 - **On surfaces:** hold **Ctrl+Shift** while dragging an arrow, a square or the middle:

@@ -7,7 +7,7 @@
 use engine_editor::icons;
 use engine_editor::paint::UiText;
 use engine_editor::shell::{
-    Field, FileItem, FileKind, MenuItem, Palette, PaletteRow, PaletteView, Section, ShellModel,
+    Field, FileItem, FileKind, MenuEntry, Palette, PaletteRow, PaletteView, Section, ShellModel,
     TreeItem, Widget, build,
 };
 use engine_ui::{TextMeasure, Theme, Ui, UiInput};
@@ -183,16 +183,28 @@ fn a_steady_shell_frame_does_not_allocate() {
         steps: ["0.1 m", "45°", "0.1"],
         step_menu: None,
         pivot: "Median",
-        add_menu: Some(&[
-            MenuItem {
-                icon: icons::NODE_3D,
-                label: "Empty",
-            },
-            MenuItem {
-                icon: icons::CUBE,
-                label: "Cube",
-            },
-        ]),
+        add_menu: Some((
+            &[
+                MenuEntry {
+                    icon: icons::NODE_3D,
+                    label: "Point",
+                    kind: 0,
+                    children: &[],
+                },
+                MenuEntry {
+                    icon: icons::MODEL,
+                    label: "Mesh",
+                    kind: usize::MAX,
+                    children: &[MenuEntry {
+                        icon: icons::CUBE,
+                        label: "Cube",
+                        kind: 1,
+                        children: &[],
+                    }],
+                },
+            ],
+            Some(1),
+        )),
         reveal_row: Some(3),
         tree_filter: "",
         inspector_filter: "",

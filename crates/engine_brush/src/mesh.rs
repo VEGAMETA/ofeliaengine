@@ -4,9 +4,17 @@
 //! where a corner of one polygon lies on another's edge (a T-junction), the rounding of
 //! the corners to f32 would otherwise open hairline cracks. Grown, neighbours overlap
 //! along their shared edges instead.
+//!
+//! Polygons thinner than [`SLIVER`] are left out first: where rounded planes meet (a
+//! torus's segments, turned brushes) the exact surface keeps strips a few nanometres wide,
+//! which no pixel would show and growing would make visible.
 
 use crate::polygon::{Planes, Polygon};
 use engine_core::math::DVec3;
+
+/// Polygons thinner than this many grid units (1 µm at 1 mm; twice the area over the
+/// perimeter) make no triangles.
+pub const SLIVER: f64 = 0.001;
 
 /// Triangles for a mesh: corners in the group's grid units, their normals, texture
 /// coordinates in metres on the axis plane each face is nearest (Quake's projection), and
@@ -48,7 +56,7 @@ pub fn triangles<'a>(
         corners.clear();
         corners.extend(polygon.corners.iter().map(|c| c.to_f64()));
         let m = corners.len();
-        if m < 3 {
+        if m < 3 || is_sliver(&corners) {
             continue;
         }
         let first = out.positions.len() as u32;
@@ -78,6 +86,23 @@ pub fn triangles<'a>(
             out.indices.extend([first, first + i, first + i + 1]);
         }
     }
+}
+
+/// A convex polygon's area (Newell's method).
+pub fn area(corners: &[DVec3]) -> f64 {
+    let mut n = DVec3::ZERO;
+    for i in 1..corners.len().saturating_sub(1) {
+        n += (corners[i] - corners[0]).cross(corners[i + 1] - corners[0]);
+    }
+    n.length() / 2.0
+}
+
+/// Whether a convex polygon is thinner than [`SLIVER`].
+pub fn is_sliver(corners: &[DVec3]) -> bool {
+    let perimeter: f64 = (0..corners.len())
+        .map(|i| corners[i].distance(corners[(i + 1) % corners.len()]))
+        .sum();
+    perimeter == 0.0 || 2.0 * area(corners) / perimeter < SLIVER
 }
 
 /// The axis a normal is nearest.

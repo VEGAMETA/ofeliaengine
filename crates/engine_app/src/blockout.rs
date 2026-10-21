@@ -67,6 +67,12 @@ pub enum BrushShape {
     Cylinder,
     /// A polyhedron of [`Brush::segments`] sides around y and half as many rings.
     Sphere,
+    /// A cone of [`Brush::segments`] sides around y, its top [`Brush::top`] of its base (0:
+    /// pointed).
+    Cone,
+    /// A ring lying on its base of [`Brush::segments`] convex parts, its tube of half as many
+    /// sides: the size's x and z its outer diameters, its y the tube's.
+    Torus,
     /// The planes in [`Brush::planes`] (a brush whose faces were edited).
     Planes,
 }
@@ -94,8 +100,11 @@ pub struct Brush {
     pub shape: BrushShape,
     /// Its size along x, y (its height) and z, metres.
     pub size: Vec3,
-    /// Stairs' steps, cylinders' and spheres' sides.
+    /// Stairs' steps; the sides of cylinders, cones, spheres and tori.
     pub segments: u32,
+    /// A cone's top, as a share of its base: 0 a point, between 0 and 1 truncated.
+    #[reflect(min = 0.0, max = 1.0)]
+    pub top: f32,
     /// Its planes when [`BrushShape::Planes`].
     pub planes: Vec<BrushPlane>,
     /// Physics collides with it (made with the colliders, a later step).
@@ -114,8 +123,8 @@ impl Default for Brush {
 }
 
 impl Brush {
-    /// An adding brush of `shape` and `size` (metres): stairs of 8 steps, cylinders of 16
-    /// sides, spheres of 12.
+    /// An adding brush of `shape` and `size` (metres): stairs of 8 steps, cylinders and
+    /// cones of 16 sides, spheres of 12, tori of 24; cones pointed.
     pub fn new(shape: BrushShape, size: Vec3) -> Self {
         Self {
             op: BrushOp::Add,
@@ -123,10 +132,12 @@ impl Brush {
             size,
             segments: match shape {
                 BrushShape::Stairs => 8,
-                BrushShape::Cylinder => 16,
+                BrushShape::Cylinder | BrushShape::Cone => 16,
                 BrushShape::Sphere => 12,
+                BrushShape::Torus => 24,
                 _ => 0,
             },
+            top: 0.0,
             planes: Vec::new(),
             collides: true,
             tint: [0.72, 0.72, 0.72, 1.0],
@@ -136,6 +147,11 @@ impl Brush {
     /// The same doing `op`.
     pub fn with_op(self, op: BrushOp) -> Self {
         Self { op, ..self }
+    }
+
+    /// The same with its top `top` of its base (a cone: truncated).
+    pub fn with_top(self, top: f32) -> Self {
+        Self { top, ..self }
     }
 
     /// Its convex parts' planes in its own grid (millimetres); none when its size is not
@@ -149,6 +165,11 @@ impl Brush {
             BrushShape::Stairs => Shape::Stairs(self.segments),
             BrushShape::Cylinder => Shape::Cylinder(self.segments),
             BrushShape::Sphere => Shape::Sphere(self.segments),
+            BrushShape::Cone => Shape::Cone(
+                self.segments,
+                (self.top.clamp(0.0, 1.0) * 1000.0).round() as u32,
+            ),
+            BrushShape::Torus => Shape::Torus(self.segments, (self.segments / 2).max(4)),
             BrushShape::Planes => {
                 let count = self.planes.iter().map(|p| p.part + 1).max().unwrap_or(0);
                 return (0..count)

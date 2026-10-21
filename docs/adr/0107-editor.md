@@ -1007,6 +1007,18 @@ W, A, S, D fly the camera as in Godot, the wheel sets the speed).
   eye and dim rows; on the player, both GPUs: a disabled group shows no brush and comes
   back, a disabled lamp saved and loaded off; no allocation per frame.
 
+## As built (the owner's notes, the add menu, 2026-10-21)
+
+- **The add menu groups its kinds** (the owner: meshes in a menu of their own, lights in
+  theirs, brushes too, more groups later): Point, **Mesh** (cube, sphere, plane, cylinder),
+  **Blockout** (the brushes, ADR 0110), **Light** (sun, point, spot), Camera; a group's
+  kinds open beside it while the pointer is over it (`shell::MenuEntry`, the opened menu
+  part of the popup for its dismissal). Every kind keeps its palette command ("Scene: Add
+  Torus Brush").
+- **"Empty" is "Point"** (the owner): an entity with a place and nothing else.
+- **Snapping's key is G in our keys** (the owner: Y is an axis in a keyboard transform);
+  Blender's keys Shift+Tab (Blender's own), Godot's Y (Godot's).
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and
