@@ -4940,6 +4940,40 @@ fn draw_gizmo(gizmo: &Gizmo, lit: Option<Handle>, rect: [u32; 4], scale: f32, ca
 
 /// Draws a keyboard transform's guides below the UI, clipped to the viewport: an axis'
 /// line in its color, the pivot's line to the pointer dashed.
+/// The window's color everywhere but the viewport `view` (`[x, y, width, height]` in the
+/// output's pixels), under everything else: what shows in the gaps between docks.
+fn draw_window(
+    view: Option<[u32; 4]>,
+    extent: engine_rhi::ash::vk::Extent2D,
+    color: [f32; 4],
+    canvas: &mut Canvas,
+) {
+    let (w, h) = (extent.width as f32, extent.height as f32);
+    let around = match view {
+        Some([x, y, vw, vh]) => {
+            let [x, y] = [x as f32, y as f32];
+            let [right, bottom] = [x + vw as f32, y + vh as f32];
+            [
+                [0.0, 0.0, w, y],
+                [0.0, bottom, w, h],
+                [0.0, y, x, bottom],
+                [right, y, w, bottom],
+            ]
+        }
+        None => [[0.0, 0.0, w, h], [0.0; 4], [0.0; 4], [0.0; 4]],
+    };
+    for [x0, y0, x1, y1] in around {
+        if x1 > x0 && y1 > y0 {
+            let (min, max) = (Vec2::new(x0, y0), Vec2::new(x1, y1));
+            canvas.draw(
+                &Quad::solid((min + max) * 0.5, max - min)
+                    .color(Vec4::from_array(color))
+                    .order(Order::layer(i16::MIN)),
+            );
+        }
+    }
+}
+
 /// The box being dragged in the viewport (ADR 0109): a light frame over a faint fill,
 /// dashed while it takes hidden objects too (Alt).
 fn draw_box(
@@ -5154,6 +5188,15 @@ impl Overlay for EditorOverlay {
                 }
             }
             self.canvas.clear();
+            // The window's color behind the docks: all but the viewport, which the 3D view
+            // fills. Nothing else draws in the 1-pixel gaps between docks, and the output
+            // holds whatever its memory held before.
+            draw_window(
+                editor.view_rect,
+                pass.extent,
+                editor.palette.window,
+                &mut self.canvas,
+            );
             if editor.key_transform.is_some()
                 && let Some(rect) = editor.view_rect
             {

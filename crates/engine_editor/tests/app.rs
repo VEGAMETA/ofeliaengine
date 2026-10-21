@@ -349,6 +349,16 @@ fn a_click_in_the_viewport_selects_what_is_drawn_there() {
         }
     }
     assert!(n > 50, "the cube is drawn: {n} red pixels");
+    // The gap right of the viewport, before the scene's dock: the window's color (sRGB 18,
+    // 18, 22), not what the output's memory held.
+    let i = (((y + h / 2) * width + x + w) * 4) as usize;
+    let gap = [rgba[i], rgba[i + 1], rgba[i + 2]];
+    assert!(
+        gap.iter()
+            .zip([18u8, 18, 22])
+            .all(|(&a, b)| a.abs_diff(b) <= 2),
+        "the gap beside the viewport: {gap:?}"
+    );
     let on_cube = ((sum.0 / n) as i32, (sum.1 / n) as i32);
     send(
         &mut game,
