@@ -2016,6 +2016,13 @@ impl Player {
             &mut self.textures,
             &mut self.materials,
         );
+        // The textures of glTF materials models began using this frame (ADR 0108).
+        self.assets.make_textures(
+            &self.device,
+            &mut self.allocator,
+            &mut self.textures,
+            &mut self.materials,
+        );
         // Saves asked for during the ticks: taken now, at the tick boundary.
         self.process_saves(game, elapsed);
         let t = Instant::now();

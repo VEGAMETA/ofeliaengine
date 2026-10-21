@@ -54,7 +54,6 @@
 //!   Ctrl+Y or Ctrl+Shift+Z redo, Ctrl+S save, Delete, Ctrl+D duplicate, Ctrl+A add, Y
 //!   snapping by default, F2 rename.
 
-use crate::bake;
 use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
@@ -5036,10 +5035,10 @@ impl Editor {
             .as_ref()
             .and_then(|p| p.parent())
             .map_or_else(|| self.root.clone(), |d| self.root.join(d));
-        let path = dir.join(bake::file_name(&name));
-        let bytes = bake::glb(&name, &brushes, &engine_app::grid_png());
+        let path = dir.join(engine_app::bake::file_name(&name));
+        let baked = engine_app::bake::glb(&name, &brushes, &engine_app::grid_png());
         let triangles: usize = brushes.iter().map(|b| b.indices.len() / 3).sum();
-        match std::fs::write(&path, bytes) {
+        match std::fs::write(&path, baked.bytes) {
             Ok(()) => format!(
                 "Exported {name} to {} ({triangles} triangles)",
                 path.display()

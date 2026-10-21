@@ -51,6 +51,8 @@ engine_net.workspace = true
 engine_net_transport.workspace = true
 # Text errors of a live folder go to the log (engine_log's backend).
 log = "0.4"
+# A baked blockout group's glTF (ADR 0110 E2b-6): the file's JSON chunk.
+serde_json = "1"
 
 [dev-dependencies]
 # The flight example: skinned characters (glTF Fox) cooked through the derived data cache,
