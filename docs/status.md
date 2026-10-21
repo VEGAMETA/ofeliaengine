@@ -180,8 +180,14 @@ Last updated: 2026-10-20.
     snapping with inference, the format as proposed): the add menu in groups (Point,
     Mesh, Blockout, Light, Camera; "Empty" is "Point"), brushes into the selection's or the
     scene's blockout group, cones (pointed, truncated) and tori; snapping on G.
-  - **Next:** the engine as a DLL for games' development builds (the owner's choice:
-    measured against today's, then an ADR), then E2b-3, drawing brushes.
+  - **Games share one build of the engine** (#290, ADR 0111; the owner asked for the
+    engine compiled once, through a DLL): `ofeliaengine new` writes cargo's `build-dir`
+    in the user's cargo folder and copies the engine's `Cargo.lock`. A second game's
+    first build: 3.4 s, not 102 s; with the editor 4.0 s, not 20 s; its `target` 31 MB,
+    not 1.9 GB. The DLL, measured: 0.03 s of a 1.5 s rebuild, and the game's own
+    components lost (the reflected registry is a linkme slice per module); it waits for
+    hot reload of game code.
+  - **Next:** E2b-3, drawing brushes.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
