@@ -165,8 +165,13 @@ Last updated: 2026-10-20.
     (3.4 ns), Godot's order over convex pieces, the surface each brush owns, a `Group`
     kept evaluated through edits (a door dragged among 2,001 brushes 0.58 ms on one
     thread; from nothing 57 ms).
-  - **Next:** E2b-2, brushes in the player and the editor (components, meshes per brush,
-    the grid material, Blockout in the add menu).
+  - **E2b-2a, brushes in the player** (#PR): `Brush` and `BrushGroup` in scenes (the shape
+    and its size, the operation, the tint; edited brushes' planes in millimetres), the
+    shapes (box, wedge, stairs, cylinder, sphere), each group evaluated in the player's
+    frame where something changed, a mesh per brush with a grid texture (cracks at
+    T-junctions closed by growing each polygon 0.05 mm); `docs/dev-guide/blockout.md`.
+  - **Next:** E2b-2b, brushes in the editor (the add menu, the tree's icons, the
+    inspector, undo).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

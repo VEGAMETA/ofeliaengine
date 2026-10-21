@@ -17,6 +17,7 @@ Start with the **[quick start](quick-start.md)**: a game on screen in five minut
 | [animation.md](animation.md) | skeletons, clips, blending, inverse kinematics |
 | [physics.md](physics.md) | bodies, gravity, queries, characters, rollback |
 | [navigation.md](navigation.md) | navigation meshes and paths |
+| [blockout.md](blockout.md) | brushes for greyboxing a level |
 | [audio.md](audio.md) | sound in the world, music, buses, effects, walls and rooms |
 | [video.md](video.md) | videos in materials and the UI |
 | [saves.md](saves.md) | quicksave, autosave, slots, your own saves |

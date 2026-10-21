@@ -42,6 +42,8 @@ engine_input.workspace = true
 engine_save.workspace = true
 engine_scene.workspace = true
 engine_reflect.workspace = true
+# Blockout brushes (ADR 0110): their groups evaluated, a mesh per brush.
+engine_brush.workspace = true
 # The pack's navigation mesh as the world's resource (ADR 0103).
 engine_nav.workspace = true
 # Networking (ADR 0106): the session the player runs, its transport and NAT traversal.

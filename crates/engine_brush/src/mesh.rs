@@ -59,12 +59,12 @@ pub fn triangles<'a>(
                 .normalize_or_zero()
         };
         let axis = dominant(normal);
-        for i in 0..m {
+        for (i, &corner) in corners.iter().enumerate() {
             let (a, b) = (outward((i + m - 1) % m), outward(i));
             // The corner where both edges, moved out by `grow`, meet; sharp corners are
             // limited to ten times the distance.
             let miter = (a + b) / (1.0 + a.dot(b)).max(0.2);
-            let p = corners[i] + miter * grow;
+            let p = corner + miter * grow;
             out.positions.push(p);
             out.normals.push(normal);
             let w = p * unit;

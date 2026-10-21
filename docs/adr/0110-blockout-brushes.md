@@ -251,3 +251,46 @@ Proposed (question 3):
   and empty brushes reported; a group equal to evaluating from nothing (its ground tiled);
   40 random edits equal to rebuilds.
 - **The bench** (`benches/csg.rs`): the tables above.
+
+## As built (E2b-2a, 2026-10-21): brushes in the player
+
+- **`engine_brush`:**
+  - `shape`: `Shape` (box, wedge rising towards +z, stairs of a part per step, a
+    cylinder's prism around y on an ellipse, a sphere's polyhedron inscribed in an
+    ellipsoid) and `parts` in a brush's own grid, its base's middle at the origin;
+  - `Plane::from_f64` (normals of whole numbers kept, others scaled to 2^22 and rounded),
+    `Plane::transformed` (a part's plane in its group's grid: moves and quarter turns
+    exact, turns rounded, the plane moved less than a unit's 2^-22);
+  - `mesh::triangles`: fans of the polygons, each grown 0.05 mm in its plane (the mitre
+    limited to ten times) so T-junctions show no cracks; normals from the planes; UVs in
+    metres on the nearest axis plane.
+- **`engine_app::blockout`:**
+  - the components, as the format proposed (question 3): `BrushGroup`, and `Brush` with
+    `op`, `shape`, `size` (metres), `segments` (stairs' steps, the sides of cylinders and
+    spheres), `planes` (`BrushPlane`: part, normal, offset in millimetres, for edited
+    brushes), `collides`, `tint`;
+  - `Blockout::sync` in the player's presentation step after the models: nothing unless a
+    brush, a group, a brush's or a parent's transform or a parent changed, or brushes
+    came or went; then each group's brushes (its descendants in the tree's order, not
+    those of a group within it; a brush outside any group alone) are compared with what
+    made their planes (the component and the transforms up to the group, in
+    millimetres), the group rebuilt when its brushes changed, otherwise `Group::set` for
+    the changed ones;
+  - a mesh per brush that shows anything, in the brush's own space (mirrored brushes turn
+    their triangles), with a `MeshRenderer` hidden from scenes; a material per tint;
+  - the grid texture (256 × 256 texels a metre: dark lines on the metres, lighter ones
+    every 25 cm, its smaller levels averaged) made after the first brush's frame and put on
+    the brushes' materials; until then they are plain.
+- **Tested:**
+  - `engine_brush`: the shapes' volumes (the box's, the wedge's half, the stairs'
+    steps, the cylinder within 1 % of the ellipse, the sphere inscribed), moves and quarter
+    turns exact (with f32's rounding of the turn), a 30° turn's volume within 10⁻⁶; a box's
+    12 triangles grown, facing out, UVs in metres;
+  - on the player, both GPUs (`tests/blockout.rs`): a scene file with a group (a room, its
+    inside cut, a door cut through a wall) and a wedge, stairs and a cylinder, saved and
+    loaded; six meshes; the room's inside darker through the door than the lit wall
+    beside it, the wall's metre line on the grid; the door moved, its mesh made again and
+    the old hole wall again; the cut taken out, its mesh gone (`ENGINE_BLOCKOUT_PNG` writes
+    the frame);
+  - no allocation in frames with a group of brushes that stays as it is
+    (`zero_alloc_models`).
