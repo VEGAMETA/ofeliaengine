@@ -248,8 +248,9 @@ fn the_editor_draws_its_scene_in_the_viewport() {
 }
 
 /// Picking on the player (ADR 0109): the pointer over the red cube drawn in the
-/// viewport hovers it, a click there selects it through the pick of its pixel, and a
-/// click on the empty sky clears the selection.
+/// viewport hovers it, a click there selects it through the pick of its pixel and
+/// outlines it (`ENGINE_EDITOR_PICK_PNG=<file>` writes that frame), and a click on the
+/// empty sky clears the selection.
 #[test]
 fn a_click_in_the_viewport_selects_what_is_drawn_there() {
     let dir = std::env::temp_dir().join(format!("ofelia-editor-pick-{}", std::process::id()));
@@ -353,6 +354,32 @@ fn a_click_in_the_viewport_selects_what_is_drawn_there() {
     assert_eq!(game.selected(), None);
     left_click(&mut player, &mut game, &mut overlay);
     assert_eq!(game.selection(), [cube], "clicked at {on_cube:?}");
+    // Its outline in the active color (sRGB about 255, 206, 118) around it.
+    let rgba = player
+        .capture_overlaid(&mut game, Some(&mut overlay))
+        .unwrap()
+        .unwrap();
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_PICK_PNG") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    let mut outline = 0;
+    for py in y..y + h {
+        for px in x..x + w {
+            let i = ((py * width + px) * 4) as usize;
+            let [r, g, b] = [rgba[i], rgba[i + 1], rgba[i + 2]];
+            if r >= 235 && (175..=235).contains(&g) && (80..=160).contains(&b) {
+                outline += 1;
+            }
+        }
+    }
+    assert!(outline > 100, "outlined pixels: {outline}");
     // The sky: the viewport's top left, away from the cube.
     send(
         &mut game,

@@ -234,8 +234,11 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   geometry: pick them in the tree until their icons come.
 - A click answers a frame or two later: the editor draws the pixels around it once more,
   each with the object it shows (ADR 0109). The pointer's pixel is drawn again whenever the
-  pointer, the camera or the scene moves, for the outline of what is under it (coming
-  next).
+  pointer, the camera or the scene moves.
+- **Outlines:** the selection is outlined in orange, 2 pixels wide, the active entity in a
+  lighter orange; an entity's children are outlined with it. The object under the pointer
+  gets a thin light line, so you see what a click will take. Where something else hides an
+  outlined object, its line is drawn at a third of its strength.
 
 ## Moving things in the viewport
 

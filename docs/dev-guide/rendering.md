@@ -2589,3 +2589,28 @@ match picker.add_pass(&mut fg, &bindless, &geo, &mats, &passes, render, request,
   RTX 4060 Ti, about 0.5 ms on the integrated Radeon. Pick when the pixel or the scene
   changed, not every frame.
 - **Views that nobody picks in pay nothing:** the picker's pipelines are its own.
+
+**Outlines** of chosen instances, as the editor draws its selection:
+`engine_render::outline::Outliner` draws them alone into a mask at the view's output
+size, without the view's jitter, then blends a line around the mask over the frame.
+
+```rust
+use engine_render::outline::{OutlineClass, OutlineItem, OutlineStyle, OutlineView, Outliner};
+
+// Once, for frames of `format` whose white is `white` (`set_output` when they change):
+let mut outliner = Outliner::new(&device, &bindless, format, white)?;
+
+// Every frame, after the view's passes, into its frame (`target`, the view at `rect`):
+let items = [OutlineItem { slot, class: OutlineClass::Selected }];
+outliner.add_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &scene_frame, &items,
+    &OutlineView { target, rect, clip_from_world, near, far, scene_depth, render },
+    &OutlineStyle::default());
+```
+
+- **Classes:** `Selected`, `Active` and `Hovered`, each with its color and width
+  (`OutlineStyle`); the strongest wins where lines meet. Where another surface hides the
+  outlined one, the line keeps `hidden` of its alpha (35 % by default).
+- **What it costs** (Sponza, 1080p, three instances): the three smallest 6 + 10 µs on an
+  RTX 4060 Ti and 63 + 108 µs on the integrated Radeon (the mask, then the line); the three
+  largest 57 + 27 µs and 0.92 + 0.51 ms. The mask spans only the instances' rectangle on
+  the screen, and the line is drawn only there.

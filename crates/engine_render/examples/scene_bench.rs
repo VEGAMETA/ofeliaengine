@@ -100,6 +100,7 @@ use engine_render::grading::{ColorGrading, GradingLut};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, LodIndices, MeshData, MeshId};
+use engine_render::outline::{OutlineClass, OutlineItem, OutlineStyle, OutlineView, Outliner};
 use engine_render::pick::{PickRequest, Picker, SQUARE};
 use engine_render::png::{PngFormat, encode_png};
 use engine_render::post::{Composite, HDR_FORMAT, ToneCurve, Tonemap};
@@ -335,6 +336,9 @@ fn main() {
     let mut pipeline_stats = false;
     // The editor's pick at the view's middle every frame (ADR 0109).
     let mut pick = false;
+    // The editor's outline of three instances (ADR 0109; with `--scene-draws --rays`): the
+    // smallest by their world boxes (`small`, the default) or the largest (`large`).
+    let mut outline: Option<String> = None;
     let mut msaa_stats: u32 = 0;
     let mut post = false;
     let mut graded = false;
@@ -427,6 +431,12 @@ fn main() {
             "--meshlet-culling" => meshlet_culling = true,
             "--pipeline-stats" => pipeline_stats = true,
             "--pick" => pick = true,
+            "--outline" => {
+                outline = Some(
+                    args.next_if(|a| !a.starts_with("--"))
+                        .unwrap_or_else(|| String::from("small")),
+                );
+            }
             "--cached-shadows" => cached_shadows = true,
             "--walk" => walk = args.next().unwrap().parse().unwrap(),
             "--turn" => turn = args.next().unwrap().parse().unwrap(),
@@ -900,6 +910,7 @@ fn main() {
         size.length() * 0.001,
         size.length() * 2.0,
     );
+    let planes = (size.length() * 0.001, size.length() * 2.0);
     let camera = Camera {
         clip_from_world: projection * look_at(eye, target, Vec3::Y),
         position: eye,
@@ -1479,6 +1490,32 @@ fn main() {
         let last = mode == "textured" && screenshot.is_some();
         let mut picker = pick.then(|| Picker::new(&device, &mut allocator, &bindless, 1).unwrap());
         let mut pick_time = Vec::new();
+        let mut outliner = outline
+            .is_some()
+            .then(|| Outliner::new(&device, &bindless, HDR_FORMAT, 1.0).unwrap());
+        // The GPU scene's slots are the draws' indices: the three by their boxes' volume.
+        let outlined: Vec<u32> = {
+            let mut by_volume: Vec<(f32, u32)> = draws
+                .iter()
+                .enumerate()
+                .filter_map(|(k, d)| {
+                    let info = geometry.mesh(d.mesh)?;
+                    let (_, extents) = engine_render::cull::transform_box(
+                        &d.world_from_object,
+                        (info.min + info.max) * 0.5,
+                        (info.max - info.min) * 0.5,
+                    );
+                    let volume = extents.x * extents.y * extents.z;
+                    (volume > 0.0).then_some((volume, k as u32))
+                })
+                .collect();
+            by_volume.sort_by(|a, b| a.0.total_cmp(&b.0));
+            if outline.as_deref() == Some("large") {
+                by_volume.reverse();
+            }
+            by_volume.iter().take(3).map(|&(_, k)| k).collect()
+        };
+        let mut outline_time = (Vec::new(), Vec::new());
         let mut frame = 0;
         let mut meshlet_room = 0u32;
         // Whether the GI updates of the frame before were the convergence's: pass times
@@ -1727,6 +1764,46 @@ fn main() {
                         number,
                     );
                 }
+                // `--outline`: the editor's outline of three instances (ADR 0109).
+                if let (Some(outliner), Some((scene_frame, _))) = (outliner.as_mut(), &ray_frames) {
+                    let items: Vec<OutlineItem> = outlined
+                        .iter()
+                        .enumerate()
+                        .map(|(k, &slot)| OutlineItem {
+                            slot,
+                            class: if k == 0 {
+                                OutlineClass::Active
+                            } else {
+                                OutlineClass::Selected
+                            },
+                        })
+                        .collect();
+                    outliner.add_passes(
+                        &mut fg,
+                        &mut ring,
+                        &bindless,
+                        &geo,
+                        &mats,
+                        scene_frame,
+                        &items,
+                        &OutlineView {
+                            target: hdr,
+                            rect: vk::Rect2D {
+                                offset: vk::Offset2D::default(),
+                                extent: vk::Extent2D {
+                                    width: WIDTH,
+                                    height: HEIGHT,
+                                },
+                            },
+                            clip_from_world: camera.clip_from_world,
+                            near: planes.0,
+                            far: planes.1,
+                            scene_depth: depth,
+                            render: (WIDTH, HEIGHT),
+                        },
+                        &OutlineStyle::default(),
+                    );
+                }
                 // `GI_DEBUG=1`: the screenshot shows the GI irradiance per pixel instead.
                 let shown = passes
                     .gi
@@ -1944,10 +2021,16 @@ fn main() {
                 let (mut tlas_frame, mut camera_rays_frame) = (0.0, 0.0);
                 let mut gi_resolve_frame = 0.0;
                 let mut pick_frame = 0.0;
+                let (mut mask_frame, mut edge_frame) = (0.0, 0.0);
                 for time in graph.gpu_pass_times() {
                     let us = f64::from(time.gpu_us);
                     if matches!(time.name, "pick" | "pick copy") {
                         pick_frame += us;
+                    }
+                    match time.name {
+                        "outline mask" => mask_frame += us,
+                        "outline" => edge_frame += us,
+                        _ => {}
                     }
                     if time.name.starts_with("dof ") {
                         match dof_us.iter_mut().find(|(n, _)| *n == time.name) {
@@ -2038,6 +2121,8 @@ fn main() {
                 tlas_time.push(tlas_frame);
                 gi_resolve_time.push(gi_resolve_frame);
                 pick_time.push(pick_frame);
+                outline_time.0.push(mask_frame);
+                outline_time.1.push(edge_frame);
                 camera_rays_time.push(camera_rays_frame);
                 decal_time.push(decal_frame);
                 local_views.push(f64::from(renderer.local_shadow_stats().views_drawn));
@@ -2121,6 +2206,14 @@ fn main() {
                 std::fs::write(file, png).unwrap();
             }
             frame += 1;
+        }
+        if outliner.take().is_some() {
+            println!(
+                "outline ({} three): mask {:.1} µs, edge {:.1} µs",
+                outline.as_deref().unwrap_or("small"),
+                median(&mut outline_time.0),
+                median(&mut outline_time.1)
+            );
         }
         if let Some(mut picker) = picker.take() {
             println!(

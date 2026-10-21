@@ -189,6 +189,52 @@ occlusion culling dropped. So:
 - **Not done:** the outline and the hover's (E2-3b); boxes, cycling and the list
   (E2-3c); the switch for transparent surfaces (on).
 
+## As built (E2-3b, 2026-10-21)
+
+- **`engine_render::outline`:** `Outliner::add_passes` draws the chosen instances (their
+  slots) alone:
+  - the commands are written on the CPU: each slot's mesh at its finest resident level,
+    opaque ones, then masked ones;
+  - they are drawn with the view's camera without jitter, both faces, into an R32_UINT
+    mask with a D32 depth of its own; new entry points (`outlineVertex`,
+    `outlineFragment` and their masked twins) write `(class + 1) << 24 | (item + 1)`;
+  - **the edge pass** (`outline.slang`) blends a line around the mask over the target. Each
+    class has its width and color, the strongest wins (active, selected, hovered), with a
+    soft outer edge. Where the outlined surface lies farther than the scene's depth (1 %
+    plus 1 cm, which the scene's lower resolution and jitter need), the line keeps
+    `hidden` of its alpha.
+- **Bounded on the screen:** each item's world box (its transform as last uploaded and
+  its mesh's box) gives its pixels with the lines' margin. Overlapping rectangles merge
+  until disjoint (more than 32 become their union). The mask spans their union, the view's
+  pixel grid shifted onto it, and the edge pass draws each rectangle once. A box reaching
+  behind the camera takes the whole view.
+- **The editor:**
+  - after each frame it lists what to outline: each selected entity with its children, the
+    active one's as the active class, then the hovered entity when it is not among them;
+  - the overlay draws the outlines under the panels, 2 logical pixels (1 for the hovered
+    one) times the UI's scale;
+  - the player's `OverlayView` gives the GPU scene's frame.
+- **Measured** on Sponza, 1920 × 1080 (`scene_bench --outline small|large --scene-draws
+  --rays`, the mask and the edge pass, medians), as the RTX 4060 Ti, then the Radeon iGPU:
+  - the three smallest instances: 6.1 + 10.2 µs, then 63 + 108 µs;
+  - the three largest: 57 + 27 µs, then 0.92 + 0.51 ms.
+
+  Before the bounds, the edge pass over the whole view took 135 µs and 3.1 ms, and the mask
+  of the smallest 9 µs and 0.22 ms.
+- **Tested:**
+  - on both GPUs, with synchronization validation: the active color just outside an outlined
+    quad, nothing inside it, 35 % behind a nearer quad, the hovered one's thin light line,
+    the background untouched;
+  - what is outlined: the selection with its children, the active class, the hovered one
+    unless selected;
+  - on the player, both GPUs: the cube outlined in the active color after the click
+    (`ENGINE_EDITOR_PICK_PNG` writes the frame).
+- **Not done:**
+  - a cheaper edge pass for large objects on the iGPU (tiles classified first, so that
+    only tiles on an edge test their neighbours);
+  - the outline under MSAA views (the mask is single-sampled, so it does not follow the
+    view's own samples).
+
 ## Steps
 
 - **E2-3a:** front-most picks (hover, click, Shift); the player's extension.

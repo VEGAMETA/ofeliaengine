@@ -2451,6 +2451,7 @@ impl Player {
                         rect: view_rect,
                         geometry: &geo,
                         materials: &mats,
+                        scene: scene_frame.as_ref(),
                         frame_number: frame.number,
                     }),
                 })?;

@@ -4,6 +4,7 @@
 
 use crate::{AppError, Setup};
 use engine_frame::{ViewCamera, ViewFrame};
+use engine_render::gpu_scene::SceneFrame;
 use engine_render::graph::{FrameGraph, Texture};
 use engine_render::material::MaterialFrame;
 use engine_render::mesh::GeometryFrame;
@@ -26,6 +27,9 @@ pub struct OverlayView<'a, 'g> {
     pub geometry: &'a GeometryFrame<'g>,
     /// This frame's materials.
     pub materials: &'a MaterialFrame<'g>,
+    /// The GPU scene's frame, when the view was drawn from it: outlines draw chosen
+    /// instances of it.
+    pub scene: Option<&'a SceneFrame<'g>>,
     /// The frame's number (readback rings poll with it).
     pub frame_number: u64,
 }
