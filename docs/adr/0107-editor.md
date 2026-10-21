@@ -973,6 +973,40 @@ W, A, S, D fly the camera as in Godot, the wheel sets the speed).
   navigation mesh (with physics and navigation in the editor); a viewport menu for
   overlays one by one.
 
+## As built (the owner's notes after trying the editor, 2026-10-21)
+
+- **The camera's drags lock the cursor** (the owner: hide the cursor, the mouse not moving):
+  while the right or middle button drags the camera, the window thread hides the cursor,
+  keeps it in the client area and puts it back where the drag began after every move,
+  reporting the distance (`WindowEventKind::CursorDelta`, `WindowSystem::lock_cursor`,
+  `Player::lock_cursor`), as Godot's captured mouse does; `WM_MOUSEMOVE`s coalesce, so
+  no distance counts twice. It is let go on release and when the window loses the
+  keyboard.
+- **The eye in the tree** (the owner: "disabled hides and disables, as in Godot"):
+  `engine_runtime::Disabled` (saved: `Disabled = {}`) turns an entity and everything below
+  it off; `ActivityPropagation` keeps `Inactive` on each entity that is off, after every
+  tick before the transforms, only when something was disabled, enabled or moved in the
+  tree, marking the renderers and lights of entities that turn changed. Extraction draws
+  an inactive chunk's meshes as hidden, the lights' extraction leaves inactive lights dark
+  (their slots kept) and skips inactive suns, a blockout group leaves inactive brushes out.
+  The tree's rows end in an eye (shut when disabled), dim when off; a click on it or **H**
+  on the selection turns them off or on as one undo step. Physics and sound of what is off
+  come with Play (E3): nothing simulates or plays while editing.
+- **A game's development build** (the owner: "everything compiled in debug"): `ofeliaengine
+  new`'s `dev` profile builds the engine as a release build (`opt-level = 3`, no overflow
+  checks, 16 code units; before, its overflow checks and debug assertions stayed on, and
+  `engine_rhi`'s debug assertions turned the Vulkan validation layer on), keeping a
+  development build's sounds from the live folder, saves as text and allocation counters;
+  `ENGINE_VALIDATION=1` (or `sync`) turns validation on. Playing is `cargo run` now, the
+  same build as the editor's: the quick start's `cargo run --release` built the engine a
+  second time.
+- **Tested:** the cursor's distances drag the camera with the cursor still (the window's
+  side is not tested: it would move the desktop's cursor); disabling a parent hides its
+  child too and enabling brings both back with their changes since (extraction), lights
+  dark and back in their slots, the sun off; H on the selection, undo and redo, the tree's
+  eye and dim rows; on the player, both GPUs: a disabled group shows no brush and comes
+  back, a disabled lamp saved and loaded off; no allocation per frame.
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and

@@ -4,8 +4,8 @@
 //! repository, `examples/quick_start/`).
 //!
 //! ```text
-//! cargo run --release                     play it
-//! cargo run --release --features editor   edit its scene (`ofeliaengine edit`)
+//! cargo run                     play it
+//! cargo run --features editor   edit its scene (`ofeliaengine edit`)
 //! ```
 
 use engine_app::prelude::*;

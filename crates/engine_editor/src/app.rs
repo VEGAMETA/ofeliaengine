@@ -85,7 +85,7 @@ use engine_render::pick::{
     ListRequest, PickPass, PickRequest, PickView, Picker, SurfaceRequest, SurfaceResult,
 };
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
-use engine_runtime::{Camera, PointLight, SpotLight, Sun, look_rotation};
+use engine_runtime::{Camera, Disabled, PointLight, SpotLight, Sun, look_rotation};
 use engine_scene::{AssetId, AssetPaths, Name, RootOrder, SaveOptions, SceneId, SceneRegistry};
 use engine_ui::{Theme, Ui, UiKey};
 use std::cell::RefCell;
@@ -268,6 +268,7 @@ fn run_inner<G: Game>(
                 break;
             }
             player.set_view_rect(game.view_rect());
+            player.lock_cursor(game.cursor_locked());
             game.sync_assets(&mut player);
             count += 1;
             if count % 30 == 1 {
@@ -504,6 +505,7 @@ struct CommandIds {
     redo: CommandId,
     save: CommandId,
     delete: CommandId,
+    disable: CommandId,
     duplicate: CommandId,
     add: CommandId,
     snap: CommandId,
@@ -566,6 +568,7 @@ fn commands() -> (Commands, CommandIds) {
         redo: c.register("edit.redo", "Edit", "Redo"),
         save: c.register("file.save", "File", "Save Scene"),
         delete: c.register("scene.delete", "Scene", "Delete Selection"),
+        disable: c.register("scene.disable", "Scene", "Disable or Enable Selection"),
         duplicate: c.register("scene.duplicate", "Scene", "Duplicate Selection"),
         add: c.register("scene.add", "Scene", "Add Entity"),
         snap: c.register("edit.snap", "Edit", "Snap by Default"),
@@ -667,6 +670,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+Shift+Z", ids.redo),
         ("Ctrl+S", ids.save),
         ("Delete", ids.delete),
+        ("H", ids.disable),
         ("Ctrl+D", ids.duplicate),
         ("Ctrl+A", ids.add),
         ("Y", ids.snap),
@@ -1453,6 +1457,19 @@ fn kind_of(world: &World, e: Entity) -> (&'static str, &'static str) {
     }
 }
 
+/// Whether `e` is off: disabled, or below a disabled entity (the engine's `Inactive`
+/// follows a tick later; the tree shows it at once).
+fn is_off(world: &World, e: Entity) -> bool {
+    let mut at = Some(e);
+    while let Some(x) = at {
+        if world.get::<Disabled>(x).is_some() {
+            return true;
+        }
+        at = world.parent(x);
+    }
+    false
+}
+
 /// Where a root comes in the tree: by its order, those without one last in spawn order.
 fn root_key(world: &World, e: Entity) -> (u32, u32) {
     (
@@ -1708,6 +1725,7 @@ impl Editor {
                 self.focused = focused;
             }
             WindowEventKind::CursorMoved { x, y } => input.cursor_moved(x as f32, y as f32),
+            WindowEventKind::CursorDelta { dx, dy } => input.cursor_delta(dx as f32, dy as f32),
             WindowEventKind::CursorLeft => input.cursor_left(),
             WindowEventKind::MouseButton { button, pressed } => {
                 let button = match button {
@@ -2020,6 +2038,8 @@ impl Editor {
                     selected: in_selection(row.entity),
                     active: Some(row.entity) == self.active(),
                     renaming: Some(row.entity) == self.renaming,
+                    disabled: world.get::<Disabled>(row.entity).is_some(),
+                    off: is_off(world, row.entity),
                 }
             })
             .collect();
@@ -2299,6 +2319,10 @@ impl Editor {
             && !self.collapsed.remove(&row.entity)
         {
             self.collapsed.insert(row.entity);
+        }
+        if let Some(row) = response.tree_eye.and_then(|i| self.rows.get(i).copied()) {
+            let on = world.get::<Disabled>(row.entity).is_none();
+            self.set_disabled(world, &[row.entity], on);
         }
         if let Some(row) = response.tree_row.and_then(|i| self.rows.get(i).copied()) {
             if self.input.shift() {
@@ -4177,6 +4201,33 @@ impl Editor {
         unique_name(base, &taken)
     }
 
+    /// Disables `entities` (`on`) or enables them, as one undo step: off, they and what is
+    /// below them are not drawn, light nothing and leave their blockout groups.
+    fn set_disabled(&mut self, world: &mut World, entities: &[Entity], on: bool) {
+        self.history
+            .begin(if on { "Disable" } else { "Enable" }, None);
+        for &e in entities {
+            self.history.touch(world, e);
+            if on {
+                world.insert(e, Disabled {});
+            } else {
+                world.remove::<Disabled>(e);
+            }
+        }
+        self.history.commit(world);
+        let what = match entities {
+            [e] => world
+                .get::<Name>(*e)
+                .map_or_else(|| String::from("the entity"), |n| n.as_str().to_owned()),
+            _ => format!("{} entities", entities.len()),
+        };
+        self.say(if on {
+            format!("{what} off: not drawn, with what is below (H turns it back on)")
+        } else {
+            format!("{what} on")
+        });
+    }
+
     /// Selects `e` and opens its parents' rows, so the tree shows it.
     fn show(&mut self, world: &World, e: Entity) {
         self.select_only(e);
@@ -4317,6 +4368,15 @@ impl Editor {
             } else {
                 "The gizmo along the world's axes"
             }));
+        } else if id == ids.disable {
+            let selection: Vec<Entity> = self.selection.clone();
+            if !selection.is_empty() {
+                // Any of them on: all off; all off: all on.
+                let on = selection
+                    .iter()
+                    .any(|&e| world.get::<Disabled>(e).is_none());
+                self.set_disabled(world, &selection, on);
+            }
         } else if id == ids.delete {
             let roots = self.selection_roots(world);
             if !roots.is_empty() {
@@ -5427,6 +5487,13 @@ impl<G> EditorGame<G> {
         self.shared.borrow().view_rect
     }
 
+    /// Whether the cursor is locked for the player's next frame (`Player::lock_cursor`):
+    /// while the right or middle button drags the camera, as in Godot and Unreal, the
+    /// cursor is hidden and stays where the drag began.
+    pub fn cursor_locked(&self) -> bool {
+        self.shared.borrow().camera_drag
+    }
+
     /// Gives the player the asset paths of scenes the editor loaded, and learns the
     /// player's again when they changed (a scene loaded since): the inspector shows
     /// references by path.
@@ -6472,6 +6539,55 @@ mod tests {
         assert_eq!(world.get::<Mover>(e).unwrap().gait, Gait::Walk);
         ed.run(&mut world, ed.ids.undo);
         assert!(!world.get::<Mover>(e).unwrap().enabled);
+    }
+
+    #[test]
+    fn h_disables_the_selection_with_what_is_below_and_undo_enables_it() {
+        let mut world = World::new();
+        let parent = world.spawn((SceneId::new(), Name::new("Parent"), Transform::IDENTITY));
+        let child = world.spawn((SceneId::new(), Name::new("Child"), Transform::IDENTITY));
+        world.set_parent(child, Some(parent)).unwrap();
+        let mut ed = Editor::new(
+            [1280, 720],
+            std::env::temp_dir(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.select_only(parent);
+        ed.run(&mut world, ed.ids.disable);
+        assert!(world.get::<Disabled>(parent).is_some());
+        assert!(
+            world.get::<Disabled>(child).is_none(),
+            "only the selection is disabled"
+        );
+        assert!(is_off(&world, child), "but the child is off below it");
+        // Again: on.
+        ed.run(&mut world, ed.ids.disable);
+        assert!(world.get::<Disabled>(parent).is_none());
+        // Off again, then undone: on; redone: off.
+        ed.run(&mut world, ed.ids.disable);
+        ed.run(&mut world, ed.ids.undo);
+        assert!(world.get::<Disabled>(parent).is_none());
+        ed.run(&mut world, ed.ids.redo);
+        assert!(world.get::<Disabled>(parent).is_some());
+        // The tree shows the eye shut and the child dim.
+        ed.update(&mut world);
+        let items: Vec<(bool, bool)> = ed
+            .rows
+            .iter()
+            .map(|r| {
+                (
+                    world.get::<Disabled>(r.entity).is_some(),
+                    is_off(&world, r.entity),
+                )
+            })
+            .collect();
+        assert!(
+            items.contains(&(true, true)) && items.contains(&(false, true)),
+            "{items:?}"
+        );
     }
 
     #[test]

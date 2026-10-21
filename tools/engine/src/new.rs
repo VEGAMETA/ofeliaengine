@@ -167,7 +167,7 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
         toml_path(&engine)
     );
     println!(
-        "next:\n  cd {}\n  cargo run --release            play it\n  \
+        "next:\n  cd {}\n  cargo run                      play it\n  \
          cargo run --features editor    edit it; a code change rebuilds and restarts it \
          (`ofeliaengine edit`)",
         dir.display()
@@ -199,9 +199,10 @@ editor = ["dep:engine_editor"]
 # A workspace of its own, even inside another folder that has one.
 [workspace]
 
-# The engine's build settings: your code builds fast, the engine runs fast. The editor
-# builds with this profile: file and line for your code in panics and the debugger, none
-# written for the engine's, so a change rebuilds in about 1.5 s.
+# The engine's build settings: your code builds fast, the engine runs fast. Playing
+# (`cargo run`) and the editor build with this profile, so the engine is built once: file
+# and line for your code in panics and the debugger, its overflow checks and debug
+# assertions; the engine as in a release build. A change rebuilds in about 1.5 s.
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"
@@ -209,6 +210,15 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 3
 debug = false
+overflow-checks = false
+codegen-units = 16
+
+# The Vulkan validation layer is for the engine's own developers and slows every frame's
+# CPU side: off in your builds (`ENGINE_VALIDATION=1` turns it on, `sync` with
+# synchronization validation). The rest of the engine keeps what a development build has:
+# sounds from the live folder, saves as text, the allocation counters.
+[profile.dev.package.engine_rhi]
+debug-assertions = false
 
 [profile.release]
 opt-level = 3
@@ -242,7 +252,7 @@ fn readme(name: &str, engine: &Path) -> String {
         "# {name}\n\n\
          A game on ofeliaengine, started from its quick start.\n\n\
          ```text\n\
-         cargo run --release           # play it\n\
+         cargo run                     # play it\n\
          cargo run --features editor   # edit it (`ofeliaengine edit`): a code change rebuilds and restarts it\n\
          ```\n\n\
          A red cube turns on a floor; fly around it with WASD and the mouse.\n\
@@ -285,6 +295,16 @@ mod tests {
         assert!(manifest.contains("/crates/engine_editor\", optional = true }"));
         // What `ofeliaengine edit` looks for.
         assert!(crate::edit::has_editor_feature(&manifest));
+        // The engine as in a release build, playing and editing on one build of it, the
+        // validation layer off.
+        for line in [
+            "overflow-checks = false",
+            "codegen-units = 16",
+            "[profile.dev.package.engine_rhi]",
+            "debug-assertions = false",
+        ] {
+            assert!(manifest.lines().any(|l| l == line), "{line}");
+        }
         assert!(!manifest.contains('\\'));
         let main = read("src/main.rs");
         assert!(

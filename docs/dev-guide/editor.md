@@ -57,6 +57,10 @@ editor = ["dep:engine_editor"]
     closes a row (or goes to its parent), Right opens it (or goes to its first child),
     Shift+Right opens its whole branch;
   - the row's arrow opens or closes it;
+  - **the eye** at the row's end turns the entity off and on, as Godot's: off, it and
+    what is below it are not drawn, light nothing and leave their blockout groups, and
+    the scene keeps it so (`Disabled`); the rows that are off are dim. **H** does the same
+    for the selection (any of it on: all off; all off: all on), one undo step;
   - **F2** or a double click renames it in place (Enter keeps, Escape drops);
   - the filter box keeps the rows whose names match, with their parents;
   - **`+`** (or Ctrl+A) adds an entity where the camera looks, on the grid: an empty
@@ -108,6 +112,7 @@ editor = ["dep:engine_editor"]
 | Redo | Ctrl+Y, Ctrl+Shift+Z |
 | Save the scene | Ctrl+S |
 | Delete the selection (with its children) | Delete |
+| Turn the selection off, or on (with its children) | H |
 | Duplicate the selection (with its children) | Ctrl+D |
 | Add an entity | Ctrl+A |
 | Snap by default, or not | Y |
@@ -349,8 +354,10 @@ the keys.
 | Follow it | Shift+F: the camera moves with the active entity until you pan, look around or fly |
 | Bookmarks | Ctrl+1..9 keeps the camera's place as bookmark 1..9, the digit flies back there (as in Unreal); the session keeps them with the scene |
 
-The bindings follow Godot (`docs/research/ux/viewport-navigation.md`). While the right
-button flies the camera, the letters are the flight's: no shortcut runs. W, A, S, D, Q and
+The bindings follow Godot (`docs/research/ux/viewport-navigation.md`). While the right or
+the middle button drags the camera, the cursor is hidden and stays where the drag began
+(as in Godot and Unreal), so the mouse can go on without reaching the screen's edge. While
+the right button flies the camera, the letters are the flight's: no shortcut runs. W, A, S, D, Q and
 E go by their place on the keyboard (Z, Q, S, D on AZERTY). Framing takes each object's
 bounds as the renderer has them, and lights, cameras and empty entities as points with
 half a meter around them; nothing selected, it frames the whole scene.

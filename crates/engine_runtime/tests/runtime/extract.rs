@@ -12,7 +12,9 @@ use engine_ecs::{
 use engine_render::gpu_scene::SceneInstance;
 use engine_render::material::MaterialId;
 use engine_render::mesh::MeshId;
-use engine_runtime::{FixedStep, MeshRenderer, RenderExtract, Runtime, SceneSink};
+use engine_runtime::{
+    ActivityPropagation, Disabled, FixedStep, MeshRenderer, RenderExtract, Runtime, SceneSink,
+};
 use std::collections::HashMap;
 
 /// Records what extraction does to it.
@@ -726,4 +728,48 @@ fn a_driven_frame_runs_the_drivers_ticks_and_shows_the_newest_state() {
     // Extracted once, at the newest state, shown as it is.
     assert_eq!(s.moves, moves + 1);
     assert_eq!(s.live[&id].world_from_object.w_axis.x, 0.75);
+}
+
+#[test]
+fn disabled_entities_and_what_is_below_them_are_not_drawn() {
+    let mut w = World::new();
+    let mut p = TransformPropagation::new(&mut w);
+    let mut a = ActivityPropagation::new(&mut w);
+    let mut x = RenderExtract::<u32>::new(&mut w, false);
+    let mut s = Recorder::default();
+    let parent = renderable(&mut w, 1.0);
+    let child = renderable(&mut w, 2.0);
+    let other = renderable(&mut w, 3.0);
+    w.set_parent(child, Some(parent)).unwrap();
+    step(&mut w, &mut a, &mut p, &mut x, &mut s);
+    assert_eq!(s.live.len(), 3);
+    // Disabled: it and its child go; the other stays.
+    w.insert(parent, Disabled {});
+    step(&mut w, &mut a, &mut p, &mut x, &mut s);
+    assert_eq!(s.live.len(), 1);
+    assert!(x.instance(parent).is_none() && x.instance(child).is_none());
+    assert!(x.instance(other).is_some());
+    // Edited while off: still not drawn.
+    w.get_mut::<MeshRenderer>(child).unwrap().material = material(9);
+    step(&mut w, &mut a, &mut p, &mut x, &mut s);
+    assert!(x.instance(child).is_none());
+    // Enabled: back, as they are now.
+    w.remove::<Disabled>(parent);
+    step(&mut w, &mut a, &mut p, &mut x, &mut s);
+    assert_eq!(s.live.len(), 3);
+    assert_eq!(s.live[&x.instance(child).unwrap()].material, material(9));
+    assert_mirrors(&mut w, &x, &s);
+}
+
+/// One tick's activity, propagation and extraction.
+fn step(
+    w: &mut World,
+    a: &mut ActivityPropagation,
+    p: &mut TransformPropagation,
+    x: &mut RenderExtract<u32>,
+    s: &mut Recorder,
+) {
+    a.run(w);
+    p.run(w);
+    x.sync(w, s);
 }

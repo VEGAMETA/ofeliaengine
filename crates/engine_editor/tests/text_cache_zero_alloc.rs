@@ -82,6 +82,8 @@ fn item<'a>(depth: u16, icon: &'a str, name: &'a str, kind: &'a str) -> TreeItem
         selected: false,
         active: false,
         renaming: false,
+        disabled: false,
+        off: false,
     }
 }
 

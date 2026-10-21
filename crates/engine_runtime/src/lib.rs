@@ -44,6 +44,7 @@
 //! blended poses into the `Transform` of physics roots) is for loops without this crate:
 //! under [`Runtime`], leave it out, or physics bodies would be blended twice.
 
+mod activity;
 mod camera;
 mod extract;
 mod lights;
@@ -52,6 +53,7 @@ mod runtime;
 mod skinned;
 mod timing;
 
+pub use activity::{ActivityEpoch, ActivityPropagation, Disabled, Inactive, is_inactive};
 pub use camera::{Camera, CameraView, MainCamera, look_rotation};
 pub use engine_physics::ecs::FixedStep;
 pub use extract::{ExtractStats, MeshRenderer, RenderExtract, SceneSink};

@@ -10,6 +10,10 @@ pub const PLAY: &str = "\u{F040A}";
 pub const PAUSE: &str = "\u{F03E4}";
 /// Stop (`md-stop`).
 pub const STOP: &str = "\u{F04DB}";
+/// An entity that is on, in the scene tree (`md-eye`).
+pub const EYE: &str = "\u{F0208}";
+/// An entity that is off (`md-eye_off`).
+pub const EYE_OFF: &str = "\u{F0209}";
 /// Expanded tree row (`md-chevron_down`).
 pub const EXPANDED: &str = "\u{F0140}";
 /// Collapsed tree row (`md-chevron_right`).

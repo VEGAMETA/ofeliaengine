@@ -91,14 +91,28 @@ pub struct Sun {
 reflect_component!(pod Sun);
 
 type Points = QueryState<
-    (Entity, &'static GlobalTransform, &'static PointLight),
+    (
+        Entity,
+        &'static GlobalTransform,
+        &'static PointLight,
+        Option<&'static crate::Inactive>,
+    ),
     Or<(Changed<GlobalTransform>, Changed<PointLight>)>,
 >;
 type Spots = QueryState<
-    (Entity, &'static GlobalTransform, &'static SpotLight),
+    (
+        Entity,
+        &'static GlobalTransform,
+        &'static SpotLight,
+        Option<&'static crate::Inactive>,
+    ),
     Or<(Changed<GlobalTransform>, Changed<SpotLight>)>,
 >;
-type Suns = QueryState<(&'static GlobalTransform, &'static Sun)>;
+type Suns = QueryState<(
+    &'static GlobalTransform,
+    &'static Sun,
+    Option<&'static crate::Inactive>,
+)>;
 
 /// A slot no light uses: shades nothing, casts nothing.
 const DARK: LocalLight = LocalLight {
@@ -219,41 +233,51 @@ impl LightExtract {
         let (lights, slots, free) = (&mut self.lights, &mut self.slots, &mut self.free);
         let world = &*world;
         self.points
-            .for_each_readonly(world, |(entity, global, light)| {
+            .for_each_readonly(world, |(entity, global, light, inactive)| {
                 let slot = slot_for(lights, slots, free, entity);
-                lights[slot] = LocalLight {
-                    position: Vec3::from(global.0.translation),
-                    range: light.range,
-                    color: light.color,
-                    spot: None,
-                    shadow: light.shadow != 0,
+                // Off: its slot kept, dark.
+                lights[slot] = if inactive.is_some() {
+                    DARK
+                } else {
+                    LocalLight {
+                        position: Vec3::from(global.0.translation),
+                        range: light.range,
+                        color: light.color,
+                        spot: None,
+                        shadow: light.shadow != 0,
+                    }
                 };
             });
         self.spots
-            .for_each_readonly(world, |(entity, global, light)| {
+            .for_each_readonly(world, |(entity, global, light, inactive)| {
                 let slot = slot_for(lights, slots, free, entity);
-                lights[slot] = LocalLight {
-                    position: Vec3::from(global.0.translation),
-                    range: light.range,
-                    color: light.color,
-                    spot: Some(Spot {
-                        direction: forward(global),
-                        inner: light.inner,
-                        outer: light.outer.max(light.inner),
-                    }),
-                    shadow: light.shadow != 0,
+                lights[slot] = if inactive.is_some() {
+                    DARK
+                } else {
+                    LocalLight {
+                        position: Vec3::from(global.0.translation),
+                        range: light.range,
+                        color: light.color,
+                        spot: Some(Spot {
+                            direction: forward(global),
+                            inner: light.inner,
+                            outer: light.outer.max(light.inner),
+                        }),
+                        shadow: light.shadow != 0,
+                    }
                 };
             });
         let mut sun = None;
-        self.suns.for_each_readonly(world, |(global, light)| {
-            if sun.is_none() {
-                sun = Some(DirectionalLight {
-                    direction: forward(global),
-                    color: light.color,
-                    ambient: light.ambient,
-                });
-            }
-        });
+        self.suns
+            .for_each_readonly(world, |(global, light, inactive)| {
+                if sun.is_none() && inactive.is_none() {
+                    sun = Some(DirectionalLight {
+                        direction: forward(global),
+                        color: light.color,
+                        ambient: light.ambient,
+                    });
+                }
+            });
         self.sun = sun;
     }
 }
@@ -291,6 +315,33 @@ mod tests {
         let mut world = World::new();
         let extract = LightExtract::new(&mut world);
         (world, extract)
+    }
+
+    #[test]
+    fn disabled_lights_go_dark_and_come_back() {
+        let (mut world, mut extract) = light_world();
+        let mut activity = crate::ActivityPropagation::new(&mut world);
+        let lamp = world.spawn((
+            GlobalTransform(Transform::from_xyz(1.0, 2.0, 3.0).to_affine()),
+            PointLight::new(Vec3::splat(10.0), 5.0),
+        ));
+        let sun = world.spawn((GlobalTransform::IDENTITY, Sun::default()));
+        activity.run(&mut world);
+        extract.sync(&mut world);
+        let slot = extract.slot(lamp).unwrap() as usize;
+        assert_ne!(extract.lights()[slot], DARK);
+        assert!(extract.sun().is_some());
+        world.insert(lamp, crate::Disabled {});
+        world.insert(sun, crate::Disabled {});
+        activity.run(&mut world);
+        extract.sync(&mut world);
+        assert_eq!(extract.lights()[slot], DARK);
+        assert_eq!(extract.slot(lamp), Some(slot as u32), "its slot kept");
+        assert!(extract.sun().is_none());
+        world.remove::<crate::Disabled>(lamp);
+        activity.run(&mut world);
+        extract.sync(&mut world);
+        assert_eq!(extract.lights()[slot].position, Vec3::new(1.0, 2.0, 3.0));
     }
 
     #[test]
