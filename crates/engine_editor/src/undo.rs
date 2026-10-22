@@ -190,6 +190,8 @@ pub struct Transaction {
     merge: Option<u64>,
     changes: Vec<Change>,
     bytes: usize,
+    /// The document it was made in ([`History::set_document`]).
+    doc: u32,
 }
 
 impl Transaction {
@@ -246,6 +248,12 @@ pub struct History {
     skipped_non_pod: usize,
     /// While playing: the last step made before Play, below which undo does not go.
     floor: Option<u64>,
+    /// The document steps are made in now: the editor's scene in the world, of those open
+    /// in tabs (ADR 0107 §4: one history across tabs).
+    doc: u32,
+    /// Each document's newest step dropped for the budget: its head while none of its
+    /// steps is left ([`Self::head_of`]).
+    dropped: Vec<(u32, u64)>,
 }
 
 /// The world as it was, kept to put it back (ADR 0107 E3: Play runs on the scene's world,
@@ -350,7 +358,61 @@ impl History {
             codecs: Codecs::default(),
             skipped_non_pod: 0,
             floor: None,
+            doc: 0,
+            dropped: Vec::new(),
         }
+    }
+
+    /// Steps from now on are document `doc`'s: the scene the editor shows (its tabs share
+    /// one history; undoing another document's step is the editor's to switch to it first,
+    /// [`Self::undo_document`]).
+    pub fn set_document(&mut self, doc: u32) {
+        self.doc = doc;
+    }
+
+    /// The document whose step undo takes next, if any.
+    pub fn undo_document(&self) -> Option<u32> {
+        self.undo
+            .back()
+            .filter(|t| self.floor.is_none_or(|floor| t.id > floor))
+            .map(|t| t.doc)
+    }
+
+    /// The document whose step redo takes next, if any.
+    pub fn redo_document(&self) -> Option<u32> {
+        self.redo.last().map(|t| t.doc)
+    }
+
+    /// [`Self::head`] for document `doc` alone: the id of its last step (0 when it has
+    /// none), so steps in other documents leave its saved state as it is.
+    pub fn head_of(&self, doc: u32) -> u64 {
+        self.undo
+            .iter()
+            .rev()
+            .find(|t| t.doc == doc)
+            .map(|t| t.id)
+            .or_else(|| {
+                self.dropped
+                    .iter()
+                    .find(|&&(d, _)| d == doc)
+                    .map(|&(_, id)| id)
+            })
+            .unwrap_or(0)
+    }
+
+    /// Document `doc` is closed: its steps go, to undo and to redo.
+    pub fn forget(&mut self, doc: u32) {
+        let mut freed = 0;
+        self.undo.retain(|t| {
+            let keep = t.doc != doc;
+            if !keep {
+                freed += t.bytes;
+            }
+            keep
+        });
+        self.bytes -= freed;
+        self.redo.retain(|t| t.doc != doc);
+        self.dropped.retain(|&(d, _)| d != doc);
     }
 
     /// Starts recording an action called `name`. Consecutive commits with the same
@@ -628,6 +690,7 @@ impl History {
         if let Some(key) = open.merge
             && let Some(top) = self.undo.back_mut()
             && top.merge == Some(key)
+            && top.doc == self.doc
         {
             top.id = self.last_id;
             for c in changes {
@@ -654,11 +717,16 @@ impl History {
                 merge: open.merge,
                 changes,
                 bytes,
+                doc: self.doc,
             });
         }
         while self.bytes > self.budget && self.undo.len() > 1 {
             if let Some(t) = self.undo.pop_front() {
                 self.bytes -= t.bytes;
+                match self.dropped.iter_mut().find(|(d, _)| *d == t.doc) {
+                    Some(entry) => entry.1 = t.id,
+                    None => self.dropped.push((t.doc, t.id)),
+                }
             }
         }
         true

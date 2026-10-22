@@ -156,6 +156,9 @@ const MIXED: &str = "—";
 /// How long a message stays in the status bar, in seconds.
 const MESSAGE_SECONDS: f32 = 4.0;
 
+/// How many closed scenes "Reopen Closed Scene" can bring back.
+const CLOSED_KEPT: usize = 20;
+
 /// How many results the command palette shows at once (the list scrolls with the
 /// highlight).
 const PALETTE_ROWS: usize = 12;
@@ -565,6 +568,13 @@ struct CommandIds {
     undo: CommandId,
     redo: CommandId,
     save: CommandId,
+    /// Scenes in tabs (E5-5a): open, new, close, reopen, the next and previous tab.
+    open_scene: CommandId,
+    new_scene: CommandId,
+    close_scene: CommandId,
+    reopen_scene: CommandId,
+    next_tab: CommandId,
+    previous_tab: CommandId,
     delete: CommandId,
     disable: CommandId,
     duplicate: CommandId,
@@ -665,6 +675,12 @@ fn commands() -> (Commands, CommandIds) {
         undo: c.register("edit.undo", "Edit", "Undo"),
         redo: c.register("edit.redo", "Edit", "Redo"),
         save: c.register("file.save", "File", "Save Scene"),
+        open_scene: c.register("file.open", "File", "Open Scene…"),
+        new_scene: c.register("file.new", "File", "New Scene"),
+        close_scene: c.register("file.close", "File", "Close Scene"),
+        reopen_scene: c.register("file.reopen", "File", "Reopen Closed Scene"),
+        next_tab: c.register("file.next_tab", "File", "Next Scene Tab"),
+        previous_tab: c.register("file.previous_tab", "File", "Previous Scene Tab"),
         delete: c.register("scene.delete", "Scene", "Delete Selection"),
         disable: c.register("scene.disable", "Scene", "Disable or Enable Selection"),
         duplicate: c.register("scene.duplicate", "Scene", "Duplicate Selection"),
@@ -796,6 +812,13 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+Y", ids.redo),
         ("Ctrl+Shift+Z", ids.redo),
         ("Ctrl+S", ids.save),
+        // VS Code's and the browsers' keys for tabs.
+        ("Ctrl+O", ids.open_scene),
+        ("Ctrl+N", ids.new_scene),
+        ("Ctrl+W", ids.close_scene),
+        ("Ctrl+Shift+T", ids.reopen_scene),
+        ("Ctrl+Tab", ids.next_tab),
+        ("Ctrl+Shift+Tab", ids.previous_tab),
         ("Delete", ids.delete),
         ("H", ids.disable),
         ("Ctrl+D", ids.duplicate),
@@ -1305,6 +1328,9 @@ struct CommandPalette {
     /// The inspector field (section, field) an asset picked here goes to, instead of the
     /// FileSystem dock.
     for_field: Option<(usize, usize)>,
+    /// A scene picked here opens in a tab ("File: Open Scene…"), instead of being shown in
+    /// the dock.
+    opens: bool,
 }
 
 impl CommandPalette {
@@ -1405,9 +1431,23 @@ struct Editor {
     scene_path: Option<PathBuf>,
     /// The scene's own id, written in its header.
     scene_id: AssetId,
-    /// The history's head at the last save (or the start): changes are unsaved while it
-    /// differs (`u64::MAX` after unsaved changes were restored).
+    /// The scene's head in the history ([`History::head_of`]) at the last save (or the
+    /// start): changes are unsaved while it differs (`u64::MAX` after unsaved changes were
+    /// restored).
     saved_head: u64,
+    /// The open scenes' tabs in their order (ADR 0107 §4, E5-5a): `None` for the scene in
+    /// the world, whose state is in the fields above; the others kept as their text.
+    tabs: Vec<Option<Doc>>,
+    /// The scene in the world's document in the history, and the next one a tab gets.
+    doc_key: u32,
+    next_doc_key: u32,
+    /// Scenes closed (their unsaved changes in their autosaves), the last one last:
+    /// "Reopen Closed Scene" brings it back, and opening its file again does.
+    closed: Vec<Doc>,
+    /// The other tabs' labels, made with the frame.
+    tab_labels: Vec<String>,
+    /// The last click on a file in the dock, for double clicks (a scene opens).
+    last_file_click: Option<(AssetId, Instant)>,
     /// The session in the project's `.ofelia/` (ADR 0107 §4): none until
     /// `begin_session`, so editors that tests and tools make write nothing there.
     session: Option<Session>,
@@ -1697,6 +1737,31 @@ struct Session {
     view_due: Instant,
 }
 
+/// A scene open in a tab but not in the world (ADR 0107 §4, E5-5a): its text as its tab
+/// was left, what its file was, its autosave and its view; shown again from them.
+struct Doc {
+    /// Its file, relative to the project; none before its first save.
+    path: Option<PathBuf>,
+    /// The scene's own id.
+    id: AssetId,
+    /// The scene as its tab was left, instances as their overrides: shown again, it takes
+    /// what their prefabs are then.
+    text: String,
+    /// Its steps' document in the history ([`History::set_document`]).
+    key: u32,
+    /// Its head in the history at its last save ([`History::head_of`]; `u64::MAX` while
+    /// it holds unsaved changes no step of this run made).
+    saved_head: u64,
+    /// What its file was when it was loaded or last saved.
+    base: Option<Base>,
+    /// Its autosave, and the head the autosave holds.
+    autosave: PathBuf,
+    autosaved: Option<u64>,
+    /// Its file changed on disk since its unsaved changes were made from it.
+    conflict: bool,
+    view: View,
+}
+
 /// How long ago a time in nanoseconds since 1970 was, for messages.
 fn ago(nanos: u64) -> String {
     let then = std::time::UNIX_EPOCH + Duration::from_nanos(nanos);
@@ -1939,6 +2004,12 @@ impl Editor {
             scene_path,
             scene_id,
             saved_head: 0,
+            tabs: vec![None],
+            doc_key: 1,
+            next_doc_key: 2,
+            closed: Vec::new(),
+            tab_labels: Vec::new(),
+            last_file_click: None,
             session: None,
             game_crate: None,
             builds: None,
@@ -1971,7 +2042,11 @@ impl Editor {
             changed_assets: Vec::new(),
             compressing: 0,
             pending_assets: AssetPaths::new(),
-            history: History::new(),
+            history: {
+                let mut history = History::new();
+                history.set_document(1);
+                history
+            },
             commands,
             keymap,
             ids,
@@ -2818,12 +2893,31 @@ impl Editor {
             Some(name) => self.scene_label.push_str(&name.to_string_lossy()),
             None => self.scene_label.push_str("untitled"),
         }
-        if self.history.head() != self.saved_head {
+        if self.history.head_of(self.doc_key) != self.saved_head {
             self.scene_label.push('*');
         }
         if self.session.as_ref().is_some_and(|s| s.conflict) {
             self.scene_label.push(' ');
             self.scene_label.push_str(icons::ALERT);
+        }
+        // The other tabs' labels: their names, `*` while unsaved, the conflict's mark.
+        self.tab_labels.resize_with(self.tabs.len(), String::new);
+        for (tab, label) in self.tabs.iter().zip(&mut self.tab_labels) {
+            label.clear();
+            let Some(d) = tab else {
+                continue;
+            };
+            match d.path.as_ref().and_then(|p| p.file_name()) {
+                Some(name) => label.push_str(&name.to_string_lossy()),
+                None => label.push_str("untitled"),
+            }
+            if self.history.head_of(d.key) != d.saved_head {
+                label.push('*');
+            }
+            if d.conflict {
+                label.push(' ');
+                label.push_str(icons::ALERT);
+            }
         }
         // The tree's row a dragged file would drop onto.
         let drop_row = match self.asset_drag.as_ref().map(|d| d.over) {
@@ -2954,7 +3048,16 @@ impl Editor {
             rows: &palette_rows,
             selected: cp.selected.saturating_sub(cp.first),
         });
-        let scenes = [self.scene_label.as_str()];
+        let active_tab = self.active_tab();
+        let scenes: Vec<&str> = self
+            .tabs
+            .iter()
+            .zip(&self.tab_labels)
+            .map(|(tab, label)| match tab {
+                None => self.scene_label.as_str(),
+                Some(_) => label.as_str(),
+            })
+            .collect();
         let tools = self.tools.each_ref().map(String::as_str);
         // A keyboard transform's hint below and right of the pointer, in the window.
         let hint_at = {
@@ -2971,7 +3074,7 @@ impl Editor {
         };
         let model = ShellModel {
             scenes: &scenes,
-            active_scene: 0,
+            active_scene: active_tab,
             tools: &tools,
             active_tool: self.active_tool,
             tree: &items,
@@ -3044,12 +3147,33 @@ impl Editor {
             && let Some(l) = self.browser.listing.get(i)
         {
             match l.asset {
-                Some(id) => self.reveal_asset(id),
+                Some(id) => {
+                    // A second click on a scene soon after opens it in a tab.
+                    let now = Instant::now();
+                    let double = self.last_file_click.is_some_and(|(a, at)| {
+                        a == id && now.duration_since(at).as_secs_f32() < 0.45
+                    });
+                    self.last_file_click = (!double).then_some((id, now));
+                    self.reveal_asset(id);
+                    let scene = self
+                        .asset_db
+                        .get(id)
+                        .filter(|e| e.kind == engine_scene::AssetKind::Scene)
+                        .map(|e| PathBuf::from(&e.path));
+                    if double && let Some(path) = scene {
+                        self.open_scene(world, &path);
+                    }
+                }
                 None => {
                     let path = l.path.clone();
                     self.open_folder(&path);
                 }
             }
+        }
+        if let Some(i) = response.close_tab {
+            self.close_tab(world, i);
+        } else if let Some(i) = response.scene_tab {
+            self.show_tab(world, i);
         }
         if response.play {
             self.run(world, self.ids.play);
@@ -3781,6 +3905,7 @@ impl Editor {
             .get_or_insert_with(CommandPalette::default);
         cp.choices = None;
         cp.for_field = None;
+        cp.opens = false;
         cp.query.clear();
         cp.query.push_str(query);
         self.search_palette(world);
@@ -3915,6 +4040,13 @@ impl Editor {
                     match (cp.assets.get(i), cp.for_field) {
                         (Some(found), Some((section, field))) => {
                             self.give_field_asset(world, section, field, found.id);
+                        }
+                        (Some(found), None) if cp.opens => {
+                            let path = self.asset_db.get(found.id).map(|e| PathBuf::from(&e.path));
+                            match path {
+                                Some(path) => self.open_scene(world, &path),
+                                None => self.reveal_asset(found.id),
+                            }
                         }
                         (Some(found), None) => self.reveal_asset(found.id),
                         (None, _) => {}
@@ -6080,6 +6212,446 @@ impl Editor {
         self.keep_list(world);
     }
 
+    /// The tab of the scene in the world.
+    fn active_tab(&self) -> usize {
+        self.tabs.iter().position(Option::is_none).unwrap_or(0)
+    }
+
+    /// The tab whose steps are document `key`'s in the history.
+    fn tab_of(&self, key: u32) -> Option<usize> {
+        if key == self.doc_key {
+            return Some(self.active_tab());
+        }
+        self.tabs
+            .iter()
+            .position(|t| t.as_ref().is_some_and(|d| d.key == key))
+    }
+
+    fn new_doc_key(&mut self) -> u32 {
+        let key = self.next_doc_key;
+        self.next_doc_key += 1;
+        key
+    }
+
+    /// The scene in the world taken out as its tab's record, its unsaved changes
+    /// autosaved first: its text, file, autosave and view.
+    fn take_scene(&mut self, world: &mut World) -> Result<Doc, String> {
+        self.keep_autosave(world, true);
+        let text = self.scene_text(world)?;
+        let view = self.view(world);
+        let (base, autosave, autosaved, conflict) = match &mut self.session {
+            Some(s) => {
+                s.due = None;
+                (
+                    s.base.take(),
+                    std::mem::take(&mut s.autosave),
+                    s.autosaved.take(),
+                    std::mem::take(&mut s.conflict),
+                )
+            }
+            None => (None, PathBuf::new(), None, false),
+        };
+        Ok(Doc {
+            path: self.scene_path.take(),
+            id: self.scene_id,
+            text,
+            key: self.doc_key,
+            saved_head: self.saved_head,
+            base,
+            autosave,
+            autosaved,
+            conflict,
+            view,
+        })
+    }
+
+    /// The editor's hold on the scene in the world let go, before it leaves: the gestures,
+    /// the selection, the picks under way and what was found of its entities.
+    fn forget_scene(&mut self, world: &mut World) {
+        if let Some(mut drag) = self.asset_drag.take() {
+            self.take_back_placed(world, &mut drag);
+        }
+        self.key_transform = None;
+        self.draw = None;
+        self.drawn = None;
+        self.face_edit = None;
+        self.drag = None;
+        self.gizmo_drag = None;
+        self.side_drag = None;
+        self.box_drag = None;
+        self.camera_drag = false;
+        self.gizmo_shown = false;
+        self.outline_items.clear();
+        self.handles.clear();
+        self.selection.clear();
+        self.anchor = None;
+        self.reveal = None;
+        self.collapsed.clear();
+        self.renaming = None;
+        self.last_click = None;
+        self.typing = None;
+        self.open_choice = None;
+        self.export_group = None;
+        self.bake_groups.clear();
+        self.hovered = None;
+        self.hovered_side = None;
+        self.hovered_handle = None;
+        self.pick_request = None;
+        self.last_pick = None;
+        self.pending_click = None;
+        self.list_request = None;
+        self.pending_list = None;
+        self.last_view_click = None;
+        self.under_pointer = None;
+        self.follow = None;
+        self.camera_move = None;
+        self.surfaced = None;
+        self.selection_box = None;
+        self.dropping = None;
+        self.icon_hover = None;
+        self.prefab_bases.clear();
+        self.nav_edges.clear();
+    }
+
+    /// Tab record `doc` put in the world as the scene shown: its entities, file, autosave,
+    /// document in the history and view. The record back on an error (the world as it
+    /// was).
+    fn put_scene(&mut self, world: &mut World, doc: Doc) -> Result<(), Box<(String, Doc)>> {
+        let report = {
+            let prefabs = self.prefabs();
+            let options = LoadOptions {
+                prefabs: Some(&prefabs),
+            };
+            engine_scene::load_with(world, &SceneRegistry::from_program(), &doc.text, &options)
+        };
+        let report = match report {
+            Ok(report) => report,
+            Err(e) => return Err(Box::new((e.to_string(), doc))),
+        };
+        for (line, warning) in &report.warnings {
+            log::warn!(target: "engine_editor", "{}:{line}: {warning}", doc.path.as_deref().unwrap_or(Path::new("untitled")).display());
+        }
+        self.assets.extend(&report.assets);
+        self.pending_assets.extend(&report.assets);
+        self.scene_path = doc.path;
+        self.scene_id = doc.id;
+        self.saved_head = doc.saved_head;
+        self.doc_key = doc.key;
+        self.history.set_document(doc.key);
+        if let Some(s) = &mut self.session {
+            s.base = doc.base;
+            s.autosave = doc.autosave;
+            s.autosaved = doc.autosaved;
+            s.conflict = doc.conflict;
+            s.due = None;
+        }
+        self.apply_view(world, &doc.view);
+        // A scene opened just now: framed.
+        if doc.view.camera.is_none() {
+            self.frame_selection(world);
+        }
+        Ok(())
+    }
+
+    /// Shows the scene open in tab `index` (ADR 0107 §4): the scene in the world kept in
+    /// its tab as text, with its file's state and its view, the other loaded in its
+    /// place. A tab with nothing unsaved whose file changed on disk is read again. Not
+    /// while playing.
+    fn show_tab(&mut self, world: &mut World, index: usize) {
+        let active = self.active_tab();
+        if index == active || index >= self.tabs.len() {
+            return;
+        }
+        if self.play.is_some() {
+            self.say(String::from(
+                "Stop first: the scene that plays stays in front",
+            ));
+            return;
+        }
+        let started = Instant::now();
+        let leaving = match self.take_scene(world) {
+            Ok(doc) => doc,
+            Err(e) => {
+                self.say(format!("Not switched: {e}"));
+                return;
+            }
+        };
+        let Some(mut target) = self.tabs[index].take() else {
+            return;
+        };
+        // Nothing unsaved, and its file written anew since: the file as it is now.
+        if self.history.head_of(target.key) == target.saved_head
+            && let Some(file) = target.path.as_ref().map(|p| self.root.join(p))
+            && target.base.and_then(|b| b.matches(&file)) == Some(false)
+            && let Ok(text) = std::fs::read_to_string(&file)
+        {
+            target.text = text;
+            target.base = Base::of(&file);
+        }
+        self.forget_scene(world);
+        for root in self.roots(world, None) {
+            world.despawn_recursive(root);
+        }
+        self.tabs[active] = Some(leaving);
+        if let Err(failed) = self.put_scene(world, target) {
+            let (e, target) = *failed;
+            let name = target
+                .path
+                .as_deref()
+                .map_or_else(|| String::from("untitled"), |p| p.display().to_string());
+            self.tabs[index] = Some(target);
+            if let Some(back) = self.tabs[active].take()
+                && let Err(failed) = self.put_scene(world, back)
+            {
+                let (e, back) = *failed;
+                log::error!(target: "engine_editor", "the scene left could not be shown again: {e}");
+                self.tabs[active] = Some(back);
+            }
+            self.say(format!("{name} could not be shown: {e}"));
+            return;
+        }
+        log::info!(
+            target: "engine_editor",
+            "switched to {} in {:.1} ms",
+            self.file_name(),
+            started.elapsed().as_secs_f64() * 1e3
+        );
+        self.write_session(world);
+    }
+
+    /// "File: Open Scene…" (and a double click in the dock): the scene file at `path`
+    /// (relative to the project) in a tab of its own after the active one, or its tab
+    /// shown when it is open; one closed with unsaved changes comes back with them.
+    fn open_scene(&mut self, world: &mut World, path: &Path) {
+        if self.scene_path.as_deref() == Some(path) {
+            return;
+        }
+        if let Some(i) = self
+            .tabs
+            .iter()
+            .position(|t| t.as_ref().is_some_and(|d| d.path.as_deref() == Some(path)))
+        {
+            self.show_tab(world, i);
+            return;
+        }
+        if self.play.is_some() {
+            self.say(String::from(
+                "Stop first: the scene that plays stays in front",
+            ));
+            return;
+        }
+        let doc = match self
+            .closed
+            .iter()
+            .rposition(|d| d.path.as_deref() == Some(path))
+        {
+            Some(i) => {
+                let doc = self.closed.remove(i);
+                self.reopened(doc)
+            }
+            None => {
+                let file = self.root.join(path);
+                let text = match std::fs::read_to_string(&file) {
+                    Ok(text) => text,
+                    Err(e) => {
+                        self.say(format!("{}: {e}", file.display()));
+                        return;
+                    }
+                };
+                // A file without an id gets a new one (`AssetId`'s default is no asset).
+                let id = match engine_scene::scene_header(&text) {
+                    Ok((_, Some(id))) => id,
+                    _ => AssetId::new(),
+                };
+                let autosave = self.session.as_ref().map_or_else(PathBuf::new, |s| {
+                    s.dir.join(session::autosave_name(Some(path), id))
+                });
+                Doc {
+                    path: Some(path.to_path_buf()),
+                    id,
+                    text,
+                    key: self.new_doc_key(),
+                    saved_head: 0,
+                    base: Base::of(&file),
+                    autosave,
+                    autosaved: None,
+                    conflict: false,
+                    view: View::default(),
+                }
+            }
+        };
+        self.open_tab(world, doc);
+    }
+
+    /// Record `doc` in a new tab after the active one, shown; left out again when it
+    /// cannot be.
+    fn open_tab(&mut self, world: &mut World, doc: Doc) {
+        let at = self.active_tab() + 1;
+        self.tabs.insert(at, Some(doc));
+        self.show_tab(world, at);
+        if self.active_tab() != at && self.tabs.get(at).is_some_and(Option::is_some) {
+            self.tabs.remove(at);
+        }
+    }
+
+    /// "File: New Scene" (Ctrl+N): an empty untitled scene in a new tab; Ctrl+S names it.
+    fn new_scene(&mut self, world: &mut World) {
+        if self.play.is_some() {
+            self.say(String::from(
+                "Stop first: the scene that plays stays in front",
+            ));
+            return;
+        }
+        let id = AssetId::new();
+        let autosave = self.session.as_ref().map_or_else(PathBuf::new, |s| {
+            s.dir.join(session::autosave_name(None, id))
+        });
+        let doc = Doc {
+            path: None,
+            id,
+            text: format!("[scene version={} id={id}]\n", engine_scene::VERSION),
+            key: self.new_doc_key(),
+            saved_head: 0,
+            base: None,
+            autosave,
+            autosaved: None,
+            conflict: false,
+            view: View::default(),
+        };
+        self.open_tab(world, doc);
+    }
+
+    /// "File: Close Scene" (Ctrl+W, a tab's ×): tab `index` closed, its unsaved changes
+    /// left in its autosave for "Reopen Closed Scene" (`docs/research/ux/sessions.md`:
+    /// no question asked). Its steps leave the history. The last tab stays open.
+    fn close_tab(&mut self, world: &mut World, index: usize) {
+        if self.tabs.len() < 2 || index >= self.tabs.len() {
+            self.say(String::from("The last scene stays open"));
+            return;
+        }
+        if self.play.is_some() {
+            self.say(String::from(
+                "Stop first: the scene that plays stays in front",
+            ));
+            return;
+        }
+        if index == self.active_tab() {
+            let next = if index + 1 < self.tabs.len() {
+                index + 1
+            } else {
+                index - 1
+            };
+            self.show_tab(world, next);
+            if self.active_tab() == index {
+                return;
+            }
+        }
+        let Some(mut doc) = self.tabs.remove(index) else {
+            return;
+        };
+        let unsaved = self.history.head_of(doc.key) != doc.saved_head;
+        self.history.forget(doc.key);
+        // Its steps gone, its head is 0: unsaved, the autosave holds that state.
+        doc.saved_head = if unsaved { u64::MAX } else { 0 };
+        doc.autosaved = unsaved.then_some(0);
+        let name = doc.path.as_deref().and_then(Path::file_name).map_or_else(
+            || String::from("untitled"),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        self.say(if unsaved {
+            format!("Closed {name}: its unsaved changes are kept (Ctrl+Shift+T brings them back)")
+        } else {
+            format!("Closed {name} (Ctrl+Shift+T opens it again)")
+        });
+        self.closed.push(doc);
+        if self.closed.len() > CLOSED_KEPT {
+            self.closed.remove(0);
+        }
+        self.write_session(world);
+    }
+
+    /// "File: Reopen Closed Scene" (Ctrl+Shift+T): the scene closed last, in a tab again,
+    /// with its unsaved changes.
+    fn reopen_scene(&mut self, world: &mut World) {
+        if self.play.is_some() {
+            self.say(String::from(
+                "Stop first: the scene that plays stays in front",
+            ));
+            return;
+        }
+        let Some(doc) = self.closed.pop() else {
+            self.say(String::from("No scene was closed"));
+            return;
+        };
+        let doc = self.reopened(doc);
+        self.open_tab(world, doc);
+    }
+
+    /// A closed scene's record as it opens again: with unsaved changes, marked when its
+    /// file changed on disk since; without, its file as it is now.
+    fn reopened(&self, mut doc: Doc) -> Doc {
+        let Some(file) = doc.path.as_ref().map(|p| self.root.join(p)) else {
+            return doc;
+        };
+        if doc.saved_head == u64::MAX {
+            doc.conflict = file.is_file() && doc.base.and_then(|b| b.matches(&file)) != Some(true);
+        } else if let Ok(text) = std::fs::read_to_string(&file) {
+            doc.text = text;
+            doc.base = Base::of(&file);
+        }
+        doc
+    }
+
+    /// A tab the session had open beside the scene in the world: its unsaved changes from
+    /// its autosave, else its file as it is; none when both are gone.
+    fn restored_tab(&mut self, d: Document) -> Option<Doc> {
+        let dir = self.session.as_ref()?.dir.clone();
+        let file = d.path.as_ref().map(|p| self.root.join(p));
+        let autosave = dir.join(session::autosave_name(d.path.as_deref(), d.id));
+        let unsaved = d
+            .autosave
+            .as_ref()
+            .map(|a| dir.join(a))
+            .filter(|a| a.is_file())
+            .and_then(|a| std::fs::read_to_string(a).ok());
+        let key = self.new_doc_key();
+        match unsaved {
+            Some(text) => {
+                let conflict = file.as_deref().is_some_and(|f| {
+                    f.is_file() && d.base.and_then(|b| b.matches(f)) != Some(true)
+                });
+                Some(Doc {
+                    path: d.path,
+                    id: d.id,
+                    text,
+                    key,
+                    saved_head: u64::MAX,
+                    base: d.base,
+                    autosave,
+                    autosaved: Some(0),
+                    conflict,
+                    view: d.view,
+                })
+            }
+            None => {
+                let file = file?;
+                let text = std::fs::read_to_string(&file).ok()?;
+                Some(Doc {
+                    path: d.path,
+                    id: d.id,
+                    text,
+                    key,
+                    saved_head: 0,
+                    base: Base::of(&file),
+                    autosave,
+                    autosaved: None,
+                    conflict: false,
+                    view: d.view,
+                })
+            }
+        }
+    }
+
     /// Whether the viewport is the game's: playing and not ejected.
     fn game_view(&self) -> bool {
         self.play.as_ref().is_some_and(|p| p.ejected.is_none())
@@ -6763,6 +7335,21 @@ impl Editor {
             return;
         }
         if id == ids.undo || id == ids.redo {
+            // A step of another tab's scene: that tab first (one history across tabs).
+            let doc = if id == ids.undo {
+                self.history.undo_document()
+            } else {
+                self.history.redo_document()
+            };
+            if let Some(key) = doc
+                && key != self.doc_key
+                && let Some(i) = self.tab_of(key)
+            {
+                self.show_tab(world, i);
+                if self.doc_key != key {
+                    return;
+                }
+            }
             self.drag = None;
             self.side_drag = None;
             if let Some(f) = &mut self.face_edit {
@@ -6784,6 +7371,23 @@ impl Editor {
                 self.say(message);
             }
             self.reselect(world, &selected);
+        } else if id == ids.open_scene {
+            self.open_palette(world, "#scene:");
+            if let Some(cp) = self.command_palette.as_mut() {
+                cp.opens = true;
+            }
+        } else if id == ids.new_scene {
+            self.new_scene(world);
+        } else if id == ids.close_scene {
+            let active = self.active_tab();
+            self.close_tab(world, active);
+        } else if id == ids.reopen_scene {
+            self.reopen_scene(world);
+        } else if id == ids.next_tab || id == ids.previous_tab {
+            let n = self.tabs.len();
+            let step = if id == ids.next_tab { 1 } else { n - 1 };
+            let to = (self.active_tab() + step) % n;
+            self.show_tab(world, to);
         } else if id == ids.save || id == ids.save_over_disk {
             let conflict = self.session.as_ref().is_some_and(|s| s.conflict);
             if id == ids.save && conflict {
@@ -7199,7 +7803,7 @@ impl Editor {
         std::fs::write(&partial, &text).map_err(|e| format!("{}: {e}", partial.display()))?;
         std::fs::rename(&partial, &path).map_err(|e| format!("{}: {e}", path.display()))?;
         self.scene_path = Some(relative);
-        self.saved_head = self.history.head();
+        self.saved_head = self.history.head_of(self.doc_key);
         if let Some(s) = &mut self.session {
             s.base = session::modified(&path).map(|t| Base::of_bytes(text.as_bytes(), t));
             s.conflict = false;
@@ -8967,12 +9571,18 @@ impl Editor {
         let mut note = None;
         let previous = s.dir.join("session");
         let mut editor_state = None;
+        // The session's other tabs, and where the scene opened goes among them.
+        let mut others = Vec::new();
+        let mut at = 0;
         let doc = match std::fs::read_to_string(&previous) {
             Err(_) => None,
             Ok(text) => match SessionFile::parse(&text) {
                 Ok(f) => {
                     editor_state = Some(f.editor);
-                    f.documents.into_iter().find(|d| d.path == self.scene_path)
+                    others = f.documents;
+                    let found = others.iter().position(|d| d.path == self.scene_path);
+                    at = found.unwrap_or(0);
+                    found.map(|i| others.remove(i))
                 }
                 Err(e) => {
                     let _ = std::fs::rename(&previous, s.dir.join("session.broken"));
@@ -9016,7 +9626,7 @@ impl Editor {
                     Ok(paths) => {
                         learned = paths;
                         self.saved_head = u64::MAX;
-                        s.autosaved = Some(self.history.head());
+                        s.autosaved = Some(self.history.head_of(self.doc_key));
                         let when = session::modified(&autosave)
                             .map_or_else(String::new, |t| format!(" from {}", ago(t)));
                         let restored = if last == LastRun::Crashed {
@@ -9053,6 +9663,22 @@ impl Editor {
         }
         if let Some(doc) = &doc {
             self.apply_view(world, &doc.view);
+        }
+        // The session's other tabs: their unsaved changes from their autosaves, else their
+        // files; those gone from the disk with nothing unsaved are left out.
+        let mut tabs: Vec<Option<Doc>> = Vec::new();
+        for d in others {
+            if let Some(doc) = self.restored_tab(d) {
+                tabs.push(Some(doc));
+            }
+        }
+        tabs.insert(at.min(tabs.len()), None);
+        self.tabs = tabs;
+        if let Some(i) = editor_state.as_ref().and_then(|s| s.active)
+            && i != self.active_tab()
+            && i < self.tabs.len()
+        {
+            self.show_tab(world, i);
         }
         self.write_session(world);
         if let Some(note) = note {
@@ -9231,23 +9857,37 @@ impl Editor {
             overlays: Some(self.overlays),
             window: self.window,
             game_window: self.game_window,
+            active: Some(self.active_tab()),
         };
-        let view = self.view(world);
+        let mut view = Some(self.view(world));
         let Some(s) = &mut self.session else {
             return;
         };
-        let file = SessionFile {
-            editor,
-            documents: vec![Document {
-                path: self.scene_path.clone(),
-                id: self.scene_id,
-                base: s.base,
-                autosave: s
-                    .autosaved
-                    .map(|_| session::autosave_name(self.scene_path.as_deref(), self.scene_id)),
-                view,
-            }],
-        };
+        // Every tab in its order: the scene in the world as it is, the others as kept.
+        let mut documents = Vec::with_capacity(self.tabs.len());
+        for tab in &self.tabs {
+            documents.push(match tab {
+                None => Document {
+                    path: self.scene_path.clone(),
+                    id: self.scene_id,
+                    base: s.base,
+                    autosave: s
+                        .autosaved
+                        .map(|_| session::autosave_name(self.scene_path.as_deref(), self.scene_id)),
+                    view: view.take().unwrap_or_default(),
+                },
+                Some(d) => Document {
+                    path: d.path.clone(),
+                    id: d.id,
+                    base: d.base,
+                    autosave: d
+                        .autosaved
+                        .map(|_| session::autosave_name(d.path.as_deref(), d.id)),
+                    view: d.view.clone(),
+                },
+            });
+        }
+        let file = SessionFile { editor, documents };
         let text = file.to_text();
         if text != s.last_text {
             s.writer
@@ -9314,7 +9954,7 @@ impl Editor {
     /// waited `session::AUTOSAVE_AFTER` and a quiet moment came (at once with `now`), and
     /// deleted with the older ones once the scene is clean again.
     fn keep_autosave(&mut self, world: &mut World, now: bool) {
-        let head = self.history.head();
+        let head = self.history.head_of(self.doc_key);
         let gesture = self.gesture();
         let Some(s) = &mut self.session else {
             return;
@@ -9356,7 +9996,7 @@ impl Editor {
                 return;
             }
         };
-        let head = self.history.head();
+        let head = self.history.head_of(self.doc_key);
         let Some(s) = &mut self.session else {
             return;
         };
@@ -9453,7 +10093,7 @@ impl Editor {
             self.say(e);
             return;
         }
-        self.saved_head = self.history.head();
+        self.saved_head = self.history.head_of(self.doc_key);
         if let Some(s) = &mut self.session {
             s.conflict = false;
             s.base = Base::of(&file);
@@ -10312,7 +10952,7 @@ impl<G> EditorGame<G> {
     /// Whether the scene has changes not saved yet.
     pub fn unsaved(&self) -> bool {
         let shared = self.shared.borrow();
-        shared.history.head() != shared.saved_head
+        shared.history.head_of(shared.doc_key) != shared.saved_head
     }
 }
 
@@ -13017,7 +13657,7 @@ mod tests {
 
     #[test]
     fn instances_follow_a_prefab_written_anew() {
-        let (dir, mut world, mut ed, _) = drop_project("follow");
+        let (dir, mut world, mut ed, _) = drop_project("prefab-follow");
         let lamp = AssetId::new();
         let ids = [SceneId::new(), SceneId::new(), SceneId::new()];
         let file = dir.join("props/lamp.scene");
@@ -14548,6 +15188,144 @@ mod tests {
 
     fn autosave_of(ed: &Editor) -> PathBuf {
         ed.session.as_ref().unwrap().autosave.clone()
+    }
+
+    /// A second scene beside the project's main one: a pillar at the origin.
+    fn write_hall(dir: &Path) {
+        let mut world = World::new();
+        world.spawn((
+            SceneId::new(),
+            Name::new("Pillar"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        let mut text = String::new();
+        let options = SaveOptions {
+            id: Some(AssetId::new()),
+            assets: None,
+            prefabs: None,
+        };
+        engine_scene::save_with(
+            &mut world,
+            &SceneRegistry::from_program(),
+            &options,
+            &mut text,
+        )
+        .unwrap();
+        std::fs::write(dir.join("hall.scene"), text).unwrap();
+    }
+
+    fn pillar_x(world: &mut World) -> f32 {
+        let pillar = engine_scene::find_named(world, "Pillar").unwrap();
+        world.get::<Transform>(pillar).unwrap().translation.x
+    }
+
+    fn move_pillar(ed: &mut Editor, world: &mut World, x: f32) {
+        let pillar = engine_scene::find_named(world, "Pillar").unwrap();
+        ed.set(
+            world,
+            pillar,
+            "Transform.translation",
+            &format!("({x}, 0, 0)"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scenes_open_in_tabs_and_one_history_spans_them() {
+        let dir = project("tabs");
+        write_hall(&dir);
+        let (mut world, mut ed) = start(&dir);
+        move_cube(&mut ed, &mut world, 3.0);
+        ed.update(&mut world);
+        // "File: Open Scene…": the palette's scenes; Enter opens one in a tab of its own.
+        ed.open_assets();
+        ed.run(&mut world, ed.ids.open_scene);
+        let cp = ed.command_palette.as_ref().unwrap();
+        assert!(cp.opens && cp.query == "#scene:", "{}", cp.query);
+        ed.command_palette.as_mut().unwrap().query.push_str("hall");
+        ed.search_palette(&mut world);
+        ed.palette_action(&mut world, PaletteAction::Run(0));
+        assert_eq!((ed.tabs.len(), ed.active_tab()), (2, 1));
+        assert!(engine_scene::find_named(&mut world, "Cube").is_none());
+        assert_eq!(pillar_x(&mut world), 0.0);
+        ed.update(&mut world);
+        assert!(ed.tab_labels[0].ends_with('*'), "{:?}", ed.tab_labels);
+        assert!(!ed.scene_label.ends_with('*'), "{}", ed.scene_label);
+        move_pillar(&mut ed, &mut world, 5.0);
+        // Back to the main scene: its cube where it was moved, still unsaved.
+        ed.run(&mut world, ed.ids.previous_tab);
+        assert_eq!(ed.active_tab(), 0);
+        assert_eq!(cube_x(&mut world), 3.0);
+        ed.update(&mut world);
+        assert!(ed.scene_label.ends_with('*') && ed.tab_labels[1].ends_with('*'));
+        // Undo takes the hall's step, the last made, in the hall's tab; then the main
+        // scene's, in its own.
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!((ed.active_tab(), pillar_x(&mut world)), (1, 0.0));
+        ed.update(&mut world);
+        assert!(!ed.scene_label.ends_with('*'), "the hall as on disk");
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!((ed.active_tab(), cube_x(&mut world)), (0, 0.0));
+        ed.run(&mut world, ed.ids.redo);
+        assert_eq!((ed.active_tab(), cube_x(&mut world)), (0, 3.0));
+        // The session keeps both tabs: the next start brings them back, the main scene's
+        // unsaved change too.
+        ed.run(&mut world, ed.ids.next_tab);
+        ed.end_session(&mut world);
+        let (mut world, mut ed) = start(&dir);
+        assert_eq!(ed.tabs.len(), 2);
+        assert_eq!(ed.active_tab(), 1, "the tab shown last is shown again");
+        assert_eq!(pillar_x(&mut world), 0.0);
+        ed.run(&mut world, ed.ids.previous_tab);
+        assert_eq!(cube_x(&mut world), 3.0);
+        ed.update(&mut world);
+        assert!(ed.scene_label.ends_with('*'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_closed_scene_comes_back_with_its_unsaved_changes() {
+        let dir = project("tabs-close");
+        write_hall(&dir);
+        let (mut world, mut ed) = start(&dir);
+        ed.open_scene(&mut world, Path::new("hall.scene"));
+        move_pillar(&mut ed, &mut world, 5.0);
+        // Ctrl+W: the main scene in front again, the hall's change kept in its autosave,
+        // its steps gone from the history.
+        ed.run(&mut world, ed.ids.close_scene);
+        assert_eq!((ed.tabs.len(), ed.active_tab()), (1, 0));
+        assert!(
+            message(&ed).contains("unsaved changes are kept"),
+            "{}",
+            message(&ed)
+        );
+        assert_eq!(cube_x(&mut world), 0.0);
+        assert_eq!(ed.history.steps().count(), 0);
+        // Ctrl+Shift+T: the hall again, with its change, unsaved.
+        ed.run(&mut world, ed.ids.reopen_scene);
+        assert_eq!((ed.tabs.len(), ed.active_tab()), (2, 1));
+        assert_eq!(pillar_x(&mut world), 5.0);
+        ed.update(&mut world);
+        assert!(ed.scene_label.ends_with('*'), "{}", ed.scene_label);
+        // Saved and closed, then opened again: the file's version.
+        ed.run(&mut world, ed.ids.save);
+        ed.run(&mut world, ed.ids.close_scene);
+        ed.open_scene(&mut world, Path::new("hall.scene"));
+        assert_eq!(pillar_x(&mut world), 5.0);
+        ed.update(&mut world);
+        assert!(!ed.scene_label.ends_with('*'), "{}", ed.scene_label);
+        // The last tab stays open; Ctrl+N makes an empty untitled one.
+        ed.run(&mut world, ed.ids.close_scene);
+        ed.run(&mut world, ed.ids.close_scene);
+        assert_eq!(ed.tabs.len(), 1);
+        assert_eq!(message(&ed), "The last scene stays open");
+        ed.run(&mut world, ed.ids.new_scene);
+        assert_eq!((ed.tabs.len(), ed.active_tab()), (2, 1));
+        assert!(engine_scene::find_named(&mut world, "Cube").is_none());
+        ed.update(&mut world);
+        assert!(ed.scene_label.starts_with("untitled"), "{}", ed.scene_label);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -16592,6 +17370,73 @@ mod tests {
              ({} lines)",
             gizmo.lines.len()
         );
+    }
+
+    /// What switching scene tabs costs (E5-5a): a scene of 10,000 entities with a name, a
+    /// transform and a model left for a small one and shown again, without a session:
+    /// `cargo test -p engine_editor --release --lib tab_switch_cost -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "a measurement"]
+    fn tab_switch_cost() {
+        let dir = folder("tab-switch-cost");
+        let mut world = World::new();
+        for i in 0..10_000 {
+            world.spawn((
+                SceneId::new(),
+                Name::new(format!("Cube {i}")),
+                Transform::from_xyz(i as f32, 0.0, 0.0),
+                GlobalTransform::default(),
+                Model::new(builtin::CUBE, builtin::MATERIAL),
+            ));
+        }
+        let mut big = String::new();
+        let options = SaveOptions {
+            id: Some(AssetId::new()),
+            assets: None,
+            prefabs: None,
+        };
+        engine_scene::save_with(
+            &mut world,
+            &SceneRegistry::from_program(),
+            &options,
+            &mut big,
+        )
+        .unwrap();
+        std::fs::write(dir.join("big.scene"), &big).unwrap();
+        let mut small = World::new();
+        small.spawn((SceneId::new(), Name::new("Pillar"), Transform::IDENTITY));
+        let mut text = String::new();
+        engine_scene::save_with(
+            &mut small,
+            &SceneRegistry::from_program(),
+            &options,
+            &mut text,
+        )
+        .unwrap();
+        std::fs::write(dir.join("small.scene"), &text).unwrap();
+        let mut world = World::new();
+        engine_scene::load(&mut world, &SceneRegistry::from_program(), &big).unwrap();
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            Some(PathBuf::from("big.scene")),
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.open_scene(&mut world, Path::new("small.scene"));
+        let (mut away, mut back) = (f64::MAX, f64::MAX);
+        for _ in 0..5 {
+            let t = Instant::now();
+            ed.show_tab(&mut world, 0);
+            back = back.min(t.elapsed().as_secs_f64() * 1e3);
+            let t = Instant::now();
+            ed.show_tab(&mut world, 1);
+            away = away.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        println!("10,000 entities: shown again {back:.2} ms, left for a small scene {away:.2} ms");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// What an autosave costs the UI thread (the scene's text), a restore (the text loaded)

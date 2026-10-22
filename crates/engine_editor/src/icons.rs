@@ -10,6 +10,8 @@ pub const PLAY: &str = "\u{F040A}";
 pub const PAUSE: &str = "\u{F03E4}";
 /// Stop (`md-stop`).
 pub const STOP: &str = "\u{F04DB}";
+/// Closes a scene's tab (`md-close`).
+pub const CLOSE: &str = "\u{F0156}";
 /// An entity that is on, in the scene tree (`md-eye`).
 pub const EYE: &str = "\u{F0208}";
 /// An entity that is off (`md-eye_off`).
