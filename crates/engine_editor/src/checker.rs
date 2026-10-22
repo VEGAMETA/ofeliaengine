@@ -5,6 +5,7 @@
 //! findings made for older text are known as such.
 
 use engine_luau_analysis::{Analysis, Completion, Diagnostic, Solver};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -20,6 +21,9 @@ enum Job {
     },
     /// Module `name` is read from the project's folder again (its tab closed).
     Forget(String),
+    /// The types every module sees are these definitions from now on (E7-2: the
+    /// engine's scripting API).
+    Definitions(String),
     /// What may be written at a place in module `name` holding `text` (Ctrl+Space).
     Complete {
         name: String,
@@ -125,35 +129,101 @@ pub(crate) trait Analyzer {
     fn definition(&mut self, _name: &str, _line: u32, _byte: u32) -> Option<(String, u32, u32)> {
         None
     }
+    /// The types every module sees are `text`'s definitions from now on.
+    fn set_definitions(&mut self, _text: &str) {}
 }
 
-impl Analyzer for Analysis {
+/// Luau's analysis with the engine's scripting API (E7-2): the old solver, which types an
+/// un-annotated hook's `self` from `component`'s declaration (the new one of Luau 0.736
+/// does not), and the definitions made again in a new analysis when they change (they
+/// cannot be taken back from one), the tabs' texts given to it again.
+pub(crate) struct LuauAnalyzer {
+    root: PathBuf,
+    analysis: Analysis,
+    /// The tabs' texts, for a new analysis.
+    sources: HashMap<String, String>,
+    /// Whether the definitions loaded without a problem.
+    loaded: bool,
+}
+
+impl LuauAnalyzer {
+    /// The analysis of the project in `root`, with `definitions` (none when empty).
+    pub(crate) fn new(root: &Path, definitions: &str) -> Option<Self> {
+        let mut analysis = Analysis::new(root, Solver::Old)?;
+        let loaded = load_definitions(&mut analysis, definitions);
+        Some(Self {
+            root: root.to_path_buf(),
+            analysis,
+            sources: HashMap::new(),
+            loaded,
+        })
+    }
+
+    /// Whether the definitions loaded without a problem (none given counts).
+    #[cfg(test)]
+    pub(crate) fn definitions_loaded(&self) -> bool {
+        self.loaded
+    }
+}
+
+/// The engine's definitions into `analysis`, whether without a problem; a problem in them
+/// goes to the log.
+fn load_definitions(analysis: &mut Analysis, text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    match analysis.add_definitions("@ofelia", text) {
+        Ok(()) => true,
+        Err((first, problems)) => {
+            log::error!(
+                target: "engine_editor",
+                "the engine's Luau types: {problems} problems, the first: {first}"
+            );
+            false
+        }
+    }
+}
+
+impl Analyzer for LuauAnalyzer {
     fn set_source(&mut self, name: &str, text: &str) {
-        Analysis::set_source(self, name, text);
+        self.sources.insert(name.to_owned(), text.to_owned());
+        self.analysis.set_source(name, text);
     }
 
     fn forget(&mut self, name: &str) {
-        self.forget_source(name);
+        self.sources.remove(name);
+        self.analysis.forget_source(name);
     }
 
     fn check(&mut self, name: &str) -> Vec<Diagnostic> {
-        Analysis::check(self, name)
+        self.analysis.check(name)
     }
 
     fn complete(&mut self, name: &str, line: u32, byte: u32) -> Vec<Completion> {
-        Analysis::complete(self, name, line, byte)
+        self.analysis.complete(name, line, byte)
     }
 
     fn hover(&mut self, name: &str, line: u32, byte: u32) -> Option<String> {
-        self.type_at(name, line, byte)
+        self.analysis.type_at(name, line, byte)
     }
 
     fn signature(&mut self, name: &str, line: u32, byte: u32) -> Option<(String, (usize, usize))> {
-        Analysis::signature(self, name, line, byte)
+        self.analysis.signature(name, line, byte)
     }
 
     fn definition(&mut self, name: &str, line: u32, byte: u32) -> Option<(String, u32, u32)> {
-        Analysis::definition(self, name, line, byte)
+        self.analysis.definition(name, line, byte)
+    }
+
+    fn set_definitions(&mut self, text: &str) {
+        let Some(mut analysis) = Analysis::new(&self.root, Solver::Old) else {
+            return;
+        };
+        self.loaded = load_definitions(&mut analysis, text);
+        for (name, source) in &self.sources {
+            analysis.set_source(name, source);
+        }
+        self.analysis = analysis;
     }
 }
 
@@ -165,12 +235,12 @@ pub(crate) struct Checker {
 }
 
 impl Checker {
-    /// Luau's checker of the project in folder `root`; `None` when its thread cannot
-    /// start.
-    pub(crate) fn luau(root: &Path) -> Option<Self> {
+    /// Luau's checker of the project in folder `root`, with the engine's types
+    /// `definitions` (E7-2); `None` when its thread cannot start.
+    pub(crate) fn luau(root: &Path, definitions: String) -> Option<Self> {
         let root: PathBuf = root.to_path_buf();
         Self::start("luau checker", move || {
-            let analysis = Analysis::new(&root, Solver::New);
+            let analysis = LuauAnalyzer::new(&root, &definitions);
             if analysis.is_none() {
                 log::error!(target: "engine_editor", "Luau's analysis could not start");
             }
@@ -215,6 +285,7 @@ impl Checker {
                                 pending.retain(|p| p.0 != name);
                                 analysis.forget(&name);
                             }
+                            Job::Definitions(text) => analysis.set_definitions(&text),
                             // Asked now, answered now: the text as it is then.
                             Job::Complete {
                                 name,
@@ -285,6 +356,14 @@ impl Checker {
             done,
             thread: Some(thread),
         })
+    }
+
+    /// The types every module sees are `text`'s definitions from now on: the editor
+    /// checks its tabs again after.
+    pub(crate) fn set_definitions(&self, text: String) {
+        if let Some(jobs) = &self.jobs {
+            let _ = jobs.send(Job::Definitions(text));
+        }
     }
 
     /// Checks module `name`'s `text`, of `stamp`.

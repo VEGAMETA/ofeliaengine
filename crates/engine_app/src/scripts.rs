@@ -926,7 +926,8 @@ fn move_values(world: &mut World, r: &Relayout) {
     }
 }
 
-/// The `.luau` files under `dir`, hidden ones left out.
+/// The `.luau` files under `dir`, hidden ones and definition files (`.d.luau`, types to
+/// read, not code to run) left out.
 fn collect_scripts(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -938,7 +939,9 @@ fn collect_scripts(dir: &Path, out: &mut Vec<PathBuf>) {
         }
         if entry.file_type().is_ok_and(|t| t.is_dir()) {
             collect_scripts(&path, out);
-        } else if path.extension().is_some_and(|x| x == "luau") {
+        } else if path.extension().is_some_and(|x| x == "luau")
+            && !entry.file_name().to_string_lossy().ends_with(".d.luau")
+        {
             out.push(path);
         }
     }

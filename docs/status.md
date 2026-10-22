@@ -509,11 +509,14 @@ Last updated: 2026-10-22.
     call could not be written there). Static models follow their entities, props fall
     and roll moving theirs; it visits only what changed and allocates nothing while
     nothing does.
+  - **E7-2, the engine's types** (#353, ADR 0114's as-built): the editor's Luau checker
+    knows the engine's API and the program's components (findings, completion and hovers),
+    a hook's `self` typed from `component`, with Luau's old solver (the new one of 0.736
+    leaves it unknown). The editor writes them to `types/ofelia.d.luau`, and `ofeliaengine
+    new` points luau-lsp in VS Code at it.
   - **Next, in this order:**
-    1. E7 on: the engine's types in the editor and for luau-lsp (E7-2, under way on
-       `feat/script-types`: the old solver types a hook's `self` from `component`'s
-       declaration, the new one of Luau 0.736 does not), then views' fast path (E7-1c);
-       E7-3's player-owned physics builds on `ScenePhysics::sync_scene`;
+    1. E7 on: views' fast path (E7-1c); E7-3's player-owned physics for scripts builds on
+       `ScenePhysics::sync_scene`;
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 

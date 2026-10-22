@@ -228,8 +228,13 @@ const KINDS: [(AssetKind, &str, &[&str]); 9] = [
 ];
 
 impl AssetKind {
-    /// The kind of the file at `path`, if it is an asset.
+    /// The kind of the file at `path`, if it is an asset. A Luau definition file
+    /// (`types/ofelia.d.luau`, the editor's) declares types: no asset.
     pub fn of(path: &Path) -> Option<Self> {
+        let file = path.file_name()?.to_str()?;
+        if file.to_ascii_lowercase().ends_with(".d.luau") {
+            return None;
+        }
         let ext = path.extension()?.to_str()?;
         KINDS
             .iter()

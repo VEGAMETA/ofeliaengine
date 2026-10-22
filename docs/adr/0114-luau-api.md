@@ -987,3 +987,39 @@ there, and see the script's file in the inspector.
   again). A component's props change their kinds only by name: a prop that changes type
   starts from its default. Each reload keeps its old type descriptions for the process's
   life (a few hundred bytes); the editor reloads, a game does not.
+
+## As built (E7-2, 2026-10-22): the engine's types
+
+- **`engine_app::script_types::definitions()`** writes the API in Luau 0.736's definition
+  syntax:
+  - `Quat` (an extern type whose `__mul` composes rotations and turns vectors),
+    `PropOptions`;
+  - every reflected component of the program (the engine's and the game's Rust ones) and
+    every script component, as an extern type of the fields scripts can read: numbers,
+    booleans, `vector` (a `Vec3`, `Vec3A` or `Vec2`), `Quat`, `Entity?`, strings, an enum's
+    variants as a union of their names, structs of those. Lists, maps, options and asset
+    references are left out, as are fields named by a reserved word (`Timer.repeat`: a
+    script reads it as `timer["repeat"]`);
+  - `Entity` (`name`, `alive`, its components by name), `ScriptSelf` (`entity`, `locals`,
+    the components), `ScriptComponent<P>` with the hooks typed `self: P & ScriptSelf`;
+  - `component<P>`, `prop`, `world`, `time`, `quat` and `warn`.
+- **The editor** makes them again whenever the run-time types change (a script declared
+  or reloaded). It writes `types/ofelia.d.luau` when the project has `scripts/`, and
+  gives them to its Luau checker: findings, completion and hovers see the engine's API.
+- **The checker uses Luau's old solver** (it used the new one, E8-3b). The new solver of
+  0.736 does not type an un-annotated hook's `self` from `component`'s declaration; the
+  old one does, and it is luau-lsp's default too (checked with luau-lsp 1.70.1,
+  2026-10-22).
+- **`ofeliaengine new`** writes `.vscode/settings.json` for luau-lsp: the standard
+  platform (not Roblox's), no Rojo sourcemap, the definitions under `@ofelia`, the old
+  solver. `/types/` is in the game's `.gitignore`: the editor writes it again.
+- **Tests:** the guide's door and the New Script template check clean against the
+  definitions; a field given a value of the wrong type is an error on its line; the
+  definitions load; a component is the type of its readable fields, a reserved word left
+  out; a new game has the settings.
+- **Not done:**
+  - `ofeliaengine scripts types`: only a build with the game's code knows its Rust
+    components, so the editor writes the file;
+  - the documentation file (`types/ofelia.docs.json`, luau-lsp's `documentationFiles`):
+    its format is to be read from luau-lsp's sources first;
+  - `.luaurc`: each script says `--!strict` itself, as the template writes it.

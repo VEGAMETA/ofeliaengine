@@ -1590,7 +1590,9 @@ so not SQLite. The editor opens it at its start and follows the folder.
 - **The decision holds:** Analysis is called in process, and the luau-lsp fallback is not
   needed.
 - **The new solver** is the default, as it is for `luau-analyze`, Luau's own command line,
-  in 0.736. `Solver::Old` stays a choice.
+  in 0.736. `Solver::Old` stays a choice. (E7-2, 2026-10-22: the editor's checker uses
+  the old one: only it types an un-annotated hook's `self` from the engine's
+  definitions; ADR 0114's as-built.)
 - **The build** (`engine_luau_analysis`):
   - `third_party/luau-analysis` holds the release mlua builds (0.736): Analysis and the
     headers of the parts it uses. `VM/include` is luau0-src's own, which mlua patches;

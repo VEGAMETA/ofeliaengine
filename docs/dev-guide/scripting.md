@@ -153,11 +153,27 @@ A field read is a call into the engine. Read it into a local once when you use i
 times in a hook (`local t = self.Transform`). A faster path for these reads comes in a
 later step. Logic over thousands of objects every tick belongs in Rust.
 
+## Types: in the editor and in VS Code
+
+The editor knows the engine's API and your components: it underlines a wrong field or a
+value of the wrong type as you write, completes `self.Transform.` and shows types on
+hover. In a hook, `self` is your component's props with the entity's components
+(`self.lift`, `self.Transform.translation`), typed from `component`'s declaration: write
+`function Door.on_tick(self, dt: number)` and nothing more.
+
+The editor writes the same types to `types/ofelia.d.luau` in your game's folder whenever
+they change (a script declared, a component added). A game made with `ofeliaengine new`
+has `.vscode/settings.json` pointing [luau-lsp](https://github.com/JohnnyMorganz/luau-lsp)
+at it, so VS Code checks and completes your scripts the same way. The file is in
+`.gitignore`: open the editor once after you clone to have it.
+
+- A field named by one of Luau's reserved words (`Timer.repeat`) has no type: read it as
+  `timer["repeat"]`.
+- Lists, maps and asset references are not readable from scripts yet, and have no types.
+
 ## Coming next
 
 - script components in saves;
 - systems over queries, `input`, `world.spawn`, `world.query`, entity methods (`has`, `add`,
   `remove`, `despawn`);
-- the types file for luau-lsp and the editor: completion of the engine's API. Until then,
-  the editor marks `component` and the engine's other globals as unknown;
 - `send`, `after` timers, `audio`, `random`, physics queries and triggers.
