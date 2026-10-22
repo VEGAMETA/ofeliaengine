@@ -386,7 +386,7 @@ Last updated: 2026-10-22.
   - **E6-5, the profiler's first panel** (#328, ADR 0107's as-built): the last 120 frames'
     CPU and GPU times as bars, the costliest CPU stages (`FrameReport`) and GPU passes
     (the frame graph's timestamps). **E6 is done.**
-  - **E8-1, scripts in tabs** (#PR, ADR 0107's as-built): `.luau` files open in tabs
+  - **E8-1, scripts in tabs** (#329, ADR 0107's as-built): `.luau` files open in tabs
     after the scenes' (a double click in the dock, "File: Open Script…", an Output error
     at a script's line), their code where the viewport is. The text is a line array
     (measured: a key 0.5 µs, a new line 15 µs in a 100,000-line file), carets several at
