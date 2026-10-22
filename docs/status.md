@@ -393,7 +393,7 @@ Last updated: 2026-10-22.
     once, VS Code's keys and mouse; Ctrl+S keeps the file's line endings; the session
     brings the tabs back with their unsaved text. engine_ui gained placed nodes and
     monospace text.
-  - **E8-1c, Luau's highlighting** (#PR, ADR 0107's as-built,
+  - **E8-1c, Luau's highlighting** (#330, ADR 0107's as-built,
     `docs/research/luau-highlighting.md`): Luau's lexical rules, luau-lsp's colors; each
     line's start state kept and made again from the first line changed (60 lines cut in
     5.6 µs a frame).
