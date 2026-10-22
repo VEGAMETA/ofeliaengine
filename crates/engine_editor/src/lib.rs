@@ -22,6 +22,7 @@ pub mod input;
 pub mod inspector;
 pub mod paint;
 mod palette;
+mod prefabs;
 mod session;
 pub mod shell;
 mod snap;

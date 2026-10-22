@@ -614,6 +614,29 @@ pub fn save_with(
     options: &SaveOptions<'_>,
     out: &mut String,
 ) -> Result<usize, SaveError> {
+    save_from(world, registry, options, None, out)
+}
+
+/// Writes entity `root` and its descendants as a scene of their own (what a prefab made
+/// of them holds, E5): `root` a root without a parent or an order; references to entities
+/// outside it written as they are (a file that loads them alone warns of them).
+pub fn save_subtree(
+    world: &mut World,
+    registry: &SceneRegistry,
+    options: &SaveOptions<'_>,
+    root: Entity,
+    out: &mut String,
+) -> Result<usize, SaveError> {
+    save_from(world, registry, options, Some(root), out)
+}
+
+fn save_from(
+    world: &mut World,
+    registry: &SceneRegistry,
+    options: &SaveOptions<'_>,
+    only: Option<Entity>,
+    out: &mut String,
+) -> Result<usize, SaveError> {
     engine_profiler::zone!("scene::save");
     let mut q = QueryState::<(Entity, &SceneId)>::new(world);
     let mut ids: HashMap<Entity, SceneId> = HashMap::new();
@@ -625,9 +648,14 @@ pub fn save_with(
         }
         ids.insert(e, id);
     }
-    for (&e, &id) in &ids {
-        if world.parent(e).is_none_or(|p| !ids.contains_key(&p)) {
-            roots.push((id, e));
+    match only {
+        Some(root) => roots.extend(ids.get(&root).map(|&id| (id, root))),
+        None => {
+            for (&e, &id) in &ids {
+                if world.parent(e).is_none_or(|p| !ids.contains_key(&p)) {
+                    roots.push((id, e));
+                }
+            }
         }
     }
     roots.sort_unstable();
@@ -697,8 +725,8 @@ pub fn save_with(
             continue;
         }
         let id = ids[&e];
-        // Its parent: by path inside an instance, else by id.
-        let parent = world.parent(e).and_then(|p| {
+        // Its parent: by path inside an instance, else by id; none for the subtree's root.
+        let parent = world.parent(e).filter(|_| Some(e) != only).and_then(|p| {
             let &id = ids.get(&p)?;
             Some(if prefabs && world.get::<PrefabPart>(p).is_some() {
                 ParentRef::Path(p)
@@ -736,11 +764,12 @@ pub fn save_with(
                 out.push('\n');
                 match parent {
                     Some(p) => p.write(&paths, out),
-                    None => {
+                    None if only.is_none() => {
                         if let Some(order) = world.get::<RootOrder>(e) {
                             let _ = writeln!(out, "order = {}", order.0);
                         }
                     }
+                    None => {}
                 }
                 if !instance.is_missing() {
                     let base = bases.get(&e);
@@ -775,11 +804,12 @@ pub fn save_with(
                 let _ = writeln!(out, "\n[entity {id}]");
                 match parent {
                     Some(p) => p.write(&paths, out),
-                    None => {
+                    None if only.is_none() => {
                         if let Some(order) = world.get::<RootOrder>(e) {
                             let _ = writeln!(out, "order = {}", order.0);
                         }
                     }
+                    None => {}
                 }
                 let writer = Writer {
                     out,

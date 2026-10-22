@@ -324,8 +324,15 @@ Last updated: 2026-10-20.
       prefab;
     - the player loads scenes with their prefabs; saving and loading plain scenes as fast
       as before (6.56 / 9.90 ms for 10,000 entities against 6.47 / 9.68).
-  - **Next:** E5-2, the editor: scenes loaded and saved through their prefabs, a scene
-    dropped from the dock placed as an instance, Make Prefab from a selection, Unpack.
+  - **E5-2, prefabs in the editor** (#PR, ADR 0108's as-built):
+    - scenes load and save through their prefabs, found by id through the asset
+      database;
+    - a scene dragged from the dock into the view or the tree is placed as an instance;
+    - "Make Prefab" writes the selection's subtree to a scene of its own and makes it an
+      instance of it (the root keeps its id, the rest derived; `History::change_ids`
+      undoes it with the references); "Unpack Prefab"; the tree names instances.
+  - **Next:** E5-3, overrides in the inspector: marked fields, revert, apply to the
+    prefab; the instance's header listing its overrides.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

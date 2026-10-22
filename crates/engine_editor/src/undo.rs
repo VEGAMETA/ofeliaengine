@@ -486,6 +486,29 @@ impl History {
         spawned.first().copied()
     }
 
+    /// Gives entities new scene ids as part of the open action (a subtree made a prefab's
+    /// instance, E5): to the history each old one is gone and each new one made, and
+    /// everything that refers to them is recorded too, so undo puts the old ids back with
+    /// the references to them.
+    pub fn change_ids(&mut self, world: &mut World, changes: &[(Entity, SceneId)]) {
+        if self.open.is_none() {
+            return;
+        }
+        let targets: HashSet<Entity> = changes.iter().map(|&(e, _)| e).collect();
+        for r in referrers(world, &mut self.codecs, &targets) {
+            self.touch(world, r);
+        }
+        for &(e, _) in changes {
+            self.touch(world, e);
+        }
+        for &(e, id) in changes {
+            world.insert(e, id);
+        }
+        for &(e, _) in changes {
+            self.touch_new(world, e);
+        }
+    }
+
     fn touch_with(&mut self, world: &mut World, entity: Entity, new: bool) {
         if self.open.is_none() || !world.contains(entity) {
             return;
