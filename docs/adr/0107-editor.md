@@ -1202,3 +1202,19 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
 §5 left the index's form to a measurement: our own text file, read in 3.2 ms and an
 unchanged project of 10,000 files scanned in 20 ms (ADR 0108's as-built of the same day),
 so not SQLite. The editor opens it at its start and follows the folder.
+
+## As built (E4-2, 2026-10-22): the asset browser
+
+- **The FileSystem dock** (the layout's, under the viewport) is filled from the asset
+  database:
+  - the folders that hold assets in tree order, `res://` at the top;
+  - the open folder's subfolders, then its files with their kinds' icons, the picked
+    file lit.
+
+  The lists are made again when a scan or a click changes them, not every frame.
+- **`#` in the palette** finds assets by path through the palette's matcher. A kind
+  before a colon narrows it (`#model:crate`; `mesh` and `audio` too), and Enter opens the
+  asset's folder with it picked.
+- **Left for E4's next steps:** drag and drop from the dock (models into the viewport and
+  the tree, materials onto objects), thumbnails, import settings in the inspector,
+  renames inside the editor, references.

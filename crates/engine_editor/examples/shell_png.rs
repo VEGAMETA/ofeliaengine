@@ -318,7 +318,11 @@ fn main() {
         tree_item(1, icons::FOLDER, "textures", "", None, false),
         tree_item(1, icons::FOLDER, "audio", "", None, false),
     ];
-    let file = |name, kind| FileItem { name, kind };
+    let file = |name, kind| FileItem {
+        name,
+        kind,
+        selected: false,
+    };
     let files = [
         file("main.scene", FileKind::Scene),
         file("level_01.scene", FileKind::Scene),

@@ -289,6 +289,8 @@ pub struct FileItem<'a> {
     pub name: &'a str,
     /// Kind.
     pub kind: FileKind,
+    /// Picked.
+    pub selected: bool,
 }
 
 /// Everything the shell shows.
@@ -728,6 +730,7 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
                             padding: [8.0, 3.0, 8.0, 3.0],
                             gap: 6.0,
                             align_cross: Align::Center,
+                            background: file.selected.then_some(p.selection),
                             ..Style::default()
                         },
                         |ui| {

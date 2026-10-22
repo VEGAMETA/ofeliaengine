@@ -103,7 +103,7 @@ editor = ["dep:engine_editor"]
   - **Ctrl+C and Ctrl+V** with the mouse over a field copy and paste its value (see
     copying values below).
 - **The command palette** (Ctrl+Shift+P) finds and runs every command; Ctrl+P finds the
-  scene's objects (see below).
+  scene's objects, `#` the project's assets (see below).
 - **Everything is undoable**, one step per action (a whole drag is one step). The scene's
   tab shows `*` while there are unsaved changes; undoing back to the saved state clears it.
 - **Saving** writes the scene file under the scene's own id, asset references by path,
@@ -127,6 +127,7 @@ editor = ["dep:engine_editor"]
 | Rename the active entity | F2 |
 | The command palette | Ctrl+Shift+P |
 | Go to a scene object (the palette with `@`) | Ctrl+P |
+| Find an asset (the palette with `#`) | Ctrl+Shift+P, then `#` |
 | Move, scale, rotate the selection at once ([keyboard transforms](#keyboard-transforms)) | Q, E, R |
 | The gizmo's handles: move, scale, rotate (the same again: all of them) | Shift+Q, Shift+E, Shift+R |
 | The gizmo along the active entity's axes, or the world's | Space |
@@ -221,6 +222,8 @@ runs the highlighted result.
 - **`@` finds the scene's objects** by name (Ctrl+P opens the palette with it typed); the
   one picked is selected, and the tree opens its parents' rows. `>` before a query looks
   for commands, as without it.
+- **`#` finds the project's assets** by path, a kind before a colon narrowing them
+  (`#model:crate`); the one picked is shown in the FileSystem dock ([assets](#assets)).
 - Up and Down move the highlight, Enter or a click runs it; Escape or a click elsewhere
   closes the palette.
 
@@ -572,7 +575,17 @@ so editing never changes the scene behind your back.
 The editor keeps the project's asset database ([scenes.md](scenes.md#the-asset-database)):
 every asset file with its id, a `.meta` beside each foreign file, the index in
 `.ofelia/`. Files you add, move or delete in Explorer are followed a moment later, and
-scenes find their assets by id. The asset browser comes next (ADR 0107 E4).
+scenes find their assets by id.
+
+**The FileSystem dock**, under the viewport, shows them:
+- on the left, the project's folders that hold assets, `res://` at the top;
+- on the right, the folder's subfolders and files, each with its kind's icon.
+
+A click on a folder opens it, a click on a file picks it.
+
+**`#` in the command palette** finds assets by path: `#crate`, or with a kind first,
+`#model:crate`, `#texture:rock` (`scene`, `material`, `model` or `mesh`, `texture`, `sound`
+or `audio`, `video`, `font`, `script`). Enter shows the asset in the dock.
 
 ## Autosave and the session
 

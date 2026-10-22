@@ -139,10 +139,12 @@ fn a_steady_shell_frame_does_not_allocate() {
     ];
     let files = [
         FileItem {
+            selected: false,
             name: "main.scene",
             kind: FileKind::Scene,
         },
         FileItem {
+            selected: false,
             name: "player.luau",
             kind: FileKind::Script,
         },
