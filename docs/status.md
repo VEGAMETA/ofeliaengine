@@ -268,7 +268,7 @@ Last updated: 2026-10-22.
       JSON alone).
   - **Decided (team decision, 2026-10-22):** meshes of several materials draw with their
     first; `Model` gets material slots, one entity per mesh, as in Unity and Godot (not a
-    part per primitive). Queued after E5.
+    part per primitive). Done after E5 (ADR 0115, below).
   - **E4-4, glTF files load in the background** (#307, ADR 0108's as-built):
     - a loading thread with a pool below normal priority reads and imports files, puts
       meshes together (their vertices encoded too) and decodes textures with their mip
@@ -366,9 +366,13 @@ Last updated: 2026-10-22.
     inspector title's Open open the nearest instance's prefab as a tab, the entity
     picked selected there; Ctrl+S writes it, and the other tabs' instances take it when
     shown again (their text holds only overrides). **E5 is done.**
-  - **Next:** material slots on `Model` (team decision, 2026-10-22: each primitive of a
-    mesh drawn with its own material), then E6 (output, errors, history; ADR 0107 §7),
-    then E7 (Luau, its API signed off by the owner first).
+  - **Material slots** (#PR, ADR 0115; team decision, 2026-10-22): `MaterialSlots` beside
+    `Model` holds the materials of a mesh's further primitives; the player draws each
+    further primitive on a child it makes (`Derived`: never saved, left out of undo,
+    picks name the model), the renderer and the extraction untouched; a model dropped
+    from the dock fills them from its glTF.
+  - **Next:** E6 (output, errors, history; ADR 0107 §7), then E7 (Luau, once the owner
+    has answered ADR 0114's questions).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
@@ -519,9 +523,10 @@ Last updated: 2026-10-22.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner:** none. Settled 2026-10-22 (team decisions): Luau
-  (E7) comes in the queue's order (E5-5, material slots, E6, then E7), its public API
-  drafted meanwhile for the owner to sign off; meshes of
+- **Questions open with the owner:** ADR 0114's seven questions on the Luau API (asked
+  2026-10-22; E7 waits for them). Settled 2026-10-22 (team decisions): Luau (E7) comes in
+  the queue's order (E5-5, material slots, E6, then E7), its public API drafted meanwhile
+  for the owner to sign off; meshes of
   several materials get material slots on `Model` (queued after E5); ADR 0108's prefab
   root rule stays; the Radeon's CPU check baseline is not refreshed for now (§6).
   Earlier: 2026-10-16, the virtual shadow pages stay off by default on discrete GPUs; the

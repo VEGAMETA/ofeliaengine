@@ -13,7 +13,7 @@
 //! Each thread is started with its first job: a player whose scenes use no glTF file never
 //! has them.
 
-use crate::assets::{GltfFile, TextureKey, gltf_mesh, open_gltf};
+use crate::assets::{GltfFile, TextureKey, gltf_mesh, gltf_primitives, open_gltf};
 use engine_assets::{
     DerivedDataCache, EncodedTexture, TextureImage, TextureSource, build_mips, cached_texture,
     decode_image, import_texture, read_texture,
@@ -44,6 +44,14 @@ pub(crate) enum Job {
     },
     /// Mesh `mesh` of an imported file as one mesh.
     Mesh {
+        asset: AssetRef,
+        file: Arc<GltfFile>,
+        mesh: usize,
+        generation: u32,
+    },
+    /// Mesh `mesh` of an imported file as a mesh per primitive (a model with material
+    /// slots, ADR 0115).
+    Primitives {
         asset: AssetRef,
         file: Arc<GltfFile>,
         mesh: usize,
@@ -98,6 +106,12 @@ pub(crate) enum Done {
         asset: AssetRef,
         generation: u32,
         result: Result<(OwnedMeshData, Vec<VertexAttributes>), String>,
+    },
+    /// Each primitive's, in the mesh's order.
+    Primitives {
+        asset: AssetRef,
+        generation: u32,
+        result: Result<Vec<(OwnedMeshData, Vec<VertexAttributes>)>, String>,
     },
     Texture {
         key: TextureKey,
@@ -389,6 +403,13 @@ fn failed(job: &Job, why: &str) -> Done {
             generation: *generation,
             result: Err(why),
         },
+        Job::Primitives {
+            asset, generation, ..
+        } => Done::Primitives {
+            asset: *asset,
+            generation: *generation,
+            result: Err(why),
+        },
         Job::Texture {
             key, generation, ..
         } => Done::Texture {
@@ -453,6 +474,36 @@ fn run(job: Job, root: &Path, pool: Option<&ThreadPool>) -> Done {
                 })
                 .ok_or_else(|| String::from("the file has no such mesh"));
             Done::Mesh {
+                asset,
+                generation,
+                result,
+            }
+        }
+        Job::Primitives {
+            asset,
+            file,
+            mesh,
+            generation,
+        } => {
+            engine_profiler::zone!("assets::load::primitives");
+            let scale = file.meta.model.applied_scale();
+            let result = file
+                .scene
+                .meshes
+                .get(mesh)
+                .map(|mesh| {
+                    mesh.primitives
+                        .iter()
+                        .map(|p| {
+                            let data = gltf_primitives(core::slice::from_ref(p), scale);
+                            let mut attributes = Vec::with_capacity(data.positions.len());
+                            encode_attributes(&data.as_data(), &mut attributes);
+                            (data, attributes)
+                        })
+                        .collect()
+                })
+                .ok_or_else(|| String::from("the file has no such mesh"));
+            Done::Primitives {
                 asset,
                 generation,
                 result,

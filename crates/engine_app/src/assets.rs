@@ -40,13 +40,13 @@ use engine_assets::{
     DerivedDataCache, EncodedTexture, ImportedScene, MaterialData, MeshData, TextureData,
     TextureImage, TextureSource, TextureUsage, TextureWrap,
 };
-use engine_ecs::{Changed, Entity, GlobalTransform, QueryState, With, Without, World};
+use engine_ecs::{Changed, Entity, GlobalTransform, QueryState, Transform, With, Without, World};
 use engine_reflect::Reflect;
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
 use engine_render::mesh::{GeometryPool, MeshId, OwnedMeshData};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_rhi::{Allocator, Bindless, Device, Wrap};
-use engine_runtime::MeshRenderer;
+use engine_runtime::{Derived, MeshRenderer};
 use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, LoadError, ValueReport};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -84,6 +84,32 @@ impl Model {
 #[derive(Debug, Clone, Copy, Default)]
 struct FromModel;
 engine_ecs::component!(FromModel);
+
+/// The materials of a model's mesh's primitives after the first, in the mesh's order (ADR
+/// 0115; team decision, 2026-10-22: material slots on the model, one entity per mesh). The
+/// first is [`Model::material`], and a primitive past the list draws with it too. Without
+/// slots, a mesh's primitives draw as one with the model's material.
+///
+/// ```text
+/// [entity 0d7e21b4c95a4f3e8b6a1c2d3e4f5a60]
+/// Model.mesh = asset("props/lamp.glb#Lamp", 5f2c0a3e9d2b47c88e51f0d4a7b3c912)
+/// Model.material = asset("props/lamp.glb#Metal", 5f2c0a3e9d2b47c88e51f0d4a7b3c912)
+/// MaterialSlots = [asset("props/lamp.glb#Glass", 5f2c0a3e9d2b47c88e51f0d4a7b3c912)]
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Reflect)]
+pub struct MaterialSlots(pub Vec<AssetRef>);
+engine_ecs::reflect_component!(MaterialSlots);
+
+/// On a model drawn a mesh per primitive ([`MaterialSlots`]): its further primitives are
+/// drawn by derived children.
+#[derive(Debug, Clone, Copy, Default)]
+struct Split;
+engine_ecs::component!(Split);
+
+/// A derived child drawing primitive `.0` of its parent's mesh (ADR 0115).
+#[derive(Debug, Clone, Copy, Default)]
+struct ModelPart(u32);
+engine_ecs::component!(ModelPart);
 
 /// The engine's built-in assets: one library of parts, written as `builtin#<part>`.
 pub mod builtin {
@@ -373,10 +399,19 @@ fn material_part(scene: &ImportedScene, part: u64) -> Result<usize, String> {
 /// `scale` (the file's import setting). Texture coordinates and tangents are kept when any
 /// primitive has them (zero coordinates and +X tangents for those without).
 pub(crate) fn gltf_mesh(mesh: &MeshData, scale: f32) -> OwnedMeshData {
+    gltf_primitives(&mesh.primitives, scale)
+}
+
+/// [`gltf_mesh`] of some of a mesh's primitives (one alone: a part of a model with
+/// material slots, ADR 0115).
+pub(crate) fn gltf_primitives(
+    primitives: &[engine_assets::Primitive],
+    scale: f32,
+) -> OwnedMeshData {
     let mut data = OwnedMeshData::default();
-    let uvs = mesh.primitives.iter().any(|p| !p.uvs.is_empty());
-    let tangents = mesh.primitives.iter().any(|p| !p.tangents.is_empty());
-    for p in &mesh.primitives {
+    let uvs = primitives.iter().any(|p| !p.uvs.is_empty());
+    let tangents = primitives.iter().any(|p| !p.tangents.is_empty());
+    for p in primitives {
         let (first, n) = (data.positions.len() as u32, p.positions.len());
         if scale == 1.0 {
             data.positions.extend_from_slice(&p.positions);
@@ -560,6 +595,9 @@ fn encoded_levels(t: EncodedTexture) -> TextureLevels {
 
 type Changes = QueryState<(Entity, &'static Model), Changed<Model>>;
 type Orphans = QueryState<Entity, (With<FromModel>, Without<Model>)>;
+type SlotChanges = QueryState<(Entity, &'static Model), Changed<MaterialSlots>>;
+type Unsplit = QueryState<(Entity, &'static Model), (With<Split>, Without<MaterialSlots>)>;
+type Parts = QueryState<Entity, With<ModelPart>>;
 
 /// The assets the player's scenes use, made on first use (ADR 0108): built-in meshes and
 /// the built-in material, material files and glTF files' meshes and materials under the
@@ -625,6 +663,14 @@ pub struct Assets {
     orphans: Option<Orphans>,
     changed: Vec<(Entity, Model)>,
     gone: Vec<Entity>,
+    /// glTF meshes made a mesh per primitive, for models with material slots (ADR 0115):
+    /// made, being made, and those of files read again drawn until made again.
+    split: HashMap<AssetRef, Vec<MeshId>>,
+    building_split: HashSet<AssetRef>,
+    stale_split: HashMap<AssetRef, Vec<MeshId>>,
+    slot_changes: Option<SlotChanges>,
+    unsplit: Option<Unsplit>,
+    parts: Option<Parts>,
 }
 
 impl Assets {
@@ -669,6 +715,12 @@ impl Assets {
             orphans: None,
             changed: Vec::new(),
             gone: Vec::new(),
+            split: HashMap::new(),
+            building_split: HashSet::new(),
+            stale_split: HashMap::new(),
+            slot_changes: None,
+            unsplit: None,
+            parts: None,
         }
     }
 
@@ -711,6 +763,15 @@ impl Assets {
         // What an earlier reading left stale goes; what is made now becomes stale, drawn
         // until the new versions are made.
         self.retire_stale(Some(file));
+        let stale_split = &mut self.stale_split;
+        self.split.retain(|asset, meshes| {
+            let keep = asset.file != file;
+            if !keep {
+                stale_split.insert(*asset, core::mem::take(meshes));
+            }
+            keep
+        });
+        self.building_split.retain(|a| a.file != file);
         let (meshes, materials) = (&mut self.stale_meshes, &mut self.stale_materials);
         self.meshes.retain(|asset, &mut mesh| {
             let keep = asset.file != file;
@@ -783,6 +844,13 @@ impl Assets {
     fn retire_stale(&mut self, file: Option<AssetId>) {
         let of = |f: AssetId| file.is_none_or(|file| file == f);
         let retired_meshes = &mut self.retired_meshes;
+        self.stale_split.retain(|asset, meshes| {
+            let go = of(asset.file);
+            if go {
+                retired_meshes.append(meshes);
+            }
+            !go
+        });
         self.stale_meshes.retain(|asset, &mut mesh| {
             let go = of(asset.file);
             if go {
@@ -1085,6 +1153,35 @@ impl Assets {
                         Err(why) => self.fail(asset, why),
                     }
                 }
+                Done::Primitives {
+                    asset,
+                    generation,
+                    result,
+                } if generation == self.generation(asset.file) => {
+                    self.building_split.remove(&asset);
+                    let made = result.and_then(|parts| {
+                        let mut meshes = Vec::with_capacity(parts.len());
+                        for (data, attributes) in &parts {
+                            match geometry.add_mesh_with_attributes(&data.as_data(), attributes) {
+                                Ok(mesh) => meshes.push(mesh),
+                                Err(e) => {
+                                    // Never drawn: let go at once.
+                                    for mesh in meshes {
+                                        geometry.remove_mesh(mesh, self.frame);
+                                    }
+                                    return Err(e.to_string());
+                                }
+                            }
+                        }
+                        Ok(meshes)
+                    });
+                    match made {
+                        Ok(meshes) => {
+                            self.split.insert(asset, meshes);
+                        }
+                        Err(why) => self.fail(asset, why),
+                    }
+                }
                 Done::Texture {
                     key,
                     generation,
@@ -1338,6 +1435,23 @@ impl Assets {
         self.changed.clear();
         self.changed
             .extend(changes.iter_readonly(world).map(|(e, model)| (e, *model)));
+        // Material slots changed, or gone from a model drawn per primitive (ADR 0115).
+        let slot_changes = self
+            .slot_changes
+            .get_or_insert_with(|| QueryState::new(world));
+        let unsplit = self.unsplit.get_or_insert_with(|| QueryState::new(world));
+        let before = self.changed.len();
+        self.changed.extend(
+            slot_changes
+                .iter_readonly(world)
+                .map(|(e, model)| (e, *model)),
+        );
+        self.changed
+            .extend(unsplit.iter_readonly(world).map(|(e, model)| (e, *model)));
+        if self.changed.len() > before {
+            self.changed.sort_unstable_by_key(|&(e, _)| e.to_bits());
+            self.changed.dedup_by_key(|&mut (e, _)| e);
+        }
         for i in 0..self.changed.len() {
             let (e, model) = self.changed[i];
             if self.give_renderer(world, e, model, geometry, materials) {
@@ -1384,12 +1498,26 @@ impl Assets {
         for &e in &self.gone {
             world.remove::<FromModel>(e);
             world.remove::<MeshRenderer>(e);
+            world.remove::<Split>(e);
             self.waiting.remove(&e);
+        }
+        // Parts whose model went or draws whole again (a model despawned alone leaves its
+        // children a dead parent): gone.
+        let parts = self.parts.get_or_insert_with(|| QueryState::new(world));
+        self.gone.clear();
+        self.gone.extend(parts.iter_readonly(world).filter(|&p| {
+            world
+                .parent(p)
+                .is_none_or(|model| world.get::<Split>(model).is_none())
+        }));
+        for &p in &self.gone {
+            world.despawn(p);
         }
         // A model drawing a stale part waits for its new one: with none waiting, none is
         // drawn.
         if self.waiting.is_empty()
             && !(self.stale_meshes.is_empty()
+                && self.stale_split.is_empty()
                 && self.stale_materials.is_empty()
                 && self.stale_textures.is_empty())
         {
@@ -1414,39 +1542,21 @@ impl Assets {
         geometry: &mut GeometryPool,
         materials: &mut MaterialTable,
     ) -> bool {
-        let made_mesh = self.mesh(model.mesh, geometry);
-        let made_material = self.material(model.material, materials);
-        // Until its new version is whole (a material with its textures), a part read again
-        // is drawn as it was.
-        let (mesh, stale_mesh) = match (made_mesh, self.stale_meshes.get(&model.mesh)) {
-            (Some(mesh), _) => (Some(mesh), false),
-            (None, Some(&old)) => (Some(old), true),
-            (None, None) => (None, false),
-        };
-        let unsettled = |m: MaterialId| self.pending_materials.iter().any(|p| p.material == m);
-        let (material, stale_material) =
-            match (made_material, self.stale_materials.get(&model.material)) {
-                (Some(new), Some(&old)) if unsettled(new) => (Some(old), true),
-                (None, Some(&old)) => (Some(old), true),
-                (made, _) => (made, false),
-            };
-        if !stale_mesh && let Some(old) = self.stale_meshes.remove(&model.mesh) {
-            self.retired_meshes.push(old);
+        // Material slots on a glTF mesh: a mesh per primitive, each with its own material.
+        let slots = world
+            .get::<MaterialSlots>(e)
+            .filter(|s| !s.0.is_empty())
+            .map(|s| s.0.clone());
+        if let Some(slots) = slots
+            && model.mesh.file != builtin::LIBRARY
+            && !model.mesh.is_none()
+        {
+            return self.give_split(world, e, model, &slots, materials);
         }
-        if !stale_material && let Some(old) = self.stale_materials.remove(&model.material) {
-            self.retired_materials.push(old);
-            // The file's old textures go with its last old material.
-            let file = model.material.file;
-            if !self.stale_materials.keys().any(|a| a.file == file) {
-                let retiring = &mut self.retiring_textures;
-                self.stale_textures.retain(|&(f, texture)| {
-                    if f == file {
-                        retiring.push(texture);
-                    }
-                    f != file
-                });
-            }
-        }
+        // Drawn whole (again): its parts go with the sync's sweep.
+        world.remove::<Split>(e);
+        let (mesh, stale_mesh) = self.drawn_mesh(model.mesh, geometry);
+        let (material, stale_material) = self.drawn_material(model.material, materials);
         match (mesh, material) {
             (Some(mesh), Some(material)) => {
                 let renderer = MeshRenderer {
@@ -1478,6 +1588,211 @@ impl Assets {
                 !(coming(mesh.is_some(), model.mesh) || coming(material.is_some(), model.material))
             }
         }
+    }
+
+    /// Mesh `asset` as a renderer draws it: made, else, until its new version is made, the
+    /// version of a file read again (E4-5). Whether it is that stale one; a stale one its
+    /// new version replaced goes.
+    fn drawn_mesh(
+        &mut self,
+        asset: AssetRef,
+        geometry: &mut GeometryPool,
+    ) -> (Option<MeshId>, bool) {
+        let drawn = match (self.mesh(asset, geometry), self.stale_meshes.get(&asset)) {
+            (Some(mesh), _) => (Some(mesh), false),
+            (None, Some(&old)) => (Some(old), true),
+            (None, None) => (None, false),
+        };
+        if !drawn.1
+            && let Some(old) = self.stale_meshes.remove(&asset)
+        {
+            self.retired_meshes.push(old);
+        }
+        drawn
+    }
+
+    /// Material `asset` as a renderer draws it: made with its textures, else the version
+    /// of a file read again until then (E4-5). Whether it is that stale one; a stale one
+    /// its new version replaced goes, the file's old textures with its last.
+    fn drawn_material(
+        &mut self,
+        asset: AssetRef,
+        materials: &mut MaterialTable,
+    ) -> (Option<MaterialId>, bool) {
+        let made = self.material(asset, materials);
+        let unsettled = |m: MaterialId| self.pending_materials.iter().any(|p| p.material == m);
+        let drawn = match (made, self.stale_materials.get(&asset)) {
+            (Some(new), Some(&old)) if unsettled(new) => (Some(old), true),
+            (None, Some(&old)) => (Some(old), true),
+            (made, _) => (made, false),
+        };
+        if !drawn.1
+            && let Some(old) = self.stale_materials.remove(&asset)
+        {
+            self.retired_materials.push(old);
+            let file = asset.file;
+            if !self.stale_materials.keys().any(|a| a.file == file) {
+                let retiring = &mut self.retiring_textures;
+                self.stale_textures.retain(|&(f, texture)| {
+                    if f == file {
+                        retiring.push(texture);
+                    }
+                    f != file
+                });
+            }
+        }
+        drawn
+    }
+
+    /// Mesh `asset` of a glTF file made a mesh per primitive (ADR 0115), on first use: in
+    /// the background, as [`Self::mesh`].
+    fn split_mesh(&mut self, asset: AssetRef) -> Option<Vec<MeshId>> {
+        if let Some(meshes) = self.split.get(&asset) {
+            return Some(meshes.clone());
+        }
+        if asset.is_none()
+            || self.problems.contains_key(&asset)
+            || self.building_split.contains(&asset)
+        {
+            return None;
+        }
+        let given = match file_path(&self.paths, asset) {
+            Some(path) if is_gltf(path) => {
+                let path = path.to_owned();
+                self.gltf(asset.file, &path).and_then(|file| {
+                    let Some(file) = file else {
+                        return Ok(());
+                    };
+                    let mesh = mesh_part(&file.scene, asset.part)?;
+                    let generation = self.generation(asset.file);
+                    self.building_split.insert(asset);
+                    self.loader.give(Job::Primitives {
+                        asset,
+                        file,
+                        mesh,
+                        generation,
+                    });
+                    Ok(())
+                })
+            }
+            Some(path) => Err(format!(
+                "{path} is not a mesh: meshes are built in or in glTF files (.glb, .gltf)"
+            )),
+            None => Err(String::from("no path known for it")),
+        };
+        if let Err(why) = given {
+            self.fail(asset, why);
+        }
+        None
+    }
+
+    /// [`Self::split_mesh`] as a renderer draws it, as [`Self::drawn_mesh`].
+    fn drawn_split(&mut self, asset: AssetRef) -> (Option<Vec<MeshId>>, bool) {
+        match (self.split_mesh(asset), self.stale_split.get(&asset)) {
+            (Some(meshes), _) => {
+                if let Some(old) = self.stale_split.remove(&asset) {
+                    self.retired_meshes.extend(old);
+                }
+                (Some(meshes), false)
+            }
+            (None, Some(old)) => (Some(old.clone()), true),
+            (None, None) => (None, false),
+        }
+    }
+
+    /// [`Self::give_renderer`] for a model with material slots (ADR 0115): its mesh made a
+    /// mesh per primitive, the first drawn on the entity with [`Model::material`], each
+    /// further one by a derived child with its slot's material (the model's own past the
+    /// slots). False while a part is still being made.
+    fn give_split(
+        &mut self,
+        world: &mut World,
+        e: Entity,
+        model: Model,
+        slots: &[AssetRef],
+        materials: &mut MaterialTable,
+    ) -> bool {
+        let slot = |i: usize| {
+            if i == 0 {
+                model.material
+            } else {
+                slots.get(i - 1).copied().unwrap_or(model.material)
+            }
+        };
+        let (meshes, mut stale) = self.drawn_split(model.mesh);
+        let n = meshes.as_ref().map_or(0, Vec::len);
+        let mut drawn = Vec::with_capacity(n);
+        let mut missing = Vec::new();
+        for i in 0..n {
+            let (material, s) = self.drawn_material(slot(i), materials);
+            stale |= s;
+            match material {
+                Some(m) => drawn.push(m),
+                None => missing.push(slot(i)),
+            }
+        }
+        let Some(meshes) = meshes.filter(|_| missing.is_empty()) else {
+            // Not all made: nothing drawn meanwhile, the parts gone with the sweep.
+            if world.remove::<FromModel>(e).is_some() {
+                world.remove::<MeshRenderer>(e);
+            }
+            world.remove::<Split>(e);
+            let coming = |asset: &AssetRef| !asset.is_none() && !self.problems.contains_key(asset);
+            let waits = (n == 0 && coming(&model.mesh)) || missing.iter().any(coming);
+            return !waits;
+        };
+        let visible = u32::from(!model.hidden);
+        let first = MeshRenderer {
+            mesh: meshes[0],
+            material: drawn[0],
+            visible,
+        };
+        if world.get::<MeshRenderer>(e) != Some(&first) {
+            world.insert(e, first);
+        }
+        if world.get::<FromModel>(e).is_none() {
+            world.insert(e, FromModel);
+            if world.get::<GlobalTransform>(e).is_none() {
+                world.insert(e, GlobalTransform::IDENTITY);
+            }
+        }
+        if world.get::<Split>(e).is_none() {
+            world.insert(e, Split);
+        }
+        // The further primitives: a derived child each, kept or made, in the mesh's order.
+        let mut have: Vec<(u32, Entity)> = world
+            .children(e)
+            .filter_map(|c| world.get::<ModelPart>(c).map(|p| (p.0, c)))
+            .collect();
+        for i in 1..n {
+            let renderer = MeshRenderer {
+                mesh: meshes[i],
+                material: drawn[i],
+                visible,
+            };
+            match have.iter().position(|&(k, _)| k as usize == i) {
+                Some(at) => {
+                    let (_, part) = have.swap_remove(at);
+                    if world.get::<MeshRenderer>(part) != Some(&renderer) {
+                        world.insert(part, renderer);
+                    }
+                }
+                None => {
+                    let part = world.spawn((
+                        Derived,
+                        ModelPart(i as u32),
+                        Transform::IDENTITY,
+                        GlobalTransform::IDENTITY,
+                        renderer,
+                    ));
+                    let _ = world.set_parent(part, Some(e));
+                }
+            }
+        }
+        for (_, part) in have {
+            world.despawn(part);
+        }
+        !stale
     }
 }
 

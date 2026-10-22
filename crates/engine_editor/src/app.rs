@@ -1705,6 +1705,9 @@ struct Editor {
     message: Option<(String, Instant)>,
     rows: Vec<Row>,
     scene_ids: Option<QueryState<(Entity, &'static SceneId)>>,
+    /// The entities the engine made for others (a model's further materials, ADR 0115):
+    /// picks on them name their scene entity.
+    derived: Option<QueryState<Entity, engine_ecs::With<engine_runtime::Derived>>>,
     frames: u64,
     since: Instant,
     fps: f64,
@@ -1825,6 +1828,18 @@ fn nearest_instance(world: &World, e: Entity) -> Option<(PrefabInstance, Option<
             return world
                 .get::<PrefabInstance>(a)
                 .map(|&instance| (instance, Some(part.local)));
+        }
+        at = world.parent(a);
+    }
+    None
+}
+
+/// The scene entity derived entity `e` was made for: its nearest ancestor with a scene id.
+fn scene_owner(world: &World, e: Entity) -> Option<Entity> {
+    let mut at = world.parent(e);
+    while let Some(a) = at {
+        if world.get::<SceneId>(a).is_some() {
+            return Some(a);
         }
         at = world.parent(a);
     }
@@ -2181,6 +2196,7 @@ impl Editor {
             message: None,
             rows: Vec::new(),
             scene_ids: None,
+            derived: None,
             frames: 0,
             since: Instant::now(),
             fps: 0.0,
@@ -2295,6 +2311,7 @@ impl Editor {
 
     /// The scene's entities in tree order, under open rows only.
     fn collect_rows(&mut self, world: &mut World) {
+        self.derived.get_or_insert_with(|| QueryState::new(world));
         // The roots by their order ([`RootOrder`]); those without one (a scene of format
         // 2, roots made by code) get one after the rest in spawn order, what the tree
         // showed, kept by the next save.
@@ -4437,7 +4454,20 @@ impl Editor {
                 }
             }
         }
+        // A model's further materials (ADR 0115): the model, once, where it is nearest.
+        if let Some(q) = self.derived.as_mut() {
+            for e in q.iter_readonly(world) {
+                if let Some(slot) = slot_of(e)
+                    && let Ok(i) = order.binary_search_by_key(&slot, |&(s, _)| s)
+                    && let Some(owner) = scene_owner(world, e)
+                {
+                    found.push((order[i].1, owner));
+                }
+            }
+        }
         found.sort_unstable_by_key(|&(k, _)| k);
+        let mut seen = HashSet::new();
+        found.retain(|&(_, e)| seen.insert(e));
         found.into_iter().map(|(_, e)| e).collect()
     }
 
@@ -4764,9 +4794,17 @@ impl Editor {
         };
         let entity = instance.and_then(|slot| {
             let q = self.scene_ids.as_mut()?;
-            q.iter_readonly(world)
+            let found = q
+                .iter_readonly(world)
                 .map(|(e, _)| e)
-                .find(|&e| slot_of(e) == Some(slot))
+                .find(|&e| slot_of(e) == Some(slot));
+            // A model's further material (ADR 0115): the model.
+            found.or_else(|| {
+                let q = self.derived.as_mut()?;
+                q.iter_readonly(world)
+                    .find(|&e| slot_of(e) == Some(slot))
+                    .and_then(|e| scene_owner(world, e))
+            })
         });
         self.hovered = Some((request, entity));
         if let Some((click, toggle, from)) = self.pending_click
@@ -8350,7 +8388,7 @@ impl Editor {
             (DropTarget::View, K::Model) => match (drag.placed, self.model_plan(&mut drag)) {
                 (Some(placed), Ok(plan)) => {
                     self.show(world, placed.root);
-                    self.say(placed_message(&name, &plan));
+                    self.say(placed_message(&name));
                 }
                 (_, Err(why)) => self.say(why),
                 (None, Ok(_)) => {}
@@ -8444,6 +8482,9 @@ impl Editor {
             if let Some(model) = node.model {
                 world.insert(e, model);
             }
+            if !node.slots.is_empty() {
+                world.insert(e, engine_app::MaterialSlots(node.slots.clone()));
+            }
             match (above, order) {
                 (Some(p), _) => {
                     let _ = world.set_parent(e, Some(p));
@@ -8492,7 +8533,7 @@ impl Editor {
         let root = self.spawn_plan(world, &plan, parent, at);
         self.history.commit(world);
         self.show(world, root);
-        self.say(placed_message(&drag.name, &plan));
+        self.say(placed_message(&drag.name));
     }
 
     /// The project's prefabs, found through its asset database.
@@ -11631,14 +11672,9 @@ struct FoundAsset {
     matched: (u32, u32),
 }
 
-/// What placing model file `name` says: its meshes of several materials, which draw with
-/// their first.
-fn placed_message(name: &str, plan: &ModelPlan) -> String {
-    if plan.mixed.is_empty() {
-        format!("Placed {name}")
-    } else {
-        format!("Placed {name}: {}", plan.mixed.join("; "))
-    }
+/// What placing model file `name` says.
+fn placed_message(name: &str) -> String {
+    format!("Placed {name}")
 }
 
 /// What an inspector's asset field `field` holding `asset` shows a preview of: a model's
@@ -12739,6 +12775,68 @@ mod tests {
         ed.run(&mut world, ed.ids.undo);
         assert_eq!(world.get::<Transform>(e).unwrap().translation, Vec3::ZERO);
         assert_eq!(world.get::<Mover>(e).unwrap().gait, Gait::Walk);
+    }
+
+    #[test]
+    fn a_models_derived_parts_are_not_the_scenes() {
+        let mut world = World::new();
+        let lamp = world.spawn((
+            SceneId::new(),
+            Name::new("Lamp"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            RootOrder(RootOrder::STEP),
+        ));
+        // What the player makes for a model's further material (ADR 0115).
+        let part = world.spawn((
+            engine_runtime::Derived,
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        world.set_parent(part, Some(lamp)).unwrap();
+        let mut ed = Editor::new(
+            [1280, 720],
+            std::env::temp_dir(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        // A pick on the part names the lamp; so does a box over it.
+        let request = PickRequest {
+            x: 1,
+            y: 1,
+            transparent: false,
+        };
+        ed.picked = Some((request, 0, Some(7)));
+        ed.resolve_pick(&world, |e| (e == part).then_some(7));
+        assert_eq!(ed.hovered, Some((request, Some(lamp))));
+        let boxed = ed.entities_in(&world, &[7, 3], |e| {
+            if e == part {
+                Some(7)
+            } else if e == lamp {
+                Some(3)
+            } else {
+                None
+            }
+        });
+        assert_eq!(boxed, [lamp], "the lamp once");
+        // Duplicated: the copy has no part of its own (the player makes it), and the part
+        // no scene id.
+        ed.select_only(lamp);
+        ed.run(&mut world, ed.ids.duplicate);
+        let copy = ed.active().unwrap();
+        assert_ne!(copy, lamp);
+        assert_eq!(world.children(copy).count(), 0);
+        assert!(world.get::<SceneId>(part).is_none());
+        // Deleted and undone: the lamp back alone, the part never recorded.
+        ed.select_only(lamp);
+        ed.run(&mut world, ed.ids.delete);
+        assert!(!world.contains(part));
+        ed.run(&mut world, ed.ids.undo);
+        let back = engine_scene::find_named(&mut world, "Lamp").unwrap();
+        assert_eq!(world.children(back).count(), 0);
     }
 
     #[test]

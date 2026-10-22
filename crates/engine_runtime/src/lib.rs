@@ -56,7 +56,7 @@ mod timing;
 pub use activity::{ActivityEpoch, ActivityPropagation, Disabled, Inactive, is_inactive};
 pub use camera::{Camera, CameraView, MainCamera, look_rotation};
 pub use engine_physics::ecs::FixedStep;
-pub use extract::{ExtractStats, MeshRenderer, RenderExtract, SceneSink};
+pub use extract::{Derived, ExtractStats, MeshRenderer, RenderExtract, SceneSink};
 pub use lights::{LightExtract, PointLight, SpotLight, Sun};
 pub use probes::{GiExtract, GiVolume, ProbeExtract, ProbeSink, ReflectionProbe};
 pub use runtime::{Driven, FrameStages, Runtime};

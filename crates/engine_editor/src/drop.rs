@@ -22,8 +22,6 @@ pub(crate) struct ModelPlan {
     pub(crate) materials: Vec<String>,
     /// The model's box in the root's space (none without bounds in the file).
     pub(crate) bounds: Option<(Vec3, Vec3)>,
-    /// The meshes of several materials, which draw with their first: what to say.
-    pub(crate) mixed: Vec<String>,
 }
 
 /// An entity of a [`ModelPlan`].
@@ -35,6 +33,9 @@ pub(crate) struct PlannedNode {
     /// Its parent's index in [`ModelPlan::nodes`] (none: the root).
     pub(crate) parent: Option<usize>,
     pub(crate) model: Option<Model>,
+    /// The materials of its mesh's further primitives, for a mesh of several
+    /// (`engine_app::MaterialSlots`, ADR 0115); empty for one of a single material.
+    pub(crate) slots: Vec<AssetRef>,
 }
 
 impl ModelPlan {
@@ -62,12 +63,12 @@ impl ModelPlan {
                 transform: Transform::IDENTITY,
                 parent: None,
                 model: None,
+                slots: Vec::new(),
             }],
             paths: Vec::new(),
             meshes,
             materials,
             bounds: None,
-            mixed: Vec::new(),
         };
         // The scene's nodes under the root, parents first; each node once (a malformed
         // file's cycles are cut).
@@ -85,7 +86,10 @@ impl ModelPlan {
                     .get(m)
                     .is_some_and(|m| !m.primitives.is_empty())
             });
-            let model = mesh.map(|m| plan.model(file, path, outline, m));
+            let (model, slots) = match mesh.map(|m| plan.model(file, path, outline, m)) {
+                Some((model, slots)) => (Some(model), slots),
+                None => (None, Vec::new()),
+            };
             let named = |s: &str| (!s.is_empty()).then(|| s.to_owned());
             let node_name = named(&n.name)
                 .or_else(|| mesh.and_then(|m| named(&outline.meshes[m].name)))
@@ -98,6 +102,7 @@ impl ModelPlan {
                     .with_scale(Vec3::from(n.scale)),
                 parent: Some(parent),
                 model,
+                slots,
             });
             mesh_of.push(mesh);
             for &c in n.children.iter().rev() {
@@ -113,6 +118,7 @@ impl ModelPlan {
             && let Some(node) = plan.nodes.pop()
         {
             plan.nodes[0].model = node.model;
+            plan.nodes[0].slots = node.slots;
             plan.nodes[0].transform.rotation = node.transform.rotation;
             plan.nodes[0].transform.scale = node.transform.scale;
             mesh_of[0] = mesh_of.pop().flatten();
@@ -121,14 +127,20 @@ impl ModelPlan {
         Ok(plan)
     }
 
-    /// The model of mesh `m`: its part, with the first primitive's material (the default
-    /// one without); a mesh of several materials noted in [`ModelPlan::mixed`].
-    fn model(&mut self, file: AssetId, path: &str, outline: &GltfOutline, m: usize) -> Model {
+    /// The model of mesh `m`: its part with the first primitive's material (the default
+    /// one without), and for a mesh of several materials the further primitives' in its
+    /// slots (ADR 0115); a mesh of one material draws whole, without slots.
+    fn model(
+        &mut self,
+        file: AssetId,
+        path: &str,
+        outline: &GltfOutline,
+        m: usize,
+    ) -> (Model, Vec<AssetRef>) {
         let mesh = AssetRef::part(file, &self.meshes[m]);
         self.add_path(mesh, format!("{path}#{}", self.meshes[m]));
         let primitives = &outline.meshes[m].primitives;
-        let first = primitives.first().and_then(|p| p.material);
-        let material = match first.filter(|&k| k < self.materials.len()) {
+        let mut material_of = |k: Option<usize>| match k.filter(|&k| k < self.materials.len()) {
             Some(k) => {
                 let material = AssetRef::part(file, &self.materials[k]);
                 self.add_path(material, format!("{path}#{}", self.materials[k]));
@@ -136,31 +148,19 @@ impl ModelPlan {
             }
             None => builtin::MATERIAL,
         };
-        let mut kinds: Vec<Option<usize>> = Vec::new();
-        for p in primitives {
-            if !kinds.contains(&p.material) {
-                kinds.push(p.material);
-            }
-        }
-        if kinds.len() > 1 {
-            let shown = |s: &str, i: usize, what: &str| {
-                if s.is_empty() {
-                    format!("{what} {i}")
-                } else {
-                    s.to_owned()
-                }
-            };
-            let mesh_name = shown(&outline.meshes[m].name, m, "mesh");
-            let material_name = first.map_or_else(
-                || String::from("the default material"),
-                |k| shown(&outline.materials[k], k, "material"),
-            );
-            self.mixed.push(format!(
-                "{mesh_name} has {} materials and draws with {material_name} alone",
-                kinds.len()
-            ));
-        }
-        Model::new(mesh, material)
+        let first = material_of(primitives.first().and_then(|p| p.material));
+        let several = primitives
+            .iter()
+            .any(|p| Some(p.material) != primitives.first().map(|f| f.material));
+        let slots = if several {
+            primitives[1..]
+                .iter()
+                .map(|p| material_of(p.material))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (Model::new(mesh, first), slots)
     }
 
     fn add_path(&mut self, asset: AssetRef, path: String) {
@@ -318,7 +318,7 @@ mod tests {
             plan.bounds,
             Some((Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 2.0, 1.0)))
         );
-        assert!(plan.mixed.is_empty());
+        assert!(plan.nodes.iter().all(|n| n.slots.is_empty()));
     }
 
     #[test]
@@ -354,8 +354,10 @@ mod tests {
             builtin::MATERIAL,
             "no material: the default one"
         );
-        assert_eq!(plan.mixed.len(), 1, "{:?}", plan.mixed);
-        assert!(plan.mixed[0].contains("2 materials"), "{}", plan.mixed[0]);
+        // The seat's mesh of two materials: the second in its slot (ADR 0115); the leg's
+        // of one, none.
+        assert_eq!(plan.nodes[3].slots, [AssetRef::part(file(), "#1")]);
+        assert!(plan.nodes[2].slots.is_empty());
         // The leg's box a meter lower.
         let (lo, hi) = plan.bounds.unwrap();
         assert_eq!(lo.y, -1.0);

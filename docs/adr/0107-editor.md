@@ -1307,7 +1307,8 @@ so not SQLite. The editor opens it at its start and follows the folder.
   needs it.
 - **Left:**
   - meshes of several materials draw with their first: per-primitive parts or material
-    slots on `Model` is a format question, put to the team;
+    slots on `Model` is a format question, put to the team (the team chose slots,
+    2026-10-22: ADR 0115);
   - live material previews while hovering;
   - aligning to the surface's normal;
   - scenes dropped as instances (prefabs).
