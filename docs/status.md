@@ -362,7 +362,7 @@ Last updated: 2026-10-22.
     - Ctrl+O (the palette's scenes, a double click in the dock), Ctrl+N, Ctrl+W (no
       question: unsaved changes kept), Ctrl+Shift+T, Ctrl+Tab; the session keeps the tabs
       and the one shown.
-  - **E5-5b, a prefab in a tab** (#PR, ADR 0107's as-built): "Prefab: Open" and the
+  - **E5-5b, a prefab in a tab** (#322, ADR 0107's as-built): "Prefab: Open" and the
     inspector title's Open open the nearest instance's prefab as a tab, the entity
     picked selected there; Ctrl+S writes it, and the other tabs' instances take it when
     shown again (their text holds only overrides). **E5 is done.**
