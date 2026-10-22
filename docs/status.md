@@ -255,7 +255,7 @@ Last updated: 2026-10-20.
   - **E4-2, the asset browser** (#305): the FileSystem dock lists the project's folders and
     each folder's files from the database; `#` in the palette finds assets by path, a kind
     narrowing it (`#model:crate`), Enter showing it in the dock.
-  - **E4-3, drag and drop from the dock** (#PR):
+  - **E4-3, drag and drop from the dock** (#306):
     - a model rests on the surface under the pointer while it is dragged over the view (an
       undo step, the surface pick leaving it out, Escape takes it back), or goes under a
       tree row, or becomes a root;
