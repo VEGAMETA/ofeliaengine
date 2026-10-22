@@ -255,8 +255,20 @@ Last updated: 2026-10-20.
   - **E4-2, the asset browser** (#305): the FileSystem dock lists the project's folders and
     each folder's files from the database; `#` in the palette finds assets by path, a kind
     narrowing it (`#model:crate`), Enter showing it in the dock.
-  - **Next:** E4-3, drag and drop from the dock: a model into the viewport (on the surface
-    under the cursor) or the tree, a material onto an object.
+  - **E4-3, drag and drop from the dock** (#306):
+    - a model rests on the surface under the pointer while it is dragged over the view (an
+      undo step, the surface pick leaving it out, Escape takes it back), or goes under a
+      tree row, or becomes a root;
+    - a material file goes onto an object or a row, and any asset onto an inspector asset
+      field;
+    - the model's entities come from its glTF's outline (`engine_assets::GltfOutline`, the
+      JSON alone).
+  - **Asked (2026-10-22):** meshes of several materials draw with their first. Two ways
+    out: per-primitive parts, an entity each; or material slots on `Model`, one entity per
+    mesh, as in Unity and Godot.
+  - **Next:** E4-4, the player's assets loaded in the background: glTF import, texture
+    decoding and mip levels off the frame's thread, uploads within a budget a frame
+    (today a large model stalls the frame where it first shows). Then E4-5, thumbnails.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
@@ -407,8 +419,10 @@ Last updated: 2026-10-20.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner:** none (2026-10-16: the virtual shadow pages stay off
-  by default on discrete GPUs; the monitor was lent for exclusive full screen, see §6).
+- **Questions open with the owner:** meshes of several materials (2026-10-22, E4-3):
+  per-primitive parts or material slots on `Model` (§0, E4). Earlier ones are settled
+  (2026-10-16: the virtual shadow pages stay off by default on discrete GPUs; the monitor
+  was lent for exclusive full screen, see §6).
 - **Agents** (team decision, 2026-10-20): at most 2 at a time, when there is a need, for
   tasks that need no full test runs (research notes, surveys, drafts). Gates and merges
   stay the coordinator's (§2).

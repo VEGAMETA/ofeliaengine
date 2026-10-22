@@ -9,7 +9,9 @@
 //! (`panorama`). Material files (`*.material.ron`) set a material type's parameters and
 //! replace a scene's glTF materials (`material_file`, ADR 0092); glTF's unlit, clear coat
 //! and sheen become materials of the engine's built-in types (`gltf_models`); PSO records
-//! (`pso_record`) let a cook compile only the entry points a game draws.
+//! (`pso_record`) let a cook compile only the entry points a game draws. A glTF's outline
+//! (its nodes, meshes and materials, from its JSON alone) is what the editor makes a
+//! dropped model's entities from ([`GltfOutline`]).
 
 pub mod animation;
 pub mod colliders;
@@ -17,6 +19,7 @@ pub mod cook;
 mod ddc;
 mod gltf_import;
 pub mod gltf_models;
+mod gltf_outline;
 pub mod gltf_physics;
 pub mod hdr;
 mod lod;
@@ -48,6 +51,7 @@ pub use gltf_import::{
     SheenData, SkinData, TextureData, TextureSource, TextureWrap, TypedMaterialData, import_gltf,
     read_texture, spawn_scene,
 };
+pub use gltf_outline::{GltfOutline, OutlineMesh, OutlineNode, OutlinePrimitive};
 pub use lod::{Lod, LodSettings, generate_lods};
 pub use texture_compress::{ENCODER, EncodedTexture, TextureFormat, compress, compressed_format};
 pub use texture_import::{Image, ImageError, TextureImage, TextureUsage, build_mips, decode_image};

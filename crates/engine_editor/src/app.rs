@@ -59,8 +59,11 @@ use crate::build::{
 };
 use crate::camera::OrbitCamera;
 use crate::draw::{self, Draw, Landed, Made, ROOM_WALLS, Stage};
+use crate::drop::{ModelPlan, resting_point, snap_along};
 use crate::faces::{self, CornerDrag, Face, FaceDrag, PartCorners};
-use crate::gizmo::{self, COLORS, Change, Gizmo, GizmoDrag, Handle, Mode, Target, ViewProj};
+use crate::gizmo::{
+    self, COLORS, Change, Gizmo, GizmoDrag, Handle, Mode, Target, ViewProj, hit_plane,
+};
 use crate::handles::{Handles, Side, SideDrag};
 use crate::icons;
 use crate::input::{Button, InputCollector};
@@ -69,8 +72,8 @@ use crate::paint::{UiText, paint};
 use crate::session::{self, Base, Document, EditorState, LastRun, Lock, SessionFile, View, Writer};
 use crate::shell::{
     Field, FieldAction, FieldEvent, FileItem, FileKind, MenuEntry, MenuItem, Palette,
-    PaletteAction, PaletteRow, PaletteView, Section, ShellModel, TreeItem, Widget, build,
-    dismissed,
+    PaletteAction, PaletteRow, PaletteView, Section, ShellModel, ShellResponse, TreeItem, Widget,
+    build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
 use crate::transform::{self, KeyTransform};
@@ -1395,6 +1398,8 @@ struct Editor {
     assets_changed: Option<Instant>,
     /// The asset browser (the FileSystem dock, E4-2).
     browser: Browser,
+    /// A file dragged out of the browser (E4-3).
+    asset_drag: Option<AssetDrag>,
     /// Asset paths of a scene the editor loaded, for the player (`sync_assets`).
     pending_assets: AssetPaths,
     history: History,
@@ -1853,6 +1858,7 @@ impl Editor {
             asset_watch: None,
             assets_changed: None,
             browser: Browser::default(),
+            asset_drag: None,
             pending_assets: AssetPaths::new(),
             history: History::new(),
             commands,
@@ -2527,6 +2533,11 @@ impl Editor {
             self.scene_label.push(' ');
             self.scene_label.push_str(icons::ALERT);
         }
+        // The tree's row a dragged file would drop onto.
+        let drop_row = match self.asset_drag.as_ref().map(|d| d.over) {
+            Some(DropTarget::Row(e)) => self.rows.iter().position(|r| r.entity == e),
+            _ => None,
+        };
         // The asset browser's rows.
         let folder_items: Vec<TreeItem<'_>> = self
             .browser
@@ -2674,11 +2685,14 @@ impl Editor {
             pivot: self.pivot.label(),
             add_menu: self.add_open.then_some((&add_items[..], self.add_group)),
             reveal_row,
+            drop_row,
             tree_filter: &self.tree_filter,
             inspector_filter: &self.inspector_filter,
             palette,
-            hint: (self.key_transform.is_some() || self.draw.is_some())
-                .then_some((self.hint.as_str(), hint_at)),
+            hint: (self.key_transform.is_some()
+                || self.draw.is_some()
+                || self.asset_drag.is_some())
+            .then_some((self.hint.as_str(), hint_at)),
         };
         let scale = self.scale.max(0.5);
         let logical = [self.size[0] as f32 / scale, self.size[1] as f32 / scale];
@@ -2845,6 +2859,7 @@ impl Editor {
         if let Some(action) = response.palette {
             self.palette_action(world, action);
         }
+        self.asset_drag_frame(world, &response, game_view);
         // Escape during a drag puts the value back as it was.
         if self.ui.input().keys.contains(&UiKey::Escape)
             && let Some(drag) = self.drag.as_mut()
@@ -3546,7 +3561,11 @@ impl Editor {
             && self.face_edit.as_ref().is_none_or(|f| !f.dragging())
             && self.key_transform.is_none()
             && self.draw.is_none()
-            && self.drag.is_none();
+            && self.drag.is_none()
+            && self
+                .asset_drag
+                .as_ref()
+                .is_none_or(|d| d.kind != engine_scene::AssetKind::Model);
         let cursor = self.input.cursor().map(|[x, y]| Vec2::new(x, y));
         // The pointer's pixel at the view's render size.
         let request = cursor.filter(|_| over && free).map(|at| {
@@ -5383,6 +5402,9 @@ impl Editor {
     /// entities, its resources, the history's place and the selection.
     fn prepare_play(&mut self, world: &mut World, from_here: bool) -> Playing {
         let started = Instant::now();
+        if let Some(mut drag) = self.asset_drag.take() {
+            self.take_back_placed(world, &mut drag);
+        }
         self.key_transform = None;
         self.draw = None;
         self.face_edit = None;
@@ -6793,6 +6815,409 @@ impl Editor {
         self.say(format!("{path} ({})", kind.name()));
     }
 
+    /// A file dragged out of the browser (ADR 0107 E4-3): started by a file of the listing
+    /// held and moved; over the view a model rests on the surface under the pointer, in an
+    /// undo step; the release drops it where the pointer is, Escape takes it back. The
+    /// keys are the drag's while it lasts.
+    fn asset_drag_frame(&mut self, world: &mut World, response: &ShellResponse, game_view: bool) {
+        if self.asset_drag.is_none()
+            && self.draw.is_none()
+            && self.key_transform.is_none()
+            && let Some(l) = response.file_drag.and_then(|i| self.browser.listing.get(i))
+            && let Some(id) = l.asset
+            && let Some(entry) = self.asset_db.get(id)
+        {
+            self.asset_drag = Some(AssetDrag {
+                asset: id,
+                kind: entry.kind,
+                path: entry.path.clone(),
+                name: l.name.clone(),
+                plan: None,
+                placed: None,
+                selection: self.selection.clone(),
+                over: DropTarget::Nowhere,
+            });
+            self.browser.selected = Some(id);
+            // The surface under the pointer is asked for anew.
+            self.surfaced = None;
+        }
+        let Some(mut drag) = self.asset_drag.take() else {
+            return;
+        };
+        let escape = self.ui.input().keys.contains(&UiKey::Escape);
+        self.input.consume_keys();
+        let released = self.input.released(Button::Left);
+        let scale = self.scale.max(0.5);
+        let cursor = self.input.cursor().map(|[x, y]| Vec2::new(x, y));
+        let over_view = !game_view
+            && cursor.is_some_and(|at| {
+                self.ui.rect_of(response.viewport).is_some_and(|r| {
+                    let (x, y) = (at.x / scale, at.y / scale);
+                    x >= r.pos[0]
+                        && y >= r.pos[1]
+                        && x < r.pos[0] + r.size[0]
+                        && y < r.pos[1] + r.size[1]
+                })
+            });
+        drag.over = match response.tree_under.and_then(|i| self.rows.get(i)) {
+            Some(row) => DropTarget::Row(row.entity),
+            None if response.tree_hovered => DropTarget::Tree,
+            None => match response.hovered_field {
+                Some((section, field)) => DropTarget::Field(section, field),
+                None if over_view => DropTarget::View,
+                None => DropTarget::Nowhere,
+            },
+        };
+        // The button let go outside the window: no drop.
+        if escape || !(released || self.input.held(Button::Left)) {
+            self.take_back_placed(world, &mut drag);
+            return;
+        }
+        match (drag.kind, drag.over, cursor) {
+            (engine_scene::AssetKind::Model, DropTarget::View, Some(at)) => {
+                self.place_dragged(world, &mut drag, at);
+            }
+            _ => self.take_back_placed(world, &mut drag),
+        }
+        if released {
+            self.drop_asset(world, drag);
+            return;
+        }
+        self.hint = self.drag_hint(world, &drag);
+        self.asset_drag = Some(drag);
+    }
+
+    /// The dragged model where the pointer is in the view: placed the first time, then
+    /// moved, resting on the surface under the pointer (asked for every frame, found a few
+    /// frames on), or where nothing is, on the ground's plane or ten meters ahead. Its
+    /// place along the surface snaps to the grid with snapping (Shift inverts it).
+    fn place_dragged(&mut self, world: &mut World, drag: &mut AssetDrag, at: Vec2) {
+        let Some(rect) = self.view_rect else {
+            return;
+        };
+        let Ok(plan) = self.model_plan(drag) else {
+            return;
+        };
+        let view = ViewProj::new(&self.orbit, rect);
+        let local = (at - Vec2::new(rect[0] as f32, rect[1] as f32)).max(Vec2::ZERO);
+        self.surface_request = Some(SurfaceRequest {
+            x: (local.x * self.view_scale[0]) as u32,
+            y: (local.y * self.view_scale[1]) as u32,
+            transparent: self.pick_transparent,
+        });
+        let (point, normal) = match self.surfaced.and_then(|r| r.hit) {
+            Some(hit) => (hit.point, hit.normal),
+            None => {
+                let ray = view.ray(at);
+                let ground = hit_plane(ray, Vec3::ZERO, Vec3::Y)
+                    .filter(|p| p.distance(ray.0) < 200.0)
+                    .unwrap_or(ray.0 + ray.1 * 10.0);
+                (ground, Vec3::Y)
+            }
+        };
+        let point = if self.snapping.on == self.input.shift() {
+            point
+        } else {
+            snap_along(point, normal, self.snapping.position as f32)
+        };
+        let to = resting_point(point, normal, plan.bounds);
+        match drag.placed.filter(|p| world.contains(p.root)) {
+            Some(p) => {
+                if world
+                    .get::<Transform>(p.root)
+                    .is_some_and(|t| t.translation != to)
+                {
+                    self.history
+                        .begin(&format!("Place {}", drag.name), Some(p.merge));
+                    self.history.touch(world, p.root);
+                    if let Some(t) = world.get_mut::<Transform>(p.root) {
+                        t.translation = to;
+                    }
+                    self.history.commit(world);
+                }
+            }
+            None => {
+                self.gestures += 1;
+                let merge = self.gestures;
+                self.history
+                    .begin(&format!("Place {}", drag.name), Some(merge));
+                let root = self.spawn_plan(world, &plan, None, to);
+                self.history.commit(world);
+                // Selected: surface picks leave it out, so it never lands on itself.
+                self.select_only(root);
+                drag.placed = Some(Placed { merge, root });
+            }
+        }
+    }
+
+    /// The dragged model placed in the view taken back, the selection as it was.
+    fn take_back_placed(&mut self, world: &mut World, drag: &mut AssetDrag) {
+        let Some(placed) = drag.placed.take() else {
+            return;
+        };
+        self.history.revert(world, placed.merge);
+        let before = self.active();
+        self.selection = drag
+            .selection
+            .iter()
+            .copied()
+            .filter(|&e| world.contains(e))
+            .collect();
+        self.anchor = self.selection.last().copied();
+        self.selection_changed(before);
+    }
+
+    /// The release: the file dropped where the pointer is.
+    fn drop_asset(&mut self, world: &mut World, mut drag: AssetDrag) {
+        use engine_scene::AssetKind as K;
+        let name = drag.name.clone();
+        match (drag.over, drag.kind) {
+            (DropTarget::View, K::Model) => match (drag.placed, self.model_plan(&mut drag)) {
+                (Some(placed), Ok(plan)) => {
+                    self.show(world, placed.root);
+                    self.say(placed_message(&name, &plan));
+                }
+                (_, Err(why)) => self.say(why),
+                (None, Ok(_)) => {}
+            },
+            (DropTarget::View, K::Material) => match self.hovered.and_then(|(_, e)| e) {
+                Some(e) => self.give_material(world, e, &drag),
+                None => self.say(format!("Drop {name} onto an object")),
+            },
+            (DropTarget::Row(e), K::Model) => self.add_model(world, &mut drag, Some(e)),
+            (DropTarget::Tree, K::Model) => self.add_model(world, &mut drag, None),
+            (DropTarget::Row(e), K::Material) => self.give_material(world, e, &drag),
+            (DropTarget::Field(section, field), _) => {
+                self.drop_on_field(world, section, field, &mut drag);
+            }
+            (DropTarget::View | DropTarget::Row(_) | DropTarget::Tree, _) => self.say(format!(
+                "{name}: models and materials go into the scene; other assets onto fields"
+            )),
+            (DropTarget::Nowhere, _) => {}
+        }
+    }
+
+    /// A dragged model's entities, read from its file the first time.
+    fn model_plan(&self, drag: &mut AssetDrag) -> Result<Rc<ModelPlan>, String> {
+        if drag.plan.is_none() {
+            let stem = Path::new(&drag.name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&drag.name);
+            let plan = engine_assets::GltfOutline::read(&self.root.join(&drag.path))
+                .map_err(|e| format!("{}: {e}", drag.name))
+                .and_then(|outline| ModelPlan::new(drag.asset, &drag.path, stem, &outline))
+                .map(Rc::new);
+            drag.plan = Some(plan);
+        }
+        drag.plan
+            .clone()
+            .unwrap_or_else(|| Err(String::from("no plan")))
+    }
+
+    /// The model `plan` makes, in the open history step: its root under `parent` (a new
+    /// root after the others for none) at `at` in its parent's space. The parts' paths go
+    /// to the player and the inspector. Returns the root.
+    fn spawn_plan(
+        &mut self,
+        world: &mut World,
+        plan: &ModelPlan,
+        parent: Option<Entity>,
+        at: Vec3,
+    ) -> Entity {
+        let mut made: Vec<Entity> = Vec::with_capacity(plan.nodes.len());
+        for node in &plan.nodes {
+            let mut transform = node.transform;
+            let (name, above) = match node.parent {
+                Some(i) => (node.name.clone(), Some(made[i])),
+                None => {
+                    transform.translation = at;
+                    (self.sibling_name(world, parent, &node.name, None), parent)
+                }
+            };
+            let order = above.is_none().then(|| self.last_root_order(world));
+            let e = world.spawn((
+                SceneId::new(),
+                Name::new(&name),
+                transform,
+                GlobalTransform::default(),
+            ));
+            if let Some(model) = node.model {
+                world.insert(e, model);
+            }
+            match (above, order) {
+                (Some(p), _) => {
+                    let _ = world.set_parent(e, Some(p));
+                }
+                (None, Some(order)) => {
+                    world.insert(e, RootOrder(order));
+                }
+                (None, None) => {}
+            }
+            self.history.touch_new(world, e);
+            made.push(e);
+        }
+        if let Some(p) = parent {
+            self.collapsed.remove(&p);
+        }
+        let mut paths = AssetPaths::new();
+        for (asset, path) in &plan.paths {
+            paths.insert(*asset, path.clone());
+        }
+        self.assets.extend(&paths);
+        self.pending_assets.extend(&paths);
+        made[0]
+    }
+
+    /// A dragged model dropped onto the tree: under entity `parent` at its origin, or as a
+    /// root where the camera looks (on the grid), as one undo step, selected.
+    fn add_model(&mut self, world: &mut World, drag: &mut AssetDrag, parent: Option<Entity>) {
+        let plan = match self.model_plan(drag) {
+            Ok(plan) => plan,
+            Err(why) => {
+                self.say(why);
+                return;
+            }
+        };
+        let at = match parent {
+            Some(_) => Vec3::ZERO,
+            None => {
+                let step = self.snapping.position as f32;
+                (self.orbit.target / step).round() * step
+            }
+        };
+        self.history.begin(&format!("Add {}", drag.name), None);
+        if let Some(p) = parent {
+            self.history.touch(world, p);
+        }
+        let root = self.spawn_plan(world, &plan, parent, at);
+        self.history.commit(world);
+        self.show(world, root);
+        self.say(placed_message(&drag.name, &plan));
+    }
+
+    /// A dragged material file given to entity `e`'s model, as one undo step.
+    fn give_material(&mut self, world: &mut World, e: Entity, drag: &AssetDrag) {
+        let target = world
+            .get::<Name>(e)
+            .map_or_else(|| String::from("The entity"), |n| n.as_str().to_owned());
+        if world.get::<Model>(e).is_none() {
+            self.say(format!("{target} has no model to take {}", drag.name));
+            return;
+        }
+        self.history
+            .begin(&format!("Give {target} {}", drag.name), None);
+        self.history.touch(world, e);
+        if let Some(model) = world.get_mut::<Model>(e) {
+            model.material = AssetRef::file(drag.asset);
+        }
+        self.history.commit(world);
+        self.say(format!("{} → {target}", drag.name));
+    }
+
+    /// A dragged file dropped onto inspector field `field` of section `section`: an asset
+    /// field takes it, on every selected entity with the field's component, as one undo
+    /// step. A model's mesh field takes a model file of one mesh; its material field a
+    /// material file, or a model file of one material.
+    fn drop_on_field(
+        &mut self,
+        world: &mut World,
+        section: usize,
+        field: usize,
+        drag: &mut AssetDrag,
+    ) {
+        use engine_scene::AssetKind as K;
+        let Some((p, component)) = self.shown_property(section, field) else {
+            return;
+        };
+        let path = self.path_of(&p, component);
+        if !engine_scene::text::is_asset_ref(p.ty) {
+            self.say(format!("{path} takes no asset"));
+            return;
+        }
+        let file = drag.name.clone();
+        let one = |parts: &[String], what: &str| -> Result<String, String> {
+            match parts {
+                [one] => Ok(one.clone()),
+                _ => Err(format!(
+                    "{file} has {} {what}s: drop it into the view or onto the tree",
+                    parts.len()
+                )),
+            }
+        };
+        let asset = match (path.as_str(), drag.kind) {
+            ("Model.mesh", K::Model) | ("Model.material", K::Model) => {
+                let mesh = path == "Model.mesh";
+                let part = self.model_plan(drag).and_then(|plan| {
+                    if mesh {
+                        one(&plan.meshes, "mesh")
+                    } else {
+                        one(&plan.materials, "material")
+                    }
+                });
+                match part {
+                    Ok(part) => {
+                        let asset = AssetRef::part(drag.asset, &part);
+                        let mut paths = AssetPaths::new();
+                        paths.insert(asset, format!("{}#{part}", drag.path));
+                        self.assets.extend(&paths);
+                        self.pending_assets.extend(&paths);
+                        asset
+                    }
+                    Err(why) => {
+                        self.say(why);
+                        return;
+                    }
+                }
+            }
+            ("Model.mesh", _) => {
+                self.say(format!("{path} takes a model's mesh, not {}", drag.name));
+                return;
+            }
+            ("Model.material", K::Material) => AssetRef::file(drag.asset),
+            ("Model.material", _) => {
+                self.say(format!("{path} takes a material, not {}", drag.name));
+                return;
+            }
+            _ => AssetRef::file(drag.asset),
+        };
+        let mut value = String::new();
+        asset.write(Some(&self.assets), &mut value);
+        let targets = self.targets(world, p.component);
+        match self.set_on(world, &targets, &path, &value) {
+            Ok(()) => self.say(format!("{} → {path}", drag.name)),
+            Err(reason) => self.say(format!("{path}: {reason}")),
+        }
+    }
+
+    /// What a release would do now, by the pointer.
+    fn drag_hint(&self, world: &World, drag: &AssetDrag) -> String {
+        use engine_scene::AssetKind as K;
+        let name = &drag.name;
+        let named = |e: Entity| world.get::<Name>(e).map_or("the entity", Name::as_str);
+        match (drag.over, drag.kind) {
+            (DropTarget::View, K::Model) => match &drag.plan {
+                Some(Err(why)) => why.clone(),
+                _ => format!("{name}: let go to place it  ·  Esc takes it back"),
+            },
+            (DropTarget::View, K::Material) => match self.hovered.and_then(|(_, e)| e) {
+                Some(e) if world.get::<Model>(e).is_some() => format!("{name} → {}", named(e)),
+                Some(e) => format!("{} has no model to take {name}", named(e)),
+                None => format!("{name}: onto an object"),
+            },
+            (DropTarget::Row(e), K::Model) => {
+                format!("{name}: let go to add it under {}", named(e))
+            }
+            (DropTarget::Row(e), K::Material) => format!("{name} → {}", named(e)),
+            (DropTarget::Tree, K::Model) => format!("{name}: let go to add it to the scene"),
+            (DropTarget::Field(section, field), _) => match self.shown_property(section, field) {
+                Some((p, component)) => format!("{name} → {}", self.path_of(&p, component)),
+                None => name.clone(),
+            },
+            _ => name.clone(),
+        }
+    }
+
     /// Starts the session in the project's `.ofelia/`: takes its lock, then brings back the
     /// scene's unsaved changes from their autosave as the last run left them, at its exit
     /// or its crash, without asking. Returns the asset paths the restored scene named.
@@ -8029,6 +8454,23 @@ impl<G> EditorGame<G> {
         view.screen(p).map(|p| p.to_array())
     }
 
+    /// The middle of where the last frame drew the text `s` (physical pixels), the first
+    /// time it drew it: for tests and tools that point at the editor's panels.
+    pub fn text_at(&self, s: &str) -> Option<[f32; 2]> {
+        let shared = self.shared.borrow();
+        let scale = shared.scale.max(0.5);
+        let frame = shared.ui.last_frame();
+        frame.commands.iter().find_map(|c| match c {
+            engine_ui::DrawCmd::Text { rect, range, .. } if frame.text[range.clone()] == *s => {
+                Some([
+                    (rect.pos[0] + rect.size[0] / 2.0) * scale,
+                    (rect.pos[1] + rect.size[1] / 2.0) * scale,
+                ])
+            }
+            _ => None,
+        })
+    }
+
     /// The navigation mesh's edges the overlay shows now (View: Navigation): for tests.
     pub fn navigation_edges(&self) -> Vec<(Vec3, Vec3, bool)> {
         self.shared.borrow().nav_edges.clone()
@@ -8645,6 +9087,45 @@ struct Listed {
     asset: Option<AssetId>,
 }
 
+/// A file dragged out of the browser (ADR 0107 E4-3): what it is, where a release would
+/// drop it, and a model placed in the view while the pointer is there.
+#[derive(Debug)]
+struct AssetDrag {
+    asset: AssetId,
+    kind: engine_scene::AssetKind,
+    /// Its path under the project's folder, and its file's name.
+    path: String,
+    name: String,
+    /// A model file's entities, read the first time they are needed (or why not).
+    plan: Option<Result<Rc<ModelPlan>, String>>,
+    /// The model where the pointer is in the view, in its undo step.
+    placed: Option<Placed>,
+    /// The selection before the model was placed: back when it is taken back.
+    selection: Vec<Entity>,
+    over: DropTarget,
+}
+
+/// A dragged model placed in the view: its undo step and its root.
+#[derive(Debug, Clone, Copy)]
+struct Placed {
+    merge: u64,
+    root: Entity,
+}
+
+/// Where a dragged file would drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropTarget {
+    Nowhere,
+    /// The viewport: a model on the surface under the pointer, a material onto the object.
+    View,
+    /// A row of the scene tree: a model under its entity, a material onto it.
+    Row(Entity),
+    /// The tree below its rows: a model as a root.
+    Tree,
+    /// An inspector field (section, field): the asset assigned.
+    Field(usize, usize),
+}
+
 /// An asset `#` in the palette found.
 #[derive(Debug, Clone, Copy)]
 struct FoundAsset {
@@ -8652,6 +9133,16 @@ struct FoundAsset {
     score: i32,
     /// Its matched characters: a range of the palette's `highlights`.
     matched: (u32, u32),
+}
+
+/// What placing model file `name` says: its meshes of several materials, which draw with
+/// their first.
+fn placed_message(name: &str, plan: &ModelPlan) -> String {
+    if plan.mixed.is_empty() {
+        format!("Placed {name}")
+    } else {
+        format!("Placed {name}: {}", plan.mixed.join("; "))
+    }
 }
 
 /// The browser's kind of an asset's kind.
@@ -10018,6 +10509,238 @@ mod tests {
         assert_eq!(ed.browser.folder, "props/rocks");
         assert_eq!(ed.browser.selected, Some(rock));
         assert_eq!(ed.asset_db.get(rock).unwrap().path, "props/rocks/rock.png");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A project with a glTF of one node (a crate, a unit box standing on its origin,
+    /// in wood) in `props/`, and a red material file beside it; the editor over it with
+    /// its assets read and `props/` shown, and a box with a model in the scene.
+    fn drop_project(name: &str) -> (PathBuf, World, Editor, Entity) {
+        let dir = folder(name);
+        std::fs::create_dir_all(dir.join("props")).unwrap();
+        let gltf = r#"{
+            "asset": {"version": "2.0"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"name": "Crate", "mesh": 0}],
+            "meshes": [{"name": "Crate", "primitives": [
+                {"attributes": {"POSITION": 0}, "material": 0}]}],
+            "materials": [{"name": "Wood"}],
+            "accessors": [{"componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [-0.5, 0, -0.5], "max": [0.5, 1, 0.5]}]
+        }"#;
+        std::fs::write(dir.join("props/crate.gltf"), gltf).unwrap();
+        let red = engine_app::MaterialFile {
+            base_color: [0.8, 0.1, 0.1, 1.0],
+            ..engine_app::MaterialFile::default()
+        };
+        std::fs::write(dir.join("props/red.material"), red.to_text(AssetId::new())).unwrap();
+        let mut world = World::new();
+        let boxed = world.spawn((
+            SceneId::new(),
+            Name::new("Box"),
+            Transform::from_xyz(0.0, 0.0, -3.0),
+            GlobalTransform::default(),
+            Model::new(builtin::CUBE, builtin::MATERIAL),
+            RootOrder(RootOrder::STEP),
+        ));
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        assert_eq!(ed.open_assets().files, 2);
+        ed.open_folder("props");
+        ed.update(&mut world);
+        (dir, world, ed, boxed)
+    }
+
+    /// The middle of rectangle `r`.
+    fn middle(r: Rect) -> [f32; 2] {
+        [r.pos[0] + r.size[0] / 2.0, r.pos[1] + r.size[1] / 2.0]
+    }
+
+    /// File `name` of the browser's listing pressed and dragged a little, a frame each:
+    /// the drag begins.
+    fn drag_file(ed: &mut Editor, world: &mut World, name: &str) {
+        let at = middle(texts(ed, name)[0]);
+        mouse(ed, at, None);
+        ed.update(world);
+        mouse(ed, at, Some(true));
+        ed.update(world);
+        mouse(ed, [at[0] + 12.0, at[1]], None);
+        ed.update(world);
+        assert!(ed.asset_drag.is_some(), "dragging {name}");
+    }
+
+    /// The viewport's middle (the window's pixels).
+    fn view_middle(ed: &Editor) -> [f32; 2] {
+        let [x, y, w, h] = ed.view_rect.unwrap();
+        [(x + w / 2) as f32, (y + h / 2) as f32]
+    }
+
+    #[test]
+    fn a_model_dragged_into_the_view_rests_on_the_surface_and_drops_as_one_step() {
+        let (dir, mut world, mut ed, boxed) = drop_project("drop-view");
+        let file = ed
+            .browser
+            .listing
+            .iter()
+            .find(|l| l.name == "crate.gltf")
+            .unwrap();
+        let id = file.asset.unwrap();
+        ed.select_only(boxed);
+        ed.snapping.on = true;
+        drag_file(&mut ed, &mut world, "crate.gltf");
+        assert_eq!(ed.browser.selected, Some(id), "the file picked");
+        // Over the view: placed, selected (surface picks leave it out), the surface under
+        // the pointer asked for.
+        let at = view_middle(&ed);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        let placed = engine_scene::find_named(&mut world, "crate").expect("placed");
+        assert_eq!(ed.selection, [placed]);
+        let model = *world.get::<Model>(placed).unwrap();
+        assert_eq!(model.mesh, AssetRef::part(id, "Crate"));
+        assert_eq!(model.material, AssetRef::part(id, "Wood"));
+        assert_eq!(ed.assets.get(model.mesh), Some("props/crate.gltf#Crate"));
+        assert!(ed.surface_request.is_some());
+        // A floor found at y = 1: the crate stands on it, its place on the grid.
+        ed.surfaced = Some(engine_render::pick::SurfaceResult {
+            frame: 1,
+            request: ed.surface_request.unwrap(),
+            hit: Some(hit(Vec3::new(2.33, 1.0, -0.61), Vec3::Y)),
+        });
+        mouse(&mut ed, [at[0] + 1.0, at[1]], None);
+        ed.update(&mut world);
+        let t = world.get::<Transform>(placed).unwrap().translation;
+        assert!((t - Vec3::new(2.3, 1.0, -0.6)).length() < 1e-5, "{t}");
+        assert_eq!(ed.history.steps().count(), 1, "one step while it moves");
+        // Let go: kept, one step, selected; undo takes it away.
+        mouse(&mut ed, [at[0] + 1.0, at[1]], Some(false));
+        ed.update(&mut world);
+        assert!(ed.asset_drag.is_none());
+        assert_eq!(ed.history.steps().count(), 1);
+        assert_eq!(ed.selection, [placed]);
+        ed.history.undo(&mut world);
+        assert!(!world.contains(placed));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn escape_or_leaving_the_view_takes_a_dragged_model_back() {
+        let (dir, mut world, mut ed, boxed) = drop_project("drop-escape");
+        ed.select_only(boxed);
+        drag_file(&mut ed, &mut world, "crate.gltf");
+        let at = view_middle(&ed);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        assert!(engine_scene::find_named(&mut world, "crate").is_some());
+        // Back over the browser: taken back, the selection as it was.
+        let listing = middle(texts(&ed, "red.material")[0]);
+        mouse(&mut ed, listing, None);
+        ed.update(&mut world);
+        assert!(engine_scene::find_named(&mut world, "crate").is_none());
+        assert_eq!(ed.selection, [boxed]);
+        // Over the view again, then Escape: taken back, no step, the drag over.
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        assert!(engine_scene::find_named(&mut world, "crate").is_some());
+        key(&mut ed, ESCAPE.0, ESCAPE.1, true);
+        ed.update(&mut world);
+        key(&mut ed, ESCAPE.0, ESCAPE.1, false);
+        assert!(engine_scene::find_named(&mut world, "crate").is_none());
+        assert!(ed.asset_drag.is_none());
+        assert_eq!(ed.history.steps().count(), 0);
+        assert_eq!(ed.selection, [boxed], "Escape went to the drag alone");
+        // The release that follows drops nothing.
+        mouse(&mut ed, at, Some(false));
+        ed.update(&mut world);
+        assert!(engine_scene::find_named(&mut world, "crate").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_drop_onto_tree_rows_and_inspector_fields() {
+        let (dir, mut world, mut ed, boxed) = drop_project("drop-tree");
+        let id_of = |ed: &Editor, name: &str| {
+            ed.browser
+                .listing
+                .iter()
+                .find(|l| l.name == name)
+                .and_then(|l| l.asset)
+                .unwrap()
+        };
+        let (crate_id, red) = (id_of(&ed, "crate.gltf"), id_of(&ed, "red.material"));
+        // The tree's row of the box (left of the inspector's name field).
+        let row = |ed: &Editor| {
+            let r = texts(ed, "Box")
+                .into_iter()
+                .min_by(|a, b| a.pos[0].total_cmp(&b.pos[0]))
+                .unwrap();
+            middle(r)
+        };
+        // A material onto the row: the box's model takes it, as one step.
+        drag_file(&mut ed, &mut world, "red.material");
+        let r = row(&ed);
+        mouse(&mut ed, r, None);
+        ed.update(&mut world);
+        assert_eq!(ed.asset_drag.as_ref().unwrap().over, DropTarget::Row(boxed));
+        let r = row(&ed);
+        mouse(&mut ed, r, Some(false));
+        ed.update(&mut world);
+        assert_eq!(
+            world.get::<Model>(boxed).unwrap().material,
+            AssetRef::file(red)
+        );
+        assert_eq!(ed.history.steps().count(), 1);
+        // A model onto the row: under the box at its origin, selected.
+        drag_file(&mut ed, &mut world, "crate.gltf");
+        let r = row(&ed);
+        mouse(&mut ed, r, None);
+        ed.update(&mut world);
+        let r = row(&ed);
+        mouse(&mut ed, r, Some(false));
+        ed.update(&mut world);
+        let child = engine_scene::find_named(&mut world, "crate").unwrap();
+        assert_eq!(world.parent(child), Some(boxed));
+        assert_eq!(
+            world.get::<Transform>(child).unwrap().translation,
+            Vec3::ZERO
+        );
+        assert_eq!(ed.selection, [child]);
+        assert_eq!(ed.history.steps().count(), 2);
+        // The box selected: the model file onto its mesh field, the material file onto
+        // its material field.
+        ed.select_only(boxed);
+        ed.update(&mut world);
+        world.get_mut::<Model>(boxed).unwrap().material = builtin::MATERIAL;
+        for (file, field) in [("crate.gltf", "mesh"), ("red.material", "material")] {
+            drag_file(&mut ed, &mut world, file);
+            let at = middle(texts(&ed, field)[0]);
+            mouse(&mut ed, at, None);
+            ed.update(&mut world);
+            assert!(
+                matches!(ed.asset_drag.as_ref().unwrap().over, DropTarget::Field(..)),
+                "over {field}"
+            );
+            mouse(&mut ed, at, Some(false));
+            ed.update(&mut world);
+        }
+        let model = *world.get::<Model>(boxed).unwrap();
+        assert_eq!(model.mesh, AssetRef::part(crate_id, "Crate"));
+        assert_eq!(model.material, AssetRef::file(red));
+        // A material file is no mesh.
+        drag_file(&mut ed, &mut world, "red.material");
+        let at = middle(texts(&ed, "mesh")[0]);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        mouse(&mut ed, at, Some(false));
+        ed.update(&mut world);
+        assert_eq!(world.get::<Model>(boxed).unwrap().mesh, model.mesh);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

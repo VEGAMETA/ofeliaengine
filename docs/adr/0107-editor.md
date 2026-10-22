@@ -1218,3 +1218,35 @@ so not SQLite. The editor opens it at its start and follows the folder.
 - **Left for E4's next steps:** drag and drop from the dock (models into the viewport and
   the tree, materials onto objects), thumbnails, import settings in the inspector,
   renames inside the editor, references.
+
+## As built (E4-3, 2026-10-22): drag and drop from the dock
+
+- **Starting a drag:** a file of the listing held and moved 4 px. The hint by the pointer
+  says what letting go does, the tree row it would land on is outlined, and Escape ends
+  it. The keys are the drag's while it lasts.
+- **A model into the viewport:**
+  - **The plan:** its entities are planned from the file's outline (`GltfOutline`:
+    nodes, meshes, primitives' materials and bounds, from the JSON alone; a `.glb`'s head
+    and JSON chunk only).
+  - **The preview:** the entities are placed while the pointer is over the view, in one
+    undo step, and selected, so the surface pick under the pointer leaves them out.
+  - **The place:** the model's box rests on the surface found, by the normal. With no
+    surface, it rests on the plane y = 0 within 200 m, else 10 m ahead. With snapping,
+    it snaps along the surface.
+  - Leaving the view or Escape reverts the step and puts the selection back.
+- **Other drops:**
+  - a model onto a tree row goes under that entity, at its origin, and onto the tree
+    below the rows it becomes a root where the camera looks;
+  - a material file onto an object (the hover pick) or a row is given to its model;
+  - any asset onto an inspector asset field is set through the fields' path, on every
+    selected entity, with `Model.mesh` and `Model.material` checked for what fits.
+- **Names:** parts are named by their names when unique, else `#i`. A file of one node is
+  one entity named after the file. Unnamed nodes take their mesh's name.
+- **Measured:** nothing; reading an outline is one small file read when the drag first
+  needs it.
+- **Left:**
+  - meshes of several materials draw with their first: per-primitive parts or material
+    slots on `Model` is a format question, put to the team;
+  - live material previews while hovering;
+  - aligning to the surface's normal;
+  - scenes dropped as instances (prefabs).
