@@ -375,7 +375,7 @@ Last updated: 2026-10-22.
     `engine_log::LogReader` reads the ring since its last read without locks or
     allocation; the panel (Ctrl+J, its tab) folds repeated messages with a count, marks
     each Play, filters by level and text, follows the newest; its tab counts the errors.
-  - **E6-2, errors next to their causes** (#PR, ADR 0107's as-built): a row's text names
+  - **E6-2, errors next to their causes** (#326, ADR 0107's as-built): a row's text names
     its cause (an id, `path:line[:column]`, a file); a click selects the entity, shows the
     asset in the dock or opens the line in VS Code; a failed build's errors are rows.
   - **Next:** E6-3, Tasks (the background work with its progress); then History, the
