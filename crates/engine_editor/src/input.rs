@@ -363,6 +363,11 @@ impl InputCollector {
         self.wheel
     }
 
+    /// This frame's wheel, taken: neither the panels nor the viewport see it after.
+    pub fn take_wheel(&mut self) -> f32 {
+        core::mem::take(&mut self.wheel)
+    }
+
     /// Starts the next frame: clears this frame's edges, keys, drag and wheel. Held
     /// buttons, modifiers and the cursor carry over. The key list keeps its storage.
     pub fn next_frame(&mut self) {

@@ -76,6 +76,7 @@ use crate::shell::{
     build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
+use crate::thumbnails::{self, Thumbnails};
 use crate::transform::{self, KeyTransform};
 use crate::undo::{PlayChange, PlayMark, WorldSnapshot};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
@@ -458,7 +459,7 @@ pub fn editor<G: Game>(
         .and_then(|text| engine_scene::scene_header(&text).ok())
         .and_then(|(_, id)| id)
         .unwrap_or_else(AssetId::new);
-    let editor = Editor::new(
+    let mut editor = Editor::new(
         size,
         root,
         scene_path,
@@ -490,6 +491,16 @@ pub fn editor<G: Game>(
         settings.frames_in_flight,
     )?;
     let outliner = Outliner::new(setup.device, setup.bindless, output.format, output.white)?;
+    // The thumbnails' atlas (ADR 0112): its pixels uploaded once the first frame records.
+    let atlas = engine_render::texture::GpuTexture::new(
+        setup.device,
+        setup.allocator,
+        setup.bindless,
+        engine_rhi::ash::vk::Format::R8G8B8A8_SRGB,
+        thumbnails::ATLAS,
+        thumbnails::ATLAS,
+    )?;
+    editor.thumbnails.set_atlas(atlas.sampled_index());
     let shared = Rc::new(RefCell::new(editor));
     // Editing: the world's time stands until Play (ADR 0107 E3), so a scene's tweens,
     // timers and sounds do not change it.
@@ -527,6 +538,7 @@ pub fn editor<G: Game>(
             canvas: Canvas::new(),
             picker,
             outliner,
+            atlas,
         },
     ))
 }
@@ -1400,6 +1412,11 @@ struct Editor {
     browser: Browser,
     /// A file dragged out of the browser (E4-3).
     asset_drag: Option<AssetDrag>,
+    /// The listing's thumbnails (ADR 0112), the side of its tiles' pictures (logical
+    /// pixels), and where its scroll area was last frame: rectangle and scroll.
+    thumbnails: Thumbnails,
+    tile: f32,
+    listing: Option<(engine_ui::Rect, f32)>,
     /// Asset files written anew since the player was told (E4-5): made again.
     changed_assets: Vec<AssetId>,
     /// Asset paths of a scene the editor loaded, for the player (`sync_assets`).
@@ -1817,6 +1834,7 @@ impl Editor {
         });
         let (commands, ids) = commands();
         let (keymap, shortcuts) = keymap(&ids, KeyPreset::default());
+        let thumbnails = Thumbnails::new(&root);
         Ok(Self {
             ui,
             text: UiText::new()?,
@@ -1838,7 +1856,7 @@ impl Editor {
             selection_label: String::new(),
             collapsed: HashSet::new(),
             view_rect: None,
-            root,
+            root: root.clone(),
             scene_path,
             scene_id,
             saved_head: 0,
@@ -1861,6 +1879,9 @@ impl Editor {
             assets_changed: None,
             browser: Browser::default(),
             asset_drag: None,
+            thumbnails,
+            tile: DEFAULT_TILE,
+            listing: None,
             changed_assets: Vec::new(),
             pending_assets: AssetPaths::new(),
             history: History::new(),
@@ -2173,6 +2194,7 @@ impl Editor {
         }
         self.tick_builds(world);
         self.tick_assets();
+        self.thumbnails.begin_frame();
         if let Some(under) = self.under_pointer.take() {
             self.offer_under_pointer(world, under);
         }
@@ -2567,16 +2589,35 @@ impl Editor {
                 off: false,
             })
             .collect();
-        let file_items: Vec<FileItem<'_>> = self
-            .browser
+        // The tiles, the thumbnails of those on screen (by last frame's scroll area).
+        let columns = self
             .listing
-            .iter()
-            .map(|l| FileItem {
+            .map_or(4, |(r, _)| crate::shell::tile_columns(r.size[0], self.tile));
+        let shown = self.listing.map_or(0..columns * 2, |(r, scroll)| {
+            let row = crate::shell::tile_row_height(self.tile);
+            let first = (scroll / row).floor().max(0.0) as usize;
+            let last = ((scroll + r.size[1]) / row).ceil() as usize;
+            first * columns..(last + 1) * columns
+        });
+        let mut file_items: Vec<FileItem<'_>> = Vec::with_capacity(self.browser.listing.len());
+        for (i, l) in self.browser.listing.iter().enumerate() {
+            let thumbnail = match l.asset.and_then(|id| self.asset_db.get(id)) {
+                Some(e) if shown.contains(&i) => {
+                    let key = thumbnails::Key {
+                        bytes: e.size,
+                        modified: e.modified,
+                    };
+                    self.thumbnails.image(e.id, &e.path, e.kind, key)
+                }
+                _ => None,
+            };
+            file_items.push(FileItem {
                 name: &l.name,
                 kind: l.kind,
                 selected: l.asset.is_some() && l.asset == self.browser.selected,
-            })
-            .collect();
+                thumbnail,
+            });
+        }
         // The command palette's results in view.
         let mut palette_rows: Vec<PaletteRow<'_>> = Vec::new();
         if let Some(cp) = &self.command_palette {
@@ -2670,6 +2711,8 @@ impl Editor {
             path: &self.browser.label,
             folders: &folder_items,
             files: &file_items,
+            tile: self.tile,
+            columns,
             bottom_tabs: &[
                 "Output",
                 "Debugger",
@@ -2699,9 +2742,25 @@ impl Editor {
         };
         let scale = self.scale.max(0.5);
         let logical = [self.size[0] as f32 / scale, self.size[1] as f32 / scale];
+        let over_listing = self.listing.is_some_and(|(r, _)| {
+            self.input
+                .cursor()
+                .is_some_and(|[x, y]| r.contains([x / scale, y / scale]))
+        });
+        if over_listing && self.input.ctrl() {
+            let notches = self.input.take_wheel();
+            if notches != 0.0 {
+                let (lo, hi) = TILE_RANGE;
+                self.tile = (self.tile * TILE_NOTCH.powf(notches)).clamp(lo, hi).round();
+            }
+        }
         self.ui.begin_frame(self.input.ui_input(scale), logical);
         let response = build(&mut self.ui, &model, &self.palette);
         self.ui.end_frame(&mut self.text);
+        self.listing = self
+            .ui
+            .rect_of(response.listing)
+            .map(|r| (r, self.ui.scroll_offset(response.listing)));
 
         if let Some(i) = response.tool {
             self.active_tool = i;
@@ -9079,6 +9138,12 @@ fn blockout_key(blockout: &engine_app::Blockout, world: &World) -> BlockoutKey {
 /// file in several steps; a copy of many files comes in a burst).
 const ASSETS_QUIET: Duration = Duration::from_millis(150);
 
+/// The listing's tiles: a picture's side by default and its bounds (logical pixels), and
+/// how much a wheel's notch with Ctrl changes it.
+const DEFAULT_TILE: f32 = 64.0;
+const TILE_RANGE: (f32, f32) = (32.0, 128.0);
+const TILE_NOTCH: f32 = 1.15;
+
 /// The asset browser's state (E4-2).
 #[derive(Debug, Default)]
 struct Browser {
@@ -9521,6 +9586,8 @@ pub struct EditorOverlay {
     picker: Picker,
     /// Outlines the selection in it.
     outliner: Outliner,
+    /// The listing's thumbnails, in cells (ADR 0112).
+    atlas: engine_render::texture::GpuTexture,
 }
 
 impl EditorOverlay {
@@ -9537,6 +9604,8 @@ impl EditorOverlay {
             self.renderer.destroy(setup.allocator);
             self.glyphs
                 .texture_mut()
+                .destroy(setup.device, setup.allocator, setup.bindless, 0);
+            self.atlas
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
             self.picker.destroy(setup.allocator);
         }
@@ -9842,6 +9911,19 @@ impl Overlay for EditorOverlay {
             self.glyphs
                 .sync(pass.fg, pass.ring, &mut editor.text.atlas)
                 .map_err(AppError::at("the editor's glyphs"))?;
+            // The thumbnails made since: into their cells, before the panels draw them.
+            if !self.atlas.is_initialized() {
+                let clear = vec![0u8; (thumbnails::ATLAS * thumbnails::ATLAS * 4) as usize];
+                self.atlas
+                    .upload(pass.fg, pass.ring, &clear)
+                    .map_err(AppError::at("the thumbnails' atlas"))?;
+            }
+            for ((x, y), pixels) in editor.thumbnails.uploads() {
+                let side = thumbnails::SIZE;
+                self.atlas
+                    .upload_region(pass.fg, pass.ring, (x, y, side, side), pixels)
+                    .map_err(AppError::at("a thumbnail"))?;
+            }
         }
         self.canvas.prepare();
         self.renderer
@@ -10759,6 +10841,70 @@ mod tests {
         mouse(&mut ed, at, Some(false));
         ed.update(&mut world);
         assert_eq!(world.get::<Model>(boxed).unwrap().mesh, model.mesh);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_images_tile_shows_its_thumbnail_and_caches_it() {
+        let dir = folder("thumbnails");
+        std::fs::create_dir_all(dir.join("props")).unwrap();
+        let rgba: Vec<u8> = (0..64 * 32)
+            .flat_map(|i| [(i % 64) as u8 * 4, 90, 160, 255])
+            .collect();
+        let png =
+            engine_render::png::encode_png(64, 32, engine_render::png::PngFormat::Rgba, &rgba)
+                .unwrap();
+        std::fs::write(dir.join("props/paint.png"), png).unwrap();
+        std::fs::write(dir.join("props/notes.luau"), "return {}").unwrap();
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.open_assets();
+        ed.open_folder("props");
+        // The overlay's atlas, as its bindless index.
+        ed.thumbnails.set_atlas(7);
+        let images = |ed: &Editor| {
+            ed.ui
+                .last_frame()
+                .commands
+                .iter()
+                .filter(|c| matches!(c, DrawCmd::Image { image, .. } if image.texture == 7))
+                .count()
+        };
+        let started = Instant::now();
+        loop {
+            ed.update(&mut world);
+            // Shown once its pixels went to the atlas (what the overlay does each frame).
+            let uploaded = ed.thumbnails.uploads().len();
+            if images(&ed) > 0 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "made in time ({uploaded} uploads)"
+            );
+        }
+        // One picture: the image's; the script keeps its icon.
+        assert_eq!(images(&ed), 1);
+        let id = ed.asset_db.find("props/paint.png").unwrap().id;
+        let cache = dir.join(".ofelia/thumbnails");
+        assert!(cache.join(format!("{id}.png")).is_file());
+        assert!(cache.join(format!("{id}.key")).is_file());
+        // Ctrl+wheel over the tiles makes them larger.
+        let before = ed.tile;
+        let at = middle(texts(&ed, "paint.png")[0]);
+        mouse(&mut ed, at, None);
+        key(&mut ed, CTRL.0, CTRL.1, true);
+        event(&mut ed, WindowEventKind::Wheel { x: 0.0, y: 2.0 });
+        ed.update(&mut world);
+        key(&mut ed, CTRL.0, CTRL.1, false);
+        assert!(ed.tile > before, "{} > {before}", ed.tile);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

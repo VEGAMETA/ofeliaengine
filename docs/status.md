@@ -279,8 +279,14 @@ Last updated: 2026-10-20.
       (`Player::asset_changed`);
     - the old version is drawn until the new one is whole (a material with its textures);
     - an image makes the glTF files that read it again.
-  - **Next:** E4-6, thumbnails in the dock (the UI needs an image command, models an
-    offscreen view).
+  - **E4-6a, the dock's tiles and image thumbnails** (#PR, ADR 0112):
+    - `engine_ui` draws pictures (`Style::image`);
+    - the dock shows tiles sized with Ctrl+wheel;
+    - images are made smaller on a thread of their own, cached in `.ofelia/thumbnails/`,
+      and kept in an atlas of 64 cells.
+  - **Next:** E4-6b, previews the engine draws (ADR 0112): the frame renderer's views
+    into images of their own format, the player's previews of models and materials (a
+    draw list, one a frame, read back for the cache), for the dock and the inspector.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

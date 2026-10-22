@@ -551,3 +551,43 @@ fn hover_regions_see_the_mouse_over_any_child() {
     let (_, in_row) = look_frame(&mut ui, &at(15.0, 20.0), "Door", false);
     assert!(!in_row, "over the field, not the row");
 }
+
+#[test]
+fn a_nodes_image_is_drawn_over_its_fill() {
+    let mut ui = Ui::new(Theme::default());
+    let image = UiImage {
+        texture: 7,
+        uv: [0.25, 0.0, 0.5, 0.25],
+    };
+    ui.begin_frame(&UiInput::default(), [200.0, 100.0]);
+    ui.container(
+        "tile",
+        Style {
+            size: [Size::Fixed(64.0), Size::Fixed(48.0)],
+            background: Some([0.1, 0.1, 0.1, 1.0]),
+            image: Some(image),
+            ..Style::default()
+        },
+        |_| {},
+    );
+    let mut measure = MonospaceMeasure;
+    ui.end_frame(&mut measure);
+    let frame = ui.last_frame();
+    let kinds: Vec<&str> = frame
+        .commands
+        .iter()
+        .map(|c| match c {
+            DrawCmd::Rect { .. } => "rect",
+            DrawCmd::Image { .. } => "image",
+            DrawCmd::Text { .. } => "text",
+            DrawCmd::Clip(_) => "clip",
+        })
+        .collect();
+    let at = kinds.iter().position(|&k| k == "image").expect("drawn");
+    assert_eq!(kinds[at - 1], "rect", "over the fill: {kinds:?}");
+    let DrawCmd::Image { rect, image: drawn } = frame.commands[at] else {
+        unreachable!()
+    };
+    assert_eq!(drawn, image);
+    assert_eq!(rect.size, [64.0, 48.0]);
+}

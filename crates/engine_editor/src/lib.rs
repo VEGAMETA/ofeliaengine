@@ -24,6 +24,7 @@ mod palette;
 mod session;
 pub mod shell;
 mod snap;
+mod thumbnails;
 mod transform;
 mod undo;
 

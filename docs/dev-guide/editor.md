@@ -581,9 +581,16 @@ until the new one is whole.
 
 **The FileSystem dock**, under the viewport, shows them:
 - on the left, the project's folders that hold assets, `res://` at the top;
-- on the right, the folder's subfolders and files, each with its kind's icon.
+- on the right, the folder's subfolders and files as tiles, each a thumbnail over its
+  name.
 
 A click on a folder opens it, a click on a file picks it.
+
+- **Thumbnails:** an image is its own picture made smaller; other kinds show their icon
+  until the engine draws their previews (ADR 0112's next step).
+- **Sizing:** Ctrl+wheel over the tiles makes them larger or smaller.
+- **Cache:** thumbnails are made in the background and kept in `.ofelia/thumbnails/`, and
+  made again when their file is written anew.
 
 **`#` in the command palette** finds assets by path: `#crate`, or with a kind first,
 `#model:crate`, `#texture:rock` (`scene`, `material`, `model` or `mesh`, `texture`, `sound`

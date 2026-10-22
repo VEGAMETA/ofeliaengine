@@ -131,6 +131,18 @@ pub struct Style {
     /// Taken out of the flow and placed at this offset from the parent's corner, drawn
     /// above everything else (popups, tooltips, menus).
     pub floating: Option<[f32; 2]>,
+    /// A picture over the node's rectangle, above its fill (a thumbnail).
+    pub image: Option<UiImage>,
+}
+
+/// A picture the UI draws: a region of a texture, by the texture's bindless index (what
+/// the painter samples).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UiImage {
+    /// The texture's bindless index.
+    pub texture: u32,
+    /// The region: min u, min v, max u, max v (the top of the picture at min v).
+    pub uv: [f32; 4],
 }
 
 impl Default for Style {
@@ -150,6 +162,7 @@ impl Default for Style {
             clip: false,
             scroll: false,
             floating: None,
+            image: None,
         }
     }
 }
@@ -386,6 +399,13 @@ pub enum DrawCmd {
     },
     /// Clip following commands to this rectangle (`None`: no clip).
     Clip(Option<Rect>),
+    /// A picture stretched over `rect`.
+    Image {
+        /// Where.
+        rect: Rect,
+        /// What.
+        image: UiImage,
+    },
 }
 
 /// The output of a frame.
@@ -1141,6 +1161,9 @@ impl Ui {
                     border,
                     radius: style.radius,
                 });
+            }
+            if let Some(image) = style.image {
+                self.commands.push(DrawCmd::Image { rect, image });
             }
             if let Some(t) = &n.text {
                 let p = style.padding;

@@ -18,7 +18,9 @@
 //! game plays, a thin colored edge around it shows the state instead of big buttons.
 
 use crate::icons;
-use engine_ui::{Align, Color, Direction, Size, Style, TextField, TextFieldResponse, Ui, UiKey};
+use engine_ui::{
+    Align, Color, Direction, Size, Style, TextField, TextFieldResponse, Ui, UiImage, UiKey,
+};
 
 /// A color from sRGB bytes, as the linear value the renderer blends in.
 pub fn srgb(r: u8, g: u8, b: u8) -> Color {
@@ -291,6 +293,8 @@ pub struct FileItem<'a> {
     pub kind: FileKind,
     /// Picked.
     pub selected: bool,
+    /// Its thumbnail (ADR 0112), once made; its kind's icon until then.
+    pub thumbnail: Option<UiImage>,
 }
 
 /// Everything the shell shows.
@@ -314,8 +318,12 @@ pub struct ShellModel<'a> {
     pub path: &'a str,
     /// Folder tree rows.
     pub folders: &'a [TreeItem<'a>],
-    /// Files in the current folder.
+    /// Files in the current folder, shown as tiles.
     pub files: &'a [FileItem<'a>],
+    /// The side of a tile's picture (logical pixels).
+    pub tile: f32,
+    /// The tiles a row holds ([`tile_columns`] of the listing's width).
+    pub columns: usize,
     /// Bottom panel tabs, and the open one (`None`: all closed).
     pub bottom_tabs: &'a [&'a str],
     /// The open bottom panel.
@@ -385,6 +393,9 @@ pub struct ShellResponse {
     pub file: Option<usize>,
     /// A file is dragged out of the listing: held and moved past [`DRAG_START`].
     pub file_drag: Option<usize>,
+    /// The listing's scroll area: its rectangle and scroll after the frame say which tiles
+    /// show.
+    pub listing: u64,
     /// The scene tree's row under the pointer, whatever the mouse holds: where a drop
     /// lands.
     pub tree_under: Option<usize>,
@@ -434,6 +445,23 @@ const FILES_HEIGHT: f32 = 190.0;
 const INDENT: f32 = 14.0;
 /// How far a held file moves before it is dragged, in logical pixels.
 pub const DRAG_START: f32 = 4.0;
+/// A tile's padding around its picture and name, the space between tiles, and the height
+/// of its name's line.
+const TILE_PAD: f32 = 4.0;
+const TILE_GAP: f32 = 6.0;
+const TILE_LABEL: f32 = 15.0;
+
+/// How many tiles of picture side `tile` a row of a listing `width` wide holds (one at
+/// least).
+pub fn tile_columns(width: f32, tile: f32) -> usize {
+    let room = width - 2.0 * TILE_GAP + TILE_GAP;
+    ((room / (tile + 2.0 * TILE_PAD + TILE_GAP)).floor() as usize).max(1)
+}
+
+/// The height of a row of tiles of picture side `tile`, its gap included.
+pub fn tile_row_height(tile: f32) -> f32 {
+    tile + 2.0 * TILE_PAD + 2.0 + TILE_LABEL + TILE_GAP
+}
 
 fn text(ui: &mut Ui, key: &str, s: &str, size: f32, color: Color) -> u64 {
     ui.text_node(key, Style::default(), s, size, color, false)
@@ -730,39 +758,82 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
         });
         dock_column(ui, "listing", Size::Grow(1.0), p, |ui| {
             dock_title(ui, model.path, p);
-            ui.scroll_column("list", |ui| {
-                for (i, file) in model.files.iter().enumerate() {
-                    ui.push_id(i as u64);
-                    let id = ui.row(
-                        "file",
-                        Style {
-                            size: [Size::Grow(1.0), Size::Fit],
-                            padding: [8.0, 3.0, 8.0, 3.0],
-                            gap: 6.0,
-                            align_cross: Align::Center,
-                            background: file.selected.then_some(p.selection),
-                            ..Style::default()
-                        },
-                        |ui| {
-                            let (glyph, color) = file_icon(file.kind, p);
-                            text(ui, "icon", glyph, ICON, color);
-                            text(ui, "name", file.name, TEXT, p.text);
-                        },
-                    );
-                    if ui.sense(id, false).clicked {
-                        out.file = Some(i);
-                    }
-                    if ui
-                        .drag_delta(id)
-                        .is_some_and(|[x, y]| x * x + y * y > DRAG_START * DRAG_START)
-                    {
-                        out.file_drag = Some(i);
-                    }
+            out.listing = ui.scroll_column("list", |ui| {
+                let columns = model.columns.max(1);
+                for (r, row) in model.files.chunks(columns).enumerate() {
+                    ui.push_id(r as u64);
+                    let tiles = Style {
+                        size: [Size::Grow(1.0), Size::Fit],
+                        padding: [TILE_GAP, TILE_GAP / 2.0, TILE_GAP, TILE_GAP / 2.0],
+                        gap: TILE_GAP,
+                        ..Style::default()
+                    };
+                    ui.row("tiles", tiles, |ui| {
+                        for (k, file) in row.iter().enumerate() {
+                            let i = r * columns + k;
+                            ui.push_id(k as u64);
+                            let id = file_tile(ui, file, model.tile, p);
+                            if ui.sense(id, false).clicked {
+                                out.file = Some(i);
+                            }
+                            if ui
+                                .drag_delta(id)
+                                .is_some_and(|[x, y]| x * x + y * y > DRAG_START * DRAG_START)
+                            {
+                                out.file_drag = Some(i);
+                            }
+                            ui.pop_id();
+                        }
+                    });
                     ui.pop_id();
                 }
             });
         });
     });
+}
+
+/// A file's tile: its thumbnail (its kind's icon until there is one) over its name.
+fn file_tile(ui: &mut Ui, file: &FileItem<'_>, tile: f32, p: &Palette) -> u64 {
+    ui.column(
+        "tile",
+        Style {
+            size: [Size::Fixed(tile + 2.0 * TILE_PAD), Size::Fit],
+            padding: [TILE_PAD; 4],
+            gap: 2.0,
+            align_cross: Align::Center,
+            radius: 4.0,
+            background: file.selected.then_some(p.selection),
+            ..Style::default()
+        },
+        |ui| {
+            let picture = Style {
+                size: [Size::Fixed(tile), Size::Fixed(tile)],
+                align_main: Align::Center,
+                align_cross: Align::Center,
+                image: file.thumbnail,
+                ..Style::default()
+            };
+            ui.row("picture", picture, |ui| {
+                if file.thumbnail.is_none() {
+                    let (glyph, color) = file_icon(file.kind, p);
+                    text(ui, "icon", glyph, (tile * 0.45).max(ICON), color);
+                }
+            });
+            ui.row(
+                "label",
+                Style {
+                    size: [Size::Fixed(tile), Size::Fixed(TILE_LABEL)],
+                    align_main: Align::Center,
+                    align_cross: Align::Center,
+                    clip: true,
+                    ..Style::default()
+                },
+                |ui| {
+                    text(ui, "name", file.name, SMALL, p.text);
+                },
+            );
+        },
+    )
 }
 
 /// Icon glyph and its color for a file kind.

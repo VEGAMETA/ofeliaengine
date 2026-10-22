@@ -214,6 +214,8 @@ pub struct PaintStats {
     pub glyphs: u32,
     /// Clip changes.
     pub clips: u32,
+    /// Pictures.
+    pub images: u32,
 }
 
 /// Appends `frame`'s commands to `canvas` (layer 0, in order), in physical pixels: the UI
@@ -294,6 +296,17 @@ pub fn paint(
                     Vec4::from_array(*color),
                     order,
                 ) as u32;
+            }
+            DrawCmd::Image { rect, image } => {
+                let size = Vec2::new(rect.size[0], rect.size[1]) * scale;
+                if size.x <= 0.0 || size.y <= 0.0 {
+                    continue;
+                }
+                let center = Vec2::new(rect.pos[0], rect.pos[1]) * scale + size * 0.5;
+                let mut quad = Quad::sprite(image.texture, center, size).order(order);
+                quad.uv = image.uv;
+                canvas.draw(&quad);
+                stats.images += 1;
             }
             DrawCmd::Clip(clip) => {
                 canvas.set_clip(clip.map(|r| {
