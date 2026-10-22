@@ -286,6 +286,18 @@ impl WorldSnapshot {
         self.states.len()
     }
 
+    /// [`History::relayout`] for what the snapshot holds.
+    pub fn relayout(&mut self, r: &engine_ecs::Relayout) {
+        relayout_changes(&mut self.states, r);
+        for types in self.alive.values_mut() {
+            for id in types.iter_mut() {
+                if *id == r.old {
+                    *id = r.new;
+                }
+            }
+        }
+    }
+
     /// Bytes of recorded state.
     pub fn bytes(&self) -> usize {
         transaction_bytes(&self.states)
@@ -346,6 +358,57 @@ impl Kept {
 pub struct PlayMark {
     head: u64,
     redo: Vec<Transaction>,
+}
+
+impl PlayMark {
+    /// [`History::relayout`] for the steps to redo it gives back.
+    pub fn relayout(&mut self, r: &engine_ecs::Relayout) {
+        for t in &mut self.redo {
+            relayout_changes(&mut t.changes, r);
+        }
+    }
+}
+
+/// The records of component `r.old` in `changes` rewritten as `r.new`'s.
+fn relayout_changes(changes: &mut [Change], r: &engine_ecs::Relayout) {
+    for change in changes {
+        for state in [&mut change.before, &mut change.after]
+            .into_iter()
+            .flatten()
+        {
+            relayout_state(state, r);
+        }
+    }
+}
+
+fn relayout_state(state: &mut EntityState, r: &engine_ecs::Relayout) {
+    for record in &mut state.components {
+        if record.id != r.old {
+            continue;
+        }
+        record.id = r.new;
+        let Value::Bytes { bytes, refs } = &mut record.value else {
+            continue;
+        };
+        let mut moved = r.apply(bytes);
+        // Entity slots hold zeros here and their scene ids apart: a moved one keeps its
+        // reference, a new one refers to no entity.
+        let mut kept = Vec::with_capacity(r.entities.len());
+        for &at in &r.entities {
+            if let Some(slot) = moved.get_mut(at..at + 8) {
+                slot.fill(0);
+            }
+            let target = r
+                .moves
+                .iter()
+                .find(|m| m.entity && m.to == at)
+                .and_then(|m| refs.iter().find(|&&(off, _)| off as usize == m.from))
+                .and_then(|&(_, target)| target);
+            kept.push((at as u32, target));
+        }
+        *bytes = moved.into_boxed_slice();
+        *refs = kept;
+    }
 }
 
 impl Default for History {
@@ -818,6 +881,21 @@ impl History {
         self.undo
             .back()
             .is_some_and(|t| self.floor.is_none_or(|floor| t.id > floor))
+    }
+
+    /// Every record of component `r.old` rewritten as `r.new`'s, its values moved by name
+    /// ([`engine_ecs::Relayout`]: a script's props changed, ADR 0114 E7-4b): the steps done
+    /// and undone, and the one open. Undo then puts back values of the layout the world
+    /// holds now.
+    pub fn relayout(&mut self, r: &engine_ecs::Relayout) {
+        for t in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            relayout_changes(&mut t.changes, r);
+        }
+        if let Some(open) = &mut self.open {
+            for state in open.touched.iter_mut().filter_map(|(_, s)| s.as_mut()) {
+                relayout_state(state, r);
+            }
+        }
     }
 
     /// Play begins (ADR 0107 E3): the steps made while playing are the play world's, so

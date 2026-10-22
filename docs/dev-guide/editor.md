@@ -130,8 +130,9 @@ editor = ["dep:engine_editor"]
   - **a script's component** shows its file under its header, and its entity's row ends in
     the script's mark. A click on either opens the script; an entity with several scripts
     offers them in the palette;
-  - a saved script takes effect when the editor starts again (reloading on save comes
-    next).
+  - **a saved script runs again** at the next frame, while playing too: its instances go
+    on with their state, its props' values kept by name, and undo goes on working
+    (`scripting.md`, "Changing a script while it runs").
 - **The command palette** (Ctrl+Shift+P) finds and runs every command; Ctrl+P finds the
   scene's objects, `#` the project's assets (see below).
 - **Everything is undoable**, one step per action (a whole drag is one step). The scene's
@@ -990,7 +991,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | Phase | What |
 |---|---|
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
-| E7 | Luau: reloading a script on save, the engine's types in the editor and for luau-lsp, faster views, physics for scripts, the rest of v1 (ADR 0114) |
+| E7 | Luau: the engine's types in the editor and for luau-lsp, faster views, physics for scripts, the rest of v1 (ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
 | E10 | materials: completion, hover and definitions in Slang modules; then the material file, the graph, previews (the team's questions are open) |
 

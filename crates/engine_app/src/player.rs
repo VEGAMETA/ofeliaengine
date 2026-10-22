@@ -1526,6 +1526,33 @@ impl Player {
         scripts.load_file(&mut self.runtime.world, &project, &folder, file)
     }
 
+    /// Script `file` (in the project's `scripts/`) run again after it changed, its
+    /// instances going on with their state: the editor's reload on save (ADR 0114 E7-4b,
+    /// [`crate::scripts::Scripts::reload_file`]). A project's first script makes the host.
+    ///
+    /// # Errors
+    ///
+    /// Without a project, or when the file cannot be read or does not run: the old version
+    /// then runs on.
+    pub fn reload_script(&mut self, file: &Path) -> Result<crate::scripts::Reloaded, String> {
+        let Some(project) = self.settings.project.clone() else {
+            return Err(String::from("scripts need a project folder"));
+        };
+        let folder = project.join("scripts");
+        let Some(scripts) = self.scripts.as_mut() else {
+            let started = std::time::Instant::now();
+            let added = self.load_script(file)?;
+            let shown = file.strip_prefix(&project).unwrap_or(file);
+            return Ok(crate::scripts::Reloaded {
+                file: shown.to_string_lossy().replace('\\', "/"),
+                added,
+                took: started.elapsed(),
+                ..crate::scripts::Reloaded::default()
+            });
+        };
+        scripts.reload_file(&mut self.runtime.world, &project, &folder, file)
+    }
+
     /// Gives `entity` script component `name` (a script's `component("Door", …)`), its
     /// props at their defaults: the editor's Add Component. False without that component
     /// or for a dead entity.

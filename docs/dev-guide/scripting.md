@@ -119,6 +119,19 @@ From Rust, `player.add_script(door, "Door")` gives one with its defaults.
 Luau's own libraries (`math`, `string`, `table`, `vector`, `buffer`) are there too, in
 Luau's sandbox.
 
+## Changing a script while it runs
+
+Save a script (Ctrl+S in the editor, or in another editor) and it runs again at once:
+
+- **Its instances go on** with their props' values and `self.locals`; `on_start` does not
+  run again. The editor says how long it took (well under a millisecond for a thousand
+  instances).
+- **Props you add, remove or change** move by name: a prop that keeps its name and type keeps
+  its value, a new one takes its default. Undo still works across the change.
+- **A script with an error** (it does not compile, or fails at its top) leaves the old
+  version running; the Output says where.
+- **An instance an error stopped** starts again when its script is saved.
+
 ## When something goes wrong
 
 - **A runtime error stops that instance:** its hooks are called no more, and the entity
@@ -145,8 +158,6 @@ later step. Logic over thousands of objects every tick belongs in Rust.
 - script components in saves;
 - systems over queries, `input`, `world.spawn`, `world.query`, entity methods (`has`, `add`,
   `remove`, `despawn`);
-- reloading a script when it is saved, while the game runs too, its state kept (until
-  then, a saved script takes effect when the editor starts again);
 - the types file for luau-lsp and the editor: completion of the engine's API. Until then,
   the editor marks `component` and the engine's other globals as unknown;
 - `send`, `after` timers, `audio`, `random`, physics queries and triggers.

@@ -102,6 +102,96 @@ impl RuntimeType {
     }
 }
 
+/// How the values of a component made at run time move to a new layout of it (a script's
+/// props changed, ADR 0114 E7-4b): field by field, by name. A field of the same name and
+/// type keeps its value; the others take the new layout's default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relayout {
+    /// The component of the old layout.
+    pub old: ComponentId,
+    /// The component of the new layout.
+    pub new: ComponentId,
+    /// The new layout's default value.
+    pub defaults: Box<[u8]>,
+    /// The fields that keep their values.
+    pub moves: Vec<FieldMove>,
+    /// Where the new layout holds entities (byte offsets), for values that keep entity
+    /// references apart from their bytes (the editor's undo).
+    pub entities: Vec<usize>,
+}
+
+/// A field that keeps its value in a [`Relayout`]: its bytes, from the old layout's offset
+/// to the new's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldMove {
+    /// Its offset in the old layout.
+    pub from: usize,
+    /// Its offset in the new layout.
+    pub to: usize,
+    /// Its size.
+    pub len: usize,
+    /// It holds an entity.
+    pub entity: bool,
+}
+
+impl Relayout {
+    /// From component `old`, described by `before`, to `new`, described by `after` with
+    /// default value `defaults`. Fields match by name, and keep their value when their types
+    /// have one name and size (type descriptions are not unique, so not by address).
+    pub fn between(
+        old: ComponentId,
+        before: &TypeInfo,
+        new: ComponentId,
+        after: &TypeInfo,
+        defaults: Box<[u8]>,
+    ) -> Self {
+        let fields = |t: &TypeInfo| match t.kind {
+            engine_reflect::TypeKind::Struct(fields) => fields,
+            _ => &[],
+        };
+        let entity = <crate::Entity as engine_reflect::Reflect>::TYPE_INFO;
+        let is_entity = |t: &TypeInfo| t.name == entity.name && t.size == entity.size;
+        let moves = fields(after)
+            .iter()
+            .filter_map(|f| {
+                let was = fields(before).iter().find(|b| b.name == f.name)?;
+                (was.ty.name == f.ty.name && was.ty.size == f.ty.size).then_some(FieldMove {
+                    from: was.offset,
+                    to: f.offset,
+                    len: f.ty.size,
+                    entity: is_entity(f.ty),
+                })
+            })
+            .collect();
+        let entities = fields(after)
+            .iter()
+            .filter(|f| is_entity(f.ty))
+            .map(|f| f.offset)
+            .collect();
+        Self {
+            old,
+            new,
+            defaults,
+            moves,
+            entities,
+        }
+    }
+
+    /// A value of the old layout (`value`, its bytes) in the new.
+    pub fn apply(&self, value: &[u8]) -> Vec<u8> {
+        let mut out = self.defaults.to_vec();
+        for m in &self.moves {
+            if let (Some(from), Some(to)) = (
+                value.get(m.from..m.from + m.len),
+                out.get_mut(m.to..m.to + m.len),
+            ) {
+                to.copy_from_slice(from);
+            }
+        }
+        out
+    }
+}
+
 /// The component types made at run time, by stable name.
 static RUNTIME: RwLock<Vec<RuntimeType>> = RwLock::new(Vec::new());
 

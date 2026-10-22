@@ -1370,3 +1370,103 @@ fn a_type_made_at_run_time_registers_by_name_in_any_world() {
     };
     assert_eq!(other.id(&mut a), None);
 }
+
+#[test]
+fn a_relayout_moves_fields_by_name_and_a_dynamic_description_is_replaced() {
+    use engine_reflect::{Attrs, Field, Reflect, TypeInfo, TypeKind};
+    static OLD_FIELDS: [Field; 3] = [
+        Field {
+            name: "lift",
+            offset: 0,
+            ty: <f32 as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+        Field {
+            name: "open",
+            offset: 4,
+            ty: <bool as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+        Field {
+            name: "target",
+            offset: 8,
+            ty: <Entity as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+    ];
+    // `open` became a number, `speed` is new, `lift` and `target` moved.
+    static NEW_FIELDS: [Field; 4] = [
+        Field {
+            name: "lift",
+            offset: 0,
+            ty: <f32 as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+        Field {
+            name: "open",
+            offset: 4,
+            ty: <f32 as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+        Field {
+            name: "speed",
+            offset: 8,
+            ty: <f32 as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+        Field {
+            name: "target",
+            offset: 16,
+            ty: <Entity as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+    ];
+    static OLD: TypeInfo = TypeInfo {
+        name: "RelayoutDoor",
+        size: 16,
+        align: 8,
+        kind: TypeKind::Struct(&OLD_FIELDS),
+        attrs: Attrs::NONE,
+    };
+    static NEW: TypeInfo = TypeInfo {
+        name: "RelayoutDoor",
+        size: 24,
+        align: 8,
+        kind: TypeKind::Struct(&NEW_FIELDS),
+        attrs: Attrs::NONE,
+    };
+    let mut world = World::new();
+    let desc = |name: &str, info: &'static TypeInfo| crate::ComponentDesc {
+        name: name.into(),
+        layout: core::alloc::Layout::from_size_align(info.size, info.align).unwrap(),
+        drop: None,
+        pod: true,
+        type_info: Some(info),
+    };
+    // SAFETY: plain data of the described layouts.
+    let old = unsafe { world.register_dynamic(desc("test::RelayoutDoor", &OLD)) }.unwrap();
+    // SAFETY: as above.
+    let new = unsafe { world.register_dynamic(desc("test::RelayoutDoor#2", &NEW)) }.unwrap();
+    let mut defaults = vec![0u8; 24];
+    defaults[8..12].copy_from_slice(&2.5f32.to_le_bytes());
+    defaults[16..24].copy_from_slice(&Entity::NULL.to_bits().to_le_bytes());
+    let r = crate::Relayout::between(old, &OLD, new, &NEW, defaults.into());
+    assert_eq!(r.entities, [16]);
+    assert_eq!(r.moves.len(), 2, "lift and target: open changed its type");
+    let target = Entity::from_bits(0x0000_0007_0000_0003);
+    let mut value = vec![0u8; 16];
+    value[0..4].copy_from_slice(&3.0f32.to_le_bytes());
+    value[4] = 1;
+    value[8..16].copy_from_slice(&target.to_bits().to_le_bytes());
+    let moved = r.apply(&value);
+    let f32_at = |at: usize| f32::from_le_bytes(moved[at..at + 4].try_into().unwrap());
+    assert_eq!(f32_at(0), 3.0, "lift kept");
+    assert_eq!(f32_at(4), 0.0, "open: a new type, its default");
+    assert_eq!(f32_at(8), 2.5, "speed: new, its default");
+    assert_eq!(moved[16..24], target.to_bits().to_le_bytes(), "target kept");
+    // Attributes changed, places not: the description is replaced; a Rust type's is not.
+    assert!(world.set_type_info(old, &OLD));
+    assert!(!world.set_type_info(old, &NEW), "another size");
+    let pos = world.register::<Pos>();
+    assert!(!world.set_type_info(pos, &OLD), "a Rust type's");
+}

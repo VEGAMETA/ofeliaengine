@@ -476,10 +476,14 @@ Last updated: 2026-10-22.
     a template named after the entity, loaded by the player's host and attached as one
     step. A script component shows its file under its header and a mark on its row; a
     click opens the script. `SceneRegistry::insert_default`, `Player::load_script`.
+  - **E7-4b, a script reloads when it is saved** (#346, ADR 0114's as-built): Ctrl+S runs
+    it again at the next frame, the file watcher when another editor saved it. Instances go
+    on with their state; props that changed move by name to a new layout
+    (`engine_ecs::Relayout`, `script::Door#2`), and the editor's history and Play's
+    snapshot follow. 1,000 instances: 0.21 ms in place, 0.33 ms moved (target 100).
   - **Next, in this order:**
-    1. E7 on: reload on save (E7-4b, values moved by name when the props change), then
-       the engine's types in the editor and for luau-lsp (E7-2: `component` reads as an
-       unknown global until then), then views' fast path (E7-1c);
+    1. E7 on: the engine's types in the editor and for luau-lsp (E7-2: `component` reads as
+       an unknown global until then), then views' fast path (E7-1c);
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 

@@ -42,9 +42,12 @@
 //! - **A runtime error stops that instance:** its hooks are called no more. The error goes
 //!   to the log once with `scripts/door.luau:14` (a click in the editor's Output opens it).
 //!   A script that does not load is reported, and the others load.
+//! - **A changed script reloads** ([`Scripts::reload_file`], E7-4b): its instances go on
+//!   with their state. Props that kept their places take the new hooks in place; props that
+//!   changed move each entity's values by name to a component of the new layout.
 
 use engine_core::math::{Quat, Vec2, Vec3, Vec3A};
-use engine_ecs::{ComponentId, Entity, World};
+use engine_ecs::{ComponentId, Entity, Relayout, World};
 use engine_reflect::{Attrs, Field, Primitive, Reflect, TypeInfo, TypeKind};
 use engine_scene::Name;
 use engine_script::mlua::{
@@ -53,6 +56,7 @@ use engine_script::mlua::{
 use engine_script::{ScriptError, ScriptSettings, ScriptVm};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// What a prop holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +183,42 @@ pub struct Scripts {
     clock: Clock,
     /// Errors already in the log.
     reported: HashSet<String>,
+    /// Each module's text as it last ran, hashed: a reload of the same text does nothing.
+    sources: HashMap<String, u64>,
+    /// Each component's registry name's version: the next layout of its props is
+    /// `script::Door#2`, and so on.
+    versions: HashMap<String, u32>,
+}
+
+/// What reloading a script did ([`Scripts::reload_file`]).
+#[derive(Debug, Clone, Default)]
+pub struct Reloaded {
+    /// The script's file, relative to the project.
+    pub file: String,
+    /// Its components whose props kept their places: they take the new hooks and
+    /// attributes.
+    pub kept: Vec<String>,
+    /// Those whose props changed: their values moved by name to a component of the new
+    /// layout, and how. What holds values of the old (an editor's undo) follows it.
+    pub relaid: Vec<(String, Relayout)>,
+    /// Those declared for the first time.
+    pub added: Vec<String>,
+    /// Those no longer declared: their data stays, without hooks.
+    pub gone: Vec<String>,
+    /// The instances that go on, their state kept.
+    pub instances: usize,
+    /// How long it took.
+    pub took: Duration,
+}
+
+impl Reloaded {
+    /// Nothing changed: the script's text was the one that ran.
+    pub fn is_empty(&self) -> bool {
+        self.kept.is_empty()
+            && self.relaid.is_empty()
+            && self.added.is_empty()
+            && self.gone.is_empty()
+    }
 }
 
 impl Scripts {
@@ -212,6 +252,8 @@ impl Scripts {
             seen: HashSet::new(),
             clock: Clock::default(),
             reported: HashSet::new(),
+            sources: HashMap::new(),
+            versions: HashMap::new(),
         };
         let mut files = Vec::new();
         collect_scripts(folder, &mut files);
@@ -267,13 +309,7 @@ impl Scripts {
         folder: &Path,
         file: &Path,
     ) -> Result<Vec<String>, String> {
-        let relative = file
-            .strip_prefix(folder)
-            .map_err(|_| format!("{} is not in {}", file.display(), folder.display()))?;
-        let module = relative
-            .with_extension("")
-            .to_string_lossy()
-            .replace('\\', "/");
+        let module = module_of(folder, file)?;
         if self.vm.has_module(&module) {
             return Err(format!("{module} is loaded already"));
         }
@@ -316,12 +352,187 @@ impl Scripts {
             log::error!(target: "script", "{}", self.place(&e));
             return;
         }
+        self.sources.insert(
+            module.to_owned(),
+            engine_core::hash::state_hash64(source.as_bytes()),
+        );
         for (name, table, props) in declared {
             if let Err(why) = self.register(world, module, &name, &table, props) {
                 let file = self.file(module);
                 log::error!(target: "script", "{file}: component `{name}`: {why}");
             }
         }
+    }
+
+    /// Script `file` (under `folder`, `root` the project) run again after it changed, its
+    /// instances going on with their state (ADR 0114 E7-4b):
+    /// - a component whose props kept their places takes the new hooks and attributes;
+    /// - one whose props changed moves to a component of the new layout (the next registry
+    ///   name, `script::Door#2`): each entity's values move by prop name ([`Relayout`]);
+    /// - a component it no longer declares keeps its data and loses its hooks;
+    /// - its stopped instances start again (the error may be fixed), and its errors are
+    ///   reported again when they come back.
+    ///
+    /// A file the host has not loaded loads as [`Self::load_file`] loads it; a file whose
+    /// text is the one that ran is left alone.
+    ///
+    /// # Errors
+    ///
+    /// When it cannot be read, is not under `folder`, or does not run. The old version then
+    /// stays, and the error names the file and line.
+    pub fn reload_file(
+        &mut self,
+        world: &mut World,
+        root: &Path,
+        folder: &Path,
+        file: &Path,
+    ) -> Result<Reloaded, String> {
+        engine_profiler::zone!("scripts::reload");
+        let started = Instant::now();
+        let module = module_of(folder, file)?;
+        if !self.vm.has_module(&module) {
+            let added = self.load_file(world, root, folder, file)?;
+            return Ok(Reloaded {
+                file: self.file(&module),
+                added,
+                took: started.elapsed(),
+                ..Reloaded::default()
+            });
+        }
+        let shown = self.file(&module);
+        let source = std::fs::read_to_string(file).map_err(|e| format!("{shown}: {e}"))?;
+        let hash = engine_core::hash::state_hash64(source.as_bytes());
+        let mut out = Reloaded {
+            file: shown.clone(),
+            ..Reloaded::default()
+        };
+        if self.sources.get(&module) == Some(&hash) {
+            out.took = started.elapsed();
+            return Ok(out);
+        }
+        self.vm.lua().set_app_data(Loading::default());
+        let loaded = self.vm.load_module(&module, &source);
+        let declared = self
+            .vm
+            .lua()
+            .remove_app_data::<Loading>()
+            .map(|l| l.declared)
+            .unwrap_or_default();
+        loaded.map_err(|e| self.place(&e))?;
+        self.sources.insert(module.clone(), hash);
+        let before = self.components.len();
+        let mut again = Vec::new();
+        for (name, table, props) in declared {
+            let result = match self.by_name.get(&name).copied() {
+                Some(k) if self.components[k].module == module => {
+                    again.push(k);
+                    self.redeclare(world, k, &table, props)
+                        .map(|relaid| match relaid {
+                            Some(r) => out.relaid.push((name.clone(), r)),
+                            None => out.kept.push(name.clone()),
+                        })
+                }
+                _ => self
+                    .register(world, &module, &name, &table, props)
+                    .map(|()| out.added.push(name.clone())),
+            };
+            if let Err(why) = result {
+                log::error!(target: "script", "{shown}: component `{name}`: {why}");
+            }
+        }
+        // What it no longer declares: the data stays, the hooks go.
+        for (k, c) in self.components[..before].iter_mut().enumerate() {
+            if c.module == module && !again.contains(&k) {
+                c.hooks = Hooks::default();
+                out.gone.push(c.name.clone());
+            }
+        }
+        // Its instances go on; the stopped ones start again.
+        for (&(_, k), (_, inst)) in &mut self.instances {
+            if self
+                .components
+                .get(k as usize)
+                .is_some_and(|c| c.module == module && c.hooks.any())
+            {
+                inst.stopped = false;
+                out.instances += 1;
+            }
+        }
+        let prefix = format!("{shown}:");
+        self.reported.retain(|line| !line.starts_with(&prefix));
+        out.took = started.elapsed();
+        Ok(out)
+    }
+
+    /// Component `k` declared again by its reloaded module, with `props` and the hooks on
+    /// `table`: in place when its props kept their places; else moved to a component of the
+    /// new layout, how it moved returned.
+    fn redeclare(
+        &mut self,
+        world: &mut World,
+        k: usize,
+        table: &Table,
+        mut props: Vec<Prop>,
+    ) -> Result<Option<Relayout>, String> {
+        let name = self.components[k].name.clone();
+        let source = self.file(&self.components[k].module);
+        let (info, defaults, layout) = describe(&name, &mut props)?;
+        let (old, old_info) = (self.components[k].id, self.components[k].info);
+        let in_place =
+            world.components().layout(old) == Some(layout) && same_places(old_info, info);
+        let registry: Box<str> = if in_place {
+            world.components().name(old).unwrap_or_default().into()
+        } else {
+            // The next free registry name (or one this layout holds already).
+            let version = self.versions.entry(name.clone()).or_insert(1);
+            loop {
+                *version += 1;
+                let candidate = format!("script::{name}#{version}");
+                match world.components().id_by_name(&candidate) {
+                    Some(id) if world.components().layout(id) != Some(layout) => continue,
+                    _ => break candidate.into(),
+                }
+            }
+        };
+        let runtime = engine_ecs::RuntimeType {
+            info,
+            component: registry,
+            layout,
+            defaults: defaults.clone().into_boxed_slice(),
+            source: source.into(),
+        };
+        let relayout = if in_place {
+            world.set_type_info(old, info);
+            None
+        } else {
+            let new = runtime
+                .id(world)
+                .ok_or_else(|| String::from("the world holds another component of its name"))?;
+            let r = Relayout::between(old, old_info, new, info, runtime.defaults.clone());
+            move_values(world, &r);
+            Some(r)
+        };
+        let id = relayout.as_ref().map_or(old, |r| r.new);
+        // SAFETY: the values are plain data of `layout`, as `register`'s.
+        unsafe { engine_ecs::add_runtime_type(runtime) };
+        if let Some(mut names) = self.vm.lua().app_data_mut::<Names>() {
+            names.by_name.insert(name, (id, info));
+        }
+        let c = &mut self.components[k];
+        c.hooks = hooks_of(table);
+        c.info = info;
+        c.id = id;
+        c.defaults = defaults;
+        // Its instances' `self`: the new place and description, their locals kept.
+        for (&(_, at), (_, inst)) in &self.instances {
+            if at as usize == k
+                && let Ok(mut this) = inst.this.borrow_mut::<This>()
+            {
+                this.id = id;
+                this.info = info;
+            }
+        }
+        Ok(relayout)
     }
 
     /// Registers component `name` of `module` with its props, its hooks from `table`.
@@ -342,39 +553,7 @@ impl Scripts {
         {
             return Err(String::from("another component has this name"));
         }
-        // Laid out by name: a table's keys have no order.
-        props.sort_by(|a, b| a.name.cmp(&b.name));
-        let mut offset = 0usize;
-        let mut align = 1usize;
-        for p in &mut props {
-            let info = p.kind.info();
-            offset = offset.next_multiple_of(info.align);
-            p.offset = offset;
-            offset += info.size;
-            align = align.max(info.align);
-        }
-        let size = offset.next_multiple_of(align);
-        let fields: Vec<Field> = props
-            .iter()
-            .map(|p| Field {
-                name: leak(&p.name),
-                offset: p.offset,
-                ty: p.kind.info(),
-                attrs: p.attrs,
-            })
-            .collect();
-        let info: &'static TypeInfo = Box::leak(Box::new(TypeInfo {
-            name: leak(name),
-            size,
-            align,
-            kind: TypeKind::Struct(Box::leak(fields.into_boxed_slice())),
-            attrs: Attrs::NONE,
-        }));
-        let mut defaults = vec![0u8; size];
-        for p in &props {
-            write_default(&mut defaults[p.offset..], p.kind, &p.default);
-        }
-        let layout = std::alloc::Layout::from_size_align(size, align).map_err(|e| e.to_string())?;
+        let (info, defaults, layout) = describe(name, &mut props)?;
         // Beside the program's types, so scenes and the editor find it by name.
         let runtime = engine_ecs::RuntimeType {
             info,
@@ -389,13 +568,7 @@ impl Scripts {
         // SAFETY: the values are plain data of `layout` (numbers, booleans, vectors and
         // entities by value), with no drop glue, `Send` and `Sync`; the defaults are one.
         unsafe { engine_ecs::add_runtime_type(runtime) };
-        let hook = |key: &str| table.get::<Option<Function>>(key).ok().flatten();
-        let hooks = Hooks {
-            start: hook("on_start"),
-            tick: hook("on_tick"),
-            frame: hook("on_frame"),
-            stop: hook("on_stop"),
-        };
+        let hooks = hooks_of(table);
         if let Some(mut names) = self.vm.lua().app_data_mut::<Names>() {
             names.by_name.insert(name.to_owned(), (id, info));
         }
@@ -647,6 +820,110 @@ impl Scripts {
 enum Stage {
     Tick,
     Frame,
+}
+
+/// The module of script `file` under `folder`: its path from there, without `.luau`
+/// (`npc/guard`).
+fn module_of(folder: &Path, file: &Path) -> Result<String, String> {
+    let relative = file
+        .strip_prefix(folder)
+        .map_err(|_| format!("{} is not in {}", file.display(), folder.display()))?;
+    Ok(relative
+        .with_extension("")
+        .to_string_lossy()
+        .replace('\\', "/"))
+}
+
+/// Component `name`'s description from its props, laid out by name (a table's keys have
+/// no order): its type, its default value and its layout.
+fn describe(
+    name: &str,
+    props: &mut [Prop],
+) -> Result<(&'static TypeInfo, Vec<u8>, std::alloc::Layout), String> {
+    props.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut offset = 0usize;
+    let mut align = 1usize;
+    for p in props.iter_mut() {
+        let info = p.kind.info();
+        offset = offset.next_multiple_of(info.align);
+        p.offset = offset;
+        offset += info.size;
+        align = align.max(info.align);
+    }
+    let size = offset.next_multiple_of(align);
+    let fields: Vec<Field> = props
+        .iter()
+        .map(|p| Field {
+            name: leak(&p.name),
+            offset: p.offset,
+            ty: p.kind.info(),
+            attrs: p.attrs,
+        })
+        .collect();
+    let info: &'static TypeInfo = Box::leak(Box::new(TypeInfo {
+        name: leak(name),
+        size,
+        align,
+        kind: TypeKind::Struct(Box::leak(fields.into_boxed_slice())),
+        attrs: Attrs::NONE,
+    }));
+    let mut defaults = vec![0u8; size];
+    for p in props.iter() {
+        write_default(&mut defaults[p.offset..], p.kind, &p.default);
+    }
+    let layout = std::alloc::Layout::from_size_align(size, align).map_err(|e| e.to_string())?;
+    Ok((info, defaults, layout))
+}
+
+/// Whether two descriptions of a component keep its props in the same places: the same
+/// names at the same offsets, of types of one name and size.
+fn same_places(a: &TypeInfo, b: &TypeInfo) -> bool {
+    let (TypeKind::Struct(x), TypeKind::Struct(y)) = (&a.kind, &b.kind) else {
+        return false;
+    };
+    a.size == b.size
+        && a.align == b.align
+        && x.len() == y.len()
+        && x.iter().zip(y.iter()).all(|(f, g)| {
+            f.name == g.name
+                && f.offset == g.offset
+                && f.ty.name == g.ty.name
+                && f.ty.size == g.ty.size
+        })
+}
+
+/// The hooks on a component's table.
+fn hooks_of(table: &Table) -> Hooks {
+    let hook = |key: &str| table.get::<Option<Function>>(key).ok().flatten();
+    Hooks {
+        start: hook("on_start"),
+        tick: hook("on_tick"),
+        frame: hook("on_frame"),
+        stop: hook("on_stop"),
+    }
+}
+
+/// Every entity's value of `r.old` moved into `r.new` ([`Relayout::apply`]).
+fn move_values(world: &mut World, r: &Relayout) {
+    let entities: Vec<Entity> = world
+        .archetypes()
+        .iter()
+        .filter(|a| a.components().contains(&r.old))
+        .flat_map(|a| (0..a.chunk_count()).flat_map(move |c| a.chunk_entities(c).iter().copied()))
+        .collect();
+    let size = world.components().layout(r.old).map_or(0, |l| l.size());
+    for e in entities {
+        let Some(ptr) = world.get_raw(e, r.old) else {
+            continue;
+        };
+        // SAFETY: the entity's live value of the old layout: `size` bytes of plain data,
+        // copied out before the world changes.
+        let value = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), size) }.to_vec();
+        let moved = r.apply(&value);
+        // SAFETY: a value of the new layout, plain data, which `insert_raw` copies.
+        unsafe { world.insert_raw(e, r.new, moved.as_ptr()) };
+        world.remove_raw(e, r.old);
+    }
 }
 
 /// The `.luau` files under `dir`, hidden ones left out.
@@ -1846,6 +2123,228 @@ return LaterLever
                 .is_err()
         );
         assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Prop `name` of script component `component` on `e`, an f32.
+    fn read_f32(world: &World, scripts: &Scripts, e: Entity, component: &str, name: &str) -> f32 {
+        let id = scripts.component(component).unwrap();
+        let info = world.components().type_info(id).unwrap();
+        let TypeKind::Struct(fields) = &info.kind else {
+            unreachable!()
+        };
+        let at = fields.iter().find(|f| f.name == name).unwrap().offset;
+        let base = world.get_raw(e, id).unwrap().as_ptr();
+        // SAFETY: an f32 prop of the entity's live value.
+        unsafe { base.add(at).cast::<f32>().read_unaligned() }
+    }
+
+    /// Prop `name` of script component `component` on `e`, an entity.
+    fn read_entity(
+        world: &World,
+        scripts: &Scripts,
+        e: Entity,
+        component: &str,
+        name: &str,
+    ) -> Entity {
+        let id = scripts.component(component).unwrap();
+        let info = world.components().type_info(id).unwrap();
+        let TypeKind::Struct(fields) = &info.kind else {
+            unreachable!()
+        };
+        let at = fields.iter().find(|f| f.name == name).unwrap().offset;
+        let base = world.get_raw(e, id).unwrap().as_ptr();
+        // SAFETY: an entity prop of the entity's live value.
+        unsafe { base.add(at).cast::<Entity>().read_unaligned() }
+    }
+
+    const RELOAD_V1: &str = r#"local D = component("ReloadDoor", { lift = 2, open = false, starts = 0, target = prop.entity() })
+function D.on_start(self)
+    self.starts += 1
+end
+function D.on_tick(self, dt)
+    self.lift += 1
+end
+return D
+"#;
+
+    #[test]
+    fn a_reloaded_script_keeps_its_instances_and_moves_changed_props_by_name() {
+        let dir = project("reload", &[("door.luau", RELOAD_V1)]);
+        let folder = dir.join("scripts");
+        let file = folder.join("door.luau");
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let e = world.spawn((Transform::IDENTITY,));
+        let other = world.spawn((Transform::IDENTITY,));
+        assert!(scripts.add(&mut world, e, "ReloadDoor"));
+        // The door's target: the other entity, written where the prop lies.
+        {
+            let id = scripts.component("ReloadDoor").unwrap();
+            let info = world.components().type_info(id).unwrap();
+            let TypeKind::Struct(fields) = &info.kind else {
+                unreachable!()
+            };
+            let at = fields.iter().find(|f| f.name == "target").unwrap().offset;
+            let base = world.get_raw_mut(e, id).unwrap().as_ptr();
+            // SAFETY: the entity prop of the entity's live value.
+            unsafe { base.add(at).cast::<Entity>().write_unaligned(other) };
+        }
+        scripts.tick(&mut world, 0.1);
+        scripts.tick(&mut world, 0.1);
+        let lift = |w: &World, s: &Scripts| read_f32(w, s, e, "ReloadDoor", "lift");
+        assert_eq!(lift(&world, &scripts), 4.0);
+        let first = scripts.component("ReloadDoor").unwrap();
+
+        // The same props, new hooks: in place, the instance going on.
+        std::fs::write(
+            &file,
+            RELOAD_V1.replace("self.lift += 1", "self.lift += 10"),
+        )
+        .unwrap();
+        let r = scripts
+            .reload_file(&mut world, &dir, &folder, &file)
+            .unwrap();
+        assert_eq!(r.kept, ["ReloadDoor"]);
+        assert!(r.relaid.is_empty());
+        assert_eq!(r.instances, 1);
+        assert_eq!(r.file, "scripts/door.luau");
+        assert_eq!(scripts.component("ReloadDoor"), Some(first));
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(lift(&world, &scripts), 14.0, "its value kept, the new hook");
+        assert_eq!(
+            read_f32(&world, &scripts, e, "ReloadDoor", "starts"),
+            1.0,
+            "on_start ran once, not again at the reload"
+        );
+        // The same text again: nothing to do.
+        assert!(
+            scripts
+                .reload_file(&mut world, &dir, &folder, &file)
+                .unwrap()
+                .is_empty()
+        );
+
+        // `open` became a number and `speed` came: each value by name.
+        let v3 = r#"local D = component("ReloadDoor", { lift = 2, open = 0.5, speed = 3, starts = 0, target = prop.entity() })
+function D.on_start(self)
+    self.starts += 1
+end
+function D.on_tick(self, dt)
+    self.lift += self.speed
+end
+return D
+"#;
+        std::fs::write(&file, v3).unwrap();
+        let r = scripts
+            .reload_file(&mut world, &dir, &folder, &file)
+            .unwrap();
+        assert_eq!(r.relaid.len(), 1);
+        let (name, relayout) = &r.relaid[0];
+        assert_eq!(name, "ReloadDoor");
+        assert_eq!(relayout.old, first);
+        let moved = scripts.component("ReloadDoor").unwrap();
+        assert_eq!(relayout.new, moved);
+        assert_eq!(world.components().name(moved), Some("script::ReloadDoor#2"));
+        assert!(
+            world.get_raw(e, first).is_none(),
+            "moved off the old layout"
+        );
+        assert_eq!(lift(&world, &scripts), 14.0, "kept by name");
+        assert_eq!(
+            read_f32(&world, &scripts, e, "ReloadDoor", "open"),
+            0.5,
+            "a new type: its default"
+        );
+        assert_eq!(
+            read_f32(&world, &scripts, e, "ReloadDoor", "speed"),
+            3.0,
+            "new: its default"
+        );
+        assert_eq!(
+            read_entity(&world, &scripts, e, "ReloadDoor", "target"),
+            other
+        );
+        let listed = engine_ecs::runtime_types()
+            .into_iter()
+            .find(|t| t.info.name == "ReloadDoor")
+            .unwrap();
+        assert_eq!(
+            &*listed.component, "script::ReloadDoor#2",
+            "scenes find the new layout"
+        );
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(lift(&world, &scripts), 17.0, "the instance went on");
+
+        // A syntax error: the old version runs on, the error names the file and line.
+        std::fs::write(&file, "local x = = 1\n").unwrap();
+        let why = scripts
+            .reload_file(&mut world, &dir, &folder, &file)
+            .unwrap_err();
+        assert!(why.starts_with("scripts/door.luau:1"), "{why}");
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(lift(&world, &scripts), 20.0);
+
+        // A runtime error stops the instance; the fix starts it again.
+        std::fs::write(
+            &file,
+            v3.replace("self.lift += self.speed", "error(\"jammed\")"),
+        )
+        .unwrap();
+        scripts
+            .reload_file(&mut world, &dir, &folder, &file)
+            .unwrap();
+        scripts.tick(&mut world, 0.1);
+        assert!(!scripts.reported.is_empty());
+        std::fs::write(&file, v3).unwrap();
+        let r = scripts
+            .reload_file(&mut world, &dir, &folder, &file)
+            .unwrap();
+        assert_eq!(r.instances, 1);
+        assert!(scripts.reported.is_empty(), "its errors may come again");
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(lift(&world, &scripts), 23.0, "started again");
+
+        // No longer declared: the data stays, the hooks go.
+        std::fs::write(&file, "return {}\n").unwrap();
+        let r = scripts
+            .reload_file(&mut world, &dir, &folder, &file)
+            .unwrap();
+        assert_eq!(r.gone, ["ReloadDoor"]);
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(lift(&world, &scripts), 23.0);
+        assert!(world.get_raw(e, moved).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "a measurement"]
+    fn measure_reload() {
+        let source = RELOAD_V1.replace("ReloadDoor", "MeasuredDoor");
+        let dir = project("reload-measure", &[("door.luau", &source)]);
+        let folder = dir.join("scripts");
+        let file = folder.join("door.luau");
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        for _ in 0..1000 {
+            let e = world.spawn((Transform::IDENTITY,));
+            scripts.add(&mut world, e, "MeasuredDoor");
+        }
+        scripts.tick(&mut world, 0.1);
+        std::fs::write(&file, source.replace("self.lift += 1", "self.lift += 2")).unwrap();
+        let in_place = scripts
+            .reload_file(&mut world, &dir, &folder, &file)
+            .unwrap();
+        std::fs::write(&file, source.replace("lift = 2,", "lift = 2, speed = 1,")).unwrap();
+        let moved = scripts
+            .reload_file(&mut world, &dir, &folder, &file)
+            .unwrap();
+        assert_eq!((in_place.instances, moved.relaid.len()), (1000, 1));
+        println!(
+            "reload of a script on 1,000 entities: in place {:.2} ms, its props changed {:.2} ms",
+            in_place.took.as_secs_f64() * 1e3,
+            moved.took.as_secs_f64() * 1e3
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
