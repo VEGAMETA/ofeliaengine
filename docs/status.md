@@ -433,7 +433,7 @@ Last updated: 2026-10-22.
     and Ctrl+click across `require`s; Ctrl+Shift+F, the palette's `%` over the project's
     scripts; a call's signature above the line, the argument at the caret lit. E8 is done
     but for rename and references across the project.
-  - **The frame cap by default** (#PR, ADR 0023's addendum): a release build's player
+  - **The frame cap by default** (#338, ADR 0023's addendum): a release build's player
     keeps a few frames under the display's refresh rate (`hz − hz²/3600`; 224 on ref-1's
     240 Hz, 4,463 µs frames against 2,003 uncapped), and as far over it with vsync, a
     backstop for a display that does not pace. `FrameCap`, `Player::set_frame_cap`; the
