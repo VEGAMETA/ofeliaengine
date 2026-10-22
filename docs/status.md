@@ -470,7 +470,7 @@ Last updated: 2026-10-22.
     `engine_ecs::RuntimeType`, a process-wide list of component types made at run time.
     `SceneRegistry::from_program` reads it (`Access::Dynamic`), so `Door.lift = 3` lines
     load and save in the player and the editor, and undo keeps them.
-  - **E7-4a, scripts in the editor** (#PR, the owner's request of 2026-10-22, ADR 0114's
+  - **E7-4a, scripts in the editor** (#345, the owner's request of 2026-10-22, ADR 0114's
     as-built): Add Component… (Ctrl+Shift+A, a button under the components), the × on a
     component's header, Attach Script… (the scene dock's script button), New Script… from
     a template named after the entity, loaded by the player's host and attached as one
