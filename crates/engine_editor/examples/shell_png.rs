@@ -323,6 +323,7 @@ fn main() {
         kind,
         selected: false,
         thumbnail: None,
+        renaming: false,
     };
     let files = [
         file("main.scene", FileKind::Scene),

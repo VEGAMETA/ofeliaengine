@@ -615,6 +615,7 @@ struct CommandIds {
     /// Keeping changes made while playing (E3-3).
     keep: CommandId,
     keep_list: CommandId,
+    find_references: CommandId,
     /// Where Play shows the game (E3-4).
     play_where: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
@@ -707,6 +708,7 @@ fn commands() -> (Commands, CommandIds) {
         eject: c.register("play.eject", "Play", "Eject or Return to the Game"),
         keep: c.register("play.keep", "Play", "Keep the Selection's Changes"),
         keep_list: c.register("play.keep_list", "Play", "Keep Changes…"),
+        find_references: c.register("assets.references", "Assets", "Find References"),
         play_where: c.register("play.where", "Play", "In a Window or in the Viewport"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
@@ -798,6 +800,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         // Unreal's K, with Ctrl: plain letters are the game's while it plays.
         ("Ctrl+K", ids.keep),
         ("Ctrl+Shift+K", ids.keep_list),
+        ("Shift+F12", ids.find_references),
     ];
     // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
     // - ours: Q, E, R at once and with Shift the gizmo's handles, the left hand beside
@@ -940,6 +943,8 @@ enum Pick {
     Step(usize, f64),
     /// Keeps a change made while playing, or not (E3-3).
     Keep(KeepItem),
+    /// Shows this asset in the FileSystem dock.
+    Reveal(AssetId),
 }
 
 /// What a line of the "Keep Changes…" list keeps.
@@ -1415,6 +1420,9 @@ struct Editor {
     browser: Browser,
     /// A file dragged out of the browser (E4-3).
     asset_drag: Option<AssetDrag>,
+    /// The listing was clicked last (F2 renames its file), and the file renamed in place.
+    dock_focus: bool,
+    renaming_file: Option<AssetId>,
     /// The listing's thumbnails (ADR 0112), the side of its tiles' pictures (logical
     /// pixels), and where its scroll area was last frame: rectangle and scroll.
     thumbnails: Thumbnails,
@@ -1882,6 +1890,8 @@ impl Editor {
             assets_changed: None,
             browser: Browser::default(),
             asset_drag: None,
+            dock_focus: false,
+            renaming_file: None,
             thumbnails,
             tile: DEFAULT_TILE,
             listing: None,
@@ -2658,6 +2668,7 @@ impl Editor {
                 kind: l.kind,
                 selected: l.asset.is_some() && l.asset == self.browser.selected,
                 thumbnail,
+                renaming: l.asset.is_some() && l.asset == self.renaming_file,
             });
         }
         // The command palette's results in view.
@@ -2839,6 +2850,15 @@ impl Editor {
         // A press tells where the keys go: the tree's arrows after a press in it.
         if self.ui.input().mouse_pressed {
             self.tree_focus = response.tree_hovered;
+            self.dock_focus = response.listing_hovered;
+        }
+        // A file renamed in place (F2 in the listing).
+        if let Some(commit) = response.file_rename {
+            if commit && let Some(id) = self.renaming_file {
+                let name = self.ui.edited_text().trim().to_owned();
+                self.rename_file(id, &name);
+            }
+            self.renaming_file = None;
         }
         if dismissed(&self.ui, &response) {
             self.add_open = false;
@@ -3526,6 +3546,7 @@ impl Editor {
                             Pick::Select(e) => self.show(world, e),
                             Pick::Step(k, value) => self.set_step(world, k, value),
                             Pick::Keep(item) => self.toggle_keep(world, item),
+                            Pick::Reveal(id) => self.reveal_asset(id),
                         }
                     }
                 } else if cp.finds_objects() {
@@ -6586,7 +6607,13 @@ impl Editor {
                 }
             }
         } else if id == ids.rename {
-            self.renaming = self.active();
+            // In the listing, its file; else the selection.
+            match self.browser.selected.filter(|_| self.dock_focus) {
+                Some(file) => self.renaming_file = Some(file),
+                None => self.renaming = self.active(),
+            }
+        } else if id == ids.find_references {
+            self.find_references(world);
         } else if id == ids.select_next || id == ids.select_previous {
             self.step(if id == ids.select_next { 1 } else { -1 }, false);
         } else if id == ids.extend_next || id == ids.extend_previous {
@@ -6989,7 +7016,17 @@ impl Editor {
                         && y < r.pos[1] + r.size[1]
                 })
             });
+        let folder_tile = response.listing_under.filter(|&i| {
+            self.browser
+                .listing
+                .get(i)
+                .is_some_and(|l| l.asset.is_none())
+        });
         drag.over = match response.tree_under.and_then(|i| self.rows.get(i)) {
+            _ if folder_tile.is_some() => DropTarget::FolderTile(folder_tile.unwrap_or(0)),
+            _ if response.folder_under.is_some() => {
+                DropTarget::FolderRow(response.folder_under.unwrap_or(0))
+            }
             Some(row) => DropTarget::Row(row.entity),
             None if response.tree_hovered => DropTarget::Tree,
             None => match response.hovered_field {
@@ -7185,6 +7222,16 @@ impl Editor {
             (DropTarget::Row(e), K::Material) => self.give_material(world, e, &drag),
             (DropTarget::Field(section, field), _) => {
                 self.drop_on_field(world, section, field, &mut drag);
+            }
+            (DropTarget::FolderTile(i), _) => {
+                if let Some(folder) = self.browser.listing.get(i).map(|l| l.path.clone()) {
+                    self.move_into(drag.asset, &folder);
+                }
+            }
+            (DropTarget::FolderRow(i), _) => {
+                if let Some((folder, _)) = self.browser.folders.get(i).cloned() {
+                    self.move_into(drag.asset, &folder);
+                }
             }
             (DropTarget::View | DropTarget::Row(_) | DropTarget::Tree, _) => self.say(format!(
                 "{name}: models and materials go into the scene; other assets onto fields"
@@ -7386,6 +7433,190 @@ impl Editor {
         }
     }
 
+    /// Asset `id`'s file renamed in its folder to `name` (its extension kept when left
+    /// out): F2 in the listing.
+    fn rename_file(&mut self, id: AssetId, name: &str) {
+        let Some(entry) = self.asset_db.get(id) else {
+            return;
+        };
+        let (folder, old) = entry
+            .path
+            .rsplit_once('/')
+            .map_or(("", entry.path.as_str()), |(f, n)| (f, n));
+        let mut name = name.to_owned();
+        if Path::new(&name).extension().is_none()
+            && let Some(ext) = Path::new(old).extension().and_then(|e| e.to_str())
+        {
+            name = format!("{name}.{ext}");
+        }
+        if name.is_empty() || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+            self.say(format!("{name:?} cannot be a file's name"));
+            return;
+        }
+        let path = if folder.is_empty() {
+            name
+        } else {
+            format!("{folder}/{name}")
+        };
+        self.move_asset(id, &path);
+    }
+
+    /// Asset `id`'s file moved into folder `folder` (under the project, `""` its top),
+    /// keeping its name: a file dropped on a folder.
+    fn move_into(&mut self, id: AssetId, folder: &str) {
+        let Some(entry) = self.asset_db.get(id) else {
+            return;
+        };
+        let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
+        let path = if folder.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{folder}/{name}")
+        };
+        self.move_asset(id, &path);
+    }
+
+    /// Asset `id`'s file moved to `path` (under the project) with its `.meta`: it keeps
+    /// its id, so scenes keep their references; the paths of its parts follow, and a
+    /// scene saved from now on writes the new one. Not an undo step: a file on disk.
+    fn move_asset(&mut self, id: AssetId, path: &str) {
+        let Some(entry) = self.asset_db.get(id).cloned() else {
+            return;
+        };
+        if entry.path == path {
+            return;
+        }
+        let (from, to) = (self.root.join(&entry.path), self.root.join(path));
+        if to.exists() {
+            self.say(format!("{path} is there already"));
+            return;
+        }
+        if let Err(e) = std::fs::rename(&from, &to) {
+            self.say(format!("{} not moved: {e}", entry.path));
+            return;
+        }
+        if !entry.kind.own_id() {
+            let (meta_from, meta_to) = (AssetMeta::path(&from), AssetMeta::path(&to));
+            if meta_from.is_file() {
+                let _ = std::fs::rename(meta_from, meta_to);
+            }
+        }
+        // The database at once (the folder's watcher would scan it a moment later).
+        self.asset_db.scan();
+        if let Err(e) = self.asset_db.save() {
+            log::warn!(target: "engine_editor", "the asset index: {e}");
+        }
+        let mut paths = self.asset_db.paths();
+        let parts: Vec<(AssetRef, String)> = self
+            .assets
+            .iter()
+            .filter(|(a, _)| a.file == id && a.part != 0)
+            .filter_map(|(a, p)| {
+                let rest = p.strip_prefix(entry.path.as_str())?;
+                Some((a, format!("{path}{rest}")))
+            })
+            .collect();
+        for (asset, part) in parts {
+            paths.insert(asset, part);
+        }
+        self.assets.extend(&paths);
+        self.pending_assets.extend(&paths);
+        if self.scene_path.as_deref() == Some(Path::new(&entry.path)) {
+            self.scene_path = Some(PathBuf::from(path));
+        }
+        let folder = path.rsplit_once('/').map_or("", |(f, _)| f).to_owned();
+        self.open_folder(&folder);
+        self.browser.selected = Some(id);
+        self.say(format!("{} → {path}", entry.path));
+    }
+
+    /// "Find References" (Shift+F12): where the dock's picked asset is used, in the palette:
+    /// the open scene's entities (as it is now), then the project's scenes and materials on
+    /// disk, each with how many times.
+    fn find_references(&mut self, world: &mut World) {
+        let Some(id) = self.browser.selected else {
+            self.say(String::from(
+                "Pick an asset in the FileSystem dock to find where it is used",
+            ));
+            return;
+        };
+        let needle = id.to_string();
+        let mut items = Vec::new();
+        // The open scene as it is: its entities whose lines name the asset.
+        let options = SaveOptions {
+            id: Some(self.scene_id),
+            assets: Some(&self.assets),
+        };
+        let mut text = String::new();
+        if engine_scene::save_with(world, &SceneRegistry::from_program(), &options, &mut text)
+            .is_ok()
+        {
+            let index: HashMap<SceneId, Entity> = {
+                let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
+                q.iter_readonly(world).map(|(e, &id)| (id, e)).collect()
+            };
+            let mut current: Option<Entity> = None;
+            let mut fields: Vec<(Entity, Vec<String>)> = Vec::new();
+            for line in text.lines() {
+                if let Some(rest) = line.strip_prefix("[entity ") {
+                    current = rest
+                        .trim_end_matches(']')
+                        .split_whitespace()
+                        .next()
+                        .and_then(SceneId::parse)
+                        .and_then(|s| index.get(&s).copied());
+                } else if line.contains(&needle)
+                    && let Some(e) = current
+                {
+                    let field = line.split(" = ").next().unwrap_or(line).trim().to_owned();
+                    match fields.iter_mut().find(|(x, _)| *x == e) {
+                        Some((_, f)) => f.push(field),
+                        None => fields.push((e, vec![field])),
+                    }
+                }
+            }
+            for (e, f) in fields {
+                items.push(Choice {
+                    label: label_of(world, e),
+                    detail: format!("{} · this scene", f.join(", ")),
+                    pick: Pick::Select(e),
+                });
+            }
+        }
+        // The project's scenes and materials on disk.
+        use engine_scene::AssetKind as K;
+        let files: Vec<(AssetId, String)> = self
+            .asset_db
+            .entries()
+            .iter()
+            .filter(|e| matches!(e.kind, K::Scene | K::Material) && e.id != id)
+            .map(|e| (e.id, e.path.clone()))
+            .collect();
+        for (file, path) in files {
+            let Ok(text) = std::fs::read_to_string(self.root.join(&path)) else {
+                continue;
+            };
+            let count = text.matches(&needle).count();
+            if count > 0 {
+                items.push(Choice {
+                    label: path,
+                    detail: format!("{count} on disk"),
+                    pick: Pick::Reveal(file),
+                });
+            }
+        }
+        let name = self
+            .asset_db
+            .get(id)
+            .map_or_else(String::new, |e| e.path.clone());
+        if items.is_empty() {
+            self.say(format!("{name} is used nowhere"));
+            return;
+        }
+        self.say(format!("{name}: {} places", items.len()));
+        self.open_list(world, "Where it is used (Enter goes there)", items);
+    }
+
     /// Inspector field `field` of section `section` given asset `id` (picked in the
     /// palette), as a file dropped on it would be.
     fn give_field_asset(&mut self, world: &mut World, section: usize, field: usize, id: AssetId) {
@@ -7432,6 +7663,17 @@ impl Editor {
             (DropTarget::Tree, K::Model) => format!("{name}: let go to add it to the scene"),
             (DropTarget::Field(section, field), _) => match self.shown_property(section, field) {
                 Some((p, component)) => format!("{name} → {}", self.path_of(&p, component)),
+                None => name.clone(),
+            },
+            (DropTarget::FolderTile(i), _) => match self.browser.listing.get(i) {
+                Some(l) => format!("{name}: let go to move it into {}", l.path),
+                None => name.clone(),
+            },
+            (DropTarget::FolderRow(i), _) => match self.browser.folders.get(i) {
+                Some((folder, _)) if folder.is_empty() => {
+                    format!("{name}: let go to move it to the top")
+                }
+                Some((folder, _)) => format!("{name}: let go to move it into {folder}"),
                 None => name.clone(),
             },
             _ => name.clone(),
@@ -9381,6 +9623,10 @@ enum DropTarget {
     Tree,
     /// An inspector field (section, field): the asset assigned.
     Field(usize, usize),
+    /// A folder of the listing (its index) or of the dock's tree (its row): the file moved
+    /// into it.
+    FolderTile(usize),
+    FolderRow(usize),
 }
 
 /// An asset `#` in the palette found.
@@ -11131,6 +11377,107 @@ mod tests {
         // Opened the plain way, the palette's assets go to the dock again.
         ed.open_palette(&mut world, "#red");
         assert!(ed.command_palette.as_ref().unwrap().for_field.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn f2_in_the_listing_renames_a_file_and_it_keeps_its_id() {
+        let (dir, mut world, mut ed, boxed) = drop_project("rename-file");
+        let crate_id = ed.asset_db.find("props/crate.gltf").unwrap().id;
+        // The box's model takes the crate's mesh, as a drop gives it.
+        world.get_mut::<Model>(boxed).unwrap().mesh = AssetRef::part(crate_id, "Crate");
+        let mut paths = AssetPaths::new();
+        paths.insert(AssetRef::part(crate_id, "Crate"), "props/crate.gltf#Crate");
+        ed.assets.extend(&paths);
+        // A click on its tile, then F2: its name a field; typed and Enter.
+        let at = middle(texts(&ed, "crate.gltf")[0]);
+        click(&mut ed, &mut world, at);
+        assert_eq!(ed.browser.selected, Some(crate_id));
+        key(&mut ed, 0x71, 0x3C, true); // F2
+        ed.update(&mut world);
+        key(&mut ed, 0x71, 0x3C, false);
+        ed.update(&mut world);
+        assert_eq!(ed.renaming_file, Some(crate_id));
+        assert!(ed.ui.editing().is_some(), "the tile's name is a field");
+        chars(&mut ed, "box");
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, true); // Enter
+        ed.update(&mut world);
+        // Moved with its `.meta`, the same id, its part's path following.
+        assert!(dir.join("props/box.gltf").is_file(), "its extension kept");
+        assert!(dir.join("props/box.gltf.meta").is_file());
+        assert!(!dir.join("props/crate.gltf").exists());
+        assert_eq!(ed.asset_db.find("props/box.gltf").unwrap().id, crate_id);
+        assert_eq!(
+            ed.assets.get(AssetRef::part(crate_id, "Crate")),
+            Some("props/box.gltf#Crate")
+        );
+        assert_eq!(ed.renaming_file, None);
+        // Dropped on a folder: moved into it, still the same asset.
+        std::fs::create_dir_all(dir.join("props/rocks")).unwrap();
+        std::fs::write(dir.join("props/rocks/rock.png"), b"a rock").unwrap();
+        ed.asset_db.scan();
+        ed.refresh_browser();
+        ed.update(&mut world);
+        drag_file(&mut ed, &mut world, "box.gltf");
+        let folder = middle(texts(&ed, "rocks")[0]);
+        mouse(&mut ed, folder, None);
+        ed.update(&mut world);
+        assert!(matches!(
+            ed.asset_drag.as_ref().unwrap().over,
+            DropTarget::FolderTile(_) | DropTarget::FolderRow(_)
+        ));
+        mouse(&mut ed, folder, Some(false));
+        ed.update(&mut world);
+        assert!(dir.join("props/rocks/box.gltf").is_file());
+        assert_eq!(
+            ed.asset_db.find("props/rocks/box.gltf").unwrap().id,
+            crate_id
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_references_lists_the_scene_and_the_files_that_use_an_asset() {
+        let (dir, mut world, mut ed, boxed) = drop_project("references");
+        let red = ed.asset_db.find("props/red.material").unwrap().id;
+        world.get_mut::<Model>(boxed).unwrap().material = AssetRef::file(red);
+        // A scene on disk that names it twice, and one that does not.
+        let other = AssetId::new();
+        std::fs::write(
+            dir.join("level.scene"),
+            format!(
+                "[scene version=3 id={other}]\n\n[entity {a}]\nModel.material = \
+                 asset(\"props/red.material\", {red})\n\n[entity {b}]\n\
+                 Model.material = asset(\"props/red.material\", {red})\n",
+                a = SceneId::new(),
+                b = SceneId::new(),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("empty.scene"),
+            format!("[scene version=3 id={}]\n", AssetId::new()),
+        )
+        .unwrap();
+        ed.asset_db.scan();
+        ed.browser.selected = Some(red);
+        ed.run(&mut world, ed.ids.find_references);
+        let cp = ed.command_palette.as_ref().expect("the list");
+        let choices = cp.choices.as_ref().unwrap();
+        let labels: Vec<(&str, &str)> = choices
+            .items
+            .iter()
+            .map(|c| (c.label.as_str(), c.detail.as_str()))
+            .collect();
+        assert_eq!(labels.len(), 2, "{labels:?}");
+        assert_eq!(labels[0].0, "Box");
+        assert!(labels[0].1.contains("Model.material"), "{labels:?}");
+        assert_eq!(labels[1], ("level.scene", "2 on disk"));
+        // Enter on the box selects it.
+        ed.select_only(ed.rows[0].entity);
+        ed.palette_action(&mut world, PaletteAction::Run(0));
+        assert_eq!(ed.active(), Some(boxed));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

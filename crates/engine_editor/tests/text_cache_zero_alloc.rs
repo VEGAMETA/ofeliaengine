@@ -141,12 +141,14 @@ fn a_steady_shell_frame_does_not_allocate() {
         FileItem {
             selected: false,
             thumbnail: None,
+            renaming: false,
             name: "main.scene",
             kind: FileKind::Scene,
         },
         FileItem {
             selected: false,
             thumbnail: None,
+            renaming: false,
             name: "player.luau",
             kind: FileKind::Script,
         },

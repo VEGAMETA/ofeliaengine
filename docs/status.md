@@ -293,8 +293,14 @@ Last updated: 2026-10-20.
   - **E4-6c, the inspector's asset fields as in Godot** (#311, ADR 0112): a square
     preview the engine draws (a mesh with its material, a material on a sphere) beside
     the asset's name; a click picks another through the palette, a drop puts one in.
-  - **Next:** E4-7, renames and moves inside the editor (F2 in the dock: the file and its
-    `.meta` move together, scenes keep their references) and "Find references".
+  - **E4-7, renames, moves and references** (#312, ADR 0107's as-built):
+    - F2 in the dock renames a file and a drop on a folder moves it; its `.meta` goes
+      with it, and its parts' paths follow;
+    - Shift+F12 finds where an asset is used: the open scene's entities, then the scenes
+      and materials on disk.
+  - **Next:** E4's last items: import settings in the inspector (a texture's use and
+    compression, a model's scale), and the cook's DDC behind the editor's textures
+    (BC7). Then E5, prefabs.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
