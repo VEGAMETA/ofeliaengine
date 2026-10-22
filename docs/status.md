@@ -489,7 +489,7 @@ Last updated: 2026-10-22.
     `engine_render::wire` draws the edges after the frame in line mode, the scene's depth
     sampled against a tolerance, so lines never z-fight the surfaces they lie on. 10,000
     cubes: 0.41–0.99 ms on the GPUs, a lit view unchanged.
-  - **View modes, V1b** (#PR, ADR 0116): Unlit on Alt+3, a pass of its own
+  - **View modes, V1b** (#349, ADR 0116): Unlit on Alt+3, a pass of its own
     (`engine_render::unlit`) drawing each material's base color and emission over a dark
     background; the forward pass untouched. 10,000 cubes: 0.28 / 1.15 ms on the GPUs.
   - **Next, in this order:**
