@@ -587,6 +587,33 @@ A click on a folder opens it, a click on a file picks it.
 `#model:crate`, `#texture:rock` (`scene`, `material`, `model` or `mesh`, `texture`, `sound`
 or `audio`, `video`, `font`, `script`). Enter shows the asset in the dock.
 
+**Drag a file out of the dock** to use it; the hint by the pointer says what letting go
+will do:
+
+| Drop | Onto | What happens |
+|---|---|---|
+| a model (`.glb`, `.gltf`) | the viewport | it rests on the surface under the pointer while you move, and stays where you let go |
+| a model | a row of the scene tree | it goes under that entity, at its origin |
+| a model | the tree below its rows | a new root where the camera looks |
+| a material (`.material`) | an object in the viewport, or its row | the object's model takes it |
+| an asset | an asset field in the inspector | the field takes it, on every selected entity with that component |
+
+- **Placing in the viewport:**
+  - the model's box rests on the surface: its bottom on a floor, its side on a wall;
+  - where nothing is under the pointer, it stands on the ground's plane (y = 0);
+  - with snapping on, its place along the surface snaps to the position step (Shift
+    inverts it, as for drags).
+- **Escape**, or moving back out of the viewport, takes the model away again. Every drop
+  is one undo step.
+- **What a model becomes:**
+  - a file of one node is one entity, named after the file;
+  - otherwise a root named after the file, with an entity for each node of the file's
+    scene (its transform, and a model of its mesh and material).
+- **Fields:** a model's `mesh` takes a model file of one mesh, its `material` a material
+  file or a model file of one material.
+- **Meshes of several materials:** a model draws one material, so such a mesh draws with
+  its first. The status line names the meshes this affects.
+
 ## Autosave and the session
 
 The editor keeps its own files in the project's `.ofelia/` folder (ADR 0107 §4). They are

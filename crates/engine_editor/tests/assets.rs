@@ -4,10 +4,12 @@
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
-use engine_app::{Game, Player, PlayerSettings, Window};
-use engine_ecs::World;
+use engine_app::{BakedBrush, Game, Model, Player, PlayerSettings, Window, builtin};
+use engine_core::math::Vec3;
+use engine_ecs::{Transform, World};
 use engine_editor::{EditorGame, EditorOverlay};
-use engine_scene::{AssetId, AssetKind, AssetMeta, AssetRef};
+use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind, WindowId};
+use engine_scene::{AssetId, AssetKind, AssetMeta, AssetRef, Name, SceneId};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -136,6 +138,193 @@ fn the_editor_knows_the_projects_assets_and_follows_the_folder() {
         player.assets().paths().get(AssetRef::file(crate_.id)),
         Some("crate.glb")
     );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A box of one meter standing on its origin, in one tint: what a bake makes a model of.
+fn box_brush() -> BakedBrush {
+    let mut b = BakedBrush {
+        tint: [0.8, 0.45, 0.2, 1.0],
+        positions: Vec::new(),
+        normals: Vec::new(),
+        uvs: Vec::new(),
+        indices: Vec::new(),
+    };
+    // Each face: its normal and two directions along it whose cross is the normal.
+    let faces = [
+        ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
+        ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+        ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
+        ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+        ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        ([0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+    ];
+    for (n, u, v) in faces {
+        let (n, u, v) = (Vec3::from(n), Vec3::from(u), Vec3::from(v));
+        let center = Vec3::new(0.0, 0.5, 0.0) + n * 0.5;
+        let base = b.positions.len() as u32;
+        for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            b.positions
+                .push((center + u * (su * 0.5) + v * (sv * 0.5)).to_array());
+            b.normals.push(n.to_array());
+            b.uvs.push([su, sv]);
+        }
+        b.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    b
+}
+
+/// The pointer at `at`, the left button pressed or let go with it (window events).
+fn pointer(game: &mut EditorGame<NoGame>, at: [f32; 2], pressed: Option<bool>) {
+    let mut send = |kind| {
+        game.event(&WindowEvent {
+            window: WindowId(0),
+            time: Instant::now(),
+            kind,
+        });
+    };
+    send(WindowEventKind::CursorMoved {
+        x: at[0].round() as i32,
+        y: at[1].round() as i32,
+    });
+    if let Some(pressed) = pressed {
+        send(WindowEventKind::MouseButton {
+            button: MouseButton::Left,
+            pressed,
+        });
+    }
+}
+
+#[test]
+fn a_model_dragged_from_the_browser_rests_on_the_floor_and_draws() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-drop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("props")).unwrap();
+    // A floor whose top is at y = -0.5, and a crate model beside the scene.
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Floor"),
+        Transform::from_xyz(0.0, -0.55, 0.0).with_scale(Vec3::new(20.0, 0.1, 20.0)),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    let options = engine_scene::SaveOptions {
+        id: Some(AssetId::new()),
+        assets: None,
+    };
+    let mut text = String::new();
+    engine_scene::save_with(
+        &mut world,
+        &engine_scene::SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let baked = engine_app::bake::glb("crate", &[box_brush()], &engine_app::grid_png());
+    let (mesh, material) = baked.parts[0].clone();
+    std::fs::write(dir.join("props/crate.glb"), baked.bytes).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("editor drop test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    // The props folder opened in the browser.
+    let folder = game.text_at("props").expect("the props folder listed");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, folder, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    // The crate's file pressed, dragged a little, then over the viewport's middle.
+    let file = game.text_at("crate.glb").expect("the crate's file listed");
+    pointer(&mut game, file, None);
+    frame(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, file, Some(true));
+    frame(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, [file[0] + 12.0, file[1]], None);
+    frame(&mut player, &mut game, &mut overlay);
+    let [x, y, w, h] = game.view_rect().unwrap();
+    let middle = [(x + w / 2) as f32, (y + h / 2) as f32];
+    pointer(&mut game, middle, None);
+    // Held there: it rests on the floor once the surface is found, and stays there (the
+    // pick under the pointer leaves the crate itself out).
+    let mut heights = Vec::new();
+    for _ in 0..30 {
+        frame(&mut player, &mut game, &mut overlay);
+        let world = player.world_mut();
+        if let Some(e) = engine_scene::find_named(world, "crate") {
+            heights.push(world.get::<Transform>(e).unwrap().translation.y);
+        }
+    }
+    let last = *heights.last().expect("placed while held over the view");
+    assert!((last + 0.5).abs() < 1e-3, "on the floor's top: {heights:?}");
+    assert!(
+        heights
+            .iter()
+            .rev()
+            .take(10)
+            .all(|y| (y + 0.5).abs() < 1e-3),
+        "it stays: {heights:?}"
+    );
+    // Let go: kept, drawn from the file's mesh and material.
+    pointer(&mut game, middle, Some(false));
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    let crate_ = game.asset("props/crate.glb").unwrap();
+    let world = player.world_mut();
+    let e = engine_scene::find_named(world, "crate").expect("kept");
+    let model = *world.get::<Model>(e).unwrap();
+    assert_eq!(model.mesh, AssetRef::part(crate_.id, &mesh));
+    assert_eq!(model.material, AssetRef::part(crate_.id, &material));
+    assert!(
+        world.get::<engine_runtime::MeshRenderer>(e).is_some(),
+        "the player draws it"
+    );
+    assert_eq!(player.assets().problem(model.mesh), None);
+    assert_eq!(player.assets().problem(model.material), None);
+    assert_eq!(game.selection(), [e]);
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_DROP_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let extent = player.extent();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

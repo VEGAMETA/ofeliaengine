@@ -11,6 +11,7 @@ pub mod app;
 mod build;
 pub mod camera;
 mod draw;
+mod drop;
 pub mod expr;
 mod faces;
 mod gizmo;

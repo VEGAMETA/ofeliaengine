@@ -338,6 +338,9 @@ pub struct ShellModel<'a> {
     pub add_menu: Option<(&'a [MenuEntry<'a>], Option<usize>)>,
     /// The scene tree's row to scroll into view.
     pub reveal_row: Option<usize>,
+    /// The scene tree's row a file dragged from the FileSystem dock would drop onto
+    /// (outlined).
+    pub drop_row: Option<usize>,
     /// What the scene tree is filtered by.
     pub tree_filter: &'a str,
     /// What the inspector is filtered by.
@@ -380,6 +383,11 @@ pub struct ShellResponse {
     pub folder: Option<usize>,
     /// A file was clicked.
     pub file: Option<usize>,
+    /// A file is dragged out of the listing: held and moved past [`DRAG_START`].
+    pub file_drag: Option<usize>,
+    /// The scene tree's row under the pointer, whatever the mouse holds: where a drop
+    /// lands.
+    pub tree_under: Option<usize>,
     /// A bottom panel tab was clicked.
     pub bottom_tab: Option<usize>,
     /// Play (F5).
@@ -424,6 +432,8 @@ const INSPECTOR_WIDTH: f32 = 320.0;
 const FILES_HEIGHT: f32 = 190.0;
 /// Indentation per tree level.
 const INDENT: f32 = 14.0;
+/// How far a held file moves before it is dragged, in logical pixels.
+pub const DRAG_START: f32 = 4.0;
 
 fn text(ui: &mut Ui, key: &str, s: &str, size: f32, color: Color) -> u64 {
     ui.text_node(key, Style::default(), s, size, color, false)
@@ -715,7 +725,7 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
         dock_column(ui, "folders", Size::Fixed(220.0), p, |ui| {
             dock_title(ui, "FileSystem", p);
             ui.scroll_column("tree", |ui| {
-                out.folder = tree_rows(ui, model.folders, p, None, false).clicked;
+                out.folder = tree_rows(ui, model.folders, p, None, None, false).clicked;
             });
         });
         dock_column(ui, "listing", Size::Grow(1.0), p, |ui| {
@@ -741,6 +751,12 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
                     );
                     if ui.sense(id, false).clicked {
                         out.file = Some(i);
+                    }
+                    if ui
+                        .drag_delta(id)
+                        .is_some_and(|[x, y]| x * x + y * y > DRAG_START * DRAG_START)
+                    {
+                        out.file_drag = Some(i);
                     }
                     ui.pop_id();
                 }
@@ -852,18 +868,22 @@ fn filter(ui: &mut Ui, text_now: &str, hint: &str, p: &Palette) -> Option<TextFi
 #[derive(Default)]
 struct RowsResponse {
     clicked: Option<usize>,
+    /// The scene tree's row under the pointer (by the last layout, whatever the mouse
+    /// holds).
+    under: Option<usize>,
     toggled: Option<usize>,
     eye: Option<usize>,
     rename: Option<bool>,
 }
 
 /// Tree rows: a click on a row, on its arrow, on its eye (`eyes`: the scene tree's rows
-/// end in one), and renaming in place.
+/// end in one), and renaming in place; row `target` outlined as where a drop lands.
 fn tree_rows(
     ui: &mut Ui,
     rows: &[TreeItem<'_>],
     p: &Palette,
     reveal: Option<usize>,
+    target: Option<usize>,
     eyes: bool,
 ) -> RowsResponse {
     let mut out = RowsResponse::default();
@@ -881,6 +901,7 @@ fn tree_rows(
                 } else {
                     item.selected.then_some(p.selection_dim)
                 },
+                border: (target == Some(i)).then_some((p.accent, 1.0)),
                 ..Style::default()
             },
             |ui| {
@@ -959,6 +980,13 @@ fn tree_rows(
         if reveal == Some(i) {
             ui.reveal(id);
         }
+        // The scene tree's rows are hover regions: where a dragged file would drop.
+        if eyes {
+            ui.mark_region(id);
+            if ui.in_region(id) {
+                out.under = Some(i);
+            }
+        }
         ui.pop_id();
     }
     out
@@ -1012,8 +1040,9 @@ fn scene_dock(
         });
         out.tree_filter = filter(ui, model.tree_filter, "Filter nodes", p);
         let tree = ui.scroll_column("tree", |ui| {
-            let rows = tree_rows(ui, model.tree, p, model.reveal_row, true);
+            let rows = tree_rows(ui, model.tree, p, model.reveal_row, model.drop_row, true);
             out.tree_row = rows.clicked;
+            out.tree_under = rows.under;
             out.tree_toggle = rows.toggled;
             out.tree_eye = rows.eye;
             out.rename = rows.rename;
