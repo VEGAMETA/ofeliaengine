@@ -77,7 +77,7 @@ mod sound;
 mod text;
 mod videos;
 
-pub use assets::{Alpha, AssetMeta, Assets, MaterialFile, Model, builtin};
+pub use assets::{Alpha, Assets, MaterialFile, Model, builtin};
 pub use blockout::{
     BakedBrush, Blockout, Brush, BrushGroup, BrushOp, BrushPlane, BrushShape, grid_png,
 };
@@ -94,6 +94,8 @@ pub use engine_save::{
     ApplyOptions, CaptureOptions, Encoding, LoadReport, LoadedSave, SaveHeader, SaveImage, SceneId,
     SlotInfo, Transient,
 };
+/// The file beside a foreign asset (ADR 0108), and the project's asset database.
+pub use engine_scene::{AssetDatabase, AssetMeta};
 pub use entry::{Start, run};
 pub use game::{FrameParts, Game, PlayFrom};
 pub use net::{

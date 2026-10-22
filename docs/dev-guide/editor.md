@@ -567,6 +567,13 @@ crash reporter still writes its report.
 **While editing, the scene stands still:** tweens, timers and sounds start only with Play,
 so editing never changes the scene behind your back.
 
+## Assets
+
+The editor keeps the project's asset database ([scenes.md](scenes.md#the-asset-database)):
+every asset file with its id, a `.meta` beside each foreign file, the index in
+`.ofelia/`. Files you add, move or delete in Explorer are followed a moment later, and
+scenes find their assets by id. The asset browser comes next (ADR 0107 E4).
+
 ## Autosave and the session
 
 The editor keeps its own files in the project's `.ofelia/` folder (ADR 0107 §4). They are

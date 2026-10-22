@@ -63,9 +63,11 @@
 //! ```
 
 mod assets;
+pub mod database;
 pub mod text;
 
 pub use assets::{AssetId, AssetPaths, AssetRef};
+pub use database::{AssetDatabase, AssetEntry, AssetKind, AssetMeta, ScanReport};
 
 use engine_ecs::reflected::WriteDefault;
 use engine_ecs::{

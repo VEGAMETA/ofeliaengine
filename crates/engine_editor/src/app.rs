@@ -490,6 +490,23 @@ pub fn editor<G: Game>(
     // Editing: the world's time stands until Play (ADR 0107 E3), so a scene's tweens,
     // timers and sounds do not change it.
     player.set_simulating(false);
+    // The project's assets, their paths to the player (ADR 0108, E4-1).
+    {
+        let mut editor = shared.borrow_mut();
+        let report = editor.open_assets();
+        log::info!(
+            target: "engine_editor",
+            "assets: {} files, {} read, {} .meta written, {} found again, {} gone, {} problems",
+            report.files,
+            report.read,
+            report.metas_written,
+            report.found_again,
+            report.gone,
+            report.problems
+        );
+        let paths = core::mem::take(&mut editor.pending_assets);
+        player.assets_mut().add_paths(&paths);
+    }
     note_panics();
     Ok((
         EditorGame {
@@ -1361,6 +1378,11 @@ struct Editor {
     scene_label: String,
     /// Where the player's assets are, for showing and saving references by path.
     assets: AssetPaths,
+    /// The project's assets (ADR 0108, E4-1): every asset file with its id, kept live by
+    /// watching the folder; a change scanned once the folder has been quiet a moment.
+    asset_db: engine_scene::AssetDatabase,
+    asset_watch: Option<engine_platform::fs_watch::DirectoryWatcher>,
+    assets_changed: Option<Instant>,
     /// Asset paths of a scene the editor loaded, for the player (`sync_assets`).
     pending_assets: AssetPaths,
     history: History,
@@ -1815,6 +1837,9 @@ impl Editor {
             restart_policy: RestartPolicy::Background,
             scene_label: String::new(),
             assets,
+            asset_db: engine_scene::AssetDatabase::default(),
+            asset_watch: None,
+            assets_changed: None,
             pending_assets: AssetPaths::new(),
             history: History::new(),
             commands,
@@ -2125,6 +2150,7 @@ impl Editor {
             self.tick_session(world);
         }
         self.tick_builds(world);
+        self.tick_assets();
         if let Some(under) = self.under_pointer.take() {
             self.offer_under_pointer(world, under);
         }
@@ -6519,6 +6545,62 @@ impl Editor {
         Ok(text)
     }
 
+    /// The project's asset database: opened from its index, scanned (foreign files met
+    /// without a `.meta` given one), the index written, the folder watched. What it found.
+    fn open_assets(&mut self) -> engine_scene::ScanReport {
+        let mut db = engine_scene::AssetDatabase::open(&self.root);
+        let report = db.scan();
+        if let Err(e) = db.save() {
+            log::warn!(target: "engine_editor", "the asset index: {e}");
+        }
+        let paths = db.paths();
+        self.assets.extend(&paths);
+        self.pending_assets.extend(&paths);
+        self.asset_db = db;
+        self.asset_watch = engine_platform::fs_watch::DirectoryWatcher::new(&self.root, true).ok();
+        for (path, why) in self.asset_db.problems() {
+            log::warn!(target: "engine_editor", "asset {path}: {why}");
+        }
+        report
+    }
+
+    /// The folder's changes: a scan once it has been quiet for [`ASSETS_QUIET`], the new
+    /// paths to the player and the inspector.
+    fn tick_assets(&mut self) {
+        if let Some(watch) = &self.asset_watch {
+            let skip = [
+                self.root.join(".ofelia"),
+                self.root.join("target"),
+                self.root.join(".git"),
+            ];
+            while let Some(event) = watch.try_next() {
+                if !skip.iter().any(|s| event.path.starts_with(s)) {
+                    self.assets_changed = Some(Instant::now());
+                }
+            }
+        }
+        if self
+            .assets_changed
+            .is_none_or(|at| at.elapsed() < ASSETS_QUIET)
+        {
+            return;
+        }
+        self.assets_changed = None;
+        let report = self.asset_db.scan();
+        if report.read == 0 && report.gone == 0 {
+            return;
+        }
+        if let Err(e) = self.asset_db.save() {
+            log::warn!(target: "engine_editor", "the asset index: {e}");
+        }
+        let paths = self.asset_db.paths();
+        self.assets.extend(&paths);
+        self.pending_assets.extend(&paths);
+        for (path, why) in self.asset_db.problems() {
+            log::warn!(target: "engine_editor", "asset {path}: {why}");
+        }
+    }
+
     /// Starts the session in the project's `.ofelia/`: takes its lock, then brings back the
     /// scene's unsaved changes from their autosave as the last run left them, at its exit
     /// or its crash, without asking. Returns the asset paths the restored scene named.
@@ -7540,6 +7622,12 @@ impl<G> EditorGame<G> {
         self.shared.borrow().play.is_some()
     }
 
+    /// The project's asset file at `path` (under its folder, with `/`), as the asset database
+    /// knows it (ADR 0108, E4-1).
+    pub fn asset(&self, path: &str) -> Option<engine_scene::AssetEntry> {
+        self.shared.borrow().asset_db.find(path).cloned()
+    }
+
     /// What the status bar last said (a command's answer), for tests and tools.
     pub fn message(&self) -> Option<String> {
         self.shared
@@ -8334,6 +8422,10 @@ fn blockout_key(blockout: &engine_app::Blockout, world: &World) -> BlockoutKey {
     key.sort_unstable_by_key(|k| k.0.to_bits());
     key
 }
+
+/// How long the project's folder stays quiet before a change is scanned (a save writes a
+/// file in several steps; a copy of many files comes in a burst).
+const ASSETS_QUIET: Duration = Duration::from_millis(150);
 
 /// What the Play controls asked for (ADR 0107 E3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

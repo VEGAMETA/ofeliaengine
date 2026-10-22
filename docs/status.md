@@ -246,7 +246,14 @@ Last updated: 2026-10-20.
     brings the view into the viewport; "Play: In a Window or in the Viewport". Latency
     control goes off while one has been open (NVIDIA's driver crashed with Reflex beside
     a second swapchain). E3 is done but for the tree's marks on what changed.
-  - **Next:** E4, assets (ids, the cache, import, the browser; ADR 0107).
+  - **E4-1, the asset database** (#304, ADR 0108's as-built; E4 is assets, ADR 0107 §5,
+    `docs/research/ux/asset-browser.md`): every asset file under the game's folder with
+    its id (our headers, `.meta` beside foreign files, written when missing, ids found
+    again by path or content), the index in `.ofelia/` (our own text file: 10,000 files
+    read in 3.2 ms, scanned unchanged in 20 ms), followed live by the editor,
+    `ofeliaengine assets [--json]`.
+  - **Next:** E4-2, the asset browser (the FileSystem dock: the folder tree, the files
+    with their kinds, search with type filters).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

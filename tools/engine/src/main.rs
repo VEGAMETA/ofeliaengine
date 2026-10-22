@@ -103,6 +103,12 @@ usage:
                                                    by its path, as it is: what a release build
                                                    plays (ADR 0105); WAV compressed at
                                                    --level (default 19)
+  ofeliaengine assets [DIR] [--json]              the game's assets in DIR (default: the
+                                                   working folder): every asset file with its
+                                                   id, a .meta written beside each foreign file
+                                                   met without one, the index in .ofelia/
+                                                   brought up to date (ADR 0108); --json: one
+                                                   object, the report and the problems
   ofeliaengine save dump <FILE>                    a save as text, either encoding: what a
                                                    development build writes, loaded back as it
                                                    is (ADR 0104)
@@ -130,6 +136,7 @@ enum Command {
     Sounds(sounds::SoundsArgs),
     New(new::NewArgs),
     Edit(edit::EditArgs),
+    Assets { dir: PathBuf, json: bool },
     Save { info: bool, file: PathBuf },
 }
 
@@ -158,6 +165,23 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some("sounds") => sounds::parse_sounds(args).map(Command::Sounds),
         Some("new") => new::parse_new(args).map(Command::New),
         Some("edit") => edit::parse_edit(args).map(Command::Edit),
+        Some("assets") => {
+            let (mut dir, mut json) = (None, false);
+            for arg in args {
+                match arg.as_str() {
+                    "--json" => json = true,
+                    other if other.starts_with('-') => {
+                        return Err(format!("unknown option `{other}`"));
+                    }
+                    path if dir.is_none() => dir = Some(PathBuf::from(path)),
+                    extra => return Err(format!("unexpected `{extra}`")),
+                }
+            }
+            Ok(Command::Assets {
+                dir: dir.unwrap_or_else(|| PathBuf::from(".")),
+                json,
+            })
+        }
         Some("save") => {
             let info = match args.next().as_deref() {
                 Some("dump") => false,
@@ -173,6 +197,50 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some("help" | "-h" | "--help") | None => Err(String::new()),
         Some(other) => Err(format!("unknown command `{other}`")),
     }
+}
+
+/// `ofeliaengine assets`: the game's asset database brought up to date (ADR 0108).
+fn assets(dir: &std::path::Path, json: bool) -> Result<ExitCode, String> {
+    let start = Instant::now();
+    let mut db = engine_scene::AssetDatabase::open(dir);
+    let report = db.scan();
+    db.save().map_err(|e| {
+        format!(
+            "{}: {e}",
+            engine_scene::AssetDatabase::index_path(dir).display()
+        )
+    })?;
+    let ms = start.elapsed().as_secs_f64() * 1e3;
+    if json {
+        let problems: Vec<serde_json::Value> = db
+            .problems()
+            .iter()
+            .map(|(path, why)| serde_json::json!({ "path": path, "problem": why }))
+            .collect();
+        let out = serde_json::json!({
+            "files": report.files,
+            "read": report.read,
+            "metas_written": report.metas_written,
+            "found_again": report.found_again,
+            "gone": report.gone,
+            "problems": problems,
+            "ms": ms,
+        });
+        println!("{out}");
+    } else {
+        println!(
+            "{} asset files: {} read, {} .meta written, {} found again, {} gone, in {ms:.0} ms",
+            report.files, report.read, report.metas_written, report.found_again, report.gone
+        );
+        for (path, why) in db.problems() {
+            println!("{path}: {why}");
+        }
+    }
+    Ok(if db.problems().is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String> {
@@ -470,6 +538,7 @@ fn main() -> ExitCode {
         Command::Sounds(args) => sounds::run_sounds(args),
         Command::New(args) => new::run_new(args),
         Command::Edit(args) => edit::run_edit(args),
+        Command::Assets { dir, json } => assets(dir, *json),
         Command::Save { info, file } => save(*info, file),
     };
     match result {
@@ -615,6 +684,7 @@ mod tests {
             | Command::Sounds(_)
             | Command::New(_)
             | Command::Edit(_)
+            | Command::Assets { .. }
             | Command::Save { .. } => Err(String::from("not a shaders command")),
         }
     }
@@ -627,6 +697,7 @@ mod tests {
             | Command::Sounds(_)
             | Command::New(_)
             | Command::Edit(_)
+            | Command::Assets { .. }
             | Command::Save { .. } => Err(String::from("not a cook command")),
         }
     }
@@ -645,6 +716,20 @@ mod tests {
         assert!(parse("sounds build sounds").is_err());
         assert!(parse("sounds pack sounds -o x.pack").is_err());
         assert!(parse("sounds build sounds -o x.pack --level 30").is_err());
+    }
+
+    #[test]
+    fn parses_assets_commands() {
+        let parse = |line: &str| parse_command(line.split_whitespace().map(str::to_owned));
+        assert!(matches!(
+            parse("assets"),
+            Ok(Command::Assets { json: false, ref dir }) if dir == &PathBuf::from(".")
+        ));
+        assert!(matches!(
+            parse("assets games/yard --json"),
+            Ok(Command::Assets { json: true, ref dir }) if dir == &PathBuf::from("games/yard")
+        ));
+        assert!(parse("assets --fast").is_err());
     }
 
     #[test]
