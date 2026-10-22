@@ -8386,7 +8386,7 @@ impl Editor {
         let name = drag.name.clone();
         match (drag.over, drag.kind) {
             (DropTarget::View, K::Model) => match (drag.placed, self.model_plan(&mut drag)) {
-                (Some(placed), Ok(plan)) => {
+                (Some(placed), Ok(_)) => {
                     self.show(world, placed.root);
                     self.say(placed_message(&name));
                 }
