@@ -381,6 +381,8 @@ pub struct ShellResponse {
     pub viewport: u64,
     /// A scene tab was clicked.
     pub scene_tab: Option<usize>,
+    /// A scene tab's close mark was clicked.
+    pub close_tab: Option<usize>,
     /// A tool was clicked.
     pub tool: Option<usize>,
     /// A scene tree row was clicked.
@@ -578,7 +580,7 @@ fn center(
     };
     ui.container("center", column, |ui| {
         ui.row("scene tabs", bar(p, 30.0), |ui| {
-            out.scene_tab = tabs(ui, model.scenes, Some(model.active_scene), p);
+            scene_tabs(ui, model, p, out);
             ui.spacer("fill");
             play_controls(ui, model.playing, model.paused, p, out);
         });
@@ -743,6 +745,49 @@ fn tabs(ui: &mut Ui, labels: &[&str], active: Option<usize>, p: &Palette) -> Opt
         ui.pop_id();
     }
     clicked
+}
+
+/// The scene tabs: each a label and, while several are open, a close mark beside it.
+fn scene_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellResponse) {
+    let closable = model.scenes.len() > 1;
+    for (i, label) in model.scenes.iter().enumerate() {
+        ui.push_id(i as u64);
+        let on = model.active_scene == i;
+        let mut close = None;
+        let id = ui.container(
+            "tab",
+            Style {
+                padding: [10.0, 5.0, 8.0, 5.0],
+                gap: 6.0,
+                radius: 3.0,
+                background: on.then_some(p.dock),
+                align_cross: Align::Center,
+                ..Style::default()
+            },
+            |ui| {
+                let color = if on { p.text } else { p.text_dim };
+                text(ui, "label", label, TEXT, color);
+                if closable {
+                    close = Some(ui.container(
+                        "close",
+                        Style {
+                            align_cross: Align::Center,
+                            ..Style::default()
+                        },
+                        |ui| {
+                            text(ui, "icon", icons::CLOSE, ICON, p.text_dim);
+                        },
+                    ));
+                }
+            },
+        );
+        if close.is_some_and(|c| ui.sense(c, false).clicked) {
+            out.close_tab = Some(i);
+        } else if ui.sense(id, false).clicked {
+            out.scene_tab = Some(i);
+        }
+        ui.pop_id();
+    }
 }
 
 /// Small monochrome play, pause and stop at the end of the tab row (not a colored group in

@@ -23,8 +23,7 @@ Last updated: 2026-10-22.
   - any scene can be a prefab.
   - **Where it stands (2026-10-22):** E1, E2, E3 and E4 are done (E2b but for the cook's
     path, E3 but for the tree's marks on what changed); E5 but for a prefab opened in a
-    tab of its own, which needs the editor to hold several scenes (E5-5, at the end of
-    this list). The entries below are in the order merged.
+    tab of its own (E5-5b; scenes in tabs are done, E5-5a, at the end of this list). The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
@@ -353,24 +352,21 @@ Last updated: 2026-10-22.
     - the game has the mouse from Play on, the cursor hidden; Shift+F1 frees it and gives
       it back, a click in the game gives it back (ADR 0107's note);
     - the game's window at least 1280 × 720, opened where it was left.
-  - **Next: E5-5, scenes in tabs, then a prefab in one** (ADR 0107 §4: one tab row, one
-    history across tabs; `docs/research/ux/sessions.md`: closing a tab keeps its
-    autosave). Found 2026-10-22: the editor holds one scene and cannot open another,
-    though the session file already lists documents. The plan:
-    - **E5-5a, documents:**
-      - an inactive tab kept as its scene's text, instances as overrides, so it follows a
-        prefab written anew by itself; switching saves one scene and loads the other
-        (about 16 ms for 10,000 entities; a world of its own per tab only if that
-        measures too slow);
-      - steps tagged by document, undoing another tab's step switching to it;
-      - File: Open Scene, Ctrl+Tab, Ctrl+W (its unsaved changes kept in its autosave,
-        "Reopen Closed Scene" brings them back); the session lists every tab; no
-        switching while playing;
-    - **E5-5b, a prefab in a tab:** "Prefab: Open" (and a double click on an instance's
-      row) opens its file; Ctrl+S there writes it, and the other tabs' instances follow.
-
-    Then material slots on `Model` (team decision, 2026-10-22: each primitive of a mesh
-    drawn with its own material), then E6 (output, errors, history; ADR 0107 §7).
+  - **E5-5a, scenes in tabs** (#321, ADR 0107's as-built; found 2026-10-22: the editor
+    held one scene and could not open another):
+    - an inactive tab is its scene's text, instances as their overrides, so it follows a
+      prefab written anew by itself; switching a scene of 10,000 entities: shown again
+      18.9 ms, left 10.7 ms;
+    - one history across tabs: steps name their document, undo and redo show its tab
+      first, a scene's unsaved state is its own;
+    - Ctrl+O (the palette's scenes, a double click in the dock), Ctrl+N, Ctrl+W (no
+      question: unsaved changes kept), Ctrl+Shift+T, Ctrl+Tab; the session keeps the tabs
+      and the one shown.
+  - **Next: E5-5b, a prefab in a tab:** "Prefab: Open" (and a double click on an
+    instance's row) opens its file; Ctrl+S there writes it, and the other tabs'
+    instances follow. Then material slots on `Model` (team decision, 2026-10-22: each
+    primitive of a mesh drawn with its own material), then E6 (output, errors, history;
+    ADR 0107 §7).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
@@ -521,11 +517,9 @@ Last updated: 2026-10-22.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner:** when Luau (E7) starts (asked 2026-10-22): (a) in
-  the queue's order (E5-5, material slots, E6, then E7), its public API drafted meanwhile
-  by an agent for the owner to sign off (recommended); (b) right after the owner's notes'
-  PR, before E5-5 and E6 (script errors only in the log until E6's panel); (c) after E5-5
-  and E6, material slots after it. Settled 2026-10-22 (team decisions): meshes of
+- **Questions open with the owner:** none. Settled 2026-10-22 (team decisions): Luau
+  (E7) comes in the queue's order (E5-5, material slots, E6, then E7), its public API
+  drafted meanwhile for the owner to sign off; meshes of
   several materials get material slots on `Model` (queued after E5); ADR 0108's prefab
   root rule stays; the Radeon's CPU check baseline is not refreshed for now (§6).
   Earlier: 2026-10-16, the virtual shadow pages stay off by default on discrete GPUs; the
@@ -725,7 +719,7 @@ water and impostors stay in §6):
      `ofeliaengine new`, `engine_app::prelude`, the quick start's game tested offscreen.
 5. **9:** editor tools, Luau bindings and debugger, other tooling. **Designed 2026-10-17**
    (ADR 0107, ADR 0108; the owner's choices are in §0). The phases (ADR 0107 §7; as of
-   2026-10-22, E1 to E4 done, E5 but for scenes in tabs, §0):
+   2026-10-22, E1 to E4 done, E5 but for a prefab in a tab, §0):
    - **E1:** foundation: the editor linked into a game, the player split so the editor
      drives it, scene format 2, the tree and the inspector, commands, sessions, rebuild
      and restart;

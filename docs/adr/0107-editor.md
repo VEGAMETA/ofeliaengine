@@ -1214,6 +1214,40 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
   least 640 × 360), fitted to its monitor; where it was when Play last ended, kept in the
   session (`game_window`).
 
+## As built (E5-5a, 2026-10-22): scenes in tabs
+
+- **Found:** the editor held one scene and could not open another; the session file
+  already listed documents, each with its view.
+- **An inactive tab is its scene's text** (`Doc`: the text as the tab was left, its
+  file's base, autosave and view, its document in the history), not a world of its own:
+  - switching saves the scene shown (instances as their overrides), lets go of what the
+    editor held of it (gestures, the selection, picks under way, prefab bases), despawns
+    its entities and loads the other's text, its view applied;
+  - an inactive scene follows a prefab written anew by itself, its text holding only the
+    overrides; one with nothing unsaved whose file changed on disk is read again;
+  - measured (ref-1, release, 10,000 entities with a name, a transform and a model):
+    shown again 18.9 ms, left for a small scene 10.7 ms. A world per tab (every system
+    that holds queries or entities of the player's world following a swap) was not
+    needed for that.
+- **One history across tabs** (§4): each step names its document
+  (`History::set_document`); a scene's unsaved state compares its own head
+  (`History::head_of`), so steps in other tabs leave it as it is; undo and redo of
+  another tab's step show that tab first (`undo_document`, `redo_document`); a closed
+  tab's steps go (`forget`); a document whose steps the budget dropped keeps its head.
+- **Commands** (Godot's keys): File: Open Scene… (Ctrl+O, the palette's scenes; a double
+  click in the dock), New Scene (Ctrl+N), Close Scene (Ctrl+W, a tab's ×), Reopen Closed
+  Scene (Ctrl+Shift+T), Next and Previous Scene Tab (Ctrl+Tab, Ctrl+Shift+Tab).
+- **Closing** asks nothing (`docs/research/ux/sessions.md` §8): unsaved changes stay in
+  the autosave written when the tab was left; the last 20 closed scenes can be opened
+  again with them (opening the file again does too), marked when the file changed on
+  disk since. The last tab stays open.
+- **The session** lists every tab in its order with its base, autosave and view, and the
+  one shown (`active`); a start opens them all, the inactive ones from their autosaves
+  (unsaved, marked when their files changed since) or their files, and shows that one.
+- **Not while playing:** switching, opening and closing wait for Stop.
+- **Left:** E5-5b, a prefab opened in a tab from its instance; tabs dragged into
+  another order; a scene open in two tabs.
+
 ## As built (E4-1, 2026-10-22): the local cache's index
 
 §5 left the index's form to a measurement: our own text file, read in 3.2 ms and an

@@ -119,6 +119,9 @@ editor = ["dep:engine_editor"]
 | Undo | Ctrl+Z |
 | Redo | Ctrl+Y, Ctrl+Shift+Z |
 | Save the scene | Ctrl+S |
+| Open a scene in a tab ([scenes in tabs](#scenes-in-tabs)); a new empty one | Ctrl+O; Ctrl+N |
+| Close the scene's tab; open the last closed again, with its unsaved changes | Ctrl+W; Ctrl+Shift+T |
+| The next scene tab; the previous one | Ctrl+Tab; Ctrl+Shift+Tab |
 | Delete the selection (with its children) | Delete |
 | Turn the selection off, or on (with its children) | H |
 | Duplicate the selection (with its children) | Ctrl+D |
@@ -706,6 +709,31 @@ room.
   open scene's instances: they take its new values where they did not change them, its
   new entities and components, and lose what it no longer has where they kept it as it
   was. What they changed stays theirs. While the scene plays, this waits for Stop.
+
+## Scenes in tabs
+
+Several scenes open at once, each in a tab above the viewport (ADR 0107 §4), with Godot's
+keys:
+
+- **Ctrl+O** ("File: Open Scene…") lists the project's scenes in the palette; Enter opens
+  one in a tab after the one shown. A double click on a scene in the FileSystem dock does
+  the same. A scene already open shows its tab.
+- **Ctrl+N** opens an empty untitled scene; Ctrl+S names it (`untitled.scene`) and writes
+  it.
+- **A click on a tab**, Ctrl+Tab and Ctrl+Shift+Tab show another. The scene shown last
+  waits as it was: its unsaved changes (the tab keeps its `*`), its camera, selection and
+  tree. A scene with nothing unsaved whose file changed on disk meanwhile is read again.
+- **One history for every tab:** Ctrl+Z takes back the last change made, in whichever
+  tab it was made, and shows that tab first.
+- **Ctrl+W** (or a tab's ×) closes it without asking: its unsaved changes stay in its
+  autosave, and **Ctrl+Shift+T** ("File: Reopen Closed Scene") brings it back with them,
+  as does opening the file again. Its changes leave the undo history. The last tab stays.
+- **The session keeps the tabs:** the next start opens them in their order, each with
+  its unsaved changes and its view, and shows the one you were in.
+- **While playing,** the scene that plays stays in front: Stop first.
+
+Switching costs about 19 ms for a scene of 10,000 entities shown again, 11 ms to leave it
+for a small one (ref-1, release): the scene left is kept as its text and the other loaded.
 
 ## Autosave and the session
 

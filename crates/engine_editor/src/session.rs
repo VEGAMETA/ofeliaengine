@@ -248,6 +248,8 @@ pub(crate) struct EditorState {
     pub(crate) window: Option<WindowPlacement>,
     /// Where the game's own window was when Play last ended (Play in a window).
     pub(crate) game_window: Option<WindowPlacement>,
+    /// The tab shown, among the documents (E5-5a).
+    pub(crate) active: Option<usize>,
 }
 
 /// `.ofelia/session`: what the editor brings back at its next start.
@@ -304,6 +306,9 @@ impl SessionFile {
             out.push_str("pivot = ");
             quote_into(&mut out, pivot);
             out.push('\n');
+        }
+        if let Some(active) = self.editor.active {
+            let _ = writeln!(out, "active = {active}");
         }
         for (key, placement) in [
             ("window", self.editor.window),
@@ -452,6 +457,13 @@ impl SessionFile {
                         });
                     }
                     "fly" => file.editor.fly = Some(parse_number(value).map_err(at)?),
+                    "active" => {
+                        file.editor.active = Some(
+                            value
+                                .parse()
+                                .map_err(|_| at(format!("`{value}` is not a tab's number")))?,
+                        );
+                    }
                     "pick_transparent" => {
                         file.editor.pick_transparent = Some(match value {
                             "true" => true,
@@ -916,6 +928,7 @@ mod tests {
                     bottom: 860,
                     maximized: false,
                 }),
+                active: Some(1),
             },
         };
         let text = file.to_text();
