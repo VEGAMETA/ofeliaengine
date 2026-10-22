@@ -449,6 +449,9 @@ pub struct Player {
     assets: crate::Assets,
     /// Blockout brushes' meshes (ADR 0110).
     blockout: crate::Blockout,
+    /// The project's Luau scripts (ADR 0114): their components and hooks; none without a
+    /// project's `scripts/` folder.
+    scripts: Option<crate::scripts::Scripts>,
     /// The part of the output the scene covers ([`Player::set_view_rect`]); `None`: all of
     /// it.
     view_rect: Option<[u32; 4]>,
@@ -1198,6 +1201,7 @@ impl Player {
             steps: 0,
             assets: assets(settings),
             blockout: crate::Blockout::new(),
+            scripts: None,
             view_rect: None,
             cursor_locked: false,
             saves: SaveState {
@@ -1218,6 +1222,19 @@ impl Player {
         // white, HDR10's encode pass and the display's metadata.
         player.apply_levels(levels)?;
         player.start_presentation()?;
+        // The scripts before any scene: scenes name their components (ADR 0114 §1).
+        if let Some(project) = &settings.project {
+            let folder = project.join("scripts");
+            if folder.is_dir() {
+                let world = &mut player.runtime.world;
+                match crate::scripts::Scripts::load(world, project, &folder) {
+                    Ok(scripts) => player.scripts = Some(scripts),
+                    Err(e) => {
+                        log::error!(target: "script", "the scripts' VM: {e}");
+                    }
+                }
+            }
+        }
         if let Some(scene) = &settings.scene {
             player.load_scene(scene)?;
         }
@@ -1471,6 +1488,21 @@ impl Player {
             (None, None) => return Ok(()),
         };
         applied.map_err(AppError::at("latency control"))
+    }
+
+    /// The project's scripts (ADR 0114), when it has a `scripts/` folder that loaded.
+    pub fn scripts(&self) -> Option<&crate::scripts::Scripts> {
+        self.scripts.as_ref()
+    }
+
+    /// Gives `entity` script component `name` (a script's `component("Door", …)`), its
+    /// props at their defaults: the editor's Add Component. False without that component
+    /// or for a dead entity.
+    pub fn add_script(&mut self, entity: Entity, name: &str) -> bool {
+        match &self.scripts {
+            Some(scripts) => scripts.add(&mut self.runtime.world, entity, name),
+            None => false,
+        }
     }
 
     /// Where the start-up spent its time, and what could not be done.
@@ -2509,6 +2541,10 @@ impl Player {
         let mut steps = self.steps;
         let stages = {
             let game_cell = RefCell::new(&mut *game);
+            // Scripts run in both stages, before the game's own hooks (ADR 0114 §7), only
+            // while the world simulates.
+            let scripts_cell = RefCell::new(self.scripts.as_mut());
+            let frame_dt = elapsed as f32;
             let timing = &mut self.timing;
             let mut net = self.net.as_deref_mut();
             let assets = &mut self.assets;
@@ -2524,6 +2560,9 @@ impl Player {
             let present = |world: &mut World, (): &(), alpha: f32| {
                 if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                     input.sample_frame(Instant::now());
+                }
+                if simulating && let Some(scripts) = scripts_cell.borrow_mut().as_mut() {
+                    scripts.frame(world, frame_dt, alpha);
                 }
                 game_cell.borrow_mut().present(world, alpha);
                 // Models (ADR 0108): their meshes and materials reach the GPU this frame,
@@ -2583,6 +2622,9 @@ impl Player {
                             host.host_tick_start(world, Instant::now());
                         }
                         timing.advance(world, dt);
+                        if let Some(scripts) = scripts_cell.borrow_mut().as_mut() {
+                            scripts.tick(world, dt);
+                        }
                         game_cell.borrow_mut().tick(world, dt);
                         // Hosting: the pawns given, the events, the snapshots out.
                         if let Some(host) = net.as_mut() {

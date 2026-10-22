@@ -8,6 +8,7 @@ Start with the **[quick start](quick-start.md)**: a game on screen in five minut
 | [player.md](player.md) | the player: the window, the GPU, the frame, your game's hooks |
 | [input.md](input.md) | actions bound to keys, the mouse and gamepads |
 | [ecs.md](ecs.md) | entities, components, queries, the hierarchy |
+| [scripting.md](scripting.md) | Luau scripts: components with hooks, `self`, the libraries |
 | [scenes.md](scenes.md) | scenes as text files that merge |
 | [assets.md](assets.md) | cooking glTF scenes into packs |
 | [rendering.md](rendering.md) | meshes, materials, lights, shadows, reflections, GI, post effects |
