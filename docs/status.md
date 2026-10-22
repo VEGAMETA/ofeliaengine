@@ -371,7 +371,7 @@ Last updated: 2026-10-22.
     further primitive on a child it makes (`Derived`: never saved, left out of undo,
     picks name the model), the renderer and the extraction untouched; a model dropped
     from the dock fills them from its glTF.
-  - **E6-1, the Output** (#PR, ADR 0107's as-built; `docs/research/ux/output.md`):
+  - **E6-1, the Output** (#325, ADR 0107's as-built; `docs/research/ux/output.md`):
     `engine_log::LogReader` reads the ring since its last read without locks or
     allocation; the panel (Ctrl+J, its tab) folds repeated messages with a count, marks
     each Play, filters by level and text, follows the newest; its tab counts the errors.
