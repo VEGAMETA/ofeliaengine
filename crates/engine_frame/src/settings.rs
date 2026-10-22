@@ -10,6 +10,7 @@ use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::post::{OutputEncoding, ToneCurve};
 use engine_render::postfx::ExposureSettings;
 use engine_render::reflections::SsrSettings;
+use engine_rhi::ash::vk;
 use engine_rhi::{AdapterKind, Device};
 use engine_upscale::Quality;
 
@@ -141,6 +142,13 @@ pub struct ViewSettings {
     /// screen, the editor's viewports) can differ; a view without one costs as if it were
     /// off.
     pub features: ViewFeatures,
+    /// The format of an image of the view's own (ADR 0112: a preview), `None` for the
+    /// renderer's output. A tone mapper for it is made the first time a view asks, and it
+    /// keeps the scene's alpha: transparent where nothing was drawn and `clear` is. Such a
+    /// view takes no filter after tone mapping, no resampling (its render size is its
+    /// output's), no grading and no bloom, and leaves the texture LOD bias, which the
+    /// samplers share, to the frame's main view.
+    pub target_format: Option<vk::Format>,
 }
 
 impl Default for ViewSettings {
@@ -169,6 +177,7 @@ impl Default for ViewSettings {
             screen_space_reflections: None,
             frame_generation: FrameGeneration::Off,
             features: ViewFeatures::ALL,
+            target_format: None,
         }
     }
 }

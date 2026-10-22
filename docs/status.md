@@ -284,9 +284,14 @@ Last updated: 2026-10-20.
     - the dock shows tiles sized with Ctrl+wheel;
     - images are made smaller on a thread of their own, cached in `.ofelia/thumbnails/`,
       and kept in an atlas of 64 cells.
-  - **Next:** E4-6b, previews the engine draws (ADR 0112): the frame renderer's views
-    into images of their own format, the player's previews of models and materials (a
-    draw list, one a frame, read back for the cache), for the dock and the inspector.
+  - **E4-6b, previews the engine draws** (#310, ADR 0112):
+    - the frame renderer's views into images of their own format, their alpha kept (a new
+      tone mapping entry point);
+    - `Player::request_preview` / `take_previews`: one a frame, drawn at twice the side
+      and averaged down, read back;
+    - models' and materials' tiles in the dock.
+  - **Next:** E4-6c, the inspector's asset fields as in Godot: a square preview beside
+    the path, the asset picked or dropped.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

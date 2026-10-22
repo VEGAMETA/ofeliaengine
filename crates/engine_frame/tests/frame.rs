@@ -95,6 +95,80 @@ fn a_cut_drops_the_history() {
     bed.finish(&mut [&mut cut_view, &mut uncut_view, &mut fresh]);
 }
 
+/// A view into an image of its own format (ADR 0112's previews): its own tone mapper
+/// draws the same light, stored sRGB-encoded where the output stores it linearly; and no
+/// filter after tone mapping can follow it.
+#[test]
+fn a_view_draws_into_a_format_of_its_own() {
+    let Some(mut bed) = Bed::new((64, 64), true) else {
+        return;
+    };
+    let red = bed.solid([0.8, 0.2, 0.1], [0.0; 3]);
+    let draws = vec![bed.cube_at(red, Vec3::splat(1.0), Vec3::ZERO)];
+    let eye = camera(Vec3::new(2.0, 1.5, 3.0), Vec3::ZERO, false);
+    let plain = ViewSettings {
+        antialiasing: Antialiasing::OFF,
+        bloom: false,
+        clear: Some([0.0, 0.0, 0.0, 0.0]),
+        ..ViewSettings::default()
+    };
+    let own = ViewSettings {
+        target_format: Some(engine_rhi::ash::vk::Format::R8G8B8A8_SRGB),
+        ..plain
+    };
+    let mut a = View::new(&bed.device, 16);
+    let mut b = View::new(&bed.device, 16);
+    let (_, linear) = bed.render(&mut a, &plain, &draws, &eye, true, |_| {});
+    let (_, encoded) = bed.render(&mut b, &own, &draws, &eye, true, |_| {});
+    let (linear, encoded) = (linear.unwrap(), encoded.unwrap());
+    // Its alpha kept: nothing drawn in the corner, the cube opaque.
+    assert_eq!(encoded[3], 0, "transparent where nothing is drawn");
+    assert!(encoded.chunks(4).any(|p| p[3] == 255));
+    let decode = |c: u8| {
+        let c = f32::from(c) / 255.0;
+        if c <= 0.040_45 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let mut worst = 0.0f32;
+    let mut lit = 0;
+    for (l, e) in linear.chunks(4).zip(encoded.chunks(4)) {
+        for k in 0..3 {
+            worst = worst.max((f32::from(l[k]) / 255.0 - decode(e[k])).abs());
+        }
+        lit += usize::from(l[0] > 40);
+    }
+    println!("the same light within {worst:.4}; {lit} red pixels");
+    assert!(lit > 100, "the cube is in view");
+    assert!(worst <= 1.0 / 255.0, "the same light: {worst}");
+    // A filter after tone mapping: refused.
+    let filtered = ViewSettings {
+        antialiasing: Antialiasing::FXAA,
+        ..own
+    };
+    let mut c = View::new(&bed.device, 16);
+    let refused = bed.frame.prepare(
+        &mut c,
+        &filtered,
+        bed.size,
+        PrepareContext {
+            device: &bed.device,
+            allocator: &mut bed.allocator,
+            bindless: &bed.bindless,
+            materials: &mut bed.materials,
+            frame_number: bed.frame_number + 1,
+            skinning: None,
+        },
+    );
+    assert!(
+        matches!(refused, Err(FrameError::TargetFormat)),
+        "{refused:?}"
+    );
+    bed.finish(&mut [&mut a, &mut b, &mut c]);
+}
+
 /// A texture whose levels are solid colors shows which level is sampled. Rendering at
 /// half the output size, textures are sampled one level coarser; TAAU's LOD bias
 /// (log2(render / output) = −1) brings back the output size's level.

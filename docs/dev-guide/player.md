@@ -71,6 +71,10 @@ let mut player = Player::new(&PlayerSettings {
   background; `player.wait_for_assets()` makes the next frame wait for them too.
 - **`player.reload_asset(id)`** reads a file again after you wrote it anew: the models
   that use it are made again in the next frame.
+- **`player.request_preview(PreviewRequest { key, parts })`** draws the parts (meshes,
+  their materials, their places) alone into a 128² image, once they are made. Use it for
+  a shop's or an inventory's icons. `player.take_previews(&mut out)` gives them back as
+  RGBA8 sRGB pixels, transparent around the parts.
 - **`player.open_view_window(title, width, height)`** draws the scene in a window of its own
   (offscreen: an image, `capture_view_window`), the main output then left to overlays;
   `show_view_in_window(false)` brings it back, `close_view_window` ends it. It turns latency

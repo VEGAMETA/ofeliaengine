@@ -9,7 +9,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)]
 
 use engine_app::prelude::*;
-use engine_app::{AssetMeta, Assets, BakedBrush};
+use engine_app::{AssetMeta, Assets, BakedBrush, PREVIEW_SIZE, Preview, PreviewRequest};
 use engine_assets::GltfOutline;
 use engine_scene::AssetPaths;
 use std::path::Path;
@@ -512,5 +512,166 @@ fn an_image_written_anew_makes_the_models_that_use_it_again() {
         *player.world_mut().get::<MeshRenderer>(quad).unwrap(),
         before
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A box of tint `tint` from `lo` to `hi`, its faces counter-clockwise from in front.
+fn cuboid(tint: [f32; 4], lo: Vec3, hi: Vec3) -> BakedBrush {
+    let mut b = BakedBrush {
+        tint,
+        ..BakedBrush::default()
+    };
+    let (centre, half) = ((lo + hi) * 0.5, (hi - lo) * 0.5);
+    let faces = [
+        (Vec3::X, Vec3::NEG_Z, Vec3::Y),
+        (Vec3::NEG_X, Vec3::Z, Vec3::Y),
+        (Vec3::Y, Vec3::X, Vec3::NEG_Z),
+        (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+        (Vec3::Z, Vec3::X, Vec3::Y),
+        (Vec3::NEG_Z, Vec3::NEG_X, Vec3::Y),
+    ];
+    for (n, u, v) in faces {
+        let base = b.positions.len() as u32;
+        let c = centre + n * half;
+        for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            b.positions
+                .push((c + u * (half * su) + v * (half * sv)).to_array());
+            b.normals.push(n.to_array());
+            b.uvs.push([su, sv]);
+        }
+        b.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    b
+}
+
+/// The previews the player has drawn by now, frames run until `count` came (at most
+/// 1,000 frames).
+fn previews_until(player: &mut Player, count: usize) -> Vec<Preview> {
+    let mut game = Still;
+    let mut got = Vec::new();
+    for _ in 0..1000 {
+        player.frame(&mut game).unwrap();
+        player.take_previews(&mut got);
+        if got.len() >= count {
+            break;
+        }
+    }
+    got
+}
+
+#[test]
+fn previews_of_a_model_and_a_material_are_drawn_and_read_back() {
+    let dir = std::env::temp_dir().join(format!("ofelia-previews-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // An orange post, taller than wide, and a blue material file.
+    let baked = engine_app::bake::glb(
+        "Post",
+        &[cuboid(
+            [0.9, 0.45, 0.1, 1.0],
+            Vec3::new(-0.25, 0.0, -0.25),
+            Vec3::new(0.25, 2.0, 0.25),
+        )],
+        &engine_app::grid_png(),
+    );
+    let (mesh, material) = baked.parts[0].clone();
+    std::fs::write(dir.join("post.glb"), &baked.bytes).unwrap();
+    let post = AssetMeta::ensure(&dir.join("post.glb")).unwrap();
+    let blue_id = AssetId::new();
+    let blue = MaterialFile {
+        base_color: [0.1, 0.25, 0.9, 1.0],
+        roughness: 0.3,
+        ..MaterialFile::default()
+    };
+    std::fs::write(dir.join("blue.material"), blue.to_text(blue_id)).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("previews test"),
+        window: Window::Offscreen {
+            width: 320,
+            height: 180,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut paths = AssetPaths::new();
+    paths.insert(AssetRef::file(post), "post.glb");
+    paths.insert(AssetRef::file(blue_id), "blue.material");
+    player.assets_mut().add_paths(&paths);
+    let identity = Affine3A::IDENTITY;
+    player.request_preview(PreviewRequest {
+        key: 1,
+        parts: vec![(
+            AssetRef::part(post, &mesh),
+            AssetRef::part(post, &material),
+            identity,
+        )],
+    });
+    player.request_preview(PreviewRequest {
+        key: 2,
+        parts: vec![(builtin::SPHERE, AssetRef::file(blue_id), identity)],
+    });
+    // A part that cannot be made: answered with no pixels.
+    player.request_preview(PreviewRequest {
+        key: 3,
+        parts: vec![(
+            AssetRef::part(AssetId::new(), "Nothing"),
+            builtin::MATERIAL,
+            identity,
+        )],
+    });
+    let mut got = previews_until(&mut player, 3);
+    got.sort_by_key(|p| p.key);
+    assert_eq!(got.iter().map(|p| p.key).collect::<Vec<_>>(), [1, 2, 3]);
+    assert!(got[2].pixels.is_empty(), "the missing part");
+    let side = PREVIEW_SIZE as usize;
+    let at = |p: &Preview, x: usize, y: usize| {
+        let i = (y * side + x) * 4;
+        [
+            p.pixels[i],
+            p.pixels[i + 1],
+            p.pixels[i + 2],
+            p.pixels[i + 3],
+        ]
+    };
+    for preview in &got[..2] {
+        assert_eq!(preview.pixels.len(), side * side * 4);
+        if let Ok(out) = std::env::var("ENGINE_PREVIEW_PNG_DIR") {
+            let png = engine_render::png::encode_png(
+                PREVIEW_SIZE,
+                PREVIEW_SIZE,
+                engine_render::png::PngFormat::Rgba,
+                &preview.pixels,
+            )
+            .unwrap();
+            std::fs::write(
+                Path::new(&out).join(format!("preview-{}.png", preview.key)),
+                png,
+            )
+            .unwrap();
+        }
+        // The asset in the middle, nothing in the corners.
+        let middle = at(preview, side / 2, side / 2);
+        assert!(middle[3] > 200, "drawn in the middle: {middle:?}");
+        assert_eq!(at(preview, 1, 1)[3], 0, "transparent around it");
+    }
+    // The post orange, the sphere blue.
+    let post_middle = at(&got[0], side / 2, side / 2);
+    assert!(post_middle[0] > post_middle[2], "{post_middle:?}");
+    let sphere_middle = at(&got[1], side / 2, side / 2);
+    assert!(sphere_middle[2] > sphere_middle[0], "{sphere_middle:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

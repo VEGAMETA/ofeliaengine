@@ -1,6 +1,6 @@
 # 0112. Asset previews: thumbnails and the inspector's previews
 
-- Status: Accepted (2026-10-22): the design and its two steps; E4-6a built the same day
+- Status: Accepted (2026-10-22): the design and its two steps, both built the same day
 - Date: 2026-10-22
 - Builds on: [ADR 0016](0016-viewports.md) (viewports into textures),
   [ADR 0072](0072-frame-renderer.md) (the frame renderer's views),
@@ -125,3 +125,45 @@ Options 1, 2, 2 above, built in two steps.
     written, and Ctrl+wheel grows the tiles;
   - on the GPU, the dock captured with an image whose colours tell its orientation shows
     it upright.
+
+## As built (E4-6b, 2026-10-22): previews the engine draws
+
+- **`engine_frame`:**
+  - `ViewSettings::target_format` names an image of the view's own format. Its tone
+    mapper (`Tonemap::keeping_alpha`, a new entry point `fragmentAlpha`) is made the first
+    time a view asks;
+  - the scene's alpha is kept and the edges' color is taken out of their coverage, so the
+    image is transparent where nothing was drawn;
+  - such a view refuses a filter after tone mapping and resampling
+    (`FrameError::TargetFormat`), and leaves the texture LOD bias, which the samplers
+    share, to the frame's main view;
+  - every other entry point's SPIR-V is unchanged.
+- **Not multisampled:** the MSAA resolve writes an alpha of 1. A preview is drawn at
+  twice its side with one sample, then averaged down 2 × 2, each pixel's color weighted by
+  its samples' alpha. That gives four samples a pixel for edges and shading alike.
+- **`engine_app`:**
+  - `Player::request_preview(PreviewRequest { key, parts })` asks, and
+    `take_previews` hands out `Preview { key, pixels }` (128², RGBA8 sRGB, empty when a
+    part cannot be made);
+  - the player draws one a frame, once each part's mesh is made and its material has its
+    textures. It uses a view of its own: a key light, an ambient term, no sky, nothing of
+    the scene's effects;
+  - **framing:** the parts' box seen from the front, turned 22.5° about Y and looking
+    22.5° down, as near as its corners allow inside a 20° lens;
+  - **read back:** through one more buffer than the frames in flight.
+- **The editor:**
+  - the thread looks for a model's or a material's cache, and on a miss the player is asked;
+  - a model's parts come from its file as a drop places them (E4-3's plan, the root at
+    the origin);
+  - a material goes on the built-in sphere;
+  - the pixels are cached by the thread.
+- **Checked:**
+  - a view into its own format draws the same light, stored sRGB-encoded, keeps its alpha,
+    and refuses FXAA;
+  - the framing keeps every corner inside the lens;
+  - the halving averages by alpha;
+  - a model's and a material's previews are drawn, transparent around them (a tall post
+    and a blue sphere), and a missing part is answered empty;
+  - in the editor, a model's, an image's and a material's tiles all get their thumbnails,
+    cached.
+- **Left:** the inspector's asset fields with their previews (E4-6c). Previews of scenes.

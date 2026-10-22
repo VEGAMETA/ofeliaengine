@@ -19,6 +19,7 @@ use engine_rhi::{
 const VERTEX: &[u8] = include_bytes!("../shaders/tonemap.vertexMain.spv");
 const FRAGMENT: &[u8] = include_bytes!("../shaders/tonemap.fragmentMain.spv");
 const FRAGMENT_PERCEPTUAL: &[u8] = include_bytes!("../shaders/tonemap.fragmentPerceptual.spv");
+const FRAGMENT_ALPHA: &[u8] = include_bytes!("../shaders/tonemap.fragmentAlpha.spv");
 const FRAGMENT_CATMULL_ROM: &[u8] = include_bytes!("../shaders/tonemap.fragmentCatmullRom.spv");
 const FRAGMENT_LANCZOS3: &[u8] = include_bytes!("../shaders/tonemap.fragmentLanczos3.spv");
 const FRAGMENT_PERCEPTUAL_CATMULL_ROM: &[u8] =
@@ -471,6 +472,23 @@ impl Tonemap {
             output_format,
             (FRAGMENT, c"fragmentMain"),
             Some((FRAGMENT_GRADED, c"fragmentGraded")),
+        )
+    }
+
+    /// A tone mapper that keeps the scene's alpha (ADR 0112: a preview, transparent where
+    /// nothing was drawn), writing `output_format`. It has no graded twin, and bloom,
+    /// resampling and PQ are not read.
+    pub fn keeping_alpha(
+        device: &Device,
+        bindless: &Bindless,
+        output_format: vk::Format,
+    ) -> Result<Self, RhiError> {
+        Self::with_fragment(
+            device,
+            bindless,
+            output_format,
+            (FRAGMENT_ALPHA, c"fragmentAlpha"),
+            None,
         )
     }
 

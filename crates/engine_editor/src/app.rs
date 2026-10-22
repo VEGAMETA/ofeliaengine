@@ -7037,6 +7037,52 @@ impl Editor {
         self.selection_changed(before);
     }
 
+    /// What a preview of asset `id` shows (ADR 0112): a model's meshes with their materials
+    /// where its file places them, a material on the built-in sphere; none for other kinds
+    /// or a model that cannot be read.
+    fn preview_parts(&self, id: AssetId) -> Option<Vec<(AssetRef, AssetRef, Affine3A)>> {
+        use engine_scene::AssetKind as K;
+        let entry = self.asset_db.get(id)?;
+        match entry.kind {
+            K::Material => Some(vec![(
+                builtin::SPHERE,
+                AssetRef::file(id),
+                Affine3A::IDENTITY,
+            )]),
+            K::Model => {
+                let outline =
+                    engine_assets::GltfOutline::read(&self.root.join(&entry.path)).ok()?;
+                let plan = ModelPlan::new(id, &entry.path, "preview", &outline).ok()?;
+                // Each node where the file places it under the root.
+                let mut placed: Vec<Affine3A> = Vec::with_capacity(plan.nodes.len());
+                let mut parts = Vec::new();
+                for node in &plan.nodes {
+                    let t = node.transform;
+                    let local = Affine3A::from_scale_rotation_translation(
+                        t.scale,
+                        t.rotation,
+                        t.translation,
+                    );
+                    let at = match node.parent {
+                        Some(p) => placed[p] * local,
+                        None => Affine3A::from_scale_rotation_translation(
+                            t.scale,
+                            t.rotation,
+                            Vec3::ZERO,
+                        ),
+                    };
+                    placed.push(at);
+                    if let Some(model) = node.model {
+                        parts.push((model.mesh, model.material, at));
+                    }
+                }
+                // The player finds the parts by the file's path, which it has.
+                (!parts.is_empty()).then_some(parts)
+            }
+            _ => None,
+        }
+    }
+
     /// The release: the file dropped where the pointer is.
     fn drop_asset(&mut self, world: &mut World, mut drag: AssetDrag) {
         use engine_scene::AssetKind as K;
@@ -8364,6 +8410,20 @@ impl<G> EditorGame<G> {
         if shared.assets.len() != paths.len() {
             shared.assets = paths.clone();
         }
+        // Thumbnails of models and materials (ADR 0112): drawn by the player, taken back.
+        for (id, _) in shared.thumbnails.take_to_draw() {
+            let parts = shared.preview_parts(id);
+            let key = thumbnails::preview_key(id);
+            match parts {
+                Some(parts) => player.request_preview(engine_app::PreviewRequest { key, parts }),
+                None => shared.thumbnails.drawn(key, Vec::new()),
+            }
+        }
+        let mut previews = Vec::new();
+        player.take_previews(&mut previews);
+        for preview in previews {
+            shared.thumbnails.drawn(preview.key, preview.pixels);
+        }
         // Files written anew (E4-5): made again, the old versions drawn until then.
         for id in core::mem::take(&mut shared.changed_assets) {
             if let Some(entry) = shared.asset_db.get(id) {
@@ -8546,6 +8606,16 @@ impl<G> EditorGame<G> {
             }
             _ => None,
         })
+    }
+
+    /// Whether the asset at `path` (under the project) has its thumbnail made (ADR 0112):
+    /// for tests.
+    pub fn thumbnail_ready(&self, path: &str) -> bool {
+        let shared = self.shared.borrow();
+        shared
+            .asset_db
+            .find(path)
+            .is_some_and(|e| shared.thumbnails.made(e.id))
     }
 
     /// The navigation mesh's edges the overlay shows now (View: Navigation): for tests.

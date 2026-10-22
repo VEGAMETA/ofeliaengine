@@ -241,6 +241,12 @@ fn a_model_dragged_from_the_browser_rests_on_the_floor_and_draws() {
     let png =
         engine_render::png::encode_png(96, 64, engine_render::png::PngFormat::Rgba, &rgba).unwrap();
     std::fs::write(dir.join("props/paint.png"), png).unwrap();
+    let red = engine_app::MaterialFile {
+        base_color: [0.85, 0.12, 0.1, 1.0],
+        roughness: 0.35,
+        ..engine_app::MaterialFile::default()
+    };
+    std::fs::write(dir.join("props/red.material"), red.to_text(AssetId::new())).unwrap();
     let settings = PlayerSettings {
         title: String::from("editor drop test"),
         window: Window::Offscreen {
@@ -325,6 +331,40 @@ fn a_model_dragged_from_the_browser_rests_on_the_floor_and_draws() {
     assert_eq!(player.assets().problem(model.mesh), None);
     assert_eq!(player.assets().problem(model.material), None);
     assert_eq!(game.selection(), [e]);
+    // The tiles' thumbnails: the image as itself, the model and the material drawn by the
+    // player (ADR 0112).
+    let tiles = ["props/crate.glb", "props/paint.png", "props/red.material"];
+    let started = Instant::now();
+    while !tiles.iter().all(|t| game.thumbnail_ready(t)) {
+        let ready: Vec<bool> = tiles.iter().map(|t| game.thumbnail_ready(t)).collect();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "thumbnails made: {ready:?}"
+        );
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(
+        dir.join(".ofelia/thumbnails").read_dir().unwrap().count() >= 6,
+        "each cached with its key"
+    );
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_DROP_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let extent = player.extent();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
     // The file written anew outside the editor (a re-export): seen by the folder's
     // watcher, made again, drawn as it was until the new one is whole.
     let before = *player
@@ -352,21 +392,6 @@ fn a_model_dragged_from_the_browser_rests_on_the_floor_and_draws() {
             started.elapsed() < Duration::from_secs(5),
             "made again from the new file"
         );
-    }
-    if let Ok(path) = std::env::var("ENGINE_EDITOR_DROP_PNG") {
-        let rgba = player
-            .capture_overlaid(&mut game, Some(&mut overlay))
-            .unwrap()
-            .unwrap();
-        let extent = player.extent();
-        let png = engine_render::png::encode_png(
-            extent.width,
-            extent.height,
-            engine_render::png::PngFormat::Rgba,
-            &rgba,
-        )
-        .unwrap();
-        std::fs::write(path, png).unwrap();
     }
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);

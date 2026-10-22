@@ -112,6 +112,35 @@ float4 fragmentMain(VertexOut input) : SV_Target
     return float4(color, 1.0);
 }
 
+// `fragmentMain` keeping the scene's alpha (ADR 0112): a preview's image, transparent
+// where nothing was drawn, its edges' color taken out of the coverage the resolve
+// averaged in. An entry point of its own, so `fragmentMain` keeps its registers.
+[shader("fragment")]
+float4 fragmentAlpha(VertexOut input) : SV_Target
+{
+    SamplerState s = g_samplers[push.sampler];
+    float4 sampled = g_textures[NonUniformResourceIndex(push.source)].SampleLevel(s, input.uv, 0);
+    float alpha = saturate(sampled.a);
+    float3 color = alpha > 1e-4 ? sampled.rgb / alpha : float3(0.0, 0.0, 0.0);
+    float exposure = push.exposure;
+    if ((push.flags & FLAG_AUTO_EXPOSURE) != 0)
+        exposure *= loadAligned<16>(push.auto_exposure).x;
+    color *= exposure;
+    if ((push.flags & FLAG_PASS_THROUGH) == 0)
+    {
+        if ((push.flags & FLAG_PBR_NEUTRAL) != 0)
+            color = pbr_neutral(color, push.peak);
+        else if ((push.flags & FLAG_AGX) != 0)
+            color = agx(color);
+        else if ((push.flags & FLAG_ACES) != 0)
+            color = aces(color);
+        else
+            color = gt3(color, push.peak);
+    }
+    color *= push.white;
+    return float4(color, alpha);
+}
+
 // `fragmentMain`'s color, for `fragmentPerceptual` (`fragmentMain` keeps its own copy:
 // its compiled code stays as it was).
 float3 tonemapped(VertexOut input)

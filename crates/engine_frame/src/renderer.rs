@@ -54,6 +54,9 @@ pub enum FrameError {
     RingFull,
     /// [`FrameRenderer::add_view`] before [`FrameRenderer::prepare`].
     NotPrepared,
+    /// A view into an image of its own (`ViewSettings::target_format`) asked for a filter
+    /// after tone mapping or for resampling.
+    TargetFormat,
     /// The view's antialiasing cannot run (ADR 0075): an invalid combination, or one
     /// this GPU does not support ([`FrameRenderer::check`]).
     Antialiasing(InvalidAntialiasing),
@@ -66,6 +69,10 @@ impl fmt::Display for FrameError {
             Self::Upscale(e) => write!(f, "{e}"),
             Self::RingFull => f.write_str("the upload ring is full"),
             Self::NotPrepared => f.write_str("the view was not prepared"),
+            Self::TargetFormat => f.write_str(
+                "a view into an image of its own takes no filter after tone mapping and no \
+                 resampling",
+            ),
             Self::Antialiasing(e) => write!(f, "{e}"),
         }
     }
@@ -372,6 +379,9 @@ pub struct GeneratedFrame {
 pub struct FrameRenderer {
     forward: ForwardRenderer,
     tonemap: Tonemap,
+    /// Tone mappers for views into images of their own (ADR 0112), by format, made the
+    /// first time one asks: they keep the scene's alpha.
+    other_tonemaps: Vec<(vk::Format, Tonemap)>,
     output_format: vk::Format,
     bloom: Bloom,
     depth_format: vk::Format,
@@ -631,6 +641,7 @@ impl FrameRenderer {
         Ok(Self {
             forward: ForwardRenderer::new(device, bindless, HDR_FORMAT, depth_format, shadows)?,
             tonemap: Tonemap::new(device, bindless, output_format)?,
+            other_tonemaps: Vec::new(),
             output_format,
             bloom: Bloom::new(device, bindless, BloomSettings::default())?,
             depth_format,
@@ -717,6 +728,20 @@ impl FrameRenderer {
     /// The format the tone mapper writes (the output's, or its HDR intermediate's).
     pub fn output_format(&self) -> vk::Format {
         self.output_format
+    }
+
+    /// The tone mapper for a view's target: the output's, or one made for the view's own
+    /// format (`ViewSettings::target_format`).
+    fn tonemap_for(&self, settings: ViewSettings) -> &Tonemap {
+        settings
+            .target_format
+            .and_then(|format| {
+                self.other_tonemaps
+                    .iter()
+                    .find(|(f, _)| *f == format)
+                    .map(|(_, t)| t)
+            })
+            .unwrap_or(&self.tonemap)
     }
 
     /// Writes `format` from now on (HDR output turned on or off, ADR 0038): the tone
@@ -1032,6 +1057,19 @@ impl FrameRenderer {
         if settings.kind.motion_blur().is_some() && self.motion_blur.is_none() {
             self.motion_blur = Some(Box::new(MotionBlur::new(device, bindless)?));
         }
+        // A view into an image of its own (ADR 0112): its tone mapper, keeping the alpha,
+        // and nothing after.
+        if let Some(format) = settings.target_format {
+            if post_filter(antialiasing.post).is_some()
+                || resample(antialiasing.upscale, render, output).is_some()
+            {
+                return Err(FrameError::TargetFormat);
+            }
+            if !self.other_tonemaps.iter().any(|(f, _)| *f == format) {
+                let tonemap = Tonemap::keeping_alpha(device, bindless, format)?;
+                self.other_tonemaps.push((format, tonemap));
+            }
+        }
         // Catmull-Rom and Lanczos-3: the tone mapper with their kernel.
         if let Some(kernel) = resample(antialiasing.upscale, render, output) {
             let perceptual = post_filter(antialiasing.post).is_some();
@@ -1079,7 +1117,9 @@ impl FrameRenderer {
                 output,
             )?);
         }
-        if materials.texture_lod_bias() != lod_bias {
+        // The samplers' bias is the frame's: a view into an image of its own (a preview)
+        // leaves it to the frame's main view.
+        if settings.target_format.is_none() && materials.texture_lod_bias() != lod_bias {
             materials.set_texture_lod_bias(bindless, lod_bias)?;
         }
 
@@ -1616,7 +1656,7 @@ impl FrameRenderer {
                 LoadOp::DontCare,
             ),
             None => (
-                resampling(false).unwrap_or(&self.tonemap),
+                resampling(false).unwrap_or_else(|| self.tonemap_for(prepared.settings)),
                 target.texture,
                 target
                     .rect
