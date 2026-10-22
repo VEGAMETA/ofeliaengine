@@ -1614,3 +1614,31 @@ so not SQLite. The editor opens it at its start and follows the folder.
 - **Next (E8-3b):** a worker thread in the editor checks a tab's text a moment after it
   changes. Its findings are underlined in the code, with the message at the line's end
   and the count in the code bar. Completion and hover come after.
+
+## As built (E8-3b, 2026-10-22): Luau's findings as you type
+
+- **The checker's thread** (`checker::Checker`) owns an `engine_luau_analysis::Analysis`
+  of the project, with the new solver:
+  - it is started with the first script tab;
+  - each script's text is given to it 150 ms after the text last changed, and at once
+    when a tab opens;
+  - jobs queued while it checks are taken together, so only each module's latest text
+    is checked.
+- **Findings come back stamped** with their tab's generation (a tab read again from its
+  file is another) and its text's version; an older text's findings never replace a newer
+  one's.
+- **Shown in the code:**
+  - each finding is underlined, in the error or warning color;
+  - each line's first message follows its text, as VS Code's Error Lens extension shows
+    them;
+  - the code bar counts them (`1 error, 1 warning`), and a click there goes to the next
+    one after the caret, around the end.
+
+  Where the text changed since the findings were made, they are not shown until new ones
+  come.
+- **A tab closed** gives its module back to the folder's text.
+- **Left:**
+  - completion (Ctrl+Space and as you type), hover and go to definition (E8-3c);
+  - the findings in the Output's list;
+  - the engine's `.d.luau` once E7 generates it (`Analysis::add_definitions`);
+  - aliases from `.luaurc`.

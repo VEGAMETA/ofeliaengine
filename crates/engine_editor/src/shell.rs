@@ -512,6 +512,14 @@ pub struct CodeView<'a> {
     /// What it found in view: a line, the first and last columns, and whether it is the
     /// match it is on.
     pub matches: &'a [(usize, usize, usize, bool)],
+    /// What Luau's checker found in view, underlined: a line, the first and last columns,
+    /// and whether it is an error (else a warning).
+    pub problems: &'a [(usize, usize, usize, bool)],
+    /// Each such line's first message, after its text: a line, a column, the message, and
+    /// whether it is an error.
+    pub notes: &'a [(usize, usize, &'a str, bool)],
+    /// The code bar's count (`2 errors, 1 warning`); empty when nothing was found.
+    pub problem_count: &'a str,
 }
 
 /// Everything the shell shows.
@@ -622,6 +630,8 @@ pub struct ShellResponse {
     pub find_close: bool,
     /// Its Replace (`false`) or Replace All (`true`).
     pub replace: Option<bool>,
+    /// The code bar's count of problems: the next one.
+    pub next_problem: bool,
     /// A tool was clicked.
     pub tool: Option<usize>,
     /// A scene tree row was clicked.
@@ -854,6 +864,26 @@ fn center(
             ui.row("code bar", bar(p, 30.0).background(p.dock), |ui| {
                 text(ui, "path", view.path, TEXT, p.text_dim);
                 ui.spacer("fill");
+                if !view.problem_count.is_empty() {
+                    let errors = view.problems.iter().any(|&(_, _, _, e)| e)
+                        || view.problem_count.contains("error");
+                    let id = ui.container(
+                        "problems",
+                        Style {
+                            padding: [8.0, 3.0, 8.0, 3.0],
+                            gap: 4.0,
+                            radius: 3.0,
+                            align_cross: Align::Center,
+                            ..Style::default()
+                        },
+                        |ui| {
+                            let color = if errors { p.error } else { p.warning };
+                            text(ui, "icon", icons::ALERT, ICON, color);
+                            text(ui, "label", view.problem_count, TEXT, color);
+                        },
+                    );
+                    out.next_problem = ui.sense(id, false).clicked;
+                }
                 text(ui, "place", view.place, TEXT, p.text_dim);
             });
             if let Some(find) = &view.find {
@@ -1160,6 +1190,25 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette) -> u64 {
             };
             let color = p.syntax[run.token as usize];
             ui.mono_text_node("run", style, run.text, CODE_TEXT, color);
+            ui.pop_id();
+        }
+        // What the checker found: underlined, each line's first message after its text.
+        for (i, &(line, a, b, error)) in view.problems.iter().enumerate() {
+            ui.push_id(i as u64);
+            let color = if error { p.error } else { p.warning };
+            let width = (b.max(a + 1) - a) as f32 * view.advance;
+            let at = [x(a as f32), y(line) + CODE_LINE - 2.5];
+            ui.container("problem", band(at, [width, 1.5], color), |_| {});
+            ui.pop_id();
+        }
+        for (i, &(line, column, message, error)) in view.notes.iter().enumerate() {
+            ui.push_id(i as u64);
+            let style = Style {
+                placed: Some([x(column as f32), y(line) + CODE_TEXT_TOP]),
+                ..Style::default()
+            };
+            let color = if error { p.error } else { p.warning };
+            ui.mono_text_node("note", style, message, CODE_TEXT, color);
             ui.pop_id();
         }
         if view.blink {

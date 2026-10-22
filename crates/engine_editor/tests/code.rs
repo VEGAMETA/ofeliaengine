@@ -1,6 +1,7 @@
 //! A script's tab on the player (ADR 0107 E8-1b): the session brings the tab back, its
-//! code draws where the viewport is, and keys edit it. `ENGINE_EDITOR_CODE_PNG=<file>`
-//! writes the frame; `ENGINE_EDITOR_FIND_PNG=<file>` the find bar's (E8-2).
+//! code draws where the viewport is, Luau's checker underlines its mistake, and keys edit
+//! it. `ENGINE_EDITOR_CODE_PNG=<file>` writes the frame; `ENGINE_EDITOR_FIND_PNG=<file>`
+//! the find bar's (E8-2).
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -23,6 +24,7 @@ local Door = {}
 
 Door.speed = 2.5
 Door.open_angle = 90
+local label: string = Door.speed
 
 function Door.on_tick(self, dt: number)
     local near = self:distance_to(self.world.player) < 3
@@ -128,8 +130,11 @@ fn a_scripts_tab_draws_its_code_where_the_viewport_is() {
         player.frame_overlaid(game, Some(&mut overlay)).unwrap();
         player.set_view_rect(game.view_rect());
     };
-    for _ in 0..3 {
+    // Luau's checker answers from its thread: a few frames for it.
+    let timer = engine_platform::time::HighResTimer::new().unwrap();
+    for _ in 0..12 {
         frame(&mut player, &mut game);
+        let _ = timer.sleep(std::time::Duration::from_millis(20));
     }
     // Shift+Down twice: two lines selected from the caret.
     key(&mut game, 0x10, 0x2A, true);

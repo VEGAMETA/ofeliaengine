@@ -831,7 +831,14 @@ comments, numbers, function names, `self` and the standard library, types).
 - **Escape** closes the bar.
 - **Ctrl+G**, then a line number (`:12`, or `:12:5` for a column), goes there.
 
-Luau's errors and completion as you type come next.
+**Luau checks your script as you type,** with Luau's own type checker and linter, the
+ones `luau-analyze` and VS Code's luau-lsp use:
+
+- a mistake is underlined, its message after the line;
+- the code bar counts errors and warnings, and a click there goes to the next one;
+- `--!strict` at the top checks every type.
+
+Completion and hover come next.
 
 ## Autosave and the session
 
@@ -914,7 +921,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 |---|---|
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau in the game: the script component, its hooks, bindings and hot reload (its public API waits for the team's answers, ADR 0114) |
-| E8 | the code editor: Luau's errors and completion as you type, find in files (scripts in tabs, highlighting, find and replace are done) |
+| E8 | the code editor: completion and hover, find in files (scripts in tabs, highlighting, find and replace, Luau's findings as you type are done) |
 
 The whole plan is ADR 0107 §7.
 
