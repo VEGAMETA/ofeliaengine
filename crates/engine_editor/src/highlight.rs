@@ -3,9 +3,55 @@
 //! string, a comment, a number, a function's name, the language's own names, a type), by
 //! Luau's lexical rules. What a line starts inside (a long comment or string, a string
 //! going on past its line's end) comes from the lines before it: kept per line, and made
-//! again from the first line changed up to the lines shown.
+//! again from the first line changed up to the lines shown. A tab's [`Language`] picks the
+//! rules: Slang's are `crate::slang_highlight`'s.
 
 use crate::shell::Token;
+use std::path::Path;
+
+/// The language of a code tab, by its file's extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Language {
+    /// A Luau script (`.luau`).
+    #[default]
+    Luau,
+    /// A Slang module (`.slang`, ADR 0107's E10-2a).
+    Slang,
+}
+
+impl Language {
+    /// The language of the file at `path`, if the code editor opens it.
+    pub(crate) fn of(path: &Path) -> Option<Self> {
+        let ext = path.extension()?.to_str()?;
+        if ext.eq_ignore_ascii_case("luau") {
+            Some(Self::Luau)
+        } else if ext.eq_ignore_ascii_case("slang") {
+            Some(Self::Slang)
+        } else {
+            None
+        }
+    }
+
+    /// Whether its checker answers more than a check: completion, hover, definitions and
+    /// signatures. Slang's only checks, until its language server (E10-2b).
+    pub(crate) fn answers(self) -> bool {
+        self == Self::Luau
+    }
+
+    /// The runs of `line`, which starts in `state`, by this language's rules
+    /// ([`line`]'s).
+    pub(crate) fn cut(
+        self,
+        line: &str,
+        state: State,
+        out: &mut Vec<(usize, usize, Token)>,
+    ) -> State {
+        match self {
+            Self::Luau => self::line(line, state, out),
+            Self::Slang => crate::slang_highlight::line(line, state, out),
+        }
+    }
+}
 
 /// What a line starts inside, from the lines before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -19,6 +65,8 @@ pub(crate) enum State {
     Long(u8),
     /// A quoted string whose line ended in `\` or `\z`: it goes on, closed by this quote.
     Quoted(u8),
+    /// A block comment, `/*` without its `*/` (Slang).
+    Block,
 }
 
 /// Luau's reserved words.
@@ -76,7 +124,7 @@ pub(crate) fn line(line: &str, state: State, out: &mut Vec<(usize, usize, Token)
     let b = line.as_bytes();
     let mut i = 0;
     match state {
-        State::Code => {}
+        State::Code | State::Block => {}
         State::Comment(level) | State::Long(level) => {
             let kind = if matches!(state, State::Comment(_)) {
                 Token::Comment
@@ -300,12 +348,12 @@ fn contextual(line: &str, at: usize, end: usize, word: &str) -> bool {
 }
 
 /// The first byte from `at` on that is not a space.
-fn next_byte(b: &[u8], at: usize) -> Option<u8> {
+pub(crate) fn next_byte(b: &[u8], at: usize) -> Option<u8> {
     b[at..].iter().copied().find(|c| *c != b' ' && *c != b'\t')
 }
 
 /// Where a name starting at `at` ends.
-fn word_end(b: &[u8], at: usize) -> usize {
+pub(crate) fn word_end(b: &[u8], at: usize) -> usize {
     let mut end = at;
     while end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_') {
         end += 1;
@@ -384,8 +432,8 @@ fn interpolated_text(b: &[u8], from: usize) -> (usize, bool) {
 }
 
 /// A number's end from `at`, as Luau reads one: digits, `.` and `_`, an exponent and its
-/// sign, then letters and digits (`0x1F`, `0b101`).
-fn number(b: &[u8], at: usize) -> usize {
+/// sign, then letters and digits (`0x1F`, `0b101`; Slang's `1.5f`, `2u` too).
+pub(crate) fn number(b: &[u8], at: usize) -> usize {
     let mut i = at;
     while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.' || b[i] == b'_') {
         i += 1;
@@ -403,6 +451,8 @@ fn number(b: &[u8], at: usize) -> usize {
 /// ([`Highlight::changed`]) and made again up to the lines asked for.
 #[derive(Debug, Default)]
 pub(crate) struct Highlight {
+    /// The language whose rules cut the lines.
+    language: Language,
     /// The state each of the first `states.len()` lines starts in.
     states: Vec<State>,
     /// Runs made while finding states, not kept.
@@ -410,6 +460,19 @@ pub(crate) struct Highlight {
 }
 
 impl Highlight {
+    /// The states of a document in `language`.
+    pub(crate) fn new(language: Language) -> Self {
+        Self {
+            language,
+            ..Self::default()
+        }
+    }
+
+    /// The language whose rules cut the lines.
+    pub(crate) fn language(&self) -> Language {
+        self.language
+    }
+
     /// The lines from `line` on changed: the states after it are made again when needed
     /// (a line's own comes from the lines before it).
     pub(crate) fn changed(&mut self, line: usize) {
@@ -424,7 +487,9 @@ impl Highlight {
         while self.states.len() <= index {
             let at = self.states.len() - 1;
             self.scratch.clear();
-            let next = line(lines(at), self.states[at], &mut self.scratch);
+            let next = self
+                .language
+                .cut(lines(at), self.states[at], &mut self.scratch);
             self.states.push(next);
         }
         self.states[index]

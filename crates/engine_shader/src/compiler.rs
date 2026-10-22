@@ -92,6 +92,99 @@ impl EntryPoint {
     }
 }
 
+/// What a compile request is run for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The entry points' code.
+    Code,
+    /// The front end alone: reflection, no code.
+    Check,
+    /// The front end alone, its diagnostics machine-readable ([`findings`]).
+    Findings,
+}
+
+/// What Slang's front end found ([`Compiler::check_source`]): a place and what it says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    /// The file it is in, as Slang names it (the path given for the source, or an
+    /// included or imported file).
+    pub path: String,
+    /// Where it starts: a line and a column, both from 1, the column in characters (a
+    /// tab is one), as Slang counts them.
+    pub start: (u32, u32),
+    /// Where it ends.
+    pub end: (u32, u32),
+    /// An error; otherwise a warning.
+    pub error: bool,
+    /// Slang's code for it (`E30027`).
+    pub code: String,
+    /// What it says: the detail at its place when Slang gives one (`'roughnes' is not a
+    /// member of 'Params'.`), otherwise its title (`member not found`).
+    pub message: String,
+}
+
+impl Finding {
+    /// A finding about the whole of `path`, at its start.
+    fn whole(path: &Path, message: String) -> Self {
+        Self {
+            path: path.to_string_lossy().into_owned(),
+            start: (1, 1),
+            end: (1, 1),
+            error: true,
+            code: String::new(),
+            message: message.trim().to_owned(),
+        }
+    }
+}
+
+/// The findings in Slang's machine-readable diagnostics
+/// (`-enable-machine-readable-diagnostics`): one line each, `code`, `error` / `warning`,
+/// the file, the start's line and column, the end's, and the title, tab-separated. A
+/// `span` line after one gives the detail at its place, which replaces the title; other
+/// lines (notes, a summary) are left out.
+pub fn findings(diagnostics: &str) -> Vec<Finding> {
+    let mut found: Vec<Finding> = Vec::new();
+    // Whether the last finding still has its title, not a span's detail.
+    let mut titled = false;
+    for line in diagnostics.lines() {
+        let parts: Vec<&str> = line.trim_end_matches('\r').split('\t').collect();
+        let [code, kind, path, l0, c0, l1, c1, message @ ..] = parts.as_slice() else {
+            continue;
+        };
+        let number = |s: &str| s.trim().parse::<u32>().ok();
+        let (Some(l0), Some(c0), Some(l1), Some(c1)) =
+            (number(l0), number(c0), number(l1), number(c1))
+        else {
+            continue;
+        };
+        let message = message.join("\t");
+        match *kind {
+            "error" | "warning" => {
+                found.push(Finding {
+                    path: (*path).to_owned(),
+                    start: (l0, c0),
+                    end: (l1, c1),
+                    error: *kind == "error",
+                    code: (*code).to_owned(),
+                    message,
+                });
+                titled = true;
+            }
+            "span" if titled => {
+                if let Some(last) = found.last_mut()
+                    && last.code == *code
+                    && !message.is_empty()
+                {
+                    last.message = message;
+                    titled = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
 /// Compilation options. Everything here is part of the cache key.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct CompileOptions {
@@ -213,7 +306,7 @@ impl Compiler {
     ) -> Result<CompileOutput, ShaderError> {
         engine_profiler::zone!("shader::Compiler::compile");
         let (request, entry_indices, diagnostics) =
-            self.run(path, source, entries, options, false)?;
+            self.run(path, source, entries, options, Mode::Code)?;
         let f = &self.library.functions;
         let req = request.raw.as_ptr();
 
@@ -292,7 +385,7 @@ impl Compiler {
     ) -> Result<StructLayout, ShaderError> {
         engine_profiler::zone!("shader::Compiler::reflect_struct");
         let source = std::fs::read_to_string(path)?;
-        let (request, _, _) = self.run(path, &source, &[], options, true)?;
+        let (request, _, _) = self.run(path, &source, &[], options, Mode::Check)?;
         let f = &self.library.functions;
         let error = |diagnostics: String| ShaderError::Compile {
             path: path.to_owned(),
@@ -341,7 +434,7 @@ impl Compiler {
     ) -> Result<Vec<EntryPoint>, ShaderError> {
         engine_profiler::zone!("shader::Compiler::entry_points");
         let source = std::fs::read_to_string(path)?;
-        let (request, _, _) = self.run(path, &source, &[], options, true)?;
+        let (request, _, _) = self.run(path, &source, &[], options, Mode::Check)?;
         // SAFETY: the request compiled.
         let found =
             unsafe { discovered_entry_points(&self.library.functions, request.raw.as_ptr()) }
@@ -352,16 +445,48 @@ impl Compiler {
         Ok(found.into_iter().map(|(entry, _)| entry).collect())
     }
 
-    /// Sets up and runs a compile request: the entry points' code, or with `check_only` the
-    /// front end alone (reflection, no code). Returns the request, the entry points'
-    /// indices and the diagnostics.
+    /// What Slang's front end finds in `source` (reported as `path`), generating no code:
+    /// the code editor's check while a module is typed (ADR 0107's E10-2a). Empty when
+    /// it is clean; a failure to run Slang at all is one finding at the file's start.
+    pub fn check_source(
+        &mut self,
+        path: &Path,
+        source: &str,
+        options: &CompileOptions,
+    ) -> Vec<Finding> {
+        engine_profiler::zone!("shader::Compiler::check");
+        match self.run(path, source, &[], options, Mode::Findings) {
+            Ok((_, _, diagnostics)) => findings(&diagnostics),
+            // Failed with nothing placed (the flags refused): the whole file.
+            Err(ShaderError::Compile { diagnostics, .. }) => {
+                let found = findings(&diagnostics);
+                if found.is_empty() {
+                    vec![Finding::whole(path, diagnostics)]
+                } else {
+                    found
+                }
+            }
+            Err(e) => vec![Finding::whole(path, e.to_string())],
+        }
+    }
+
+    /// [`Self::check_source`] of the file at `path`.
+    pub fn check_file(&mut self, path: &Path, options: &CompileOptions) -> Vec<Finding> {
+        match std::fs::read_to_string(path) {
+            Ok(source) => self.check_source(path, &source, options),
+            Err(e) => vec![Finding::whole(path, e.to_string())],
+        }
+    }
+
+    /// Sets up and runs a compile request in `mode`. Returns the request, the entry
+    /// points' indices and the diagnostics.
     fn run(
         &self,
         path: &Path,
         source: &str,
         entries: &[EntryPoint],
         options: &CompileOptions,
-        check_only: bool,
+        mode: Mode,
     ) -> Result<(RequestGuard<'_>, Vec<i32>, String), ShaderError> {
         let f = &self.library.functions;
         // SAFETY: live session.
@@ -394,12 +519,18 @@ impl Compiler {
             .collect();
         let names: Vec<CString> = entries.iter().map(|e| cstring(&e.name)).collect();
         // SPIR-V entry points keep their source names (Slang otherwise renames them "main").
-        // Checking only: the front end and reflection, no code for any entry point.
+        // Checking: the front end and reflection, no code for any entry point; for findings,
+        // the diagnostics one per line, tab-separated.
         let args = [
             c"-fvk-use-entrypoint-name".as_ptr(),
             c"-skip-codegen".as_ptr(),
+            c"-enable-machine-readable-diagnostics".as_ptr(),
         ];
-        let arg_count = if check_only { 2 } else { 1 };
+        let arg_count = match mode {
+            Mode::Code => 1,
+            Mode::Check => 2,
+            Mode::Findings => 3,
+        };
 
         // SAFETY: every pointer passed below is a NUL-terminated string owned by this
         // frame and outliving the request; indices come from the calls that returned them.

@@ -206,10 +206,12 @@ pub enum AssetKind {
     Font,
     /// A Luau script (`.luau`).
     Script,
+    /// A Slang module (`.slang`): a material type or the code it imports (ADR 0092).
+    Shader,
 }
 
 /// Every kind with its name and extensions.
-const KINDS: [(AssetKind, &str, &[&str]); 8] = [
+const KINDS: [(AssetKind, &str, &[&str]); 9] = [
     (AssetKind::Scene, "scene", &["scene"]),
     (AssetKind::Material, "material", &["material"]),
     (AssetKind::Model, "model", &["glb", "gltf"]),
@@ -222,6 +224,7 @@ const KINDS: [(AssetKind, &str, &[&str]); 8] = [
     (AssetKind::Video, "video", &["webm"]),
     (AssetKind::Font, "font", &["ttf", "otf"]),
     (AssetKind::Script, "script", &["luau"]),
+    (AssetKind::Shader, "shader", &["slang"]),
 ];
 
 impl AssetKind {
@@ -235,7 +238,7 @@ impl AssetKind {
     }
 
     /// The kind's name: `scene`, `material`, `model`, `texture`, `sound`, `video`, `font`,
-    /// `script`.
+    /// `script`, `shader`.
     pub fn name(self) -> &'static str {
         KINDS
             .iter()
@@ -806,6 +809,10 @@ mod tests {
     fn kinds_by_extension() {
         assert_eq!(AssetKind::of(Path::new("a/b.GLB")), Some(AssetKind::Model));
         assert_eq!(AssetKind::of(Path::new("x.scene")), Some(AssetKind::Scene));
+        assert_eq!(
+            AssetKind::of(Path::new("w/water.slang")),
+            Some(AssetKind::Shader)
+        );
         assert_eq!(AssetKind::of(Path::new("x.rs")), None);
         assert_eq!(AssetKind::of(Path::new("x.glb.meta")), None);
         for (k, n, _) in KINDS {

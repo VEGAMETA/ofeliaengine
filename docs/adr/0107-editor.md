@@ -1707,3 +1707,44 @@ so not SQLite. The editor opens it at its start and follows the folder.
   - Rename (F2) and references (Shift+F12) of a name across the project;
   - "Open in VS Code" at the caret;
   - the engine API's documentation in the completion list (with E7's `.d.luau`).
+
+## As built (E10-2a, 2026-10-22): Slang in the code editor
+
+Research: `docs/research/slang-in-the-editor.md`. Of its options (Slang's front end in
+process; `slangd` over LSP; Slang's server in process), the front end checks, and
+`slangd` waits for E10-2b.
+
+- **`.slang` files are assets of their own kind** (`AssetKind::Shader`, `md-file_code`'s
+  icon), with a `.meta` beside them as other foreign files have. A double click, the
+  palette and an error's line in the Output open one in a code tab, as a script.
+- **A tab knows its language by its extension** (`Language`): it picks the highlighting's
+  rules and the checker.
+- **Slang's colors** (`slang_highlight.rs`), lexical as Luau's:
+  - keywords; attributes (`[shader("compute")]`, `[[vk::binding(0)]]`, only where an
+    attribute can stand, so indexing stays plain); preprocessor lines (`#include
+    <file>`'s file as a string);
+  - types: the scalar, vector and matrix names (`float3`, `half4x4`), a declared type's
+    name, and PascalCase names, by Slang's convention;
+  - a call's or a declaration's name as a function; `SV_` semantics, `this`;
+  - numbers with suffixes, strings, comments, and block comments across lines (a line
+    state of their own).
+- **The checkers share one thread loop** (`checker::Analyzer`): Luau's analysis and
+  Slang's, each started with its language's first tab, its findings stamped as before.
+- **Slang's checker** (`slang_check.rs`) runs `engine_shader`'s front end with no code
+  generated (`Compiler::check_source`, machine-readable diagnostics as `Finding`s):
+  - a material type (`struct … : IMaterial`, comments left out) is checked inside
+    `forward.slang`, as it compiles. Its unsaved text goes to `.ofelia/check/<file>`,
+    included through `MATERIAL_FILE`, with its own folder searched;
+  - any other module is checked alone, the engine's shader folder and the project
+    searched;
+  - findings of the module are placed by Slang's columns (characters) made bytes;
+  - errors of other files go on the first line with their file and line;
+  - other files' warnings are theirs: `forward.slang` warns about itself.
+- **Measured** (the test's dev build, ref-1): the golden `stripes.slang` is clean inside
+  `forward.slang`. Its first check came 264–268 ms after opening; a misspelt field showed
+  at its place 281–282 ms after typing (150 ms of rest, about 130 ms of check).
+- **Slang's tabs only check, for now** (`Language::answers`): no completion, hover,
+  definitions or signatures until E10-2b.
+- **E10-2b:** `slangd` for those. First, material types must be readable alone: a module
+  of the engine's material API, imported by `forward.slang` and by the types, with the
+  registers measured (the research note's "What we take").

@@ -58,7 +58,7 @@ use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
 use crate::camera::OrbitCamera;
-use crate::checker::Stamp;
+use crate::checker::{Checker, Stamp};
 use crate::code::{Pos, char_column, col_at};
 use crate::complete::{self, Completing, ListKey};
 use crate::draw::{self, Draw, Landed, Made, ROOM_WALLS, Stage};
@@ -68,6 +68,7 @@ use crate::gizmo::{
     self, COLORS, Change, Gizmo, GizmoDrag, Handle, Mode, Target, ViewProj, hit_plane,
 };
 use crate::handles::{Handles, Side, SideDrag};
+use crate::highlight::Language;
 use crate::icons;
 use crate::input::{Button, InputCollector, Stroke};
 use crate::inspector::{self, Defaults, Inspector, Kind, Property};
@@ -1570,9 +1571,9 @@ struct Editor {
     code_shown: CodeShown,
     /// When the open scripts' files were last compared with what was read.
     scripts_checked: Instant,
-    /// Luau's checker on its thread (E8-3b), started with the first script; the next tab
-    /// generation it tells apart.
-    checker: Option<crate::checker::Checker>,
+    /// The checkers on their threads (E8-3b, E10-2a), each started with its language's
+    /// first tab; the next tab generation they tell apart.
+    checkers: Checkers,
     generations: u64,
     /// The word the mouse rests on in the code (its start), since when, and whether the
     /// checker was asked what it is (E8-3c).
@@ -2253,7 +2254,7 @@ impl Editor {
             find_focus: None,
             code_shown: CodeShown::default(),
             scripts_checked: Instant::now(),
-            checker: None,
+            checkers: Checkers::default(),
             generations: 0,
             hover_probe: None,
             output: crate::output::Output::new(),
@@ -3697,7 +3698,10 @@ impl Editor {
                         Some((engine_scene::AssetKind::Scene, path)) if double => {
                             self.open_scene(world, &path);
                         }
-                        Some((engine_scene::AssetKind::Script, path)) if double => {
+                        Some((
+                            engine_scene::AssetKind::Script | engine_scene::AssetKind::Shader,
+                            path,
+                        )) if double => {
                             self.open_script(world, &path, None);
                         }
                         _ => {}
@@ -4626,11 +4630,14 @@ impl Editor {
             });
         } else if let Some(text) = query.strip_prefix('%') {
             cp.commands.clear();
-            // The scripts read once a search, the open tabs as they are.
+            // The scripts and Slang modules read once a search, the open tabs as they are.
             if cp.sources.is_none() {
                 let mut sources = Vec::new();
                 for e in self.asset_db.entries() {
-                    if e.kind != engine_scene::AssetKind::Script {
+                    if !matches!(
+                        e.kind,
+                        engine_scene::AssetKind::Script | engine_scene::AssetKind::Shader
+                    ) {
                         continue;
                     }
                     let path = PathBuf::from(&e.path);
@@ -4732,7 +4739,11 @@ impl Editor {
                                 .get(found.id)
                                 .map(|e| (e.kind, PathBuf::from(&e.path)));
                             match file {
-                                Some((engine_scene::AssetKind::Script, path)) => {
+                                Some((
+                                    engine_scene::AssetKind::Script
+                                    | engine_scene::AssetKind::Shader,
+                                    path,
+                                )) => {
                                     self.open_script(world, &path, None);
                                 }
                                 Some((_, path)) => self.open_scene(world, &path),
@@ -7428,9 +7439,14 @@ impl Editor {
             }
             self.input.take_ui_keys();
         }
+        // A language whose checker only checks is asked nothing else.
+        if !script.language.answers() {
+            ask_list = false;
+            ask_signature = false;
+        }
         // A signature shown follows the caret (the argument it is at).
         if (ask_signature || (touched && script.signature.is_some()))
-            && let Some(checker) = &self.checker
+            && let Some(checker) = self.checkers.of(script.language)
         {
             let head = script.doc.primary().head;
             let stamp = Stamp {
@@ -7440,7 +7456,7 @@ impl Editor {
             let at = (head.line as u32, head.col as u32);
             checker.signature(&script.module(), script.doc.text(), stamp, at);
         }
-        if ask_list && let Some(checker) = &self.checker {
+        if ask_list && let Some(checker) = self.checkers.of(script.language) {
             let head = script.doc.primary().head;
             let start = complete::word_start(&script.doc, head);
             let stamp = Stamp {
@@ -7481,7 +7497,8 @@ impl Editor {
                     Some((p, since, asked)) if on_word && p == a => {
                         if !asked
                             && since.elapsed() >= HOVER_AFTER
-                            && let Some(checker) = &self.checker
+                            && script.language.answers()
+                            && let Some(checker) = self.checkers.of(script.language)
                         {
                             let stamp = Stamp {
                                 generation: script.generation,
@@ -7506,7 +7523,8 @@ impl Editor {
                 let pos = script.pos_at(local, advance, gutter);
                 // Ctrl+click: where it is defined, as F12.
                 if self.input.ctrl()
-                    && let Some(checker) = &self.checker
+                    && script.language.answers()
+                    && let Some(checker) = self.checkers.of(script.language)
                 {
                     let at = script.char_at(local, advance, gutter);
                     checker.definition(
@@ -7616,7 +7634,7 @@ impl Editor {
             }
             let text = &shown.text[start..];
             shown.cut.clear();
-            state = crate::highlight::line(text, state, &mut shown.cut);
+            state = script.highlight.language().cut(text, state, &mut shown.cut);
             // The plain code between the runs, its spaces left out at either end.
             let mut at = 0;
             let column = |byte: usize| text[..byte].chars().count();
@@ -7829,26 +7847,23 @@ impl Editor {
         }
     }
 
-    /// Luau's checker's frame (E8-3b): each open script's text given to it a moment after
-    /// it changed ([`script::CHECK_AFTER`]), and what came back put with the text it was
-    /// of; the checker started with the first script.
+    /// The checkers' frame (E8-3b, E10-2a): each open tab's text given to its language's
+    /// checker a moment after it changed ([`script::CHECK_AFTER`]), and what came back put
+    /// with the text it was of; a checker started with its language's first tab.
     fn tick_checker(&mut self, world: &World) {
         if self.scripts.is_empty() {
             return;
         }
-        if self.checker.is_none() {
-            self.checker = crate::checker::Checker::new(&self.root);
-        }
-        let Some(checker) = &self.checker else {
-            return;
-        };
         let now = Instant::now();
         for s in &mut self.scripts {
             let version = s.doc.version();
             let rested = s
                 .changed_at
                 .is_none_or(|t| now.duration_since(t) >= script::CHECK_AFTER);
-            if s.sent != Some(version) && rested {
+            if s.sent != Some(version)
+                && rested
+                && let Some(checker) = self.checkers.start(s.language, &self.root)
+            {
                 let stamp = crate::checker::Stamp {
                     generation: s.generation,
                     version,
@@ -7858,7 +7873,7 @@ impl Editor {
             }
         }
         let mut defined = None;
-        for answer in checker.finished() {
+        for answer in self.checkers.all().flat_map(Checker::finished) {
             let checked = match answer {
                 crate::checker::Answer::Checked(checked) => checked,
                 crate::checker::Answer::Defined(found) => {
@@ -7957,7 +7972,13 @@ impl Editor {
             self.say(String::from("Go to Definition works in a script's tab"));
             return;
         };
-        let Some(checker) = &self.checker else {
+        if !s.language.answers() {
+            self.say(String::from(
+                "Go to Definition works in Luau scripts for now",
+            ));
+            return;
+        }
+        let Some(checker) = self.checkers.of(s.language) else {
             return;
         };
         let pos = at.unwrap_or(s.doc.primary().head);
@@ -8194,7 +8215,7 @@ impl Editor {
             return;
         }
         let s = self.scripts.remove(k);
-        if let Some(checker) = &self.checker {
+        if let Some(checker) = self.checkers.of(s.language) {
             checker.forget(&s.module());
         }
         if s.autosaved.is_some()
@@ -12461,13 +12482,13 @@ impl Editor {
             }
             Cause::Place { path, line, column } => {
                 let file = found(&self.root, crate_dir.as_deref(), &path);
-                // A script of the project in the editor's own code editor; the rest (the
-                // game's Rust) in VS Code.
+                // A script or a Slang module of the project in the editor's own code
+                // editor; the rest (the game's Rust, the engine's shaders) in VS Code.
                 let script = file.as_deref().and_then(|f| {
-                    let luau = f.extension().is_some_and(|e| e == "luau");
+                    let code = Language::of(f).is_some();
                     f.strip_prefix(&self.root)
                         .ok()
-                        .filter(|_| luau)
+                        .filter(|_| code)
                         .map(Path::to_path_buf)
                 });
                 match (script, file) {
@@ -13850,6 +13871,44 @@ fn field_subject(asset: AssetRef, field: &str, kind: Option<engine_scene::AssetK
     }
 }
 
+/// The code editor's checkers, one a language (E8-3b, E10-2a), each started with its
+/// language's first tab.
+#[derive(Default)]
+struct Checkers {
+    luau: Option<Checker>,
+    slang: Option<Checker>,
+}
+
+impl Checkers {
+    /// The checker of `language`, if it started.
+    fn of(&self, language: Language) -> Option<&Checker> {
+        match language {
+            Language::Luau => self.luau.as_ref(),
+            Language::Slang => self.slang.as_ref(),
+        }
+    }
+
+    /// The checker of `language`, started now for the project in `root` if it was not.
+    fn start(&mut self, language: Language, root: &Path) -> Option<&Checker> {
+        let slot = match language {
+            Language::Luau => &mut self.luau,
+            Language::Slang => &mut self.slang,
+        };
+        if slot.is_none() {
+            *slot = match language {
+                Language::Luau => Checker::luau(root),
+                Language::Slang => Checker::slang(root),
+            };
+        }
+        slot.as_ref()
+    }
+
+    /// Every checker started.
+    fn all(&self) -> impl Iterator<Item = &Checker> {
+        self.luau.iter().chain(self.slang.iter())
+    }
+}
+
 /// The browser's kind of an asset's kind.
 fn file_kind(kind: engine_scene::AssetKind) -> FileKind {
     use engine_scene::AssetKind as K;
@@ -13859,6 +13918,7 @@ fn file_kind(kind: engine_scene::AssetKind) -> FileKind {
         K::Texture => FileKind::Texture,
         K::Sound => FileKind::Audio,
         K::Script => FileKind::Script,
+        K::Shader => FileKind::Shader,
         K::Material | K::Video | K::Font => FileKind::Other,
     }
 }
@@ -13869,6 +13929,7 @@ fn file_icon_of(kind: engine_scene::AssetKind) -> &'static str {
         FileKind::Folder => icons::FOLDER,
         FileKind::Scene => icons::SCENE,
         FileKind::Script => icons::SCRIPT,
+        FileKind::Shader => icons::SHADER,
         FileKind::Texture => icons::TEXTURE,
         FileKind::Mesh => icons::MESH,
         FileKind::Audio => icons::AUDIO,
@@ -20319,6 +20380,84 @@ mod tests {
         });
         assert_eq!(ed.scripts[0].found, []);
         assert!(texts(&ed, "1 error").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_slang_material_type_is_highlighted_and_checked_inside_forward_slang() {
+        if let Err(e) = engine_shader::SlangLibrary::load() {
+            assert!(
+                std::env::var("ENGINE_REQUIRE_SLANG").is_err_and(|_| true),
+                "{e}"
+            );
+            println!("skipping (no Slang library): {e}");
+            return;
+        }
+        let dir = project("slang-check");
+        std::fs::create_dir_all(dir.join("shaders")).unwrap();
+        // The golden shots' material type: `IMaterial`, `MaterialContext` and `Surface`
+        // are `forward.slang`'s, so it is clean only checked inside it.
+        let stripes = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/golden/materials/stripes.slang"
+        ))
+        .unwrap();
+        std::fs::write(dir.join("shaders/stripes.slang"), &stripes).unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.update(&mut world);
+        ed.open_script(&world, Path::new("shaders/stripes.slang"), None);
+        let opened = Instant::now();
+        let checked = |ed: &Editor| {
+            let s = &ed.scripts[0];
+            s.found_for.is_some_and(|f| f.version == s.doc.version())
+        };
+        wait_for(&mut ed, &mut world, checked);
+        assert!(checked(&ed), "checked");
+        println!(
+            "first check {:.0} ms after opening",
+            opened.elapsed().as_secs_f64() * 1e3
+        );
+        assert_eq!(ed.scripts[0].found, [], "clean inside forward.slang");
+        // Slang's rules colour it.
+        let run = |ed: &Editor, word: &str| {
+            let shown = &ed.code_shown;
+            shown
+                .runs
+                .iter()
+                .find(|r| &shown.text[r.2..r.3] == word)
+                .map(|r| r.4)
+        };
+        assert_eq!(run(&ed, "struct"), Some(Token::Keyword));
+        assert_eq!(run(&ed, "StripesMaterial"), Some(Token::Type));
+        assert_eq!(run(&ed, "IMaterial"), Some(Token::Type));
+        assert_eq!(run(&ed, "float4"), Some(Token::Type));
+        // A field misspelt: found at its place, a moment after typing stops.
+        let (line, col) = (0..ed.scripts[0].doc.line_count())
+            .find_map(|l| {
+                let text = ed.scripts[0].doc.line(l);
+                text.find("p.frequency").map(|c| (l, c + 2))
+            })
+            .unwrap();
+        ed.scripts[0].doc.select(
+            Pos::new(line, col),
+            Pos::new(line, col + "frequency".len()),
+            false,
+        );
+        chars(&mut ed, "frequenc");
+        let typed = Instant::now();
+        ed.update(&mut world);
+        wait_for(&mut ed, &mut world, checked);
+        println!(
+            "found {:.0} ms after typing",
+            typed.elapsed().as_secs_f64() * 1e3
+        );
+        let found = &ed.scripts[0].found;
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].start, (line as u32, col as u32), "{found:?}");
+        assert!(found[0].message.contains("frequenc"), "{found:?}");
+        assert!(!texts(&ed, "1 error").is_empty(), "the code bar's count");
+        // Its copy, checked inside forward.slang, is the editor's.
+        assert!(dir.join(".ofelia/check/stripes.slang").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

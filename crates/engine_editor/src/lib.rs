@@ -33,6 +33,8 @@ mod profile;
 mod script;
 mod session;
 pub mod shell;
+mod slang_check;
+mod slang_highlight;
 mod snap;
 mod thumbnails;
 mod transform;

@@ -17,6 +17,8 @@
 //!   and reports [`ShaderEvent`]s; on errors the previous SPIR-V stays in use (ADR 0009).
 //! - [`Compiler::reflect_struct`] reads a struct's layout as shaders read it through a
 //!   pointer: a material type's parameters (ADR 0092).
+//! - [`Compiler::check_source`] runs the front end alone and returns its [`Finding`]s by
+//!   place: the code editor's check while a module is typed (ADR 0107).
 
 mod build;
 mod cache;
@@ -30,7 +32,9 @@ mod sources;
 
 pub use build::{BuildReport, UnitResult, compile_all, compile_all_streaming};
 pub use cache::{CacheOutcome, ShaderCache};
-pub use compiler::{CompileOptions, CompileOutput, CompiledEntry, Compiler, EntryPoint, Stage};
+pub use compiler::{
+    CompileOptions, CompileOutput, CompiledEntry, Compiler, EntryPoint, Finding, Stage, findings,
+};
 pub use pool::CompilerPool;
 pub use reflect::{Field, FieldKind, StructLayout, TEXTURE_REF};
 pub use reload::{HotReloadConfig, ShaderEvent, ShaderHotReload, ShaderSet};

@@ -389,6 +389,8 @@ pub enum FileKind {
     Scene,
     /// A Luau script.
     Script,
+    /// A Slang module.
+    Shader,
     /// A texture.
     Texture,
     /// A model or mesh.
@@ -1665,6 +1667,7 @@ fn file_icon(kind: FileKind, p: &Palette) -> (&'static str, Color) {
         FileKind::Folder => (icons::FOLDER, srgb(214, 170, 90)),
         FileKind::Scene => (icons::SCENE, p.accent),
         FileKind::Script => (icons::SCRIPT, srgb(222, 196, 96)),
+        FileKind::Shader => (icons::SHADER, srgb(96, 196, 222)),
         FileKind::Texture => (icons::TEXTURE, srgb(110, 190, 130)),
         FileKind::Mesh => (icons::MESH, srgb(222, 140, 90)),
         FileKind::Audio => (icons::AUDIO, srgb(180, 130, 220)),

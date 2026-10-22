@@ -8,7 +8,7 @@ use crate::checker::Stamp;
 use crate::code::{Document, Motion, Pos, char_column, col_at};
 use crate::complete::Completing;
 use crate::find::Find;
-use crate::highlight::Highlight;
+use crate::highlight::{Highlight, Language};
 use crate::session::Base;
 use crate::shell::{CODE_LINE, CODE_PAD};
 use engine_input::Key;
@@ -22,10 +22,13 @@ pub(crate) const WHEEL_LINES: f32 = 3.0;
 /// How long the text rests after a change before the checker is given it.
 pub(crate) const CHECK_AFTER: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// A script open in a tab.
+/// A script open in a tab: a Luau script, or a Slang module (E10-2a).
 pub(crate) struct Script {
     /// Its file, relative to the project.
     pub(crate) path: PathBuf,
+    /// Its language, by its file's extension: the rules that highlight it and the checker
+    /// that checks it.
+    pub(crate) language: Language,
     /// Its text, being edited.
     pub(crate) doc: Document,
     /// The states its lines start in, for highlighting.
@@ -76,12 +79,14 @@ impl Script {
     /// it was `base`.
     pub(crate) fn new(path: PathBuf, text: &str, base: Option<Base>) -> Self {
         let body = text.strip_prefix('\u{feff}');
+        let language = Language::of(&path).unwrap_or_default();
         Self {
             crlf: text.contains("\r\n"),
             bom: body.is_some(),
             path,
+            language,
             doc: Document::new(body.unwrap_or(text)),
-            highlight: Highlight::default(),
+            highlight: Highlight::new(language),
             find: None,
             generation: 0,
             found: Vec::new(),

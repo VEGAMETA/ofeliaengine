@@ -737,7 +737,8 @@ start (`log::warn!(target: "doors", "door {id} is stuck")`).
   - a scene entity's id (32 hex digits) selects it, and an asset's id shows it in the
     FileSystem dock;
   - a project file's path (`props/lamp.scene`) shows it in the dock;
-  - a file and line (`src/main.rs:12:5`, `scripts/door.luau:7`) opens in VS Code.
+  - a file and line of your game's code (`src/main.rs:12:5`) opens in VS Code; a
+    script's or a Slang module's (`scripts/door.luau:7`) opens in the editor's code tab.
 
   Your own messages work the same: name the file or the entity's id in the text
   (`log::warn!("{}: no door here", path)`). A failed build of your game's code puts each
@@ -795,7 +796,7 @@ for a small one (ref-1, release): the scene left is kept as its text and the oth
 Scripts open in tabs after the scenes' (ADR 0107 E8), their code where the viewport is:
 
 - **Opening one:**
-  - a double click on a `.luau` file in the FileSystem dock;
+  - a double click on a `.luau` file (or a `.slang` module) in the FileSystem dock;
   - "File: Open Script…" in the palette;
   - a click on an error at a script's line in the Output, which opens it at that line.
 - **A scene's tab** brings the scene back in front; Ctrl+Tab goes through the scenes'
@@ -852,6 +853,18 @@ ones `luau-analyze` and VS Code's luau-lsp use:
   that has it; Enter opens one there, the match selected.
 - **Inside a call's parentheses**, its signature shows above the line, the argument you
   are at lit. Ctrl+Shift+Space shows it, Escape hides it.
+
+**Slang modules** (`.slang`) open in code tabs too, with Slang's colors:
+
+- **Slang checks them as you type,** with the compiler the engine uses.
+  - A material type (`struct Water : IMaterial`) is checked as it compiles, inside the
+    engine's `forward.slang`. `IMaterial`, `MaterialContext` and `Surface` are known.
+  - A mistake is underlined at its place about a quarter of a second after you stop
+    typing, counted in the code bar.
+  - An error in a file the module includes shows on its first line, with that file and
+    line.
+- **Completion, hover and F12** work in Luau scripts for now; Slang's come later.
+- **Ctrl+Shift+F** finds text in the Slang modules too.
 
 ## Autosave and the session
 
@@ -935,6 +948,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau in the game: the script component, its hooks, bindings and hot reload (its public API waits for the team's answers, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
+| E10 | materials: completion, hover and definitions in Slang modules; then the material file, the graph, previews (the team's questions are open) |
 
 The whole plan is ADR 0107 §7.
 
