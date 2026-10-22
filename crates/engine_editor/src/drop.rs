@@ -39,12 +39,14 @@ pub(crate) struct PlannedNode {
 
 impl ModelPlan {
     /// The plan of glTF file `file`, at `path` under the project's folder, from its
-    /// outline; its root named `name`.
+    /// outline; its root named `name`. `scale` is the file's import setting (E4-9): the
+    /// player scales the meshes by it, and the plan the nodes' places and the box.
     pub(crate) fn new(
         file: AssetId,
         path: &str,
         name: &str,
         outline: &GltfOutline,
+        scale: f32,
     ) -> Result<Self, String> {
         let mesh_names: Vec<&str> = outline.meshes.iter().map(|m| m.name.as_str()).collect();
         let material_names: Vec<&str> = outline.materials.iter().map(String::as_str).collect();
@@ -91,7 +93,7 @@ impl ModelPlan {
             let index = plan.nodes.len();
             plan.nodes.push(PlannedNode {
                 name: node_name,
-                transform: Transform::from_translation(Vec3::from(n.translation))
+                transform: Transform::from_translation(Vec3::from(n.translation) * scale)
                     .with_rotation(Quat::from_array(n.rotation))
                     .with_scale(Vec3::from(n.scale)),
                 parent: Some(parent),
@@ -115,7 +117,7 @@ impl ModelPlan {
             plan.nodes[0].transform.scale = node.transform.scale;
             mesh_of[0] = mesh_of.pop().flatten();
         }
-        plan.bounds = bounds(&plan, &mesh_of, outline);
+        plan.bounds = bounds(&plan, &mesh_of, outline, scale);
         Ok(plan)
     }
 
@@ -183,11 +185,12 @@ fn part_name(names: &[&str], i: usize) -> String {
 }
 
 /// The box around the plan's meshes in its root's space (the root's translation left
-/// out), from the primitives' bounds.
+/// out), from the primitives' bounds, scaled by the file's import scale as the meshes are.
 fn bounds(
     plan: &ModelPlan,
     mesh_of: &[Option<usize>],
     outline: &GltfOutline,
+    scale: f32,
 ) -> Option<(Vec3, Vec3)> {
     let mut placed: Vec<Affine3A> = Vec::with_capacity(plan.nodes.len());
     let mut out: Option<(Vec3, Vec3)> = None;
@@ -211,7 +214,8 @@ fn bounds(
                         hi[axis]
                     }
                 };
-                let p = at.transform_point3(Vec3::new(pick(1, 0), pick(2, 1), pick(4, 2)));
+                let corner = Vec3::new(pick(1, 0), pick(2, 1), pick(4, 2)) * scale;
+                let p = at.transform_point3(corner);
                 out = Some(out.map_or((p, p), |(a, b)| (a.min(p), b.max(p))));
             }
         }
@@ -292,7 +296,7 @@ mod tests {
             meshes: vec![mesh("Crate", &[Some(0)])],
             materials: vec![String::from("Wood")],
         };
-        let plan = ModelPlan::new(file(), "props/crate.glb", "crate", &outline).unwrap();
+        let plan = ModelPlan::new(file(), "props/crate.glb", "crate", &outline, 1.0).unwrap();
         assert_eq!(plan.nodes.len(), 1);
         let root = &plan.nodes[0];
         assert_eq!(root.name, "crate");
@@ -332,7 +336,7 @@ mod tests {
             meshes: vec![mesh("Part", &[Some(0), Some(1)]), mesh("Part", &[None])],
             materials: vec![String::from("Wood"), String::new()],
         };
-        let plan = ModelPlan::new(file(), "chair.glb", "chair", &outline).unwrap();
+        let plan = ModelPlan::new(file(), "chair.glb", "chair", &outline, 1.0).unwrap();
         let names: Vec<&str> = plan.nodes.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(
             names,
@@ -356,6 +360,15 @@ mod tests {
         let (lo, hi) = plan.bounds.unwrap();
         assert_eq!(lo.y, -1.0);
         assert_eq!(hi.y, 1.0);
+        // Imported at half its size (its `.meta`, E4-9): the leg half a meter lower, the
+        // box half as tall.
+        let half = ModelPlan::new(file(), "chair.glb", "chair", &outline, 0.5).unwrap();
+        assert_eq!(
+            half.nodes[2].transform.translation,
+            Vec3::new(0.0, -0.5, 0.0)
+        );
+        let (lo, hi) = half.bounds.unwrap();
+        assert_eq!((lo.y, hi.y), (-0.5, 0.5));
     }
 
     #[test]
@@ -365,7 +378,7 @@ mod tests {
             roots: vec![0],
             ..GltfOutline::default()
         };
-        assert!(ModelPlan::new(file(), "empty.glb", "empty", &outline).is_err());
+        assert!(ModelPlan::new(file(), "empty.glb", "empty", &outline, 1.0).is_err());
     }
 
     #[test]

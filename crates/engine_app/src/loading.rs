@@ -21,7 +21,7 @@ use engine_assets::{
 use engine_core::jobs::ThreadPool;
 use engine_core::spsc;
 use engine_render::mesh::{OwnedMeshData, VertexAttributes, encode_attributes};
-use engine_scene::{AssetId, AssetRef};
+use engine_scene::{AssetId, AssetMeta, AssetRef, TextureCompression};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -446,7 +446,7 @@ fn run(job: Job, root: &Path, pool: Option<&ThreadPool>) -> Done {
                 .meshes
                 .get(mesh)
                 .map(|mesh| {
-                    let data = gltf_mesh(mesh);
+                    let data = gltf_mesh(mesh, file.meta.model.applied_scale());
                     let mut attributes = Vec::with_capacity(data.positions.len());
                     encode_attributes(&data.as_data(), &mut attributes);
                     (data, attributes)
@@ -473,6 +473,15 @@ fn run(job: Job, root: &Path, pool: Option<&ThreadPool>) -> Done {
                 .and_then(|texture| {
                     let bytes = read_texture(&texture.source, Some(&file.dir))
                         .map_err(|e| e.to_string())?;
+                    // An image file's own settings, or its model's for one inside it (E4-9):
+                    // one kept uncompressed skips the cache.
+                    let settings = match &texture.source {
+                        TextureSource::Uri(uri) => AssetMeta::read(&file.dir.join(uri)),
+                        TextureSource::Embedded { .. } => file.meta,
+                    };
+                    let cache = cache.filter(|_| {
+                        settings.texture.compression != TextureCompression::Uncompressed
+                    });
                     if let Some(texture) = cache
                         .as_deref()
                         .and_then(|cache| cached_texture(cache, &bytes, key.usage()))

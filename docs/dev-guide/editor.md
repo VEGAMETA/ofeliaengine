@@ -614,6 +614,16 @@ A click on a folder opens it, a click on a file picks it.
   shows "Compressing textures: N" meanwhile. They are kept in `.ofelia/ddc/`, so the next
   time the project opens they load compressed at once. Deleting that folder only costs
   compressing them again.
+- **Import settings:** a file picked in the dock is shown in the inspector, its path and
+  kind, then its settings, until you select entities again:
+  - a model: **scale** (0.01 for a file made in centimeters) and **texture compression**
+    for the images inside it;
+  - an image: **compression**, `Auto` (BC7, BC5 for normal maps) or `Uncompressed` (pixel
+    art, gradients, text).
+
+  A change is saved in the file's `.meta` at once and the asset is made again, with
+  nothing to press. It is not an undo step (a file on disk, as a rename): ↺ puts a
+  setting back.
 
 **`#` in the command palette** finds assets by path: `#crate`, or with a kind first,
 `#model:crate`, `#texture:rock` (`scene`, `material`, `model` or `mesh`, `texture`, `sound`

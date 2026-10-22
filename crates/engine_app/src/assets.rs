@@ -305,21 +305,22 @@ fn find_part<'a>(part: u64, names: impl Iterator<Item = &'a str>) -> Option<usiz
     by_index
 }
 
-/// A glTF file read for its parts: what the importer made of it, and the folder its
-/// external files are in.
+/// A glTF file read for its parts: what the importer made of it, the folder its external
+/// files are in, and its import settings (its `.meta`'s, E4-9).
 pub(crate) struct GltfFile {
     pub(crate) scene: ImportedScene,
     pub(crate) dir: PathBuf,
+    pub(crate) meta: AssetMeta,
 }
 
 /// glTF file `id` at `path` under `root`, its id checked against its `.meta` when it has
-/// one.
+/// one, and its settings read from it.
 pub(crate) fn open_gltf(root: &Path, path: &str, id: AssetId) -> Result<GltfFile, String> {
     let full = root.join(path);
-    let meta = AssetMeta::path(&full);
-    match std::fs::read_to_string(&meta) {
+    let meta_path = AssetMeta::path(&full);
+    let meta = match std::fs::read_to_string(&meta_path) {
         Ok(text) => {
-            let (_, report) = AssetMeta::parse(&text).map_err(|e| format!("{path}.meta:{e}"))?;
+            let (meta, report) = AssetMeta::parse(&text).map_err(|e| format!("{path}.meta:{e}"))?;
             if let Some(meta_id) = report.id
                 && meta_id != id
             {
@@ -327,15 +328,19 @@ pub(crate) fn open_gltf(root: &Path, path: &str, id: AssetId) -> Result<GltfFile
                     "{path} is the asset {meta_id} (its .meta), not {id}"
                 ));
             }
+            for (line, warning) in &report.warnings {
+                log::warn!(target: "engine_app::assets", "{path}.meta:{line}: {warning}");
+            }
+            meta
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("{}: {e}", meta.display())),
-    }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => AssetMeta::default(),
+        Err(e) => return Err(format!("{}: {e}", meta_path.display())),
+    };
     let bytes = std::fs::read(&full).map_err(|e| format!("{}: {e}", full.display()))?;
     let dir = full.parent().map(Path::to_path_buf).unwrap_or_default();
     let scene =
         engine_assets::import_gltf(&bytes, Some(&dir)).map_err(|e| format!("{path}: {e}"))?;
-    Ok(GltfFile { scene, dir })
+    Ok(GltfFile { scene, dir, meta })
 }
 
 /// Which of a glTF's meshes part `part` is.
@@ -364,16 +369,21 @@ fn material_part(scene: &ImportedScene, part: u64) -> Result<usize, String> {
         .ok_or_else(|| String::from("the file has no material of that name or index"))
 }
 
-/// A glTF mesh as one mesh: its primitives one after another. Texture coordinates and
-/// tangents are kept when any primitive has them (zero coordinates and +X tangents for
-/// those without).
-pub(crate) fn gltf_mesh(mesh: &MeshData) -> OwnedMeshData {
+/// A glTF mesh as one mesh: its primitives one after another, its positions multiplied by
+/// `scale` (the file's import setting). Texture coordinates and tangents are kept when any
+/// primitive has them (zero coordinates and +X tangents for those without).
+pub(crate) fn gltf_mesh(mesh: &MeshData, scale: f32) -> OwnedMeshData {
     let mut data = OwnedMeshData::default();
     let uvs = mesh.primitives.iter().any(|p| !p.uvs.is_empty());
     let tangents = mesh.primitives.iter().any(|p| !p.tangents.is_empty());
     for p in &mesh.primitives {
         let (first, n) = (data.positions.len() as u32, p.positions.len());
-        data.positions.extend_from_slice(&p.positions);
+        if scale == 1.0 {
+            data.positions.extend_from_slice(&p.positions);
+        } else {
+            data.positions
+                .extend(p.positions.iter().map(|v| v.map(|c| c * scale)));
+        }
         data.normals.extend_from_slice(&p.normals);
         if uvs {
             if p.uvs.len() == n {
@@ -1580,8 +1590,21 @@ mod tests {
         let (mesh, material) = &baked.parts[1];
         let k = mesh_part(&file.scene, AssetRef::part_hash(mesh)).unwrap();
         assert_eq!(
-            gltf_mesh(&file.scene.meshes[k]).positions[0],
+            gltf_mesh(&file.scene.meshes[k], 1.0).positions[0],
             [0.0, 1.0, 0.0]
+        );
+        // Its import setting: no scale in a `.meta` of defaults; one written scales it.
+        assert_eq!(file.meta, AssetMeta::default());
+        let meta = AssetMeta {
+            model: engine_scene::ModelImport { scale: 0.5 },
+            ..AssetMeta::default()
+        };
+        meta.write(&dir.join("yard.glb"), id).unwrap();
+        let file = open_gltf(&dir, "yard.glb", id).unwrap();
+        assert_eq!(file.meta.model.applied_scale(), 0.5);
+        assert_eq!(
+            gltf_mesh(&file.scene.meshes[k], file.meta.model.applied_scale()).positions[0],
+            [0.0, 0.5, 0.0]
         );
         assert!(mesh_part(&file.scene, 0).unwrap_err().contains("2 meshes"));
         assert!(material_part(&file.scene, 0).is_err());
@@ -1615,7 +1638,7 @@ mod tests {
             name: String::from("Two"),
             primitives: vec![primitive(0.0, true), primitive(1.0, false)],
         };
-        let data = gltf_mesh(&mesh);
+        let data = gltf_mesh(&mesh, 1.0);
         assert_eq!(data.positions.len(), 6);
         assert_eq!(data.indices, [0, 1, 2, 3, 4, 5]);
         assert_eq!(data.uvs[0], [0.5, 0.5]);
@@ -1661,7 +1684,7 @@ mod tests {
         let scene = engine_assets::import_gltf(&baked.bytes, None).unwrap();
         let import = t.elapsed();
         let t = std::time::Instant::now();
-        let meshes: Vec<OwnedMeshData> = scene.meshes.iter().map(gltf_mesh).collect();
+        let meshes: Vec<OwnedMeshData> = scene.meshes.iter().map(|m| gltf_mesh(m, 1.0)).collect();
         let merge = t.elapsed();
         let t = std::time::Instant::now();
         let image = engine_assets::decode_image(&png).unwrap();

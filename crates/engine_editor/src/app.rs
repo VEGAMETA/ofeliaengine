@@ -1428,6 +1428,9 @@ struct Editor {
     /// The listing was clicked last (F2 renames its file), and the file renamed in place.
     dock_focus: bool,
     renaming_file: Option<AssetId>,
+    /// The file the inspector shows instead of the entities, with its import settings
+    /// (E4-9): the dock's last pick, until the entity selection changes.
+    inspected: Option<crate::import::Inspected>,
     /// The listing's thumbnails (ADR 0112), the side of its tiles' pictures (logical
     /// pixels), and where its scroll area was last frame: rectangle and scroll.
     thumbnails: Thumbnails,
@@ -1900,6 +1903,7 @@ impl Editor {
             asset_drag: None,
             dock_focus: false,
             renaming_file: None,
+            inspected: None,
             thumbnails,
             tile: DEFAULT_TILE,
             listing: None,
@@ -2274,6 +2278,18 @@ impl Editor {
         {
             self.anchor = self.active();
         }
+        // The file the inspector shows: gone once the entities selected change, or the file
+        // does; its path followed through renames.
+        if let Some(i) = &mut self.inspected {
+            match self.asset_db.get(i.id) {
+                Some(entry) if i.selection == self.selection => {
+                    if entry.path != i.path {
+                        i.path.clone_from(&entry.path);
+                    }
+                }
+                _ => self.inspected = None,
+            }
+        }
         match self.active() {
             Some(e) => {
                 self.inspector
@@ -2406,20 +2422,69 @@ impl Editor {
             })
             .collect();
         let section_list = self.inspector.sections();
-        let sections: Vec<Section<'_>> = self
-            .shown_sections
-            .iter()
-            .map(|&(a, b)| {
-                let title = section_list
-                    .iter()
-                    .find(|s| s.properties.contains(&self.shown[a]))
-                    .map_or("", |s| s.title);
-                Section {
-                    title,
-                    fields: &fields[a..b],
-                }
-            })
-            .collect();
+        // A file picked in the dock: its path and kind, then its import settings (E4-9).
+        let asset_fields: Vec<Field<'_>>;
+        let scale_value: [&str; 1];
+        let sections: Vec<Section<'_>> = if let Some(asset) = &self.inspected {
+            scale_value = [asset.scale_text.as_str()];
+            let mut list = vec![
+                Field {
+                    name: "path",
+                    widget: Widget::Text(&asset.path),
+                    changed: false,
+                },
+                Field {
+                    name: "kind",
+                    widget: Widget::Text(asset.kind.name()),
+                    changed: false,
+                },
+            ];
+            for &s in crate::import::settings(asset.kind) {
+                let widget = match s {
+                    crate::import::Setting::Scale => Widget::Numbers {
+                        values: &scale_value,
+                        labels: &[],
+                        typing: asset.typing.then_some(0),
+                    },
+                    crate::import::Setting::Compression => Widget::Choice {
+                        current: asset.choice(s),
+                        open: (asset.open == Some(s))
+                            .then_some(crate::import::COMPRESSIONS.as_slice()),
+                    },
+                };
+                list.push(Field {
+                    name: s.name(asset.kind),
+                    widget,
+                    changed: asset.changed(s),
+                });
+            }
+            asset_fields = list;
+            let mut sections = vec![Section {
+                title: "Asset",
+                fields: &asset_fields[..2],
+            }];
+            if asset_fields.len() > 2 {
+                sections.push(Section {
+                    title: "Import",
+                    fields: &asset_fields[2..],
+                });
+            }
+            sections
+        } else {
+            self.shown_sections
+                .iter()
+                .map(|&(a, b)| {
+                    let title = section_list
+                        .iter()
+                        .find(|s| s.properties.contains(&self.shown[a]))
+                        .map_or("", |s| s.title);
+                    Section {
+                        title,
+                        fields: &fields[a..b],
+                    }
+                })
+                .collect()
+        };
 
         // The tree. A large selection is looked up through a set (one row at a time
         // would be rows times selected).
@@ -2460,7 +2525,10 @@ impl Editor {
             })
             .collect();
         self.selection_label.clear();
-        if let Some(e) = self.active() {
+        if let Some(asset) = &self.inspected {
+            self.selection_label
+                .push_str(asset.path.rsplit('/').next().unwrap_or(&asset.path));
+        } else if let Some(e) = self.active() {
             let name = world
                 .get::<Name>(e)
                 .map_or(kind_of(world, e).1, Name::as_str);
@@ -2880,6 +2948,9 @@ impl Editor {
             self.add_open = false;
             self.add_group = None;
             self.open_choice = None;
+            if let Some(i) = &mut self.inspected {
+                i.open = None;
+            }
             self.command_palette = None;
             self.step_menu = None;
         }
@@ -2962,7 +3033,11 @@ impl Editor {
             }
         }
         if let Some(event) = response.field {
-            self.edit(world, event);
+            if self.inspected.is_some() {
+                self.edit_import(event);
+            } else {
+                self.edit(world, event);
+            }
         }
         // Over a field that is not being typed in: Backspace resets it, Ctrl+C and Ctrl+V
         // copy and paste its value (Blender).
@@ -2979,19 +3054,22 @@ impl Editor {
             );
             if reset {
                 let action = FieldAction::Reset;
-                self.edit(
-                    world,
-                    FieldEvent {
-                        section,
-                        field,
-                        action,
-                    },
-                );
+                let event = FieldEvent {
+                    section,
+                    field,
+                    action,
+                };
+                if self.inspected.is_some() {
+                    self.edit_import(event);
+                } else {
+                    self.edit(world, event);
+                }
             }
-            if copy {
+            // An entity's field: a file's settings have none of this.
+            if copy && self.inspected.is_none() {
                 self.copy_value(world, section, field);
             }
-            if paste {
+            if paste && self.inspected.is_none() {
                 let text = self.ui.input().paste.clone();
                 self.paste_value(world, section, field, &text);
             }
@@ -3358,6 +3436,107 @@ impl Editor {
                     }
                 }
                 self.history.commit(world);
+            }
+        }
+    }
+
+    /// Applies an inspector field's action to the file the inspector shows (E4-9): its
+    /// import settings, written to its `.meta` at once (not an undo step: a file on disk,
+    /// as a rename), and the asset made again. A scale drag is written at its release.
+    fn edit_import(&mut self, event: FieldEvent) {
+        use crate::import::{SCALES, Setting, chosen, dragged_scale, reset, settings};
+        let Some(asset) = self.inspected.as_mut() else {
+            return;
+        };
+        // The second section holds the settings; the first, the file's path and kind.
+        if event.section != 1 {
+            return;
+        }
+        let Some(&setting) = settings(asset.kind).get(event.field) else {
+            return;
+        };
+        let meta = match (setting, event.action) {
+            (Setting::Compression, FieldAction::Open) => {
+                asset.open = (asset.open != Some(setting)).then_some(setting);
+                return;
+            }
+            (Setting::Compression, FieldAction::Choose(i)) => {
+                asset.open = None;
+                chosen(asset.meta, i)
+            }
+            (Setting::Scale, FieldAction::Drag { travel, start, .. }) => {
+                if start || asset.drag.is_none() {
+                    asset.drag = Some((asset.meta.model.scale, false));
+                    asset.typing = false;
+                }
+                if let Some((from, moved)) = &mut asset.drag {
+                    *moved |= travel != 0.0;
+                    asset.meta.model.scale = dragged_scale(*from, travel);
+                    asset.refresh();
+                }
+                return;
+            }
+            (Setting::Scale, FieldAction::Release) => match asset.drag.take() {
+                // A press and release without moving: type it instead.
+                Some((_, false)) => {
+                    asset.typing = true;
+                    return;
+                }
+                Some((_, true)) => asset.meta,
+                None => return,
+            },
+            (Setting::Scale, FieldAction::Typed { commit, .. }) => {
+                asset.typing = false;
+                if !commit {
+                    return;
+                }
+                let text = self.ui.edited_text().trim().to_owned();
+                match crate::expr::evaluate(&text, f64::from(asset.meta.model.scale)) {
+                    Ok(value) => {
+                        let mut meta = asset.meta;
+                        meta.model.scale = (value as f32).clamp(SCALES.0, SCALES.1);
+                        meta
+                    }
+                    Err(reason) => {
+                        self.say(format!("Scale: {reason}"));
+                        return;
+                    }
+                }
+            }
+            (_, FieldAction::Reset) => reset(asset.meta, setting),
+            _ => return,
+        };
+        self.write_import(meta);
+    }
+
+    /// Writes the import settings `meta` to the inspected file's `.meta` when they differ
+    /// from what it holds, and has the asset made again.
+    fn write_import(&mut self, meta: AssetMeta) {
+        let Some(asset) = self.inspected.as_mut() else {
+            return;
+        };
+        asset.meta = meta;
+        asset.refresh();
+        if meta == asset.saved {
+            return;
+        }
+        let file = self.root.join(&asset.path);
+        let name = asset
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&asset.path)
+            .to_owned();
+        match meta.write(&file, asset.id) {
+            Ok(()) => {
+                asset.saved = meta;
+                self.changed_assets.push(asset.id);
+                self.say(format!("{name}: import settings saved, made again"));
+            }
+            Err(e) => {
+                asset.meta = asset.saved;
+                asset.refresh();
+                self.say(format!("Import settings not saved: {e}"));
             }
         }
     }
@@ -6985,6 +7164,15 @@ impl Editor {
         let folder = path.rsplit_once('/').map_or("", |(f, _)| f).to_owned();
         self.open_folder(&folder);
         self.browser.selected = Some(id);
+        // The inspector shows it, its import settings read from its `.meta`.
+        let meta = AssetMeta::read(&self.root.join(&path));
+        self.inspected = Some(crate::import::Inspected::new(
+            id,
+            path.clone(),
+            kind,
+            meta,
+            self.selection.clone(),
+        ));
         self.say(format!("{path} ({})", kind.name()));
     }
 
@@ -7166,9 +7354,11 @@ impl Editor {
             Subject::Mesh(mesh) => {
                 // The mesh's own material, from where its file uses it.
                 let entry = self.asset_db.get(mesh.file)?;
-                let outline =
-                    engine_assets::GltfOutline::read(&self.root.join(&entry.path)).ok()?;
-                let plan = ModelPlan::new(mesh.file, &entry.path, "preview", &outline).ok()?;
+                let full = self.root.join(&entry.path);
+                let outline = engine_assets::GltfOutline::read(&full).ok()?;
+                let scale = AssetMeta::read(&full).model.applied_scale();
+                let plan =
+                    ModelPlan::new(mesh.file, &entry.path, "preview", &outline, scale).ok()?;
                 let material = plan
                     .nodes
                     .iter()
@@ -7183,9 +7373,10 @@ impl Editor {
         match entry.kind {
             K::Material => one(builtin::SPHERE, AssetRef::file(id)),
             K::Model => {
-                let outline =
-                    engine_assets::GltfOutline::read(&self.root.join(&entry.path)).ok()?;
-                let plan = ModelPlan::new(id, &entry.path, "preview", &outline).ok()?;
+                let full = self.root.join(&entry.path);
+                let outline = engine_assets::GltfOutline::read(&full).ok()?;
+                let scale = AssetMeta::read(&full).model.applied_scale();
+                let plan = ModelPlan::new(id, &entry.path, "preview", &outline, scale).ok()?;
                 // Each node where the file places it under the root.
                 let mut placed: Vec<Affine3A> = Vec::with_capacity(plan.nodes.len());
                 let mut parts = Vec::new();
@@ -7263,9 +7454,12 @@ impl Editor {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or(&drag.name);
-            let plan = engine_assets::GltfOutline::read(&self.root.join(&drag.path))
+            let full = self.root.join(&drag.path);
+            // The file's import scale (its `.meta`, E4-9), as the player scales its meshes.
+            let scale = AssetMeta::read(&full).model.applied_scale();
+            let plan = engine_assets::GltfOutline::read(&full)
                 .map_err(|e| format!("{}: {e}", drag.name))
-                .and_then(|outline| ModelPlan::new(drag.asset, &drag.path, stem, &outline))
+                .and_then(|outline| ModelPlan::new(drag.asset, &drag.path, stem, &outline, scale))
                 .map(Rc::new);
             drag.plan = Some(plan);
         }
@@ -11394,6 +11588,69 @@ mod tests {
         // Opened the plain way, the palette's assets go to the dock again.
         ed.open_palette(&mut world, "#red");
         assert!(ed.command_palette.as_ref().unwrap().for_field.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_files_import_settings_are_edited_in_the_inspector() {
+        let (dir, mut world, mut ed, boxed) = drop_project("import-settings");
+        let crate_id = ed.asset_db.find("props/crate.gltf").unwrap().id;
+        let meta = || std::fs::read_to_string(dir.join("props/crate.gltf.meta")).unwrap();
+        // An entity selected, then a click on the crate's tile: the inspector shows the
+        // file, its path and kind, then its import settings.
+        ed.select_only(boxed);
+        ed.update(&mut world);
+        let at = middle(texts(&ed, "crate.gltf")[0]);
+        click(&mut ed, &mut world, at);
+        ed.update(&mut world);
+        assert_eq!(ed.inspected.as_ref().map(|i| i.id), Some(crate_id));
+        assert!(!texts(&ed, "Import").is_empty(), "the settings' section");
+        assert!(!texts(&ed, "texture compression").is_empty());
+        // The scale typed: written to the `.meta` at once, the model made again.
+        let at = on_row(&ed, "scale", "1");
+        click(&mut ed, &mut world, at);
+        ed.update(&mut world);
+        assert!(ed.ui.editing().is_some(), "a click types the number");
+        chars(&mut ed, "0.01");
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, true); // Enter
+        ed.update(&mut world);
+        assert!(meta().contains("model.scale = 0.01"), "{}", meta());
+        assert_eq!(ed.changed_assets, [crate_id]);
+        assert_eq!(
+            ed.history.steps().count(),
+            0,
+            "a file on disk, not an undo step"
+        );
+        // The textures inside it kept uncompressed: picked from the list.
+        let at = on_row(&ed, "texture compression", "Auto");
+        click(&mut ed, &mut world, at);
+        ed.update(&mut world);
+        let at = middle(texts(&ed, "Uncompressed")[0]);
+        click(&mut ed, &mut world, at);
+        ed.update(&mut world);
+        assert!(
+            meta().contains("texture.compression = Uncompressed"),
+            "{}",
+            meta()
+        );
+        // The scale reset: its line goes, the other stays.
+        ed.edit_import(FieldEvent {
+            section: 1,
+            field: 0,
+            action: FieldAction::Reset,
+        });
+        assert!(!meta().contains("model.scale"), "{}", meta());
+        assert!(meta().contains("texture.compression"));
+        assert_eq!(
+            AssetMeta::read(&dir.join("props/crate.gltf")).model.scale,
+            1.0
+        );
+        // The entity selection changed (here, emptied): the inspector shows the entities
+        // again.
+        ed.selection.clear();
+        ed.update(&mut world);
+        assert!(ed.inspected.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

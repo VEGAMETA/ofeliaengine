@@ -515,3 +515,46 @@ editor compiles textures in the background and Unity's caches its imports:
     31 ms in the first frame);
   - compressing on the GPU (ADR 0041's next) would make the 8 s of the first time
     vanish.
+
+## As built (E4-9, 2026-10-22): import settings
+
+The asset browser research's "import settings in the inspector" (Unity, Godot), kept in
+the `.meta` as this ADR planned:
+
+```text
+[asset version=1 id=5f2c0a3e9d2b47c88e51f0d4a7b3c912]
+
+texture.compression = Uncompressed
+model.scale = 0.01
+```
+
+- **`AssetMeta`** holds the settings (`engine_scene`: `TextureImport`, `ModelImport`).
+  - Only the settings that are not the defaults are written, so a `.meta` of defaults is
+    its header alone, as before.
+  - A copy given a new id (two files with one id) keeps the settings it was copied with.
+- **`texture.compression`** (`Auto`, `Uncompressed`): whether the player block-compresses
+  an image through the derived data cache (E4-8). The setting comes from the image file's
+  own `.meta`, or from its model's for an image inside the file. `Uncompressed` keeps
+  RGBA8: pixel art, gradients and text that BC7 would smudge.
+- **`model.scale`** (from 0.0001 to 10,000; 1 by default) multiplies a model's mesh
+  positions in the player. The editor's drop (and its previews) also multiplies the
+  file's node offsets and the model's box, so a file in centimeters drops whole at 0.01.
+  A value that is not a positive number applies as 1.
+- **The inspector:**
+  - a file picked in the FileSystem dock (or from the palette's `#`) is shown in the
+    inspector instead of the entities, as Godot's inspector shows a resource, until the
+    entity selection changes;
+  - "Asset" shows its path and kind; "Import" shows its settings (a model: scale and its
+    textures' compression; an image: compression);
+  - an edit writes the `.meta` at once and the asset is made again in the background,
+    with nothing to press. A scale drag (doubled every 100 pixels) is written at its
+    release.
+  - An edit is not an undo step: a `.meta` is a file on disk, as a rename is, and an undo
+    step would also mark the scene unsaved. ↺ (or Backspace over the field) puts a
+    setting back to its default.
+- **Left:**
+  - a `.meta` edited outside the editor is not seen by the watcher (the database follows
+    the asset files' sizes and times, not their `.meta`'s): the asset is made again on
+    its next reading;
+  - the cook (`ofeliaengine cook`) does not read the settings yet; the game's build from
+    the editor will.
