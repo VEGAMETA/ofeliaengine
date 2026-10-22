@@ -428,7 +428,7 @@ Last updated: 2026-10-22.
     or the player, which read only ADR 0108's `.material`. Four questions are with the
     owner: one material file, variants with a base, numbers on graph nodes, where
     generated Slang lives.
-  - **E8-4, go to definition, find in files, signatures** (#PR, ADR 0107's as-built): F12
+  - **E8-4, go to definition, find in files, signatures** (#337, ADR 0107's as-built): F12
     and Ctrl+click across `require`s; Ctrl+Shift+F, the palette's `%` over the project's
     scripts; a call's signature above the line, the argument at the caret lit. E8 is done
     but for rename and references across the project.
