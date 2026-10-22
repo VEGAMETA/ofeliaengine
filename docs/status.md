@@ -417,7 +417,7 @@ Last updated: 2026-10-22.
   - **The freed mouse** (#335, ADR 0021's addendum): `DeviceFilter` filters the keyboard
     and the mouse apart; a game whose mouse is freed (Shift+F1, paused) stops hearing it
     and keeps the keyboard, and `set_devices` lets go of what it stops hearing.
-  - **E10, materials: the UX note** (#PR, `docs/research/ux/materials.md`). It studies
+  - **E10, materials: the UX note** (#336, `docs/research/ux/materials.md`). It studies
     Unreal, Unity, Godot, Blender and Roblox, and proposes E10's steps:
     1. materials in the inspector, edited live;
     2. Slang in the editor;
