@@ -36,7 +36,7 @@ use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, Textu
 use engine_rhi::{Allocator, Device};
 use engine_runtime::MeshRenderer;
 use engine_scene::AssetRef;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A grid unit in metres: brushes' planes are held on a 1 mm grid.
 const UNIT: f64 = 0.001;
@@ -482,9 +482,14 @@ impl Blockout {
     }
 
     /// The edges of every group's colliding pieces in the world (`world` places the groups)
-    /// into `out` (cleared first): what the editor's overlay shows of the colliders.
-    pub fn collider_edges(&self, world: &World, out: &mut Vec<(Vec3, Vec3)>) {
+    /// into `out` (cleared first), each once: what the editor's overlay shows of the
+    /// colliders.
+    pub fn collider_edges(&self, world: &World, out: &mut Vec<[Vec3; 2]>) {
         out.clear();
+        // A face's neighbour lists its edge again, backwards; equal corners land on equal
+        // floats.
+        let mut seen = HashSet::new();
+        let bits = |p: Vec3| p.to_array().map(f32::to_bits);
         for (&key, state) in &self.groups {
             let placed = world
                 .get::<GlobalTransform>(key)
@@ -502,7 +507,11 @@ impl Blockout {
                 for face in &solid.faces {
                     let c = &face.polygon.corners;
                     for i in 0..c.len() {
-                        out.push((at(&c[i]), at(&c[(i + 1) % c.len()])));
+                        let (a, b) = (at(&c[i]), at(&c[(i + 1) % c.len()]));
+                        let (x, y) = (bits(a), bits(b));
+                        if seen.insert(if x < y { (x, y) } else { (y, x) }) {
+                            out.push([a, b]);
+                        }
                     }
                 }
             }
@@ -1109,6 +1118,46 @@ mod tests {
             }
         });
         v.round() as i64
+    }
+
+    #[test]
+    fn collider_edges_list_each_edge_once() {
+        let mut world = World::new();
+        let group = world.spawn((Transform::IDENTITY, BrushGroup::default()));
+        let b = world.spawn((
+            Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+            Brush::new(BrushShape::Box, Vec3::new(2.0, 1.0, 3.0)),
+        ));
+        world.set_parent(b, Some(group)).unwrap();
+        let mut entities = Vec::new();
+        collect(&world, group, &mut entities);
+        let inputs: Vec<Input> = entities.iter().map(|&e| input(&world, group, e)).collect();
+        let hosts = hosts_of(&world, &entities);
+        let mut g = Group::new();
+        let own: Vec<engine_brush::Brush> =
+            inputs.iter().map(|i| to_brush(i, g.planes_mut())).collect();
+        let (brushes, made) = operands(&own, &hosts, None, g.planes());
+        g.rebuild(brushes);
+        let mut blockout = Blockout::default();
+        blockout.groups.insert(
+            group,
+            GroupState {
+                group: g,
+                entities,
+                inputs,
+                hosts,
+                own,
+                made,
+                epoch: 0,
+                baked: false,
+            },
+        );
+        let mut edges = Vec::new();
+        blockout.collider_edges(&world, &mut edges);
+        // A box's twelve, not each twice (once per face beside it).
+        assert_eq!(edges.len(), 12, "{edges:?}");
+        let length: f32 = edges.iter().map(|[a, b]| a.distance(*b)).sum();
+        assert!((length - 4.0 * (2.0 + 1.0 + 3.0)).abs() < 1e-4, "{length}");
     }
 
     #[test]

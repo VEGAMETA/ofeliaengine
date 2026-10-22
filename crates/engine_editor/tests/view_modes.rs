@@ -1,11 +1,14 @@
 //! The viewport's view modes (ADR 0116) in the editor's frame: Wireframe fills the view
 //! with its background and draws the cube's edges; Lit + Wireframe draws its edges over the
-//! lit cube; Unlit draws it in one flat color. `ENGINE_EDITOR_VIEW_MODES_PNG=<prefix>` writes
+//! lit cube; Unlit draws it in one flat color. The blockout's colliders are lines in the
+//! world, steady on the surfaces they lie on. `ENGINE_EDITOR_VIEW_MODES_PNG=<prefix>` writes
 //! the frames.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
-use engine_app::{Assets, Game, Model, Player, PlayerSettings, Window, builtin};
+use engine_app::{
+    Assets, Brush, BrushGroup, BrushShape, Game, Model, Player, PlayerSettings, Window, builtin,
+};
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Transform, World};
 use engine_editor::{EditorGame, EditorOverlay};
@@ -30,6 +33,23 @@ fn frame<G: Game>(player: &mut Player, game: &mut EditorGame<G>, overlay: &mut E
     game.sync_assets(player);
 }
 
+/// Frames the scene (`view.frame`) and waits for the camera to come to rest: its move takes
+/// 0.2 s of the clock (`CAMERA_MOVE`), which a fast GPU's 180 frames do not.
+fn frame_the_scene<G: Game>(
+    player: &mut Player,
+    game: &mut EditorGame<G>,
+    overlay: &mut EditorOverlay,
+) {
+    assert!(game.run_command(player.world_mut(), "view.frame"));
+    let start = std::time::Instant::now();
+    for k in 0.. {
+        frame(player, game, overlay);
+        if k >= 60 && start.elapsed() > std::time::Duration::from_millis(500) {
+            break;
+        }
+    }
+}
+
 /// A cube in the middle, lit by the sun.
 fn write_scene(dir: &Path) {
     let mut world = World::new();
@@ -39,6 +59,35 @@ fn write_scene(dir: &Path) {
         Transform::IDENTITY.with_scale(Vec3::splat(2.0)),
         Model::new(builtin::CUBE, builtin::MATERIAL),
     ));
+    save_lit(dir, world);
+}
+
+/// A blockout crate on a floor brush: the crate's lower edges lie on the floor.
+fn write_blockout(dir: &Path) {
+    let mut world = World::new();
+    let group = world.spawn((
+        SceneId::new(),
+        Name::new("Blockout"),
+        Transform::IDENTITY,
+        BrushGroup::default(),
+    ));
+    for (name, at, size) in [
+        ("Floor", Vec3::new(0.0, -1.0, 0.0), Vec3::new(8.0, 1.0, 8.0)),
+        ("Crate", Vec3::ZERO, Vec3::new(2.0, 1.0, 2.0)),
+    ] {
+        let e = world.spawn((
+            SceneId::new(),
+            Name::new(name),
+            Transform::from_translation(at),
+            Brush::new(BrushShape::Box, size),
+        ));
+        world.set_parent(e, Some(group)).unwrap();
+    }
+    save_lit(dir, world);
+}
+
+/// `world` with the sun, saved as the project's `main.scene`.
+fn save_lit(dir: &Path, mut world: World) {
     world.spawn((
         SceneId::new(),
         Name::new("Sun"),
@@ -136,8 +185,7 @@ fn wireframe_modes_draw_the_edges_in_the_editors_view() {
     };
     frames(&mut player, &mut game, &mut overlay, 10);
     // The cube framed in the view, the camera at rest.
-    assert!(game.run_command(player.world_mut(), "view.frame"));
-    frames(&mut player, &mut game, &mut overlay, 180);
+    frame_the_scene(&mut player, &mut game, &mut overlay);
     let [vx, vy, vw, vh] = game.view_rect().unwrap();
     let (lit, width) = capture(&mut player, &mut game, &mut overlay, "lit");
     let pixel = |rgba: &[u8], x: u32, y: u32| {
@@ -219,6 +267,99 @@ fn wireframe_modes_draw_the_edges_in_the_editors_view() {
 }
 
 #[test]
+fn colliders_are_steady_lines_in_the_world() {
+    let dir = temp_dir("colliders");
+    write_blockout(&dir);
+    let settings = PlayerSettings {
+        title: String::from("editor colliders test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame_the_scene(&mut player, &mut game, &mut overlay);
+    let [vx, vy, vw, vh] = game.view_rect().unwrap();
+    let (before, width) = capture(&mut player, &mut game, &mut overlay, "colliders-off");
+    assert!(game.run_command(player.world_mut(), "view.colliders"));
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let (shown, _) = capture(&mut player, &mut game, &mut overlay, "colliders");
+    // The next frames, the camera's jitter elsewhere: the same lines.
+    let mut later = Vec::new();
+    for k in 0..4 {
+        frame(&mut player, &mut game, &mut overlay);
+        later.push(
+            capture(
+                &mut player,
+                &mut game,
+                &mut overlay,
+                &format!("colliders-{k}"),
+            )
+            .0,
+        );
+    }
+    let pixel = |rgba: &[u8], x: u32, y: u32| {
+        let i = ((y * width + x) * 4) as usize;
+        [rgba[i], rgba[i + 1], rgba[i + 2]]
+    };
+    let view = |rgba: &[u8]| -> Vec<[u8; 3]> {
+        (vy + 40..vy + vh - 4)
+            .flat_map(|y| (vx + 4..vx + vw - 4).map(move |x| (x, y)))
+            .map(|(x, y)| pixel(rgba, x, y))
+            .collect()
+    };
+    // The colliders' cyan, in front.
+    let cyan = |p: &[u8; 3]| p[1] > 170 && p[2] > 170 && u16::from(p[0]) + 40 < u16::from(p[1]);
+    let (before, shown) = (view(&before), view(&shown));
+    let drawn: Vec<bool> = before
+        .iter()
+        .zip(&shown)
+        .map(|(b, s)| !cyan(b) && cyan(s))
+        .collect();
+    let lines = drawn.iter().filter(|&&d| d).count();
+    let flicker = later
+        .iter()
+        .map(|rgba| {
+            view(rgba)
+                .iter()
+                .zip(&drawn)
+                .filter(|(p, d)| cyan(p) != **d)
+                .count()
+        })
+        .max()
+        .unwrap();
+    println!(
+        "colliders: {lines} pixels on their lines, at most {flicker} changed in a later frame"
+    );
+    assert!(lines > 1000, "the crate's and the floor's edges");
+    assert!(flicker * 50 < lines, "steady: no line fights its surface");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 #[ignore = "a measurement"]
 fn measure_the_view_modes_over_ten_thousand_cubes() {
     let dir = temp_dir("view-modes-measure");
@@ -275,10 +416,7 @@ fn measure_the_view_modes_over_ten_thousand_cubes() {
     for _ in 0..10 {
         frame(&mut player, &mut game, &mut overlay);
     }
-    assert!(game.run_command(player.world_mut(), "view.frame"));
-    for _ in 0..180 {
-        frame(&mut player, &mut game, &mut overlay);
-    }
+    frame_the_scene(&mut player, &mut game, &mut overlay);
     println!("adapter: {}", player.device().adapter().summary());
     for mode in [
         "view.lit",
@@ -312,6 +450,92 @@ fn measure_the_view_modes_over_ten_thousand_cubes() {
         };
         println!(
             "{mode}: its pass {:.0} µs on the GPU; composing the frame {:.0} µs (medians of 100)",
+            median(&mut gpu),
+            median(&mut cpu)
+        );
+    }
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "a measurement"]
+fn measure_the_collider_lines() {
+    let dir = temp_dir("colliders-measure");
+    // 1,600 crates in 16 groups of 100: 19,200 edges.
+    let mut world = World::new();
+    for g in 0..16 {
+        let (gx, gz) = ((g % 4) as f32 * 16.0 - 32.0, (g / 4) as f32 * 16.0 - 32.0);
+        let group = world.spawn((
+            SceneId::new(),
+            Name::new(format!("Blockout {g}")),
+            Transform::from_xyz(gx, 0.0, gz),
+            BrushGroup::default(),
+        ));
+        for i in 0..100 {
+            let (x, z) = ((i % 10) as f32 * 1.5 - 7.0, (i / 10) as f32 * 1.5 - 7.0);
+            let e = world.spawn((
+                SceneId::new(),
+                Name::new(format!("Crate {g}.{i}")),
+                Transform::from_xyz(x, 0.0, z),
+                Brush::new(BrushShape::Box, Vec3::splat(0.8)),
+            ));
+            world.set_parent(e, Some(group)).unwrap();
+        }
+    }
+    save_lit(&dir, world);
+    let settings = PlayerSettings {
+        title: String::from("editor colliders measurement"),
+        window: Window::Offscreen {
+            width: 1920,
+            height: 1080,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let mut player = Player::new(&settings).unwrap();
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame_the_scene(&mut player, &mut game, &mut overlay);
+    println!("adapter: {}", player.device().adapter().summary());
+    for shown in [false, true] {
+        if shown {
+            assert!(game.run_command(player.world_mut(), "view.colliders"));
+        }
+        let (mut gpu, mut cpu) = (Vec::new(), Vec::new());
+        for k in 0..120 {
+            let report = player
+                .frame_overlaid(&mut game, Some(&mut overlay))
+                .unwrap();
+            player.set_view_rect(game.view_rect());
+            game.sync_assets(&mut player);
+            if k >= 20 {
+                cpu.push(report.map_or(0.0, |r| r.compose));
+                let lines = player
+                    .graph()
+                    .gpu_pass_times()
+                    .iter()
+                    .filter(|t| t.name == "lines")
+                    .map(|t| t.gpu_us)
+                    .fold(0.0, |a, b| a + b);
+                gpu.push(f64::from(lines));
+            }
+        }
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        println!(
+            "colliders {}: the lines' pass {:.0} µs on the GPU; composing the frame {:.0} µs \
+             (medians of 100)",
+            if shown { "shown" } else { "hidden" },
             median(&mut gpu),
             median(&mut cpu)
         );

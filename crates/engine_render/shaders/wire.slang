@@ -10,6 +10,10 @@
 // The vertex stage reads `forward.slang`'s push constants. The wire's own parameters are
 // at the address in `batches`, and the scene's depth is `texture`: `outlineVertex` reads
 // neither.
+//
+// Line lists (`LineLists::add_passes`: colliders, the navigation mesh) go through
+// `lineVertex`: each segment's two ends from the buffer at `positions` (three floats a
+// point), through the camera at `frame`; `wireFragment` colors them the same way.
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
 
@@ -29,17 +33,24 @@ struct Params
     float4 _pad;
 };
 
-// `Push` in forward/mod.rs and forward.slang (128 bytes), its pointers as addresses.
+// What `lineVertex` reads at `frame`: the camera, as `Frame` in forward.slang begins.
+struct LineFrame
+{
+    float4x4 clip_from_world;
+};
+
+// `Push` in forward/mod.rs and forward.slang (128 bytes): the pointers this file reads
+// typed, the others as addresses.
 struct Push
 {
-    uint64_t frame;
+    LineFrame* frame;
     uint64_t instances;
     Params* params;      // `batches` in forward.slang
     uint64_t visible;
     uint64_t commands;
     uint64_t visibility;
     uint64_t pyramid;
-    uint64_t positions;
+    float* positions;    // line lists' ends, three floats a point
     uint64_t attributes;
     uint64_t materials;
     uint64_t previous_instances;
@@ -89,6 +100,17 @@ float4 wireFragment(WireIn input) : SV_Target0
     if (alpha <= 0.0)
         discard;
     return float4(p.color.rgb * (alpha * p.white), alpha);
+}
+
+[shader("vertex")]
+WireIn lineVertex(uint vertex : SV_VulkanVertexID)
+{
+    float* end = push.positions + vertex * 3;
+    float3 p = float3(end[0], end[1], end[2]);
+    WireIn o;
+    o.position = mul(push.frame.clip_from_world, float4(p, 1.0));
+    o.value = 0u;
+    return o;
 }
 
 struct FillOut

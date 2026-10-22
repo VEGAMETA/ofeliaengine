@@ -492,9 +492,14 @@ Last updated: 2026-10-22.
   - **View modes, V1b** (#349, ADR 0116): Unlit on Alt+3, a pass of its own
     (`engine_render::unlit`) drawing each material's base color and emission over a dark
     background; the forward pass untouched. 10,000 cubes: 0.28 / 1.15 ms on the GPUs.
+  - **View modes, V2a** (#350, ADR 0116): the blockout's colliders (Alt+C) and the
+    navigation mesh are lines in the world (`engine_render::wire::LineLists`), tested
+    against the scene's depth as the wireframes are: faint behind surfaces, steady on the
+    ones they lie on; the X-ray overlay is gone. 19,200 edges: 10 / 82 µs on the GPUs,
+    41 µs of the CPU's frame.
   - **Next, in this order:**
-    1. View modes on (ADR 0116): the colliders of every body over any mode (V2),
-       replacing the blockout's X-ray overlay;
+    1. View modes on (ADR 0116 V2b): the models' colliders and the bodies in Play, from the
+       shapes' edges in the physics API, colored by how they move;
     2. E7 on: the engine's types in the editor and for luau-lsp (E7-2, under way on
        `feat/script-types`: the old solver types a hook's `self` from `component`'s
        declaration, the new one of Luau 0.736 does not), then views' fast path (E7-1c);

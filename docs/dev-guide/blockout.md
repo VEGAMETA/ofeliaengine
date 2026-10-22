@@ -74,7 +74,8 @@ Brushes collide: each brush group becomes one static body, its brushes' pieces a
 hulls, when the game asks its physics for them (`ScenePhysics::sync_blockout`, physics.md
 §11). `collides: false` leaves a brush out (decoration). Bodies that roll or slide over a
 blockout set `internal_edges`, and the seams between pieces are as smooth as one floor.
-In the editor, **View: Colliders** (the palette) draws the pieces that collide.
+In the editor, **View: Colliders** (the palette, Alt+C) draws the pieces that collide, as
+lines in the world ([editor.md](editor.md#colliders)).
 
 ## Exporting a greybox
 
