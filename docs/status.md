@@ -476,7 +476,7 @@ Last updated: 2026-10-22.
     a template named after the entity, loaded by the player's host and attached as one
     step. A script component shows its file under its header and a mark on its row; a
     click opens the script. `SceneRegistry::insert_default`, `Player::load_script`.
-  - **E7-4b, a script reloads when it is saved** (#PR, ADR 0114's as-built): Ctrl+S runs
+  - **E7-4b, a script reloads when it is saved** (#346, ADR 0114's as-built): Ctrl+S runs
     it again at the next frame, the file watcher when another editor saved it. Instances go
     on with their state; props that changed move by name to a new layout
     (`engine_ecs::Relayout`, `script::Door#2`), and the editor's history and Play's
