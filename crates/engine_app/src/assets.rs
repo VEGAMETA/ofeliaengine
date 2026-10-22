@@ -19,8 +19,10 @@
 //! - **A mesh's primitives** are drawn as one, with the model's material, in the mesh's own
 //!   space: the file's node transforms are not applied.
 //! - **A material's textures** (base color, metallic-roughness, normal, occlusion,
-//!   emissive) are decoded on first use and kept uncompressed (RGBA8 with their levels);
-//!   textures the cooker compresses come with the asset browser (ADR 0107 E4). Shading
+//!   emissive) are decoded on first use with their levels, uncompressed (RGBA8). With a
+//!   derived data cache ([`Assets::set_derived_data`], E4-8) they are then compressed in
+//!   the background as the cooker compresses them (BC7, BC5 for normal maps) and swapped
+//!   in once whole on the GPU; a later run loads them from the cache compressed. Shading
 //!   models from extensions (unlit, clearcoat, sheen) are plain PBR here.
 //! - **glTF files load in the background** (ADR 0108's E4-4, [`crate::loading`]): read,
 //!   imported, their meshes put together and their textures decoded off the frame's
@@ -33,10 +35,10 @@
 //! - **The file's id** is its `.meta`'s ([`AssetMeta`]); a file without one is found by
 //!   its path alone.
 
-use crate::loading::{Done, Job, Loader};
+use crate::loading::{Done, Job, Loader, Made};
 use engine_assets::{
-    ImportedScene, MaterialData, MeshData, TextureData, TextureImage, TextureSource, TextureUsage,
-    TextureWrap,
+    DerivedDataCache, EncodedTexture, ImportedScene, MaterialData, MeshData, TextureData,
+    TextureImage, TextureSource, TextureUsage, TextureWrap,
 };
 use engine_ecs::{Changed, Entity, GlobalTransform, QueryState, With, Without, World};
 use engine_reflect::Reflect;
@@ -506,6 +508,46 @@ struct PendingMaterial {
     slots: Slots,
 }
 
+/// A texture compressed in the background (E4-8), swapped in for the uncompressed one
+/// once it is whole on the GPU.
+#[derive(Clone, Copy)]
+struct Swap {
+    key: TextureKey,
+    old: TextureId,
+    new: TextureId,
+}
+
+/// An uncompressed texture's levels as the pool takes them.
+fn decoded_levels(t: TextureImage) -> TextureLevels {
+    TextureLevels {
+        width: t.width,
+        height: t.height,
+        format: if t.srgb {
+            TextureFormat::Rgba8Srgb
+        } else {
+            TextureFormat::Rgba8Unorm
+        },
+        levels: t.levels,
+    }
+}
+
+/// A compressed texture's levels as the pool takes them.
+fn encoded_levels(t: EncodedTexture) -> TextureLevels {
+    use engine_assets::TextureFormat as Encoded;
+    TextureLevels {
+        width: t.width,
+        height: t.height,
+        format: match t.format {
+            Encoded::Rgba8Srgb => TextureFormat::Rgba8Srgb,
+            Encoded::Rgba8Unorm => TextureFormat::Rgba8Unorm,
+            Encoded::Bc7Srgb => TextureFormat::Bc7Srgb,
+            Encoded::Bc7Unorm => TextureFormat::Bc7Unorm,
+            Encoded::Bc5Unorm => TextureFormat::Bc5Unorm,
+        },
+        levels: t.levels,
+    }
+}
+
 type Changes = QueryState<(Entity, &'static Model), Changed<Model>>;
 type Orphans = QueryState<Entity, (With<FromModel>, Without<Model>)>;
 
@@ -522,16 +564,24 @@ pub struct Assets {
     /// The background's loading (E4-4), and its results taken this frame.
     loader: Loader,
     done: Vec<Done>,
+    /// Where textures are compressed into and loaded from compressed (E4-8), if anywhere.
+    cache: Option<Arc<DerivedDataCache>>,
     /// Each file's generation, raised when it is read again ([`Self::reload`]): what was
     /// made from an older one is dropped when it comes back.
     generations: HashMap<AssetId, u32>,
     /// Meshes and textures being made in the background.
     building: HashSet<AssetRef>,
     decoding: HashSet<TextureKey>,
-    /// Textures decoded, made where the device is at hand ([`Self::make_textures`]).
-    decoded: Vec<(TextureKey, Result<TextureImage, String>)>,
+    /// Textures decoded or loaded compressed, made where the device is at hand
+    /// ([`Self::make_textures`]).
+    decoded: Vec<(TextureKey, Result<Made, String>)>,
     /// glTF materials' textures, made or (`None`) failed.
     textures: HashMap<TextureKey, Option<TextureId>>,
+    /// Textures compressed in the background, to be made; then made, until they are whole
+    /// on the GPU and swapped in. The textures compressed so far.
+    compressed: Vec<(TextureKey, EncodedTexture)>,
+    swapping: Vec<Swap>,
+    compressed_textures: HashSet<TextureKey>,
     /// glTF materials waiting for their textures.
     pending_materials: Vec<PendingMaterial>,
     /// Models waiting for their meshes and materials, given renderers once those are made.
@@ -578,11 +628,15 @@ impl Assets {
             gltf: HashMap::new(),
             loader: Loader::new(root.clone()),
             done: Vec::new(),
+            cache: None,
             generations: HashMap::new(),
             building: HashSet::new(),
             decoding: HashSet::new(),
             decoded: Vec::new(),
             textures: HashMap::new(),
+            compressed: Vec::new(),
+            swapping: Vec::new(),
+            compressed_textures: HashSet::new(),
             pending_materials: Vec::new(),
             waiting: HashSet::new(),
             retry: Vec::new(),
@@ -625,6 +679,15 @@ impl Assets {
         self.problems.get(&asset).map(String::as_str)
     }
 
+    /// Compresses the textures of glTF files through the derived data cache `cache` (ADR
+    /// 0041, E4-8): a texture an earlier run stored there is loaded from it compressed;
+    /// another is made uncompressed, compressed in the background (BC7, BC5 for normal
+    /// maps, as the cooker does) into the cache, and swapped in once whole on the GPU.
+    /// `None`: textures stay uncompressed. Textures made already are kept as they are.
+    pub fn set_derived_data(&mut self, cache: Option<DerivedDataCache>) {
+        self.cache = cache.map(Arc::new);
+    }
+
     /// Reads file `file` again on its next use: its meshes, materials and textures made
     /// so far are forgotten (and freed in the next frame), what could not be made is tried
     /// again, and every model in `world` that uses the file is made again. What the editor
@@ -645,6 +708,17 @@ impl Assets {
             let keep = asset.file != file;
             if !keep {
                 materials.insert(*asset, material);
+            }
+            keep
+        });
+        // What was compressed from the old version is not swapped in.
+        self.compressed.retain(|(k, _)| k.file != file);
+        self.compressed_textures.retain(|k| k.file != file);
+        let retired = &mut self.retired_textures;
+        self.swapping.retain(|swap| {
+            let keep = swap.key.file != file;
+            if !keep {
+                retired.push(swap.new);
             }
             keep
         });
@@ -744,6 +818,19 @@ impl Assets {
     /// How many textures have been made from glTF files so far.
     pub fn textures_made(&self) -> usize {
         self.textures.values().filter(|t| t.is_some()).count()
+    }
+
+    /// How many textures are being compressed in the background, or compressed and not
+    /// swapped in yet ([`Self::set_derived_data`]): not counted as loading, the scene shows
+    /// whole without them.
+    pub fn compressing(&self) -> usize {
+        self.loader.compressing() + self.compressed.len() + self.swapping.len()
+    }
+
+    /// How many of the textures made from glTF files are compressed: loaded from the
+    /// derived data cache, or compressed in the background and swapped in.
+    pub fn textures_compressed(&self) -> usize {
+        self.compressed_textures.len()
     }
 
     fn fail(&mut self, asset: AssetRef, why: String) {
@@ -877,6 +964,7 @@ impl Assets {
             self.loader.give(Job::Texture {
                 key: *key,
                 file: Arc::clone(&file),
+                cache: self.cache.clone(),
                 generation,
             });
         }
@@ -989,6 +1077,22 @@ impl Assets {
                     self.decoding.remove(&key);
                     self.decoded.push((key, result));
                 }
+                Done::Compressed {
+                    key,
+                    generation,
+                    result,
+                } if generation == self.generation(key.file) => match result {
+                    Ok(texture) => self.compressed.push((key, texture)),
+                    Err(why) => {
+                        let path = self.paths.get(AssetRef::file(key.file)).unwrap_or("");
+                        let texture = key.texture;
+                        log::warn!(
+                            target: "engine_app::assets",
+                            "{path}: texture {texture}: compressing it failed, it stays \
+                             uncompressed: {why}"
+                        );
+                    }
+                },
                 // From a file read again since.
                 _ => {}
             }
@@ -1011,29 +1115,48 @@ impl Assets {
         for texture in self.retired_textures.drain(..) {
             textures.remove(texture, retire.1, retire.0);
         }
-        if self.pending_materials.is_empty() && self.decoded.is_empty() {
+        if !self.swapping.is_empty() {
+            self.swap_compressed(textures, materials);
+        }
+        if self.pending_materials.is_empty()
+            && self.decoded.is_empty()
+            && self.compressed.is_empty()
+        {
             return;
         }
         engine_profiler::zone!("assets::make_textures");
         let decoded = !self.decoded.is_empty();
-        for (key, result) in self.decoded.drain(..) {
-            let made = result.and_then(|t| {
-                let levels = TextureLevels {
-                    width: t.width,
-                    height: t.height,
-                    format: if t.srgb {
-                        TextureFormat::Rgba8Srgb
-                    } else {
-                        TextureFormat::Rgba8Unorm
-                    },
-                    levels: t.levels,
-                };
+        let mut made_now = core::mem::take(&mut self.decoded);
+        for (key, result) in made_now.drain(..) {
+            let (levels, compress, cached) = match result {
+                Ok(Made::Decoded { image, compress }) => {
+                    (Ok(decoded_levels(image)), compress, false)
+                }
+                Ok(Made::Cached(texture)) => (Ok(encoded_levels(texture)), None, true),
+                Err(why) => (Err(why), None, false),
+            };
+            let made = levels.and_then(|levels| {
                 textures
                     .add(device, allocator, levels)
                     .map_err(|e| e.to_string())
             });
             let made = match made {
-                Ok(id) => Some(id),
+                Ok(id) => {
+                    if cached {
+                        self.compressed_textures.insert(key);
+                    }
+                    // Not in the cache: compressed in the background, swapped in once done.
+                    if let (Some(source), Some(cache)) = (compress, &self.cache) {
+                        let generation = self.generation(key.file);
+                        self.loader.give(Job::Compress {
+                            key,
+                            source,
+                            cache: Arc::clone(cache),
+                            generation,
+                        });
+                    }
+                    Some(id)
+                }
                 Err(why) => {
                     let path = self.paths.get(AssetRef::file(key.file)).unwrap_or("");
                     let texture = key.texture;
@@ -1042,6 +1165,25 @@ impl Assets {
                 }
             };
             self.textures.insert(key, made);
+        }
+        self.decoded = made_now;
+        // Textures compressed in the background: made, and swapped in once whole.
+        for (key, texture) in self.compressed.drain(..) {
+            // Not when what it was made for is gone (failed, or its file read again).
+            let Some(&Some(old)) = self.textures.get(&key) else {
+                continue;
+            };
+            match textures.add(device, allocator, encoded_levels(texture)) {
+                Ok(new) => self.swapping.push(Swap { key, old, new }),
+                Err(why) => {
+                    let path = self.paths.get(AssetRef::file(key.file)).unwrap_or("");
+                    let texture = key.texture;
+                    log::warn!(
+                        target: "engine_app::assets",
+                        "{path}: texture {texture}: the compressed one: {why}"
+                    );
+                }
+            }
         }
         // Materials given the textures made so far; one leaves the list once each of its
         // slots is made or failed.
@@ -1075,6 +1217,51 @@ impl Assets {
             }
             !settled
         });
+    }
+
+    /// Swaps in the compressed textures whole on the GPU by now (every level uploaded and
+    /// shown, so the picture neither blurs nor loses them for a frame): the materials that
+    /// use the uncompressed ones take them, and those are freed from the next frame on.
+    fn swap_compressed(&mut self, textures: &TexturePool, materials: &mut MaterialTable) {
+        let mut i = 0;
+        while i < self.swapping.len() {
+            let swap = self.swapping[i];
+            if textures.shown_level(swap.new) != Some(0.0) {
+                i += 1;
+                continue;
+            }
+            self.swapping.swap_remove(i);
+            for &material in self.materials.values() {
+                let Some(&desc) = materials.get(material) else {
+                    continue;
+                };
+                let mut uses = false;
+                let mut swapped = |slot: Option<TextureRef>| match slot {
+                    Some(r) if r.texture == swap.old => {
+                        uses = true;
+                        Some(TextureRef {
+                            texture: swap.new,
+                            ..r
+                        })
+                    }
+                    slot => slot,
+                };
+                let desc = MaterialDesc {
+                    base_color_texture: swapped(desc.base_color_texture),
+                    metallic_roughness_texture: swapped(desc.metallic_roughness_texture),
+                    normal_texture: swapped(desc.normal_texture),
+                    occlusion_texture: swapped(desc.occlusion_texture),
+                    emissive_texture: swapped(desc.emissive_texture),
+                    ..desc
+                };
+                if uses {
+                    materials.set(material, desc);
+                }
+            }
+            self.textures.insert(swap.key, Some(swap.new));
+            self.compressed_textures.insert(swap.key);
+            self.retired_textures.push(swap.old);
+        }
     }
 
     fn read_material(&self, asset: AssetRef) -> Result<MaterialFile, String> {

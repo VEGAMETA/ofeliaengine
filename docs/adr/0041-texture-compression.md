@@ -135,3 +135,17 @@ of ADR 0040. RGBA8 → BC7/BC5:
   - BC6H: no HDR textures yet (environment maps come with IBL).
 - **All textures stay resident.** Streaming mip levels by distance can now read blocks
   from the cache.
+
+## Addendum (2026-10-22): the editor's textures through the cache (ADR 0108's E4-8)
+
+- The player's glTF textures use the same keys as the cooker (`texture_key`: the image
+  file's bytes, its use, the encoder, the filtering), so the editor's entries and the
+  cook's are the same when they share a folder. The editor's is `.ofelia/ddc`.
+- `cached_texture` is `import_texture`'s lookup alone: a texture found is loaded
+  compressed; one not found is shown uncompressed and compressed in the background
+  (ADR 0108's E4-8 as-built).
+- Measured on FlightHelmet (15 textures of 2048², 45 MB of PNG): from the cache, the
+  textures cost 42 ms of keys on one thread (FNV-1a at 1.1 GB/s) and 19 ms of entries
+  read, against 897 ms decoded with their levels; GPU memory 272 → 68 MB. The keys' hash
+  is the next thing to make faster (a new content hash: `StableHasher` keeps ADR 0008's
+  promise).

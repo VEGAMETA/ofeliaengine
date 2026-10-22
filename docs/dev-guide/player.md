@@ -71,6 +71,11 @@ let mut player = Player::new(&PlayerSettings {
   background; `player.wait_for_assets()` makes the next frame wait for them too.
 - **`player.reload_asset(id)`** reads a file again after you wrote it anew: the models
   that use it are made again in the next frame.
+- **`derived_data: Some(".ofelia/ddc".into())`** in the settings compresses the textures
+  of glTF files in the background into that folder (BC7, BC5 for normal maps, a quarter
+  of the memory), and loads them from it compressed the next time. Without it they stay
+  uncompressed. The editor sets it for you; `player.assets().compressing()` says how many
+  are left.
 - **`player.request_preview(PreviewRequest { key, parts })`** draws the parts (meshes,
   their materials, their places) alone into a 128² image, once they are made. Use it for
   a shop's or an inventory's icons. `player.take_previews(&mut out)` gives them back as

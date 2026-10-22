@@ -170,9 +170,13 @@ Model.material = asset("models/yard.glb#Yard 2 grid", 5f2c0a3e9d2b47c88e51f0d4a7
   own space: the file's node transforms are not applied. A mesh of several materials is
   several models.
 - **Textures** (base color, metallic-roughness, normal, occlusion, emissive), embedded or
-  beside the file, are decoded the first time a material uses them and kept
-  uncompressed; the shipped game's cooked textures are compressed. Shading models from
-  extensions (unlit, clearcoat, sheen) are drawn as plain PBR here.
+  beside the file, are decoded the first time a material uses them, uncompressed.
+  - With a derived data cache (`PlayerSettings::derived_data`; the editor uses the
+    project's `.ofelia/ddc`), they are then compressed in the background as the cooker
+    compresses them (BC7, BC5 for normal maps): a quarter of the memory, swapped in once
+    ready. A later run loads them from the cache compressed, 8 to 10 times faster.
+  - The shipped game's cooked textures are compressed.
+  - Shading models from extensions (unlit, clearcoat, sheen) are drawn as plain PBR here.
 - **The file's id** is in `<file>.meta` beside it (`[asset version=1 id=…]`, ADR 0108),
   which the editor writes the first time it meets the file (`AssetMeta::ensure` in code).
   A `.meta` naming another id is reported as the asset's problem; a file without one is

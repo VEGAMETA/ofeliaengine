@@ -608,6 +608,12 @@ A click on a folder opens it, a click on a file picks it.
     file).
 - **Cache:** thumbnails are made in the background and kept in `.ofelia/thumbnails/`, and
   made again when their file is written anew.
+- **Textures are compressed in the background:** the first time a model's textures are
+  used, they show at once uncompressed, then are compressed as the shipped game's are
+  (BC7, BC5 for normal maps) and swapped in, a quarter of the memory. The status bar
+  shows "Compressing textures: N" meanwhile. They are kept in `.ofelia/ddc/`, so the next
+  time the project opens they load compressed at once. Deleting that folder only costs
+  compressing them again.
 
 **`#` in the command palette** finds assets by path: `#crate`, or with a kind first,
 `#model:crate`, `#texture:rock` (`scene`, `material`, `model` or `mesh`, `texture`, `sound`

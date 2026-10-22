@@ -36,11 +36,12 @@ fn part_name(names: &[&str], i: usize) -> String {
 
 /// The frames of a player whose world holds a model of every mesh of `file` in
 /// `test-assets/<folder>`, seen from `eye`: each frame's time until every model draws and
-/// nothing is loading, then 60 more. With `later` the models come after the first frames
+/// nothing is loading, then until nothing is left to compress (through derived data cache
+/// `cache`, if given), then 60 more. With `later` the models come after the first frames
 /// (loaded in the background, as an editor's drop), else they are there from the first
 /// (which waits for them). Prints what it found; none when the folder is missing or there
 /// is no GPU.
-fn measure(folder: &str, file: &str, eye: Vec3, target: Vec3, later: bool) {
+fn measure(folder: &str, file: &str, eye: Vec3, target: Vec3, later: bool, cache: Option<&Path>) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../test-assets")
         .join(folder);
@@ -55,11 +56,13 @@ fn measure(folder: &str, file: &str, eye: Vec3, target: Vec3, later: bool) {
             height: 360,
         },
         project: Some(dir.clone()),
+        derived_data: cache.map(Path::to_path_buf),
         process_setup: false,
         pipeline_cache: Some(None),
         warm_up: false,
         ..PlayerSettings::default()
     };
+    let entries = cache.map(cache_entries);
     let mut player = match Player::new(&settings) {
         Ok(player) => player,
         Err(e) => {
@@ -113,8 +116,9 @@ fn measure(folder: &str, file: &str, eye: Vec3, target: Vec3, later: bool) {
     ));
     let started = Instant::now();
     let mut frames: Vec<Duration> = Vec::new();
-    let mut shown = None;
-    while frames.len() < 2000 {
+    let (mut shown, mut compressed) = (None, None);
+    let mut memory_shown = 0;
+    while started.elapsed() < Duration::from_secs(600) {
         let at = Instant::now();
         player.frame(&mut game).unwrap();
         frames.push(at.elapsed());
@@ -125,32 +129,58 @@ fn measure(folder: &str, file: &str, eye: Vec3, target: Vec3, later: bool) {
             .count();
         if shown.is_none() && drawn == models.len() && player.assets().loading() == 0 {
             shown = Some((frames.len(), started.elapsed()));
+            memory_shown = player.texture_memory().0;
         }
-        if shown.is_some_and(|(n, _)| frames.len() >= n + 60) {
+        if shown.is_some() && compressed.is_none() && player.assets().compressing() == 0 {
+            compressed = Some((frames.len(), started.elapsed()));
+        }
+        if compressed.is_some_and(|(n, _)| frames.len() >= n + 60) {
             break;
         }
     }
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let mb = |bytes: u64| bytes as f64 / (1 << 20) as f64;
     let (count, at) = shown.expect("the model shows");
+    let (done, done_at) = compressed.expect("compressed");
     let loading = &frames[..count];
-    let after = &frames[count..];
+    let compressing = &frames[count..done];
+    let after = &frames[done..];
     let mut sorted: Vec<f64> = after.iter().map(|&d| ms(d)).collect();
     sorted.sort_by(f64::total_cmp);
     let worst = loading.iter().copied().max().map_or(0.0, ms);
     println!(
-        "{folder}{}: {} meshes, {} materials, {} textures; shown after {count} frames, {:.0} \
-         ms; worst frame while loading {worst:.1} ms; after: median {:.2} ms, worst {:.2} ms",
+        "{folder}{}{}: {} meshes, {} materials, {} textures ({} compressed); shown after \
+         {count} frames, {:.0} ms; worst frame while loading {worst:.1} ms; textures {:.1} MB \
+         then",
         if later {
             " added later"
         } else {
             " in the first frame"
         },
+        match entries {
+            None => "",
+            Some(0) => ", through an empty cache",
+            Some(_) => ", through a filled cache",
+        },
         outline.meshes.len(),
         outline.materials.len(),
         player.assets().textures_made(),
+        player.assets().textures_compressed(),
         ms(at),
+        mb(memory_shown),
+    );
+    if done > count {
+        println!(
+            "  compressed after {:.1} s, worst frame meanwhile {:.1} ms",
+            done_at.as_secs_f64(),
+            compressing.iter().copied().max().map_or(0.0, ms),
+        );
+    }
+    println!(
+        "  after: median {:.2} ms, worst {:.2} ms; textures {:.1} MB",
         sorted[sorted.len() / 2],
         sorted.last().copied().unwrap_or(0.0),
+        mb(player.texture_memory().0),
     );
     let used: Vec<Model> = models
         .iter()
@@ -175,6 +205,7 @@ fn measure_loading_flight_helmet() {
             Vec3::new(0.0, 0.35, 1.0),
             Vec3::new(0.0, 0.3, 0.0),
             later,
+            None,
         );
     }
 }
@@ -189,8 +220,40 @@ fn measure_loading_sponza() {
             Vec3::new(0.0, 300.0, 0.0),
             Vec3::new(1000.0, 300.0, 0.0),
             later,
+            None,
         );
     }
+}
+
+/// FlightHelmet's and Sponza's textures (E4-8): without a derived data cache, through an
+/// empty one (compressed in the background), then through it filled (loaded compressed);
+/// in the first frame, then added later (an editor's drop).
+#[test]
+#[ignore = "measured by hand, on test-assets"]
+fn measure_textures_through_the_cache() {
+    let ddc = std::env::temp_dir().join(format!("ofelia-measure-ddc-{}", std::process::id()));
+    for (folder, file, eye, target) in [
+        (
+            "FlightHelmet",
+            "FlightHelmet.gltf",
+            Vec3::new(0.0, 0.35, 1.0),
+            Vec3::new(0.0, 0.3, 0.0),
+        ),
+        (
+            "Sponza",
+            "Sponza.gltf",
+            Vec3::new(0.0, 300.0, 0.0),
+            Vec3::new(1000.0, 300.0, 0.0),
+        ),
+    ] {
+        for later in [false, true] {
+            let _ = std::fs::remove_dir_all(&ddc);
+            for cache in [None, Some(ddc.as_path()), Some(ddc.as_path())] {
+                measure(folder, file, eye, target, later, cache);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&ddc);
 }
 
 /// Where the frame's time goes when FlightHelmet loads on one thread: reading and
@@ -227,6 +290,42 @@ fn measure_the_parts_of_loading_flight_helmet() {
         ms(decode),
         ms(mips)
     );
+    // Through a derived data cache filled first (E4-8): each texture's key (the hash of
+    // its file) and its entry read.
+    let ddc = std::env::temp_dir().join(format!("ofelia-parts-ddc-{}", std::process::id()));
+    let cache = engine_assets::DerivedDataCache::new(&ddc).unwrap();
+    let pool = engine_core::jobs::ThreadPool::builder().build().unwrap();
+    let usage = engine_assets::TextureUsage::Color;
+    let files: Vec<Vec<u8>> = scene
+        .textures
+        .iter()
+        .map(|t| engine_assets::read_texture(&t.source, Some(&dir)).unwrap())
+        .collect();
+    let at = Instant::now();
+    for bytes in &files {
+        engine_assets::import_texture(bytes, usage, Some(&cache), Some(&pool)).unwrap();
+    }
+    let compress = at.elapsed();
+    let (mut key, mut entry) = (Duration::ZERO, Duration::ZERO);
+    for bytes in &files {
+        let at = Instant::now();
+        std::hint::black_box(engine_assets::texture_key(bytes, usage));
+        key += at.elapsed();
+        let at = Instant::now();
+        // The lookup hashes the file again: its key's time taken off.
+        assert!(engine_assets::cached_texture(&cache, bytes, usage).is_some());
+        entry += at.elapsed();
+    }
+    println!(
+        "  compressed on {} threads in {:.1} s; through the cache on one thread: keys {:.0} ms \
+         ({:.0} MB of files), entries read {:.0} ms",
+        pool.num_workers(),
+        compress.as_secs_f64(),
+        ms(key),
+        files.iter().map(Vec::len).sum::<usize>() as f64 / 1e6,
+        ms(entry.saturating_sub(key)),
+    );
+    let _ = std::fs::remove_dir_all(&ddc);
 }
 
 /// A quad of tint `tint`, facing up: a bake's model of one mesh and one textured material.
@@ -489,6 +588,9 @@ fn an_image_written_anew_makes_the_models_that_use_it_again() {
     frames_until(&mut player, ready).expect("drawn");
     assert_eq!(player.assets().textures_made(), 1);
     assert_eq!(player.assets().problem(model.material), None);
+    // No derived data cache: nothing compressed.
+    assert_eq!(player.assets().compressing(), 0);
+    assert_eq!(player.assets().textures_compressed(), 0);
     let first = *player.world_mut().get::<MeshRenderer>(quad).unwrap();
     // The image painted again: the model's material made again with it, drawn as it was
     // meanwhile.
@@ -512,6 +614,111 @@ fn an_image_written_anew_makes_the_models_that_use_it_again() {
         *player.world_mut().get::<MeshRenderer>(quad).unwrap(),
         before
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `.texture` entries of derived data cache `dir`.
+fn cache_entries(dir: &Path) -> usize {
+    std::fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "texture"))
+            .count()
+    })
+}
+
+#[test]
+fn textures_are_compressed_in_the_background_and_loaded_compressed_after() {
+    let dir = std::env::temp_dir().join(format!("ofelia-texture-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("props/textures")).unwrap();
+    std::fs::write(dir.join("props/quad.gltf"), quad_gltf("textures/paint.png")).unwrap();
+    std::fs::write(dir.join("props/textures/paint.png"), png([200, 30, 20])).unwrap();
+    // A second quad whose image is inside its file.
+    let inline = format!("data:image/png;base64,{}", base64(&png([30, 200, 20])));
+    std::fs::write(dir.join("props/inline.gltf"), quad_gltf(&inline)).unwrap();
+    let ddc = dir.join(".ofelia/ddc");
+    let settings = PlayerSettings {
+        title: String::from("texture cache test"),
+        window: Window::Offscreen {
+            width: 320,
+            height: 180,
+        },
+        project: Some(dir.clone()),
+        derived_data: Some(ddc.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let files = [
+        (AssetId::new(), "props/quad.gltf"),
+        (AssetId::new(), "props/inline.gltf"),
+    ];
+    let models =
+        files.map(|(id, _)| Model::new(AssetRef::part(id, "Quad"), AssetRef::part(id, "Painted")));
+    // A player drawing the quads, their textures made.
+    let start = || -> Option<(Player, [Entity; 2])> {
+        let mut player = match Player::new(&settings) {
+            Ok(player) => player,
+            Err(e) if !required => {
+                println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+                return None;
+            }
+            Err(e) => panic!("GPU required but unavailable: {e}"),
+        };
+        let mut paths = AssetPaths::new();
+        for (id, path) in files {
+            paths.insert(AssetRef::file(id), path);
+        }
+        player.assets_mut().add_paths(&paths);
+        let quads = models.map(|model| {
+            player
+                .world_mut()
+                .spawn((SceneId::new(), Transform::IDENTITY, model))
+        });
+        let ready = |player: &mut Player| {
+            quads
+                .iter()
+                .all(|&e| player.world_mut().get::<MeshRenderer>(e).is_some())
+                && player.assets().loading() == 0
+        };
+        frames_until(&mut player, ready).expect("drawn");
+        assert_eq!(player.assets().textures_made(), 2);
+        Some((player, quads))
+    };
+    let Some((mut player, quads)) = start() else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    // The first time: drawn uncompressed at once (not waiting for compression), then
+    // compressed in the background into the cache and swapped in.
+    assert_eq!(player.assets().textures_compressed(), 0);
+    assert_eq!(player.assets().compressing(), 2);
+    let drawn = quads.map(|e| *player.world_mut().get::<MeshRenderer>(e).unwrap());
+    frames_until(&mut player, |p| p.assets().compressing() == 0).expect("compressed");
+    assert_eq!(player.assets().textures_compressed(), 2);
+    assert_eq!(cache_entries(&ddc), 2);
+    assert_eq!(
+        quads.map(|e| *player.world_mut().get::<MeshRenderer>(e).unwrap()),
+        drawn,
+        "the same materials, their textures swapped"
+    );
+    drop(player);
+    // A later run: loaded from the cache compressed, nothing compressed again.
+    let (mut player, quads) = start().unwrap();
+    assert_eq!(player.assets().textures_compressed(), 2);
+    assert_eq!(player.assets().compressing(), 0);
+    // The image painted again: made uncompressed, then compressed as a new entry.
+    std::fs::write(dir.join("props/textures/paint.png"), png([20, 30, 200])).unwrap();
+    player.asset_changed(AssetId::new(), "props/textures/paint.png");
+    let renewed = |p: &mut Player| p.assets().loading() == 0 && p.assets().compressing() == 0;
+    frames_until(&mut player, renewed).expect("made again and compressed");
+    assert!(player.world_mut().get::<MeshRenderer>(quads[0]).is_some());
+    assert_eq!(player.assets().textures_compressed(), 2);
+    assert_eq!(cache_entries(&ddc), 3);
+    drop(player);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

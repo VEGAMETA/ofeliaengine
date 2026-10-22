@@ -53,6 +53,12 @@ pub struct PlayerSettings {
     pub scene: Option<PathBuf>,
     /// The game's folder: scene and asset paths start from it. `None`: the working folder.
     pub project: Option<PathBuf>,
+    /// The derived data cache's folder (ADR 0041, ADR 0108's E4-8): the textures of glTF
+    /// files the player makes are compressed into it in the background (BC7, BC5 for
+    /// normal maps, as the cooker does) and swapped in once compressed; a later run loads
+    /// them from it compressed. `None`: they stay uncompressed (RGBA8). The editor gives
+    /// its project's `.ofelia/ddc`.
+    pub derived_data: Option<PathBuf>,
     /// The window.
     pub window: Window,
     /// The monitor (an `HMONITOR`, `engine_platform::display::Monitor::handle`); `None`:
@@ -168,6 +174,7 @@ impl Default for PlayerSettings {
             pack: None,
             scene: None,
             project: None,
+            derived_data: None,
             window: Window::FullScreen,
             monitor: None,
             window_placement: None,
