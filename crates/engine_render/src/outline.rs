@@ -594,7 +594,7 @@ fn disjoint(rects: &mut Vec<[u32; 4]>) {
 
 /// The pixels a world box covers in a view of `size` through `clip_from_world`, as
 /// `[x0, y0, x1, y1]`; `None` when a corner lies behind the camera (it may cover anything).
-fn on_screen(
+pub(crate) fn on_screen(
     clip_from_world: &Mat4,
     (min, max): (Vec3, Vec3),
     size: (u32, u32),
@@ -645,7 +645,11 @@ unsafe fn set_viewport(device: &engine_rhi::ash::Device, cmd: vk::CommandBuffer,
 /// # Safety
 ///
 /// `cmd` is recording; `area` lies in the attachments.
-unsafe fn set_area(device: &engine_rhi::ash::Device, cmd: vk::CommandBuffer, area: vk::Rect2D) {
+pub(crate) unsafe fn set_area(
+    device: &engine_rhi::ash::Device,
+    cmd: vk::CommandBuffer,
+    area: vk::Rect2D,
+) {
     // SAFETY: guaranteed by the caller.
     unsafe {
         set_viewport(device, cmd, area);

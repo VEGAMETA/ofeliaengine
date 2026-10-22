@@ -67,6 +67,9 @@ pub struct GraphicsPipelineDesc<'a> {
     pub depth_format: vk::Format,
     /// Primitive topology.
     pub topology: vk::PrimitiveTopology,
+    /// How triangles are filled: `LINE` draws their edges (wireframes, ADR 0116; needs
+    /// [`crate::OptionalCaps::fill_mode_non_solid`]). A depth bias applies to them.
+    pub polygon_mode: vk::PolygonMode,
     /// Faces to cull.
     pub cull_mode: vk::CullModeFlags,
     /// Winding of front faces (counter-clockwise with the engine's projection).
@@ -108,6 +111,7 @@ impl<'a> GraphicsPipelineDesc<'a> {
             color_formats: &[],
             depth_format: vk::Format::UNDEFINED,
             topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            polygon_mode: vk::PolygonMode::FILL,
             cull_mode: vk::CullModeFlags::BACK,
             front_face: vk::FrontFace::COUNTER_CLOCKWISE,
             dynamic_culling: false,
@@ -224,6 +228,9 @@ fn record_attachments(desc: &GraphicsPipelineDesc<'_>) -> String {
     }
     if desc.alpha_to_coverage {
         text.push_str(" a2c");
+    }
+    if desc.polygon_mode == vk::PolygonMode::LINE {
+        text.push_str(" lines");
     }
     text
 }
@@ -700,7 +707,7 @@ impl Pipeline {
             .viewport_count(desc.viewports.max(1))
             .scissor_count(desc.viewports.max(1));
         let mut raster = vk::PipelineRasterizationStateCreateInfo::default()
-            .polygon_mode(vk::PolygonMode::FILL)
+            .polygon_mode(desc.polygon_mode)
             .cull_mode(desc.cull_mode)
             .front_face(desc.front_face)
             .line_width(1.0);
