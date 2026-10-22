@@ -1,0 +1,803 @@
+# 0114. The Luau scripting API: script components with hooks, systems over queries, live views, the engine's own names
+
+- Status: **Proposed (the owner signs it off).** The public scripting API is an irreversible
+  decision (CLAUDE.md §3); nothing here is built until the questions at the end are answered.
+- Date: 2026-10-22
+- Related:
+  - CLAUDE.md §10 (scripting), §5 (performance), §12 (the editor);
+  - [ADR 0032](0032-scripting.md): the VM, modules with `state` and `on_reload`, the time
+    budget and memory limit, the types at the boundary, the tiers;
+  - [ADR 0107](0107-editor.md) §6 and §7: E7 (Luau in the game), E8 (code editor), E9
+    (debugger);
+  - [ADR 0017](0017-ecs.md), [ADR 0019](0019-networking-model.md),
+    [ADR 0026](0026-system-scheduler.md): the world, fixed ticks, the schedule;
+    [ADR 0022](0022-reflection.md): reflection;
+    [ADR 0066](0066-physics-queries-characters-rollback.md): physics queries and events;
+    [ADR 0074](0074-replication-prediction-lag-compensation.md): replication and
+    prediction; [ADR 0104](0104-save-games.md): saves;
+    [ADR 0105](0105-sound-in-the-player.md): sound; [ADR 0108](0108-scene-format-2.md):
+    scenes and prefabs;
+  - research: [docs/research/luau-api.md](../research/luau-api.md),
+    [docs/research/scripting.md](../research/scripting.md); UX:
+    `docs/research/ux/code-editor.md`, `docs/research/ux/script-debugger.md`.
+
+## Context
+
+**What exists:**
+- `engine_script::ScriptVm` (ADR 0032): one sandboxed Luau VM (mlua 0.12, Luau 0.736,
+  native code), modules that receive a persistent `state` table and return a table of
+  functions, reload with `on_reload(old)`, a 50 ms budget per call, a 256 MiB limit, errors
+  with module and line. No bindings to the engine.
+- **The world** (`engine_ecs`): `Entity` (32-bit index and generation), components with
+  reflection, cached queries in a canonical order, `Commands`, `Parent`/`Children`, and
+  `World::register_dynamic`, made for components defined at run time by scripts.
+- **Reflection** (`engine_reflect`): fields, offsets and types, with `min`, `max`, `step`,
+  `tooltip`, `hidden`, `skip`, `net_quantum`, `net_skip`, `hint` (`color`, `degrees`,
+  `multiline`) and `version`. The program's reflected types are listed at run time
+  (`engine_ecs::reflected_types`). Reflection describes data, not functions.
+- **The player's frame** (`engine_app::Game`): `tick(world, dt)` at a fixed rate (64 Hz by
+  default), `present(world, alpha)` every frame, then `animate` and `ui`. Input is a world
+  resource with a tick view (presses latched between ticks) and a frame view. Timers and
+  tweens advance before each tick. The game owns its physics (`ScenePhysics`) and steps it
+  in its tick; contact events are arrays read after the step, sorted.
+- **Everything is components:** a mesh (`Model`), a sound (`AudioSource3D`, which can despawn
+  its entity when it ends), a timer, a tween (`Tween.target = "Transform.translation"`),
+  being off (`Disabled`). Saves, scene files and the inspector work from reflection.
+- **Networking** (ADR 0074, 0106): plain-data reflected components replicate; a joined
+  client predicts by re-running the game's tick for its own entities and rolls back by
+  restoring their replicated components.
+
+**What a game developer needs** (CLAUDE.md §10, ADR 0107 E7, the owner's "главное чтобы для
+разработчика было удобно"): to give an object behaviour without Rust, see its numbers in
+the inspector, have completion and type checking, see an error at its line without the game
+stopping, and change code while playing.
+
+**What the API must not cost:**
+- the fixed tick stays deterministic (ADR 0019): saves, replays and prediction depend on it;
+- no heap allocations per frame in steady state from the engine's side (CLAUDE.md §5);
+- a feature costs nothing where it is not used: a hook no script defines is never called;
+- names and data the same as in Rust, scene files and the inspector, so one guide serves
+  all of them.
+
+## Options
+
+Each decision is listed with its options and their costs; the recommendation follows.
+
+### a. How behaviour attaches to the world
+
+1. **Script components on entities** (Unity, Godot, Defold). A script declares a component
+   with hooks; adding the component to an entity gives it the behaviour.
+   - Convenience: the most familiar model; one-off level logic (this door, that lever) is
+     a few lines; the props show in the inspector.
+   - Performance: one call into Luau per entity per hook per tick (to be measured,
+     Decision §13): fine for tens to hundreds of objects, wasteful for thousands of alike
+     ones.
+   - Determinism: the engine fixes the order (below).
+2. **Systems over queries only** (Bevy; Roblox's recommended `CollectionService` pattern).
+   - Performance: one call per system per tick, however many entities.
+   - Convenience: every behaviour is a loop plus a tag component, even for one door; less
+     obvious to beginners; an error stops the behaviour for every entity at once.
+3. **Both** (recommended): script components for an object's own behaviour, systems for
+   many alike objects; one file format, one world API. The cost is a second concept in the
+   guide.
+
+Hard to change later: no. Adding systems to (1) later is easy; adding components to (2)
+later means a second way to attach that every tool must learn.
+
+### b. Reading and writing components
+
+1. **Live views written through** (Roblox, Godot and Unity for engine objects):
+   `self.Transform.translation = p` changes the entity at once.
+   - Convenience: the shortest code; the next line, other scripts, the inspector and
+     change detection see the write.
+   - Performance: each field access is a call into Rust that checks the entity's
+     generation and the world's layout and reads at the field's offset (target ≤ 100 ns,
+     measured in E7-1). Views are cached per entity and component: no allocation in steady
+     state.
+   - Safety: a view of a despawned entity raises an error naming the component; it never
+     reads freed memory.
+2. **Copies with explicit get and set:**
+   `local t = world.get(e, Transform) ... world.set(e, Transform, t)`.
+   - A table per `get` (an allocation), or a table passed in to fill.
+   - Writes are explicit and batchable, but a forgotten `set` silently does nothing: the
+     most common bug of this style.
+3. **Field paths without objects:** `e:get("Transform.translation")`,
+   `e:set("Transform.translation", v)`. Values only, so nothing allocates, but the type
+   checker cannot type a path in a string, and the code reads worse.
+
+Recommended: **1**, with (3)'s cost model kept underneath (paths resolved once, values as
+Luau values). Hard to change later: yes. Every script ever written depends on it.
+
+### c. Naming
+
+1. **The engine's own names** (recommended): components in PascalCase as in Rust and the
+   scene files (`Transform`, `AudioSource3D`), fields, functions and hooks in snake_case
+   (`translation`, `min_distance`, `world.find`, `on_tick`), as in our Rust, Luau's own
+   library (`string.split`, `vector.magnitude`), Defold and Godot.
+   - One name everywhere: code, scene files, the inspector, tween targets
+     (`"Transform.translation"`), error messages, the dev guide.
+   - The bindings are generated from reflection with no renaming table.
+2. **Roblox's style:** PascalCase properties and methods (`Transform.Translation`,
+   `world:FindFirstChild`, `OnTick`). Familiar to Roblox's developers and to their
+   tutorials, but every name then differs from the scene file and the Rust code, the
+   generator keeps a renaming table, and the docs show two names for each field.
+
+Hard to change later: yes, completely.
+
+### d. Events
+
+1. **Hook functions called by name** (Unity's `OnTriggerEnter`, Defold's lifecycle, Godot's
+   virtual functions), plus **messages** between scripts: `e:send("open")` calls the hook
+   `open` on the target's scripts after the current hook returns (Defold's message queue,
+   with the hook's name as the message).
+   - Nothing to connect or disconnect; nothing allocates; the engine knows at load which
+     hooks a script has, so contact events cost nothing when no script has `on_touch`.
+   - Reload: the next call goes to the new function.
+   - Order: fixed by the engine; the same on every machine.
+   - Limits: one handler per hook per script; a script cannot listen to an arbitrary other
+     object's events unless that object sends to it.
+2. **Signals** (Roblox, Godot): `e.touched:connect(function(other) ... end)`.
+   - Any number of listeners, on any object.
+   - Connections must be disconnected or they outlive their owner; a connected closure runs
+     the old code after a reload; handlers run in connection order; closures allocate;
+     Roblox's deferred and immediate signals behave differently.
+3. **Both.** The flexibility of signals with all of their costs.
+
+Recommended: **1**. Hard to change later: adding signals later is possible; taking them
+away is not.
+
+### e. Fixed ticks and frames
+
+1. **Gameplay in `on_tick`, presentation in `on_frame`** (recommended), as our Rust hooks
+   (`Game::tick`, `Game::present`, ADR 0019's addendum). `on_tick` runs 64 times a second
+   with a fixed `dt`, sees the tick's input and changes the game's state; `on_frame` runs
+   every rendered frame for what follows the hand at once (the camera) and what only shows
+   (bobbing, UI).
+   - Saves, replays and networked prediction work, and physics sees steady steps.
+   - The developer learns two hooks and when to use which.
+2. **One `update(dt)` every frame,** with an optional fixed hook (Unity's `Update` and
+   `FixedUpdate`, Roblox's `Heartbeat`, Defold's `update`). Familiar, but gameplay written
+   there depends on the frame rate and cannot be predicted, replayed or saved exactly.
+
+Hard to change later: yes; scripts would have to move their logic.
+
+### f. Waiting
+
+1. **Timers that call a hook by name** (recommended): `self:after(3, "close")` calls
+   `close(self)` three seconds of game time later. Kept in a component: saved, rolled back,
+   and after a reload it calls the new `close`.
+2. **Also `wait(3)` inside a hook** (Roblox's `task.wait`, Unity's coroutines, Godot's
+   `await`). A sequence reads top to bottom, but a suspended coroutine cannot be saved or
+   rolled back: a save during the wait loses the rest of the sequence, a networked client
+   cannot re-run it, and after a reload it goes on in the old code.
+
+Hard to change later: adding `wait` later (for presentation-only sequences, say) is
+possible.
+
+### g. Where a script's per-object state lives
+
+1. **Declared props, in the script's component** (recommended): everything a script keeps
+   per object is declared at the top with its default (`radius = 3.0`). It is saved with
+   the game, shown in the inspector, set per instance in the scene file, kept across a
+   reload, rolled back by prediction, and replicable. Scratch data that must not be saved
+   goes in `self.locals`, a plain table per instance, explicitly unsaved.
+2. **Free fields on `self`** (Godot, Unity, Defold): `self.cooldown = 0` anywhere. Easier
+   to start with, but such fields are not saved, not shown, not rolled back, and the type
+   checker cannot see them.
+
+Hard to change later: yes; it decides what saves and networking can promise.
+
+## Decision (proposed)
+
+### 1. Files, components and systems
+
+- **Scripts are `.luau` files under the project's `scripts/` folder.** All of them load
+  when the game (or the editor) starts, before any scene: scene files name script
+  components, so those must be registered first. A release packs them like sounds
+  (ADR 0105: a folder while developing, a pack in a release).
+- **`component(name, props)` declares a component** registered with the world through
+  `World::register_dynamic`, with a `TypeInfo` built from `props` at run time:
+  - plain defaults give the type: a number is an `f32`, a boolean a `bool`, a vector a
+    `Vec3`, a string a `String`;
+  - `prop.*` helpers give the rest and the reflection attributes, under reflection's own
+    names: `prop.number(2, { min = 0.1, max = 10, step = 0.1, tooltip = "…", hint =
+    "degrees" })`, `prop.integer(0)`, `prop.entity()`, `prop.asset("scene")`,
+    `prop.choice("Idle", { "Idle", "Open" })` (a C-like enum), with `hidden`, `skip` (not
+    saved), `net_skip` and `net_quantum`;
+  - the layout has no hidden padding, so a component of plain props (no strings) is plain
+    data: snapshotted, hashed and replicable byte-wise.
+- **A component with hooks is a script component.** Adding it to an entity ("Add Component
+  → Door" in the inspector, `Door.radius = 3` in the scene file) gives the entity that
+  behaviour. A component without hooks is data (a tag, a wallet). An entity takes any
+  number of script components.
+- **`system(name, hooks)` declares a system:** `on_tick(dt)` and `on_frame(dt, alpha)` called
+  once per tick or frame, iterating queries.
+- A file may declare several components and systems. What it returns is its module table
+  for `require` (Luau's require by string: `require("./wallet")`, aliases from `.luaurc`;
+  mlua 0.12's `create_require_function` implements it).
+
+### 2. Hooks
+
+| Hook | When |
+|---|---|
+| `on_start(self)` | once, before the instance's first tick: at Play or at the scene's load for its entities, after the spawning stage for spawned ones |
+| `on_tick(self, dt)` | every fixed tick, `dt` the tick's length |
+| `on_frame(self, dt, alpha)` | every rendered frame after the ticks; `alpha` is how far the frame lies between the last two ticks |
+| `on_touch(self, other, point, normal)` | another body began touching this entity's body or `Trigger` (delivered at the start of the next tick) |
+| `on_untouch(self, other)` | it stopped touching |
+| `on_load(self)` | a save was applied: the components hold the saved values |
+| `on_stop(self)` | the entity despawned or lost the component, or the world is dropped (Stop, quitting) |
+| any other name | called by `send` and `after` |
+| `on_reload(old)` | module level, after a reload (ADR 0032) |
+
+`self` is the instance: its props (`self.radius`), its entity's components
+(`self.Transform`), the entity's methods (`self:despawn()`), `self.entity` and
+`self.locals`. Lowercase names are props and built-ins, PascalCase names are components, so
+they never clash.
+
+### 3. The world, entities and components
+
+- **`Entity` is a value:** a tagged light userdata holding the 64-bit handle. It is never
+  allocated, compares by value, works as a table key, and `typeof` says `Entity`.
+- **Components are live views:** `e.Transform` gives a view, its fields read and write the
+  world at once, vectors are Luau `vector`s (written whole: Luau vectors cannot be assigned
+  by component). Reading a component the entity lacks is an error that names it; check
+  with `e:has(Transform)`.
+- **Entity built-ins:** `name`, `parent`, `alive()`, `despawn()` (with its children, at the
+  end of the stage), `has`, `add(Component, values?)`, `remove`, `children()` (an
+  iterator), `find_child(name)`, `send(hook, ...)`.
+- **`world`:** `find(name)` (through a name index the host keeps, so it is cheap every
+  tick; names need not be unique, and of several the first in the fixed order wins; Rust's
+  `find_named` scans),
+  `spawn({ Component = { field = value } })`, `instantiate(prefab, translation?)` (a prefab
+  scene, ADR 0108), `query(A, B, ...)` (made once, iterated with `for e, a, b in q do`;
+  `:with(C)` and `:without(D)` filter).
+- **Structural changes** (spawn, add, remove) apply at once: the new entity's components can
+  be written on the next line. A query's loop visits the entities that matched when it
+  started. Despawns wait for the end of the stage, as Godot's `queue_free` and Unity's
+  `Destroy` do.
+- **Types at the boundary** (ADR 0032, made concrete):
+
+| Rust (reflection) | Luau |
+|---|---|
+| `f32`, `f64` | `number` |
+| `i8` to `i32`, `u8` to `u32` | `number`, which must be a whole number in the type's range; clamped to `min`/`max` as the inspector does (ADR 0022) |
+| `i64`, `u64` | userdata (ADR 0032); Luau's `integer` once it ships enabled (it is behind a flag in 0.736) |
+| `bool` | `boolean` |
+| `Vec3`, `Vec3A`; `Vec2` | `vector`; `vector` with z = 0 |
+| `Quat` | `Quat` userdata (allocated when made); `Transform`'s methods cover common rotations without making one |
+| C-like enum | `string`, typed as the union of its variants (`"Once" \| "Loop" \| "Despawn"`) |
+| `String` | `string` |
+| `Entity` | `Entity` |
+| `AssetRef` | `Asset` (made from a path through the asset database) |
+| nested struct, array, `Vec`, map | a view (arrays and lists indexed from 1, as Luau's) |
+| `Option<T>` | `T` or `nil` |
+| opaque | not visible |
+
+`hidden` and `skip` fields are visible to scripts (those attributes are for the inspector
+and saves); angles stay in radians, as in Rust (`hint = "degrees"` only changes the
+inspector).
+
+### 4. The libraries
+
+| Library | v1 |
+|---|---|
+| `world` | `find`, `spawn`, `instantiate`, `query` |
+| `input` | `pressed`, `just_pressed`, `just_released`, `axis`, `vector`, `strength`, by the game's action names; in tick hooks the tick's view, in frame hooks the frame's view, chosen by the hook that runs |
+| `physics` | `raycast(origin, direction, max, filter?)` returning `entity, point, normal, distance` (several results, no table), `overlap_sphere` as an iterator; filters made once (`physics.filter({ "enemies" })`) |
+| `audio` | `play(sound, bus?)` and `play_at(sound, position, bus?)`: an entity with an `AudioSource` or `AudioSource3D` that despawns when the sound ends (ADR 0105) |
+| `time` | `now()` (seconds of game time: ticks × `dt`, saved), `tick()`, `dt` |
+| `random` | `number()`, `integer(a, b)`, `vector_in_sphere()`: the world's generator, seeded, saved and rolled back (`math.random` stays, outside the simulation) |
+| `net` | `is_server()`, `is_client()`, `resimulating()` |
+| `print`, `warn` | the engine's log, with the script's file and line |
+
+Later, each with its own step: in-game UI, navigation, animation control beyond components,
+localized text, saves on request, video. A game's own Rust code adds functions with the
+same macro as the engine's (§6); its reflected components are visible to scripts with no
+work.
+
+### 5. Examples
+
+**A door that opens when the player comes near** (a distance check; with a `Trigger` it
+would count `on_touch` and `on_untouch` instead):
+
+```luau
+--!strict
+-- scripts/door.luau: rises while the player is near, sinks back when they leave.
+local Door = component("Door", {
+    radius = prop.number(3, { min = 0, tooltip = "Metres from the closed door" }),
+    lift = 2.5, -- metres
+    speed = 2.0, -- metres a second
+    closed = vector.zero, -- where it rests, taken at start
+})
+type Self = Script<typeof(Door.props)>
+
+function Door.on_start(self: Self)
+    self.closed = self.Transform.translation
+end
+
+function Door.on_tick(self: Self, dt: number)
+    local player = world.find("Player")
+    local near = player ~= nil
+        and vector.magnitude(player.Transform.translation - self.closed) < self.radius
+    local goal = if near then self.closed + vector.create(0, self.lift, 0) else self.closed
+    local t = self.Transform
+    local to_goal = goal - t.translation
+    local step = math.min(vector.magnitude(to_goal), self.speed * dt)
+    if step > 0 then
+        t.translation += vector.normalize(to_goal) * step
+    end
+end
+
+return Door
+```
+
+`closed` is a prop, so a save taken while the door is open still knows where it rests (after
+a load, `on_start` runs on the reloaded level, then the save's values arrive).
+
+**A pickup that plays a sound and despawns** (the coin has a `Trigger`; the wallet is a
+data component of its own):
+
+```luau
+--!strict
+-- scripts/wallet.luau: what the player carries.
+return component("Wallet", {
+    coins = prop.integer(0, { min = 0 }),
+})
+```
+
+```luau
+--!strict
+-- scripts/coin.luau: touched by something with a Wallet, it pays, rings and goes.
+local Wallet = require("./wallet")
+
+local Coin = component("Coin", {
+    value = prop.integer(1, { min = 1 }),
+    sound = "pickups/coin.ogg",
+})
+type Self = Script<typeof(Coin.props)>
+
+function Coin.on_touch(self: Self, other: Entity)
+    if not other:has(Wallet) then
+        return
+    end
+    other.Wallet.coins += self.value
+    audio.play_at(self.sound, self.Transform.translation)
+    self:despawn()
+end
+
+return Coin
+```
+
+**Spinning props, as a system** (one call into Luau per tick for all of them):
+
+```luau
+--!strict
+-- scripts/spin.luau: everything with Spin turns about its up axis.
+local Spin = component("Spin", {
+    speed = prop.number(math.rad(90), { hint = "degrees", tooltip = "Turn a second" }),
+})
+
+local spinning = world.query(Spin, Transform) -- made once, iterated every tick
+local UP = vector.create(0, 1, 0)
+
+system("Spin", {
+    on_tick = function(dt: number)
+        for _, spin, t in spinning do
+            t:rotate(UP, spin.speed * dt)
+        end
+    end,
+})
+
+return Spin
+```
+
+The same as a per-entity hook is `function Spin.on_tick(self, dt)
+self.Transform:rotate(UP, self.speed * dt) end`: shorter, one call per spinner.
+
+**Reading input** (the game's actions; the tick's view for movement, the frame's for the
+camera):
+
+```luau
+--!strict
+-- scripts/walker.luau: walks with "move" (faster with "run"); its camera looks with "look".
+local Walker = component("Walker", {
+    speed = 4.0, -- metres a second
+    sensitivity = 0.002, -- radians per count of mouse motion
+})
+type Self = Script<typeof(Walker.props)>
+local RIGHT = vector.create(1, 0, 0)
+
+function Walker.on_tick(self: Self, dt: number)
+    local move = input.vector("move") -- the tick's view: a tap shorter than a tick still counts
+    local speed = if input.pressed("run") then self.speed * 2 else self.speed
+    local t = self.Transform
+    t.translation += (t:right() * move.x + t:forward() * move.y) * (speed * dt)
+end
+
+function Walker.on_frame(self: Self, dt: number)
+    local look = input.vector("look") -- the frame's view: the camera follows the hand at once
+    local camera = self:find_child("Camera")
+    if camera then
+        camera.Transform:rotate(RIGHT, -look.y * self.sensitivity)
+    end
+end
+
+return Walker
+```
+
+The camera's pitch changes in `on_frame` because it only shows; anything the game's state
+depends on (the walker's position) changes in `on_tick`.
+
+**The matching `.d.luau` excerpt** (generated; Luau 0.736's definition syntax; its exact
+form is checked against luau-lsp in strict mode in E7-1):
+
+```luau
+-- types/ofelia.d.luau: generated by `ofeliaengine scripts types` and by the editor at every
+-- start, rebuild and script reload. Do not edit.
+
+type Value = nil | boolean | number | string | vector | Entity
+
+-- What `has`, `add`, `remove` and `world.query` take: `Transform`, or a script's component.
+declare extern type ComponentType with
+    name: string
+end
+-- `Quat`, `Asset`, `Query` and `Filter` are declared the same way (not shown).
+
+-- An entity: a 64-bit value, compared by value, usable as a table key.
+declare extern type Entity with
+    name: string
+    parent: Entity?
+    function alive(self): boolean
+    function despawn(self): ()
+    function has(self, component: ComponentType): boolean
+    function add(self, component: ComponentType, values: { [string]: any }?): ()
+    function remove(self, component: ComponentType): ()
+    function children(self): () -> Entity?
+    function find_child(self, name: string): Entity?
+    function send(self, hook: string, ...: Value): ()
+    -- Components (the program's reflected types and scripts/*.luau). Reading one the
+    -- entity lacks is an error: check with `has`.
+    Transform: Transform
+    AudioSource: AudioSource
+    Wallet: Wallet
+end
+
+-- Where an entity is, relative to its parent.
+declare extern type Transform with
+    translation: vector
+    rotation: Quat
+    scale: vector
+    function rotate(self, axis: vector, angle: number): ()
+    function look_at(self, point: vector, up: vector?): ()
+    function forward(self): vector
+    function right(self): vector
+    function up(self): vector
+end
+
+-- A sound heard as it is: music, the UI, a narrator (ADR 0105).
+declare extern type AudioSource with
+    sound: string
+    bus: string
+    volume: number
+    mode: "Once" | "Loop" | "Despawn"
+    playing: boolean
+    position: number
+    restart_on_load: boolean
+end
+
+-- scripts/wallet.luau
+declare extern type Wallet with
+    coins: number -- a whole number, at least 0
+end
+
+type Script<P> = P & Entity & {
+    entity: Entity,
+    locals: { [string]: any },
+    after: (self: any, seconds: number, hook: string, ...Value) -> (),
+}
+type ComponentScript<P> = ComponentType & { props: P, [string]: any }
+type PropOptions = {
+    min: number?, max: number?, step: number?, tooltip: string?,
+    hint: ("degrees" | "color" | "multiline")?,
+    hidden: boolean?, skip: boolean?, net_skip: boolean?, net_quantum: number?,
+}
+
+declare Transform: ComponentType
+declare AudioSource: ComponentType
+declare function component<P>(name: string, props: P): ComponentScript<P>
+declare function system(name: string, hooks: {
+    on_tick: ((dt: number) -> ())?,
+    on_frame: ((dt: number, alpha: number) -> ())?,
+}): ()
+declare prop: {
+    number: (default: number, options: PropOptions?) -> number,
+    integer: (default: number, options: PropOptions?) -> number,
+    entity: (options: PropOptions?) -> Entity?,
+    asset: (kind: string, options: PropOptions?) -> Asset?,
+}
+declare world: {
+    find: (name: string) -> Entity?,
+    spawn: (components: { [string]: { [string]: any } }?) -> Entity,
+    instantiate: (prefab: Asset, translation: vector?) -> Entity,
+    query: (...ComponentType) -> Query,
+}
+declare input: {
+    pressed: (action: string) -> boolean,
+    just_pressed: (action: string) -> boolean,
+    just_released: (action: string) -> boolean,
+    axis: (action: string) -> number,
+    vector: (action: string) -> vector,
+}
+declare physics: {
+    raycast: (origin: vector, direction: vector, max_distance: number, filter: Filter?)
+        -> (Entity?, vector, vector, number),
+}
+declare audio: {
+    play: (sound: string, bus: string?) -> Entity,
+    play_at: (sound: string, position: vector, bus: string?) -> Entity,
+}
+declare time: { now: () -> number, tick: () -> number, dt: number }
+```
+
+The `prop.*` helpers are typed as returning their default's type, so `typeof(Door.props)`
+gives `{ radius: number, ... }` to the checker; at run time they return descriptors the
+engine reads. Tooltips also go into a documentation file for luau-lsp's hovers.
+
+### 6. Bindings and `.d.luau` from reflection
+
+- **Components are bound from their `TypeInfo`, not from generated code per type.** At start
+  the script host walks the program's reflected types and the script components and gives
+  each a descriptor: its component id, and per field the offset, the kind and the
+  attributes. One accessor per kind reads and writes at the offset, as scene loading and
+  the inspector already do. Field names are matched against Luau's interned strings, so a
+  lookup is a hash probe. If E7-1's measurements show the interpretive accessor too slow,
+  a proc macro generates typed accessors per component instead, with the same Luau side.
+- **Functions are bound with a proc macro** (CLAUDE.md §10): `#[script]` on a Rust function
+  or an `impl` block (`Transform::rotate`, `physics.raycast`) generates the mlua
+  registration and the `.d.luau` line, with its `///` comment as the documentation. A
+  game's own Rust code uses the same macro.
+- **The generated files,** written by `ofeliaengine scripts types` and by the editor at
+  start, after a rebuild and after each script reload (a few milliseconds):
+  - `types/ofelia.d.luau`: the engine's libraries and types, every reflected component
+    (the engine's and the game's Rust ones) and every script component;
+  - `types/ofelia.docs.json`: their documentation (luau-lsp's `documentationFiles`);
+  - `ofeliaengine new` writes `.luaurc` (strict mode, the `@scripts` alias) and the VS Code
+    settings that point luau-lsp at both files.
+- **The definition syntax follows the VM's Luau release** (0.736: `declare extern type`).
+  luau-lsp calls its definition syntax unstable, so the generator is updated with each Luau
+  update, and a test type-checks the examples of this ADR and of the dev guide against the
+  generated file (with Luau's analysis library once E8 vendors it; before that, the
+  generated text is compared with a reviewed copy).
+
+### 7. Where scripts run in the frame
+
+```text
+frame
+├─ ticks (0..n per frame, 64 Hz by default)
+│  ├─ input sampled for the tick; timers and tweens advance        (the player, today)
+│  ├─ scripts:
+│  │  ├─ `after` timers that are due
+│  │  ├─ the last physics step's contacts: on_touch, on_untouch
+│  │  ├─ on_start of new instances, in spawn order
+│  │  ├─ on_tick of script components, in the fixed order
+│  │  ├─ systems' on_tick, in declaration order
+│  │  │  (each hook's messages delivered when it returns)
+│  │  └─ despawns applied, on_stop
+│  ├─ Game::tick (Rust; steps physics)                              (today)
+│  └─ transforms propagated                                         (today)
+├─ presentation: scripts' on_frame (input's frame view), then Game::present
+├─ animate, UI                                                      (today)
+└─ render
+```
+
+- **The fixed order:** the scene tree's order for the scene's entities, then spawn order;
+  script components of one entity in name order. It depends on neither archetypes nor
+  threads, and it is the same on every machine.
+- **Messages** sent by a hook are delivered after it returns, in send order; messages sent
+  while delivering go in the same pass, up to 16 passes a stage (then the rest wait for the
+  next stage, and the editor says so). A message to a despawned entity is dropped; a hook
+  no script of the target has is reported once in the editor.
+- **Scripts run on the game thread,** before the Rust game's hook in each stage, so a
+  script's kinematic target or velocity is used by the same tick's physics step. Parallel
+  Luau (separate VMs on the job system) is not part of this version.
+- **In the editor,** scripts load in edit mode (their components show in the inspector and
+  the add menu) but their hooks run only in Play; pause and step (ADR 0107 E3-2) step the
+  scripts with the ticks. Scripts that run in the editor itself (tools) are a later step.
+
+### 8. Determinism, saves and networking
+
+Rules for everything that runs in ticks (`on_tick`, `on_touch`, `on_untouch`, `on_start`,
+`after` and messages sent from ticks), after Roblox's server authority rules:
+1. **State lives in components** (props or Rust components): saved, rolled back,
+   replicable. The module's `state` and `self.locals` are neither; the dev guide says so,
+   and the editor shows `self.locals` read-only while paused.
+2. **Time is the game's:** `time.now()`, `dt`. The wall clock (`os.clock`, `os.time`) is
+   for logs.
+3. **Randomness is the world's** `random`, saved and rolled back.
+4. **Effects are presentation:** sounds and particles started from a tick hook while a
+   networked client re-simulates are dropped by the engine (they already played in the
+   first prediction); `net.resimulating()` tells scripts the same.
+5. **On a joined client,** tick hooks run for the predicted entities only (the client's own,
+   ADR 0074), again on every re-simulation; the rest of the world comes from snapshots.
+   Script components replicate when the game's schema names them, as plain data (a later
+   step: `NetSchema` takes them by name).
+6. **Saves** keep script components like Rust ones (ADR 0104): the save finds them through
+   the script host's registry beside the program's reflected types. `after` timers are a
+   component too.
+
+### 9. Errors
+
+- **A runtime error stops that instance:** its hooks are no longer called; its entity keeps
+  its other components (it still draws, collides and sounds). A failing system stops.
+  Errors include Luau errors, wrong types at the boundary (a string written into a number
+  field), a view of a despawned entity, and the time budget (ADR 0032: 50 ms) running out.
+- **Where it shows:**
+  - the output (E6) with the message, `door.luau:14`, the hook, the entity's name and the
+    stack; a click opens the script at the line (E8);
+  - a mark on the entity in the scene tree, and on the component in the inspector:
+    "Stopped: <message> (door.luau:14) — Resume";
+  - the same error from many instances is one entry with a count.
+- **Resuming:** saving the script (a reload) resumes every instance it stopped; Resume in
+  the inspector resumes one.
+- **A compile error** keeps the old code running (ADR 0032) and shows in the output and
+  under the line in the code editor.
+- **With the debugger** (E9), "pause on errors" stops the game at the failing line instead.
+- **In a shipped game** the error goes to the log (and to crash reports' log tail, ADR
+  0061), the instance stays stopped, and the game goes on.
+- Until E6's output panel exists, errors go to the log only.
+
+### 10. Hot reload
+
+- **A saved script reloads in the running game** (the asset watcher, ADR 0107 E4-5) through
+  `ScriptVm::load_module`: the module's `state` is kept, `on_reload(old)` runs, the next
+  hook call goes to the new code. Target: ≤ 100 ms from save to running (CLAUDE.md §5).
+- **Props are data, so they survive:** a prop added gets its default on every instance, a
+  removed one is dropped (a scene file still holding it warns on load, as for Rust
+  components), a changed default changes only new instances. A changed layout is a new
+  version of the component: the host moves every instance's values over by name in one
+  structural change.
+- **Dependents reload too:** modules that `require` a reloaded one reload after it, in
+  dependency order (Defold's stale module tables avoided).
+- **A broken edit** keeps the old version running (ADR 0032).
+- **Native code** is generated again for the reloaded functions; a function with a
+  breakpoint runs interpreted (ADR 0107 §6).
+
+### 11. Performance rules
+
+- **The price of Luau** (ADR 0032, ref-1): native Luau 4.8× Rust on a numeric hot loop
+  (boids: 3.25 ms against 0.68), the interpreter 30×. Script components are for event-driven
+  and per-object logic; a loop over thousands of entities every tick goes to Rust.
+- **A hook costs a call across the boundary,** per instance per tick: only hooks a script
+  defines are called. Many alike objects take a system (one call per tick).
+- **A component field is a call into Rust:** read it into a local once per hook when it is
+  used several times.
+- **Queries and physics filters are made once,** at the module's top, and iterated or used
+  every tick without allocating.
+- **The engine's API allocates nothing per call in steady state:** entities and vectors are
+  values, views are cached, results come back as several values instead of tables. The
+  zero-allocation test runs this ADR's examples for 600 ticks after warm-up.
+- **A script's own allocations** (tables, strings, closures it makes) go through the
+  engine's allocator (mlua uses Rust's global allocator): the dev build's statistics count
+  them per script, and Tracy shows them. Luau's collector runs incrementally as scripts
+  allocate; the player also gives it a bounded step at the end of the frame, sized by
+  measurement, so collection never lands on one frame.
+- **Tracy** has a zone per stage and per component's hook (`script Door.on_tick`); the
+  editor's profiler (E6) shows each script's time and allocations.
+- **The debugger costs only in the editor:** there hooks are entered as resumable threads
+  (ADR 0107 §6); the shipped player calls them directly.
+- **Later, if measured worth it:** Luau's code generator lets the host lower field access on
+  its userdata to native code (`HostIrHooks`), which would make `t.translation` as cheap as
+  a table field.
+
+### 12. What the engine needs (the E7 steps)
+
+1. **E7-1, the script host** (`engine_app`): one `ScriptVm`; `scripts/` loaded at start (a
+   pack in a release); components from props through `World::register_dynamic`; the stages
+   in the player's frame; entities, views, `world`, `input`, `time`, `print`; errors to the
+   log. The measurements below, then this ADR's numbers filled in.
+2. **E7-2, types:** `ofeliaengine scripts types`, the documentation file, `.luaurc` and VS
+   Code settings from `ofeliaengine new`; the type test.
+3. **E7-3, physics for scripts:** the player owns the scene's physics world when the game
+   does not (`PlayerSettings::physics`); `Trigger`, a sensor shape on an entity set in the
+   editor; `on_touch`, `on_untouch`, `physics.raycast`, `physics.overlap_sphere`.
+4. **E7-4, the editor:** script components in the add menu and the inspector, "New Script…"
+   from a template with the cursor in `on_tick`, reload on save, stopped instances marked
+   with Resume.
+5. **E7-5, the rest of v1:** `send`, `after`, `audio`, `random`, `world.instantiate`, saves
+   of script components, the networking rules of §8.
+
+Then E8 (the code editor) and E9 (the debugger), as ADR 0107 plans.
+
+### 13. Measurements before acceptance (E7-1, ref-1, release)
+
+| What | Target | If missed |
+|---|---|---|
+| an empty `on_tick`, per instance | ≤ 0.5 µs | batch the calls per component (one call carrying the instances) |
+| a view's field read or write | ≤ 100 ns | generated accessors (§6), then `HostIrHooks` |
+| 1,000 doors (example 1), one tick | ≤ 1 ms | as above |
+| 10,000 spinners as a system, one tick | ≤ 2 ms | a bulk `buffer` column API for systems (ADR 0032) |
+| allocations from the engine's API, the four examples, 600 ticks after warm-up | 0 | fix before merging |
+| reload of a script used by 1,000 entities | ≤ 100 ms | move values lazily, on each instance's next hook |
+
+## Consequences
+
+- **Easier:** a game developer gives an object behaviour without Rust; the inspector, scene
+  files, saves, undo, tweens and (later) replication handle script components like Rust
+  ones; names and data are the same in every tool; errors stop one object, not the game;
+  luau-lsp in VS Code and the built-in editor see the same types.
+- **Harder:** the engine keeps a run-time component registry beside the program's static
+  list, and every system that finds components by name (saves, scenes, the inspector, the
+  network schema) consults both. Script components' layouts change at run time in the
+  editor, which the world supports only through a structural change per instance.
+- **Fixed by this decision** (hard to change once games exist): components with hooks, live
+  views, snake_case names, hooks and messages instead of signals, `on_tick`/`on_frame`,
+  `after` instead of `wait`, per-object state as declared props.
+- **To revisit:**
+  - Luau's `integer` type when it ships enabled (64-bit fields as numbers, not userdata);
+  - `HostIrHooks` if views are hot in profiles;
+  - parallel systems in separate VMs if a game needs more script time than one thread has;
+  - scripts that run in the editor (tools) and in-game UI from scripts, each with its own
+    ADR.
+
+## Questions for the owner
+
+Each question has lettered options and a recommendation. "You" is the game developer.
+Questions 1 to 7 are decisions a to g above, with their options in the same order.
+
+1. **How do scripts attach to the world?**
+   - a) **Only as components on objects.** You select the door, "Add Component → Door",
+     and write what one door does. Simple and familiar (Unity, Godot). A thousand coins
+     cost a thousand calls a tick.
+   - b) **Only as systems.** You write one script that loops over all doors. Fast for many
+     objects, but even a single lever needs a loop and a tag.
+   - c) **Both** (recommended): components for what one object does, which is most game
+     logic; a system when there are many alike objects. Same files, same functions.
+2. **How does a script change an object's data?**
+   - a) **Directly** (recommended): `self.Transform.translation = p` moves the object at
+     once, as in Roblox, Godot and Unity. Each such access costs a small call into the
+     engine (about 100 ns, to be measured).
+   - b) **Read a copy, change it, write it back:** `local t = get(e, Transform) … set(e,
+     Transform, t)`. Explicit, but forgetting the `set` silently does nothing.
+   - c) **By text paths:** `e:get("Transform.translation")`. Nothing to allocate, but no
+     completion or type checking for the paths.
+3. **How are names written?**
+   - a) **As in our Rust and our scene files** (recommended): `Transform.translation`,
+     `min_distance`, `world.find`, `on_tick`. The same name in code, scene files, the
+     inspector and the docs.
+   - b) **As in Roblox:** `Transform.Translation`, `MinDistance`, `world:Find`, `OnTick`.
+     Familiar to Roblox developers, but every name then differs from the scene files and
+     the Rust code.
+4. **How does a script react to events and talk to other scripts?**
+   - a) **By functions with fixed names** (recommended): you write
+     `function Coin.on_touch(self, other)` and the engine calls it; to tell another object
+     something, `door:send("open")` calls its `open`. Nothing to connect or disconnect;
+     after a code change the new function is called.
+   - b) **By signals, as in Roblox:** `coin.touched:connect(function(other) … end)`. Any
+     number of listeners, but connections must be cleaned up, and after a code change the
+     old function keeps running until reconnected.
+   - c) **Both.**
+5. **Fixed ticks or every frame?**
+   - a) **Gameplay in `on_tick`, 64 times a second; the camera and visual-only things in
+     `on_frame`** (recommended). As our Rust code does. Saves, replays and network play
+     stay exact; you learn which of the two hooks to use.
+   - b) **One `update(dt)` every frame,** as in Unity and Roblox, plus an optional fixed
+     hook. Familiar, but gameplay written there depends on the frame rate, and saves and
+     network play cannot be exact.
+6. **How does a script wait?**
+   - a) **With a timer that calls a function by name** (recommended):
+     `self:after(3, "close")` calls the door's `close` in three seconds of game time. It is
+     saved with the game and survives a code change. A sequence of steps is written as
+     several functions.
+   - b) **Also with `wait(3)` in the middle of a function,** as in Roblox (`task.wait`) and
+     Unity's coroutines. A sequence reads top to bottom, but a save in the middle of a wait
+     loses the rest of the sequence, network play cannot replay it, and after a code change
+     the old code finishes the wait.
+7. **Where does a script keep each object's data?**
+   - a) **In declared properties** (recommended): you list them at the top of the script
+     (`radius = 3.0`). They show in the inspector, are saved with the game, survive code
+     changes and work with network play. Temporary data that should not be saved goes in
+     `self.locals`.
+   - b) **Anywhere on `self`,** as in Godot and Unity (`self.cooldown = 0` in any
+     function). Quicker to start, but such data is not saved, not shown in the inspector,
+     and the type checker cannot see it.
