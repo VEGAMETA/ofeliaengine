@@ -410,7 +410,7 @@ Last updated: 2026-10-22.
     given each tab's text 150 ms after it rests; findings stamped by tab and version,
     underlined, each line's first message after its text, counted in the code bar (a
     click goes to the next).
-  - **E8-3c, completion and hover** (#PR, ADR 0107's as-built): Luau's `autocomplete`
+  - **E8-3c, completion and hover** (#334, ADR 0107's as-built): Luau's `autocomplete`
     after `.`, `:`, a word's first letter and Ctrl+Space, narrowed as the word grows,
     written with parentheses as one undo step; the mouse resting on a name shows its
     type.
