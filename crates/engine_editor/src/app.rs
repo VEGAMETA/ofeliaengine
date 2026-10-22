@@ -626,8 +626,9 @@ struct CommandIds {
     /// Prefabs (E5-2): the selection made a prefab's instance, an instance unpacked.
     make_prefab: CommandId,
     unpack_prefab: CommandId,
-    /// An instance's values back to its prefab's (E5-3).
+    /// An instance's values back to its prefab's (E5-3), or written into it (E5-4).
     revert_prefab: CommandId,
+    apply_prefab: CommandId,
     /// Where Play shows the game (E3-4).
     play_where: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
@@ -724,6 +725,7 @@ fn commands() -> (Commands, CommandIds) {
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
         unpack_prefab: c.register("scene.unpack_prefab", "Scene", "Unpack Prefab"),
         revert_prefab: c.register("prefab.revert", "Prefab", "Revert Overrides"),
+        apply_prefab: c.register("prefab.apply", "Prefab", "Apply Overrides"),
         play_where: c.register("play.where", "Play", "In a Window or in the Viewport"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
@@ -1445,6 +1447,8 @@ struct Editor {
     /// what its entities' overrides are measured against, kept while the prefab's file is
     /// unchanged.
     prefab_bases: HashMap<SceneId, CachedBase>,
+    /// Prefab files written anew while the scene played: followed once it stops (E5-4).
+    pending_follow: Vec<AssetId>,
     /// The listing's thumbnails (ADR 0112), the side of its tiles' pictures (logical
     /// pixels), and where its scroll area was last frame: rectangle and scroll.
     thumbnails: Thumbnails,
@@ -1943,6 +1947,7 @@ impl Editor {
             renaming_file: None,
             inspected: None,
             prefab_bases: HashMap::new(),
+            pending_follow: Vec::new(),
             thumbnails,
             tile: DEFAULT_TILE,
             listing: None,
@@ -2258,7 +2263,10 @@ impl Editor {
             self.tick_session(world);
         }
         self.tick_builds(world);
-        self.tick_assets();
+        self.tick_assets(world);
+        if !playing {
+            self.ensure_prefab_bases(world);
+        }
         self.thumbnails.begin_frame();
         if let Some(under) = self.under_pointer.take() {
             self.offer_under_pointer(world, under);
@@ -6116,6 +6124,9 @@ impl Editor {
             self.history.commit(world);
             kept.len()
         });
+        // Prefabs written anew while it played.
+        let pending = core::mem::take(&mut self.pending_follow);
+        self.follow_prefabs(world, &pending);
         let ids = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
         let index: HashMap<SceneId, Entity> =
             ids.iter_readonly(world).map(|(e, id)| (*id, e)).collect();
@@ -6911,6 +6922,8 @@ impl Editor {
             self.unpack_prefab(world);
         } else if id == ids.revert_prefab {
             self.revert_prefab(world);
+        } else if id == ids.apply_prefab {
+            self.apply_prefab(world);
         } else if id == ids.select_next || id == ids.select_previous {
             self.step(if id == ids.select_next { 1 } else { -1 }, false);
         } else if id == ids.extend_next || id == ids.extend_previous {
@@ -7152,7 +7165,7 @@ impl Editor {
 
     /// The folder's changes: a scan once it has been quiet for [`ASSETS_QUIET`], the new
     /// paths to the player and the inspector.
-    fn tick_assets(&mut self) {
+    fn tick_assets(&mut self, world: &mut World) {
         if let Some(watch) = &self.asset_watch {
             let skip = [
                 self.root.join(".ofelia"),
@@ -7176,11 +7189,25 @@ impl Editor {
         if report.read == 0 && report.gone == 0 {
             return;
         }
-        // Files written anew: what the player made from them is made again.
+        // Files written anew: what the player made from them is made again; the open
+        // scene's instances follow their prefabs (once Play stops, while it plays).
+        let mut prefabs = Vec::new();
         for id in report.changed {
             if !self.changed_assets.contains(&id) {
                 self.changed_assets.push(id);
             }
+            if self
+                .asset_db
+                .get(id)
+                .is_some_and(|e| e.kind == engine_scene::AssetKind::Scene)
+            {
+                prefabs.push(id);
+            }
+        }
+        if self.play.is_some() {
+            self.pending_follow.extend(prefabs);
+        } else {
+            self.follow_prefabs(world, &prefabs);
         }
         if let Err(e) = self.asset_db.save() {
             log::warn!(target: "engine_editor", "the asset index: {e}");
@@ -7926,10 +7953,13 @@ impl Editor {
             .asset_db
             .get(prefab)
             .map_or((0, 0), |e| (e.size, e.modified));
-        if self
+        // While playing, a prefab written anew is followed at Stop, from the base kept.
+        let kept = self
             .prefab_bases
             .get(&id)
-            .is_some_and(|c| c.prefab == prefab && c.stamp == stamp)
+            .is_some_and(|c| c.prefab == prefab);
+        if kept
+            && (self.play.is_some() || self.prefab_bases.get(&id).is_some_and(|c| c.stamp == stamp))
         {
             return;
         }
@@ -7951,6 +7981,333 @@ impl Editor {
                 base,
             },
         );
+    }
+
+    /// Every outermost instance's prefab placed alone (built for those new since): what a
+    /// prefab written anew is followed from.
+    fn ensure_prefab_bases(&mut self, world: &mut World) {
+        let mut q = QueryState::<(Entity, &PrefabInstance)>::new(world);
+        let roots: Vec<Entity> = q
+            .iter_readonly(world)
+            .map(|(e, _)| e)
+            .filter(|&e| world.get::<PrefabPart>(e).is_none())
+            .collect();
+        for root in roots {
+            self.ensure_prefab_base(world, root);
+        }
+    }
+
+    /// The open scene's instances follow the prefab files `changed` (written anew; E5-4):
+    /// each outermost instance whose prefab, or one inside it, is among them goes from its
+    /// prefab as it was (the base kept) to the prefab as it is now, in one undo step.
+    fn follow_prefabs(&mut self, world: &mut World, changed: &[AssetId]) {
+        if changed.is_empty() {
+            return;
+        }
+        let mut q = QueryState::<(Entity, &PrefabInstance, &SceneId)>::new(world);
+        let roots: Vec<(Entity, PrefabInstance, SceneId)> = q
+            .iter_readonly(world)
+            .filter(|&(e, _, _)| world.get::<PrefabPart>(e).is_none())
+            .map(|(e, &i, &id)| (e, i, id))
+            .collect();
+        let affected: Vec<(Entity, PrefabInstance, SceneId)> = roots
+            .into_iter()
+            .filter(|(_, _, id)| {
+                self.prefab_bases
+                    .get(id)
+                    .and_then(|c| c.base.as_ref())
+                    .is_some_and(|b| b.prefabs().iter().any(|p| changed.contains(p)))
+            })
+            .collect();
+        if affected.is_empty() {
+            return;
+        }
+        self.history.begin("Follow Prefabs", None);
+        let total = self.follow_in_step(world, &affected);
+        self.history.commit(world);
+        if !total.is_empty() {
+            self.say(format!(
+                "Instances followed their prefabs: {} value{}, {} component{}, {} entit{}",
+                total.values,
+                if total.values == 1 { "" } else { "s" },
+                total.components,
+                if total.components == 1 { "" } else { "s" },
+                total.entities,
+                if total.entities == 1 { "y" } else { "ies" },
+            ));
+        }
+    }
+
+    /// The outermost instances whose prefab, or one inside it, is among `changed`.
+    fn instances_of(
+        &mut self,
+        world: &mut World,
+        changed: &[AssetId],
+    ) -> Vec<(Entity, PrefabInstance, SceneId)> {
+        let mut q = QueryState::<(Entity, &PrefabInstance, &SceneId)>::new(world);
+        let roots: Vec<(Entity, PrefabInstance, SceneId)> = q
+            .iter_readonly(world)
+            .filter(|&(e, _, _)| world.get::<PrefabPart>(e).is_none())
+            .map(|(e, &i, &id)| (e, i, id))
+            .collect();
+        roots
+            .into_iter()
+            .filter(|(_, _, id)| {
+                self.prefab_bases
+                    .get(id)
+                    .and_then(|c| c.base.as_ref())
+                    .is_some_and(|b| b.prefabs().iter().any(|p| changed.contains(p)))
+            })
+            .collect()
+    }
+
+    /// [`Self::follow_prefabs`] for `affected`, in the open history step.
+    fn follow_in_step(
+        &mut self,
+        world: &mut World,
+        affected: &[(Entity, PrefabInstance, SceneId)],
+    ) -> crate::prefabs::Followed {
+        let registry = SceneRegistry::from_program();
+        let mut total = crate::prefabs::Followed::default();
+        for &(root, instance, id) in affected {
+            let new = {
+                let prefabs = self.prefabs();
+                engine_scene::PrefabBase::new(
+                    &registry,
+                    &prefabs,
+                    Some(&self.assets),
+                    id,
+                    instance.prefab,
+                )
+            };
+            // A prefab that cannot be read now: the instance stays as it is.
+            let Some(new) = new else {
+                continue;
+            };
+            if let Some(old) = self.prefab_bases.get(&id).and_then(|c| c.base.as_ref()) {
+                let done = crate::prefabs::follow(
+                    world,
+                    &mut self.history,
+                    root,
+                    old,
+                    &new,
+                    &registry,
+                    &self.assets,
+                );
+                total.values += done.values;
+                total.components += done.components;
+                total.entities += done.entities;
+            }
+            // Measured against the prefab as it is from now on.
+            let stamp = self
+                .asset_db
+                .get(instance.prefab.file)
+                .map_or((0, 0), |e| (e.size, e.modified));
+            self.prefab_bases.insert(
+                id,
+                CachedBase {
+                    prefab: instance.prefab.file,
+                    stamp,
+                    base: Some(new),
+                },
+            );
+        }
+        total
+    }
+
+    /// "Prefab: Apply Overrides": the active entity's outermost instance written into its
+    /// prefab (its values, the components and entities it added or removed), then the open
+    /// scene's instances follow the prefab written anew, in one undo step: this one has
+    /// nothing left to override, the entities it added are its prefab's now. Undo leaves
+    /// the file.
+    fn apply_prefab(&mut self, world: &mut World) {
+        let Some(root) = self.active().and_then(|e| outermost_instance(world, e)) else {
+            self.say(String::from(
+                "Select an instance (or an entity in one) to apply",
+            ));
+            return;
+        };
+        let (Some(instance), Some(&id)) = (
+            world.get::<PrefabInstance>(root).copied(),
+            world.get::<SceneId>(root),
+        ) else {
+            return;
+        };
+        let Some(path) = self
+            .asset_db
+            .get(instance.prefab.file)
+            .map(|e| e.path.clone())
+        else {
+            self.say(String::from("Its prefab is not in the project"));
+            return;
+        };
+        if instance.is_missing() {
+            self.say(format!("{path} cannot be read: nothing to apply to"));
+            return;
+        }
+        self.ensure_prefab_base(world, root);
+        let registry = SceneRegistry::from_program();
+        let file = self.root.join(&path);
+        let written = self.prefab_text_of(world, root, id, &file, &registry);
+        let text = match written {
+            Ok(text) => text,
+            Err(e) => {
+                self.say(format!("Not applied: {e}"));
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(&file, &text) {
+            self.say(format!("Not applied: {}: {e}", file.display()));
+            return;
+        }
+        // The scene: the entities the instance added are its prefab's now (their ids
+        // derived, marked), then every instance follows the prefab written anew.
+        let mut added = Vec::new();
+        let mut stack: Vec<Entity> = world.children(root).collect();
+        while let Some(e) = stack.pop() {
+            if world.get::<PrefabPart>(e).is_none()
+                && let Some(&old) = world.get::<SceneId>(e)
+            {
+                added.push((e, old));
+            }
+            stack.extend(world.children(e));
+        }
+        for changed in self.asset_db.scan().changed {
+            if !self.changed_assets.contains(&changed) {
+                self.changed_assets.push(changed);
+            }
+        }
+        let affected = self.instances_of(world, &[instance.prefab.file]);
+        self.history.begin("Apply Overrides", None);
+        let changes: Vec<(Entity, SceneId)> = added
+            .iter()
+            .map(|&(e, old)| (e, SceneId::derive(id, old)))
+            .collect();
+        self.history.change_ids(world, &changes);
+        for &(e, old) in &added {
+            world.insert(
+                e,
+                PrefabPart {
+                    instance: id,
+                    local: old,
+                },
+            );
+        }
+        let total = self.follow_in_step(world, &affected);
+        self.history.commit(world);
+        self.refresh_browser();
+        let others = affected.len().saturating_sub(1);
+        self.say(format!(
+            "Applied to {path}: {} other instance{} followed ({} values, {} entities)",
+            others,
+            if others == 1 { "" } else { "s" },
+            total.values,
+            total.entities
+        ));
+    }
+
+    /// The text of prefab `file` with instance `root` (scene id `id`) written into it:
+    /// the instance as a scene of its own placed alone (its prefab with its overrides and
+    /// additions), then made the prefab's own entities again (their ids back to the
+    /// prefab's, the instance's marks gone) and written under the prefab's id.
+    fn prefab_text_of(
+        &self,
+        world: &mut World,
+        root: Entity,
+        id: SceneId,
+        file: &Path,
+        registry: &SceneRegistry,
+    ) -> Result<String, String> {
+        let current =
+            std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let (_, prefab_id) = engine_scene::scene_header(&current).map_err(|e| e.to_string())?;
+        let roots = engine_scene::scene_roots(&current).map_err(|e| e.to_string())?;
+        let prefabs = self.prefabs();
+        let mut alone = String::new();
+        let options = SaveOptions {
+            id: None,
+            assets: Some(&self.assets),
+            prefabs: Some(&prefabs),
+        };
+        engine_scene::save_subtree(world, registry, &options, root, &mut alone)
+            .map_err(|e| e.to_string())?;
+        let mut scratch = World::new();
+        let load = LoadOptions {
+            prefabs: Some(&prefabs),
+        };
+        let report = engine_scene::load_with(&mut scratch, registry, &alone, &load)
+            .map_err(|e| e.to_string())?;
+        let find = |w: &World, id: SceneId| {
+            report
+                .entities
+                .iter()
+                .copied()
+                .find(|&e| w.get::<SceneId>(e) == Some(&id))
+        };
+        let top = find(&scratch, id).ok_or("the instance was not placed")?;
+        // Its ids back to the prefab's: parents first, so an instance inside it is mapped
+        // before what it placed.
+        let mut order = Vec::new();
+        let mut stack = vec![top];
+        while let Some(e) = stack.pop() {
+            order.push(e);
+            stack.extend(scratch.children(e));
+        }
+        let mut mapped: HashMap<SceneId, SceneId> = HashMap::new();
+        for &e in &order {
+            let Some(&old) = scratch.get::<SceneId>(e) else {
+                continue;
+            };
+            let new = if e == top {
+                match roots.as_slice() {
+                    [single] => *single,
+                    _ => old,
+                }
+            } else {
+                match scratch.get::<PrefabPart>(e).copied() {
+                    Some(part) if part.instance == id => part.local,
+                    Some(part) => {
+                        let instance = mapped.get(&part.instance).copied().unwrap_or(part.instance);
+                        scratch.insert(
+                            e,
+                            PrefabPart {
+                                instance,
+                                local: part.local,
+                            },
+                        );
+                        SceneId::derive(instance, part.local)
+                    }
+                    None => old,
+                }
+            };
+            mapped.insert(old, new);
+            scratch.insert(e, new);
+            if scratch
+                .get::<PrefabPart>(e)
+                .is_some_and(|p| p.instance == id)
+            {
+                scratch.remove::<PrefabPart>(e);
+            }
+        }
+        scratch.remove::<PrefabInstance>(top);
+        scratch.remove::<KeptBlocks>(top);
+        // Several roots: the instance's own entity held them, the prefab does not have it.
+        if roots.len() != 1 {
+            let children: Vec<Entity> = scratch.children(top).collect();
+            for c in children {
+                let _ = scratch.set_parent(c, None);
+            }
+            scratch.despawn(top);
+        }
+        let mut text = String::new();
+        let options = SaveOptions {
+            id: prefab_id,
+            assets: Some(&self.assets),
+            prefabs: Some(&prefabs),
+        };
+        engine_scene::save_with(&mut scratch, registry, &options, &mut text)
+            .map_err(|e| e.to_string())?;
+        Ok(text)
     }
 
     /// The value of component `name` on entity `e` as its prefab places it, when a prefab
@@ -12502,6 +12859,211 @@ mod tests {
             !text.contains("[override"),
             "nothing left to override: {text}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lamp's scene: a pole, its bulb at `bulb_y` named `bulb_name`, and (with `shade`)
+    /// a shade.
+    fn lamp_scene(
+        lamp: AssetId,
+        ids: [SceneId; 3],
+        bulb_y: f32,
+        bulb_name: &str,
+        shade: bool,
+    ) -> String {
+        let [pole, bulb, shade_id] = ids;
+        let mut text = format!(
+            "[scene version=4 id={lamp}]\n\n[entity {pole}]\nName = \"Lamp\"\n\
+             Transform.rotation = (0, 0, 0, 1)\nTransform.translation = (0, 0, 0)\n\
+             Transform.scale = (1, 1, 1)\n\n[entity {bulb}]\nparent = {pole}\n\
+             Name = \"{bulb_name}\"\nTransform.rotation = (0, 0, 0, 1)\n\
+             Transform.translation = (0, {bulb_y}, 0)\nTransform.scale = (1, 1, 1)\n"
+        );
+        if shade {
+            text.push_str(&format!(
+                "\n[entity {shade_id}]\nparent = {pole}\nName = \"Shade\"\n"
+            ));
+        }
+        text
+    }
+
+    #[test]
+    fn instances_follow_a_prefab_written_anew() {
+        let (dir, mut world, mut ed, _) = drop_project("follow");
+        let lamp = AssetId::new();
+        let ids = [SceneId::new(), SceneId::new(), SceneId::new()];
+        let file = dir.join("props/lamp.scene");
+        std::fs::write(&file, lamp_scene(lamp, ids, 1.0, "Bulb", false)).unwrap();
+        ed.asset_db.scan();
+        ed.refresh_browser();
+        let place = |ed: &mut Editor, world: &mut World| {
+            let drag = AssetDrag {
+                asset: lamp,
+                kind: engine_scene::AssetKind::Scene,
+                path: String::from("props/lamp.scene"),
+                name: String::from("lamp.scene"),
+                plan: None,
+                refused: None,
+                placed: None,
+                selection: Vec::new(),
+                over: DropTarget::Tree,
+            };
+            ed.drop_asset(world, drag);
+        };
+        place(&mut ed, &mut world);
+        place(&mut ed, &mut world);
+        let mut q = QueryState::<(Entity, &PrefabInstance)>::new(&mut world);
+        let roots: Vec<Entity> = q.iter_readonly(&world).map(|(e, _)| e).collect();
+        assert_eq!(roots.len(), 2);
+        let bulb_of = |world: &World, root: Entity| {
+            let id = SceneId::derive(*world.get::<SceneId>(root).unwrap(), ids[1]);
+            world
+                .children(root)
+                .find(|&c| world.get::<SceneId>(c) == Some(&id))
+        };
+        // One instance's bulb renamed: its override.
+        let (a, b) = (roots[0], roots[1]);
+        let bulb_a = bulb_of(&world, a).unwrap();
+        world.get_mut::<Name>(bulb_a).unwrap().0 = String::from("Red bulb");
+        ed.update(&mut world); // the bases kept for both instances
+        // The prefab written anew: its bulb higher and renamed, a shade added.
+        std::fs::write(&file, lamp_scene(lamp, ids, 2.0, "Big bulb", true)).unwrap();
+        let report = ed.asset_db.scan();
+        assert!(report.changed.contains(&lamp), "{report:?}");
+        let steps = ed.history.steps().count();
+        ed.follow_prefabs(&mut world, &[lamp]);
+        assert_eq!(ed.history.steps().count(), steps + 1, "one step");
+        for root in [a, b] {
+            let bulb = bulb_of(&world, root).unwrap();
+            assert_eq!(
+                world.get::<Transform>(bulb).unwrap().translation.y,
+                2.0,
+                "the new place, nobody's override"
+            );
+            let shade = SceneId::derive(*world.get::<SceneId>(root).unwrap(), ids[2]);
+            let shade_e = world
+                .children(root)
+                .find(|&c| world.get::<SceneId>(c) == Some(&shade))
+                .expect("the shade added");
+            assert_eq!(world.get::<Name>(shade_e).map(Name::as_str), Some("Shade"));
+            assert!(world.get::<PrefabPart>(shade_e).is_some());
+        }
+        assert_eq!(
+            world.get::<Name>(bulb_a).map(Name::as_str),
+            Some("Red bulb"),
+            "the override kept"
+        );
+        let bulb_b = bulb_of(&world, b).unwrap();
+        assert_eq!(
+            world.get::<Name>(bulb_b).map(Name::as_str),
+            Some("Big bulb")
+        );
+        // Saved: only the override, against the prefab as it is now.
+        let text = ed.scene_text(&mut world).unwrap();
+        assert!(text.contains("Name = \"Red bulb\""), "{text}");
+        assert!(
+            !text.contains("Transform.translation = (0, 2, 0)"),
+            "{text}"
+        );
+        // Undone: as before.
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(world.get::<Transform>(bulb_b).unwrap().translation.y, 1.0);
+        assert!(engine_scene::find_named(&mut world, "Shade").is_none());
+        ed.run(&mut world, ed.ids.redo);
+        // The shade taken out of the prefab: gone from the instances.
+        std::fs::write(&file, lamp_scene(lamp, ids, 2.0, "Big bulb", false)).unwrap();
+        ed.asset_db.scan();
+        ed.follow_prefabs(&mut world, &[lamp]);
+        assert!(engine_scene::find_named(&mut world, "Shade").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_overrides_writes_an_instance_into_its_prefab() {
+        let (dir, mut world, mut ed, _) = drop_project("apply");
+        let lamp = AssetId::new();
+        let ids = [SceneId::new(), SceneId::new(), SceneId::new()];
+        let file = dir.join("props/lamp.scene");
+        std::fs::write(&file, lamp_scene(lamp, ids, 1.0, "Bulb", false)).unwrap();
+        ed.asset_db.scan();
+        ed.refresh_browser();
+        for _ in 0..2 {
+            let drag = AssetDrag {
+                asset: lamp,
+                kind: engine_scene::AssetKind::Scene,
+                path: String::from("props/lamp.scene"),
+                name: String::from("lamp.scene"),
+                plan: None,
+                refused: None,
+                placed: None,
+                selection: Vec::new(),
+                over: DropTarget::Tree,
+            };
+            ed.drop_asset(&mut world, drag);
+        }
+        let mut q = QueryState::<(Entity, &PrefabInstance)>::new(&mut world);
+        let roots: Vec<Entity> = q.iter_readonly(&world).map(|(e, _)| e).collect();
+        let (a, b) = (roots[0], roots[1]);
+        let child = |world: &World, root: Entity, local: SceneId| {
+            let id = SceneId::derive(*world.get::<SceneId>(root).unwrap(), local);
+            world
+                .children(root)
+                .find(|&c| world.get::<SceneId>(c) == Some(&id))
+        };
+        // The first lamp's bulb moved, and a moth added to it.
+        let bulb_a = child(&world, a, ids[1]).unwrap();
+        world.get_mut::<Transform>(bulb_a).unwrap().translation.y = 3.0;
+        let moth_id = SceneId::new();
+        let moth = world.spawn((
+            moth_id,
+            Name::new("Moth"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        world.set_parent(moth, Some(a)).unwrap();
+        ed.update(&mut world); // the bases kept for both lamps
+        ed.select_only(bulb_a);
+        let steps = ed.history.steps().count();
+        ed.run(&mut world, ed.ids.apply_prefab);
+        // The prefab has them now.
+        let prefab = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            prefab.contains("Transform.translation = (0, 3, 0)"),
+            "{prefab}"
+        );
+        assert!(prefab.contains(&format!("[entity {moth_id}]")), "{prefab}");
+        assert!(
+            prefab.contains(&format!("[entity {}]", ids[0])),
+            "the root keeps its id: {prefab}"
+        );
+        assert!(!prefab.contains("[instance"), "{prefab}");
+        assert_eq!(ed.history.steps().count(), steps + 1, "one step");
+        // The first lamp: nothing left to override, its moth its prefab's.
+        assert_eq!(
+            world.get::<SceneId>(moth),
+            Some(&SceneId::derive(*world.get::<SceneId>(a).unwrap(), moth_id))
+        );
+        assert!(world.get::<PrefabPart>(moth).is_some());
+        // The other followed: its bulb up, a moth of its own.
+        let bulb_b = child(&world, b, ids[1]).unwrap();
+        assert_eq!(world.get::<Transform>(bulb_b).unwrap().translation.y, 3.0);
+        assert!(
+            child(&world, b, moth_id).is_some(),
+            "the moth placed in the other lamp"
+        );
+        let text = ed.scene_text(&mut world).unwrap();
+        assert!(!text.contains("[override"), "nothing overridden: {text}");
+        assert!(
+            !text.contains("Moth"),
+            "the moth is the prefab's now: {text}"
+        );
+        // Undone: the scene as before (the file stays).
+        ed.run(&mut world, ed.ids.undo);
+        let bulb_b = child(&world, b, ids[1]).unwrap();
+        assert_eq!(world.get::<Transform>(bulb_b).unwrap().translation.y, 1.0);
+        assert!(child(&world, b, moth_id).is_none());
+        let moth = engine_scene::find_named(&mut world, "Moth").unwrap();
+        assert_eq!(world.get::<SceneId>(moth), Some(&moth_id));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
