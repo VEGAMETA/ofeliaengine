@@ -309,7 +309,7 @@ Last updated: 2026-10-20.
     MIT) as `engine_core::hash::content_hash128` for the keys of textures, panoramas and
     colliders' parts, 55–64 GB/s against FNV-1a's 1.13; FlightHelmet's keys 42 → 1 ms,
     from the cache 31 → 27 ms; the old entries computed once more.
-  - **E4-9, import settings** (#PR, ADR 0108's as-built): `AssetMeta` holds
+  - **E4-9, import settings** (#315, ADR 0108's as-built): `AssetMeta` holds
     `texture.compression` and `model.scale`, written only when not the defaults; the
     player applies them (an image's own `.meta`, or its model's for images inside it);
     the dock's pick is shown in the inspector with its settings, an edit written at once
