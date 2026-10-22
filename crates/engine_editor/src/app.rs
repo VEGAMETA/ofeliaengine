@@ -105,6 +105,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -625,6 +626,8 @@ struct CommandIds {
     /// Prefabs (E5-2): the selection made a prefab's instance, an instance unpacked.
     make_prefab: CommandId,
     unpack_prefab: CommandId,
+    /// An instance's values back to its prefab's (E5-3).
+    revert_prefab: CommandId,
     /// Where Play shows the game (E3-4).
     play_where: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
@@ -720,6 +723,7 @@ fn commands() -> (Commands, CommandIds) {
         find_references: c.register("assets.references", "Assets", "Find References"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
         unpack_prefab: c.register("scene.unpack_prefab", "Scene", "Unpack Prefab"),
+        revert_prefab: c.register("prefab.revert", "Prefab", "Revert Overrides"),
         play_where: c.register("play.where", "Play", "In a Window or in the Viewport"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
@@ -1437,6 +1441,10 @@ struct Editor {
     /// The file the inspector shows instead of the entities, with its import settings
     /// (E4-9): the dock's last pick, until the entity selection changes.
     inspected: Option<crate::import::Inspected>,
+    /// Each outermost prefab instance's prefab placed alone (E5-3), by the instance's id:
+    /// what its entities' overrides are measured against, kept while the prefab's file is
+    /// unchanged.
+    prefab_bases: HashMap<SceneId, CachedBase>,
     /// The listing's thumbnails (ADR 0112), the side of its tiles' pictures (logical
     /// pixels), and where its scroll area was last frame: rectangle and scroll.
     thumbnails: Thumbnails,
@@ -1714,6 +1722,28 @@ fn kind_of(world: &World, e: Entity) -> (&'static str, &'static str) {
     }
 }
 
+/// The outermost prefab instance `e` is in: its root (`e` itself when it is one), found up
+/// the hierarchy through the entities instances placed; none for an entity no instance
+/// placed.
+fn outermost_instance(world: &World, e: Entity) -> Option<Entity> {
+    let mut at = e;
+    loop {
+        let part = world.get::<PrefabPart>(at).is_some();
+        if !part {
+            return world.get::<PrefabInstance>(at).is_some().then_some(at);
+        }
+        at = world.parent(at)?;
+    }
+}
+
+/// A prefab placed alone for an outermost instance ([`Editor::ensure_prefab_base`]), with
+/// its file's size and time when it was: built again once they change.
+struct CachedBase {
+    prefab: AssetId,
+    stamp: (u64, u64),
+    base: Option<engine_scene::PrefabBase>,
+}
+
 /// Whether `e` is off: disabled, or below a disabled entity (the engine's `Inactive`
 /// follows a tick later; the tree shows it at once).
 fn is_off(world: &World, e: Entity) -> bool {
@@ -1912,6 +1942,7 @@ impl Editor {
             dock_focus: false,
             renaming_file: None,
             inspected: None,
+            prefab_bases: HashMap::new(),
             thumbnails,
             tile: DEFAULT_TILE,
             listing: None,
@@ -2300,8 +2331,29 @@ impl Editor {
         }
         match self.active() {
             Some(e) => {
-                self.inspector
-                    .build(world, e, &self.assets, &mut self.defaults);
+                // An entity a prefab instance placed: its fields against the prefab's.
+                let root = outermost_instance(world, e);
+                if let Some(r) = root {
+                    self.ensure_prefab_base(world, r);
+                }
+                let base = root
+                    .and_then(|r| world.get::<SceneId>(r))
+                    .and_then(|id| self.prefab_bases.get(id))
+                    .and_then(|c| c.base.as_ref());
+                let scene_id = world.get::<SceneId>(e).copied();
+                let shared: &World = world;
+                let prefab = base.zip(scene_id).map(|(base, id)| {
+                    move |c: ComponentId| base.component(id, shared.components().name(c)?)
+                });
+                self.inspector.build(
+                    shared,
+                    e,
+                    &self.assets,
+                    &mut self.defaults,
+                    prefab
+                        .as_ref()
+                        .map(|f| f as &dyn Fn(ComponentId) -> Option<NonNull<u8>>),
+                );
                 // The others selected: their shared components, "—" where they differ.
                 let others = &self.selection[..self.selection.len() - 1];
                 self.inspector
@@ -2541,6 +2593,19 @@ impl Editor {
                 .get::<Name>(e)
                 .map_or(kind_of(world, e).1, Name::as_str);
             self.selection_label.push_str(name);
+            // What prefab it is an instance of, or in.
+            let prefab = match (world.get::<PrefabInstance>(e), outermost_instance(world, e)) {
+                (Some(i), _) => Some(("instance of", i.prefab)),
+                (None, Some(r)) => world.get::<PrefabInstance>(r).map(|i| ("in", i.prefab)),
+                (None, None) => None,
+            };
+            if let Some((how, prefab)) = prefab {
+                let path = self
+                    .asset_db
+                    .get(prefab.file)
+                    .map_or_else(|| prefab.file.to_string(), |a| a.path.clone());
+                let _ = write!(self.selection_label, "  ·  {how} {path}");
+            }
             if self.selection.len() > 1 {
                 let _ = write!(
                     self.selection_label,
@@ -3430,17 +3495,40 @@ impl Editor {
                 self.history.commit(world);
             }
             FieldAction::Reset => {
-                let Some(default) = self.defaults.of(world, p.component).filter(|_| p.changed)
-                else {
+                if !p.changed {
                     return;
-                };
-                self.history.begin(&format!("Reset {title}"), None);
+                }
+                // An entity a prefab instance placed goes back to the prefab's value (E5-3);
+                // another to its type's default.
+                let name = world.components().name(p.component).map(str::to_owned);
                 for &t in &targets {
+                    if let Some(r) = outermost_instance(world, t) {
+                        self.ensure_prefab_base(world, r);
+                    }
+                }
+                let froms: Vec<(Entity, Option<NonNull<u8>>)> = targets
+                    .iter()
+                    .map(|&t| (t, self.prefab_value(world, t, name.as_deref())))
+                    .collect();
+                let default = self.defaults.of(world, p.component);
+                self.history.begin(&format!("Reset {title}"), None);
+                for (t, from) in froms {
                     self.history.touch(world, t);
-                    if let Some(ptr) = world.get_raw_mut(t, p.component) {
-                        // SAFETY: the entity's live value of the property's component, and
-                        // the component type's default value.
-                        unsafe { inspector::reset(&p, ptr.as_ptr(), default.as_ptr()) };
+                    let Some(ptr) = world.get_raw_mut(t, p.component) else {
+                        continue;
+                    };
+                    match (from, default) {
+                        // SAFETY: the entity's live value of the property's component, and the
+                        // same component as its prefab places it (alive in the cache).
+                        (Some(from), _) => unsafe {
+                            inspector::revert(&p, ptr.as_ptr(), from.as_ptr());
+                        },
+                        // SAFETY: the entity's live value of the property's component, and the
+                        // component type's default value.
+                        (None, Some(default)) => unsafe {
+                            inspector::reset(&p, ptr.as_ptr(), default.as_ptr());
+                        },
+                        (None, None) => {}
                     }
                 }
                 self.history.commit(world);
@@ -6821,6 +6909,8 @@ impl Editor {
             self.make_prefab(world);
         } else if id == ids.unpack_prefab {
             self.unpack_prefab(world);
+        } else if id == ids.revert_prefab {
+            self.revert_prefab(world);
         } else if id == ids.select_next || id == ids.select_previous {
             self.step(if id == ids.select_next { 1 } else { -1 }, false);
         } else if id == ids.extend_next || id == ids.extend_previous {
@@ -7819,6 +7909,153 @@ impl Editor {
         self.refresh_browser();
         self.say(format!(
             "{name} made the prefab {path}, and this an instance of it"
+        ));
+    }
+
+    /// The prefab of outermost instance `root` placed alone, built (or built again when its
+    /// prefab's file changed) into the cache.
+    fn ensure_prefab_base(&mut self, world: &World, root: Entity) {
+        let (Some(instance), Some(&id)) = (
+            world.get::<PrefabInstance>(root).copied(),
+            world.get::<SceneId>(root),
+        ) else {
+            return;
+        };
+        let prefab = instance.prefab.file;
+        let stamp = self
+            .asset_db
+            .get(prefab)
+            .map_or((0, 0), |e| (e.size, e.modified));
+        if self
+            .prefab_bases
+            .get(&id)
+            .is_some_and(|c| c.prefab == prefab && c.stamp == stamp)
+        {
+            return;
+        }
+        let base = {
+            let prefabs = self.prefabs();
+            engine_scene::PrefabBase::new(
+                &SceneRegistry::from_program(),
+                &prefabs,
+                Some(&self.assets),
+                id,
+                instance.prefab,
+            )
+        };
+        self.prefab_bases.insert(
+            id,
+            CachedBase {
+                prefab,
+                stamp,
+                base,
+            },
+        );
+    }
+
+    /// The value of component `name` on entity `e` as its prefab places it, when a prefab
+    /// instance placed `e` (its base built already: [`Self::ensure_prefab_base`]).
+    fn prefab_value(&self, world: &World, e: Entity, name: Option<&str>) -> Option<NonNull<u8>> {
+        let root = outermost_instance(world, e)?;
+        let base = self
+            .prefab_bases
+            .get(world.get::<SceneId>(root)?)?
+            .base
+            .as_ref()?;
+        base.component(*world.get::<SceneId>(e)?, name?)
+    }
+
+    /// "Prefab: Revert Overrides": the active entity's outermost instance back to its
+    /// prefab's values in one undo step: every field that differs put back, components the
+    /// instance added taken away. Entities and components it removed stay removed (said).
+    fn revert_prefab(&mut self, world: &mut World) {
+        let Some(root) = self.active().and_then(|e| outermost_instance(world, e)) else {
+            self.say(String::from(
+                "Select an instance (or an entity in one) to revert",
+            ));
+            return;
+        };
+        self.ensure_prefab_base(world, root);
+        let Some(&root_id) = world.get::<SceneId>(root) else {
+            return;
+        };
+        if self
+            .prefab_bases
+            .get(&root_id)
+            .is_none_or(|c| c.base.is_none())
+        {
+            self.say(String::from(
+                "Its prefab cannot be read now: nothing to revert to",
+            ));
+            return;
+        }
+        // The instance's entities: its root and what it placed, at any depth.
+        let mut entities = vec![root];
+        let mut stack: Vec<Entity> = world.children(root).collect();
+        while let Some(e) = stack.pop() {
+            if world.get::<PrefabPart>(e).is_some() {
+                entities.push(e);
+                stack.extend(world.children(e));
+            }
+        }
+        let registry = SceneRegistry::from_program();
+        self.history.begin("Revert Overrides", None);
+        let (mut fields, mut added) = (0usize, 0usize);
+        for &e in &entities {
+            self.history.touch(world, e);
+            let Some(&id) = world.get::<SceneId>(e) else {
+                continue;
+            };
+            let Some(base) = self
+                .prefab_bases
+                .get(&root_id)
+                .and_then(|c| c.base.as_ref())
+            else {
+                break;
+            };
+            // Components the instance added (scene types the prefab's entity has not).
+            let ids: Vec<ComponentId> = world
+                .component_ids_of(e)
+                .map_or_else(Vec::new, <[_]>::to_vec);
+            for c in ids {
+                let Some(info) = world.components().type_info(c) else {
+                    continue;
+                };
+                let name = world.components().name(c).unwrap_or_default().to_owned();
+                if registry.contains(info.name) && base.component(id, &name).is_none() {
+                    world.remove_raw(e, c);
+                    added += 1;
+                }
+            }
+            // Every field that differs, back.
+            let mut inspector = Inspector::new();
+            let lookup = |c: ComponentId| base.component(id, world.components().name(c)?);
+            inspector.build(world, e, &self.assets, &mut self.defaults, Some(&lookup));
+            let changed: Vec<Property> = inspector
+                .properties()
+                .iter()
+                .filter(|p| p.changed)
+                .copied()
+                .collect();
+            for p in changed {
+                let name = world.components().name(p.component).map(str::to_owned);
+                let Some(from) = name.and_then(|n| base.component(id, &n)) else {
+                    continue;
+                };
+                if let Some(ptr) = world.get_raw_mut(e, p.component) {
+                    // SAFETY: the entity's live value of the property's component, and the
+                    // same component as the prefab places it.
+                    if unsafe { inspector::revert(&p, ptr.as_ptr(), from.as_ptr()) } {
+                        fields += 1;
+                    }
+                }
+            }
+        }
+        self.history.commit(world);
+        self.say(format!(
+            "Reverted {fields} value{} and {added} added component{} to the prefab's",
+            if fields == 1 { "" } else { "s" },
+            if added == 1 { "" } else { "s" }
         ));
     }
 
@@ -12156,6 +12393,114 @@ mod tests {
                 .unwrap()
                 .0
                 .contains("cannot be placed in itself")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The shown field `name` of component `component` in the inspector: its section and
+    /// its place in it, and whether it is marked changed.
+    fn shown_field(ed: &Editor, component: &str, name: &str) -> Option<(usize, usize, bool)> {
+        let props = ed.inspector.properties();
+        for (section, &(start, end)) in ed.shown_sections.iter().enumerate() {
+            for (field, &i) in ed.shown[start..end].iter().enumerate() {
+                let p = &props[i];
+                let title = ed
+                    .inspector
+                    .sections()
+                    .iter()
+                    .find(|s| s.properties.contains(&i))
+                    .map_or("", |s| s.title);
+                if title == component && ed.inspector.name(p) == name {
+                    return Some((section, field, p.changed));
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn an_instances_fields_are_measured_against_its_prefab() {
+        let (dir, mut world, mut ed, _) = drop_project("overrides");
+        let red = ed.asset_db.find("props/red.material").unwrap().id;
+        // A lamp whose bulb sits a meter up, with the built-in material.
+        let (lamp, pole, bulb) = (AssetId::new(), SceneId::new(), SceneId::new());
+        std::fs::write(
+            dir.join("props/lamp.scene"),
+            format!(
+                "[scene version=4 id={lamp}]\n\n[entity {pole}]\nName = \"Lamp\"\n\
+                 Transform.rotation = (0, 0, 0, 1)\nTransform.translation = (0, 0, 0)\n\
+                 Transform.scale = (1, 1, 1)\n\n[entity {bulb}]\nparent = {pole}\n\
+                 Model.mesh = asset(\"builtin#sphere\", {mesh})\n\
+                 Model.material = asset(\"builtin#default\", {material})\n\
+                 Name = \"Bulb\"\nTransform.rotation = (0, 0, 0, 1)\n\
+                 Transform.translation = (0, 1, 0)\nTransform.scale = (1, 1, 1)\n",
+                mesh = builtin::SPHERE.file,
+                material = builtin::MATERIAL.file,
+            ),
+        )
+        .unwrap();
+        ed.asset_db.scan();
+        ed.refresh_browser();
+        let drag = AssetDrag {
+            asset: lamp,
+            kind: engine_scene::AssetKind::Scene,
+            path: String::from("props/lamp.scene"),
+            name: String::from("lamp.scene"),
+            plan: None,
+            refused: None,
+            placed: None,
+            selection: Vec::new(),
+            over: DropTarget::Tree,
+        };
+        ed.drop_asset(&mut world, drag);
+        let root = engine_scene::find_named(&mut world, "Lamp").unwrap();
+        let bulb_e = engine_scene::find_named(&mut world, "Bulb").unwrap();
+        // As the prefab places it: nothing an override, its name neither.
+        ed.select_only(bulb_e);
+        ed.update(&mut world);
+        assert!(
+            ed.selection_label.contains("in props/lamp.scene"),
+            "{}",
+            ed.selection_label
+        );
+        let (_, _, moved) = shown_field(&ed, "Transform", "translation").unwrap();
+        assert!(!moved, "the prefab's place, not the default's");
+        assert!(!shown_field(&ed, "Name", "value").is_some_and(|f| f.2));
+        // Moved and given another material: both overrides.
+        world.get_mut::<Transform>(bulb_e).unwrap().translation = Vec3::new(0.0, 2.0, 0.0);
+        world.get_mut::<Model>(bulb_e).unwrap().material = AssetRef::file(red);
+        ed.update(&mut world);
+        let (section, field, moved) = shown_field(&ed, "Transform", "translation").unwrap();
+        assert!(moved);
+        assert!(shown_field(&ed, "Model", "material").unwrap().2);
+        // Reset puts the prefab's place back (a meter up), not the default's.
+        ed.edit(
+            &mut world,
+            FieldEvent {
+                section,
+                field,
+                action: FieldAction::Reset,
+            },
+        );
+        assert_eq!(
+            world.get::<Transform>(bulb_e).unwrap().translation,
+            Vec3::new(0.0, 1.0, 0.0)
+        );
+        // Revert Overrides on the instance: the material back too, one step.
+        ed.select_only(root);
+        ed.update(&mut world);
+        assert!(ed.selection_label.contains("instance of props/lamp.scene"));
+        let steps = ed.history.steps().count();
+        ed.run(&mut world, ed.ids.revert_prefab);
+        assert_eq!(
+            world.get::<Model>(bulb_e).unwrap().material,
+            builtin::MATERIAL
+        );
+        assert_eq!(ed.history.steps().count(), steps + 1);
+        let text = ed.scene_text(&mut world).unwrap();
+        assert!(
+            !text.contains("[override"),
+            "nothing left to override: {text}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

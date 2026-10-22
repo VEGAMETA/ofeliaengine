@@ -331,8 +331,12 @@ Last updated: 2026-10-20.
     - "Make Prefab" writes the selection's subtree to a scene of its own and makes it an
       instance of it (the root keeps its id, the rest derived; `History::change_ids`
       undoes it with the references); "Unpack Prefab"; the tree names instances.
-  - **Next:** E5-3, overrides in the inspector: marked fields, revert, apply to the
-    prefab; the instance's header listing its overrides.
+  - **E5-3, overrides in the inspector** (#PR, ADR 0108's as-built): an instance's
+    entities measured against their prefab (`PrefabBase`, cached per outermost instance
+    until the prefab's file changes), names and assets too; ↺ and Backspace put the
+    prefab's value back; "Prefab: Revert Overrides"; the title names the prefab.
+  - **Next:** E5-4, prefabs followed live: applying overrides to the prefab, the open
+    scene's instances following a prefab written anew, the prefab opened in its own tab.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
