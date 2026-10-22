@@ -304,10 +304,8 @@ fn a_component_is_added_by_name_at_its_default_with_what_it_requires() {
     assert!(r.insert_default(&mut w, e, "SceneTestGauge"));
     let id = w.components().id_by_name("script::SceneTestGauge").unwrap();
     // SAFETY: the gauge is an f32.
-    assert_eq!(
-        unsafe { w.get_raw(e, id).unwrap().cast::<f32>().read() },
-        0.5
-    );
+    let level = unsafe { w.get_raw(e, id).unwrap().cast::<f32>().read() };
+    assert_eq!(level, 0.5);
     assert!(!r.insert_default(&mut w, e, "Nothing"));
     let gone = w.spawn(());
     w.despawn(gone);
