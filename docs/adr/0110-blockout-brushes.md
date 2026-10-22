@@ -607,3 +607,67 @@ Proposed (question 3):
 - **Checked:** three blocks drawn at four frames a tick, one edited every frame (taller,
   moved, grown into another): each block shows in every frame; before the fix the edited
   one was gone from the first.
+
+## Addendum (2026-10-22, the owner's request): brushes inside brushes, Godot's rule
+
+**Context.** The owner asked for blockout inside blockout, not every brush under one parent.
+Until now a group's brushes acted on each other in the tree's order, flat: a brush below
+another was only a later brush. A window cut through a wall also cut the floor it reached
+into, and the wall could not be moved or duplicated with its window.
+
+**Options.**
+- **a) Godot's rule:** a CSG node's children are combined into it first, and what they make
+  of it acts in its place with its own operation. A window below a wall cuts that wall
+  only; below a cut, an add makes the cut bigger and a cut makes it smaller.
+- **b) Scoped cuts only:** a cut below a brush cuts only it, and nothing else changes.
+  Simpler to explain, but it is a rule of its own that Godot users would not expect, and
+  it leaves adds and intersects below a brush meaning what they meant flat.
+- **c) Nesting as organisation only,** evaluated flat as before. Nothing to build, but the
+  window still cuts the floor.
+
+**Decision: a**, the rule the blockout was asked to follow from the start ("as in Godot").
+- **`engine_brush::Brush::made`:** what a brush's children made of it, convex solids whose
+  faces keep their own brushes' places in the group. When set, they are its solids instead
+  of its parts'; empty, nothing is left of it. A room keeps its inside, so it still opens
+  into the other rooms.
+- **`csg::combine(brushes, owners, planes)`:** the first brush added whatever its op, then
+  the others in order, through `evaluate`'s own loop; every face is owned by the group's
+  numbering.
+- **`Group`** takes such brushes as any other. A brush combined into another is an empty
+  brush in its own place. Its polygons are found where its faces live: the group keeps,
+  for each brush, the brush whose pieces its faces were last seen on. The changed brushes
+  are marked by their faces' owners, as before.
+- **The player** (`blockout.rs`) finds each brush's host, its nearest brush ancestor in
+  the group. It makes the hosts bottom up from the tree's end and keeps what each was made
+  of: an edit makes again only the hosts above the brushes it touched. A change of host
+  rebuilds the group, as a change of order does.
+- **The editor:**
+  - a shape added with a brush active goes inside it (Godot: a child of the selection);
+  - a cut drawn on a brush's surface goes inside the adding brush that surface belongs
+    to. A hole's side is the cut's face, so its host is taken, or the new cut would shrink
+    the hole;
+  - drawn adds still go to the group;
+  - the tree's drag (ADR 0107's as-built) moves brushes into others and out.
+
+**Measured** (`cargo bench -p engine_brush --bench csg`, ref-1, one thread): the 400
+rooms' 2,001 brushes, each room's inside, door, window and pillar below its box.
+
+| | flat | nested |
+|---|---:|---:|
+| from nothing (tiles kept; nested: the 400 rooms combined first) | 122 ms | 136 ms |
+| a door dragged a millimetre, the changed polygons gathered | 0.59 ms | 0.63 ms (its room combined again, then 1 brush and 79 tiles redone) |
+
+**Tests:**
+- `combine` against flat evaluation: a window below a wall leaves the floor whole, and
+  sideways it cuts it;
+- a cut below a cut makes a bridge;
+- a group with a combined brush finds the absorbed brush's polygons, and ends where a
+  rebuild does after the window moves;
+- the player's hosts and its reuse of what hosts were made of;
+- the editor's add and draw placements.
+
+**Consequences.**
+- **Scenes already saved keep their meaning** where no brush has brush children. A scene
+  that put brushes below brushes by hand now evaluates them Godot's way.
+- **A combined brush's collision flag covers its children's volume**: the pieces belong to
+  it.

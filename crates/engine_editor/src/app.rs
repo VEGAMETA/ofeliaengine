@@ -1767,6 +1767,8 @@ struct Editor {
     /// A brush being drawn (B, Shift+B), and its brush once it has a size, as last made.
     draw: Option<Draw>,
     drawn: Option<(Entity, Made)>,
+    /// The entity whose surface the brush being drawn was started on.
+    draw_on: Option<Entity>,
     /// What the overlay shows of it this frame: lines (the mark, the box's edges) and
     /// sizes on the screen; the edges and sizes in the world, kept for their storage.
     draw_lines: Vec<(Vec2, Vec2)>,
@@ -2361,6 +2363,7 @@ impl Editor {
             nav_pool: None,
             draw: None,
             drawn: None,
+            draw_on: None,
             draw_lines: Vec::new(),
             draw_labels: Vec::new(),
             draw_edges: Vec::new(),
@@ -6516,8 +6519,9 @@ impl Editor {
     }
 
     /// Adds an entity of the add menu's kind `what` where the camera looks (on the grid),
-    /// and selects it. A brush goes to the end of the selection's blockout group, or of the
-    /// scene's first, or of a new "Blockout" group (ADR 0110).
+    /// and selects it. A brush goes inside the active brush (its last child: it acts on that
+    /// one first, ADR 0110's nesting), else to the end of the selection's blockout group, or
+    /// of the scene's first, or of a new "Blockout" group (ADR 0110).
     fn add(&mut self, world: &mut World, what: usize) {
         self.add_open = false;
         self.add_group = None;
@@ -6526,16 +6530,22 @@ impl Editor {
         let kind = ADD[what].0;
         self.history.begin(&format!("Add {kind}"), None);
         let e = if what >= FIRST_BRUSH {
-            let group = self.brush_group_or_new(world);
-            // Where the camera looks, in the group's space.
-            let inverse = world
-                .get::<GlobalTransform>(group)
-                .map_or(Affine3A::IDENTITY, |g| g.0.inverse());
-            let local = inverse.transform_point3(at);
-            let name = self.sibling_name(world, Some(group), kind, None);
+            let host = self
+                .active()
+                .filter(|&b| world.get::<Brush>(b).is_some() && baked_group(world, b).is_none());
+            let parent = match host {
+                Some(b) => {
+                    self.history.touch(world, b);
+                    b
+                }
+                None => self.brush_group_or_new(world),
+            };
+            // Where the camera looks, in its parent's space.
+            let local = world_affine(world, parent).inverse().transform_point3(at);
+            let name = self.sibling_name(world, Some(parent), kind, None);
             let e = spawn(world, what, &name, local);
-            let _ = world.set_parent(e, Some(group));
-            self.collapsed.remove(&group);
+            let _ = world.set_parent(e, Some(parent));
+            self.collapsed.remove(&parent);
             e
         } else {
             let name = self.sibling_name(world, None, kind, None);
@@ -6715,7 +6725,12 @@ impl Editor {
                 edges: &self.land_edges,
                 reach: 8.0 * self.scale.max(0.5),
             };
+            let was_aiming = d.stage == Stage::Aim;
             make |= d.pointer(&pointer);
+            // The first corner placed: on whose surface.
+            if was_aiming && d.stage != Stage::Aim {
+                self.draw_on = self.hovered.and_then(|(_, e)| e);
+            }
             // The surface under the pointer for the mark, a few frames on.
             if d.stage == Stage::Aim && over {
                 let local = (at - Vec2::new(rect[0] as f32, rect[1] as f32)).max(Vec2::ZERO);
@@ -9259,25 +9274,36 @@ impl Editor {
                         e
                     }
                     None => {
-                        let group = self.brush_group_or_new(world);
-                        let name = self.sibling_name(world, Some(group), &kind, None);
+                        // A cut goes inside the solid brush it was drawn on, so it cuts
+                        // that one only (ADR 0110's nesting); a brush to its group.
+                        let host = (m.op == BrushOp::Cut)
+                            .then(|| self.draw_on.and_then(|e| solid_brush(world, e)))
+                            .flatten()
+                            .filter(|&b| baked_group(world, b).is_none());
+                        let parent = match host {
+                            Some(b) => {
+                                self.history.touch(world, b);
+                                b
+                            }
+                            None => self.brush_group_or_new(world),
+                        };
+                        let name = self.sibling_name(world, Some(parent), &kind, None);
                         let e = world.spawn((
                             SceneId::new(),
                             Name::new(&name),
                             Transform::IDENTITY,
                             GlobalTransform::default(),
                         ));
-                        let _ = world.set_parent(e, Some(group));
+                        let _ = world.set_parent(e, Some(parent));
                         self.history.touch_new(world, e);
-                        self.collapsed.remove(&group);
+                        self.collapsed.remove(&parent);
                         e
                     }
                 };
-                // Its place in its group's space.
+                // Its place in its parent's space.
                 let inverse = world
                     .parent(e)
-                    .and_then(|g| world.get::<GlobalTransform>(g))
-                    .map_or(Affine3A::IDENTITY, |g| g.0.inverse());
+                    .map_or(Affine3A::IDENTITY, |p| world_affine(world, p).inverse());
                 let local = inverse * Affine3A::from_rotation_translation(m.rotation, m.at);
                 let (scale, rotation, translation) = local.to_scale_rotation_translation();
                 let mut brush = Brush::new(m.shape.shape, m.size)
@@ -14059,6 +14085,20 @@ fn scene_parent(world: &World, e: Entity) -> Option<Entity> {
         .filter(|&p| world.get::<SceneId>(p).is_some())
 }
 
+/// The solid brush (an adding one) `e` is, or is below nearest among the brushes: what a
+/// cut drawn on `e`'s surface goes inside. A cut's surface (a hole's walls) is its host's.
+fn solid_brush(world: &World, e: Entity) -> Option<Entity> {
+    let mut at = Some(e);
+    while let Some(x) = at {
+        let brush = world.get::<Brush>(x)?;
+        if brush.op == BrushOp::Add {
+            return Some(x);
+        }
+        at = world.parent(x);
+    }
+    None
+}
+
 /// Where `e` is in the world, from the transforms up its hierarchy (the propagated one may
 /// be a frame old).
 fn world_affine(world: &World, e: Entity) -> Affine3A {
@@ -17501,11 +17541,19 @@ mod tests {
         let group = world.parent(torus).unwrap();
         assert!(world.get::<BrushGroup>(group).is_some());
         assert_eq!(world.get::<Brush>(torus).unwrap().shape, BrushShape::Torus);
-        // The next brush, the torus selected, joins its group; a cut too.
+        // The next brush, the torus selected, goes inside it: it acts on the torus first
+        // (ADR 0110's nesting).
         ed.add(&mut world, 13);
         let cone = ed.active().unwrap();
-        assert_eq!(world.parent(cone), Some(group));
+        assert_eq!(world.parent(cone), Some(torus));
         assert_eq!(world.get::<Brush>(cone).unwrap().shape, BrushShape::Cone);
+        // The group selected: a brush joins it, after the torus.
+        ed.select_only(group);
+        ed.add(&mut world, FIRST_BRUSH);
+        let next = ed.active().unwrap();
+        assert_eq!(world.parent(next), Some(group));
+        assert_eq!(world.children(group).collect::<Vec<_>>(), [torus, next]);
+        ed.run(&mut world, ed.ids.undo);
         // The tree names their kinds: a brush, a cut.
         world.get_mut::<Brush>(cone).unwrap().op = BrushOp::Cut;
         assert_eq!(kind_of(&world, cone).1, "Cut");
@@ -17653,6 +17701,67 @@ mod tests {
             "{}",
             t.translation
         );
+    }
+
+    #[test]
+    fn a_cut_drawn_on_a_brush_goes_inside_it_and_one_drawn_on_a_hole_into_its_wall() {
+        let mut world = World::new();
+        let mut ed = draw_editor("draw-nested", &mut world);
+        ed.add(&mut world, FIRST_BRUSH);
+        let wall = ed.active().unwrap();
+        ed.select_only(world.parent(wall).unwrap());
+        // A cut drawn with the wall under the pointer when its first corner is placed.
+        let draw_cut = |ed: &mut Editor, world: &mut World, under: Entity| {
+            chord(ed, world, &[SHIFT, B]);
+            let at = on_view(ed, Vec3::new(-0.5, 0.0, 1.0));
+            ed.surfaced = Some(engine_render::pick::SurfaceResult {
+                frame: 0,
+                request: SurfaceRequest {
+                    x: 0,
+                    y: 0,
+                    transparent: false,
+                },
+                hit: Some(hit(Vec3::new(-0.52, 0.01, 1.0), Vec3::Z)),
+            });
+            mouse(ed, at, None);
+            ed.update(world);
+            ed.hovered = Some((
+                PickRequest {
+                    x: 0,
+                    y: 0,
+                    transparent: false,
+                },
+                Some(under),
+            ));
+            press_release(ed, world, at);
+            let up = on_view(ed, Vec3::new(-1.0, 1.0, 1.0));
+            mouse(ed, up, None);
+            type_chars(ed, "1");
+            ed.update(world);
+            chord(ed, world, &[TAB]);
+            type_chars(ed, "2.1");
+            ed.update(world);
+            chord(ed, world, &[ENTER]);
+            type_chars(ed, "0.3");
+            ed.update(world);
+            chord(ed, world, &[ENTER]);
+            ed.active().unwrap()
+        };
+        let door = draw_cut(&mut ed, &mut world, wall);
+        assert_eq!(
+            world.parent(door),
+            Some(wall),
+            "inside the wall: it cuts that only"
+        );
+        assert_eq!(world.get::<Brush>(door).unwrap().op, BrushOp::Cut);
+        // The door's hole under the pointer (its walls are the door's): the next cut goes
+        // inside the wall too, not inside the door.
+        let other = draw_cut(&mut ed, &mut world, door);
+        assert_eq!(world.parent(other), Some(wall));
+        // Each is one step; undone, the second goes and the wall stays as it was.
+        ed.run(&mut world, ed.ids.undo);
+        assert!(!world.contains(other));
+        assert_eq!(world.parent(door), Some(wall));
     }
 
     #[test]

@@ -19,6 +19,10 @@
 //! tree or placement within the group changed are evaluated again, and only the brushes
 //! whose polygons that changed get new meshes. A brush with no group acts on nothing but
 //! itself.
+//!
+//! A brush's child brushes act on it first (ADR 0110's nesting, Godot's rule): they are
+//! combined into it in the tree's order ([`engine_brush::combine`]), and what they make of
+//! it acts in its place with its op. A window cut below a wall cuts that wall only.
 
 use engine_brush::{Group, Plane, Shape, Triangles, triangles};
 use engine_core::math::{Affine3A, DMat3, DVec3, Mat3, Vec3};
@@ -296,6 +300,12 @@ struct GroupState {
     group: Group,
     entities: Vec<Entity>,
     inputs: Vec<Input>,
+    /// For each brush, the place of the brush it is below, nearest: its host.
+    hosts: Vec<Option<usize>>,
+    /// Each brush as its own planes make it, before its children act on it, and what a
+    /// host's children made of it.
+    own: Vec<engine_brush::Brush>,
+    made: Vec<Option<Vec<engine_brush::Solid>>>,
     /// Changes whenever its pieces may have: what colliders made from it follow.
     epoch: u64,
     /// Baked: its brushes' meshes are not drawn.
@@ -612,8 +622,9 @@ impl Blockout {
                 entities.push(key);
             }
             let inputs: Vec<Input> = entities.iter().map(|&e| input(world, key, e)).collect();
+            let hosts = hosts_of(world, &entities);
             let state = self.groups.entry(key).or_default();
-            let mut redone = state.entities != entities;
+            let mut redone = state.entities != entities || state.hosts != hosts;
             if redone {
                 // Brushes came, went or moved in the tree: the group from nothing.
                 for e in &state.entities {
@@ -623,23 +634,42 @@ impl Blockout {
                     }
                 }
                 state.group = Group::new();
-                let brushes: Vec<engine_brush::Brush> = inputs
+                let own: Vec<engine_brush::Brush> = inputs
                     .iter()
                     .map(|i| to_brush(i, state.group.planes_mut()))
                     .collect();
+                let (brushes, made) = operands(&own, &hosts, None, state.group.planes());
                 state.group.rebuild(brushes);
                 for (i, &e) in entities.iter().enumerate() {
                     self.places.insert(e, (key, i));
                 }
                 state.entities = entities;
                 state.inputs = inputs;
+                state.hosts = hosts;
+                state.own = own;
+                state.made = made;
             } else {
+                let mut touched = vec![false; inputs.len()];
                 for (i, input) in inputs.into_iter().enumerate() {
                     if input != state.inputs[i] {
-                        let b = to_brush(&input, state.group.planes_mut());
-                        state.group.set(i, b);
+                        state.own[i] = to_brush(&input, state.group.planes_mut());
                         state.inputs[i] = input;
-                        redone = true;
+                        touched[i] = true;
+                    }
+                }
+                if touched.contains(&true) {
+                    let (brushes, made) = operands(
+                        &state.own,
+                        &state.hosts,
+                        Some((&touched, &state.made)),
+                        state.group.planes(),
+                    );
+                    state.made = made;
+                    for (i, b) in brushes.into_iter().enumerate() {
+                        if state.group.brushes()[i] != b {
+                            state.group.set(i, b);
+                            redone = true;
+                        }
                     }
                 }
             }
@@ -824,6 +854,98 @@ fn collect(world: &World, e: Entity, out: &mut Vec<Entity>) {
     }
 }
 
+/// For each of a group's brushes `entities` (in the tree's order), the place among them of
+/// the brush it is below, nearest: its children act on that one first.
+fn hosts_of(world: &World, entities: &[Entity]) -> Vec<Option<usize>> {
+    let place: HashMap<Entity, usize> = entities.iter().enumerate().map(|(i, &e)| (e, i)).collect();
+    entities
+        .iter()
+        .map(|&e| {
+            let mut at = world.parent(e);
+            while let Some(p) = at {
+                if world.get::<BrushGroup>(p).is_some() {
+                    return None;
+                }
+                if let Some(&k) = place.get(&p) {
+                    return Some(k);
+                }
+                at = world.parent(p);
+            }
+            None
+        })
+        .collect()
+}
+
+/// What each host's children made of it, as [`operands`] keeps it.
+type Made = Vec<Option<Vec<engine_brush::Solid>>>;
+
+/// A group's brushes as its evaluation takes them (ADR 0110's nesting), and what each
+/// host's children made of it: a brush with child brushes is what they make of it
+/// ([`engine_brush::combine`], its op kept), each child, combined into it, an empty brush
+/// in its own place. `own` are the brushes' own; with `reuse` (the brushes touched, what the
+/// hosts were made of before), a host above none of them keeps what it was made of.
+fn operands(
+    own: &[engine_brush::Brush],
+    hosts: &[Option<usize>],
+    reuse: Option<(&[bool], &Made)>,
+    planes: &engine_brush::Planes,
+) -> (Vec<engine_brush::Brush>, Made) {
+    let n = own.len();
+    let mut kids: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, &h) in hosts.iter().enumerate() {
+        if let Some(h) = h {
+            kids[h].push(i);
+        }
+    }
+    // What changed, up to the hosts it is below.
+    let mut stale = vec![reuse.is_none(); n];
+    if let Some((touched, _)) = reuse {
+        for (i, &t) in touched.iter().enumerate() {
+            let mut at = t.then_some(i);
+            while let Some(k) = at {
+                stale[k] = true;
+                at = hosts[k];
+            }
+        }
+    }
+    let mut made: Made = vec![None; n];
+    // A host's children come after it in the tree's order: from the last, each host's
+    // children are made before it.
+    for i in (0..n).rev() {
+        if kids[i].is_empty() {
+            continue;
+        }
+        if !stale[i]
+            && let Some((_, before)) = reuse
+        {
+            made[i].clone_from(&before[i]);
+            continue;
+        }
+        let mut level = Vec::with_capacity(kids[i].len() + 1);
+        let mut owners = Vec::with_capacity(kids[i].len() + 1);
+        level.push(own[i].clone());
+        owners.push(i as u32);
+        for &k in &kids[i] {
+            level.push(engine_brush::Brush {
+                made: made[k].clone(),
+                ..own[k].clone()
+            });
+            owners.push(k as u32);
+        }
+        made[i] = Some(engine_brush::combine(&level, &owners, planes).0);
+    }
+    let operands = (0..n)
+        .map(|i| match hosts[i] {
+            Some(_) => engine_brush::Brush::default(),
+            None => engine_brush::Brush {
+                made: made[i].clone(),
+                ..own[i].clone()
+            },
+        })
+        .collect();
+    (operands, made)
+}
+
 /// What makes brush `e`'s planes in group `group`: its component, and its transforms up to
 /// the group, in millimetres.
 fn input(world: &World, group: Entity, e: Entity) -> Input {
@@ -875,6 +997,7 @@ fn to_brush(input: &Input, planes: &mut engine_brush::Planes) -> engine_brush::B
         },
         parts,
         inside,
+        made: None,
     }
 }
 
@@ -974,5 +1097,73 @@ mod tests {
         let b = to_brush(&input, &mut planes);
         assert!(b.is_room());
         assert_eq!((b.parts.len(), b.inside.len()), (1, 1));
+    }
+
+    /// The volume the group's surface encloses, in cubic grid units.
+    fn volume(g: &Group) -> i64 {
+        let mut v = 0.0;
+        g.for_each_polygon(|_, p| {
+            let c: Vec<engine_core::math::DVec3> = p.corners.iter().map(|c| c.to_f64()).collect();
+            for i in 1..c.len() - 1 {
+                v += c[0].dot(c[i].cross(c[i + 1])) / 6.0;
+            }
+        });
+        v.round() as i64
+    }
+
+    #[test]
+    fn a_window_below_a_wall_cuts_that_wall_and_not_the_floor() {
+        let mut world = World::new();
+        let group = world.spawn((Transform::IDENTITY, BrushGroup::default()));
+        let brush = |world: &mut World, parent: Entity, at: Vec3, b: Brush| {
+            let e = world.spawn((Transform::from_translation(at), b));
+            world.set_parent(e, Some(parent)).unwrap();
+            e
+        };
+        let box_of = |x: f32, y: f32, z: f32| Brush::new(BrushShape::Box, Vec3::new(x, y, z));
+        // Boxes stand on their base, centred across. A floor 10 × 1 × 10 m; a wall
+        // 2 × 4 × 1 m on it; a window 1 × 2 × 1.2 m below the wall, from 0.5 m down in the
+        // floor to 1.5 m up the wall.
+        let _floor = brush(
+            &mut world,
+            group,
+            Vec3::new(0.0, -1.0, 0.0),
+            box_of(10.0, 1.0, 10.0),
+        );
+        let wall = brush(&mut world, group, Vec3::ZERO, box_of(2.0, 4.0, 1.0));
+        let window = brush(
+            &mut world,
+            wall,
+            Vec3::new(0.0, -0.5, 0.0),
+            box_of(1.0, 2.0, 1.2).with_op(BrushOp::Cut),
+        );
+        let evaluate = |world: &World| {
+            let mut entities = Vec::new();
+            collect(world, group, &mut entities);
+            let inputs: Vec<Input> = entities.iter().map(|&e| input(world, group, e)).collect();
+            let hosts = hosts_of(world, &entities);
+            let mut g = Group::new();
+            let own: Vec<engine_brush::Brush> =
+                inputs.iter().map(|i| to_brush(i, g.planes_mut())).collect();
+            let (brushes, made) = operands(&own, &hosts, None, g.planes());
+            g.rebuild(brushes);
+            (g, hosts, own, made)
+        };
+        let m3 = |v: f64| (v * 1e9).round() as i64;
+        let (g, hosts, own, made) = evaluate(&world);
+        assert_eq!(hosts, [None, None, Some(1)]);
+        // The floor whole; the wall less the window's 1 × 1.5 × 1 m inside it.
+        assert_eq!(volume(&g), m3(100.0 + 8.0 - 1.5));
+        // Unchanged brushes reuse what their hosts were made of.
+        let touched = [true, false, false];
+        let (again, _) = operands(&own, &hosts, Some((&touched, &made)), g.planes());
+        assert_eq!(again[1].made, made[1]);
+        // The window a sibling of the wall, where it is in the world: it cuts the floor too
+        // (1 × 0.5 × 1.2 m more).
+        world.set_parent(window, Some(group)).unwrap();
+        world.get_mut::<Transform>(window).unwrap().translation = Vec3::new(0.0, -0.5, 0.0);
+        let (g, hosts, _, _) = evaluate(&world);
+        assert_eq!(hosts, [None, None, None]);
+        assert_eq!(volume(&g), m3(100.0 + 8.0 - 1.5 - 0.6));
     }
 }

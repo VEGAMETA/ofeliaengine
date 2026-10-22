@@ -7,7 +7,8 @@
 //! - [`solid`]: convex solids split by planes, one cut out of another, one clipped to
 //!   another;
 //! - [`csg`]: a group of brushes evaluated in order into convex pieces (the colliders)
-//!   and the surface left (the meshes, the navigation's input);
+//!   and the surface left (the meshes, the navigation's input); a brush's children
+//!   combined into it first (Godot's nesting);
 //! - [`group`]: a group kept evaluated through edits, each redoing only what it touches;
 //! - [`shape`]: the shapes brushes start as (box, wedge, stairs, cylinder, sphere);
 //! - [`mesh`]: triangles of a brush's polygons, grown so T-junctions show no cracks.
@@ -25,7 +26,7 @@ pub mod polygon;
 pub mod shape;
 pub mod solid;
 
-pub use csg::{Brush, Evaluated, Op, Piece, evaluate};
+pub use csg::{Brush, Evaluated, Op, Piece, combine, evaluate};
 pub use exact::{Plane, Point};
 pub use group::{Group, Redone};
 pub use mesh::{Triangles, triangles};

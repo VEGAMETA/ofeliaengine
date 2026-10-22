@@ -21,6 +21,14 @@ every machine.
   order, each on what the brushes before it made. A cut cuts what is above it in the tree,
   not what comes after it. Brushes of different groups do not touch each other: make a
   building one group, a door that will move another.
+- **A brush's child brushes act on it first** (Godot's rule). It is added, then its
+  children act on it in order, and what they make of it then acts where it stands, with
+  its own op:
+  - a window cut below a wall cuts that wall only, not the floor it reaches into, and
+    moves and is duplicated with the wall;
+  - a cut beside the wall in the tree cuts everything above it, as before;
+  - below a cut, an adding brush makes the cut bigger and a cut makes it smaller;
+  - a room keeps its inside: it still opens into the other rooms.
 - The faces a cut makes belong to the cut, so selecting a doorway's side selects the doorway.
 - A brush that is off (`Disabled`, or below a disabled entity; the eye in the editor's tree)
   acts on nothing: a cut turned off leaves its wall whole, a group turned off shows nothing.
@@ -120,6 +128,9 @@ steps are low enough.
 - Rooms cost more, each cut by the insides that reach it: 400 rooms joined by 380
   corridors take 0.12 s from nothing, and dragging one redoes it and the two it opens into
   in about 1.3 ms.
+- Nesting costs little: the same 2,000 brushes with each room's cuts and pillar below its
+  box take 136 ms from nothing (against 122 ms), and a door dragged there 0.63 ms (against
+  0.59 ms).
 
 ## In the editor
 
@@ -127,8 +138,14 @@ steps are low enough.
 first corner, one for the base, one for the height, or the sizes typed (`editor.md`,
 "Drawing brushes"). A doorway: Shift+B over the wall, a click, `1` Tab `2.1` Enter `0.3`
 Enter. Ctrl+H while drawing makes it a room: what you draw is its inside. **+** →
-**Blockout** adds each shape where the camera looks. Both go into the selection's group (or
-the scene's first, or a new "Blockout" group), at its end. **Ctrl+H** makes the selected
+**Blockout** adds each shape where the camera looks. Where they go:
+- a shape added with a brush selected goes inside it (its last child);
+- a cut drawn on a brush's surface goes inside that brush, so it cuts that one only.
+  Drawn on a hole's side, it goes inside the brush the hole is in;
+- the rest goes into the selection's group (or the scene's first, or a new "Blockout"
+  group), at its end.
+
+Drag rows in the tree to move a brush into another or out of it (`editor.md`). **Ctrl+H** makes the selected
 brushes rooms with walls 0.2 m thick, or solid again. While drawing, corners land on other
 brushes' corners and edges near the pointer, so brushes meet exactly; the active brush's
 side handles size it afterwards, the opposite side staying (`editor.md`, "Sizing a brush by

@@ -319,6 +319,7 @@ mod tests {
                 })
                 .collect(),
             inside: Vec::new(),
+            made: None,
         };
         let e = evaluate(&[brush], &table);
         assert!(e.invalid.is_empty(), "{:?}", e.invalid);
@@ -463,6 +464,7 @@ mod tests {
                 .map(|p| p.iter().map(|q| table.add(*q)).collect())
                 .collect(),
             inside: Vec::new(),
+            made: None,
         };
         let e = evaluate(&[brush], &table);
         let shown = e

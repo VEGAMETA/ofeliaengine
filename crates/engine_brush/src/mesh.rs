@@ -132,6 +132,7 @@ mod tests {
                 box_planes([0, 0, 0], [1000, 2000, 3000], &mut planes).unwrap_or_else(|| panic!()),
             ],
             inside: Vec::new(),
+            made: None,
         };
         let e = evaluate(&[b], &planes);
         let mut t = Triangles::default();

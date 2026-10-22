@@ -449,15 +449,17 @@ Last updated: 2026-10-22.
     world placement kept (Alt: local), one undo step; an instance's parts stay.
   - **ADR 0114 accepted** (the owner, 2026-10-22: "да" to all seven recommendations): E7
     can start.
+  - **Brushes inside brushes** (#341, ADR 0110's addendum; the owner's request): Godot's
+    rule, a brush's children act on it first and what they make of it acts in its place
+    (`Brush::made`, `csg::combine`). A window below a wall cuts that wall only. A shape
+    added with a brush active goes inside it, a cut drawn on a brush into it. Nested 400
+    rooms: a door dragged 0.63 ms (flat 0.59).
   - **Next, the owner's requests of 2026-10-22, in this order:**
-    1. blockout inside blockout: a new brush inside the selected brush, and Godot's rule
-       (a brush's children act on it first, its result then on the group), ADR 0110's
-       addendum, the re-evaluation measured;
-    2. a code mode: a code tab shows the open files (scripts, Slang modules, other text
+    1. a code mode: a code tab shows the open files (scripts, Slang modules, other text
        files) and the file's outline on the left, the inspector hidden;
-    3. E7, starting with Attach Script as in Godot (a script's mark on its row opens it,
+    2. E7, starting with Attach Script as in Godot (a script's mark on its row opens it,
        the inspector shows its path);
-    4. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
+    3. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):

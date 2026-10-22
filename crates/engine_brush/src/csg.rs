@@ -25,7 +25,7 @@ pub enum Op {
 }
 
 /// A brush as the CSG sees it: what it does, and its convex parts, each the planes that
-/// bound it in the group's grid.
+/// bound it in the group's grid; or, for a brush with children, what they made of it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Brush {
     /// What it does.
@@ -36,6 +36,12 @@ pub struct Brush {
     /// A room's inside, as convex parts (empty: not a room). Its faces are numbered after
     /// the parts'. Only an additive brush is a room.
     pub inside: Vec<Vec<PlaneId>>,
+    /// What its children made of it (ADR 0110's nesting, Godot's rule; [`combine`]): its
+    /// parts added, then each child acting in order, as convex solids whose faces keep
+    /// their own brushes' places in the group. When set, its solids instead of its parts'
+    /// (empty: nothing is left of it); its op then acts with them where it stands. A
+    /// room's inside stays its own.
+    pub made: Option<Vec<Solid>>,
 }
 
 impl Brush {
@@ -72,17 +78,53 @@ pub struct Evaluated {
 /// it leaves nothing of it); a room's are first cut by every room's inside that touches
 /// it. So an edit redoes only the additive brushes it touches.
 pub fn evaluate(brushes: &[Brush], table: &Planes) -> Evaluated {
+    let owners: Vec<u32> = (0..brushes.len() as u32).collect();
+    let mut out = evaluate_owned(brushes, &owners, table);
+    out.surface = surface(&out.pieces, table);
+    out
+}
+
+/// What brushes make of the first of `brushes`, as a brush's children make it (ADR 0110's
+/// nesting, Godot's rule): it is added, whatever its op, then each of the others acts in
+/// order on what the ones before it made. The solids' faces are owned by `owners[k]` for
+/// brush `k` (their places in the whole group; a brush with [`Brush::made`] keeps its
+/// own), and the parts that make no solid are given by those places too.
+pub fn combine(
+    brushes: &[Brush],
+    owners: &[u32],
+    table: &Planes,
+) -> (Vec<Solid>, Vec<(u32, SolidError)>) {
+    engine_profiler::zone!("brush::combine");
+    let Some((first, rest)) = brushes.split_first() else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut level = Vec::with_capacity(brushes.len());
+    level.push(Brush {
+        op: Op::Add,
+        ..first.clone()
+    });
+    level.extend(rest.iter().cloned());
+    let out = evaluate_owned(&level, owners, table);
+    (
+        out.pieces.into_iter().map(|p| p.solid).collect(),
+        out.invalid,
+    )
+}
+
+/// [`evaluate`]'s pieces (no surface), each brush `k`'s faces owned by `owners[k]`; the
+/// pieces name their brushes by place in `brushes`.
+fn evaluate_owned(brushes: &[Brush], owners: &[u32], table: &Planes) -> Evaluated {
     engine_profiler::zone!("brush::evaluate");
     let mut out = Evaluated::default();
     let solids: Vec<Vec<Solid>> = brushes
         .iter()
-        .enumerate()
-        .map(|(b, brush)| brush_solids(b as u32, brush, table, &mut out.invalid))
+        .zip(owners)
+        .map(|(brush, &b)| brush_solids(b, brush, table, &mut out.invalid))
         .collect();
     let insides: Vec<Vec<Solid>> = brushes
         .iter()
-        .enumerate()
-        .map(|(b, brush)| inside_solids(b as u32, brush, table, &mut out.invalid))
+        .zip(owners)
+        .map(|(brush, &b)| inside_solids(b, brush, table, &mut out.invalid))
         .collect();
     // The rooms' insides, with their bounds.
     let rooms: Vec<(usize, Bounds)> = (0..brushes.len())
@@ -151,7 +193,6 @@ pub fn evaluate(brushes: &[Brush], table: &Planes) -> Evaluated {
             solid,
         }));
     }
-    out.surface = surface(&out.pieces, table);
     out
 }
 
@@ -175,15 +216,18 @@ pub(crate) fn subtract_all(
     }
 }
 
-/// The solids of `brush`'s parts, its faces numbered through them; the parts that make
-/// none go to `invalid`.
+/// The solids of `brush`'s parts, its faces numbered through them (what its children made
+/// of it, when they did); the parts that make none go to `invalid`.
 pub(crate) fn brush_solids(
     b: u32,
     brush: &Brush,
     table: &Planes,
     invalid: &mut Vec<(u32, SolidError)>,
 ) -> Vec<Solid> {
-    solids_of(b, &brush.parts, 0, table, invalid)
+    match &brush.made {
+        Some(made) => made.clone(),
+        None => solids_of(b, &brush.parts, 0, table, invalid),
+    }
 }
 
 /// The solids of a room's inside, its faces numbered after its parts'; none for a brush
@@ -463,6 +507,7 @@ mod tests {
             op,
             parts: vec![box_planes(lo, hi, table).unwrap_or_else(|| panic!())],
             inside: Vec::new(),
+            made: None,
         }
     }
 
@@ -505,6 +550,51 @@ mod tests {
         let (v, a, e) = closed(&b, &t);
         assert_eq!((v, a), (6000.0, 2200.0));
         assert_eq!((e.pieces.len(), e.surface.len()), (1, 6));
+    }
+
+    #[test]
+    fn a_brushs_children_act_on_it_first_and_its_op_then_acts_with_what_they_made() {
+        let mut t = Planes::new();
+        // A floor, then a wall standing on it with a window cut below the wall that goes
+        // down into the floor too.
+        let floor = cuboid(Op::Add, [0, -10, 0], [100, 0, 100], &mut t);
+        let wall = cuboid(Op::Add, [40, 0, 40], [60, 50, 50], &mut t);
+        let window = cuboid(Op::Cut, [45, -5, 39], [55, 20, 51], &mut t);
+        // The window combined into the wall: the wall less the window, its faces the
+        // window's places' (here 2 in the group).
+        let (made, invalid) = combine(&[wall.clone(), window.clone()], &[1, 2], &t);
+        assert!(invalid.is_empty());
+        let walled = Brush {
+            made: Some(made),
+            ..wall.clone()
+        };
+        let (v, _, e) = closed(&[floor.clone(), walled], &t);
+        // The floor whole (100 × 10 × 100) and the wall less the window's 10 × 20 × 10.
+        assert_eq!(v, 100_000.0 + (20.0 * 50.0 * 10.0 - 10.0 * 20.0 * 10.0));
+        assert!(
+            e.surface.iter().any(|(o, _)| o.brush == 2),
+            "the window owns its walls"
+        );
+        // The same three flat: the window cuts the floor too.
+        let (flat, _, _) = closed(&[floor, wall, window], &t);
+        assert_eq!(flat, v - 10.0 * 5.0 * 12.0);
+    }
+
+    #[test]
+    fn a_cut_with_a_child_cuts_what_they_made_together() {
+        let mut t = Planes::new();
+        let block = cuboid(Op::Add, [0, 0, 0], [100, 10, 10], &mut t);
+        // A cut 0..60 with a smaller cut inside it (20..30): the cut less its child, so a
+        // bridge of 10 stays.
+        let cut = cuboid(Op::Cut, [0, -1, -1], [60, 11, 11], &mut t);
+        let kept = cuboid(Op::Cut, [20, -2, -2], [30, 12, 12], &mut t);
+        let (made, _) = combine(&[cut.clone(), kept], &[1, 2], &t);
+        let cut = Brush {
+            made: Some(made),
+            ..cut
+        };
+        let (v, _, _) = closed(&[block, cut], &t);
+        assert_eq!(v, (40.0 + 10.0) * 100.0);
     }
 
     #[test]
@@ -606,6 +696,7 @@ mod tests {
                 op: Op::Cut,
                 parts: vec![tilted],
                 inside: Vec::new(),
+                made: None,
             },
         ];
         let (v, _, e) = closed(&b, &t);
@@ -641,6 +732,7 @@ mod tests {
                 .map(|p| p.into_iter().map(|q| table.add(q)).collect())
                 .collect(),
             inside: vec![inside.into_iter().map(|q| table.add(q)).collect()],
+            made: None,
         }
     }
 
@@ -714,6 +806,7 @@ mod tests {
             op: Op::Add,
             parts: vec![vec![x, y]],
             inside: Vec::new(),
+            made: None,
         };
         let e = evaluate(&[open], &t);
         assert_eq!(e.invalid, [(0, SolidError::Open)]);
@@ -721,6 +814,7 @@ mod tests {
             op: Op::Add,
             parts: vec![vec![x, x.flip(), y]],
             inside: Vec::new(),
+            made: None,
         };
         assert_eq!(evaluate(&[slab], &t).invalid, [(0, SolidError::Empty)]);
     }
