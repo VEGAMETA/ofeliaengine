@@ -61,6 +61,7 @@ fn the_editor_draws_its_scene_in_the_viewport() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
+        prefabs: None,
     };
     save_with(
         &mut world,
@@ -298,6 +299,7 @@ fn a_click_in_the_viewport_selects_what_is_drawn_there() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
+        prefabs: None,
     };
     save_with(
         &mut world,
@@ -543,6 +545,7 @@ fn end_drops_the_selection_onto_the_floor() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
+        prefabs: None,
     };
     save_with(
         &mut world,
@@ -684,6 +687,7 @@ fn lights_and_cameras_show_as_icons() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
+        prefabs: None,
     };
     save_with(
         &mut world,
@@ -818,6 +822,7 @@ fn b_draws_a_brush_on_the_floor_under_the_pointer() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
+        prefabs: None,
     };
     save_with(
         &mut world,
@@ -986,6 +991,7 @@ fn a_brushs_handles_show_and_a_drawn_corner_lands_on_its_corner() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
+        prefabs: None,
     };
     save_with(
         &mut world,
@@ -1281,6 +1287,7 @@ fn view_navigation_bakes_the_brushes_in_the_background() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
+        prefabs: None,
     };
     save_with(
         &mut world,
@@ -1440,6 +1447,7 @@ fn tab_edits_a_brushs_faces_and_the_player_meshes_them() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
+        prefabs: None,
     };
     save_with(
         &mut world,

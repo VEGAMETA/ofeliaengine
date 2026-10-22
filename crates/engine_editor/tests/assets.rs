@@ -213,6 +213,7 @@ fn a_model_dragged_from_the_browser_rests_on_the_floor_and_draws() {
     let options = engine_scene::SaveOptions {
         id: Some(AssetId::new()),
         assets: None,
+        prefabs: None,
     };
     let mut text = String::new();
     engine_scene::save_with(

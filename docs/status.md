@@ -314,9 +314,18 @@ Last updated: 2026-10-20.
     player applies them (an image's own `.meta`, or its model's for images inside it);
     the dock's pick is shown in the inspector with its settings, an edit written at once
     and the asset made again. **E4 is done.**
-  - **Next:** E5, prefabs (ADR 0108's "Prefab instances"): E5-1 instances and overrides
-    in the format, E5-2 making, placing and unpacking them in the editor, E5-3 overrides
-    in the inspector, E5-4 prefabs edited live.
+  - **E5, prefabs** (ADR 0108's "Prefab instances"; the owner: any scene is a prefab):
+  - **E5-1, instances in the format** (#PR, ADR 0108's as-built, format 4):
+    - `[instance]` places a scene, `[override <instance>/<entity>]` changes what it
+      placed, `remove` takes a component or an entity away; ids inside derived from the
+      instance's, paths through nested instances;
+    - a single-rooted prefab's root is the instance's entity; several roots get a holder;
+    - what cannot be placed is kept as written; saving writes what differs from the
+      prefab;
+    - the player loads scenes with their prefabs; saving and loading plain scenes as fast
+      as before (6.56 / 9.90 ms for 10,000 entities against 6.47 / 9.68).
+  - **Next:** E5-2, the editor: scenes loaded and saved through their prefabs, a scene
+    dropped from the dock placed as an instance, Make Prefab from a selection, Unpack.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

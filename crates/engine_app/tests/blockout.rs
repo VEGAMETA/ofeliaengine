@@ -126,6 +126,7 @@ fn brushes_in_a_scene_file_draw_their_group() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: None,
+        prefabs: None,
     };
     let mut text = String::new();
     save_with(
@@ -333,6 +334,7 @@ fn rooms_open_into_each_other_with_no_doorway_cut() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: None,
+        prefabs: None,
     };
     let mut text = String::new();
     save_with(
@@ -461,6 +463,7 @@ fn a_ball_rolls_on_over_the_seam_between_floor_brushes_and_an_edit_makes_the_bod
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: None,
+        prefabs: None,
     };
     let mut text = String::new();
     save_with(

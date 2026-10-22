@@ -7020,6 +7020,7 @@ impl Editor {
         let options = SaveOptions {
             id: Some(self.scene_id),
             assets: Some(&self.assets),
+            prefabs: None,
         };
         engine_scene::save_with(world, &registry, &options, &mut text)
             .map_err(|e| e.to_string())?;
@@ -7756,6 +7757,7 @@ impl Editor {
         let options = SaveOptions {
             id: Some(self.scene_id),
             assets: Some(&self.assets),
+            prefabs: None,
         };
         let mut text = String::new();
         if engine_scene::save_with(world, &SceneRegistry::from_program(), &options, &mut text)
@@ -12914,6 +12916,7 @@ mod tests {
         let options = SaveOptions {
             id: Some(AssetId::new()),
             assets: None,
+            prefabs: None,
         };
         engine_scene::save_with(
             &mut world,

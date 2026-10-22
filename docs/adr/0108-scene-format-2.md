@@ -558,3 +558,56 @@ model.scale = 0.01
     its next reading;
   - the cook (`ofeliaengine cook`) does not read the settings yet; the game's build from
     the editor will.
+
+## As built (E5-1, 2026-10-22): prefab instances in the format
+
+The section "Prefab instances" above, built in `engine_scene` (`prefab` module), format 4:
+
+- **Ids:** `SceneId::derive(instance, local)` hashes both (StableHasher). A path names an
+  entity through instances: `SceneId::of_path([a, b, c]) = derive(a, of_path([b, c]))`,
+  a fold from the right, so placing a prefab under instance `I` maps each of its ids
+  `x` to `derive(I, x)` and a path written in a scene names the same entity that nesting
+  places.
+- **The root (decided here; the format did not say):**
+  - a prefab of one root: that root is the instance's entity and takes the instance's
+    id, so `[instance]`'s lines override its values, as the format reads;
+  - a prefab of several roots ("any scene is a prefab": a level of many roots): an
+    entity of the instance's own holds them, with the instance's id and the instance's
+    lines.
+
+  A variant (a scene whose only root is an instance) falls out of the first rule: the
+  outermost instance's prefab is the one its root shows.
+- **In the world:** `PrefabInstance { prefab }` on an instance's root, `PrefabPart {
+  instance, local }` on what it placed (plain data, so undo keeps them), `KeptBlocks` for
+  what could not be applied.
+- **Loading** (`load_with` with `LoadOptions { prefabs }`; `Prefabs` gives a prefab's text
+  by id and path, `PrefabFiles` reads them from a folder, checking each file's id):
+  - every prefab reachable is read once and parsed; one that would place itself, cannot
+    be read, or that loading alone would refuse is not placed;
+  - the plan places each instance's prefab with its ids mapped, then applies the scene's
+    lines over it: a component's lines after the prefab's, `Component = {}` among them
+    starting it from its default, `remove = Component` and `remove = @<entity>` (with its
+    children);
+  - an instance not placed is its entity alone (its lines place it), and its blocks are
+    kept; an override of an entity the prefab no longer has is a warning, its block kept;
+    both are written back as they were;
+  - `load` (no prefabs) keeps every instance that way, so a scene round-trips unchanged
+    through code that knows nothing of prefabs (the editor until E5-2).
+- **Saving** (`SaveOptions { prefabs }`): each outermost instance's prefab is loaded alone
+  under the same ids (a scene of that one instance block); an instance's root and each
+  entity it placed are compared line by line with theirs. What differs is written; a
+  component whose lines name other fields (a list grown or shrunk) is written whole after
+  `Component = {}`; components and entities gone are `remove` lines. References to
+  entities inside instances are written as paths.
+- **The player** loads scenes with the project's folder as their prefabs' source.
+- **Measured** (`engine_scene` bench `scene`, ref-1, 10,000 entities with no instances;
+  main before → this):
+  - first build: save 6.5 → 10.2 ms, load 9.8 → 14.3 ms;
+  - after the plain path was made as lean as before (lines straight to the text, the
+    writer's path kept, the plan borrowing its blocks' lines, rare fields boxed, no second
+    id map): save 6.47 → 6.56 ms, load 9.68 → 9.90 ms (with names 7.01 → 7.10, 12.06 →
+    12.23).
+- **Left for E5-2 to E5-4:** the editor loading and saving through prefabs, making and
+  unpacking instances, overrides in the inspector, prefabs edited live. Undo does not
+  keep `KeptBlocks` (not plain data, not a scene type): deleting an instance that has
+  them and undoing drops them.

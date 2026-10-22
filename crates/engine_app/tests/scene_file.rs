@@ -71,6 +71,7 @@ fn a_scene_file_draws_its_models() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
+        prefabs: None,
     };
     let mut text = String::new();
     save_with(
@@ -246,6 +247,7 @@ fn a_scene_file_draws_models_from_a_baked_glb() {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
+        prefabs: None,
     };
     let mut text = String::new();
     save_with(
@@ -381,6 +383,7 @@ fn the_view_draws_into_a_window_of_its_own() {
         &SaveOptions {
             id: Some(AssetId::new()),
             assets: Some(&paths),
+            prefabs: None,
         },
         &mut text,
     )
@@ -440,5 +443,108 @@ fn the_view_draws_into_a_window_of_its_own() {
         red_at(&rgba, width, width / 2, height / 2),
         "the cube in the main output"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A scene placing a prefab twice (ADR 0108's E5): the player reads the prefab from the
+/// project's folder and draws both lamps where their instances put them.
+#[test]
+fn a_scene_places_its_prefabs() {
+    let dir = std::env::temp_dir().join(format!("ofelia-scene-prefabs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("props")).unwrap();
+    // The lamp: a cube on a pole, its own scene.
+    let (lamp_id, root, bulb) = (AssetId::new(), SceneId::new(), SceneId::new());
+    let mut lamp = World::new();
+    let pole = lamp.spawn((
+        root,
+        Name::new("Lamp"),
+        Transform::IDENTITY,
+        Model::new(builtin::CYLINDER, builtin::MATERIAL),
+    ));
+    let light = lamp.spawn((
+        bulb,
+        Name::new("Bulb"),
+        Transform::from_xyz(0.0, 1.0, 0.0),
+        Model::new(builtin::SPHERE, builtin::MATERIAL),
+    ));
+    lamp.set_parent(light, Some(pole)).unwrap();
+    let paths = Assets::new(dir.clone()).paths().clone();
+    let mut text = String::new();
+    save_with(
+        &mut lamp,
+        &SceneRegistry::from_program(),
+        &SaveOptions {
+            id: Some(lamp_id),
+            assets: Some(&paths),
+            prefabs: None,
+        },
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("props/lamp.scene"), &text).unwrap();
+    // Two lamps, the second one's bulb renamed.
+    let (a, b) = (SceneId::new(), SceneId::new());
+    let scene = format!(
+        "[scene version=4 id={main}]\n\n[instance {a}]\nprefab = asset(\"props/lamp.scene\", \
+         {lamp_id})\nTransform.translation = (-2, 0, 0)\n\n[instance {b}]\nprefab = \
+         asset(\"props/lamp.scene\", {lamp_id})\nTransform.translation = (2, 0, 0)\n\n\
+         [override {b}/{bulb}]\nName = \"Red bulb\"\n",
+        main = AssetId::new(),
+    );
+    std::fs::write(dir.join("main.scene"), &scene).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("prefab scene test"),
+        window: Window::Offscreen {
+            width: 320,
+            height: 180,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let report = player.load_scene("main.scene").unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(report.entities.len(), 4, "two lamps of two entities each");
+    let mut game = Still;
+    player.frame(&mut game).unwrap();
+    let world = player.world_mut();
+    let lamps: Vec<Entity> = report
+        .entities
+        .iter()
+        .copied()
+        .filter(|&e| world.get::<Name>(e).is_some_and(|n| n.as_str() == "Lamp"))
+        .collect();
+    assert_eq!(lamps.len(), 2);
+    let xs: Vec<f32> = lamps
+        .iter()
+        .map(|&e| world.get::<Transform>(e).unwrap().translation.x)
+        .collect();
+    assert!(xs.contains(&-2.0) && xs.contains(&2.0), "{xs:?}");
+    for &e in &report.entities {
+        assert!(world.get::<MeshRenderer>(e).is_some(), "every part drawn");
+    }
+    let red = report
+        .entities
+        .iter()
+        .filter(|&&e| {
+            world
+                .get::<Name>(e)
+                .is_some_and(|n| n.as_str() == "Red bulb")
+        })
+        .count();
+    assert_eq!(red, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
