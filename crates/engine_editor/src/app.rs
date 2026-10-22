@@ -293,6 +293,7 @@ fn run_inner<G: Game>(
             }
             player.set_view_rect(game.view_rect());
             player.lock_cursor(game.cursor_locked());
+            player.lock_view_cursor(game.view_cursor_locked());
             game.sync_assets(&mut player);
             count += 1;
             if count % 30 == 1 {
@@ -619,6 +620,8 @@ struct CommandIds {
     pause: CommandId,
     step: CommandId,
     eject: CommandId,
+    /// The mouse freed from the game while it plays, or given back (Unreal's Shift+F1).
+    game_mouse: CommandId,
     /// Keeping changes made while playing (E3-3).
     keep: CommandId,
     keep_list: CommandId,
@@ -719,6 +722,11 @@ fn commands() -> (Commands, CommandIds) {
         pause: c.register("play.pause", "Play", "Pause or Go On"),
         step: c.register("play.step", "Play", "Step One Tick"),
         eject: c.register("play.eject", "Play", "Eject or Return to the Game"),
+        game_mouse: c.register(
+            "play.mouse",
+            "Play",
+            "Free the Mouse or Give It to the Game",
+        ),
         keep: c.register("play.keep", "Play", "Keep the Selection's Changes"),
         keep_list: c.register("play.keep_list", "Play", "Keep Changes…"),
         find_references: c.register("assets.references", "Assets", "Find References"),
@@ -814,6 +822,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("F7", ids.pause),
         ("Shift+F7", ids.step),
         ("Shift+F8", ids.eject),
+        // Unreal's, a function key: the game's while it plays are the others.
+        ("Shift+F1", ids.game_mouse),
         // Unreal's K, with Ctrl: plain letters are the game's while it plays.
         ("Ctrl+K", ids.keep),
         ("Ctrl+Shift+K", ids.keep_list),
@@ -1420,6 +1430,11 @@ struct Editor {
     restarted_at: Option<u128>,
     /// Where the window is (`note_window`), kept in the session for the next start.
     window: Option<engine_platform::window::WindowPlacement>,
+    /// Where the game's own window was when Play last ended, kept in the session: it
+    /// opens there.
+    game_window: Option<engine_platform::window::WindowPlacement>,
+    /// Shift is held in the game's own window (its Shift+F1).
+    view_shift: bool,
     /// The session's state when it ended for a restart, to go on with it when the new
     /// build fails at its start: its base, autosave, what the autosave holds, the conflict.
     ended: Option<(Option<Base>, PathBuf, Option<u64>, bool)>,
@@ -1934,6 +1949,8 @@ impl Editor {
             focused: false,
             restarted_at: Restarted::from_env().map(|r| r.at),
             window: None,
+            game_window: None,
+            view_shift: false,
             ended: None,
             restart_policy: RestartPolicy::Background,
             scene_label: String::new(),
@@ -2074,22 +2091,53 @@ impl Editor {
     }
 
     fn event(&mut self, event: &WindowEvent) {
-        // The game's window: its F7 and F8 are Play's; the rest is the game's.
+        // The game's window: its F7 and F8 are Play's, its Shift+F1 frees the mouse or
+        // gives it back, a click there gives it back; the rest is the game's.
         if self.view_window.is_some() && Some(event.window) == self.view_window {
-            if let WindowEventKind::Key {
-                virtual_key,
-                pressed: true,
-                repeat: false,
-                ..
-            } = event.kind
-            {
-                match virtual_key {
-                    0x76 => self.play_request = Some(PlayRequest::Pause),
-                    0x77 => self.play_request = Some(PlayRequest::Stop),
-                    _ => {}
+            match event.kind {
+                WindowEventKind::Key {
+                    virtual_key,
+                    pressed,
+                    repeat,
+                    ..
+                } => {
+                    // VK_SHIFT, VK_LSHIFT, VK_RSHIFT.
+                    if matches!(virtual_key, 0x10 | 0xA0 | 0xA1) {
+                        self.view_shift = pressed;
+                    }
+                    if pressed && !repeat {
+                        match virtual_key {
+                            0x70 if self.view_shift => self.toggle_game_mouse(),
+                            0x76 => self.play_request = Some(PlayRequest::Pause),
+                            0x77 => self.play_request = Some(PlayRequest::Stop),
+                            _ => {}
+                        }
+                    }
                 }
+                WindowEventKind::MouseButton {
+                    button: MouseButton::Left,
+                    pressed: true,
+                } => self.set_game_mouse(true),
+                WindowEventKind::Focused(false) => {
+                    self.view_shift = false;
+                    self.set_game_mouse(false);
+                }
+                _ => {}
             }
             return;
+        }
+        // The game has the mouse in the viewport: the panels get none of it (a button let
+        // go still, so none stays held), and the window losing the keyboard frees it.
+        if self.game_has_mouse() && !self.in_view_window {
+            match event.kind {
+                WindowEventKind::CursorMoved { .. }
+                | WindowEventKind::CursorDelta { .. }
+                | WindowEventKind::CursorLeft
+                | WindowEventKind::Wheel { .. }
+                | WindowEventKind::MouseButton { pressed: true, .. } => return,
+                WindowEventKind::Focused(false) => self.set_game_mouse(false),
+                _ => {}
+            }
         }
         let input = &mut self.input;
         match event.kind {
@@ -2675,11 +2723,14 @@ impl Editor {
             Some(p) if p.paused => self
                 .status
                 .push_str("Paused: F7 goes on, Shift+F7 steps a tick, F8 stops  ·  "),
+            Some(p) if !p.mouse => self.status.push_str(
+                "Playing, the mouse free: a click in the game or Shift+F1 gives it back; F7 pauses, F8 stops  ·  ",
+            ),
             Some(_) if self.in_view_window => self.status.push_str(
-                "Playing in its window: F7 pauses, F8 stops (there too), Shift+F8 ejects here  ·  ",
+                "Playing in its window: Shift+F1 frees the mouse, F7 pauses, F8 stops (there too), Shift+F8 ejects here  ·  ",
             ),
             Some(_) => self.status.push_str(
-                "Playing: keys without Ctrl go to the game; F7 pauses, Shift+F8 ejects, F8 stops  ·  ",
+                "Playing: keys without Ctrl go to the game; Shift+F1 frees the mouse, F7 pauses, Shift+F8 ejects, F8 stops  ·  ",
             ),
             None => {}
         }
@@ -3196,7 +3247,8 @@ impl Editor {
             .ui
             .rect_of(response.viewport)
             .map(|r| [r.pos[0], r.pos[1], r.size[0], r.size[1]]);
-        // The game's view: the viewport without the editor's tools.
+        // The game's view: the viewport without the editor's tools; a click in it gives
+        // the game the mouse back (Unreal's "click for mouse control").
         if game_view {
             if let Some([x, y, w, h]) = rect {
                 self.view_rect = Some([
@@ -3205,6 +3257,13 @@ impl Editor {
                     ((w * scale).round() as u32).max(1),
                     ((h * scale).round() as u32).max(1),
                 ]);
+                let over = self.input.cursor().is_some_and(|[cx, cy]| {
+                    let (cx, cy) = (cx / scale, cy / scale);
+                    cx >= x && cy >= y && cx < x + w && cy < y + h
+                });
+                if over && self.input.pressed(Button::Left) && !self.in_view_window {
+                    self.set_game_mouse(true);
+                }
             }
             self.input.next_frame();
             return;
@@ -5881,6 +5940,7 @@ impl Editor {
             keep: Vec::new(),
             keep_gone: Vec::new(),
             ejected: None,
+            mouse: true,
         }
     }
 
@@ -6023,6 +6083,47 @@ impl Editor {
     /// Whether the viewport is the game's: playing and not ejected.
     fn game_view(&self) -> bool {
         self.play.as_ref().is_some_and(|p| p.ejected.is_none())
+    }
+
+    /// Whether the game has the mouse now ([`Playing::mouse`]): playing, not paused or
+    /// ejected, the mouse not freed.
+    fn game_has_mouse(&self) -> bool {
+        self.play
+            .as_ref()
+            .is_some_and(|p| p.mouse && !p.paused && p.ejected.is_none())
+    }
+
+    /// Gives the game the mouse, or frees it: the panels forget the pointer while the
+    /// game has it.
+    fn set_game_mouse(&mut self, has: bool) {
+        let Some(p) = self.play.as_mut() else {
+            return;
+        };
+        if p.mouse != has {
+            p.mouse = has;
+            if has {
+                self.input.cursor_left();
+            }
+        }
+    }
+
+    /// "Play: Free the Mouse or Give It to the Game" (Shift+F1, in the game's window too).
+    fn toggle_game_mouse(&mut self) {
+        let message = match &self.play {
+            None => "Nothing is playing (F5 plays the scene)",
+            Some(p) if p.paused || p.ejected.is_some() => {
+                "The mouse is the editor's while the game is paused or ejected"
+            }
+            Some(p) if p.mouse => {
+                self.set_game_mouse(false);
+                "The mouse is free: a click in the game or Shift+F1 gives it back"
+            }
+            Some(_) => {
+                self.set_game_mouse(true);
+                "The game has the mouse: Shift+F1 frees it"
+            }
+        };
+        self.say(String::from(message));
     }
 
     /// "Play from Here": the editor's camera as the game's start (ADR 0107 E3): the
@@ -6782,6 +6883,8 @@ impl Editor {
             }
         } else if id == ids.eject {
             self.eject(world);
+        } else if id == ids.game_mouse {
+            self.toggle_game_mouse();
         } else if id == ids.play_where {
             self.play_in_window = !self.play_in_window;
             self.say(String::from(if self.play_in_window {
@@ -8992,6 +9095,9 @@ impl Editor {
         if let Some(on) = state.overlays {
             self.overlays = on;
         }
+        if state.game_window.is_some() {
+            self.game_window = state.game_window;
+        }
         self.refresh_steps();
     }
 
@@ -9124,6 +9230,7 @@ impl Editor {
             pivot: Some(String::from(self.pivot.name())),
             overlays: Some(self.overlays),
             window: self.window,
+            game_window: self.game_window,
         };
         let view = self.view(world);
         let Some(s) = &mut self.session else {
@@ -9778,7 +9885,9 @@ impl<G> EditorGame<G> {
                 shared.play_from_here(player.world_mut());
             }
         }
-        // The game's own window (the UX note's default), as large as the viewport.
+        // The game's own window (the UX note's default): where it was when Play last
+        // ended, else as large as the viewport and at least 1280 × 720 (the owner,
+        // 2026-10-22: larger), fitted to its monitor.
         {
             let mut shared = self.shared.borrow_mut();
             if shared.play_in_window {
@@ -9787,7 +9896,8 @@ impl<G> EditorGame<G> {
                     [w as f32 / scale, h as f32 / scale]
                 });
                 let title = format!("{} (playing)", shared.file_name());
-                match player.open_view_window(&title, (w as u32).max(640), (h as u32).max(360)) {
+                let (w, h) = ((w as u32).max(1280), (h as u32).max(720));
+                match player.open_view_window(&title, w, h, shared.game_window) {
                     Ok(()) => {
                         shared.in_view_window = true;
                         shared.view_window = player.view_window_id();
@@ -9826,6 +9936,10 @@ impl<G> EditorGame<G> {
         self.game = None;
         self.failed = None;
         self.stepping = false;
+        // Where the game's window was: it opens there next time.
+        if let Some(placement) = player.view_window_placement() {
+            self.shared.borrow_mut().game_window = Some(placement);
+        }
         player.close_view_window();
         {
             let mut shared = self.shared.borrow_mut();
@@ -9890,9 +10004,18 @@ impl<G> EditorGame<G> {
 
     /// Whether the cursor is locked for the player's next frame (`Player::lock_cursor`):
     /// while the right or middle button drags the camera, as in Godot and Unreal, the
-    /// cursor is hidden and stays where the drag began.
+    /// cursor is hidden and stays where the drag began; while the game playing in the
+    /// viewport has the mouse.
     pub fn cursor_locked(&self) -> bool {
-        self.shared.borrow().camera_drag
+        let shared = self.shared.borrow();
+        shared.camera_drag || (shared.game_has_mouse() && !shared.in_view_window)
+    }
+
+    /// Whether the cursor is locked over the game's own window for the player's next
+    /// frame (`Player::lock_view_cursor`): while the game playing there has the mouse.
+    pub fn view_cursor_locked(&self) -> bool {
+        let shared = self.shared.borrow();
+        shared.game_has_mouse() && shared.in_view_window
     }
 
     /// Gives the player the asset paths of scenes the editor loaded, and learns the
@@ -10891,6 +11014,11 @@ struct Playing {
     /// The editor's camera and tools on the running world (Unreal's eject), with the
     /// devices the game's input listened to before, given back on returning.
     ejected: Option<Option<engine_input::DeviceFilter>>,
+    /// The game has the mouse from Play on (the owner, 2026-10-22): the cursor hidden
+    /// and held over its view while it runs (not paused or ejected). Shift+F1 frees it,
+    /// and the window it is held over losing the keyboard; a click in the game or
+    /// Shift+F1 gives it back.
+    mouse: bool,
 }
 
 /// Whether `key` is one of F1 to F12 (the editor's keys while playing).

@@ -317,6 +317,9 @@ pub struct Blockout {
     /// Each brush's group and place in it.
     places: HashMap<Entity, (Entity, usize)>,
     meshes: HashMap<Entity, MeshId>,
+    /// Meshes made again or dropped: the scene's instances draw them until it is next
+    /// extracted (a tick), so they are freed in the first [`Self::sync`] after that.
+    retired: Vec<MeshId>,
     materials: HashMap<[u32; 4], MaterialId>,
     grid: Option<TextureId>,
     /// The grid could not be made: not tried again, the brushes stay plain.
@@ -497,16 +500,24 @@ impl Blockout {
     }
 
     /// Brings the brushes' meshes in step with the world: run where models turn into
-    /// renderers, before extraction. `frame` is the frame's number (old meshes are freed
-    /// after it).
+    /// renderers, after the frame's ticks; the next tick's extraction gives the scene the
+    /// new meshes. `frame` is the frame's number; `extracted`: the scene was extracted this
+    /// frame, so the meshes let go of before are drawn no more and are freed (after this
+    /// frame).
     pub fn sync(
         &mut self,
         world: &mut World,
         geometry: &mut GeometryPool,
         materials: &mut MaterialTable,
         frame: u64,
+        extracted: bool,
     ) {
         engine_profiler::zone!("blockout::sync");
+        if extracted {
+            for mesh in self.retired.drain(..) {
+                geometry.remove_mesh(mesh, frame);
+            }
+        }
         let q = self.queries.get_or_insert_with(|| Queries {
             brushes: QueryState::new(world),
             changed: QueryState::new(world),
@@ -550,7 +561,7 @@ impl Blockout {
             .iter_readonly(world)
             .filter(|&e| !engine_runtime::is_inactive(world, e))
             .collect();
-        self.scan(world, &all, geometry, materials, frame);
+        self.scan(world, &all, geometry, materials);
     }
 
     /// Makes the grid texture, once a brush is drawn, and puts it on the brushes'
@@ -585,7 +596,6 @@ impl Blockout {
         all: &[Entity],
         geometry: &mut GeometryPool,
         materials: &mut MaterialTable,
-        frame: u64,
     ) {
         engine_profiler::zone!("blockout::scan");
         // The groups and their brushes in the tree's order.
@@ -674,21 +684,21 @@ impl Blockout {
         changed_entities.sort_unstable_by_key(|e| e.to_bits());
         changed_entities.dedup();
         for e in changed_entities {
-            self.remesh(world, e, geometry, materials, frame);
+            self.remesh(world, e, geometry, materials);
         }
     }
 
-    /// Makes brush `e`'s mesh again (or drops it, when it shows nothing or is gone).
+    /// Makes brush `e`'s mesh again (or drops it, when it shows nothing or is gone); the
+    /// old one is drawn until the scene's next extraction.
     fn remesh(
         &mut self,
         world: &mut World,
         e: Entity,
         geometry: &mut GeometryPool,
         materials: &mut MaterialTable,
-        frame: u64,
     ) {
         if let Some(old) = self.meshes.remove(&e) {
-            geometry.remove_mesh(old, frame);
+            self.retired.push(old);
         }
         let place = self
             .places

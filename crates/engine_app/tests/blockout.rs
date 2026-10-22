@@ -570,3 +570,166 @@ fn a_ball_rolls_on_over_the_seam_between_floor_brushes_and_an_edit_makes_the_bod
     assert!(physics.blockout_body(group).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Brushes edited between ticks (a display faster than the ticks, a brush dragged) never
+/// vanish: neither the one edited nor the others (`ENGINE_FLICKER_DIR=<dir>` writes the
+/// frames).
+#[test]
+fn brushes_edited_between_ticks_never_vanish() {
+    let dir = std::env::temp_dir().join(format!("ofelia-flicker-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("scenes")).unwrap();
+    let mut world = World::new();
+    let group = world.spawn((
+        SceneId::new(),
+        Name::new("Blockout"),
+        Transform::IDENTITY,
+        BrushGroup::default(),
+    ));
+    let brush = |world: &mut World, name: &str, at: Vec3, b: Brush| {
+        let e = world.spawn((
+            SceneId::new(),
+            Name::new(name),
+            Transform::from_translation(at),
+            b,
+        ));
+        world.set_parent(e, Some(group)).unwrap();
+    };
+    // Three blocks side by side, apart; the middle one is dragged.
+    for (name, x) in [("Left", -2.5), ("Middle", 0.0), ("Right", 2.5)] {
+        brush(
+            &mut world,
+            name,
+            Vec3::new(x, 0.0, 0.0),
+            Brush::new(BrushShape::Box, Vec3::new(1.5, 1.5, 1.5)),
+        );
+    }
+    world.spawn((
+        SceneId::new(),
+        Name::new("Ground"),
+        Transform::from_xyz(0.0, -0.05, 0.0).with_scale(Vec3::new(40.0, 0.1, 40.0)),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-0.9)),
+        Sun {
+            color: Vec3::splat(1.5),
+            ambient: Vec3::splat(0.03),
+        },
+    ));
+    let eye = Vec3::new(0.0, 1.5, 7.0);
+    world.spawn((
+        SceneId::new(),
+        Name::new("Camera"),
+        Transform::from_translation(eye).with_rotation(look_rotation(
+            eye,
+            Vec3::new(0.0, 0.75, 0.0),
+            Vec3::Y,
+        )),
+        Camera::perspective(1.0, 0.05, 200.0),
+    ));
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: None,
+        prefabs: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("scenes/main.scene"), &text).unwrap();
+
+    let (width, height) = (320u32, 180u32);
+    let settings = PlayerSettings {
+        title: String::from("flicker test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("scenes/main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..30 {
+        player.frame(&mut game).unwrap();
+    }
+    let frames = std::env::var_os("ENGINE_FLICKER_DIR").map(std::path::PathBuf::from);
+    let write = |name: &str, rgba: &[u8]| {
+        if let Some(frames) = &frames {
+            let png = engine_render::png::encode_png(
+                width,
+                height,
+                engine_render::png::PngFormat::Rgba,
+                rgba,
+            )
+            .unwrap();
+            std::fs::write(frames.join(name), png).unwrap();
+        }
+    };
+    let still = player.capture(&mut game).unwrap().unwrap();
+    write("still.png", &still);
+    let lum = |rgba: &[u8], x: u32, y: u32| {
+        let i = ((y * width + x) * 4) as usize;
+        (f32::from(rgba[i]) + f32::from(rgba[i + 1]) + f32::from(rgba[i + 2])) / 3.0
+    };
+    // The blocks' middles, and the ground's colour below them.
+    let middles = [
+        (width * 3 / 10, height / 2),
+        (width / 2, height / 2),
+        (width * 7 / 10, height / 2),
+    ];
+    let ground = lum(&still, width / 2, height - 4);
+    for &(x, y) in &middles {
+        let block = lum(&still, x, y);
+        assert!(
+            (block - ground).abs() > 30.0,
+            "a block at {x}, {y}: {block}, the ground {ground}"
+        );
+    }
+    // A display four times faster than the ticks, each frame an edit: the middle block
+    // grows taller (a side handle dragged), the right one moves (a gizmo dragged: a brush
+    // is made again in its group's space), the left one grows into the middle one (both
+    // made again, as rooms that touch).
+    player.set_frame_time(Some(1.0 / 240.0));
+    let left = named(player.world_mut(), "Left");
+    let middle = named(player.world_mut(), "Middle");
+    let right = named(player.world_mut(), "Right");
+    for k in 0..40 {
+        let world = player.world_mut();
+        if k < 12 {
+            world.get_mut::<Brush>(middle).unwrap().size.y = 1.5 + 0.02 * (k + 1) as f32;
+        } else if k < 24 {
+            world.get_mut::<Transform>(right).unwrap().translation.x = 2.5 - 0.02 * (k - 11) as f32;
+        } else {
+            world.get_mut::<Brush>(left).unwrap().size.x = 1.5 + 0.18 * (k - 23) as f32;
+        }
+        let rgba = player.capture(&mut game).unwrap().unwrap();
+        write(&format!("frame{k:02}.png"), &rgba);
+        for (b, &(x, y)) in middles.iter().enumerate() {
+            let (was, now) = (lum(&still, x, y), lum(&rgba, x, y));
+            assert!(
+                (now - was).abs() < 12.0,
+                "frame {k}: block {b} at {x}, {y} {was} -> {now}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

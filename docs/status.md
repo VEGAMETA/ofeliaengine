@@ -4,9 +4,9 @@ Where the engine stands and how work on it is run. A new session (coordinator or
 reads this after `CLAUDE.md` and `docs/agent-rules.md`. Keep it current: whoever merges a
 PR that changes the picture updates this file in the same PR.
 
-Last updated: 2026-10-20.
+Last updated: 2026-10-22.
 
-## 0. Now (2026-10-20)
+## 0. Now (2026-10-22)
 
 - **In progress: the editor** (queue item 9). Designed with the owner on 2026-10-17
   (#250: ADR 0107, ADR 0108; research `docs/research/editor-architecture.md`, UX notes in
@@ -21,6 +21,10 @@ Last updated: 2026-10-20.
   - asset ids: ids inside our own files, a `.meta` beside foreign ones, references by id
     and path, the local database only a cache;
   - any scene can be a prefab.
+  - **Where it stands (2026-10-22):** E1, E2, E3 and E4 are done (E2b but for the cook's
+    path, E3 but for the tree's marks on what changed); E5 but for a prefab opened in a
+    tab of its own, which needs the editor to hold several scenes (E5-5, at the end of
+    this list). The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
@@ -342,10 +346,31 @@ Last updated: 2026-10-20.
       while playing;
     - "Prefab: Apply Overrides" writes an instance into its prefab (values, added and
       removed components and entities); the others follow at once.
-  - **Next:** E5's last item, a prefab opened in a tab of its own (the editor holding
-    several scenes); then material slots on `Model` (team decision, 2026-10-22: each
-    primitive of a mesh drawn with its own material); then E6 (output, errors, history;
-    ADR 0107 §7).
+  - **The owner's notes, 2026-10-22** (#320):
+    - brushes no longer flicker while edited: a mesh made again is freed only once the
+      scene has been extracted since (a tick), models read again likewise (ADR 0110's
+      note);
+    - the game has the mouse from Play on, the cursor hidden; Shift+F1 frees it and gives
+      it back, a click in the game gives it back (ADR 0107's note);
+    - the game's window at least 1280 × 720, opened where it was left.
+  - **Next: E5-5, scenes in tabs, then a prefab in one** (ADR 0107 §4: one tab row, one
+    history across tabs; `docs/research/ux/sessions.md`: closing a tab keeps its
+    autosave). Found 2026-10-22: the editor holds one scene and cannot open another,
+    though the session file already lists documents. The plan:
+    - **E5-5a, documents:**
+      - an inactive tab kept as its scene's text, instances as overrides, so it follows a
+        prefab written anew by itself; switching saves one scene and loads the other
+        (about 16 ms for 10,000 entities; a world of its own per tab only if that
+        measures too slow);
+      - steps tagged by document, undoing another tab's step switching to it;
+      - File: Open Scene, Ctrl+Tab, Ctrl+W (its unsaved changes kept in its autosave,
+        "Reopen Closed Scene" brings them back); the session lists every tab; no
+        switching while playing;
+    - **E5-5b, a prefab in a tab:** "Prefab: Open" (and a double click on an instance's
+      row) opens its file; Ctrl+S there writes it, and the other tabs' instances follow.
+
+    Then material slots on `Model` (team decision, 2026-10-22: each primitive of a mesh
+    drawn with its own material), then E6 (output, errors, history; ADR 0107 §7).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
@@ -496,7 +521,11 @@ Last updated: 2026-10-20.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner:** none. Settled 2026-10-22 (team decisions): meshes of
+- **Questions open with the owner:** when Luau (E7) starts (asked 2026-10-22): (a) in
+  the queue's order (E5-5, material slots, E6, then E7), its public API drafted meanwhile
+  by an agent for the owner to sign off (recommended); (b) right after the owner's notes'
+  PR, before E5-5 and E6 (script errors only in the log until E6's panel); (c) after E5-5
+  and E6, material slots after it. Settled 2026-10-22 (team decisions): meshes of
   several materials get material slots on `Model` (queued after E5); ADR 0108's prefab
   root rule stays; the Radeon's CPU check baseline is not refreshed for now (§6).
   Earlier: 2026-10-16, the virtual shadow pages stay off by default on discrete GPUs; the
@@ -640,18 +669,10 @@ Left in the core: recording on the job system.
 
 ## 4. In flight
 
-8d, localization (ADR 0102): its first PR (#233, `feat/localization`: 8d-1 to 8d-3, the
-research note and the ADR, `engine_loc`, strings packs, the CLI and the player's text)
-merged; the second (#234, `feat/bidi-text`: 8d-4, bidirectional layout and font stacks) merged.
-8d is done (the owner kept Fluent, 2026-10-16).
-8c, colliders made from meshes (ADR 0101): its first PR (#230, `feat/mesh-colliders`:
-8c-1, 8c-2a, 8c-4a) merged; the second (#231, `feat/convex-decomposition`: 8c-3, the
-decomposition and its place in the cook) merged; the third (#232, `feat/props-on-sponza`:
-8c-4, props on Sponza at every scale) merged. What is left of 8c (the rules file, the
-owner's choice of 2026-10-16) is queue item 3. 8b, video playback, was done 2026-10-16 (its
-record is under the queue's item 8b). Meshlets (item 4) and custom materials (item 3c) were listed
-here until 2026-10-15; their records moved to those items in §5, with what is left of
-them.
+Nothing beside the editor's queue (2026-10-22): the coordinator takes its items in §0's
+order, E5-5 next, one PR at a time. The records of what was here before (localization,
+colliders made from meshes, video playback, meshlets, custom materials) are under their
+items in §0 and §5; what is left of 8c (the rules file) is queue item 3.
 
 ## 5. Queue (in order)
 
@@ -703,7 +724,8 @@ water and impostors stay in §6):
    - ~~The dev guide's quick start~~ (done 2026-10-17, #249): `quick-start.md`,
      `ofeliaengine new`, `engine_app::prelude`, the quick start's game tested offscreen.
 5. **9:** editor tools, Luau bindings and debugger, other tooling. **Designed 2026-10-17**
-   (ADR 0107, ADR 0108; the owner's choices are in §0). The phases (ADR 0107 §7):
+   (ADR 0107, ADR 0108; the owner's choices are in §0). The phases (ADR 0107 §7; as of
+   2026-10-22, E1 to E4 done, E5 but for scenes in tabs, §0):
    - **E1:** foundation: the editor linked into a game, the player split so the editor
      drives it, scene format 2, the tree and the inspector, commands, sessions, rebuild
      and restart;
@@ -1501,6 +1523,19 @@ grown, divide and conquer); the old labels stay in parentheses.
 - **Frame pacing (the owner, 2026-10-21, for later):** a release build's player capped at
   the display's refresh rate by default (CLAUDE.md §7's limiter just below it under VRR),
   not uncapped.
+
+- **Play: the game still hears a freed mouse** (2026-10-22): Shift+F1 frees the cursor,
+  but the game's input listens to raw input, and `engine_input::DeviceFilter` has one
+  switch for the keyboard and the mouse together. Unreal stops the game's mouse there.
+  To do: a switch for the mouse alone, off while the mouse is free.
+
+- **Prefabs** (E5, 2026-10-22):
+  - undoing a following puts the old prefab's values back while the file is new: saving
+    then writes them as overrides (undo it only to step past it);
+  - Revert does not bring back the entities and components an instance removed;
+  - the player finds prefabs by the path written in the scene only (the editor by id,
+    through the asset database);
+  - undo does not keep what an instance could not place (`KeptBlocks`).
 
 - **The editor's frame allocates** (found 2026-10-22, E4-2). ADR 0107 §8 asks for 0
   allocations per frame in steady state, panels included. The zero-allocation test covers

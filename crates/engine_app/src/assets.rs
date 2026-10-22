@@ -599,10 +599,14 @@ pub struct Assets {
     retry: Vec<Entity>,
     /// The frame of the last [`Self::sync`].
     frame: u64,
-    /// Parts of files read again ([`Self::reload`]), freed in the next frame: meshes and
-    /// materials in [`Self::sync`], textures in [`Self::make_textures`].
+    /// Parts of files read again ([`Self::reload`]) that renderers let go of. The scene's
+    /// instances draw them until it is next extracted (a tick), so they are freed in the
+    /// first [`Self::sync`] after that: meshes and materials there, the textures of those
+    /// materials in the [`Self::make_textures`] that follows.
     retired_meshes: Vec<MeshId>,
     retired_materials: Vec<MaterialId>,
+    retiring_textures: Vec<TextureId>,
+    /// Textures no material draws any more, freed in the next [`Self::make_textures`].
     retired_textures: Vec<TextureId>,
     /// Parts of files read again, drawn until their new versions are made (E4-5):
     /// meshes, materials, and the textures of those materials.
@@ -653,6 +657,7 @@ impl Assets {
             frame: 0,
             retired_meshes: Vec::new(),
             retired_materials: Vec::new(),
+            retiring_textures: Vec::new(),
             retired_textures: Vec::new(),
             stale_meshes: HashMap::new(),
             stale_materials: HashMap::new(),
@@ -773,7 +778,8 @@ impl Assets {
         }
     }
 
-    /// The stale parts of `file` (of every file for none) let go: freed in the next frame.
+    /// The stale parts of `file` (of every file for none) let go: freed once the scene has
+    /// been extracted since ([`Self::sync`]).
     fn retire_stale(&mut self, file: Option<AssetId>) {
         let of = |f: AssetId| file.is_none_or(|file| file == f);
         let retired_meshes = &mut self.retired_meshes;
@@ -792,11 +798,11 @@ impl Assets {
             }
             !go
         });
-        let retired_textures = &mut self.retired_textures;
+        let retiring_textures = &mut self.retiring_textures;
         self.stale_textures.retain(|&(f, texture)| {
             let go = of(f);
             if go {
-                retired_textures.push(texture);
+                retiring_textures.push(texture);
             }
             !go
         });
@@ -1303,8 +1309,11 @@ impl Assets {
 
     /// Gives every entity whose [`Model`] changed a `MeshRenderer` of its mesh and material,
     /// and takes it from those whose model went. Runs in the player's frame after the
-    /// game's ticks and presentation, before extraction; new meshes and materials reach the
-    /// GPU in the same frame. Visits only chunks where models were written.
+    /// game's ticks (each extracting the scene) and presentation: the renderers given here
+    /// reach the scene in the next tick's extraction, new meshes and materials reach the
+    /// GPU in this frame. `extracted`: the scene was extracted this frame, so the parts
+    /// renderers let go of before are drawn no more and are freed. Visits only chunks where
+    /// models were written.
     pub(crate) fn sync(
         &mut self,
         world: &mut World,
@@ -1312,13 +1321,17 @@ impl Assets {
         materials: &mut MaterialTable,
         frame: u64,
         wait: bool,
+        extracted: bool,
     ) {
         self.frame = frame;
-        for mesh in self.retired_meshes.drain(..) {
-            geometry.remove_mesh(mesh, frame);
-        }
-        for material in self.retired_materials.drain(..) {
-            materials.remove(material);
+        if extracted {
+            for mesh in self.retired_meshes.drain(..) {
+                geometry.remove_mesh(mesh, frame);
+            }
+            for material in self.retired_materials.drain(..) {
+                materials.remove(material);
+            }
+            self.retired_textures.append(&mut self.retiring_textures);
         }
         let mut came = self.take_done(geometry, false);
         let changes = self.changes.get_or_insert_with(|| QueryState::new(world));
@@ -1425,10 +1438,10 @@ impl Assets {
             // The file's old textures go with its last old material.
             let file = model.material.file;
             if !self.stale_materials.keys().any(|a| a.file == file) {
-                let retired = &mut self.retired_textures;
+                let retiring = &mut self.retiring_textures;
                 self.stale_textures.retain(|&(f, texture)| {
                     if f == file {
-                        retired.push(texture);
+                        retiring.push(texture);
                     }
                     f != file
                 });

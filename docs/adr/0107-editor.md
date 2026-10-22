@@ -1197,6 +1197,23 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
   - the game gets the events of the window it plays in;
   - "Play: In a Window or in the Viewport" chooses (in a window by default).
 
+## As built (2026-10-22, the owner's notes): the mouse while playing, the game's window
+
+- **The mouse** (`docs/research/ux/play-mode.md`'s "The mouse while playing"; the owner:
+  the cursor hidden by default):
+  - the game has the mouse from Play on: the cursor hidden and held over the window it
+    plays in (`Player::lock_cursor` over the editor's, `Player::lock_view_cursor` over
+    its own), while it runs (not paused or ejected);
+  - "Play: Free the Mouse or Give It to the Game" (Shift+F1, in the game's window too),
+    and a click in the game gives it back; the window losing the keyboard frees it;
+  - while it has the mouse in the viewport, the panels get none of it (a button let go
+    still, so none stays held); the status bar says how to free it;
+  - a lock asked for while the cursor is off the window holds it in the window's middle
+    (a game's window just opened, the cursor over the editor's).
+- **The game's window:** as large as the viewport and at least 1280 × 720 (it was at
+  least 640 × 360), fitted to its monitor; where it was when Play last ended, kept in the
+  session (`game_window`).
+
 ## As built (E4-1, 2026-10-22): the local cache's index
 
 §5 left the index's form to a measurement: our own text file, read in 3.2 ms and an

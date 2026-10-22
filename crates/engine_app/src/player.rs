@@ -7,7 +7,7 @@ use crate::report::{FrameReport, Startup, StartupPipelines};
 use crate::settings::{PlayerSettings, Window};
 use crate::sound::Sound;
 use crate::videos::Videos;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::fmt;
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
@@ -588,6 +588,8 @@ struct ViewWindow {
     focused: bool,
     resized: bool,
     minimized: bool,
+    /// The cursor is locked over it ([`Player::lock_view_cursor`]).
+    cursor_locked: bool,
 }
 
 /// The offscreen view window's readback, if the view window is offscreen.
@@ -1718,9 +1720,11 @@ impl Player {
     }
 
     /// Opens a window of its own for the view (ADR 0107 E3-4: the editor plays the game
-    /// there): `width` × `height` logical pixels, titled `title`, the scene drawn into it
-    /// from the next frame and the main output left to the overlays. Offscreen, an image
-    /// of that size instead ([`Self::capture_view_window`]). Nothing when one is open.
+    /// there): `width` × `height` logical pixels at `placement` (where
+    /// [`Self::view_window_placement`] found it before; `None`: centred on the primary
+    /// monitor), titled `title`, the scene drawn into it from the next frame and the main
+    /// output left to the overlays. Offscreen, an image of that size instead
+    /// ([`Self::capture_view_window`]). Nothing when one is open.
     ///
     /// # Errors
     ///
@@ -1732,6 +1736,7 @@ impl Player {
         title: &str,
         width: u32,
         height: u32,
+        placement: Option<engine_platform::window::WindowPlacement>,
     ) -> Result<(), AppError> {
         if self.view_window.is_some() {
             return Ok(());
@@ -1756,6 +1761,7 @@ impl Player {
                         height: height.max(1),
                         resizable: true,
                         visible: true,
+                        placement,
                         ..WindowDesc::default()
                     })
                     .map_err(AppError::at("the view's window"))?;
@@ -1830,6 +1836,7 @@ impl Player {
             focused: true,
             resized: false,
             minimized: false,
+            cursor_locked: false,
         });
         Ok(())
     }
@@ -1982,6 +1989,17 @@ impl Player {
             .and_then(|w| engine_platform::window::window_placement(w.hwnd))
     }
 
+    /// Where the view's own window is now ([`Self::open_view_window`]), to open it there
+    /// next time; none without one, or offscreen.
+    pub fn view_window_placement(&self) -> Option<engine_platform::window::WindowPlacement> {
+        match &self.view_window.as_ref()?.output {
+            ViewOutput::Window { handle, .. } => {
+                engine_platform::window::window_placement(handle.hwnd)
+            }
+            ViewOutput::Offscreen(_) => None,
+        }
+    }
+
     /// Shows a window opened hidden ([`PlayerSettings::start_hidden`]) with the frame it
     /// last drew; with `front`, brings it to the front too (when Windows allows it).
     pub fn show_window(&self, front: bool) {
@@ -2122,6 +2140,22 @@ impl Player {
         self.cursor_locked = locked;
         if let (Some(windows), Some(window)) = (&self.windows, self.window) {
             let _ = windows.lock_cursor(window.id, locked);
+        }
+    }
+
+    /// Locks the cursor over the view's own window ([`Self::open_view_window`]) as
+    /// [`Self::lock_cursor`] does over the main one, or lets it go: a game playing there
+    /// has the mouse. Windows lets it go when that window loses the keyboard.
+    pub fn lock_view_cursor(&mut self, locked: bool) {
+        let Some(view) = &mut self.view_window else {
+            return;
+        };
+        if locked == view.cursor_locked {
+            return;
+        }
+        view.cursor_locked = locked;
+        if let (Some(windows), ViewOutput::Window { handle, .. }) = (&self.windows, &view.output) {
+            let _ = windows.lock_cursor(handle.id, locked);
         }
     }
 
@@ -2440,6 +2474,10 @@ impl Player {
             let materials = &mut self.materials;
             let frame_number = frame.number;
             let wait_for_assets = self.wait_for_assets;
+            // Whether the scene was extracted this frame before its presentation (every
+            // tick extracts it; a joined client's frame always does): what renderers let
+            // go of is drawn until then.
+            let extracted = Cell::new(joined);
             let present = |world: &mut World, (): &(), alpha: f32| {
                 if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                     input.sample_frame(Instant::now());
@@ -2447,9 +2485,16 @@ impl Player {
                 game_cell.borrow_mut().present(world, alpha);
                 // Models (ADR 0108): their meshes and materials reach the GPU this frame,
                 // the pools beginning theirs after the simulation.
-                assets.sync(world, geometry, materials, frame_number, wait_for_assets);
+                assets.sync(
+                    world,
+                    geometry,
+                    materials,
+                    frame_number,
+                    wait_for_assets,
+                    extracted.get(),
+                );
                 // Brushes (ADR 0110): their groups evaluated again where they changed.
-                blockout.sync(world, geometry, materials, frame_number);
+                blockout.sync(world, geometry, materials, frame_number, extracted.get());
             };
             match net.as_mut() {
                 // Joined: the client runs the frame's ticks (its predictions, and past ones
@@ -2477,6 +2522,7 @@ impl Player {
                     &(),
                     &mut self.scene,
                     |world, (), dt| {
+                        extracted.set(true);
                         if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                             input.sample_tick(Instant::now());
                         }

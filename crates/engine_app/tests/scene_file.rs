@@ -413,7 +413,7 @@ fn the_view_draws_into_a_window_of_its_own() {
     let mut game = Still;
     player.set_frame_time(Some(1.0 / 60.0));
     let (w, h) = (320u32, 180u32);
-    player.open_view_window("the view", w, h).unwrap();
+    player.open_view_window("the view", w, h, None).unwrap();
     assert!(player.has_view_window());
     for _ in 0..20 {
         player.frame(&mut game).unwrap();

@@ -58,6 +58,29 @@ be kept explicitly. CLAUDE.md §5: entering Play from the editor ≤ 1 s.
 8. **Co-op in one process** (Unreal's multiplayer PIE), later: a host and guests over
    loopback UDP, as ADR 0106's test already runs them.
 
+## The mouse while playing (checked 2026-10-22)
+
+The owner (2026-10-22): when Play starts, the cursor should hide by default, as in the
+game.
+
+- **Unreal** ([Play In Editor settings](https://dev.epicgames.com/documentation/unreal-engine/play-in-editor-settings-in-unreal-engine),
+  [in-editor testing](https://dev.epicgames.com/documentation/unreal-engine/ineditor-testing-play-and-simulate-in-unreal-engine)):
+  playing in a new window or standalone gives the game the mouse at once; in the viewport
+  a click gives it ("Game Gets Mouse Control" gives it at once there too). Shift+F1 frees
+  the cursor, and a label says so while playing.
+- **Unity** ([`Cursor.lockState`](https://docs.unity3d.com/ScriptReference/Cursor-lockState.html)):
+  the game's script locks and hides the cursor; the editor lets it go on Escape or when
+  another application is switched to.
+- **Godot 4.4:** the game sets `Input.mouse_mode`; with the mouse captured in the
+  embedded game view, nothing built in frees it but stopping (F8); users write their own
+  key for it ([a forum thread](https://forum.godotengine.org/t/how-to-free-my-cursor-from-game-window-under-mousemode-captured/108797)).
+
+**We take:** the game has the mouse from Play on (Unreal's new window), the cursor hidden
+and held over its view; Shift+F1 frees it and gives it back (Unreal's key; a function key,
+which stays the editor's while playing); a click in the game gives it back (Unreal's);
+pausing, ejecting and the window losing the keyboard free it (Unity's switch away). Not
+Unity's Escape: Escape is the game's while it plays.
+
 ## What we do not take
 
 - Losing changes made while playing (Unity, Godot's picks in the running game).

@@ -8,7 +8,7 @@ use engine_app::{Assets, Game, Model, Player, PlayerSettings, Window, builtin};
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Entity, QueryState, Transform, World};
 use engine_editor::{EditorGame, EditorOverlay};
-use engine_platform::window::{WindowEvent, WindowEventKind, WindowId};
+use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind, WindowId};
 use engine_runtime::{Camera, Sun, Tween, look_rotation};
 use engine_scene::{AssetId, Name, SaveOptions, SceneId, SceneRegistry, find_named, save_with};
 use std::path::{Path, PathBuf};
@@ -609,7 +609,20 @@ fn the_game_plays_in_a_window_of_its_own_or_in_the_viewport() {
     }
     assert!(player.has_view_window());
     let extent = player.view_window_extent().unwrap();
-    assert!(extent.width >= 640 && extent.height >= 360, "{extent:?}");
+    assert!(extent.width >= 1280 && extent.height >= 720, "{extent:?}");
+    // The game has the mouse there; Shift+F1 frees it and gives it back, pausing frees
+    // it until going on.
+    assert!(game.view_cursor_locked() && !game.cursor_locked());
+    assert!(game.run_command(player.world_mut(), "play.mouse"));
+    assert!(!game.view_cursor_locked());
+    assert!(game.run_command(player.world_mut(), "play.mouse"));
+    assert!(game.view_cursor_locked());
+    assert!(game.run_command(player.world_mut(), "play.pause"));
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(!game.view_cursor_locked());
+    assert!(game.run_command(player.world_mut(), "play.pause"));
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.view_cursor_locked());
     let rgba = player
         .capture_view_window(&mut game, Some(&mut overlay))
         .unwrap()
@@ -631,17 +644,62 @@ fn the_game_plays_in_a_window_of_its_own_or_in_the_viewport() {
         .unwrap();
         std::fs::write(path, png).unwrap();
     }
-    // Stop: the window goes.
+    // Stop: the window goes, and the mouse is the editor's.
     assert!(game.run_command(player.world_mut(), "play.stop"));
     frame(&mut player, &mut game, &mut overlay);
     assert!(!player.has_view_window());
-    // In the viewport instead: no window.
+    assert!(!game.view_cursor_locked() && !game.cursor_locked());
+    // In the viewport instead: no window, the game has the mouse over the editor's.
     assert!(game.run_command(player.world_mut(), "play.where"));
     assert!(game.run_command(player.world_mut(), "play.play"));
     for _ in 0..3 {
         frame(&mut player, &mut game, &mut overlay);
     }
     assert!(game.playing() && !player.has_view_window());
+    assert!(game.cursor_locked() && !game.view_cursor_locked());
+    // The window losing the keyboard frees it; a click in the game gives it back.
+    let send = |game: &mut engine_editor::EditorGame<_>, kind| {
+        game.event(&WindowEvent {
+            window: WindowId(0),
+            time: std::time::Instant::now(),
+            kind,
+        });
+    };
+    send(&mut game, WindowEventKind::Focused(false));
+    assert!(!game.cursor_locked());
+    send(&mut game, WindowEventKind::Focused(true));
+    let [x, y, w, h] = game.view_rect().unwrap();
+    send(
+        &mut game,
+        WindowEventKind::CursorMoved {
+            x: (x + w / 2) as i32,
+            y: (y + h / 2) as i32,
+        },
+    );
+    send(
+        &mut game,
+        WindowEventKind::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        },
+    );
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(
+        game.cursor_locked(),
+        "a click in the game gives it the mouse"
+    );
+    send(
+        &mut game,
+        WindowEventKind::MouseButton {
+            button: MouseButton::Left,
+            pressed: false,
+        },
+    );
+    // Ejected, the editor's; back in the game, the game's.
+    assert!(game.run_command(player.world_mut(), "play.eject"));
+    assert!(!game.cursor_locked());
+    assert!(game.run_command(player.world_mut(), "play.eject"));
+    assert!(game.cursor_locked());
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -12,7 +12,7 @@ fn a_second_window_shows_the_view_beside_the_main_one() {
         return;
     };
     player
-        .open_view_window("engine_app view window test", 200, 150)
+        .open_view_window("engine_app view window test", 200, 150, None)
         .unwrap();
     assert!(player.has_view_window());
     let id = player.view_window_id().unwrap();
