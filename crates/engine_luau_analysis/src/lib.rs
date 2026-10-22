@@ -50,7 +50,35 @@ mod ffi {
         pub(crate) message_len: usize,
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub(crate) struct EngineCompletion {
+        pub(crate) label: *const u8,
+        pub(crate) label_len: usize,
+        pub(crate) kind: u32,
+        pub(crate) flags: u32,
+        pub(crate) detail: *const u8,
+        pub(crate) detail_len: usize,
+    }
+
     unsafe extern "C" {
+        pub(crate) fn engine_analysis_complete(
+            a: *mut EngineAnalysis,
+            name: *const u8,
+            name_len: usize,
+            line: u32,
+            column: u32,
+            out: *mut EngineCompletion,
+            cap: usize,
+        ) -> usize;
+        pub(crate) fn engine_analysis_hover(
+            a: *mut EngineAnalysis,
+            name: *const u8,
+            name_len: usize,
+            line: u32,
+            column: u32,
+            text: *mut *const u8,
+        ) -> usize;
         pub(crate) fn engine_analysis_new(
             root: *const u8,
             root_len: usize,
@@ -118,6 +146,44 @@ pub struct Diagnostic {
     pub severity: Severity,
     /// What Luau says (a lint warning's name first: `LocalUnused: …`).
     pub message: String,
+}
+
+/// What a completion is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionKind {
+    /// A table's field or method.
+    Property,
+    /// A local, a global, a parameter.
+    Binding,
+    /// A keyword (`local`, `function`).
+    Keyword,
+    /// A string (`require`'s paths, a tagged function's).
+    String,
+    /// A type's name.
+    Type,
+    /// A module.
+    Module,
+    /// Something else Luau offers (a function written out, a hot comment).
+    Other,
+}
+
+/// Something that may be written at a place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// What is written.
+    pub label: String,
+    /// What it is.
+    pub kind: CompletionKind,
+    /// Its type, as Luau writes it (empty for a keyword).
+    pub detail: String,
+    /// Of the type wanted there: offered first.
+    pub fits: bool,
+    /// A function: parentheses after it.
+    pub call: bool,
+    /// A function of no arguments: the caret after its parentheses, not between them.
+    pub no_arguments: bool,
+    /// Deprecated.
+    pub deprecated: bool,
 }
 
 /// Luau's analysis over a project's modules.
@@ -237,6 +303,93 @@ impl Analysis {
             }
             return out;
         }
+    }
+}
+
+impl Analysis {
+    /// What may be written at `line` and `column` (from 0, a byte in the line) of module
+    /// `name`: those of the type wanted there first, then by kind and name.
+    pub fn complete(&mut self, name: &str, line: u32, column: u32) -> Vec<Completion> {
+        let mut found: Vec<ffi::EngineCompletion> = Vec::with_capacity(256);
+        let mut out = Vec::new();
+        loop {
+            let cap = found.capacity();
+            // SAFETY: `raw` is live; `found` has room for `cap` records, of which the
+            // call writes at most `cap` and reports how many there were.
+            let n = unsafe {
+                ffi::engine_analysis_complete(
+                    self.raw.as_ptr(),
+                    name.as_ptr(),
+                    name.len(),
+                    line,
+                    column,
+                    found.as_mut_ptr(),
+                    cap,
+                )
+            };
+            if n > cap {
+                found.reserve(n);
+                continue;
+            }
+            // SAFETY: the call wrote `n` records.
+            unsafe { found.set_len(n) };
+            for c in &found {
+                let kind = match c.kind {
+                    0 => CompletionKind::Property,
+                    1 => CompletionKind::Binding,
+                    2 => CompletionKind::Keyword,
+                    3 => CompletionKind::String,
+                    4 => CompletionKind::Type,
+                    5 => CompletionKind::Module,
+                    _ => CompletionKind::Other,
+                };
+                out.push(Completion {
+                    // SAFETY: the texts are valid until the analysis is next called.
+                    label: unsafe { text_of(c.label, c.label_len) },
+                    kind,
+                    // SAFETY: as above.
+                    detail: unsafe { text_of(c.detail, c.detail_len) },
+                    fits: c.flags & 2 != 0,
+                    call: c.flags & 4 != 0,
+                    no_arguments: c.flags & 8 != 0,
+                    deprecated: c.flags & 1 != 0,
+                });
+            }
+            break;
+        }
+        let rank = |k: CompletionKind| match k {
+            CompletionKind::Property | CompletionKind::Binding => 0,
+            CompletionKind::Type | CompletionKind::Module | CompletionKind::String => 1,
+            CompletionKind::Other => 2,
+            CompletionKind::Keyword => 3,
+        };
+        out.sort_by(|a, b| {
+            (!a.fits, a.deprecated, rank(a.kind), &a.label).cmp(&(
+                !b.fits,
+                b.deprecated,
+                rank(b.kind),
+                &b.label,
+            ))
+        });
+        out
+    }
+
+    /// What is at `line` and `column` of module `name`: its type, as Luau writes it.
+    pub fn type_at(&mut self, name: &str, line: u32, column: u32) -> Option<String> {
+        let mut text = core::ptr::null();
+        // SAFETY: `raw` is live, the name for the call, and `text` a local.
+        let n = unsafe {
+            ffi::engine_analysis_hover(
+                self.raw.as_ptr(),
+                name.as_ptr(),
+                name.len(),
+                line,
+                column,
+                &raw mut text,
+            )
+        };
+        // SAFETY: `n` bytes at `text`, valid until the analysis is next called.
+        (n > 0).then(|| unsafe { text_of(text, n) })
     }
 }
 

@@ -1642,3 +1642,37 @@ so not SQLite. The editor opens it at its start and follows the folder.
   - the findings in the Output's list;
   - the engine's `.d.luau` once E7 generates it (`Analysis::add_definitions`);
   - aliases from `.luaurc`.
+
+## As built (E8-3c, 2026-10-22): completion and hover
+
+- **From the same analysis:**
+  - `Analysis::complete` uses Luau's `autocomplete` at a place. It gives what may be
+    written there, each item with its kind, its type, whether it is the type wanted
+    there, and whether it is a function and of what arguments. Items of the wanted type
+    come first, then by kind (fields and names before keywords) and name.
+  - `Analysis::type_at` gives the type at a place. A name where it is declared (a
+    `local`, a parameter) gets its own binding, which Luau's `findBindingAtPosition`
+    leaves out inside its definition. A table shows its fields, not the name the solver
+    gave it.
+- **The checker's thread** also answers these two, the text as it is when asked.
+- **The completion list** (`complete::Completing`) opens:
+  - after `.` and `:`;
+  - at a word's first letter, as VS Code's quick suggestions do;
+  - on Ctrl+Space.
+
+  It is asked once where the word starts, narrows as the word grows (those starting with
+  what is typed first, then those holding it), and closes when the caret leaves the word.
+  Up and Down pick, Enter or Tab write the pick, Escape closes, a click on a row writes
+  it. A function is written with its parentheses when none follow, the caret between
+  them unless it takes no arguments. All of it is one undo step. Rows show VS Code's
+  codicons by kind and the type at their end.
+- **Hover:** the mouse resting half a second on a word shows `name: type` above it. It
+  hides when the mouse moves or a key is pressed.
+- **The findings' messages:** one a line, its first error before its first warning
+  (two had drawn over each other).
+- **Left:**
+  - go to definition (F12);
+  - signature help while typing arguments;
+  - the documentation of the engine's API in the list (with E7's `.d.luau`);
+  - `require` paths in the list;
+  - find in files.

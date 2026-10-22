@@ -459,6 +459,19 @@ pub struct CodeRun<'a> {
     pub token: Token,
 }
 
+/// The completion list under the word being typed (ADR 0107 E8-3c), while open.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompletionView<'a> {
+    /// Where the word starts: its line and column.
+    pub line: usize,
+    /// Its column.
+    pub column: usize,
+    /// The rows in view: an icon, what is written, its type.
+    pub rows: &'a [(&'a str, &'a str, &'a str)],
+    /// The picked row among them.
+    pub selected: usize,
+}
+
 /// The find bar over a script's code (ADR 0107 E8-2), while it is open.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FindView<'a> {
@@ -520,6 +533,10 @@ pub struct CodeView<'a> {
     pub notes: &'a [(usize, usize, &'a str, bool)],
     /// The code bar's count (`2 errors, 1 warning`); empty when nothing was found.
     pub problem_count: &'a str,
+    /// The completion list, while open.
+    pub completion: Option<CompletionView<'a>>,
+    /// What the mouse rests on: its line, its column, and what it is.
+    pub hover: Option<(usize, usize, &'a str)>,
 }
 
 /// Everything the shell shows.
@@ -632,6 +649,8 @@ pub struct ShellResponse {
     pub replace: Option<bool>,
     /// The code bar's count of problems: the next one.
     pub next_problem: bool,
+    /// A row of the completion list was clicked: its place among the rows in view.
+    pub completion_row: Option<usize>,
     /// A tool was clicked.
     pub tool: Option<usize>,
     /// A scene tree row was clicked.
@@ -889,7 +908,7 @@ fn center(
             if let Some(find) = &view.find {
                 find_bar(ui, find, p, out);
             }
-            out.code = code_view(ui, view, p);
+            out.code = code_view(ui, view, p, out);
             file_browser(ui, model, p, out);
             return;
         }
@@ -1143,7 +1162,7 @@ fn script_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shell
 /// A script's code: the primary caret's line lit, the selections, the lines in view on
 /// their grid in their runs' colors, the carets over them, and the gutter with the lines'
 /// numbers over what is scrolled under it.
-fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette) -> u64 {
+fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellResponse) -> u64 {
     let area = Style {
         background: Some(p.code),
         clip: true,
@@ -1224,6 +1243,31 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette) -> u64 {
             band([0.0, 0.0], [view.gutter, CODE_FAR], p.code),
             |_| {},
         );
+        if let Some(list) = &view.completion {
+            let at = [
+                x(list.column as f32) - ICON - 12.0,
+                y(list.line) + CODE_LINE + 2.0,
+            ];
+            completion_list(ui, list, at, p, &mut out.completion_row);
+        }
+        if let Some((line, column, what)) = view.hover {
+            let above = if line > view.first {
+                -26.0
+            } else {
+                CODE_LINE + 4.0
+            };
+            let style = Style {
+                floating: Some([x(column as f32), y(line) + above]),
+                padding: [8.0, 3.0, 8.0, 3.0],
+                radius: 3.0,
+                background: Some(p.header),
+                border: Some((p.selection_dim, 1.0)),
+                ..Style::default()
+            };
+            ui.container("hover", style, |ui| {
+                ui.mono_text_node("text", Style::default(), what, CODE_TEXT, p.text);
+            });
+        }
         for (k, number) in view.numbers.iter().enumerate() {
             ui.push_id(k as u64);
             let line = view.first + k;
@@ -1244,6 +1288,55 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette) -> u64 {
             ui.pop_id();
         }
     })
+}
+
+/// The completion list at `at` in the code area: a row each, its kind's icon, what is
+/// written and its type; the picked one lit, a click on one into `out_row`.
+fn completion_list(
+    ui: &mut Ui,
+    list: &CompletionView<'_>,
+    at: [f32; 2],
+    p: &Palette,
+    out_row: &mut Option<usize>,
+) {
+    let style = Style {
+        direction: Direction::Column,
+        size: [Size::Fixed(460.0), Size::Fit],
+        floating: Some(at),
+        padding: [2.0; 4],
+        radius: 3.0,
+        background: Some(p.header),
+        border: Some((p.selection_dim, 1.0)),
+        ..Style::default()
+    };
+    ui.container("completion", style, |ui| {
+        for (i, &(glyph, label, detail)) in list.rows.iter().enumerate() {
+            ui.push_id(i as u64);
+            let on = i == list.selected;
+            let id = ui.row(
+                "row",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(22.0)],
+                    padding: [6.0, 0.0, 8.0, 0.0],
+                    gap: 6.0,
+                    radius: 2.0,
+                    background: on.then_some(p.selection),
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    text(ui, "icon", glyph, ICON, p.accent);
+                    ui.mono_text_node("label", Style::default(), label, CODE_TEXT, p.text);
+                    ui.spacer("fill");
+                    text(ui, "detail", detail, SMALL, p.text_dim);
+                },
+            );
+            if ui.sense(id, false).clicked {
+                *out_row = Some(i);
+            }
+            ui.pop_id();
+        }
+    });
 }
 
 /// The find bar under the code bar: the query field, match case and whole words, the
