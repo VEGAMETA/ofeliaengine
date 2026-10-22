@@ -568,7 +568,7 @@ The section "Prefab instances" above, built in `engine_scene` (`prefab` module),
   a fold from the right, so placing a prefab under instance `I` maps each of its ids
   `x` to `derive(I, x)` and a path written in a scene names the same entity that nesting
   places.
-- **The root (decided here; the format did not say):**
+- **The root (team decision, 2026-10-22; the format did not say):**
   - a prefab of one root: that root is the instance's entity and takes the instance's
     id, so `[instance]`'s lines override its values, as the format reads;
   - a prefab of several roots ("any scene is a prefab": a level of many roots): an
