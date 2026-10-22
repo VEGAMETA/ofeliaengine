@@ -509,7 +509,7 @@ Last updated: 2026-10-22.
     call could not be written there). Static models follow their entities, props fall
     and roll moving theirs; it visits only what changed and allocates nothing while
     nothing does.
-  - **E7-2, the engine's types** (#PR, ADR 0114's as-built): the editor's Luau checker
+  - **E7-2, the engine's types** (#353, ADR 0114's as-built): the editor's Luau checker
     knows the engine's API and the program's components (findings, completion and hovers),
     a hook's `self` typed from `component`, with Luau's old solver (the new one of 0.736
     leaves it unknown). The editor writes them to `types/ofelia.d.luau`, and `ofeliaengine
