@@ -264,3 +264,91 @@ fn a_project_without_scripts_gets_its_script_host_from_its_first_new_script() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_script_changed_on_disk_runs_again_its_values_kept_by_name() {
+    let dir = temp_dir("reload");
+    write_project(&dir, "Front door", true);
+    let Some((mut player, settings)) = player(&dir) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let door = find_named(player.world_mut(), "Front door").unwrap();
+    assert!(player.add_script(door, "EditorSpin"));
+    let first = player
+        .world_mut()
+        .components()
+        .id_by_name("script::EditorSpin")
+        .unwrap();
+    // The rate set on the door (3, not the default 2): kept through the reload.
+    game.set(player.world_mut(), door, "EditorSpin.rate", "3")
+        .unwrap();
+    // Another prop and a faster hook, written by another editor: the watcher's turn.
+    let changed = SPIN
+        .replace("{ rate = 2 }", "{ rate = 2, boost = 10 }")
+        .replace("self.rate * dt", "self.rate * self.boost * dt");
+    std::fs::write(dir.join("scripts/spin.luau"), changed).unwrap();
+    let started = std::time::Instant::now();
+    loop {
+        frame(&mut player, &mut game, &mut overlay);
+        let said = game.message().unwrap_or_default();
+        if said.starts_with("Reloaded scripts/spin.luau") {
+            assert!(said.contains("EditorSpin: props changed"), "{said}");
+            println!("{said}");
+            break;
+        }
+        assert!(started.elapsed().as_secs() < 10, "no reload: {said}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let world = player.world_mut();
+    let moved = world
+        .components()
+        .id_by_name("script::EditorSpin#2")
+        .unwrap();
+    assert!(world.get_raw(door, first).is_none());
+    assert!(world.get_raw(door, moved).is_some());
+    // The values by name: the rate set, the boost's default; the inspector's path reads them.
+    let rate = |player: &mut Player| {
+        let world = player.world_mut();
+        let info = world.components().type_info(moved).unwrap();
+        let engine_reflect::TypeKind::Struct(fields) = &info.kind else {
+            unreachable!()
+        };
+        let at = |name: &str| fields.iter().find(|f| f.name == name).unwrap().offset;
+        let base = world.get_raw(door, moved).unwrap().as_ptr();
+        // SAFETY: two f32 props of the door's live value.
+        unsafe {
+            (
+                base.add(at("rate")).cast::<f32>().read_unaligned(),
+                base.add(at("boost")).cast::<f32>().read_unaligned(),
+            )
+        }
+    };
+    assert_eq!(rate(&mut player), (3.0, 10.0));
+    // Undo of the rate's step puts back the default, in the new layout.
+    assert!(game.run_command(player.world_mut(), "edit.undo"));
+    frame(&mut player, &mut game, &mut overlay);
+    assert_eq!(rate(&mut player), (2.0, 10.0));
+    assert!(player.world_mut().get_raw(door, first).is_none());
+    // Play runs the new hook.
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let turned = player
+        .world_mut()
+        .get::<Transform>(door)
+        .unwrap()
+        .rotation
+        .angle_between(Quat::IDENTITY);
+    assert!(turned > 1.0, "the boosted hook turned it {turned} rad");
+    assert!(game.run_command(player.world_mut(), "play.stop"));
+    frame(&mut player, &mut game, &mut overlay);
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

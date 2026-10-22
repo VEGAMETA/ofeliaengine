@@ -1911,6 +1911,9 @@ struct Editor {
     play_request: Option<PlayRequest>,
     /// A script New Script… made, loaded once the player's frame is at hand (E7-4a).
     script_request: Option<ScriptRequest>,
+    /// Scripts saved, or changed on disk, to run again once the player's frame is at hand
+    /// (E7-4b): their files, relative to the project.
+    script_reloads: Vec<PathBuf>,
     /// The world's script components and their files.
     script_files: ScriptFiles,
     /// The active brush's side handles (ADR 0110 E2b-3c), the one under the pointer, and
@@ -2538,6 +2541,7 @@ impl Editor {
             view_window: None,
             play_request: None,
             script_request: None,
+            script_reloads: Vec::new(),
             script_files: ScriptFiles::default(),
             handles: Handles::default(),
             hovered_side: None,
@@ -8632,11 +8636,80 @@ impl Editor {
                 s.base = Base::of(&file);
                 s.closing = false;
                 let message = format!("Saved {}", s.path.display());
+                // A game's script runs again at the next frame, not after the file watcher's
+                // quiet time (E7-4b); the watcher's turn then finds the text it ran.
+                if s.language == Language::Luau && s.path.starts_with("scripts") {
+                    let path = s.path.clone();
+                    self.reload_script(path);
+                }
                 self.keep_script_autosaves(world, false);
                 self.say(message);
             }
             Err(e) => self.say(format!("Not saved: {e}")),
         }
+    }
+
+    /// Script `path` (relative to the project) to run again at the player's next frame.
+    fn reload_script(&mut self, path: PathBuf) {
+        if !self.script_reloads.contains(&path) {
+            self.script_reloads.push(path);
+        }
+    }
+
+    /// What running script `path` again did (E7-4b), said: how long it took, what went on,
+    /// what moved. The history, and Play's snapshot, follow a component whose props moved
+    /// to a new layout. An error goes to the Output (a click opens its line) and the old
+    /// version runs on.
+    fn script_reloaded(
+        &mut self,
+        path: &Path,
+        reloaded: Result<engine_app::scripts::Reloaded, String>,
+    ) {
+        let r = match reloaded {
+            Ok(r) => r,
+            Err(e) => {
+                let text = format!("{e} (the old version runs on)");
+                log::error!(target: "script", "{text}");
+                // In the Output once, as an error: the status only says it.
+                self.message = Some((text, Instant::now()));
+                return;
+            }
+        };
+        if r.is_empty() {
+            return;
+        }
+        for (_, relayout) in &r.relaid {
+            self.history.relayout(relayout);
+            if let Some(play) = &mut self.play {
+                play.snapshot.relayout(relayout);
+                play.mark.relayout(relayout);
+            }
+        }
+        let file = if r.file.is_empty() {
+            path.to_string_lossy().replace('\\', "/")
+        } else {
+            r.file.clone()
+        };
+        let mut message = format!("Reloaded {file} in {:.1} ms", r.took.as_secs_f64() * 1e3);
+        if r.instances > 0 {
+            let _ = write!(message, ", {} instances going on", r.instances);
+        }
+        if !r.relaid.is_empty() {
+            let moved: Vec<&str> = r.relaid.iter().map(|(n, _)| n.as_str()).collect();
+            let _ = write!(
+                message,
+                "; {}: props changed, values kept by name",
+                moved.join(", ")
+            );
+        }
+        if !r.added.is_empty() {
+            let _ = write!(message, "; new: {}", r.added.join(", "));
+        }
+        if !r.gone.is_empty() {
+            let gone = r.gone.join(", ");
+            let _ = write!(message, "; no longer declared: {gone} (their data stays)");
+        }
+        self.say(message);
     }
 
     /// Keeps the scripts' autosaves in step with their unsaved text: written once it has
@@ -10407,11 +10480,19 @@ impl Editor {
             return;
         }
         // Files written anew: what the player made from them is made again; the open
-        // scene's instances follow their prefabs (once Play stops, while it plays).
+        // scene's instances follow their prefabs (once Play stops, while it plays); a
+        // game's script runs again (E7-4b).
         let mut prefabs = Vec::new();
         for id in report.changed {
             if !self.changed_assets.contains(&id) {
                 self.changed_assets.push(id);
+            }
+            if let Some(e) = self.asset_db.get(id)
+                && e.kind == engine_scene::AssetKind::Script
+                && e.path.starts_with("scripts/")
+            {
+                let path = PathBuf::from(&e.path);
+                self.reload_script(path);
             }
             if self
                 .asset_db
@@ -13877,8 +13958,22 @@ impl<G> EditorGame<G> {
         // A script New Script… made (E7-4a): loaded by the player's script host, then
         // attached to what it was made for.
         if let Some(request) = shared.script_request.take() {
-            let loaded = player.load_script(&shared.root.join(&request.path));
+            let mut loaded = player.load_script(&shared.root.join(&request.path));
+            // Loaded already (the file watcher came first): it is there all the same.
+            if player
+                .scripts()
+                .and_then(|s| s.component(&request.component))
+                .is_some()
+            {
+                loaded = Ok(vec![request.component.clone()]);
+            }
             shared.script_loaded(player.world_mut(), request, loaded);
+        }
+        // Scripts saved or changed on disk (E7-4b): run again by the player's host, their
+        // instances going on with their state.
+        for path in core::mem::take(&mut shared.script_reloads) {
+            let reloaded = player.reload_script(&shared.root.join(&path));
+            shared.script_reloaded(&path, reloaded);
         }
         // The newest pick's entity, and what to outline (ADR 0109), through the
         // extraction's slots.
@@ -22328,5 +22423,54 @@ mod tests {
         assert_eq!(names("Дверь", &free), "Script scripts/script.luau");
         let taken = |c: &str, f: &str| c == "Door" || f == "scripts/door_2.luau";
         assert_eq!(names("Door", &taken), "Door3 scripts/door_3.luau");
+    }
+
+    #[test]
+    fn a_saved_script_runs_again_at_the_next_frame_and_says_what_it_did() {
+        let dir = folder("reload");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/lamp.luau"), "return {}\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "notes\n").unwrap();
+        let (world, mut ed, _) = door_project(&dir);
+        // Ctrl+S on a game's script: it runs again at the player's next frame.
+        ed.open_script(&world, Path::new("scripts/lamp.luau"), None);
+        ed.save_script(&world, 0);
+        assert_eq!(ed.script_reloads, [PathBuf::from("scripts/lamp.luau")]);
+        ed.save_script(&world, 0);
+        assert_eq!(ed.script_reloads.len(), 1, "once");
+        // A text file is no script.
+        ed.open_script(&world, Path::new("notes.txt"), None);
+        ed.save_script(&world, 1);
+        assert_eq!(ed.script_reloads.len(), 1);
+        // What the host did, said.
+        let done = engine_app::scripts::Reloaded {
+            file: String::from("scripts/lamp.luau"),
+            kept: vec![String::from("Lamp")],
+            added: vec![String::from("Glow")],
+            instances: 3,
+            took: Duration::from_micros(1500),
+            ..Default::default()
+        };
+        ed.script_reloaded(Path::new("scripts/lamp.luau"), Ok(done));
+        assert_eq!(
+            said(&ed),
+            "Reloaded scripts/lamp.luau in 1.5 ms, 3 instances going on; new: Glow"
+        );
+        // The same text: nothing said.
+        ed.message = None;
+        let same = engine_app::scripts::Reloaded {
+            file: String::from("scripts/lamp.luau"),
+            ..Default::default()
+        };
+        ed.script_reloaded(Path::new("scripts/lamp.luau"), Ok(same));
+        assert!(ed.message.is_none());
+        // An error: the old version runs on.
+        let why = String::from("scripts/lamp.luau:2: expected 'end'");
+        ed.script_reloaded(Path::new("scripts/lamp.luau"), Err(why));
+        assert_eq!(
+            said(&ed),
+            "scripts/lamp.luau:2: expected 'end' (the old version runs on)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

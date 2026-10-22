@@ -953,3 +953,37 @@ there, and see the script's file in the inspector.
   - a saved script takes effect when the editor starts again; reloading on save is E7-4b;
   - the editor's Luau analysis does not know the engine's API, so `component` reads as an
     unknown global until the types file (E7-2).
+
+## As built (E7-4b, 2026-10-22): a script reloads when it is saved
+
+- **When:** Ctrl+S on a game's script (`scripts/…`) runs it again at the player's next
+  frame. A file changed by another editor runs again when the file watcher's scan finds it
+  written anew. The host keeps a hash of each module's text, so a text that already ran (the
+  watcher's turn after Ctrl+S) does nothing.
+- **How** (`Scripts::reload_file`, `Player::reload_script`):
+  - the module runs again in its VM, keeping its `state` table; a module that does not
+    compile or run leaves the old version running, and the error names the file and line
+    (in the Output, a click opens it);
+  - a component whose props kept their places (the same names at the same offsets, of the
+    same types) takes the new hooks in place; its new attributes (ranges, tooltips) replace
+    the description the world holds (`World::set_type_info`, for components made at run
+    time);
+  - a component whose props changed moves to a component of the new layout, registered
+    under the next name (`script::Door#2`; names stay unique, and a world cannot drop a
+    component). `engine_ecs::Relayout` describes the move: by prop name, a prop of the same
+    type keeps its value, the others take the new defaults. Every entity's value moves at
+    once; scene files are unchanged (they name props);
+  - instances go on with their `self.locals`; `on_start` does not run again;
+  - stopped instances of the reloaded components start again (the error may be fixed),
+    and their errors are reported again when they come back;
+  - a component the script no longer declares keeps its data and loses its hooks.
+- **The editor follows a move:** `History::relayout` rewrites every record of the old
+  component, done and undone, and Play's snapshot and mark do the same. Undo then puts back
+  values of the layout the world holds now, entity references kept by scene id.
+- **Measured** (ref-1, release, `scripts::tests::measure_reload --ignored`): a script used by
+  1,000 entities reloads in 0.21 ms when its props keep their places, and in 0.33 ms when they
+  change (§13's target: 100 ms). No lazy move is needed.
+- **Not yet:** the Resume mark on an instance stopped by an error (a reload starts it
+  again). A component's props change their kinds only by name: a prop that changes type
+  starts from its default. Each reload keeps its old type descriptions for the process's
+  life (a few hundred bytes); the editor reloads, a game does not.

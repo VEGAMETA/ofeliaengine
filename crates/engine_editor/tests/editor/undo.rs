@@ -628,3 +628,116 @@ fn changes_kept_from_play_enter_the_scene_as_one_step() {
     assert_eq!(h.undo(&mut w).as_deref(), Some("Keep Changes"));
     assert_eq!(text(&mut w), before);
 }
+
+#[test]
+fn records_follow_a_components_new_layout_by_name() {
+    use engine_ecs::{ComponentDesc, Relayout};
+    use engine_reflect::{Attrs, Field, TypeInfo, TypeKind};
+    static OLD_FIELDS: [Field; 2] = [
+        Field {
+            name: "lift",
+            offset: 0,
+            ty: <f32 as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+        Field {
+            name: "target",
+            offset: 8,
+            ty: <Entity as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+    ];
+    static NEW_FIELDS: [Field; 3] = [
+        Field {
+            name: "lift",
+            offset: 0,
+            ty: <f32 as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+        Field {
+            name: "speed",
+            offset: 4,
+            ty: <f32 as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+        Field {
+            name: "target",
+            offset: 8,
+            ty: <Entity as Reflect>::TYPE_INFO,
+            attrs: Attrs::NONE,
+        },
+    ];
+    static OLD: TypeInfo = TypeInfo {
+        name: "UndoDoor",
+        size: 16,
+        align: 8,
+        kind: TypeKind::Struct(&OLD_FIELDS),
+        attrs: Attrs::NONE,
+    };
+    static NEW: TypeInfo = TypeInfo {
+        name: "UndoDoor",
+        size: 16,
+        align: 8,
+        kind: TypeKind::Struct(&NEW_FIELDS),
+        attrs: Attrs::NONE,
+    };
+    let desc = |name: &str, info: &'static TypeInfo| ComponentDesc {
+        name: name.into(),
+        layout: core::alloc::Layout::from_size_align(16, 8).unwrap(),
+        drop: None,
+        pod: true,
+        type_info: Some(info),
+    };
+    let mut w = World::new();
+    // SAFETY: plain data of the described layouts.
+    let old = unsafe { w.register_dynamic(desc("script::UndoDoor", &OLD)) }.unwrap();
+    // SAFETY: as above.
+    let new = unsafe { w.register_dynamic(desc("script::UndoDoor#2", &NEW)) }.unwrap();
+    let value = |lift: f32, target: Entity| {
+        let mut v = [0u8; 16];
+        v[0..4].copy_from_slice(&lift.to_le_bytes());
+        v[8..16].copy_from_slice(&target.to_bits().to_le_bytes());
+        v
+    };
+    let friend = spawn(&mut w, 9.0);
+    let door = spawn(&mut w, 0.0);
+    // SAFETY: a value of the old layout, plain data.
+    unsafe { w.insert_raw(door, old, value(1.0, friend).as_ptr()) };
+    let mut history = History::new();
+    history.begin("Raise", None);
+    history.touch(&mut w, door);
+    // SAFETY: as above.
+    unsafe { w.insert_raw(door, old, value(3.0, friend).as_ptr()) };
+    history.commit(&mut w);
+    // The script's props changed: the world moves to the new layout, the history follows.
+    let mut defaults = vec![0u8; 16];
+    defaults[4..8].copy_from_slice(&2.0f32.to_le_bytes());
+    defaults[8..16].copy_from_slice(&Entity::NULL.to_bits().to_le_bytes());
+    let r = Relayout::between(old, &OLD, new, &NEW, defaults.into());
+    let now = r.apply(&value(3.0, friend));
+    // SAFETY: a value of the new layout.
+    unsafe { w.insert_raw(door, new, now.as_ptr()) };
+    w.remove_raw(door, old);
+    history.relayout(&r);
+    // Undo puts back the value before the step, in the new layout, its reference resolved.
+    history.undo(&mut w);
+    assert!(
+        w.get_raw(door, old).is_none(),
+        "nothing of the old layout comes back"
+    );
+    let bytes = |w: &World| {
+        let p = w.get_raw(door, new).unwrap().as_ptr();
+        // SAFETY: the new layout's 16 bytes.
+        unsafe { core::slice::from_raw_parts(p, 16) }.to_vec()
+    };
+    let undone = bytes(&w);
+    assert_eq!(undone[0..4], 1.0f32.to_le_bytes(), "lift as it was");
+    assert_eq!(undone[4..8], 2.0f32.to_le_bytes(), "speed: its default");
+    assert_eq!(
+        undone[8..16],
+        friend.to_bits().to_le_bytes(),
+        "the reference kept"
+    );
+    history.redo(&mut w);
+    assert_eq!(bytes(&w)[0..4], 3.0f32.to_le_bytes());
+}

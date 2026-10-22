@@ -160,6 +160,8 @@ pub(crate) struct ComponentInfo {
     pub(crate) drop: Option<unsafe fn(*mut u8)>,
     pub(crate) pod: bool,
     pub(crate) type_info: Option<&'static engine_reflect::TypeInfo>,
+    /// Registered through `World::register_dynamic`: no Rust type behind it.
+    pub(crate) dynamic: bool,
 }
 
 unsafe fn drop_as<T>(ptr: *mut u8) {
@@ -242,8 +244,26 @@ impl Components {
             // beyond what `#[repr(align)]` allows; both only fail for broken programs.
             Err(e) => panic!("registering a Rust component: {e}"),
         };
+        self.infos[id.0 as usize].dynamic = false;
         self.by_type.insert(TypeId::of::<T>(), id);
         id
+    }
+
+    /// Replaces dynamic component `id`'s description with `info`, of the same size and
+    /// alignment. False for a Rust type's component, or another size.
+    pub(crate) fn set_type_info(
+        &mut self,
+        id: ComponentId,
+        info: &'static engine_reflect::TypeInfo,
+    ) -> bool {
+        let Some(c) = self.infos.get_mut(id.0 as usize) else {
+            return false;
+        };
+        if !c.dynamic || c.layout.size() != info.size || c.layout.align() != info.align {
+            return false;
+        }
+        c.type_info = Some(info);
+        true
     }
 
     pub(crate) fn add(&mut self, desc: ComponentDesc) -> Result<ComponentId, RegisterError> {
@@ -263,6 +283,7 @@ impl Components {
             drop: desc.drop,
             pod: desc.pod,
             type_info: desc.type_info,
+            dynamic: true,
         });
         Ok(id)
     }

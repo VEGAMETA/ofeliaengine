@@ -234,6 +234,18 @@ impl World {
         self.components.add(desc)
     }
 
+    /// Replaces the description of component `id`, made by [`Self::register_dynamic`],
+    /// with `info` of the same size and alignment: a script whose props kept their places
+    /// changed their attributes (a range, a tooltip). False for a Rust type's component, or
+    /// another size.
+    pub fn set_type_info(
+        &mut self,
+        id: ComponentId,
+        info: &'static engine_reflect::TypeInfo,
+    ) -> bool {
+        self.components.set_type_info(id, info)
+    }
+
     /// Id of `T`, if registered.
     pub fn component_id<T: Component>(&self) -> Option<ComponentId> {
         self.components.id_of::<T>()
