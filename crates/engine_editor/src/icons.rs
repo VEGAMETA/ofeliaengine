@@ -36,6 +36,10 @@ pub const SCRIPT: &str = "\u{F08B1}";
 pub const SCRIPT_MARK: &str = "\u{F0BC3}";
 /// The inspector's Add Component (`md-puzzle_plus_outline`).
 pub const ADD_COMPONENT: &str = "\u{F14D6}";
+/// A scale's proportions kept, its lock shut (`md-lock`).
+pub const LOCK: &str = "\u{F033E}";
+/// A scale's parts free, its lock open (`md-lock_open_variant`).
+pub const UNLOCK: &str = "\u{F0FC6}";
 /// Slang module (`md-file_code`).
 pub const SHADER: &str = "\u{F022E}";
 /// A text file: settings, data, notes (`md-file_document_outline`).

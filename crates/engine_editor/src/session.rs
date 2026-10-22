@@ -253,6 +253,8 @@ pub(crate) struct EditorState {
     pub(crate) fly: Option<f64>,
     /// Whether clicks in the viewport pick transparent surfaces (ADR 0109).
     pub(crate) pick_transparent: Option<bool>,
+    /// Whether a transform's scale keeps its proportions in the inspector (its lock).
+    pub(crate) scale_lock: Option<bool>,
     /// What rotating and scaling turn about (`median`, `origins`, `active`).
     pub(crate) pivot: Option<String>,
     /// Whether the viewport shows its overlays (lights' and cameras' icons and reach).
@@ -315,6 +317,9 @@ impl SessionFile {
         }
         if let Some(on) = self.editor.pick_transparent {
             let _ = writeln!(out, "pick_transparent = {on}");
+        }
+        if let Some(on) = self.editor.scale_lock {
+            let _ = writeln!(out, "scale_lock = {on}");
         }
         if let Some(on) = self.editor.overlays {
             let _ = writeln!(out, "overlays = {on}");
@@ -513,6 +518,13 @@ impl SessionFile {
                     }
                     "pick_transparent" => {
                         file.editor.pick_transparent = Some(match value {
+                            "true" => true,
+                            "false" => false,
+                            other => return Err(at(format!("`{other}` is not true or false"))),
+                        });
+                    }
+                    "scale_lock" => {
+                        file.editor.scale_lock = Some(match value {
                             "true" => true,
                             "false" => false,
                             other => return Err(at(format!("`{other}` is not true or false"))),
@@ -1018,6 +1030,7 @@ mod tests {
                 keys: Some(String::from("godot")),
                 fly: Some(7.5),
                 pick_transparent: Some(false),
+                scale_lock: Some(false),
                 pivot: Some(String::from("origins")),
                 overlays: Some(false),
                 window: Some(WindowPlacement {

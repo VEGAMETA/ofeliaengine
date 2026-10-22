@@ -85,6 +85,11 @@ errors next to their cause, keyboard-first.
     animation editor.
 14. **Speed:** "—" is worked out only for visible fields, so a selection of 1,000
     entities costs what its visible rows cost.
+15. **A transform's scale keeps its proportions** while its lock is shut, the default
+    (the owner, 2026-10-22): Unity's "Constrained Proportions" (a link icon before the
+    fields), Unreal's "Preserve Scale Ratio" (a lock after the label), Godot's linked
+    scale (a chain). Ours is a lock at the end of the name, as Unreal's; one setting for
+    every entity, kept in the session.
 
 ## What we do not take
 

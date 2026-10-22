@@ -1238,6 +1238,23 @@ fn script_template(name: &str) -> String {
 /// Where a new script opens: in `on_tick`, its line and column (1-based).
 const SCRIPT_CURSOR: (usize, usize) = (10, 5);
 
+/// A scale's parts in proportion (its lock shut): part `part` set to `values[part]`, the
+/// other two of the first three by the same ratio to `start`; from a zero, they take the
+/// new value.
+fn in_proportion(start: [f64; 4], mut values: [f64; 4], part: usize) -> [f64; 4] {
+    let (from, to) = (start[part], values[part]);
+    for (i, v) in values.iter_mut().enumerate().take(3) {
+        if i != part {
+            *v = if from.abs() > f64::EPSILON {
+                start[i] * to / from
+            } else {
+                to
+            };
+        }
+    }
+    values
+}
+
 /// What a line of the "Keep Changes…" list keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeepItem {
@@ -1882,8 +1899,13 @@ struct Editor {
     shown_sections: Vec<(usize, usize, usize)>,
     /// The enum whose list is open: its component and offset.
     open_choice: Option<(ComponentId, usize)>,
-    /// The add menu is open.
+    /// The add menu is open, and where: at the pointer when Ctrl+A opened it (logical
+    /// pixels), else under the scene dock's +.
     add_open: bool,
+    add_at: Option<[f32; 2]>,
+    /// A transform's scale keeps its proportions in the inspector (its lock, shut by
+    /// default: the owner, 2026-10-22).
+    scale_lock: bool,
     /// The add menu's group opened beside it.
     add_group: Option<usize>,
     /// Drag gestures so far (each its own undo step).
@@ -2527,6 +2549,8 @@ impl Editor {
             shown_sections: Vec::new(),
             open_choice: None,
             add_open: false,
+            add_at: None,
+            scale_lock: true,
             add_group: None,
             gestures: 0,
             gizmo: Gizmo::default(),
@@ -3073,6 +3097,8 @@ impl Editor {
             }
         }
         let typing = self.typing;
+        // A transform's scale shows its lock (the owner, 2026-10-22).
+        let (transform, scale_lock) = (world.component_id::<Transform>(), self.scale_lock);
         let fields: Vec<Field<'_>> = self
             .shown
             .iter()
@@ -3081,6 +3107,8 @@ impl Editor {
                 let (a, b) = spans[i];
                 let shown = &values[a..b];
                 let first = shown.first().copied().unwrap_or("");
+                let lock = (transform == Some(p.component) && self.inspector.name(p) == "scale")
+                    .then_some(scale_lock);
                 let widget = match p.kind {
                     Kind::Numbers { .. } | Kind::Rotation => Widget::Numbers {
                         values: shown,
@@ -3092,6 +3120,7 @@ impl Editor {
                         typing: typing
                             .filter(|&(c, o, _)| c == p.component && o == p.offset)
                             .map(|(_, _, part)| part),
+                        lock,
                     },
                     Kind::Bool => Widget::Check((p.mixed == 0).then_some(first == "true")),
                     Kind::Choice => Widget::Choice {
@@ -3172,6 +3201,7 @@ impl Editor {
                         values: &scale_value,
                         labels: &[],
                         typing: asset.typing.then_some(0),
+                        lock: None,
                     },
                     crate::import::Setting::Compression => Widget::Choice {
                         current: asset.choice(s),
@@ -3931,6 +3961,7 @@ impl Editor {
             step_menu: self.step_menu.map(|k| (k, step_items[k])),
             pivot: self.pivot.label(),
             add_menu: self.add_open.then_some((&add_items[..], self.add_group)),
+            add_at: self.add_at,
             reveal_row,
             drop_row,
             drop_line,
@@ -4161,6 +4192,7 @@ impl Editor {
         }
         if response.add {
             self.add_open = !self.add_open;
+            self.add_at = None;
             self.add_group = None;
         }
         if response.attach_script {
@@ -4491,6 +4523,11 @@ impl Editor {
         }
     }
 
+    /// Whether `p` is a transform's scale: its lock keeps its parts' proportions.
+    fn is_scale(&self, world: &World, p: &Property) -> bool {
+        world.component_id::<Transform>() == Some(p.component) && self.inspector.name(p) == "scale"
+    }
+
     /// The selected entities that have component `id`, the active one last: what an
     /// inspector edit applies to.
     fn targets(&self, world: &World, id: ComponentId) -> Vec<Entity> {
@@ -4553,6 +4590,7 @@ impl Editor {
                     _ => return,
                 };
                 let (shift, ctrl) = (self.input.shift(), self.input.ctrl());
+                let keep = self.scale_lock && self.is_scale(world, &drag.property);
                 let moved: Vec<(Entity, [f64; 4])> = drag
                     .starts
                     .iter()
@@ -4561,6 +4599,9 @@ impl Editor {
                         values[drag.part] =
                             self.snapping
                                 .drag(quantity, start[drag.part], travel, shift, ctrl);
+                        if keep {
+                            values = in_proportion(start, values, drag.part);
+                        }
                         (t, values)
                     })
                     .collect();
@@ -4599,6 +4640,7 @@ impl Editor {
                     return;
                 }
                 let part = usize::from(part).min(3);
+                let keep = self.scale_lock && self.is_scale(world, &p);
                 // An absolute value goes to every entity; a relative one (`+=1`) is worked
                 // out from each one's own.
                 self.history.begin(&format!("Set {title}"), None);
@@ -4609,6 +4651,11 @@ impl Editor {
                     // SAFETY: the entity's live value of the property's component.
                     let mut values = unsafe { inspector::read_numbers(&p, ptr.as_ptr()) };
                     match crate::expr::evaluate(&text, values[part]) {
+                        Ok(value) if keep => {
+                            let start = values;
+                            values[part] = value;
+                            values = in_proportion(start, values, part);
+                        }
                         Ok(value) => values[part] = value,
                         Err(reason) => {
                             self.history.cancel(world);
@@ -4636,6 +4683,15 @@ impl Editor {
                 if let Err(reason) = self.set_on(world, &targets, &path, &text) {
                     self.say(format!("{title}: {reason}"));
                 }
+            }
+            FieldAction::Lock => {
+                self.scale_lock = !self.scale_lock;
+                self.write_session(world);
+                self.say(String::from(if self.scale_lock {
+                    "Scale: its parts keep their proportions (the lock opens them)"
+                } else {
+                    "Scale: each part on its own"
+                }));
             }
             FieldAction::Toggle => {
                 // All on turns off; otherwise (off, or differing) all on.
@@ -10222,6 +10278,9 @@ impl Editor {
             self.open_or_close(world, id);
         } else if id == ids.add {
             self.add_open = !self.add_open;
+            // Under the pointer (in logical pixels), not across the window at the +.
+            let scale = self.scale.max(0.5);
+            self.add_at = self.input.cursor().map(|[x, y]| [x / scale, y / scale]);
         } else if id == ids.snap {
             self.snapping.on = !self.snapping.on;
             let mode = if self.snapping.on {
@@ -12613,6 +12672,9 @@ impl Editor {
         if let Some(on) = state.pick_transparent {
             self.pick_transparent = on;
         }
+        if let Some(on) = state.scale_lock {
+            self.scale_lock = on;
+        }
         if let Some(pivot) = state.pivot.as_deref().and_then(Pivot::from_name) {
             self.pivot = pivot;
         }
@@ -12751,6 +12813,7 @@ impl Editor {
             keys: Some(String::from(self.key_preset.name())),
             fly: Some(f64::from(self.fly_speed)),
             pick_transparent: Some(self.pick_transparent),
+            scale_lock: Some(self.scale_lock),
             pivot: Some(String::from(self.pivot.name())),
             overlays: Some(self.overlays),
             window: self.window,
@@ -22472,5 +22535,122 @@ mod tests {
             "scripts/lamp.luau:2: expected 'end' (the old version runs on)"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Types `text` into number `part` (`x`, `y` or `z`) of field `field` and presses Enter.
+    fn type_number(ed: &mut Editor, world: &mut World, field: &str, part: &str, text: &str) {
+        ed.update(world);
+        let at = on_row(ed, field, part);
+        click(ed, world, at);
+        ed.update(world);
+        chars(ed, text);
+        ed.update(world);
+        key(ed, 0x0D, 0x1C, true);
+        ed.update(world);
+        key(ed, 0x0D, 0x1C, false);
+    }
+
+    #[test]
+    fn a_scales_lock_keeps_its_proportions_until_it_is_opened() {
+        let (mut world, mut ed, cube, _) = two_entities();
+        ed.set(&mut world, cube, "Transform.scale", "(1, 2, 4)")
+            .unwrap();
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let scale = |w: &World| w.get::<Transform>(cube).unwrap().scale;
+        // Shut by default: x typed as 2 doubles y and z.
+        assert!(ed.scale_lock);
+        assert_eq!(texts(&ed, icons::LOCK).len(), 1, "on the scale's row only");
+        type_number(&mut ed, &mut world, "scale", "x", "2");
+        assert_eq!(scale(&world), Vec3::new(2.0, 4.0, 8.0));
+        // A drag keeps them too, each from where it began.
+        let (section, field, _) = shown_field(&ed, "Transform", "scale").unwrap();
+        for (travel, start) in [(0.0, true), (60.0, false)] {
+            let action = FieldAction::Drag {
+                part: 1,
+                travel,
+                start,
+            };
+            ed.edit(
+                &mut world,
+                FieldEvent {
+                    section,
+                    field,
+                    action,
+                },
+            );
+        }
+        let action = FieldAction::Release;
+        ed.edit(
+            &mut world,
+            FieldEvent {
+                section,
+                field,
+                action,
+            },
+        );
+        let s = scale(&world);
+        assert!(s.y > 4.0, "{s}");
+        assert!(
+            (s.y - 2.0 * s.x).abs() < 1e-4 && (s.z - 2.0 * s.y).abs() < 1e-4,
+            "{s}"
+        );
+        // From a zero, every part takes the value.
+        ed.set(&mut world, cube, "Transform.scale", "(0, 1, 1)")
+            .unwrap();
+        type_number(&mut ed, &mut world, "scale", "x", "3");
+        assert_eq!(scale(&world), Vec3::splat(3.0));
+        // The lock opened: each part on its own.
+        ed.update(&mut world);
+        let lock = on_row(&ed, "scale", icons::LOCK);
+        click(&mut ed, &mut world, lock);
+        assert!(!ed.scale_lock);
+        ed.update(&mut world);
+        assert_eq!(texts(&ed, icons::UNLOCK).len(), 1);
+        type_number(&mut ed, &mut world, "scale", "x", "5");
+        assert_eq!(scale(&world), Vec3::new(5.0, 3.0, 3.0));
+        // Other numbers have no lock: a position's parts stay apart.
+        type_number(&mut ed, &mut world, "translation", "x", "7");
+        assert_eq!(world.get::<Transform>(cube).unwrap().translation.y, 0.0);
+    }
+
+    #[test]
+    fn ctrl_a_opens_the_add_menu_under_the_pointer_and_the_plus_under_itself() {
+        let (mut world, mut ed, _, _) = two_entities();
+        let blockout = |ed: &Editor| texts(ed, "Blockout").first().copied();
+        // Over the viewport, Ctrl+A: the menu where the pointer is.
+        mouse(&mut ed, [300.0, 250.0], None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[CTRL, A]);
+        ed.update(&mut world);
+        assert!(ed.add_open);
+        let r = blockout(&ed).unwrap();
+        assert!(r.pos[0] > 300.0 && r.pos[0] < 360.0, "{r:?}");
+        assert!(r.pos[1] > 250.0 && r.pos[1] < 360.0, "{r:?}");
+        // Near the window's bottom right corner it stays in the window, a group's menu
+        // beside it too.
+        chord(&mut ed, &mut world, &[CTRL, A]);
+        assert!(!ed.add_open, "Ctrl+A again closes it");
+        mouse(&mut ed, [1270.0, 710.0], None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[CTRL, A]);
+        ed.update(&mut world);
+        // The label lies some 32 pixels into its menu: the menu and a group's beside it fit.
+        let r = blockout(&ed).unwrap();
+        assert!(r.pos[0] - 32.0 + 2.0 * 174.0 <= 1280.0, "{r:?}");
+        assert!(r.pos[1] < 700.0 - 24.0, "{r:?}");
+        chord(&mut ed, &mut world, &[CTRL, A]);
+        // The scene dock's +: under itself, as before.
+        let plus = texts(&ed, icons::PLUS)[0];
+        click(&mut ed, &mut world, middle(plus));
+        ed.update(&mut world);
+        assert!(ed.add_open);
+        assert!(ed.add_at.is_none());
+        let r = blockout(&ed).unwrap();
+        assert!(
+            r.pos[1] > plus.pos[1] && r.pos[1] < plus.pos[1] + 120.0,
+            "{r:?}"
+        );
+        assert!((r.pos[0] - plus.pos[0]).abs() < 200.0, "{r:?} {plus:?}");
     }
 }

@@ -225,11 +225,20 @@ fn main() {
         values,
         labels: &xyz,
         typing: None,
+        lock: None,
+    };
+    // The scale's lock, shut (its parts keep their proportions).
+    let scaled = |values| Widget::Numbers {
+        values,
+        labels: &xyz,
+        typing: None,
+        lock: Some(true),
     };
     let one = |values| Widget::Numbers {
         values,
         labels: &[],
         typing: None,
+        lock: None,
     };
     let transform = [
         Field {
@@ -244,7 +253,7 @@ fn main() {
         },
         Field {
             name: "Scale",
-            widget: numbers(&["1", "1", "1"]),
+            widget: scaled(&["1", "1", "1"]),
             changed: false,
         },
     ];
@@ -419,6 +428,7 @@ fn main() {
         prefab: false,
         inspector: &inspector,
         add_component: true,
+        add_at: None,
         path: "res://levels",
         folders: &folders,
         files: &files,
