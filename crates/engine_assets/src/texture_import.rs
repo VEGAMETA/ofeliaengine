@@ -16,6 +16,7 @@
 //! blurs away. Sizes halve with rounding down, as Vulkan's mip levels do; odd sizes are
 //! resampled by their exact ratio. Edges clamp.
 
+use engine_core::math::Vec4;
 use std::io::Cursor;
 
 /// What a texture holds, which decides how its levels are filtered.
@@ -163,36 +164,65 @@ fn srgb_to_linear_table() -> [f32; 256] {
     })
 }
 
-/// Linear → sRGB 8-bit, through a table of 4096 linear steps refined by the nearest of
-/// the two candidate codes (exact: the result is the code whose linear value is closest).
+/// Linear → sRGB 8-bit (exact: the code whose linear value is closest), through 4096
+/// linear steps. Codes' midpoints lie further apart than a step, so the nearest code
+/// changes at most once inside one: each step keeps the code at its start and the first
+/// value that takes the next. Made once (`get`).
 struct LinearToSrgb {
-    decode: [f32; 256],
-    coarse: Vec<u8>,
+    steps: Vec<(u8, f32)>,
 }
 
 impl LinearToSrgb {
     const STEPS: usize = 4096;
 
-    fn new(decode: [f32; 256]) -> Self {
-        let coarse = (0..=Self::STEPS)
+    /// The table, made the first time.
+    fn get() -> &'static Self {
+        static TABLE: std::sync::OnceLock<LinearToSrgb> = std::sync::OnceLock::new();
+        TABLE.get_or_init(|| Self::new(&srgb_to_linear_table()))
+    }
+
+    fn new(decode: &[f32; 256]) -> Self {
+        let steps = (0..=Self::STEPS)
             .map(|i| {
-                let v = i as f32 / Self::STEPS as f32;
-                // The largest code whose linear value does not exceed v.
-                decode.partition_point(|&d| d <= v).saturating_sub(1) as u8
+                // `v * STEPS` is exact (a power of two): step `i` is [i, i + 1) / STEPS.
+                let start = i as f32 / Self::STEPS as f32;
+                let end = (i + 1) as f32 / Self::STEPS as f32;
+                let code = nearest_code(decode, start);
+                // The first value of the step whose nearest code is the next, by halving
+                // the step's floats (in order, as their bits are).
+                let (mut lo, mut hi) = (start.to_bits(), end.to_bits());
+                if nearest_code(decode, f32::from_bits(hi - 1)) == code {
+                    return (code, f32::INFINITY);
+                }
+                while lo + 1 < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    if nearest_code(decode, f32::from_bits(mid)) == code {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                (code, f32::from_bits(hi))
             })
             .collect();
-        Self { decode, coarse }
+        Self { steps }
     }
 
     fn encode(&self, v: f32) -> u8 {
         let v = v.clamp(0.0, 1.0);
-        let mut code = self.coarse[(v * Self::STEPS as f32) as usize] as usize;
-        // Walk up while the next code is closer (at most a few steps).
-        while code < 255 && (self.decode[code + 1] - v).abs() <= (v - self.decode[code]).abs() {
-            code += 1;
-        }
-        code as u8
+        let (code, next) = self.steps[(v * Self::STEPS as f32) as usize];
+        code + u8::from(v >= next)
     }
+}
+
+/// The sRGB code whose linear value (`decode`) is closest to `v` in [0, 1], ties to the
+/// higher: from the largest code at or below `v`, up while the next is as close.
+fn nearest_code(decode: &[f32; 256], v: f32) -> u8 {
+    let mut code = decode.partition_point(|&d| d <= v).saturating_sub(1);
+    while code < 255 && (decode[code + 1] - v).abs() <= (v - decode[code]).abs() {
+        code += 1;
+    }
+    code as u8
 }
 
 /// Modified Bessel function of the first kind, order 0 (power series).
@@ -254,7 +284,9 @@ fn taps(source: u32, target: u32) -> Vec<(usize, Vec<f32>)> {
 }
 
 /// Resamples a `width × height` image of 4-channel floats to `target_w × target_h`,
-/// separably.
+/// separably: each row across, then each target row as the weighted sum of the rows it
+/// takes, a whole row at a time (in the order of the taps: the sums of a texel at a time,
+/// to the bit).
 fn resample(
     src: &[[f32; 4]],
     width: u32,
@@ -264,31 +296,29 @@ fn resample(
 ) -> Vec<[f32; 4]> {
     let horizontal = taps(width, target_w);
     let vertical = taps(height, target_h);
-    let mut rows = vec![[0.0f32; 4]; (target_w * height) as usize];
-    for y in 0..height as usize {
-        let line = &src[y * width as usize..(y + 1) * width as usize];
-        for (x, (first, weights)) in horizontal.iter().enumerate() {
-            let mut sum = [0.0f32; 4];
-            for (k, &w) in weights.iter().enumerate() {
-                let p = line[first + k];
-                for c in 0..4 {
-                    sum[c] += p[c] * w;
-                }
+    let (width, target_w) = (width as usize, target_w as usize);
+    let mut rows = vec![Vec4::ZERO; target_w * height as usize];
+    for (line, row) in src.chunks_exact(width).zip(rows.chunks_exact_mut(target_w)) {
+        for (texel, (first, weights)) in row.iter_mut().zip(&horizontal) {
+            let mut sum = Vec4::ZERO;
+            for (p, &w) in line[*first..*first + weights.len()].iter().zip(weights) {
+                sum += Vec4::from_array(*p) * w;
             }
-            rows[y * target_w as usize + x] = sum;
+            *texel = sum;
         }
     }
-    let mut out = vec![[0.0f32; 4]; (target_w * target_h) as usize];
-    for (y, (first, weights)) in vertical.iter().enumerate() {
-        for x in 0..target_w as usize {
-            let mut sum = [0.0f32; 4];
-            for (k, &w) in weights.iter().enumerate() {
-                let p = rows[(first + k) * target_w as usize + x];
-                for c in 0..4 {
-                    sum[c] += p[c] * w;
-                }
+    let mut out = vec![[0.0f32; 4]; target_w * target_h as usize];
+    let mut sums = vec![Vec4::ZERO; target_w];
+    for (target, (first, weights)) in out.chunks_exact_mut(target_w).zip(&vertical) {
+        sums.fill(Vec4::ZERO);
+        for (k, &w) in weights.iter().enumerate() {
+            let row = &rows[(first + k) * target_w..(first + k + 1) * target_w];
+            for (sum, &p) in sums.iter_mut().zip(row) {
+                *sum += p * w;
             }
-            out[y * target_w as usize + x] = sum;
+        }
+        for (texel, sum) in target.iter_mut().zip(&sums) {
+            *texel = sum.to_array();
         }
     }
     out
@@ -318,7 +348,7 @@ fn coverage_scale(texels: &[[f32; 4]], cutoff: f32, target: f32) -> f32 {
 pub fn build_mips(image: &Image, usage: TextureUsage) -> TextureImage {
     engine_profiler::zone!("assets::build_mips");
     let decode = srgb_to_linear_table();
-    let encode = LinearToSrgb::new(decode);
+    let encode = LinearToSrgb::get();
     let (width, height) = (image.width.max(1), image.height.max(1));
 
     // Working texels: linear, premultiplied color; normals as vectors.
@@ -417,6 +447,130 @@ pub fn build_mips(image: &Image, usage: TextureUsage) -> TextureImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The resampling as it was first written, a texel at a time: the reference the faster
+    /// one matches to the bit.
+    fn resample_texel_by_texel(
+        src: &[[f32; 4]],
+        width: u32,
+        height: u32,
+        target_w: u32,
+        target_h: u32,
+    ) -> Vec<[f32; 4]> {
+        let horizontal = taps(width, target_w);
+        let vertical = taps(height, target_h);
+        let mut rows = vec![[0.0f32; 4]; (target_w * height) as usize];
+        for y in 0..height as usize {
+            let line = &src[y * width as usize..(y + 1) * width as usize];
+            for (x, (first, weights)) in horizontal.iter().enumerate() {
+                let mut sum = [0.0f32; 4];
+                for (k, &w) in weights.iter().enumerate() {
+                    let p = line[first + k];
+                    for c in 0..4 {
+                        sum[c] += p[c] * w;
+                    }
+                }
+                rows[y * target_w as usize + x] = sum;
+            }
+        }
+        let mut out = vec![[0.0f32; 4]; (target_w * target_h) as usize];
+        for (y, (first, weights)) in vertical.iter().enumerate() {
+            for x in 0..target_w as usize {
+                let mut sum = [0.0f32; 4];
+                for (k, &w) in weights.iter().enumerate() {
+                    let p = rows[(first + k) * target_w as usize + x];
+                    for c in 0..4 {
+                        sum[c] += p[c] * w;
+                    }
+                }
+                out[y * target_w as usize + x] = sum;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn encoding_by_steps_finds_the_codes_the_walk_found() {
+        let decode = srgb_to_linear_table();
+        let encode = LinearToSrgb::get();
+        // The walk as first written: from the largest code at or below each step's start.
+        let coarse: Vec<u8> = (0..=LinearToSrgb::STEPS)
+            .map(|i| {
+                let v = i as f32 / LinearToSrgb::STEPS as f32;
+                decode.partition_point(|&d| d <= v).saturating_sub(1) as u8
+            })
+            .collect();
+        let walk = |v: f32| {
+            let v = v.clamp(0.0, 1.0);
+            let mut code = coarse[(v * LinearToSrgb::STEPS as f32) as usize] as usize;
+            while code < 255 && (decode[code + 1] - v).abs() <= (v - decode[code]).abs() {
+                code += 1;
+            }
+            code as u8
+        };
+        let steps = 1 << 20;
+        for i in 0..=steps {
+            let v = i as f32 / steps as f32;
+            assert_eq!(encode.encode(v), walk(v), "{v}");
+        }
+        // The codes' own values and the midpoints between them, and outside [0, 1].
+        for c in 0..255 {
+            for v in [decode[c], (decode[c] + decode[c + 1]) * 0.5, decode[c + 1]] {
+                for v in [
+                    v,
+                    f32::from_bits(v.to_bits() + 1),
+                    f32::from_bits(v.to_bits().max(1) - 1),
+                ] {
+                    assert_eq!(encode.encode(v), walk(v), "{v}");
+                }
+            }
+        }
+        for v in [-1.0, 2.0, f32::NAN] {
+            assert_eq!(encode.encode(v), walk(v), "{v}");
+        }
+    }
+
+    /// Every float from 0 to 1 encodes as the nearest code (about a billion, a minute in
+    /// release; run by hand when the table changes).
+    #[test]
+    #[ignore = "exhaustive, by hand"]
+    fn every_value_in_zero_to_one_encodes_as_the_nearest_code() {
+        let decode = srgb_to_linear_table();
+        let encode = LinearToSrgb::get();
+        let mut code = 0usize;
+        for bits in 0..=1.0f32.to_bits() {
+            let v = f32::from_bits(bits);
+            // The nearest code only grows with v.
+            while code < 255 && (decode[code + 1] - v).abs() <= (v - decode[code]).abs() {
+                code += 1;
+            }
+            assert_eq!(encode.encode(v), code as u8, "{v}");
+        }
+    }
+
+    #[test]
+    fn resampling_a_row_at_a_time_matches_a_texel_at_a_time_to_the_bit() {
+        // Noise from a small generator, signed (normal maps) and above one (premultiplied
+        // sums), over sizes even, odd and thin.
+        let mut state = 0x9e37_79b9_u32;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state as f32 / u32::MAX as f32) * 2.5 - 1.0
+        };
+        for (w, h) in [(64, 64), (37, 21), (1, 9), (16, 1), (130, 66)] {
+            let src: Vec<[f32; 4]> = (0..w * h)
+                .map(|_| [next(), next(), next(), next()])
+                .collect();
+            let (tw, th) = ((w / 2).max(1), (h / 2).max(1));
+            let fast = resample(&src, w, h, tw, th);
+            let reference = resample_texel_by_texel(&src, w, h, tw, th);
+            let bits =
+                |v: &[[f32; 4]]| -> Vec<u32> { v.iter().flatten().map(|f| f.to_bits()).collect() };
+            assert_eq!(bits(&fast), bits(&reference), "{w}×{h}");
+        }
+    }
 
     fn image(width: u32, height: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> Image {
         let rgba = (0..height)
@@ -533,7 +687,7 @@ mod tests {
     #[test]
     fn linear_to_srgb_is_exact() {
         let decode = srgb_to_linear_table();
-        let encode = LinearToSrgb::new(decode);
+        let encode = LinearToSrgb::get();
         for code in 0..=255u8 {
             assert_eq!(encode.encode(decode[code as usize]), code);
         }

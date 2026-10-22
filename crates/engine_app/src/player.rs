@@ -566,6 +566,9 @@ pub struct Player {
     timing: engine_runtime::Timing,
     /// The world's time runs ([`Player::set_simulating`]).
     simulating: bool,
+    /// The next frame waits until the assets its models use are made (ADR 0108's E4-4):
+    /// the first, the one after a scene is loaded, and one asked for.
+    wait_for_assets: bool,
     /// Ticks to run while the world is kept still ([`Player::step_tick`]).
     steps: u32,
 }
@@ -1186,6 +1189,7 @@ impl Player {
             first_present_ms: None,
             timing,
             simulating: true,
+            wait_for_assets: true,
             steps: 0,
             assets: crate::Assets::new(settings.project.clone().unwrap_or_default()),
             blockout: crate::Blockout::new(),
@@ -1239,7 +1243,15 @@ impl Player {
             log::warn!(target: "engine_app::scene", "{}:{line}: {warning}", path.display());
         }
         self.assets.add_paths(&report.assets);
+        self.wait_for_assets = true;
         Ok(report)
+    }
+
+    /// Makes the next frame wait until every asset its models use is made: what the frame
+    /// after [`Self::load_scene`] does. Assets are otherwise made in the background, and a
+    /// model draws once its own are (ADR 0108's E4-4).
+    pub fn wait_for_assets(&mut self) {
+        self.wait_for_assets = true;
     }
 
     /// The meshes and materials scenes name (ADR 0108).
@@ -2394,6 +2406,7 @@ impl Player {
             let geometry = &mut self.geometry;
             let materials = &mut self.materials;
             let frame_number = frame.number;
+            let wait_for_assets = self.wait_for_assets;
             let present = |world: &mut World, (): &(), alpha: f32| {
                 if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                     input.sample_frame(Instant::now());
@@ -2401,7 +2414,7 @@ impl Player {
                 game_cell.borrow_mut().present(world, alpha);
                 // Models (ADR 0108): their meshes and materials reach the GPU this frame,
                 // the pools beginning theirs after the simulation.
-                assets.sync(world, geometry, materials, frame_number);
+                assets.sync(world, geometry, materials, frame_number, wait_for_assets);
                 // Brushes (ADR 0110): their groups evaluated again where they changed.
                 blockout.sync(world, geometry, materials, frame_number);
             };
@@ -2471,7 +2484,7 @@ impl Player {
             &mut self.textures,
             &mut self.materials,
         );
-        // The textures of glTF materials models began using this frame (ADR 0108).
+        // The textures of glTF materials decoded by now (ADR 0108).
         self.assets.make_textures(
             &self.device,
             &mut self.allocator,
@@ -2479,6 +2492,7 @@ impl Player {
             &mut self.materials,
             (&self.bindless, frame.number),
         );
+        self.wait_for_assets = false;
         // Saves asked for during the ticks: taken now, at the tick boundary.
         self.process_saves(game, elapsed);
         let t = Instant::now();

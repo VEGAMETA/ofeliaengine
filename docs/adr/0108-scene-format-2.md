@@ -355,3 +355,80 @@ The player's `Assets` makes a `Model`'s mesh and material from a glTF file's par
 - **Left:** a file moved without its `.meta` is found by content only if the database
   wrote that `.meta` (others' hashes come with background hashing); renames inside the
   editor and the browser (E4-2).
+
+## As built (E4-4, 2026-10-22): glTF files load in the background
+
+**Context.** The player made a glTF model's parts on first use on the frame's thread:
+- the file read and imported;
+- its meshes put together and their vertices encoded;
+- its textures read, decoded and given their mip levels.
+
+FlightHelmet (6 meshes, 15 textures of 2048²) held one frame for 1,110 ms. In the editor
+that froze the window when a model was dropped or a scene opened. CLAUDE.md §5: asset
+import never blocks the UI.
+
+**Where the time went** (FlightHelmet on one thread, release, ref-1):
+
+| Step | Time |
+|---|---|
+| import | 4 ms |
+| the textures read | 9 ms |
+| decoding | 293 ms |
+| mip levels | 1,023 ms |
+
+The mip levels were mostly the linear → sRGB encoding (a walk through a table with a serial chain of loads) and the resampling's vertical pass, a texel at a time. Both are faster now, to the bit (ADR 0040's addendum of the same day).
+
+**Options:**
+- **a) Keep the frame's thread, one texture a frame.** Still a frame of 40–70 ms for each
+  2048² texture, and an import cannot be split.
+- **b) A loading thread with a pool of workers below normal priority, as the streaming
+  thread (ADR 0057).** The frame's thread gives jobs and takes each result back as soon
+  as it is done, then makes the GPU's mesh or texture (the pools spread the copies over
+  frames).
+- **c) The frame's job system.** Its workers would hold long jobs through frames and
+  compete with the frame's own work.
+
+**Decision: b** (`engine_app::loading`):
+- **Jobs and results:**
+  - jobs go through a queue to the thread, which runs the batch it finds on its pool (half
+    the cores, at most 8, below normal);
+  - each result comes back on a channel as soon as its worker is done;
+  - the thread starts with the first job and parks when idle.
+- **The jobs:**
+  - a file read and imported;
+  - a mesh put together, its vertices encoded as the pool keeps them
+    (`GeometryPool::add_mesh_with_attributes`, added for this);
+  - a texture read, decoded and given its mip levels.
+
+  A panic in a job is that asset's failure, not the thread's.
+- **The frame's side:**
+  - a model draws once its mesh and material are made, and the material's textures fill
+    in as they come;
+  - models waiting are tried again when something comes back;
+  - a file read again (`reload`) raises its generation, and older results are dropped;
+  - a file is let go a frame after its parts no longer need it.
+- **Waiting:** the frame after a scene is loaded (`load_scene`, and the first frame) waits
+  for its assets, so a scene shows whole as before, and so does one asked for with
+  `Player::wait_for_assets`. The editor asks for it after a bake, so the model shows as
+  the brushes go. A wait gives up after 10 s.
+
+**Measured** (ref-1, release, `engine_app` tests/asset_loading.rs, `--ignored`):
+
+| | FlightHelmet | Sponza (one mesh) |
+|---|---|---|
+| Before, the frame that first shows it | 1,110 ms | 103 ms |
+| Added later: the worst frame while it loads | 6.5–8.7 ms | 4.0–4.9 ms |
+| Added later: shown after | 225–290 ms | 38–43 ms |
+| In the first frame, which waits: that frame | 208–285 ms | 45–48 ms |
+
+- Before the vertices were encoded on the thread, Sponza's one mesh of 192,496 vertices
+  cost the frame that made it 15 ms; now it costs 4–5 ms.
+- What is left of the worst frame is the frame's own share of making the meshes and
+  textures that came back.
+
+**Left:**
+- a model read again shows nothing until its new version is made (the old one could stay
+  until then);
+- the Sponza here is one mesh of 25 materials, which draws with its first (the format
+  question of E4-3), so 3 of its textures are made;
+- a loading screen's progress (`Assets::loading` counts what is in flight).

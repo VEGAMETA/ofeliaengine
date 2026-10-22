@@ -235,3 +235,30 @@ camera inside, down the scene's long axis (Sponza's atrium); textures RGBA8 with
   distance comes with compression.
 - **Draw order:** with occlusion culling, batches keep being known by their instances'
   positions in the draw list, which front-to-back ordering does not change.
+
+## Addendum (2026-10-22): mip levels 1.1–1.9× faster, to the bit
+
+Measured for ADR 0108's E4-4 (loading in the background), where mip levels were three
+quarters of FlightHelmet's loading:
+- **The linear → sRGB encoding** walked up the table from a step's code, a serial chain
+  of loads. Each of the 4096 steps now keeps the code at its start and the first value
+  of the next code (codes' midpoints lie further apart than a step, so it changes at most
+  once inside one): one load and one comparison. The table is made once.
+- **The resampling's vertical pass** goes a target row at a time over whole rows (`Vec4`),
+  the horizontal pass over `Vec4` too. The sums are made in the same order, so every
+  level is the same to the bit.
+- **Checks:**
+  - the resampling against the first one on noise of five sizes;
+  - the encoding against the walk on a million values and every code's neighbours;
+  - every float from 0 to 1, by hand (`--ignored`, 2 s).
+
+`texture_bench`, one thread, Mtexels/s, before → after:
+
+| Use | Sponza | FlightHelmet |
+|---|---|---|
+| color | 46.6 → 88.9 | 51.8 → 89.9 |
+| masked color | 48.7 → 72.8 | — |
+| normal | 76.7 → 85.2 | 78.9 → 86.1 |
+| data | 88.6 → 101.2 | 89.8 → 100.3 |
+| everything, one thread | 1,467 → 1,194 ms | 1,063 → 877 ms |
+| everything, 16 threads | 191 → 192 ms | 193 → 158 ms |

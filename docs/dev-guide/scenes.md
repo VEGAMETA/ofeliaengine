@@ -177,8 +177,14 @@ Model.material = asset("models/yard.glb#Yard 2 grid", 5f2c0a3e9d2b47c88e51f0d4a7
   which the editor writes the first time it meets the file (`AssetMeta::ensure` in code).
   A `.meta` naming another id is reported as the asset's problem; a file without one is
   found by its path alone.
-- **Files are read on first use** on the frame's thread, so a scene with large textures
-  takes a moment on its first frame.
+- **Files load in the background:** read, imported, their meshes put together and
+  their textures decoded off the frame's thread (ADR 0108's E4-4).
+  - A model draws once its mesh and material are made, and its textures fill in as they
+    come: a model added while the game runs never holds a frame.
+  - The frame after `Player::load_scene` (and the first frame) waits until the scene's
+    assets are made, so a scene shows whole. `player.wait_for_assets()` makes the next
+    frame wait the same way, after you add models of your own.
+  - `player.assets().loading()` counts what is still being made, for a progress bar.
 
 ### Materials
 
