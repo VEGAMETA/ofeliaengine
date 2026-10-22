@@ -382,7 +382,7 @@ Last updated: 2026-10-22.
     the background work (the build, assets, compression, thumbnails, navigation) with how
     far and how long; the scene dock's History lists every step, the current one marked,
     and a click goes to it.
-  - **E6-5, the profiler's first panel** (#PR, ADR 0107's as-built): the last 120 frames'
+  - **E6-5, the profiler's first panel** (#328, ADR 0107's as-built): the last 120 frames'
     CPU and GPU times as bars, the costliest CPU stages (`FrameReport`) and GPU passes
     (the frame graph's timestamps). **E6 is done.**
   - **Next:** E7 waits for the owner's answers to ADR 0114's questions; meanwhile E8's
