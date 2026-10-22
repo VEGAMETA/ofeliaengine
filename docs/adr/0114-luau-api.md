@@ -1023,3 +1023,46 @@ there, and see the script's file in the inspector.
   - the documentation file (`types/ofelia.docs.json`, luau-lsp's `documentationFiles`):
     its format is to be read from luau-lsp's sources first;
   - `.luaurc`: each script says `--!strict` itself, as the template writes it.
+
+## As built (E7-1c, 2026-10-22): the views' fast path
+
+- **`engine_app::script_views`**, on Luau's own API through mlua's `ffi`:
+  - **atoms:** Luau's `useratom` callback gives every name-like string the next number
+    from the thread's table, and each struct's fields are found by their names' atoms
+    (`Slot`); a name made before the callback was set is matched by its bytes;
+  - **tags:** `self` (64), views (65) and entities (66) are userdata of tags of their own,
+    made with their tag's metatable (`lua_setuserdatametatable`), whose metamethods are C
+    functions. They read the userdata, the key's atom and the stage's world directly;
+  - numbers, booleans and vectors are read and written there; entities answer `name`,
+    `alive`, their components, `==` and `tostring`; `world.find` is a C function too.
+    Rotations, entity props, strings, enums and nested structs written whole go to the
+    host's own functions, called from the C functions;
+  - a view of `self`'s entity's component (up to four), `self.locals` and `self.entity`
+    are made once and kept on `self`; the references go with the instance, and the views
+    with a reload;
+  - errors are raised at the calling script's line (`luaL_where`), once nothing with a
+    destructor is alive in the frame.
+- **The time budget** (`engine_script`): Luau's interrupt is a C function now, not mlua's
+  closure. It counts interrupts and reads the clock every 64 (`CHECK_EVERY`).
+- **Measured** (`scripts::tests::measure_hooks_and_views`, ref-1, release, medians of 51
+  ticks, three runs):
+
+  | What | Target | E7-1a | Now |
+  |---|---|---|---|
+  | an empty `on_tick`, per instance | ≤ 0.5 µs | 0.19 µs | **0.17 µs** |
+  | a prop's read and write (`self.a = self.a + 1`) | ≤ 100 ns each | 354–386 ns the pair | **71–73 ns the pair** |
+  | a component field's read and write (`t.translation = t.translation + v`) | ≤ 100 ns each | 296–299 ns the pair | **75–76 ns the pair** |
+  | 1,000 doors (example 1), one tick | ≤ 1 ms | 3.3–3.4 ms | **0.65 ms** |
+
+  §13's targets are met. `HostIrHooks` is not needed.
+- **Found:** in the `shipping` profile (`panic = "abort"`), an error raised through a
+  Rust callback aborts the game, because Luau's errors are C++ exceptions and
+  unwinding into a `C-unwind` Rust frame aborts under that profile. A probe built that
+  way stopped at the first binding error ("panic in a function that cannot unwind").
+  [ADR 0118](0118-shipping-panic-strategy.md) proposes the fix.
+- **Tests:** the earlier ones, plus entities on the fast path (`world.find`, `==`,
+  `name`, `alive`, `tostring`, a component through an entity, an entity prop written) and
+  the fast path's errors at their lines.
+- **Not in this step:** an entity from `world.find` and a view through another entity
+  are still made at each access (a garbage-collected block each); the zero-allocation
+  test.

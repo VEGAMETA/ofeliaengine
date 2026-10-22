@@ -145,13 +145,15 @@ Save a script (Ctrl+S in the editor, or in another editor) and it runs again at 
 ## What it costs
 
 Measured on ref-1 (Ryzen 7 7700, release):
-- an empty `on_tick` costs 0.19 µs per instance;
-- reading and writing a prop or a component's field costs about 0.15 µs each;
-- 1,000 doors like the one above take 3.3 ms a tick.
+- an empty `on_tick` costs 0.17 µs per instance;
+- reading and writing a prop or a component's field costs about 36 ns each (a number, a
+  boolean, a vector);
+- 1,000 doors like the one above take 0.65 ms a tick.
 
-A field read is a call into the engine. Read it into a local once when you use it several
-times in a hook (`local t = self.Transform`). A faster path for these reads comes in a
-later step. Logic over thousands of objects every tick belongs in Rust.
+A field read is a call into the engine, though a short one. `self.Transform` is made once
+and kept, as are `self.entity` and `self.locals`. An entity from `world.find` and a
+component reached through it are made at each access: keep them in a local within a hook.
+Logic over thousands of objects every tick belongs in Rust.
 
 ## Types: in the editor and in VS Code
 

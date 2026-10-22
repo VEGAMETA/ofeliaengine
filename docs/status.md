@@ -514,9 +514,16 @@ Last updated: 2026-10-22.
     a hook's `self` typed from `component`, with Luau's old solver (the new one of 0.736
     leaves it unknown). The editor writes them to `types/ofelia.d.luau`, and `ofeliaengine
     new` points luau-lsp in VS Code at it.
+  - **E7-1c, the views' fast path** (#PR, ADR 0114's as-built): `self`, views and
+    entities are tagged userdata whose metamethods are C functions on Luau's own API,
+    fields found by their names' atoms; the time budget's interrupt is a C function that
+    reads the clock every 64 calls. A prop's read and write 386 → 71 ns the pair, a
+    field's 296 → 75 ns, 1,000 doors 3.4 → 0.65 ms (target 1 ms). Found: the shipping
+    profile aborts on a binding's error (Luau's C++ exceptions through mlua's callbacks
+    under `panic = "abort"`): ADR 0118 proposes `unwind` (+5 % executable, +3.5 % in
+    mlua-heavy code), for the team.
   - **Next, in this order:**
-    1. E7 on: views' fast path (E7-1c); E7-3's player-owned physics for scripts builds on
-       `ScenePhysics::sync_scene`;
+    1. E7 on: E7-3's player-owned physics for scripts builds on `ScenePhysics::sync_scene`;
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 

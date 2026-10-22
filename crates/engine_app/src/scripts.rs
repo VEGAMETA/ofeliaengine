@@ -46,10 +46,10 @@
 //!   with their state. Props that kept their places take the new hooks in place; props that
 //!   changed move each entity's values by name to a component of the new layout.
 
+use crate::script_views::{self, Tables};
 use engine_core::math::{Quat, Vec2, Vec3, Vec3A};
 use engine_ecs::{ComponentId, Entity, Relayout, World};
 use engine_reflect::{Attrs, Field, Primitive, Reflect, TypeInfo, TypeKind};
-use engine_scene::Name;
 use engine_script::mlua::{
     self, AnyUserData, Function, Lua, MetaMethod, Table, UserData, UserDataMethods, Value, Vector,
 };
@@ -148,19 +148,6 @@ struct Names {
 #[derive(Default)]
 struct Files(HashMap<String, String>);
 
-/// The entities by name, made at a stage's first `world.find` (ADR 0114 §3: cheap every
-/// tick): of several of one name, the first in the entities' order.
-#[derive(Default)]
-struct NameIndex {
-    /// The stage it was made in.
-    stage: u64,
-    by_name: HashMap<String, Entity>,
-}
-
-/// The stage the world is open for: a name index made in another is stale.
-#[derive(Default, Clone, Copy)]
-struct StageCount(u64);
-
 /// The game's clock, as `time` gives it.
 #[derive(Default, Clone, Copy)]
 struct Clock {
@@ -172,6 +159,9 @@ struct Clock {
 /// the world.
 pub struct Scripts {
     vm: ScriptVm,
+    /// What `self` and views read on the fast path (ADR 0114 E7-1c), boxed: the C
+    /// functions find it through a pointer for the length of a stage.
+    tables: Box<Tables>,
     /// Each module's file, relative to the project.
     files: HashMap<String, PathBuf>,
     components: Vec<Declared>,
@@ -233,18 +223,24 @@ impl Scripts {
     pub fn load(world: &mut World, root: &Path, folder: &Path) -> Result<Self, ScriptError> {
         engine_profiler::zone!("scripts::load");
         let vm = ScriptVm::new_with(ScriptSettings::default(), install)?;
+        let mut tables = Box::new(Tables::default());
+        tables.slow = vm
+            .lua()
+            .remove_app_data::<script_views::Slow>()
+            .unwrap_or_default();
         let mut names = Names::default();
         for t in engine_ecs::reflected_types() {
             if let engine_ecs::ReflectedKind::Component { id, .. } = t.kind {
-                names
-                    .by_name
-                    .insert(t.info.name.to_owned(), (id(world), t.info));
+                let id = id(world);
+                names.by_name.insert(t.info.name.to_owned(), (id, t.info));
+                tables.name(t.info.name, id, t.info);
             }
         }
         vm.lua().set_app_data(names);
         vm.lua().set_app_data(Clock::default());
         let mut scripts = Self {
             vm,
+            tables,
             files: HashMap::new(),
             components: Vec::new(),
             by_name: HashMap::new(),
@@ -516,21 +512,32 @@ impl Scripts {
         // SAFETY: the values are plain data of `layout`, as `register`'s.
         unsafe { engine_ecs::add_runtime_type(runtime) };
         if let Some(mut names) = self.vm.lua().app_data_mut::<Names>() {
-            names.by_name.insert(name, (id, info));
+            names.by_name.insert(name.clone(), (id, info));
         }
+        self.tables.name(&name, id, info);
         let c = &mut self.components[k];
         c.hooks = hooks_of(table);
         c.info = info;
         c.id = id;
         c.defaults = defaults;
-        // Its instances' `self`: the new place and description, their locals kept.
+        // Its instances' `self`: the new place and description, their locals kept; every
+        // `self`'s kept views go, as they may name the old component.
+        let tables = &mut *self.tables;
         for (&(_, at), (_, inst)) in &self.instances {
-            if at as usize == k
-                && let Ok(mut this) = inst.this.borrow_mut::<This>()
-            {
-                this.id = id;
-                this.info = info;
-            }
+            let this = inst.this.to_pointer();
+            let ours = at as usize == k;
+            // SAFETY: instances' `self`s are the host's own, of `self`'s tag; the VM's state
+            // for the references.
+            let _ = unsafe {
+                self.vm.lua().exec_raw::<()>((), |state| {
+                    let this = script_views::this_at(this);
+                    if ours {
+                        script_views::retarget(state, tables, this, id, info);
+                    } else {
+                        script_views::forget_views(state, this);
+                    }
+                })
+            };
         }
         Ok(relayout)
     }
@@ -572,6 +579,7 @@ impl Scripts {
         if let Some(mut names) = self.vm.lua().app_data_mut::<Names>() {
             names.by_name.insert(name.to_owned(), (id, info));
         }
+        self.tables.name(name, id, info);
         self.by_name.insert(name.to_owned(), self.components.len());
         self.components.push(Declared {
             name: name.to_owned(),
@@ -644,15 +652,16 @@ impl Scripts {
     }
 
     /// The world open to the scripts until [`Self::close`].
-    fn open(&self, world: &mut World) {
+    fn open(&mut self, world: &mut World) {
         let lua = self.vm.lua();
+        let _ = lua;
         OPEN_WORLD.set(world);
-        let stage = lua.app_data_ref::<StageCount>().map_or(0, |s| s.0) + 1;
-        lua.set_app_data(StageCount(stage));
+        script_views::open(&mut self.tables);
     }
 
     fn close(&self) {
         OPEN_WORLD.set(core::ptr::null_mut());
+        script_views::close();
     }
 
     /// The instances made to match the world: those that came get a `self` and are started
@@ -688,26 +697,42 @@ impl Scripts {
             .copied()
             .collect();
         for key in gone {
-            if let Some((e, inst)) = self.instances.remove(&key)
-                && world.contains(e)
+            let Some((e, inst)) = self.instances.remove(&key) else {
+                continue;
+            };
+            if world.contains(e)
                 && !inst.stopped
                 && let Some(stop) = self.components[key.1 as usize].hooks.stop.clone()
             {
                 let module = self.components[key.1 as usize].module.clone();
-                if let Err(err) = self.vm.call_function::<_, ()>(&module, &stop, inst.this) {
+                if let Err(err) = self
+                    .vm
+                    .call_function::<_, ()>(&module, &stop, inst.this.clone())
+                {
                     self.report(key.1 as usize, "on_stop", e, &err);
                 }
             }
+            let this = inst.this.to_pointer();
+            // SAFETY: the instance's `self`, of `self`'s tag; the VM's state for the
+            // references.
+            let _ = unsafe {
+                self.vm.lua().exec_raw::<()>((), |state| {
+                    script_views::release(state, script_views::this_at(this));
+                })
+            };
         }
         came.sort_unstable_by_key(|(k, _)| *k);
         for (key, e) in came {
             let c = &self.components[key.1 as usize];
-            let this = This {
-                entity: e,
-                id: c.id,
-                info: c.info,
+            let (id, info) = (c.id, c.info);
+            let tables = &mut *self.tables;
+            // SAFETY: room for the one value pushed, returned as the userdata.
+            let made = unsafe {
+                self.vm.lua().exec_raw::<AnyUserData>((), |state| {
+                    script_views::push_this(state, tables, e, id, info);
+                })
             };
-            let Ok(this) = self.vm.lua().create_userdata(this) else {
+            let Ok(this) = made else {
                 continue;
             };
             self.instances.insert(
@@ -973,8 +998,31 @@ fn write_default(out: &mut [u8], kind: Kind, value: &Value) {
     }
 }
 
+/// Function `f` in the registry, by a reference the fast path pushes it by.
+fn registry_ref(lua: &Lua, f: Function) -> mlua::Result<std::ffi::c_int> {
+    let mut made = 0;
+    // SAFETY: the function is the one argument pushed; the reference keeps it.
+    unsafe {
+        lua.exec_raw::<()>(f, |state| {
+            made = mlua::ffi::lua_ref(state, -1);
+        })?;
+    }
+    Ok(made)
+}
+
 /// The host's libraries, before the sandbox seals the globals.
 fn install(lua: &Lua) -> mlua::Result<()> {
+    // The fast path's atoms and metatables (ADR 0114 E7-1c), and the functions it hands
+    // the rest to.
+    // SAFETY: the VM's state; installed once, before any script runs.
+    unsafe { lua.exec_raw::<()>((), |state| script_views::install(state))? };
+    let slow = script_views::Slow {
+        self_index: registry_ref(lua, lua.create_function(self_index_slow)?)?,
+        self_newindex: registry_ref(lua, lua.create_function(self_newindex_slow)?)?,
+        view_index: registry_ref(lua, lua.create_function(view_index_slow)?)?,
+        view_newindex: registry_ref(lua, lua.create_function(view_newindex_slow)?)?,
+    };
+    lua.set_app_data(slow);
     let globals = lua.globals();
     globals.set("component", lua.create_function(declare_component)?)?;
     let prop = lua.create_table()?;
@@ -998,39 +1046,10 @@ fn install(lua: &Lua) -> mlua::Result<()> {
     }
     globals.set("prop", prop)?;
     let world = lua.create_table()?;
-    world.set(
-        "find",
-        lua.create_function(|lua, name: mlua::LuaString| {
-            let stage = lua.app_data_ref::<StageCount>().map_or(0, |s| s.0);
-            let stale = lua
-                .app_data_ref::<NameIndex>()
-                .is_none_or(|index| index.stage != stage);
-            if stale {
-                // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
-                let w = unsafe { &mut *world_ptr(lua)? };
-                let mut by_name: HashMap<String, Entity> = HashMap::new();
-                let mut q = engine_ecs::QueryState::<(Entity, &Name)>::new(w);
-                for (e, n) in q.iter_readonly(w) {
-                    by_name
-                        .entry(n.as_str().to_owned())
-                        .and_modify(|f| {
-                            if e.index() < f.index() {
-                                *f = e;
-                            }
-                        })
-                        .or_insert(e);
-                }
-                lua.set_app_data(NameIndex { stage, by_name });
-            }
-            let name = name.to_str()?;
-            let found = lua
-                .app_data_ref::<NameIndex>()
-                .and_then(|index| index.by_name.get(&*name).copied());
-            found
-                .map(|e| lua.create_userdata(ScriptEntity(e)))
-                .transpose()
-        })?,
-    )?;
+    // SAFETY: a C function of the fast path's, which checks its argument.
+    world.set("find", unsafe {
+        lua.create_c_function(script_views::world_find)?
+    })?;
     globals.set("world", world)?;
     let time = lua.create_table()?;
     time.set(
@@ -1224,6 +1243,11 @@ fn prop_of(component: &str, name: String, value: Value) -> mlua::Result<Prop> {
     })
 }
 
+/// The world the host opened for this stage (null outside), for the fast path.
+pub(crate) fn open_world() -> *mut World {
+    OPEN_WORLD.get()
+}
+
 /// The world the host opened for this stage. A caller dereferences it within one callback
 /// and not across a call back into Lua, so no two borrows of the world are alive at once.
 fn world_ptr(_lua: &Lua) -> mlua::Result<*mut World> {
@@ -1241,98 +1265,109 @@ fn named(lua: &Lua, name: &str) -> Option<(ComponentId, &'static TypeInfo)> {
     lua.app_data_ref::<Names>()?.by_name.get(name).copied()
 }
 
-/// `self` in a hook.
-#[derive(Clone, Copy)]
-struct This {
+/// `self.key` where the fast path hands over (ADR 0114 E7-1c): `entity`, `locals`, props
+/// of the kinds it does not read, and what is missing.
+fn self_index_slow(lua: &Lua, (ud, key): (AnyUserData, mlua::LuaString)) -> mlua::Result<Value> {
+    // SAFETY: the fast path hands over `self`s of its tag only.
+    let this = unsafe { *script_views::this_at(ud.to_pointer()) };
+    let key = key.to_str()?;
+    // `self.entity` and `self.locals` are the fast path's own.
+    if key.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return component_view(lua, this.entity, &key);
+    }
+    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
+    let w = unsafe { &mut *world_ptr(lua)? };
+    field(lua, w, this.entity, this.id, this.info, 0, &key)
+}
+
+/// `self.key = value` where the fast path hands over: props of the kinds it does not write,
+/// and what cannot be written.
+fn self_newindex_slow(
+    lua: &Lua,
+    (ud, key, value): (AnyUserData, mlua::LuaString, Value),
+) -> mlua::Result<()> {
+    // SAFETY: as `self_index_slow`.
+    let this = unsafe { *script_views::this_at(ud.to_pointer()) };
+    let key = key.to_str()?;
+    if key.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return Err(mlua::Error::runtime(format!(
+            "`self.{key}` is a component: write its fields (`self.{key}.field = …`)"
+        )));
+    }
+    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
+    let w = unsafe { &mut *world_ptr(lua)? };
+    set_field(lua, w, this.entity, this.id, this.info, 0, &key, value)
+}
+
+/// `view.key` where the fast path hands over.
+fn view_index_slow(lua: &Lua, (ud, key): (AnyUserData, mlua::LuaString)) -> mlua::Result<Value> {
+    // SAFETY: the fast path hands over views of their tag only.
+    let view = unsafe { *script_views::view_at(ud.to_pointer()) };
+    let key = key.to_str()?;
+    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
+    let w = unsafe { &mut *world_ptr(lua)? };
+    field(lua, w, view.entity, view.id, view.info, view.offset, &key)
+}
+
+/// `view.key = value` where the fast path hands over.
+fn view_newindex_slow(
+    lua: &Lua,
+    (ud, key, value): (AnyUserData, mlua::LuaString, Value),
+) -> mlua::Result<()> {
+    // SAFETY: as `view_index_slow`.
+    let view = unsafe { *script_views::view_at(ud.to_pointer()) };
+    let key = key.to_str()?;
+    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
+    let w = unsafe { &mut *world_ptr(lua)? };
+    set_field(
+        lua,
+        w,
+        view.entity,
+        view.id,
+        view.info,
+        view.offset,
+        &key,
+        value,
+    )
+}
+
+/// A view of `entity`'s component `id` (described by `info`), or of a struct of type
+/// `info` at `offset` in it, made on the fast path's tag.
+fn new_view(
+    lua: &Lua,
     entity: Entity,
     id: ComponentId,
     info: &'static TypeInfo,
-}
-
-impl UserData for This {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_meta_function(
-            MetaMethod::Index,
-            |lua, (ud, key): (AnyUserData, mlua::LuaString)| {
-                let this = *ud.borrow::<This>()?;
-                let key = key.to_str()?;
-                match &*key {
-                    "entity" => {
-                        return lua
-                            .create_userdata(ScriptEntity(this.entity))
-                            .map(Value::UserData);
-                    }
-                    "locals" => {
-                        if let Ok(Value::Table(t)) = ud.named_user_value::<Value>("locals") {
-                            return Ok(Value::Table(t));
-                        }
-                        let t = lua.create_table()?;
-                        ud.set_named_user_value("locals", t.clone())?;
-                        return Ok(Value::Table(t));
-                    }
-                    _ => {}
-                }
-                if key.starts_with(|c: char| c.is_ascii_uppercase()) {
-                    return component_view(lua, this.entity, &key);
-                }
-                // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
-                let w = unsafe { &mut *world_ptr(lua)? };
-                field(lua, w, this.entity, this.id, this.info, 0, &key)
-            },
-        );
-        methods.add_meta_function(
-            MetaMethod::NewIndex,
-            |lua, (ud, key, value): (AnyUserData, mlua::LuaString, Value)| {
-                let this = *ud.borrow::<This>()?;
-                let key = key.to_str()?;
-                if key.starts_with(|c: char| c.is_ascii_uppercase()) {
-                    return Err(mlua::Error::runtime(format!(
-                        "`self.{key}` is a component: write its fields (`self.{key}.field = …`)"
-                    )));
-                }
-                // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
-                let w = unsafe { &mut *world_ptr(lua)? };
-                set_field(w, this.entity, this.id, this.info, 0, &key, value)
-            },
-        );
+    offset: usize,
+) -> mlua::Result<Value> {
+    let tables = script_views::open_tables();
+    if tables.is_null() {
+        return Err(mlua::Error::runtime(
+            "the world is open to scripts only in their hooks",
+        ));
+    }
+    // SAFETY: the stage's tables (`open_tables`), used within this call only; room for the
+    // one value pushed.
+    unsafe {
+        lua.exec_raw::<Value>((), |state| {
+            script_views::push_view(state, &mut *tables, entity, id, info, offset);
+        })
     }
 }
 
-/// An entity in a script: its components by name, its `name`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct ScriptEntity(Entity);
-
-impl UserData for ScriptEntity {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_meta_method(MetaMethod::Index, |lua, this, key: mlua::LuaString| {
-            let key = key.to_str()?;
-            if key.starts_with(|c: char| c.is_ascii_uppercase()) {
-                return component_view(lua, this.0, &key);
-            }
-            match &*key {
-                "name" => {
-                    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
-                    let w = unsafe { &mut *world_ptr(lua)? };
-                    let name = w.get::<Name>(this.0).map(|n| n.as_str().to_owned());
-                    Ok(name.map_or(Value::Nil, |n| {
-                        lua.create_string(&n).map_or(Value::Nil, Value::String)
-                    }))
-                }
-                "alive" => {
-                    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
-                    let alive = world_ptr(lua).is_ok_and(|w| unsafe { &*w }.contains(this.0));
-                    Ok(Value::Boolean(alive))
-                }
-                other => Err(mlua::Error::runtime(format!("an entity has no `{other}`"))),
-            }
-        });
-        methods.add_meta_method(MetaMethod::Eq, |_, this, other: AnyUserData| {
-            Ok(other.borrow::<ScriptEntity>().is_ok_and(|o| *o == *this))
-        });
-        methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
-            Ok(format!("Entity({})", this.0.index()))
-        });
+/// The entity `value` is, if one.
+fn entity_of(lua: &Lua, value: &Value) -> mlua::Result<Option<Entity>> {
+    if !matches!(value, Value::UserData(_)) {
+        return Ok(None);
     }
+    let mut found = None;
+    // SAFETY: the value is the one argument pushed, read where it lies.
+    unsafe {
+        lua.exec_raw::<()>(value.clone(), |state| {
+            found = script_views::entity_at(state, -1);
+        })?;
+    }
+    Ok(found)
 }
 
 /// A view of `entity`'s component `name`, or an error naming what is missing.
@@ -1349,44 +1384,7 @@ fn component_view(lua: &Lua, entity: Entity, name: &str) -> mlua::Result<Value> 
             "the entity has no {name} (check with `e:has({name})` once it exists)"
         )));
     }
-    lua.create_userdata(View {
-        entity,
-        id,
-        info,
-        offset: 0,
-    })
-    .map(Value::UserData)
-}
-
-/// A component (or a struct inside one) of an entity, seen live: its fields read and write
-/// the world.
-#[derive(Clone, Copy)]
-struct View {
-    entity: Entity,
-    id: ComponentId,
-    info: &'static TypeInfo,
-    /// Where it lies in the component.
-    offset: usize,
-}
-
-impl UserData for View {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_meta_method(MetaMethod::Index, |lua, this, key: mlua::LuaString| {
-            let key = key.to_str()?;
-            // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
-            let w = unsafe { &mut *world_ptr(lua)? };
-            field(lua, w, this.entity, this.id, this.info, this.offset, &key)
-        });
-        methods.add_meta_method(
-            MetaMethod::NewIndex,
-            |lua, this, (key, value): (mlua::LuaString, Value)| {
-                let key = key.to_str()?;
-                // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
-                let w = unsafe { &mut *world_ptr(lua)? };
-                set_field(w, this.entity, this.id, this.info, this.offset, &key, value)
-            },
-        );
-    }
+    new_view(lua, entity, id, info, 0)
 }
 
 /// A rotation in a script.
@@ -1480,10 +1478,8 @@ fn read(
         }
         if ty.name == "Entity" {
             let e = at.cast::<Entity>().read_unaligned();
-            if e == Entity::NULL {
-                return Ok(Value::Nil);
-            }
-            return lua.create_userdata(ScriptEntity(e)).map(Value::UserData);
+            // SAFETY: room for the one value pushed.
+            return lua.exec_raw::<Value>((), |state| script_views::push_entity(state, e));
         }
         match &ty.kind {
             TypeKind::Primitive(p) => Ok(match p {
@@ -1511,14 +1507,7 @@ fn read(
                 let s = engine_reflect::read_str(at);
                 lua.create_string(s).map(Value::String)
             }
-            TypeKind::Struct(_) => lua
-                .create_userdata(View {
-                    entity,
-                    id,
-                    info: ty,
-                    offset,
-                })
-                .map(Value::UserData),
+            TypeKind::Struct(_) => new_view(lua, entity, id, ty, offset),
             _ => Ok(Value::Nil),
         }
     }
@@ -1558,7 +1547,9 @@ fn struct_field(info: &'static TypeInfo, key: &str) -> mlua::Result<&'static Fie
 
 /// Writes `value` into field `key` of `info` at `offset` in `entity`'s component `id`,
 /// clamped to the field's range as the inspector does.
+#[allow(clippy::too_many_arguments)]
 fn set_field(
+    lua: &Lua,
     w: &mut World,
     entity: Entity,
     id: ComponentId,
@@ -1615,11 +1606,7 @@ fn set_field(
         if ty.name == "Entity" {
             let e = match &value {
                 Value::Nil => Entity::NULL,
-                Value::UserData(u) => {
-                    u.borrow::<ScriptEntity>()
-                        .map_err(|_| wrong("an entity"))?
-                        .0
-                }
+                Value::UserData(_) => entity_of(lua, &value)?.ok_or_else(|| wrong("an entity"))?,
                 _ => return Err(wrong("an entity")),
             };
             at.cast::<Entity>().write_unaligned(e);
@@ -1695,6 +1682,7 @@ mod tests {
 
     use super::*;
     use engine_ecs::Transform;
+    use engine_scene::Name;
 
     /// A project folder with `scripts/<name>` for each of `files`.
     fn project(name: &str, files: &[(&str, &str)]) -> PathBuf {
@@ -2004,6 +1992,84 @@ return Spin
             "{:?}",
             scripts.reported
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn entities_answer_on_the_fast_path_and_its_errors_name_the_line() {
+        let dir = project(
+            "entities",
+            &[
+                (
+                    "probe.luau",
+                    r#"local Probe = component("Probe", { seen = 0, target = prop.entity(), ok = false })
+function Probe.on_tick(self, dt)
+    local p = world.find("Player")
+    self.target = p
+    local same = p == world.find("Player") and p ~= self.entity and self.entity == self.entity
+    local named = p.name == "Player" and p.alive and string.sub(tostring(p), 1, 7) == "Entity("
+    local moved = p.Transform.translation.x == 7 and self.Transform.translation.y == 2
+    self.ok = same and named and moved and self.target == p and world.find("Nobody") == nil
+    self.seen += 1
+end
+return Probe
+"#,
+                ),
+                (
+                    "wrong.luau",
+                    r#"local Wrong = component("Wrong", { speed = 1 })
+function Wrong.on_tick(self, dt)
+    self.speed = "fast"
+end
+return Wrong
+"#,
+                ),
+                (
+                    "ghost.luau",
+                    r#"local Ghost = component("Ghost", {})
+function Ghost.on_tick(self, dt)
+    local g = world.find("Player").Haunt
+end
+return Ghost
+"#,
+                ),
+            ],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let player = world.spawn((Name::new("Player"), Transform::from_xyz(7.0, 0.0, 0.0)));
+        let probe = world.spawn((Transform::from_xyz(0.0, 2.0, 0.0),));
+        scripts.add(&mut world, probe, "Probe");
+        let wrong = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, wrong, "Wrong");
+        let ghost = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, ghost, "Ghost");
+        for _ in 0..3 {
+            scripts.tick(&mut world, 0.1);
+        }
+        assert_eq!(read_f32(&world, &scripts, probe, "Probe", "seen"), 3.0);
+        let id = scripts.component("Probe").unwrap();
+        let info = world.components().type_info(id).unwrap();
+        let TypeKind::Struct(fields) = &info.kind else {
+            unreachable!()
+        };
+        let at = |name: &str| fields.iter().find(|f| f.name == name).unwrap().offset;
+        let base = world.get_raw(probe, id).unwrap().as_ptr();
+        // SAFETY: Probe's props at their offsets: a bool and an entity.
+        unsafe {
+            assert_eq!(base.add(at("ok")).read(), 1, "every check held");
+            assert_eq!(
+                base.add(at("target")).cast::<Entity>().read_unaligned(),
+                player
+            );
+        }
+        let reported: Vec<&str> = scripts.reported.iter().map(String::as_str).collect();
+        for line in [
+            "scripts/wrong.luau:3: Wrong.speed takes a number, not string (Wrong.on_tick)",
+            "scripts/ghost.luau:3: no component is called `Haunt` (Ghost.on_tick)",
+        ] {
+            assert!(reported.contains(&line), "{line} in {reported:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
