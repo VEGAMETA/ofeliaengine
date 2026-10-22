@@ -484,7 +484,7 @@ Last updated: 2026-10-22.
   - **The owner's notes of 2026-10-22** (#347): a transform's scale keeps its proportions
     while the lock beside its name is shut (the default, kept in the session); Ctrl+A
     opens the add menu under the pointer, inside the window.
-  - **View modes, V1a** (#PR, the owner's request of 2026-10-22, ADR 0116): Lit,
+  - **View modes, V1a** (#348, the owner's request of 2026-10-22, ADR 0116): Lit,
     Wireframe and Lit + Wireframe from the viewport's chip or Alt+4, Alt+2, Alt+5.
     `engine_render::wire` draws the edges after the frame in line mode, the scene's depth
     sampled against a tolerance, so lines never z-fight the surfaces they lie on. 10,000
