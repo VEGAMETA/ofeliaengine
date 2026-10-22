@@ -185,6 +185,10 @@ Model.material = asset("models/yard.glb#Yard 2 grid", 5f2c0a3e9d2b47c88e51f0d4a7
     assets are made, so a scene shows whole. `player.wait_for_assets()` makes the next
     frame wait the same way, after you add models of your own.
   - `player.assets().loading()` counts what is still being made, for a progress bar.
+- **A file written anew is made again:** `player.asset_changed(id, path)` (the editor
+  calls it when its watcher sees a file change). The old version stays drawn until the new
+  one is whole, a material with its textures. An image beside glTF files makes the files
+  that use it again.
 
 ### Materials
 

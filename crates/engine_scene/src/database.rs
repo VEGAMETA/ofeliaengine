@@ -202,6 +202,9 @@ pub struct ScanReport {
     pub gone: usize,
     /// Problems (also in [`AssetDatabase::problems`]).
     pub problems: usize,
+    /// Files written anew since the last scan: at the same path, with the same id, of
+    /// another size or time. What was made from them is to be made again.
+    pub changed: Vec<AssetId>,
 }
 
 /// The project's assets ([module](self)).
@@ -328,14 +331,22 @@ impl AssetDatabase {
             }
             report.read += 1;
             match self.read_id(&path, kind, size, known, &mut report) {
-                Ok((id, hash)) => kept.push(AssetEntry {
-                    id,
-                    path,
-                    kind,
-                    size,
-                    modified,
-                    hash,
-                }),
+                Ok((id, hash)) => {
+                    // The same file, written anew (not only given its `.meta`).
+                    if known
+                        .is_some_and(|e| e.id == id && (e.size != size || e.modified != modified))
+                    {
+                        report.changed.push(id);
+                    }
+                    kept.push(AssetEntry {
+                        id,
+                        path,
+                        kind,
+                        size,
+                        modified,
+                        hash,
+                    });
+                }
                 Err(why) => self.problems.push((path, why)),
             }
         }
@@ -787,6 +798,30 @@ mod tests {
         std::fs::write(dir.join("old.scene"), "[scene version=3]\n").unwrap();
         db.scan();
         assert!(db.problems().iter().any(|(p, _)| p == "old.scene"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scan_names_the_files_written_anew() {
+        let dir = temp("changed");
+        std::fs::write(dir.join("props/crate.glb"), b"glTF crate").unwrap();
+        std::fs::write(dir.join("props/rock.png"), b"png rock").unwrap();
+        let mut db = AssetDatabase::open(&dir);
+        assert!(
+            db.scan().changed.is_empty(),
+            "new files are not changed ones"
+        );
+        let crate_id = db.find("props/crate.glb").unwrap().id;
+        // Written anew: named, its id kept. The rock, untouched, is not.
+        std::fs::write(dir.join("props/crate.glb"), b"glTF crate, bigger").unwrap();
+        let report = db.scan();
+        assert_eq!(report.changed, [crate_id], "{report:?}");
+        assert_eq!(db.find("props/crate.glb").unwrap().id, crate_id);
+        assert!(db.scan().changed.is_empty(), "once");
+        // Moved: not written anew.
+        std::fs::rename(dir.join("props/rock.png"), dir.join("rock.png")).unwrap();
+        std::fs::rename(dir.join("props/rock.png.meta"), dir.join("rock.png.meta")).unwrap();
+        assert!(db.scan().changed.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -432,3 +432,32 @@ The mip levels were mostly the linear → sRGB encoding (a walk through a table 
 - the Sponza here is one mesh of 25 materials, which draws with its first (the format
   question of E4-3), so 3 of its textures are made;
 - a loading screen's progress (`Assets::loading` counts what is in flight).
+
+## As built (E4-5, 2026-10-22): files written anew are made again
+
+CLAUDE.md §13: hot reload for any asset, a file watcher to a reimport to a swap at run
+time.
+- **Seen:** the asset database's scan names the files written anew (`ScanReport::changed`:
+  at the same path with the same id, of another size or time; not new or moved ones). The
+  editor's watcher already scans the folder after 0.15 s of quiet (E4-1).
+- **Made again:** `Player::asset_changed(id, path)` (`Assets::changed`) reads the file
+  again in the background (E4-4). An image beside glTF files makes the files that read it
+  again: a file notes its images as it is read.
+- **No gap:** what was made from the file becomes stale. It is drawn until its new version
+  is whole: a mesh once made, a material once its textures are.
+  - A model drawing a stale part keeps waiting, and is tried again when results come or a
+    material settles.
+  - A stale part goes once no model draws it: at its replacement, or once nothing waits.
+  - A file read again while already being read lets the older stale parts go.
+  - A broken new version keeps the old one drawn, its problem in the log.
+- **Checked:**
+  - a model drawn every frame while it is made again, then from the new file, the old
+    texture let go;
+  - an image painted again makes the glTF that uses it again, and one nobody uses makes
+    nothing;
+  - in the editor, a model's file written anew outside it is made again, drawn all along.
+- **Left:**
+  - the editor's own bakes are seen by the watcher too and made again once more, which
+    costs a reload of a file just made;
+  - scenes and scripts written anew are not reloaded here (scripts come with Luau,
+    scenes with the session's conflict rules, ADR 0107 §4).

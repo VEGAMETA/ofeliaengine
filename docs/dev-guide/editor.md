@@ -575,7 +575,9 @@ so editing never changes the scene behind your back.
 The editor keeps the project's asset database ([scenes.md](scenes.md#the-asset-database)):
 every asset file with its id, a `.meta` beside each foreign file, the index in
 `.ofelia/`. Files you add, move or delete in Explorer are followed a moment later, and
-scenes find their assets by id.
+scenes find their assets by id. A model, material or image written anew (export from
+Blender again, save a texture) is made again in the background, the old version drawn
+until the new one is whole.
 
 **The FileSystem dock**, under the viewport, shows them:
 - on the left, the project's folders that hold assets, `res://` at the top;

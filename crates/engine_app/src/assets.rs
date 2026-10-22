@@ -27,12 +27,16 @@
 //!   thread. A model draws once its mesh and material are made; its material's textures
 //!   fill in as they come. The frame after a scene is loaded waits for its assets, so a
 //!   scene shows whole.
+//! - **A file written anew** ([`Assets::changed`], E4-5) is made again the same way, its
+//!   old version drawn until the new one is whole (a material: with its textures). An
+//!   image makes the glTF files that use it again.
 //! - **The file's id** is its `.meta`'s ([`AssetMeta`]); a file without one is found by
 //!   its path alone.
 
 use crate::loading::{Done, Job, Loader};
 use engine_assets::{
-    ImportedScene, MaterialData, MeshData, TextureData, TextureImage, TextureUsage, TextureWrap,
+    ImportedScene, MaterialData, MeshData, TextureData, TextureImage, TextureSource, TextureUsage,
+    TextureWrap,
 };
 use engine_ecs::{Changed, Entity, GlobalTransform, QueryState, With, Without, World};
 use engine_reflect::Reflect;
@@ -237,6 +241,23 @@ fn file_part(path: &str) -> &str {
         Some(hash) => &path[..name_start + hash],
         None => path,
     }
+}
+
+/// `full` as a path under `root` with `/` between its parts, `..` resolved (none outside
+/// `root`).
+fn project_path(root: &Path, full: &Path) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for part in full.strip_prefix(root).ok()?.components() {
+        match part {
+            std::path::Component::Normal(p) => parts.push(p.to_string_lossy().into_owned()),
+            std::path::Component::ParentDir => {
+                parts.pop()?;
+            }
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(parts.join("/"))
 }
 
 /// Whether a written path names a glTF file (`.glb`, `.gltf`).
@@ -523,6 +544,17 @@ pub struct Assets {
     retired_meshes: Vec<MeshId>,
     retired_materials: Vec<MaterialId>,
     retired_textures: Vec<TextureId>,
+    /// Parts of files read again, drawn until their new versions are made (E4-5):
+    /// meshes, materials, and the textures of those materials.
+    stale_meshes: HashMap<AssetRef, MeshId>,
+    stale_materials: HashMap<AssetRef, MaterialId>,
+    stale_textures: Vec<(AssetId, TextureId)>,
+    /// The models waiting are tried again in the next sync: a material's textures were
+    /// all made.
+    retry_waiting: bool,
+    /// The images glTF files read besides themselves, by their paths under the root: the
+    /// files to read again when one is written anew.
+    depends: HashMap<String, Vec<AssetId>>,
     /// Why an asset could not be made, said once.
     problems: HashMap<AssetRef, String>,
     changes: Option<Changes>,
@@ -558,6 +590,11 @@ impl Assets {
             retired_meshes: Vec::new(),
             retired_materials: Vec::new(),
             retired_textures: Vec::new(),
+            stale_meshes: HashMap::new(),
+            stale_materials: HashMap::new(),
+            stale_textures: Vec::new(),
+            retry_waiting: false,
+            depends: HashMap::new(),
             problems: HashMap::new(),
             changes: None,
             orphans: None,
@@ -593,30 +630,36 @@ impl Assets {
     /// again, and every model in `world` that uses the file is made again. What the editor
     /// does after writing the file (a bake over an earlier one).
     pub fn reload(&mut self, world: &mut World, file: AssetId) {
+        // What an earlier reading left stale goes; what is made now becomes stale, drawn
+        // until the new versions are made.
+        self.retire_stale(Some(file));
+        let (meshes, materials) = (&mut self.stale_meshes, &mut self.stale_materials);
         self.meshes.retain(|asset, &mut mesh| {
             let keep = asset.file != file;
             if !keep {
-                self.retired_meshes.push(mesh);
+                meshes.insert(*asset, mesh);
             }
             keep
         });
         self.materials.retain(|asset, &mut material| {
             let keep = asset.file != file;
             if !keep {
-                self.retired_materials.push(material);
+                materials.insert(*asset, material);
             }
             keep
         });
+        let textures = &mut self.stale_textures;
         self.textures.retain(|key, made| {
             let keep = key.file != file;
             if !keep && let Some(texture) = made {
-                self.retired_textures.push(*texture);
+                textures.push((file, *texture));
             }
             keep
         });
-        let retired = &self.retired_materials;
+        // Stale materials take no more textures.
+        let stale = &self.stale_materials;
         self.pending_materials
-            .retain(|m| !retired.contains(&m.material));
+            .retain(|m| !stale.values().any(|&id| id == m.material));
         *self.generations.entry(file).or_default() += 1;
         self.building.retain(|a| a.file != file);
         self.decoding.retain(|k| k.file != file);
@@ -632,6 +675,47 @@ impl Assets {
         for e in using {
             world.mark_changed::<Model>(e);
         }
+    }
+
+    /// Asset file `file` at `path` (under the root) was written anew: what was made from it
+    /// is made again in the background, its old version drawn until then; an image makes
+    /// the glTF files that use it again.
+    pub fn changed(&mut self, world: &mut World, file: AssetId, path: &str) {
+        self.reload(world, file);
+        if let Some(users) = self.depends.get(path).cloned() {
+            for user in users {
+                self.reload(world, user);
+            }
+        }
+    }
+
+    /// The stale parts of `file` (of every file for none) let go: freed in the next frame.
+    fn retire_stale(&mut self, file: Option<AssetId>) {
+        let of = |f: AssetId| file.is_none_or(|file| file == f);
+        let retired_meshes = &mut self.retired_meshes;
+        self.stale_meshes.retain(|asset, &mut mesh| {
+            let go = of(asset.file);
+            if go {
+                retired_meshes.push(mesh);
+            }
+            !go
+        });
+        let retired_materials = &mut self.retired_materials;
+        self.stale_materials.retain(|asset, &mut material| {
+            let go = of(asset.file);
+            if go {
+                retired_materials.push(material);
+            }
+            !go
+        });
+        let retired_textures = &mut self.retired_textures;
+        self.stale_textures.retain(|&(f, texture)| {
+            let go = of(f);
+            if go {
+                retired_textures.push(texture);
+            }
+            !go
+        });
     }
 
     /// How many assets are still being made: files being read, meshes and textures being
@@ -828,6 +912,20 @@ impl Assets {
         self.generations.get(&file).copied().unwrap_or(0)
     }
 
+    /// The images beside glTF file `file` that it reads, noted for [`Self::changed`].
+    fn note_images(&mut self, file: AssetId, read: &GltfFile) {
+        for texture in &read.scene.textures {
+            if let TextureSource::Uri(uri) = &texture.source
+                && let Some(path) = project_path(&self.root, &read.dir.join(uri))
+            {
+                let users = self.depends.entry(path).or_default();
+                if !users.contains(&file) {
+                    users.push(file);
+                }
+            }
+        }
+    }
+
     /// The loader's results taken: files read, meshes made, textures decoded (made in
     /// [`Self::make_textures`]). Waits a moment for one with `wait`. Whether any came.
     fn take_done(&mut self, geometry: &mut GeometryPool, wait: bool) -> bool {
@@ -846,10 +944,13 @@ impl Assets {
                     result,
                 } if generation == self.generation(file) => {
                     let state = match result {
-                        Ok(read) => GltfState::Read {
-                            file: read,
-                            used: self.frame,
-                        },
+                        Ok(read) => {
+                            self.note_images(file, &read);
+                            GltfState::Read {
+                                file: read,
+                                used: self.frame,
+                            }
+                        }
                         Err(why) => GltfState::Failed(why),
                     };
                     self.gltf.insert(file, state);
@@ -937,6 +1038,7 @@ impl Assets {
         // Materials given the textures made so far; one leaves the list once each of its
         // slots is made or failed.
         let made_so_far = &self.textures;
+        let retry = &mut self.retry_waiting;
         self.pending_materials.retain(|pending| {
             let made = |slot: Option<(TextureKey, [Wrap; 2])>| {
                 let (key, wrap) = slot?;
@@ -948,6 +1050,9 @@ impl Assets {
                 .iter()
                 .flatten()
                 .all(|(key, _)| made_so_far.contains_key(key));
+            if settled {
+                *retry = true;
+            }
             if decoded || settled {
                 let [color, metallic_roughness, normal, occlusion, emissive] = pending.slots;
                 let desc = MaterialDesc {
@@ -1024,6 +1129,7 @@ impl Assets {
             }
         }
         let since = std::time::Instant::now();
+        came |= core::mem::take(&mut self.retry_waiting);
         loop {
             // The models waiting, again once something came back.
             if came && !self.waiting.is_empty() {
@@ -1062,6 +1168,15 @@ impl Assets {
             world.remove::<MeshRenderer>(e);
             self.waiting.remove(&e);
         }
+        // A model drawing a stale part waits for its new one: with none waiting, none is
+        // drawn.
+        if self.waiting.is_empty()
+            && !(self.stale_meshes.is_empty()
+                && self.stale_materials.is_empty()
+                && self.stale_textures.is_empty())
+        {
+            self.retire_stale(None);
+        }
         // Files no part is made from any more: let go a frame on (their parts kept).
         if !self.gltf.is_empty() {
             self.gltf.retain(|_, state| match state {
@@ -1081,8 +1196,39 @@ impl Assets {
         geometry: &mut GeometryPool,
         materials: &mut MaterialTable,
     ) -> bool {
-        let mesh = self.mesh(model.mesh, geometry);
-        let material = self.material(model.material, materials);
+        let made_mesh = self.mesh(model.mesh, geometry);
+        let made_material = self.material(model.material, materials);
+        // Until its new version is whole (a material with its textures), a part read again
+        // is drawn as it was.
+        let (mesh, stale_mesh) = match (made_mesh, self.stale_meshes.get(&model.mesh)) {
+            (Some(mesh), _) => (Some(mesh), false),
+            (None, Some(&old)) => (Some(old), true),
+            (None, None) => (None, false),
+        };
+        let unsettled = |m: MaterialId| self.pending_materials.iter().any(|p| p.material == m);
+        let (material, stale_material) =
+            match (made_material, self.stale_materials.get(&model.material)) {
+                (Some(new), Some(&old)) if unsettled(new) => (Some(old), true),
+                (None, Some(&old)) => (Some(old), true),
+                (made, _) => (made, false),
+            };
+        if !stale_mesh && let Some(old) = self.stale_meshes.remove(&model.mesh) {
+            self.retired_meshes.push(old);
+        }
+        if !stale_material && let Some(old) = self.stale_materials.remove(&model.material) {
+            self.retired_materials.push(old);
+            // The file's old textures go with its last old material.
+            let file = model.material.file;
+            if !self.stale_materials.keys().any(|a| a.file == file) {
+                let retired = &mut self.retired_textures;
+                self.stale_textures.retain(|&(f, texture)| {
+                    if f == file {
+                        retired.push(texture);
+                    }
+                    f != file
+                });
+            }
+        }
         match (mesh, material) {
             (Some(mesh), Some(material)) => {
                 let renderer = MeshRenderer {
@@ -1101,7 +1247,7 @@ impl Assets {
                         world.insert(e, GlobalTransform::IDENTITY);
                     }
                 }
-                true
+                !(stale_mesh || stale_material)
             }
             (mesh, material) => {
                 if world.remove::<FromModel>(e).is_some() {

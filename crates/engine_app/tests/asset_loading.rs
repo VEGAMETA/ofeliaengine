@@ -326,14 +326,15 @@ fn a_model_added_later_loads_in_the_background() {
     );
     std::fs::write(dir.join("tile.glb"), &again.bytes).unwrap();
     player.reload_asset(id);
+    // Drawn every frame meanwhile, the old version until the new one is whole.
     let renewed = |player: &mut Player| {
-        player
-            .world_mut()
-            .get::<MeshRenderer>(tile)
-            .is_some_and(|r| r.mesh != first.mesh && r.material != first.material)
+        let r = player.world_mut().get::<MeshRenderer>(tile).copied();
+        assert!(r.is_some(), "drawn while it is made again");
+        r.is_some_and(|r| r.mesh != first.mesh && r.material != first.material)
             && player.assets().loading() == 0
     };
     frames_until(&mut player, renewed).expect("drawn again from the new file");
+    assert_eq!(player.assets().textures_made(), 1, "the old texture let go");
     // A file that is not there: said as its problem, nothing waiting for it.
     let lost = Model::new(
         AssetRef::part(AssetId::from_u128(9), "Gone"),
@@ -355,5 +356,161 @@ fn a_model_added_later_loads_in_the_background() {
     player.wait_for_assets();
     player.frame(&mut game).unwrap();
     assert!(player.world_mut().get::<MeshRenderer>(second).is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Standard base64 of `bytes`, for a glTF's data URI.
+fn base64(bytes: &[u8]) -> String {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for k in 0..4 {
+            if k <= chunk.len() {
+                out.push(ABC[(n >> (18 - 6 * k) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// A `.gltf` of one quad whose material's base color is the image `image` beside it.
+fn quad_gltf(image: &str) -> String {
+    let mut bin: Vec<u8> = Vec::new();
+    let positions: [[f32; 3]; 4] = [
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+    ];
+    for p in positions {
+        for v in p {
+            bin.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    for _ in 0..4 {
+        for v in [0.0f32, 1.0, 0.0] {
+            bin.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    for uv in [[0.0f32, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]] {
+        for v in uv {
+            bin.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    for i in [0u32, 1, 2, 0, 2, 3] {
+        bin.extend_from_slice(&i.to_le_bytes());
+    }
+    format!(
+        r#"{{
+  "asset": {{"version": "2.0"}},
+  "scene": 0, "scenes": [{{"nodes": [0]}}], "nodes": [{{"name": "Quad", "mesh": 0}}],
+  "buffers": [{{"byteLength": {len}, "uri": "data:application/octet-stream;base64,{data}"}}],
+  "bufferViews": [
+    {{"buffer": 0, "byteOffset": 0, "byteLength": 48}},
+    {{"buffer": 0, "byteOffset": 48, "byteLength": 48}},
+    {{"buffer": 0, "byteOffset": 96, "byteLength": 32}},
+    {{"buffer": 0, "byteOffset": 128, "byteLength": 24}}
+  ],
+  "accessors": [
+    {{"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [0, 0, 0], "max": [1, 0, 1]}},
+    {{"bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC3"}},
+    {{"bufferView": 2, "componentType": 5126, "count": 4, "type": "VEC2"}},
+    {{"bufferView": 3, "componentType": 5125, "count": 6, "type": "SCALAR"}}
+  ],
+  "meshes": [{{"name": "Quad", "primitives": [{{"attributes": {{"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2}}, "indices": 3, "material": 0}}]}}],
+  "materials": [{{"name": "Painted", "pbrMetallicRoughness": {{"baseColorTexture": {{"index": 0}}}}}}],
+  "textures": [{{"source": 0}}],
+  "images": [{{"uri": "{image}"}}]
+}}"#,
+        len = bin.len(),
+        data = base64(&bin),
+    )
+}
+
+/// A 4 × 4 PNG of one color.
+fn png(rgb: [u8; 3]) -> Vec<u8> {
+    let rgba: Vec<u8> = (0..16)
+        .flat_map(|_| [rgb[0], rgb[1], rgb[2], 255])
+        .collect();
+    engine_render::png::encode_png(4, 4, engine_render::png::PngFormat::Rgba, &rgba).unwrap()
+}
+
+#[test]
+fn an_image_written_anew_makes_the_models_that_use_it_again() {
+    let dir = std::env::temp_dir().join(format!("ofelia-image-reload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("props/textures")).unwrap();
+    std::fs::write(dir.join("props/quad.gltf"), quad_gltf("textures/paint.png")).unwrap();
+    std::fs::write(dir.join("props/textures/paint.png"), png([200, 30, 20])).unwrap();
+    let (model_id, image_id) = (AssetId::new(), AssetId::new());
+    let settings = PlayerSettings {
+        title: String::from("image reload test"),
+        window: Window::Offscreen {
+            width: 320,
+            height: 180,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut paths = AssetPaths::new();
+    paths.insert(AssetRef::file(model_id), "props/quad.gltf");
+    player.assets_mut().add_paths(&paths);
+    let model = Model::new(
+        AssetRef::part(model_id, "Quad"),
+        AssetRef::part(model_id, "Painted"),
+    );
+    let quad = player
+        .world_mut()
+        .spawn((SceneId::new(), Transform::IDENTITY, model));
+    let ready = |player: &mut Player| {
+        player.world_mut().get::<MeshRenderer>(quad).is_some() && player.assets().loading() == 0
+    };
+    frames_until(&mut player, ready).expect("drawn");
+    assert_eq!(player.assets().textures_made(), 1);
+    assert_eq!(player.assets().problem(model.material), None);
+    let first = *player.world_mut().get::<MeshRenderer>(quad).unwrap();
+    // The image painted again: the model's material made again with it, drawn as it was
+    // meanwhile.
+    std::fs::write(dir.join("props/textures/paint.png"), png([20, 30, 200])).unwrap();
+    player.asset_changed(image_id, "props/textures/paint.png");
+    let renewed = |player: &mut Player| {
+        let r = player.world_mut().get::<MeshRenderer>(quad).copied();
+        assert!(r.is_some(), "drawn while it is made again");
+        r.is_some_and(|r| r.material != first.material) && player.assets().loading() == 0
+    };
+    frames_until(&mut player, renewed).expect("made again from the new image");
+    assert_eq!(player.assets().textures_made(), 1);
+    // An image nobody uses: nothing made again.
+    let before = *player.world_mut().get::<MeshRenderer>(quad).unwrap();
+    player.asset_changed(AssetId::new(), "props/textures/other.png");
+    let mut game = Still;
+    for _ in 0..5 {
+        player.frame(&mut game).unwrap();
+    }
+    assert_eq!(
+        *player.world_mut().get::<MeshRenderer>(quad).unwrap(),
+        before
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
