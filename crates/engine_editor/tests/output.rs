@@ -94,6 +94,24 @@ fn the_output_shows_the_log_under_the_viewport() {
     assert!(game.run_command(player.world_mut(), "view.output"));
     frames(&mut player, &mut game, &mut overlay, 3);
     assert_eq!(game.view_rect().unwrap()[3], closed);
+    // The Tasks below and the History in the tree's place (`ENGINE_EDITOR_PANELS_PNG=<file>`).
+    assert!(game.run_command(player.world_mut(), "view.tasks"));
+    assert!(game.run_command(player.world_mut(), "view.history"));
+    frames(&mut player, &mut game, &mut overlay, 3);
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_PANELS_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

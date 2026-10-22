@@ -378,9 +378,12 @@ Last updated: 2026-10-22.
   - **E6-2, errors next to their causes** (#326, ADR 0107's as-built): a row's text names
     its cause (an id, `path:line[:column]`, a file); a click selects the entity, shows the
     asset in the dock or opens the line in VS Code; a failed build's errors are rows.
-  - **Next:** E6-3, Tasks (the background work with its progress); then History, the
-    profiler's first panel; then E7 (Luau, once the owner has answered ADR 0114's
-    questions).
+  - **E6-3 and E6-4, Tasks and History** (#327, ADR 0107's as-built): a Tasks tab lists
+    the background work (the build, assets, compression, thumbnails, navigation) with how
+    far and how long; the scene dock's History lists every step, the current one marked,
+    and a click goes to it.
+  - **Next:** E6-5, the profiler's first panel (the frame's stages and the GPU's passes);
+    then E7 (Luau, once the owner has answered ADR 0114's questions).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

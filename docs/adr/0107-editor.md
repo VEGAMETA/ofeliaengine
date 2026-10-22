@@ -1300,6 +1300,26 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
 - **Build errors in the Output:** a failed build logs each error (`build`), its place
   relative to the game's crate, so a click opens it; "Build: Show Errors…" stays.
 
+## As built (E6-3 and E6-4, 2026-10-22): Tasks and History
+
+- **Tasks** (a bottom tab after the Output, "View: Tasks"): the background work under way,
+  each kind once, with how far it is and how long since it was first seen. The kinds:
+  - the game's code building;
+  - the player's assets being made (files read, meshes and textures made);
+  - textures being compressed;
+  - thumbnails being made, on their thread or drawn by the player;
+  - the navigation being baked.
+
+  The tab counts them. Nothing blocks the editor meanwhile (§12).
+- **History** (the scene dock's second tab, "View: History", in the tree's place):
+  - `Start`, then every step by its name, oldest first;
+  - the current state highlighted, and the steps undone below it dimmed;
+  - another tab's steps carry their scene's name (one history across tabs).
+
+  A click goes to that state, a step at a time through undo and redo, so another tab's
+  step shows its tab as Ctrl+Z does. `Start` takes back every step it can (while
+  playing, not past Play's start).
+
 ## As built (E4-1, 2026-10-22): the local cache's index
 
 §5 left the index's form to a measurement: our own text file, read in 3.2 ms and an

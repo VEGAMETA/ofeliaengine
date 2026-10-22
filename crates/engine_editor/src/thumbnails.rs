@@ -130,6 +130,15 @@ impl Thumbnails {
         }
     }
 
+    /// How many thumbnails are being made: on the thread, or drawn by the player (the
+    /// Tasks panel).
+    pub(crate) fn pending(&self) -> usize {
+        self.thumbs
+            .values()
+            .filter(|t| matches!(t, Thumb::Making(_)))
+            .count()
+    }
+
     /// The atlas the overlay made: its bindless index.
     pub(crate) fn set_atlas(&mut self, index: u32) {
         self.atlas = Some(index);

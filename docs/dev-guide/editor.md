@@ -742,6 +742,16 @@ start (`log::warn!(target: "doors", "door {id} is stuck")`).
   (`log::warn!("{}: no door here", path)`). A failed build of your game's code puts each
   error there too.
 
+## Tasks and History
+
+- **Tasks** (the bottom bar's second tab, or "View: Tasks"): what runs in the background
+  and how long it has run. That covers your game's build, assets loading, textures
+  compressing, thumbnails and the navigation bake. The tab counts them; you keep working
+  meanwhile.
+- **History** (the scene dock's second tab, or "View: History"): every step by name, the
+  current one highlighted, those undone below it dimmed, another tab's steps with their
+  scene's name. A click goes back or forward to that step; `Start` takes back everything.
+
 ## Scenes in tabs
 
 Several scenes open at once, each in a tab above the viewport (ADR 0107 §4), with Godot's
