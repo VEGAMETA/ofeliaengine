@@ -1773,3 +1773,36 @@ The owner asked to drag entities to other parents. The tree's UX note had design
 - **Brushes moved** between blockout groups, or within one, are evaluated again by the
   blockout's parent-change query, as an edit.
 - **Left:** Ctrl+drag to copy (the note's), scrolling the tree while a drag nears its edge.
+
+## As built (2026-10-22, the owner's request): a code tab's own panel, and text files
+
+The owner asked why a code tab shows the scene's tree and inspector, and proposed the open
+scripts and other text files on the left (`docs/research/ux/code-editor.md`, "The code's
+side panel", after Godot, VS Code and JetBrains):
+- **In a code tab** a panel stands left of the code, and the scene's tree and inspector
+  go, so the code takes their width:
+  - **Open Files:** the code tabs in their order, each with its icon, its name and its
+    folder dimmed, its findings' count, and a dot while unsaved. A filter narrows them.
+    A click shows the tab; the close mark (the dot when unsaved) closes it.
+  - **Outline:** the shown file's declarations (`outline.rs`), read by lexical rules
+    again whenever its text changes:
+    - Luau's functions (`Door.on_tick`), `component("…")` declarations and types;
+    - Slang's structs, interfaces, enums and functions, methods one deeper;
+    - TOML's sections, Markdown's headings, Fluent's message ids.
+
+    What lies in comments and strings is left out by the highlighting's states. The
+    declaration the caret is in is lit; a click puts the caret there.
+- **View: Scene Docks Beside Code** brings the tree and the inspector back in code tabs
+  (for this run).
+- **Text files** of the project open in code tabs (`Language::Text`), colored by
+  `text_highlight.rs`:
+  - TOML (sections, keys, values);
+  - RON (structs, fields, block comments);
+  - JSON (keys);
+  - Fluent (ids, attributes, placeables);
+  - Markdown (headings, code spans, fences);
+  - plain text (`.txt`, `.cfg`, `.ini`, `.yaml`, `.csv`).
+
+  They are no assets, so no `.meta`. The FileSystem dock lists them after the assets of
+  their folder, read from the disk when it refreshes (hidden folders and `target` left
+  out); a double click opens one. Nothing checks them.

@@ -207,6 +207,50 @@ pub struct TreeItem<'a> {
     pub off: bool,
 }
 
+/// A code tab's panel (`code-editor.md`, "The code's side panel"): the open files and the
+/// shown file's outline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CodeSide<'a> {
+    /// The open files, in their tabs' order (those the filter keeps).
+    pub files: &'a [OpenFile<'a>],
+    /// The shown file's declarations.
+    pub outline: &'a [OutlineRow<'a>],
+    /// What the files are filtered by.
+    pub filter: &'a str,
+}
+
+/// An open file of the code panel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenFile<'a> {
+    /// Its kind's icon.
+    pub icon: &'a str,
+    /// Its file's name.
+    pub name: &'a str,
+    /// Its folder in the project, dimmed after the name.
+    pub folder: &'a str,
+    /// Shown now.
+    pub active: bool,
+    /// Its changes not saved.
+    pub unsaved: bool,
+    /// Its errors and warnings found (Luau's, Slang's), as a short label (`2`), or empty.
+    pub problems: &'a str,
+    /// Of them an error.
+    pub error: bool,
+}
+
+/// A declaration in the outline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutlineRow<'a> {
+    /// What it is: a function, a type, a component, a heading.
+    pub icon: &'a str,
+    /// Its name as written.
+    pub name: &'a str,
+    /// How deep it is: a method one more than its struct.
+    pub depth: u16,
+    /// The one the caret is in.
+    pub current: bool,
+}
+
 /// An entry of a menu of groups (the add menu): a kind to pick, or a group of them opened
 /// beside it on hover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,6 +435,8 @@ pub enum FileKind {
     Script,
     /// A Slang module.
     Shader,
+    /// A text file that is no asset (settings, data, notes).
+    Text,
     /// A texture.
     Texture,
     /// A model or mesh.
@@ -616,6 +662,12 @@ pub struct ShellModel<'a> {
     /// The scene tree's row dragged rows would go next to: a line above it, or below it
     /// with `true`.
     pub drop_line: Option<(usize, bool)>,
+    /// A code tab's own panel on the left (its open files and outline); with it, the scene's
+    /// tree and inspector only when `docks_beside_code`.
+    pub code_side: Option<CodeSide<'a>>,
+    /// The scene's tree and inspector beside a code tab too (View: Scene Docks Beside
+    /// Code).
+    pub docks_beside_code: bool,
     /// What the scene tree is filtered by.
     pub tree_filter: &'a str,
     /// What the inspector is filtered by.
@@ -708,6 +760,14 @@ pub struct ShellResponse {
     pub tree_under_id: Option<u64>,
     /// A scene tree's row held and moved past [`DRAG_START`]: rows dragged.
     pub tree_drag: Option<usize>,
+    /// The code panel's open file clicked: its place among the rows shown.
+    pub open_file: Option<usize>,
+    /// The close mark of an open file clicked.
+    pub close_file: Option<usize>,
+    /// An outline row clicked.
+    pub outline_row: Option<usize>,
+    /// The code panel's filter used (`Ui::edited_text` while it changes).
+    pub code_filter: Option<TextFieldResponse>,
     /// A bottom panel tab was clicked.
     pub bottom_tab: Option<usize>,
     /// The Output's filter field was used (`Ui::edited_text` while it changes).
@@ -824,9 +884,15 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
                 ..Style::fill()
             },
             |ui| {
+                // A code tab: its own panel on the left, the scene's docks only when asked.
+                if let Some(side) = &model.code_side {
+                    code_side(ui, side, p, &mut out);
+                }
                 center(ui, model, p, &mut out, &mut popups);
-                scene_dock(ui, model, p, &mut out, &mut popups);
-                inspector_dock(ui, model, p, &mut out, &mut popups);
+                if model.code_side.is_none() || model.docks_beside_code {
+                    scene_dock(ui, model, p, &mut out, &mut popups);
+                    inspector_dock(ui, model, p, &mut out, &mut popups);
+                }
             },
         );
         if let Some(view) = &model.output {
@@ -1675,6 +1741,7 @@ fn file_icon(kind: FileKind, p: &Palette) -> (&'static str, Color) {
         FileKind::Scene => (icons::SCENE, p.accent),
         FileKind::Script => (icons::SCRIPT, srgb(222, 196, 96)),
         FileKind::Shader => (icons::SHADER, srgb(96, 196, 222)),
+        FileKind::Text => (icons::TEXT_FILE, p.text_dim),
         FileKind::Texture => (icons::TEXTURE, srgb(110, 190, 130)),
         FileKind::Mesh => (icons::MESH, srgb(222, 140, 90)),
         FileKind::Audio => (icons::AUDIO, srgb(180, 130, 220)),
@@ -1924,6 +1991,91 @@ fn tree_rows(
         ui.pop_id();
     }
     out
+}
+
+/// The code tab's panel: the open files (filtered), then the shown file's outline.
+fn code_side(ui: &mut Ui, side: &CodeSide<'_>, p: &Palette, out: &mut ShellResponse) {
+    let row = |depth: u16, lit: bool| Style {
+        size: [Size::Grow(1.0), Size::Fixed(22.0)],
+        padding: [8.0 + INDENT * f32::from(depth), 0.0, 6.0, 0.0],
+        gap: 5.0,
+        align_cross: Align::Center,
+        background: lit.then_some(p.selection),
+        ..Style::default()
+    };
+    dock_column(ui, "code side", Size::Fixed(SCENE_WIDTH), p, |ui| {
+        ui.row("tabs", bar(p, 30.0), |ui| {
+            let _ = tabs(ui, &["Open Files"], Some(0), p);
+        });
+        out.code_filter = filter(ui, side.filter, "Filter files", p);
+        ui.container(
+            "files",
+            Style {
+                size: [Size::Grow(1.0), Size::Fit],
+                direction: Direction::Column,
+                ..Style::default()
+            },
+            |ui| {
+                for (i, f) in side.files.iter().enumerate() {
+                    ui.push_id(i as u64);
+                    let mut close = false;
+                    let id = ui.row("file", row(0, f.active), |ui| {
+                        icon(ui, "icon", f.icon, p.text_dim);
+                        text(ui, "name", f.name, TEXT, p.text);
+                        if !f.folder.is_empty() {
+                            text(ui, "folder", f.folder, SMALL, p.text_dim);
+                        }
+                        ui.spacer("fill");
+                        if !f.problems.is_empty() {
+                            let color = if f.error { p.error } else { p.warning };
+                            text(ui, "problems", f.problems, SMALL, color);
+                        }
+                        // The close mark, or the unsaved dot until the row is hovered.
+                        let mark = ui.container(
+                            "close",
+                            Style {
+                                size: [Size::Fixed(ICON + 4.0), Size::Fit],
+                                align_main: Align::Center,
+                                ..Style::default()
+                            },
+                            |ui| {
+                                let glyph = if f.unsaved {
+                                    icons::UNSAVED
+                                } else {
+                                    icons::CLOSE
+                                };
+                                text(ui, "glyph", glyph, ICON, p.text_dim);
+                            },
+                        );
+                        close = ui.sense(mark, false).clicked;
+                    });
+                    if close {
+                        out.close_file = Some(i);
+                    } else if ui.sense(id, false).clicked {
+                        out.open_file = Some(i);
+                    }
+                    ui.pop_id();
+                }
+            },
+        );
+        dock_title(ui, "OUTLINE", p);
+        ui.scroll_column("outline", |ui| {
+            for (i, s) in side.outline.iter().enumerate() {
+                ui.push_id(i as u64);
+                let id = ui.row("symbol", row(s.depth, s.current), |ui| {
+                    icon(ui, "icon", s.icon, p.text_dim);
+                    text(ui, "name", s.name, TEXT, p.text);
+                });
+                if s.current {
+                    ui.reveal(id);
+                }
+                if ui.sense(id, false).clicked {
+                    out.outline_row = Some(i);
+                }
+                ui.pop_id();
+            }
+        });
+    });
 }
 
 /// Scene tree dock: tabs and the add button, filter, tree.
