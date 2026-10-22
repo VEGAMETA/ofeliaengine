@@ -2340,6 +2340,59 @@ uint outlineFragmentMasked(OutlineMaskedOut input) : SV_Target0
     return input.value;
 }
 
+// The unlit view (ADR 0116 V1b, `unlit.rs`): instances drawn again over the frame, each
+// pixel its material's base color and emission, no light. An item is the instance index of
+// the draw: `push.visible` holds the items' slots. `push.phase` holds the output's white
+// (its bits: 1, or SDR white in scRGB units for HDR).
+struct UnlitOut
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    nointerpolation uint material : MATERIAL;
+};
+
+[shader("vertex")]
+UnlitOut unlitVertex(uint vertex : SV_VulkanVertexID, uint item : SV_VulkanInstanceID)
+{
+    Instance inst = read_instance(push.instances, push.visible[item]);
+    UnlitOut o;
+    o.position = clip_position(inst, load_position(vertex)).clip;
+    o.uv = read_attributes(vertex).uv;
+    o.material = inst.material;
+    return o;
+}
+
+// The base color and emission (clamped to the display's white), and the coverage.
+float4 unlit_color(UnlitOut input, bool masked)
+{
+    MaterialContext ctx = coverage_context(input.uv, input.material);
+    MATERIAL.Params p = MATERIAL::load(ctx);
+    Surface s = MATERIAL::surface(ctx, p, masked);
+    float3 color = min(s.base.rgb + MATERIAL::emission(ctx, p), 1.0) * asfloat(push.phase);
+    return float4(color, s.base.a);
+}
+
+[shader("fragment")]
+float4 unlitFragment(UnlitOut input) : SV_Target0
+{
+    return float4(unlit_color(input, false).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 unlitFragmentMasked(UnlitOut input) : SV_Target0
+{
+    return float4(unlit_color(input, true).rgb, 1.0);
+}
+
+// Premultiplied over what is behind, as the transparent pass blends (ADR 0054).
+[shader("fragment")]
+float4 unlitFragmentBlended(UnlitOut input) : SV_Target0
+{
+    float4 c = unlit_color(input, false);
+    float alpha = saturate(c.a);
+    return float4(c.rgb * alpha, alpha);
+}
+
 static const float PI = 3.14159265;
 
 float distribution_ggx(float n_dot_h, float a)

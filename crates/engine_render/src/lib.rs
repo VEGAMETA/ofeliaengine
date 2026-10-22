@@ -84,6 +84,7 @@ pub mod streaming;
 pub mod subsurface;
 pub mod texture;
 pub mod texture_pool;
+pub mod unlit;
 pub mod upload;
 pub mod viewport;
 pub mod vsm;

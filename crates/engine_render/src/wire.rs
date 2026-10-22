@@ -85,10 +85,10 @@ pub struct WireView {
     pub render: (u32, u32),
 }
 
-/// `Params` in `wire.slang` (80 bytes).
+/// `Params` in `wire.slang` (80 bytes): the unlit view's background reads them too.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct WireParams {
+pub(crate) struct WireParams {
     color: [f32; 4],
     background: [f32; 4],
     scene_scale: [f32; 2],
@@ -101,6 +101,17 @@ struct WireParams {
 }
 
 const _: () = assert!(core::mem::size_of::<WireParams>() == 80);
+
+impl WireParams {
+    /// For `wireFill` alone: `background` (linear, straight alpha) at the output's `white`.
+    pub(crate) fn fill(background: [f32; 4], white: f32) -> Self {
+        Self {
+            background,
+            white,
+            ..bytemuck::Zeroable::zeroed()
+        }
+    }
+}
 
 /// Wireframes in one view (see the module documentation).
 #[derive(Debug)]

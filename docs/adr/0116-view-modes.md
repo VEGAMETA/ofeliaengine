@@ -42,8 +42,10 @@
 2. **Their own pipelines, made the first time a view uses them** (chosen):
    - The wireframes are a pass of their own after the frame, as the outline is, and as
      Bevy's wireframe pass is.
-   - Unlit is a material role: the engine's `forwardUnlit` and each material type's derived
-     from it, drawn instead of the lit roles in a view whose mode is unlit.
+   - Unlit is a pass of its own too (decided at V1b): the instances drawn again over the
+     frame in their base color and emission. A material role was the first plan: every
+     material type would derive one more pipeline, and the forward pass's batching would
+     pick it per view, for a debug view.
    - A lit view declares nothing new and draws with untouched shaders.
 3. **Debug buffers written by the lit pass** (a G-buffer of base color for unlit, Godot's
    advanced modes). The forward renderer has no G-buffer, so the lit pass would write more
@@ -80,9 +82,11 @@ For lines on surfaces:
     hidden or not, as Unreal's and Godot's are.
   - The device asks for `fillModeNonSolid` where it has it (every desktop GPU); without it
     the editor offers no wireframe.
-- **Unlit** is a role (`forwardUnlit` in `forward.slang`): the material evaluated, its base
-  color and emission written. A view in unlit declares no shadow, ambient occlusion, GI or
-  reflection passes.
+- **Unlit** (`engine_render::unlit`, decided at V1b): the instances the view sees drawn
+  again over the frame, as the wireframes are, with a depth of their own: each material's
+  base color plus its emission (clamped to the display's white), over a dark background.
+  Materials are read as the engine's own pipelines read them, so a material type shows its
+  glTF fallback; the forward pass is untouched.
 - **Colliders** (the second step):
   - The physics API gives a shape's edges in its own space, made in Rust from the shape's
     description: a box's twelve edges, a sphere's and a capsule's rings, a hull's and a
@@ -102,7 +106,8 @@ For lines on surfaces:
 1. **V1a:** `engine_render::wire`, the device's line mode, the editor's menu and keys:
    Wireframe and Lit + Wireframe. Golden images on both GPUs; the cost measured in a heavy
    scene on both.
-2. **V1b:** the unlit role and the view's mode in the forward pass; its golden images.
+2. **V1b:** `engine_render::unlit` and the editor's Unlit (Alt+3); a render test of its
+   colors on both GPUs.
 3. **V2:** shapes' edges in `engine_physics`, the colliders overlay for every body, the
    blockout's X-ray overlay gone.
 
@@ -114,7 +119,8 @@ For lines on surfaces:
   - the debug buffers Godot and Unreal show (normals, lighting only, overdraw) can come one
     at a time as further modes, each with its own pipelines.
 - **Harder:**
-  - every material type derives one more pipeline, compiled the first time a view is unlit;
+  - a material type's own base color code does not run in the unlit view: it shows its
+    glTF fallback;
   - the editor writes a draw per visible instance for wireframes each frame on the CPU,
     from the slots' boxes. The GPU's culled draws are the faster path when scenes grow:
     revisit with the measurement of V1a.
@@ -158,3 +164,29 @@ For lines on surfaces:
 - **Tests:** a render test of the pass on both GPUs under synchronization validation (edges
   in front drawn, one behind a nearer quad not, every one over the background), and the
   editor's frame with the real player in each mode.
+
+## As built (V1b, 2026-10-22): Unlit
+
+- **`engine_render::unlit::Unlit`:**
+  - `unlitVertex` and `unlitFragment`, `unlitFragmentMasked` and `unlitFragmentBlended`
+    (`forward.slang`), whose material is read through `coverage_context`; the background is
+    `wire.slang`'s fill. The existing SPIR-V stayed byte for byte the same;
+  - one pass, `unlit`: the background, then the instances the view sees sorted by state
+    (blended ones last), each run with its culling and winding, over a depth as large as
+    the target (a pass's attachments share its area);
+  - the output's white goes in `phase`, as its bits.
+- **The editor:** Unlit in the chip's menu and on Alt+3.
+- **Measured** (the same 10,000 cubes, 1920 × 1080, medians of 100 frames):
+
+  | the pass | RTX 4060 Ti | Radeon iGPU |
+  |---|---|---|
+  | `unlit` | 0.28 ms | 1.15 ms |
+  | `wireframe`, Wireframe (a second run) | 0.73 ms | 0.94 ms |
+  | `wireframe`, Lit + Wireframe | 0.82 ms | 1.00 ms |
+
+  Composing the frame took 123 µs lit and 460–500 µs in the other modes on the RTX
+  (128 µs and 395–430 µs on the Radeon). The RTX's two runs of Wireframe measured 0.41 and
+  0.73 ms.
+- **Tests:** the pass's colors on both GPUs under synchronization validation (base colors,
+  one in front of another, a blended one over the background, emission added), and the
+  editor's frame in Unlit: one flat color for the cube's every face.

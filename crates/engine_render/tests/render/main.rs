@@ -41,6 +41,7 @@ mod streaming;
 mod subsurface;
 mod tonemap;
 mod transparency;
+mod unlit;
 mod upload;
 mod vsm;
 mod vsm_draw;

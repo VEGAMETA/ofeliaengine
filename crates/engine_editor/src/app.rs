@@ -101,6 +101,7 @@ use engine_render::outline::{OutlineClass, OutlineItem, OutlineStyle, OutlineVie
 use engine_render::pick::{
     ListRequest, PickPass, PickRequest, PickView, Picker, SurfaceRequest, SurfaceResult,
 };
+use engine_render::unlit::{Unlit, UnlitView};
 use engine_render::wire::{WireStyle, WireView, Wireframer};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, Disabled, PointLight, SpotLight, Sun, look_rotation};
@@ -521,6 +522,7 @@ pub fn editor<G: Game>(
     )?;
     let outliner = Outliner::new(setup.device, setup.bindless, output.format, output.white)?;
     let wireframer = Wireframer::new(setup.device, setup.bindless, output.format, output.white)?;
+    let unlit = Unlit::new(setup.device, setup.bindless, output.format, output.white)?;
     // The thumbnails' atlas (ADR 0112): its pixels uploaded once the first frame records.
     let atlas = engine_render::texture::GpuTexture::new(
         setup.device,
@@ -569,6 +571,7 @@ pub fn editor<G: Game>(
             picker,
             outliner,
             wireframer,
+            unlit,
             atlas,
         },
     ))
@@ -681,7 +684,7 @@ struct CommandIds {
     /// The prefab of the selection's instance opened in a tab (E5-5b).
     open_prefab: CommandId,
     /// The view's modes (ADR 0116), in `ViewMode::ALL`'s order.
-    view_modes: [CommandId; 3],
+    view_modes: [CommandId; 4],
     /// Components and scripts for the selection (E7-4a): Add Component…, Attach Script…,
     /// New Script….
     add_component: CommandId,
@@ -812,6 +815,7 @@ fn commands() -> (Commands, CommandIds) {
         open_prefab: c.register("prefab.open", "Prefab", "Open Prefab"),
         view_modes: [
             c.register("view.lit", "View", "Lit"),
+            c.register("view.unlit", "View", "Unlit"),
             c.register("view.wireframe", "View", "Wireframe"),
             c.register("view.lit_wireframe", "View", "Lit + Wireframe"),
         ],
@@ -895,8 +899,9 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+Shift+A", ids.add_component),
         // Unreal's view modes; Alt+5 the edges over the lit scene, which it lacks.
         ("Alt+4", ids.view_modes[0]),
-        ("Alt+2", ids.view_modes[1]),
-        ("Alt+5", ids.view_modes[2]),
+        ("Alt+3", ids.view_modes[1]),
+        ("Alt+2", ids.view_modes[2]),
+        ("Alt+5", ids.view_modes[3]),
         ("F2", ids.rename),
         ("Ctrl+Shift+P", ids.palette),
         // VS Code's: the project's scripts searched (the palette's `%`).
@@ -1275,6 +1280,8 @@ enum ViewMode {
     /// As the game shows it.
     #[default]
     Lit,
+    /// Each material's base color and emission, no light.
+    Unlit,
     /// Every triangle's edges, lines only.
     Wireframe,
     /// The lit scene with the edges in front.
@@ -1283,12 +1290,13 @@ enum ViewMode {
 
 impl ViewMode {
     /// In the menu's order.
-    const ALL: [Self; 3] = [Self::Lit, Self::Wireframe, Self::LitWireframe];
+    const ALL: [Self; 4] = [Self::Lit, Self::Unlit, Self::Wireframe, Self::LitWireframe];
 
     /// What its chip and its menu read.
     fn label(self) -> &'static str {
         match self {
             Self::Lit => "Lit",
+            Self::Unlit => "Unlit",
             Self::Wireframe => "Wireframe",
             Self::LitWireframe => "Lit + Wireframe",
         }
@@ -1298,6 +1306,7 @@ impl ViewMode {
     fn name(self) -> &'static str {
         match self {
             Self::Lit => "lit",
+            Self::Unlit => "unlit",
             Self::Wireframe => "wireframe",
             Self::LitWireframe => "lit_wireframe",
         }
@@ -15595,6 +15604,8 @@ pub struct EditorOverlay {
     /// Its wireframes in the view modes that show edges (ADR 0116); none on a device
     /// without the line mode.
     wireframer: Option<Wireframer>,
+    /// Its unlit view (ADR 0116).
+    unlit: Unlit,
     /// The listing's thumbnails, in cells (ADR 0112).
     atlas: engine_render::texture::GpuTexture,
 }
@@ -15820,9 +15831,32 @@ impl Overlay for EditorOverlay {
                         editor.picked = Some((request, view.frame_number, None));
                     }
                 }
+                // The unlit view (ADR 0116), below the outlines and the panels.
+                if let Some(scene) = view.scene
+                    && editor.view_mode == ViewMode::Unlit
+                    && !editor.game_view()
+                {
+                    self.unlit.add_passes(
+                        pass.fg,
+                        pass.ring,
+                        pass.bindless,
+                        view.geometry,
+                        view.materials,
+                        scene,
+                        &UnlitView {
+                            target: pass.target,
+                            rect,
+                            clip_from_world: view.camera.clip_from_world(aspect),
+                        },
+                        engine_render::unlit::BACKGROUND,
+                    );
+                }
                 // The view mode's edges (ADR 0116), below the outlines and the panels.
                 if let (Some(wires), Some(scene)) = (self.wireframer.as_mut(), view.scene)
-                    && editor.view_mode != ViewMode::Lit
+                    && matches!(
+                        editor.view_mode,
+                        ViewMode::Wireframe | ViewMode::LitWireframe
+                    )
                     && !editor.game_view()
                 {
                     let lines_only = editor.view_mode == ViewMode::Wireframe;
@@ -15998,6 +16032,9 @@ impl Overlay for EditorOverlay {
                 .set_output(setup.device, setup.bindless, output.format, output.white)
                 .map_err(AppError::at("the editor's wireframes"))?;
         }
+        self.unlit
+            .set_output(setup.device, setup.bindless, output.format, output.white)
+            .map_err(AppError::at("the editor's unlit view"))?;
         let mut old = core::mem::replace(&mut self.renderer, renderer);
         // SAFETY: the player calls this with the device idle: nothing uses the old
         // renderer's pipelines and buffers.
@@ -22786,6 +22823,7 @@ mod tests {
     }
 
     const TWO: (u16, u16) = (0x32, 0x03);
+    const THREE: (u16, u16) = (0x33, 0x04);
     const FOUR: (u16, u16) = (0x34, 0x05);
     const FIVE: (u16, u16) = (0x35, 0x06);
 
@@ -22797,6 +22835,7 @@ mod tests {
         // Alt+2: lines only; Alt+5: the edges over the lit scene; Alt+4: lit again.
         for (keys, mode) in [
             ([ALT, TWO], ViewMode::Wireframe),
+            ([ALT, THREE], ViewMode::Unlit),
             ([ALT, FIVE], ViewMode::LitWireframe),
             ([ALT, FOUR], ViewMode::Lit),
         ] {

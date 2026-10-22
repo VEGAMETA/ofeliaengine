@@ -255,7 +255,7 @@ pub(crate) struct EditorState {
     pub(crate) pick_transparent: Option<bool>,
     /// Whether a transform's scale keeps its proportions in the inspector (its lock).
     pub(crate) scale_lock: Option<bool>,
-    /// How the viewport shades the scene (`lit`, `wireframe`, `lit_wireframe`).
+    /// How the viewport shades the scene (`lit`, `unlit`, `wireframe`, `lit_wireframe`).
     pub(crate) view_mode: Option<String>,
     /// What rotating and scaling turn about (`median`, `origins`, `active`).
     pub(crate) pivot: Option<String>,

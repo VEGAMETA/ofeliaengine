@@ -1,6 +1,7 @@
 //! The viewport's view modes (ADR 0116) in the editor's frame: Wireframe fills the view
 //! with its background and draws the cube's edges; Lit + Wireframe draws its edges over the
-//! lit cube. `ENGINE_EDITOR_VIEW_MODES_PNG=<prefix>` writes the frames.
+//! lit cube; Unlit draws it in one flat color. `ENGINE_EDITOR_VIEW_MODES_PNG=<prefix>` writes
+//! the frames.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -193,13 +194,33 @@ fn wireframe_modes_draw_the_edges_in_the_editors_view() {
     );
     assert!(darker > 30, "edges over the lit cube");
     assert!(same * 10 > before.len() * 9, "the rest as lit");
+    // Unlit: the cube one flat color, every face alike, over the unlit view's background.
+    assert!(game.run_command(player.world_mut(), "view.unlit"));
+    frames(&mut player, &mut game, &mut overlay, 2);
+    let (flat, _) = capture(&mut player, &mut game, &mut overlay, "unlit");
+    let unlit_background = [63u8, 63, 66];
+    let pixels = view(&flat);
+    let surface: Vec<[u8; 3]> = pixels
+        .iter()
+        .copied()
+        .filter(|&p| !near(p, unlit_background))
+        .collect();
+    let first = surface[0];
+    let alike = surface.iter().filter(|&&p| near(p, first)).count();
+    println!(
+        "unlit: {} of {} pixels the cube, {alike} of them its one color {first:?}",
+        surface.len(),
+        pixels.len()
+    );
+    assert!(surface.len() > 1000, "the cube is drawn");
+    assert!(alike * 100 > surface.len() * 95, "one flat color");
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 #[ignore = "a measurement"]
-fn measure_wireframes_over_ten_thousand_cubes() {
+fn measure_the_view_modes_over_ten_thousand_cubes() {
     let dir = temp_dir("view-modes-measure");
     let mut world = World::new();
     for i in 0..10_000 {
@@ -259,7 +280,12 @@ fn measure_wireframes_over_ten_thousand_cubes() {
         frame(&mut player, &mut game, &mut overlay);
     }
     println!("adapter: {}", player.device().adapter().summary());
-    for mode in ["view.lit", "view.wireframe", "view.lit_wireframe"] {
+    for mode in [
+        "view.lit",
+        "view.unlit",
+        "view.wireframe",
+        "view.lit_wireframe",
+    ] {
         assert!(game.run_command(player.world_mut(), mode));
         let (mut gpu, mut cpu) = (Vec::new(), Vec::new());
         for k in 0..120 {
@@ -274,7 +300,7 @@ fn measure_wireframes_over_ten_thousand_cubes() {
                     .graph()
                     .gpu_pass_times()
                     .iter()
-                    .filter(|t| t.name == "wireframe")
+                    .filter(|t| t.name == "wireframe" || t.name == "unlit")
                     .map(|t| t.gpu_us)
                     .sum::<f32>();
                 gpu.push(f64::from(wire));
@@ -285,7 +311,7 @@ fn measure_wireframes_over_ten_thousand_cubes() {
             v[v.len() / 2]
         };
         println!(
-            "{mode}: the wireframe pass {:.0} µs on the GPU; composing the frame {:.0} µs (medians of 100)",
+            "{mode}: its pass {:.0} µs on the GPU; composing the frame {:.0} µs (medians of 100)",
             median(&mut gpu),
             median(&mut cpu)
         );
