@@ -406,9 +406,12 @@ Last updated: 2026-10-22.
     mlua-sys's Luau libraries. Measured: 20.6 s cold once (cached across profiles), at
     most 3.2 MB in the editor, a 220-line module checked again in 0.16 ms. Modules in
     memory or on disk, require by string, definitions, findings placed by line and byte.
-  - **Next:** E7 waits for the owner's answers to ADR 0114's questions; E8-3b, the
-    editor's findings as you type (a worker thread, underlines, messages at the line's
-    end).
+  - **E8-3b, Luau's findings as you type** (#PR, ADR 0107's as-built): a checker thread
+    given each tab's text 150 ms after it rests; findings stamped by tab and version,
+    underlined, each line's first message after its text, counted in the code bar (a
+    click goes to the next).
+  - **Next:** E7 waits for the owner's answers to ADR 0114's questions; E8-3c,
+    completion and hover from the same analysis.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

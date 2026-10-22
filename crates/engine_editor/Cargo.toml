@@ -11,6 +11,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Luau's own type checker and linter for the code editor (ADR 0107 §6, E8-3).
+engine_luau_analysis.workspace = true
 # The player the editor runs inside of (ADR 0107): the game's world, its renderer, the
 # window.
 engine_app.workspace = true

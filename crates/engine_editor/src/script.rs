@@ -4,17 +4,22 @@
 
 use crate::Chord;
 use crate::app::is_function_key;
+use crate::checker::Stamp;
 use crate::code::{Document, Motion, Pos, char_column, col_at};
 use crate::find::Find;
 use crate::highlight::Highlight;
 use crate::session::Base;
 use crate::shell::{CODE_LINE, CODE_PAD};
 use engine_input::Key;
+use engine_luau_analysis::Diagnostic;
 use std::path::PathBuf;
 use std::time::Instant;
 
 /// Lines a notch of the wheel scrolls (VS Code's).
 pub(crate) const WHEEL_LINES: f32 = 3.0;
+
+/// How long the text rests after a change before the checker is given it.
+pub(crate) const CHECK_AFTER: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// A script open in a tab.
 pub(crate) struct Script {
@@ -26,6 +31,19 @@ pub(crate) struct Script {
     pub(crate) highlight: Highlight,
     /// Its find bar, while open (Ctrl+F).
     pub(crate) find: Option<Find>,
+    /// Which of the editor's tabs this is, as the checker tells them apart: a tab read
+    /// again from its file is another.
+    pub(crate) generation: u64,
+    /// What the checker found (E8-3b), and in which text.
+    pub(crate) found: Vec<Diagnostic>,
+    pub(crate) found_for: Option<Stamp>,
+    /// The text's version the checker was given last, and when the text last changed:
+    /// it is given the text a moment after ([`CHECK_AFTER`]).
+    pub(crate) sent: Option<u64>,
+    pub(crate) changed_at: Option<Instant>,
+    /// The first line changed since the findings were made: theirs from there on are not
+    /// shown until new ones come, as they could be another text's.
+    pub(crate) stale_from: Option<usize>,
     /// How far its view is scrolled: logical pixels across and down.
     pub(crate) scroll: [f32; 2],
     /// The primary caret is brought into view at the next frame: it moved, or the text
@@ -57,6 +75,12 @@ impl Script {
             doc: Document::new(body.unwrap_or(text)),
             highlight: Highlight::default(),
             find: None,
+            generation: 0,
+            found: Vec::new(),
+            found_for: None,
+            sent: None,
+            changed_at: None,
+            stale_from: None,
             scroll: [0.0; 2],
             reveal: false,
             base,
@@ -64,6 +88,11 @@ impl Script {
             due: None,
             closing: false,
         }
+    }
+
+    /// Its module's name for the checker: its path with `/`.
+    pub(crate) fn module(&self) -> String {
+        self.path.to_string_lossy().replace('\\', "/")
     }
 
     /// The text as its file holds it: its line endings and its byte order mark kept.

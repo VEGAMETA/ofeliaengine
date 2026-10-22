@@ -10,6 +10,7 @@
 pub mod app;
 mod build;
 pub mod camera;
+mod checker;
 mod code;
 mod draw;
 mod drop;

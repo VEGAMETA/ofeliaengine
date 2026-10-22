@@ -1535,6 +1535,10 @@ struct Editor {
     code_shown: CodeShown,
     /// When the open scripts' files were last compared with what was read.
     scripts_checked: Instant,
+    /// Luau's checker on its thread (E8-3b), started with the first script; the next tab
+    /// generation it tells apart.
+    checker: Option<crate::checker::Checker>,
+    generations: u64,
     /// The log as the Output panel shows it (E6), and the bottom panel open (0: Output).
     output: crate::output::Output,
     bottom: Option<usize>,
@@ -1878,6 +1882,13 @@ struct CodeShown {
     /// one), and its count.
     matches: Vec<(usize, usize, usize, bool)>,
     count: String,
+    /// The checker's findings in view (a line, its columns, an error), each line's first
+    /// message (a line, the column after its text, the message's range in `messages`,
+    /// an error), and the code bar's count.
+    problems: Vec<(usize, usize, usize, bool)>,
+    notes: Vec<(usize, usize, usize, usize, bool)>,
+    messages: String,
+    problem_count: String,
     place: String,
     path: String,
 }
@@ -2196,6 +2207,8 @@ impl Editor {
             find_focus: None,
             code_shown: CodeShown::default(),
             scripts_checked: Instant::now(),
+            checker: None,
+            generations: 0,
             output: crate::output::Output::new(),
             bottom: None,
             output_label: String::new(),
@@ -2589,6 +2602,7 @@ impl Editor {
         self.tick_builds(world);
         self.tick_assets(world);
         self.tick_scripts();
+        self.tick_checker();
         self.keep_script_autosaves(world, false);
         if !playing {
             self.ensure_prefab_bases(world);
@@ -3435,6 +3449,13 @@ impl Editor {
         } else {
             Vec::new()
         };
+        let code_notes: Vec<(usize, usize, &str, bool)> = shown
+            .notes
+            .iter()
+            .map(|&(line, column, a, b, error)| {
+                (line, column, shown.messages.get(a..b).unwrap_or(""), error)
+            })
+            .collect();
         let in_view = if code_script.is_some() {
             shown.last - shown.first
         } else {
@@ -3472,6 +3493,9 @@ impl Editor {
                 focus_replace: self.find_focus == Some(true),
             }),
             matches: &shown.matches,
+            problems: &shown.problems,
+            notes: &code_notes,
+            problem_count: &shown.problem_count,
         });
         let model = ShellModel {
             scenes: &scenes,
@@ -3603,6 +3627,9 @@ impl Editor {
         }
         self.find_focus = None;
         self.find_frame(&response);
+        if response.next_problem {
+            self.next_problem();
+        }
         if response.open_prefab {
             self.run(world, self.ids.open_prefab);
         }
@@ -7261,6 +7288,8 @@ impl Editor {
         }
         if let Some(line) = script.doc.take_changed() {
             script.highlight.changed(line);
+            script.changed_at = Some(Instant::now());
+            script.stale_from = Some(script.stale_from.map_or(line, |s| s.min(line)));
         }
         if let Some(find) = &mut script.find {
             find.refresh(&script.doc);
@@ -7372,6 +7401,65 @@ impl Editor {
             }
             find.count(&mut shown.count);
         }
+        // What the checker found in view, but where the text changed since.
+        shown.problems.clear();
+        shown.notes.clear();
+        shown.messages.clear();
+        shown.problem_count.clear();
+        let (mut errors, mut warnings) = (0, 0);
+        for d in &script.found {
+            let error = d.severity == engine_luau_analysis::Severity::Error;
+            if error {
+                errors += 1;
+            } else {
+                warnings += 1;
+            }
+            let line = d.start.0 as usize;
+            if !(shown.first..shown.last).contains(&line)
+                || script.stale_from.is_some_and(|s| line >= s)
+            {
+                continue;
+            }
+            let text = doc.line(line);
+            let at = |col: u32| char_column(text, (col as usize).min(text.len()));
+            let to = if d.end.0 as usize == line {
+                at(d.end.1)
+            } else {
+                at(u32::MAX)
+            };
+            shown.problems.push((line, at(d.start.1), to, error));
+            if shown.notes.last().is_none_or(|n| n.0 != line) {
+                let first = d.message.lines().next().unwrap_or("");
+                let cut = first
+                    .char_indices()
+                    .nth(160)
+                    .map_or(first.len(), |(i, _)| i);
+                let start = shown.messages.len();
+                shown.messages.push_str(&first[..cut]);
+                let column = char_column(text, text.len()) + 4;
+                shown
+                    .notes
+                    .push((line, column, start, shown.messages.len(), error));
+            }
+        }
+        let s = |n: i32| if n == 1 { "" } else { "s" };
+        match (errors, warnings) {
+            (0, 0) => {}
+            (e, 0) => {
+                let _ = write!(shown.problem_count, "{e} error{}", s(e));
+            }
+            (0, w) => {
+                let _ = write!(shown.problem_count, "{w} warning{}", s(w));
+            }
+            (e, w) => {
+                let _ = write!(
+                    shown.problem_count,
+                    "{e} error{}, {w} warning{}",
+                    s(e),
+                    s(w)
+                );
+            }
+        }
         let head = doc.primary().head;
         shown.place.clear();
         let _ = write!(
@@ -7423,6 +7511,87 @@ impl Editor {
             find.origin = a;
             script.reveal = true;
         }
+    }
+
+    /// Luau's checker's frame (E8-3b): each open script's text given to it a moment after
+    /// it changed ([`script::CHECK_AFTER`]), and what came back put with the text it was
+    /// of; the checker started with the first script.
+    fn tick_checker(&mut self) {
+        if self.scripts.is_empty() {
+            return;
+        }
+        if self.checker.is_none() {
+            self.checker = crate::checker::Checker::new(&self.root);
+        }
+        let Some(checker) = &self.checker else {
+            return;
+        };
+        let now = Instant::now();
+        for s in &mut self.scripts {
+            let version = s.doc.version();
+            let rested = s
+                .changed_at
+                .is_none_or(|t| now.duration_since(t) >= script::CHECK_AFTER);
+            if s.sent != Some(version) && rested {
+                let stamp = crate::checker::Stamp {
+                    generation: s.generation,
+                    version,
+                };
+                checker.check(&s.module(), s.doc.text(), stamp);
+                s.sent = Some(version);
+            }
+        }
+        for checked in checker.finished() {
+            let Some(s) = self
+                .scripts
+                .iter_mut()
+                .find(|s| s.generation == checked.stamp.generation)
+            else {
+                continue;
+            };
+            if s.found_for
+                .is_some_and(|f| f.version > checked.stamp.version)
+            {
+                continue;
+            }
+            log::debug!(
+                target: "engine_editor",
+                "checked {} in {:.2} ms: {} found",
+                checked.name,
+                checked.took.as_secs_f64() * 1e3,
+                checked.found.len()
+            );
+            s.found = checked.found;
+            s.found_for = Some(checked.stamp);
+            if checked.stamp.version == s.doc.version() {
+                s.stale_from = None;
+            }
+        }
+    }
+
+    /// The code bar's count clicked: the caret to the next thing the checker found after
+    /// it, around the text's end.
+    fn next_problem(&mut self) {
+        let Some(s) = self.active_script.and_then(|k| self.scripts.get_mut(k)) else {
+            return;
+        };
+        let head = s.doc.primary().head;
+        let at =
+            |d: &engine_luau_analysis::Diagnostic| Pos::new(d.start.0 as usize, d.start.1 as usize);
+        let Some(next) = s
+            .found
+            .iter()
+            .map(at)
+            .filter(|&p| p > head)
+            .min()
+            .or_else(|| s.found.iter().map(at).min())
+        else {
+            return;
+        };
+        s.doc.place(next, false, false);
+        s.reveal = true;
+        self.code_focus = true;
+        self.caret_since = Instant::now();
     }
 
     /// Ctrl+G's row: the caret to `line` and `column` (from 1) of the shown script.
@@ -7556,6 +7725,12 @@ impl Editor {
         }
     }
 
+    /// The next script tab's generation, for the checker.
+    fn next_generation(&mut self) -> u64 {
+        self.generations += 1;
+        self.generations
+    }
+
     /// Shows scene tab `index` (a click on it, Ctrl+Tab): a script shown goes behind.
     fn show_scene_tab(&mut self, world: &mut World, index: usize) {
         self.active_script = None;
@@ -7585,7 +7760,8 @@ impl Editor {
                 let file = self.root.join(path);
                 match std::fs::read_to_string(&file) {
                     Ok(text) => {
-                        let script = Script::new(path.to_path_buf(), &text, Base::of(&file));
+                        let mut script = Script::new(path.to_path_buf(), &text, Base::of(&file));
+                        script.generation = self.next_generation();
                         self.scripts.push(script);
                         self.scripts.len() - 1
                     }
@@ -7623,6 +7799,9 @@ impl Editor {
             return;
         }
         let s = self.scripts.remove(k);
+        if let Some(checker) = &self.checker {
+            checker.forget(&s.module());
+        }
         if s.autosaved.is_some()
             && let Some(session) = &self.session
         {
@@ -7723,6 +7902,7 @@ impl Editor {
         script.doc.place(Pos::new(line, col), false, false);
         script.scroll = d.scroll;
         script.clamp_scroll();
+        script.generation = self.next_generation();
         self.scripts.push(script);
     }
 
@@ -7750,6 +7930,8 @@ impl Editor {
                 ));
             } else if let Ok(text) = std::fs::read_to_string(&file) {
                 let mut fresh = Script::new(s.path.clone(), &text, base);
+                self.generations += 1;
+                fresh.generation = self.generations;
                 let head = s.doc.primary().head;
                 fresh.doc.place(head, false, false);
                 fresh.scroll = s.scroll;
@@ -19568,6 +19750,55 @@ mod tests {
         chord(&mut ed, &mut world, &[ENTER]);
         ed.update(&mut world);
         assert_eq!(ed.scripts[0].doc.primary().head, Pos::new(2, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn luaus_findings_are_underlined_counted_and_gone_once_fixed() {
+        let dir = project("script-check");
+        std::fs::write(
+            dir.join("door.luau"),
+            "--!strict\nlocal speed: number = \"fast\"\nreturn speed\n",
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.update(&mut world);
+        ed.open_script(&world, Path::new("door.luau"), None);
+        // The checker runs on a thread of its own: frames until it answers.
+        let timer = engine_platform::time::HighResTimer::new().unwrap();
+        let wait = |ed: &mut Editor, world: &mut World, done: &dyn Fn(&Editor) -> bool| {
+            let t = Instant::now();
+            while !done(ed) && t.elapsed() < Duration::from_secs(20) {
+                ed.update(world);
+                let _ = timer.sleep(Duration::from_millis(5));
+            }
+            ed.update(world);
+        };
+        wait(&mut ed, &mut world, &|ed| !ed.scripts[0].found.is_empty());
+        assert_eq!(ed.scripts[0].found.len(), 1, "{:?}", ed.scripts[0].found);
+        assert!(!texts(&ed, "1 error").is_empty(), "the code bar's count");
+        assert_eq!(ed.code_shown.problems.len(), 1, "underlined");
+        assert_eq!(ed.code_shown.notes.len(), 1, "its message after the line");
+        // The count goes to it.
+        ed.scripts[0].doc.place(Pos::new(2, 0), false, false);
+        ed.next_problem();
+        assert_eq!(ed.scripts[0].doc.primary().head.line, 1, "around the end");
+        // Fixed: once the text rests and is checked again, nothing.
+        ed.scripts[0]
+            .doc
+            .select(Pos::new(1, 22), Pos::new(1, 28), false);
+        chars(&mut ed, "4");
+        ed.update(&mut world);
+        assert!(
+            ed.code_shown.problems.is_empty(),
+            "the changed line's finding is not shown"
+        );
+        wait(&mut ed, &mut world, &|ed| {
+            let s = &ed.scripts[0];
+            s.found_for.is_some_and(|f| f.version == s.doc.version())
+        });
+        assert_eq!(ed.scripts[0].found, []);
+        assert!(texts(&ed, "1 error").is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
