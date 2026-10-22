@@ -298,7 +298,7 @@ Last updated: 2026-10-20.
       with it, and its parts' paths follow;
     - Shift+F12 finds where an asset is used: the open scene's entities, then the scenes
       and materials on disk.
-  - **E4-8, textures through the derived data cache** (#PR, ADR 0108's as-built, ADR
+  - **E4-8, textures through the derived data cache** (#313, ADR 0108's as-built, ADR
     0041's addendum):
     - a texture in `.ofelia/ddc` loads compressed (BC7, BC5); another shows uncompressed,
       is compressed on a thread below the loading's priority and swapped in once whole
