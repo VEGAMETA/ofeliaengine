@@ -30,13 +30,65 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// The file beside a foreign asset (`<file>.meta`, ADR 0108): `[asset version=1 id=…]`, the
-/// asset's id, then its importer's settings (none yet).
+/// asset's id, then its importer's settings, only those that are not the defaults (a file
+/// of defaults is its header alone).
 ///
 /// ```text
 /// [asset version=1 id=5f2c0a3e9d2b47c88e51f0d4a7b3c912]
+///
+/// texture.compression = Uncompressed
+/// model.scale = 0.01
 /// ```
+#[derive(Debug, Clone, Copy, PartialEq, Default, Reflect)]
+pub struct AssetMeta {
+    /// How an image is imported: an image file's own, or the images inside a model.
+    pub texture: TextureImport,
+    /// How a model (a glTF file) is imported.
+    pub model: ModelImport,
+}
+
+/// How an image is imported (ADR 0108's E4-9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
-pub struct AssetMeta;
+pub struct TextureImport {
+    /// Whether it is block-compressed where there is a derived data cache (the editor's).
+    pub compression: TextureCompression,
+}
+
+/// Whether an image is block-compressed (ADR 0041).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+#[repr(u8)]
+pub enum TextureCompression {
+    /// BC7 for color and data, BC5 for normal maps: a quarter of the memory.
+    #[default]
+    Auto,
+    /// Kept as decoded, RGBA8: pixel art, gradients and text that BC7 would smudge.
+    Uncompressed,
+}
+
+/// How a model is imported (ADR 0108's E4-9).
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
+pub struct ModelImport {
+    /// Its meshes' positions multiplied by this: 0.01 for a file in centimeters.
+    #[reflect(min = 0.0001, max = 10000.0)]
+    pub scale: f32,
+}
+
+impl Default for ModelImport {
+    fn default() -> Self {
+        Self { scale: 1.0 }
+    }
+}
+
+impl ModelImport {
+    /// The scale to apply: [`Self::scale`], or 1 for one that is not a positive number.
+    pub fn applied_scale(&self) -> f32 {
+        if self.scale.is_finite() && self.scale > 0.0 {
+            self.scale
+        } else {
+            1.0
+        }
+    }
+}
 
 impl AssetMeta {
     /// The header's kind.
@@ -51,10 +103,28 @@ impl AssetMeta {
         PathBuf::from(path)
     }
 
-    /// The file's text, with its id.
+    /// The file's text, with its id: the header, then the settings that are not the
+    /// defaults, a line each.
     pub fn to_text(&self, id: AssetId) -> String {
-        let mut out = String::new();
-        crate::write_value(Self::KIND, Self::VERSION, Some(id), self, None, &mut out);
+        let mut all = String::new();
+        crate::write_value(Self::KIND, Self::VERSION, Some(id), self, None, &mut all);
+        let mut defaults = String::new();
+        crate::write_value(
+            Self::KIND,
+            Self::VERSION,
+            Some(id),
+            &Self::default(),
+            None,
+            &mut defaults,
+        );
+        let mut out = String::with_capacity(all.len());
+        for (line, default) in all.lines().zip(defaults.lines()) {
+            // The header and the blank line after it are the same in both.
+            if line.is_empty() || line.starts_with('[') || line != default {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
         out
     }
 
@@ -64,7 +134,7 @@ impl AssetMeta {
     ///
     /// Not a `.meta`, a newer one, or a bad line (with its number).
     pub fn parse(text: &str) -> Result<(Self, ValueReport), LoadError> {
-        let mut meta = Self;
+        let mut meta = Self::default();
         let report = crate::read_value(Self::KIND, Self::VERSION, text, &mut meta)?;
         Ok((meta, report))
     }
@@ -81,12 +151,31 @@ impl AssetMeta {
             Ok(text) => Self::id_in(&path, &text),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let id = AssetId::new();
-                std::fs::write(&path, Self.to_text(id))
+                std::fs::write(&path, Self::default().to_text(id))
                     .map_err(|e| format!("{}: {e}", path.display()))?;
                 Ok(id)
             }
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
+    }
+
+    /// The settings in the `.meta` beside `file`: the defaults when it has none or it
+    /// cannot be read (the asset database reports a broken one).
+    pub fn read(file: &Path) -> Self {
+        std::fs::read_to_string(Self::path(file))
+            .ok()
+            .and_then(|text| Self::parse(&text).ok())
+            .map_or_else(Self::default, |(meta, _)| meta)
+    }
+
+    /// Writes the `.meta` beside `file` with `id` and these settings.
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be written.
+    pub fn write(&self, file: &Path, id: AssetId) -> Result<(), String> {
+        let path = Self::path(file);
+        std::fs::write(&path, self.to_text(id)).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     /// The id a `.meta`'s text at `path` names.
@@ -461,7 +550,7 @@ impl AssetDatabase {
             }
             None => AssetId::new(),
         };
-        std::fs::write(&meta, AssetMeta.to_text(id))
+        std::fs::write(&meta, AssetMeta::default().to_text(id))
             .map_err(|e| format!("{}: {e}", meta.display()))?;
         report.metas_written += 1;
         Ok((id, Some(hash)))
@@ -488,16 +577,15 @@ impl AssetDatabase {
                 continue;
             }
             let new = AssetId::new();
-            let meta = AssetMeta::path(&self.root.join(&later));
-            match std::fs::write(&meta, AssetMeta.to_text(new)) {
+            let file = self.root.join(&later);
+            // A copy keeps the settings it was copied with.
+            match AssetMeta::read(&file).write(&file, new) {
                 Ok(()) => {
                     self.entries[i].id = new;
                     report.metas_written += 1;
                     first.insert(new, i);
                 }
-                Err(e) => self
-                    .problems
-                    .push((later, format!("{}: {e}", meta.display()))),
+                Err(e) => self.problems.push((later, e)),
             }
         }
     }
@@ -780,7 +868,16 @@ mod tests {
         let report = db.scan();
         assert_eq!((report.found_again, report.gone), (1, 0), "{report:?}");
         assert_eq!(db.find("crate.glb").unwrap().id, crate_id);
-        // A copy with its `.meta`: a new id for the later path.
+        // A copy with its `.meta` (and a setting): a new id for the later path, the setting
+        // kept.
+        let pixel_art = AssetMeta {
+            texture: TextureImport {
+                compression: TextureCompression::Uncompressed,
+            },
+            ..AssetMeta::default()
+        };
+        let rock = db.find("props/rock.png").unwrap().id;
+        pixel_art.write(&dir.join("props/rock.png"), rock).unwrap();
         std::fs::copy(dir.join("props/rock.png"), dir.join("props/rock2.png")).unwrap();
         std::fs::copy(
             dir.join("props/rock.png.meta"),
@@ -794,6 +891,7 @@ mod tests {
         );
         assert_ne!(a, b);
         assert_eq!(AssetMeta::ensure(&dir.join("props/rock2.png")).unwrap(), b);
+        assert_eq!(AssetMeta::read(&dir.join("props/rock2.png")), pixel_art);
         // A scene without an id is a problem, reported.
         std::fs::write(dir.join("old.scene"), "[scene version=3]\n").unwrap();
         db.scan();
@@ -822,6 +920,57 @@ mod tests {
         std::fs::rename(dir.join("props/rock.png"), dir.join("rock.png")).unwrap();
         std::fs::rename(dir.join("props/rock.png.meta"), dir.join("rock.png.meta")).unwrap();
         assert!(db.scan().changed.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn metas_write_only_settings_that_are_not_the_defaults() {
+        let id = AssetId::new();
+        // Defaults: the header alone, as before settings existed.
+        let text = AssetMeta::default().to_text(id);
+        assert_eq!(
+            text,
+            format!(
+                "[asset version=1 id={id}]
+
+"
+            )
+        );
+        let meta = AssetMeta {
+            texture: TextureImport {
+                compression: TextureCompression::Uncompressed,
+            },
+            model: ModelImport { scale: 0.01 },
+        };
+        let text = meta.to_text(id);
+        assert_eq!(
+            text,
+            format!(
+                "[asset version=1 id={id}]
+
+texture.compression = Uncompressed
+model.scale = 0.01
+"
+            )
+        );
+        let (read, report) = AssetMeta::parse(&text).unwrap();
+        assert_eq!((read, report.id), (meta, Some(id)));
+        // One setting back to its default: its line goes.
+        let back = AssetMeta {
+            model: ModelImport::default(),
+            ..meta
+        };
+        assert!(!back.to_text(id).contains("model.scale"));
+        // A scale that is not a positive number applies as 1.
+        for scale in [0.0, -2.0, f32::NAN] {
+            assert_eq!(ModelImport { scale }.applied_scale(), 1.0);
+        }
+        // Without a `.meta`, or with a broken one: the defaults.
+        let dir = temp("meta-read");
+        let file = dir.join("props/sign.png");
+        assert_eq!(AssetMeta::read(&file), AssetMeta::default());
+        std::fs::write(AssetMeta::path(&file), "not a meta").unwrap();
+        assert_eq!(AssetMeta::read(&file), AssetMeta::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

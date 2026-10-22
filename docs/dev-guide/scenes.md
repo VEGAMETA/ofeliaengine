@@ -181,6 +181,11 @@ Model.material = asset("models/yard.glb#Yard 2 grid", 5f2c0a3e9d2b47c88e51f0d4a7
   which the editor writes the first time it meets the file (`AssetMeta::ensure` in code).
   A `.meta` naming another id is reported as the asset's problem; a file without one is
   found by its path alone.
+- **Its import settings** follow the id in the `.meta`; the editor writes only those you
+  change (in its inspector):
+  - `model.scale = 0.01` multiplies a model's meshes (a file made in centimeters);
+  - `texture.compression = Uncompressed` keeps an image uncompressed, and in a model's
+    `.meta` the images inside the file.
 - **Files load in the background:** read, imported, their meshes put together and
   their textures decoded off the frame's thread (ADR 0108's E4-4).
   - A model draws once its mesh and material are made, and its textures fill in as they

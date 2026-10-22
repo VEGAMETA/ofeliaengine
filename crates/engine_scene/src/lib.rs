@@ -67,7 +67,10 @@ pub mod database;
 pub mod text;
 
 pub use assets::{AssetId, AssetPaths, AssetRef};
-pub use database::{AssetDatabase, AssetEntry, AssetKind, AssetMeta, ScanReport};
+pub use database::{
+    AssetDatabase, AssetEntry, AssetKind, AssetMeta, ModelImport, ScanReport, TextureCompression,
+    TextureImport,
+};
 
 use engine_ecs::reflected::WriteDefault;
 use engine_ecs::{

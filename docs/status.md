@@ -309,8 +309,14 @@ Last updated: 2026-10-20.
     MIT) as `engine_core::hash::content_hash128` for the keys of textures, panoramas and
     colliders' parts, 55–64 GB/s against FNV-1a's 1.13; FlightHelmet's keys 42 → 1 ms,
     from the cache 31 → 27 ms; the old entries computed once more.
-  - **Next:** E4's last item, import settings in the inspector (a texture's use and
-    compression, a model's scale). Then E5, prefabs.
+  - **E4-9, import settings** (#PR, ADR 0108's as-built): `AssetMeta` holds
+    `texture.compression` and `model.scale`, written only when not the defaults; the
+    player applies them (an image's own `.meta`, or its model's for images inside it);
+    the dock's pick is shown in the inspector with its settings, an edit written at once
+    and the asset made again. **E4 is done.**
+  - **Next:** E5, prefabs (ADR 0108's "Prefab instances"): E5-1 instances and overrides
+    in the format, E5-2 making, placing and unpacking them in the editor, E5-3 overrides
+    in the inspector, E5-4 prefabs edited live.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

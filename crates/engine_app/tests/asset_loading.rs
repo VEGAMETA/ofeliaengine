@@ -722,6 +722,84 @@ fn textures_are_compressed_in_the_background_and_loaded_compressed_after() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn textures_kept_uncompressed_skip_the_cache() {
+    let dir = std::env::temp_dir().join(format!("ofelia-uncompressed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("props/textures")).unwrap();
+    // An image beside its file, kept uncompressed by its own `.meta`; an image inside a
+    // file, by the file's.
+    std::fs::write(dir.join("props/quad.gltf"), quad_gltf("textures/pixel.png")).unwrap();
+    std::fs::write(dir.join("props/textures/pixel.png"), png([200, 30, 20])).unwrap();
+    let inline = format!("data:image/png;base64,{}", base64(&png([30, 200, 20])));
+    std::fs::write(dir.join("props/inline.gltf"), quad_gltf(&inline)).unwrap();
+    let uncompressed = AssetMeta {
+        texture: engine_scene::TextureImport {
+            compression: engine_scene::TextureCompression::Uncompressed,
+        },
+        ..AssetMeta::default()
+    };
+    let files = [
+        (AssetId::new(), "props/quad.gltf"),
+        (AssetId::new(), "props/inline.gltf"),
+    ];
+    uncompressed
+        .write(&dir.join("props/textures/pixel.png"), AssetId::new())
+        .unwrap();
+    uncompressed
+        .write(&dir.join(files[1].1), files[1].0)
+        .unwrap();
+    let ddc = dir.join(".ofelia/ddc");
+    let settings = PlayerSettings {
+        title: String::from("uncompressed test"),
+        window: Window::Offscreen {
+            width: 320,
+            height: 180,
+        },
+        project: Some(dir.clone()),
+        derived_data: Some(ddc.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut paths = AssetPaths::new();
+    for (id, path) in files {
+        paths.insert(AssetRef::file(id), path);
+    }
+    player.assets_mut().add_paths(&paths);
+    let quads = files.map(|(id, _)| {
+        let model = Model::new(AssetRef::part(id, "Quad"), AssetRef::part(id, "Painted"));
+        player
+            .world_mut()
+            .spawn((SceneId::new(), Transform::IDENTITY, model))
+    });
+    let ready = |player: &mut Player| {
+        quads
+            .iter()
+            .all(|&e| player.world_mut().get::<MeshRenderer>(e).is_some())
+            && player.assets().loading() == 0
+    };
+    frames_until(&mut player, ready).expect("drawn");
+    // Made, and neither compressed nor waiting to be.
+    assert_eq!(player.assets().textures_made(), 2);
+    assert_eq!(player.assets().compressing(), 0);
+    assert_eq!(player.assets().textures_compressed(), 0);
+    assert_eq!(cache_entries(&ddc), 0);
+    drop(player);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A box of tint `tint` from `lo` to `hi`, its faces counter-clockwise from in front.
 fn cuboid(tint: [f32; 4], lo: Vec3, hi: Vec3) -> BakedBrush {
     let mut b = BakedBrush {
