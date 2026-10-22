@@ -1475,6 +1475,13 @@ grown, divide and conquer); the old labels stay in parentheses.
   measure the editor's frame with the counting allocator, keep its rows in reused
   buffers.
 
+- **`zero_alloc_probes` still fails under the gate's load now and then** (again on
+  2026-10-22, #PR's gate): 6 allocations in 593 frames after 203 warm-up frames, the GI
+  volume converged; alone it passes (0 in 1,168 frames after 990). The test waits for the
+  volume's convergence since 2026-10-16, but the probe's capture (pending all along) can
+  still land inside the measurement when frames are slow. To do: find what the 6
+  allocations are (a capture completing?) and wait for that too, or make it allocation-free.
+
 - **Rendering:**
   - **the meshlet draws' order follows the GPU's scheduling** (atomic appends). A meshlet
     cull with fewer registers on the RTX (47 → 40) ran more groups at once and shuffled
