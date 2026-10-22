@@ -484,10 +484,14 @@ Last updated: 2026-10-22.
   - **The owner's notes of 2026-10-22** (#347): a transform's scale keeps its proportions
     while the lock beside its name is shut (the default, kept in the session); Ctrl+A
     opens the add menu under the pointer, inside the window.
+  - **View modes, V1a** (#PR, the owner's request of 2026-10-22, ADR 0116): Lit,
+    Wireframe and Lit + Wireframe from the viewport's chip or Alt+4, Alt+2, Alt+5.
+    `engine_render::wire` draws the edges after the frame in line mode, the scene's depth
+    sampled against a tolerance, so lines never z-fight the surfaces they lie on. 10,000
+    cubes: 0.41–0.99 ms on the GPUs, a lit view unchanged.
   - **Next, in this order:**
-    1. The viewport's view modes, the owner's request of 2026-10-22: lit, unlit, wireframe
-       and colliders shown for every body, drawn so that lines on surfaces do not z-fight
-       (research first: Godot, Unreal, Blender);
+    1. View modes on (ADR 0116): Unlit as a material role (V1b), then the colliders of
+       every body over any mode (V2), replacing the blockout's X-ray overlay;
     2. E7 on: the engine's types in the editor and for luau-lsp (E7-2, under way on
        `feat/script-types`: the old solver types a hook's `self` from `component`'s
        declaration, the new one of Luau 0.736 does not), then views' fast path (E7-1c);

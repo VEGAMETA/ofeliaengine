@@ -633,6 +633,10 @@ pub struct ShellModel<'a> {
     /// Where the add menu opens, in logical pixels of the window: at the pointer when
     /// Ctrl+A opened it, so it is not far away. None: under the scene dock's +.
     pub add_at: Option<[f32; 2]>,
+    /// The viewport's view mode as its chip reads it (`Lit`, ADR 0116).
+    pub view_mode: &'a str,
+    /// The modes' menu below the chip, while it is open.
+    pub view_modes: Option<&'a [MenuItem<'a>]>,
     /// The current folder's path.
     pub path: &'a str,
     /// Folder tree rows.
@@ -822,6 +826,13 @@ pub struct ShellResponse {
     pub add: bool,
     /// The scene dock's Attach Script button.
     pub attach_script: bool,
+    /// The viewport's view mode chip was clicked: its menu opens or closes.
+    pub view_mode: bool,
+    /// A mode of its menu was picked.
+    pub view_mode_item: Option<usize>,
+    /// The mouse is over the viewport's bar of chips: a click there picks nothing in the
+    /// view.
+    pub on_view_bar: bool,
     /// A kind picked in the open add menu.
     pub add_item: Option<usize>,
     /// The add menu's group the pointer is over: opened beside it.
@@ -1156,18 +1167,51 @@ fn center(
                 ..Style::fill()
             },
             |ui| {
-                ui.row(
-                    "view menu",
+                let chip = |open: bool| Style {
+                    padding: [8.0, 3.0, 8.0, 3.0],
+                    gap: 4.0,
+                    radius: 3.0,
+                    background: Some(if open {
+                        p.selection
+                    } else {
+                        [0.0, 0.0, 0.0, 0.45]
+                    }),
+                    align_cross: Align::Center,
+                    ..Style::default()
+                };
+                let bar = ui.row(
+                    "view bar",
                     Style {
-                        padding: [8.0, 3.0, 8.0, 3.0],
-                        radius: 3.0,
-                        background: Some([0.0, 0.0, 0.0, 0.45]),
+                        gap: 4.0,
                         ..Style::default()
                     },
                     |ui| {
-                        text(ui, "label", "Perspective", SMALL, p.text);
+                        ui.row("view menu", chip(false), |ui| {
+                            text(ui, "label", "Perspective", SMALL, p.text);
+                        });
+                        // The view mode (ADR 0116), its menu below it.
+                        let opener = ui.row("view mode", chip(model.view_modes.is_some()), |ui| {
+                            text(ui, "label", model.view_mode, SMALL, p.text);
+                            text(ui, "more", icons::EXPANDED, SMALL, p.text_dim);
+                            if let Some(items) = model.view_modes {
+                                let items = items.iter().map(|m| (m.icon, m.label));
+                                let popup =
+                                    menu(ui, items, p, [0.0, 22.0], &mut out.view_mode_item);
+                                popups.open = Some((popup, 0));
+                            }
+                        });
+                        if model.view_modes.is_some()
+                            && let Some((popup, _)) = popups.open
+                        {
+                            popups.open = Some((popup, opener));
+                        }
+                        if ui.sense(opener, false).clicked {
+                            out.view_mode = true;
+                        }
                     },
                 );
+                ui.mark_region(bar);
+                out.on_view_bar = ui.in_region(bar);
             },
         );
         file_browser(ui, model, p, out);

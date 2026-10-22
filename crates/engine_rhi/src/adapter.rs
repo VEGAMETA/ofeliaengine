@@ -120,6 +120,9 @@ pub struct OptionalCaps {
     /// `sampleRateShading`: fragment shaders that run per sample (MSAA's per-sample
     /// passes, ADR 0075); enabled when present.
     pub sample_rate_shading: bool,
+    /// `fillModeNonSolid`: triangles drawn as their edges (`PolygonMode::LINE`, the
+    /// editor's wireframes, ADR 0116); enabled when present.
+    pub fill_mode_non_solid: bool,
     /// `shaderInt64`: 64-bit integers in shaders; enabled when present. Material types read
     /// their parameters at a 64-bit address (ADR 0092: AMD's compiler reads zeros through
     /// a pointer cast after pointer arithmetic).
@@ -424,6 +427,7 @@ impl Adapter {
             image_view_min_lod: has(c"VK_EXT_image_view_min_lod"),
             shader_float16: f12.shader_float16 == vk::TRUE && base.shader_int16 == vk::TRUE,
             sample_rate_shading: base.sample_rate_shading == vk::TRUE,
+            fill_mode_non_solid: base.fill_mode_non_solid == vk::TRUE,
             shader_int64: base.shader_int64 == vk::TRUE,
             draw_indirect_count: f12.draw_indirect_count == vk::TRUE,
             viewport_index: base.multi_viewport == vk::TRUE

@@ -255,6 +255,8 @@ pub(crate) struct EditorState {
     pub(crate) pick_transparent: Option<bool>,
     /// Whether a transform's scale keeps its proportions in the inspector (its lock).
     pub(crate) scale_lock: Option<bool>,
+    /// How the viewport shades the scene (`lit`, `wireframe`, `lit_wireframe`).
+    pub(crate) view_mode: Option<String>,
     /// What rotating and scaling turn about (`median`, `origins`, `active`).
     pub(crate) pivot: Option<String>,
     /// Whether the viewport shows its overlays (lights' and cameras' icons and reach).
@@ -320,6 +322,11 @@ impl SessionFile {
         }
         if let Some(on) = self.editor.scale_lock {
             let _ = writeln!(out, "scale_lock = {on}");
+        }
+        if let Some(mode) = &self.editor.view_mode {
+            out.push_str("view_mode = ");
+            quote_into(&mut out, mode);
+            out.push('\n');
         }
         if let Some(on) = self.editor.overlays {
             let _ = writeln!(out, "overlays = {on}");
@@ -523,6 +530,7 @@ impl SessionFile {
                             other => return Err(at(format!("`{other}` is not true or false"))),
                         });
                     }
+                    "view_mode" => file.editor.view_mode = Some(unquote(value).map_err(at)?),
                     "scale_lock" => {
                         file.editor.scale_lock = Some(match value {
                             "true" => true,
@@ -1031,6 +1039,7 @@ mod tests {
                 fly: Some(7.5),
                 pick_transparent: Some(false),
                 scale_lock: Some(false),
+                view_mode: Some(String::from("wireframe")),
                 pivot: Some(String::from("origins")),
                 overlays: Some(false),
                 window: Some(WindowPlacement {

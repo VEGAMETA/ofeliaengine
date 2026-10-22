@@ -327,6 +327,7 @@ impl Device {
             .shader_int16(adapter.caps.shader_float16)
             .shader_int64(adapter.caps.shader_int64)
             .sample_rate_shading(adapter.caps.sample_rate_shading)
+            .fill_mode_non_solid(adapter.caps.fill_mode_non_solid)
             .multi_viewport(adapter.caps.viewport_index)
             .fragment_stores_and_atomics(adapter.caps.fragment_stores_and_atomics)
             .shader_clip_distance(adapter.caps.shader_clip_distance);

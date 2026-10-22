@@ -101,6 +101,7 @@ use engine_render::outline::{OutlineClass, OutlineItem, OutlineStyle, OutlineVie
 use engine_render::pick::{
     ListRequest, PickPass, PickRequest, PickView, Picker, SurfaceRequest, SurfaceResult,
 };
+use engine_render::wire::{WireStyle, WireView, Wireframer};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, Disabled, PointLight, SpotLight, Sun, look_rotation};
 use engine_scene::{
@@ -519,6 +520,7 @@ pub fn editor<G: Game>(
         settings.frames_in_flight,
     )?;
     let outliner = Outliner::new(setup.device, setup.bindless, output.format, output.white)?;
+    let wireframer = Wireframer::new(setup.device, setup.bindless, output.format, output.white)?;
     // The thumbnails' atlas (ADR 0112): its pixels uploaded once the first frame records.
     let atlas = engine_render::texture::GpuTexture::new(
         setup.device,
@@ -566,6 +568,7 @@ pub fn editor<G: Game>(
             canvas: Canvas::new(),
             picker,
             outliner,
+            wireframer,
             atlas,
         },
     ))
@@ -677,6 +680,8 @@ struct CommandIds {
     apply_prefab: CommandId,
     /// The prefab of the selection's instance opened in a tab (E5-5b).
     open_prefab: CommandId,
+    /// The view's modes (ADR 0116), in `ViewMode::ALL`'s order.
+    view_modes: [CommandId; 3],
     /// Components and scripts for the selection (E7-4a): Add Component…, Attach Script…,
     /// New Script….
     add_component: CommandId,
@@ -805,6 +810,11 @@ fn commands() -> (Commands, CommandIds) {
         revert_prefab: c.register("prefab.revert", "Prefab", "Revert Overrides"),
         apply_prefab: c.register("prefab.apply", "Prefab", "Apply Overrides"),
         open_prefab: c.register("prefab.open", "Prefab", "Open Prefab"),
+        view_modes: [
+            c.register("view.lit", "View", "Lit"),
+            c.register("view.wireframe", "View", "Wireframe"),
+            c.register("view.lit_wireframe", "View", "Lit + Wireframe"),
+        ],
         add_component: c.register("scene.add_component", "Scene", "Add Component…"),
         attach_script: c.register("scene.attach_script", "Scene", "Attach Script…"),
         new_script: c.register("scene.new_script", "Scene", "New Script…"),
@@ -883,6 +893,10 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+D", ids.duplicate),
         ("Ctrl+A", ids.add),
         ("Ctrl+Shift+A", ids.add_component),
+        // Unreal's view modes; Alt+5 the edges over the lit scene, which it lacks.
+        ("Alt+4", ids.view_modes[0]),
+        ("Alt+2", ids.view_modes[1]),
+        ("Alt+5", ids.view_modes[2]),
         ("F2", ids.rename),
         ("Ctrl+Shift+P", ids.palette),
         // VS Code's: the project's scripts searched (the palette's `%`).
@@ -1253,6 +1267,45 @@ fn in_proportion(start: [f64; 4], mut values: [f64; 4], part: usize) -> [f64; 4]
         }
     }
     values
+}
+
+/// How the viewport shades the scene (ADR 0116): Godot's Display menu, Unreal's view modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ViewMode {
+    /// As the game shows it.
+    #[default]
+    Lit,
+    /// Every triangle's edges, lines only.
+    Wireframe,
+    /// The lit scene with the edges in front.
+    LitWireframe,
+}
+
+impl ViewMode {
+    /// In the menu's order.
+    const ALL: [Self; 3] = [Self::Lit, Self::Wireframe, Self::LitWireframe];
+
+    /// What its chip and its menu read.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Lit => "Lit",
+            Self::Wireframe => "Wireframe",
+            Self::LitWireframe => "Lit + Wireframe",
+        }
+    }
+
+    /// Its name in the session.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Lit => "lit",
+            Self::Wireframe => "wireframe",
+            Self::LitWireframe => "lit_wireframe",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.name() == name)
+    }
 }
 
 /// What a line of the "Keep Changes…" list keeps.
@@ -1906,6 +1959,9 @@ struct Editor {
     /// A transform's scale keeps its proportions in the inspector (its lock, shut by
     /// default: the owner, 2026-10-22).
     scale_lock: bool,
+    /// How the viewport shades the scene (ADR 0116), and its chip's menu is open.
+    view_mode: ViewMode,
+    view_menu_open: bool,
     /// The add menu's group opened beside it.
     add_group: Option<usize>,
     /// Drag gestures so far (each its own undo step).
@@ -2551,6 +2607,8 @@ impl Editor {
             add_open: false,
             add_at: None,
             scale_lock: true,
+            view_mode: ViewMode::Lit,
+            view_menu_open: false,
             add_group: None,
             gestures: 0,
             gizmo: Gizmo::default(),
@@ -3342,6 +3400,18 @@ impl Editor {
             group(icons::LIGHT, "Light", &lights[..]),
             leaf(8),
         ];
+        // The view modes' menu: the current one checked.
+        let view_mode_items: Vec<MenuItem<'_>> = ViewMode::ALL
+            .iter()
+            .map(|&m| MenuItem {
+                icon: if m == self.view_mode {
+                    icons::CHECK
+                } else {
+                    ""
+                },
+                label: m.label(),
+            })
+            .collect();
         // The steps' menus: the current value marked.
         let current = [
             self.snapping.position,
@@ -3962,6 +4032,8 @@ impl Editor {
             pivot: self.pivot.label(),
             add_menu: self.add_open.then_some((&add_items[..], self.add_group)),
             add_at: self.add_at,
+            view_mode: self.view_mode.label(),
+            view_modes: self.view_menu_open.then_some(view_mode_items.as_slice()),
             reveal_row,
             drop_row,
             drop_line,
@@ -4169,6 +4241,7 @@ impl Editor {
             self.renaming_file = None;
         }
         if dismissed(&self.ui, &response) {
+            self.view_menu_open = false;
             self.add_open = false;
             self.add_group = None;
             self.open_choice = None;
@@ -4197,6 +4270,13 @@ impl Editor {
         }
         if response.attach_script {
             self.run(world, self.ids.attach_script);
+        }
+        if response.view_mode {
+            self.view_menu_open = !self.view_menu_open;
+        }
+        if let Some(&mode) = response.view_mode_item.and_then(|i| ViewMode::ALL.get(i)) {
+            self.view_menu_open = false;
+            self.set_view_mode(world, mode);
         }
         if response.add_group.is_some() {
             self.add_group = response.add_group;
@@ -4482,7 +4562,8 @@ impl Editor {
                 ((w * scale).round() as u32).max(1),
                 ((h * scale).round() as u32).max(1),
             ]);
-            self.pick_frame(world, over, Vec2::new(x * scale, y * scale));
+            let over_scene = over && !response.on_view_bar;
+            self.pick_frame(world, over_scene, Vec2::new(x * scale, y * scale));
         }
         self.gizmo_frame(world, scale);
         self.overlay_frame(world);
@@ -5332,6 +5413,7 @@ impl Editor {
         let free = !self.camera_drag
             && self.command_palette.is_none()
             && !self.add_open
+            && !self.view_menu_open
             && self.open_choice.is_none()
             && self.renaming.is_none()
             && self.gizmo_drag.is_none()
@@ -6912,6 +6994,13 @@ impl Editor {
         } else {
             format!("{what} on")
         });
+    }
+
+    /// The viewport's mode (ADR 0116), kept in the session.
+    fn set_view_mode(&mut self, world: &World, mode: ViewMode) {
+        self.view_mode = mode;
+        self.write_session(world);
+        self.say(format!("View: {}", mode.label()));
     }
 
     /// Selects `e` and opens its parents' rows, so the tree shows it.
@@ -10266,6 +10355,8 @@ impl Editor {
             self.apply_prefab(world);
         } else if id == ids.open_prefab {
             self.open_prefab(world);
+        } else if let Some(k) = ids.view_modes.iter().position(|&m| m == id) {
+            self.set_view_mode(world, ViewMode::ALL[k]);
         } else if id == ids.add_component || id == ids.attach_script {
             self.offer_components(world, id == ids.attach_script);
         } else if id == ids.new_script {
@@ -12675,6 +12766,9 @@ impl Editor {
         if let Some(on) = state.scale_lock {
             self.scale_lock = on;
         }
+        if let Some(mode) = state.view_mode.as_deref().and_then(ViewMode::from_name) {
+            self.view_mode = mode;
+        }
         if let Some(pivot) = state.pivot.as_deref().and_then(Pivot::from_name) {
             self.pivot = pivot;
         }
@@ -12814,6 +12908,7 @@ impl Editor {
             fly: Some(f64::from(self.fly_speed)),
             pick_transparent: Some(self.pick_transparent),
             scale_lock: Some(self.scale_lock),
+            view_mode: Some(String::from(self.view_mode.name())),
             pivot: Some(String::from(self.pivot.name())),
             overlays: Some(self.overlays),
             window: self.window,
@@ -15497,6 +15592,9 @@ pub struct EditorOverlay {
     picker: Picker,
     /// Outlines the selection in it.
     outliner: Outliner,
+    /// Its wireframes in the view modes that show edges (ADR 0116); none on a device
+    /// without the line mode.
+    wireframer: Option<Wireframer>,
     /// The listing's thumbnails, in cells (ADR 0112).
     atlas: engine_render::texture::GpuTexture,
 }
@@ -15722,6 +15820,34 @@ impl Overlay for EditorOverlay {
                         editor.picked = Some((request, view.frame_number, None));
                     }
                 }
+                // The view mode's edges (ADR 0116), below the outlines and the panels.
+                if let (Some(wires), Some(scene)) = (self.wireframer.as_mut(), view.scene)
+                    && editor.view_mode != ViewMode::Lit
+                    && !editor.game_view()
+                {
+                    let lines_only = editor.view_mode == ViewMode::Wireframe;
+                    wires.add_passes(
+                        pass.fg,
+                        pass.ring,
+                        pass.bindless,
+                        view.geometry,
+                        scene,
+                        &WireView {
+                            target: pass.target,
+                            rect,
+                            clip_from_world: view.camera.clip_from_world(aspect),
+                            near: view.camera.near,
+                            far: view.camera.far,
+                            scene_depth: (!lines_only).then_some(view.frame.depth),
+                            render: view.frame.render,
+                        },
+                        if lines_only {
+                            &WireStyle::LINES
+                        } else {
+                            &WireStyle::OVER
+                        },
+                    );
+                }
                 // The outlines, below the panels (none in the game's view).
                 if let Some(scene) = view.scene
                     && !editor.outline_items.is_empty()
@@ -15867,6 +15993,11 @@ impl Overlay for EditorOverlay {
         self.outliner
             .set_output(setup.device, setup.bindless, output.format, output.white)
             .map_err(AppError::at("the editor's outlines"))?;
+        if let Some(wires) = &mut self.wireframer {
+            wires
+                .set_output(setup.device, setup.bindless, output.format, output.white)
+                .map_err(AppError::at("the editor's wireframes"))?;
+        }
         let mut old = core::mem::replace(&mut self.renderer, renderer);
         // SAFETY: the player calls this with the device idle: nothing uses the old
         // renderer's pipelines and buffers.
@@ -22652,5 +22783,49 @@ mod tests {
             "{r:?}"
         );
         assert!((r.pos[0] - plus.pos[0]).abs() < 200.0, "{r:?} {plus:?}");
+    }
+
+    const TWO: (u16, u16) = (0x32, 0x03);
+    const FOUR: (u16, u16) = (0x34, 0x05);
+    const FIVE: (u16, u16) = (0x35, 0x06);
+
+    #[test]
+    fn view_modes_switch_by_unreals_keys_and_the_viewports_chip() {
+        let (mut world, mut ed, _, _) = two_entities();
+        assert_eq!(ed.view_mode, ViewMode::Lit);
+        assert_eq!(texts(&ed, "Lit").len(), 1, "the chip reads the mode");
+        // Alt+2: lines only; Alt+5: the edges over the lit scene; Alt+4: lit again.
+        for (keys, mode) in [
+            ([ALT, TWO], ViewMode::Wireframe),
+            ([ALT, FIVE], ViewMode::LitWireframe),
+            ([ALT, FOUR], ViewMode::Lit),
+        ] {
+            chord(&mut ed, &mut world, &keys);
+            assert_eq!(ed.view_mode, mode);
+        }
+        // The chip opens its menu, the current mode checked; a click on a mode takes it.
+        // Neither click picks in the view.
+        ed.update(&mut world);
+        let chip = middle(texts(&ed, "Lit")[0]);
+        click(&mut ed, &mut world, chip);
+        assert!(ed.view_menu_open);
+        assert!(
+            ed.pending_click.is_none(),
+            "a click on the chip picks nothing"
+        );
+        ed.update(&mut world);
+        assert_eq!(texts(&ed, icons::CHECK).len(), 1);
+        let item = middle(texts(&ed, "Wireframe")[0]);
+        click(&mut ed, &mut world, item);
+        assert_eq!(ed.view_mode, ViewMode::Wireframe);
+        assert!(!ed.view_menu_open);
+        assert!(ed.pending_click.is_none(), "nor a click on its menu");
+        ed.update(&mut world);
+        assert_eq!(texts(&ed, "Wireframe").len(), 1, "the chip reads it");
+        assert_eq!(said(&ed), "View: Wireframe");
+        // The palette has them, and the session's names round trip.
+        for mode in ViewMode::ALL {
+            assert_eq!(ViewMode::from_name(mode.name()), Some(mode));
+        }
     }
 }

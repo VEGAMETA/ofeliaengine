@@ -164,6 +164,7 @@ editor = ["dep:engine_editor"]
 | Duplicate the selection (with its children) | Ctrl+D |
 | Add an entity (the menu under the pointer) | Ctrl+A |
 | Add a component to the selection | Ctrl+Shift+A |
+| View mode: Lit, Wireframe, Lit + Wireframe | Alt+4, Alt+2, Alt+5 |
 | Snap by default, or not (Y is an axis in a keyboard transform) | G (Blender's keys: Shift+Tab; Godot's: Y) |
 | Rename the active entity | F2 |
 | The command palette | Ctrl+Shift+P |
@@ -523,6 +524,22 @@ the right button flies the camera, the letters are the flight's: no shortcut run
 E go by their place on the keyboard (Z, Q, S, D on AZERTY). Framing takes each object's
 bounds as the renderer has them, and lights, cameras and empty entities as points with
 half a meter around them; nothing selected, it frames the whole scene.
+
+## View modes
+
+The chip beside "Perspective" at the viewport's top left shows how the view shades the scene;
+a click opens its menu (ADR 0116). Unreal's keys switch it too:
+
+| Mode | Key | What it shows |
+|---|---|---|
+| Lit | Alt+4 | the scene as the game draws it |
+| Wireframe | Alt+2 | every triangle's edges over a dark background, those behind others too |
+| Lit + Wireframe | Alt+5 | the lit scene with the edges of what is in front |
+
+- The edges are each mesh's finest level. They are drawn after the frame at the view's own
+  size: an edge on a surface never flickers against it, and an edge behind another
+  surface is left out (Lit + Wireframe).
+- The session keeps the mode. Unlit and the colliders of every body come next.
 
 ## Playing
 

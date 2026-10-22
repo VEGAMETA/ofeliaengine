@@ -87,3 +87,4 @@ pub mod texture_pool;
 pub mod upload;
 pub mod viewport;
 pub mod vsm;
+pub mod wire;

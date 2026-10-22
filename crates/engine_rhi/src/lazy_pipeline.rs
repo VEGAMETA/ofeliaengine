@@ -135,6 +135,7 @@ impl Recipe {
                     color_formats: &[],
                     depth_format: desc.depth_format,
                     topology: desc.topology,
+                    polygon_mode: desc.polygon_mode,
                     cull_mode: desc.cull_mode,
                     front_face: desc.front_face,
                     dynamic_culling: desc.dynamic_culling,

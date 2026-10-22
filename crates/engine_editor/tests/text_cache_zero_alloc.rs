@@ -189,6 +189,8 @@ fn a_steady_shell_frame_does_not_allocate() {
         inspector: &sections,
         add_component: true,
         add_at: None,
+        view_mode: "Lit",
+        view_modes: None,
         path: "res://levels",
         folders: &folders,
         files: &files,
