@@ -438,7 +438,7 @@ Last updated: 2026-10-22.
     240 Hz, 4,463 µs frames against 2,003 uncapped), and as far over it with vsync, a
     backstop for a display that does not pace. `FrameCap`, `Player::set_frame_cap`; the
     cap follows the window to another monitor.
-  - **E10-2a, Slang in the code editor** (#PR, ADR 0107's as-built; research
+  - **E10-2a, Slang in the code editor** (#339, ADR 0107's as-built; research
     `docs/research/slang-in-the-editor.md`): `.slang` files are assets
     (`AssetKind::Shader`) and open in code tabs, with Slang's lexical colors. Slang's
     front end checks a tab as it is typed (`Compiler::check_source`): a material type
