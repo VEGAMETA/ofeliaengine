@@ -216,6 +216,15 @@ impl Components {
         self.infos.get(id.0 as usize).and_then(|i| i.type_info)
     }
 
+    /// The component registered under `name` (its registry name: a Rust type's path, a
+    /// script's `script::Door`), if any.
+    pub fn id_by_name(&self, name: &str) -> Option<ComponentId> {
+        self.by_key
+            .get(&state_hash64(name.as_bytes()))
+            .copied()
+            .filter(|id| &*self.infos[id.0 as usize].name == name)
+    }
+
     pub(crate) fn register<T: Component>(&mut self) -> ComponentId {
         if let Some(id) = self.id_of::<T>() {
             return id;

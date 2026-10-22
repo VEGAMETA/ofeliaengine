@@ -46,7 +46,10 @@ pub use hierarchy::{ChildIter, Children, HierarchyError, Parent};
 #[doc(hidden)]
 pub use linkme;
 pub use query::{Changed, Fetch, Filter, Or, QueryIter, QueryState, ReadOnlyFetch, With, Without};
-pub use reflected::{ReflectedKind, ReflectedType, find_reflected, reflected_types};
+pub use reflected::{
+    ReflectedKind, ReflectedType, RuntimeType, add_runtime_type, find_reflected, reflected_types,
+    runtime_types,
+};
 pub use schedule::{
     Access, FnSystem, Res, ResMut, Schedule, System, SystemContext, SystemQuery, system,
 };

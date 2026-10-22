@@ -881,3 +881,29 @@ Questions 1 to 7 are decisions a to g above, with their options in the same orde
   - reloading;
   - the types file (E7-2);
   - the editor (E7-4).
+
+## As built (E7-1b, 2026-10-22): script components in scene files
+
+- **`engine_ecs::RuntimeType`:** a component type made while the program runs. It holds
+  its `TypeInfo`, its registry name (`script::Door`), its layout and its default bytes.
+  - `RuntimeType::id(world)` finds it in a world by that name, or registers it there
+    (`None` when another layout holds the name).
+  - `add_runtime_type` adds it to a process-wide list beside the program's
+    `reflected_types`, replacing one of its stable name; `runtime_types` reads the list.
+  - The script host puts each component it declares there, and registers it in its own
+    world through it.
+  - `Components::id_by_name` finds a component by its registry name.
+- **`SceneRegistry::from_program`** now takes those types too (`Access::Dynamic`):
+  - loading starts from the default bytes, fills the lines, and inserts the value
+    (`Door.lift = 3`);
+  - saving reads it through its id;
+  - an override removes it;
+  - in a world that has not seen it, the first use registers it.
+
+  The player and every scene path of the editor build their registries this way, so a
+  scene with script components keeps them through the editor's loads, saves, tabs,
+  prefabs and undo. Undo records them as plain data.
+- **Order:** the scripts load before the player loads its first scene, so the scene's
+  `Door.*` lines find their component.
+- **Saves** (ADR 0104) and the network schema read their own registries: script components
+  join them in E7-5.
