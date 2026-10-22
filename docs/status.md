@@ -1409,6 +1409,16 @@ grown, divide and conquer); the old labels stay in parentheses.
   the display's refresh rate by default (CLAUDE.md §7's limiter just below it under VRR),
   not uncapped.
 
+- **The editor's frame allocates** (found 2026-10-22, E4-2). ADR 0107 §8 asks for 0
+  allocations per frame in steady state, panels included. The zero-allocation test covers
+  the shell's frame with fixed rows, not the editor's own:
+  - the editor's frame collects the tree's and the FileSystem dock's rows into `Vec`s
+    every frame it builds.
+
+  An idle editor builds no frame, so the cost is only while something changes. To do:
+  measure the editor's frame with the counting allocator, keep its rows in reused
+  buffers.
+
 - **Rendering:**
   - **the meshlet draws' order follows the GPU's scheduling** (atomic appends). A meshlet
     cull with fewer registers on the RTX (47 → 40) ran more groups at once and shuffled
