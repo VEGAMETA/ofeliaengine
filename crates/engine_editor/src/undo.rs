@@ -200,6 +200,11 @@ impl Transaction {
         &self.name
     }
 
+    /// The document it was made in ([`History::set_document`]).
+    pub fn doc(&self) -> u32 {
+        self.doc
+    }
+
     /// Number of entities it changed.
     pub fn entity_count(&self) -> usize {
         self.changes.len()

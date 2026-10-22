@@ -582,9 +582,12 @@ struct CommandIds {
     snap: CommandId,
     rename: CommandId,
     palette: CommandId,
-    /// The Output panel opened or closed (E6), and emptied.
+    /// The Output panel opened or closed (E6), and emptied; the Tasks panel.
     output: CommandId,
     clear_output: CommandId,
+    tasks: CommandId,
+    /// The scene dock's History (E6-4) shown, or the tree again.
+    history: CommandId,
     find: CommandId,
     select_next: CommandId,
     select_previous: CommandId,
@@ -695,6 +698,8 @@ fn commands() -> (Commands, CommandIds) {
         palette: c.register("editor.palette", "Editor", "Command Palette"),
         output: c.register("view.output", "View", "Output"),
         clear_output: c.register("output.clear", "Output", "Clear"),
+        tasks: c.register("view.tasks", "View", "Tasks"),
+        history: c.register("view.history", "View", "History"),
         find: c.register("scene.find", "Scene", "Go to Object"),
         select_next: c.register("scene.select_next", "Scene", "Select Next Row"),
         select_previous: c.register("scene.select_previous", "Scene", "Select Previous Row"),
@@ -1531,6 +1536,20 @@ struct Editor {
     /// Textures the player is compressing into the derived data cache (E4-8), for the
     /// status bar.
     compressing: usize,
+    /// Assets the player is making (files read, meshes and textures made), for the Tasks
+    /// panel (E6-3).
+    loading: usize,
+    /// When each kind of background work was first seen running (the Tasks panel): the
+    /// game's build, assets loading, textures compressing, thumbnails, the navigation.
+    tasks_since: [Option<Instant>; 5],
+    /// The Tasks panel's rows (name, how far, how long) and its tab's label, made with the
+    /// frame.
+    task_rows: Vec<(&'static str, String, String)>,
+    tasks_label: String,
+    /// The scene dock shows the History (E6-4) instead of the tree; its rows (name, the
+    /// scene when another tab's, done, current), made with the frame.
+    history_shown: bool,
+    history_rows: Vec<(String, String, bool, bool)>,
     /// Asset paths of a scene the editor loaded, for the player (`sync_assets`).
     pending_assets: AssetPaths,
     history: History,
@@ -2096,6 +2115,12 @@ impl Editor {
             listing: None,
             changed_assets: Vec::new(),
             compressing: 0,
+            loading: 0,
+            tasks_since: [None; 5],
+            task_rows: Vec::new(),
+            tasks_label: String::new(),
+            history_shown: false,
+            history_rows: Vec::new(),
             pending_assets: AssetPaths::new(),
             history: {
                 let mut history = History::new();
@@ -2552,6 +2577,17 @@ impl Editor {
                 self.drag = None;
                 self.open_choice = None;
             }
+        }
+        // The History (E6-4), while the scene dock shows it.
+        if self.history_shown {
+            self.collect_history();
+        }
+        // The Tasks (E6-3): the background work under way, its tab counting it.
+        self.collect_tasks();
+        self.tasks_label.clear();
+        self.tasks_label.push_str("Tasks");
+        if !self.task_rows.is_empty() {
+            let _ = write!(self.tasks_label, " {}", self.task_rows.len());
         }
         let properties = self.inspector.properties();
         let mut values: Vec<&str> = Vec::with_capacity(properties.len() * 3);
@@ -3143,6 +3179,25 @@ impl Editor {
             counts: self.output.counts,
             follow: self.output.follow,
         });
+        let history_rows: Vec<crate::shell::HistoryRow<'_>> = self
+            .history_rows
+            .iter()
+            .map(|(name, scene, done, current)| crate::shell::HistoryRow {
+                name,
+                scene,
+                done: *done,
+                current: *current,
+            })
+            .collect();
+        let task_rows: Vec<crate::shell::TaskRow<'_>> = self
+            .task_rows
+            .iter()
+            .map(|(name, detail, elapsed)| crate::shell::TaskRow {
+                name,
+                detail,
+                elapsed,
+            })
+            .collect();
         let active_tab = self.active_tab();
         let scenes: Vec<&str> = self
             .tabs
@@ -3182,6 +3237,7 @@ impl Editor {
             columns,
             bottom_tabs: &[
                 self.output_label.as_str(),
+                self.tasks_label.as_str(),
                 "Debugger",
                 "Audio",
                 "Animation",
@@ -3190,6 +3246,8 @@ impl Editor {
             ],
             active_bottom: self.bottom,
             output: output_view,
+            tasks: (self.bottom == Some(1)).then_some(task_rows.as_slice()),
+            history: self.history_shown.then_some(history_rows.as_slice()),
             playing,
             paused: self.play.as_ref().is_some_and(|p| p.paused),
             status: &self.status,
@@ -3280,12 +3338,12 @@ impl Editor {
         }
         // The bottom panel's tabs: Output opens and closes; the others come later.
         if let Some(i) = response.bottom_tab {
-            if i == 0 {
-                self.run(world, self.ids.output);
-            } else {
-                self.say(String::from(
-                    "Only the Output is there yet (ADR 0107's phases)",
-                ));
+            match i {
+                0 => self.run(world, self.ids.output),
+                1 => self.run(world, self.ids.tasks),
+                _ => self.say(String::from(
+                    "Only the Output and the Tasks are there yet (ADR 0107's phases)",
+                )),
             }
         }
         if let Some(r) = response.output_filter {
@@ -3304,6 +3362,12 @@ impl Editor {
         }
         if response.output_clear {
             self.run(world, self.ids.clear_output);
+        }
+        if let Some(tab) = response.scene_dock_tab {
+            self.history_shown = tab == 1;
+        }
+        if let Some(i) = response.history_row {
+            self.go_to_step(world, i);
         }
         if let Some(i) = response.output_row
             && let Some(&serial) = self.output_shown.get(i)
@@ -6369,6 +6433,104 @@ impl Editor {
         self.keep_list(world);
     }
 
+    /// The History panel's rows (E6-4): `Start`, every step done (the last one current),
+    /// then those undone; another tab's steps with their scene's name.
+    fn collect_history(&mut self) {
+        let name_of = |key: u32, tabs: &[Option<Doc>], active: &Option<PathBuf>, doc: u32| {
+            let path = if key == doc {
+                return String::new();
+            } else {
+                tabs.iter()
+                    .flatten()
+                    .find(|d| d.key == key)
+                    .map(|d| d.path.clone())
+                    .unwrap_or_else(|| active.clone())
+            };
+            path.as_deref().and_then(Path::file_name).map_or_else(
+                || String::from("untitled"),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        };
+        self.history_rows.clear();
+        let done = self.history.steps().count();
+        self.history_rows
+            .push((String::from("Start"), String::new(), true, done == 0));
+        for (i, step) in self.history.steps().enumerate() {
+            let scene = name_of(step.doc(), &self.tabs, &self.scene_path, self.doc_key);
+            self.history_rows
+                .push((step.name().to_owned(), scene, true, i + 1 == done));
+        }
+        for step in self.history.redo_steps() {
+            let scene = name_of(step.doc(), &self.tabs, &self.scene_path, self.doc_key);
+            self.history_rows
+                .push((step.name().to_owned(), scene, false, false));
+        }
+    }
+
+    /// A click on History row `row` (E6-4): undone or redone to that state, a step at a
+    /// time (another tab's step showing its tab, as Ctrl+Z does); `Start` takes back every
+    /// step it can.
+    fn go_to_step(&mut self, world: &mut World, row: usize) {
+        let done = self.history.steps().count();
+        let to_redo = self.history.redo_steps().count();
+        if row <= done {
+            for _ in row..done {
+                if !self.history.can_undo() {
+                    break;
+                }
+                self.run(world, self.ids.undo);
+            }
+        } else if row - done <= to_redo {
+            for _ in 0..row - done {
+                if !self.history.can_redo() {
+                    break;
+                }
+                self.run(world, self.ids.redo);
+            }
+        }
+    }
+
+    /// The background work under way, as the Tasks panel lists it (E6-3): each kind with
+    /// how far it is and how long it has run since first seen.
+    fn collect_tasks(&mut self) {
+        let now = Instant::now();
+        let building = match self.build_state {
+            BuildState::Building(since) => Some(since),
+            _ => None,
+        };
+        let thumbnails = self.thumbnails.pending();
+        let left = |n: usize| (n > 0).then(|| format!("{n} left"));
+        let kinds: [(&'static str, Option<String>); 5] = [
+            ("Building the game's code", building.map(|_| String::new())),
+            ("Loading assets", left(self.loading)),
+            ("Compressing textures", left(self.compressing)),
+            ("Making thumbnails", left(thumbnails)),
+            (
+                "Baking the navigation",
+                self.nav_job.is_some().then(String::new),
+            ),
+        ];
+        self.task_rows.clear();
+        for (k, (name, detail)) in kinds.into_iter().enumerate() {
+            let Some(detail) = detail else {
+                self.tasks_since[k] = None;
+                continue;
+            };
+            let since = *self.tasks_since[k].get_or_insert(if k == 0 {
+                building.unwrap_or(now)
+            } else {
+                now
+            });
+            let seconds = now.duration_since(since).as_secs();
+            let elapsed = if seconds < 60 {
+                format!("{seconds} s")
+            } else {
+                format!("{} min {} s", seconds / 60, seconds % 60)
+            };
+            self.task_rows.push((name, detail, elapsed));
+        }
+    }
+
     /// The tab of the scene in the world.
     fn active_tab(&self) -> usize {
         self.tabs.iter().position(Option::is_none).unwrap_or(0)
@@ -7578,6 +7740,14 @@ impl Editor {
             };
         } else if id == ids.clear_output {
             self.output.clear();
+        } else if id == ids.tasks {
+            self.bottom = if self.bottom == Some(1) {
+                None
+            } else {
+                Some(1)
+            };
+        } else if id == ids.history {
+            self.history_shown = !self.history_shown;
         } else if id == ids.open_scene {
             self.open_palette(world, "#scene:");
             if let Some(cp) = self.command_palette.as_mut() {
@@ -10967,6 +11137,7 @@ impl<G> EditorGame<G> {
             shared.thumbnails.drawn(preview.key, preview.pixels);
         }
         shared.compressing = player.assets().compressing();
+        shared.loading = player.assets().loading();
         // Files written anew (E4-5): made again, the old versions drawn until then.
         for id in core::mem::take(&mut shared.changed_assets) {
             if let Some(entry) = shared.asset_db.get(id) {
@@ -12976,6 +13147,94 @@ mod tests {
         ed.update(&mut world);
         assert_eq!(ed.output_label, "Output");
         assert!(ed.output.shown().is_empty());
+    }
+
+    #[test]
+    fn the_history_panel_lists_the_steps_and_goes_to_one() {
+        let mut world = World::new();
+        let e = world.spawn((SceneId::new(), Name::new("Crate"), Transform::IDENTITY));
+        let mut ed = Editor::new(
+            [1280, 720],
+            std::env::temp_dir(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        for x in ["1", "2", "3"] {
+            ed.set(
+                &mut world,
+                e,
+                "Transform.translation",
+                &format!("({x}, 0, 0)"),
+            )
+            .unwrap();
+        }
+        ed.history_shown = true;
+        ed.update(&mut world);
+        let rows: Vec<(&str, bool, bool)> = ed
+            .history_rows
+            .iter()
+            .map(|(n, _, done, current)| (n.as_str(), *done, *current))
+            .collect();
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert_eq!(rows[0], ("Start", true, false));
+        assert!(
+            rows[3].1 && rows[3].2,
+            "the last step done is the current one"
+        );
+        // A click on the first step: the two after it undone.
+        ed.go_to_step(&mut world, 1);
+        let x = world.get::<Transform>(e).unwrap().translation.x;
+        assert_eq!(x, 1.0);
+        ed.update(&mut world);
+        assert!(ed.history_rows[1].3, "the first step current");
+        assert!(!ed.history_rows[3].2, "the last one undone, to redo");
+        // On the last row: redone to it; on Start: everything undone.
+        ed.go_to_step(&mut world, 3);
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 3.0);
+        ed.go_to_step(&mut world, 0);
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 0.0);
+    }
+
+    #[test]
+    fn the_tasks_panel_lists_the_background_work() {
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            std::env::temp_dir(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        assert!(ed.task_rows.is_empty());
+        assert_eq!(ed.tasks_label, "Tasks");
+        ed.compressing = 12;
+        ed.loading = 3;
+        ed.build_state = BuildState::Building(Instant::now());
+        ed.update(&mut world);
+        let names: Vec<&str> = ed.task_rows.iter().map(|(n, _, _)| *n).collect();
+        assert_eq!(
+            names,
+            [
+                "Building the game's code",
+                "Loading assets",
+                "Compressing textures"
+            ]
+        );
+        assert_eq!(ed.task_rows[2].1, "12 left");
+        assert_eq!(ed.tasks_label, "Tasks 3");
+        // "View: Tasks" opens the panel; the work done, the rows go.
+        ed.run(&mut world, ed.ids.tasks);
+        assert_eq!(ed.bottom, Some(1));
+        ed.compressing = 0;
+        ed.loading = 0;
+        ed.build_state = BuildState::Idle;
+        ed.update(&mut world);
+        assert!(ed.task_rows.is_empty());
+        assert_eq!(ed.tasks_since, [None; 5]);
     }
 
     #[test]

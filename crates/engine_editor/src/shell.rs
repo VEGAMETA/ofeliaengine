@@ -101,6 +101,30 @@ pub struct OutputView<'a> {
     pub follow: bool,
 }
 
+/// A row of the History panel (ADR 0107 E6-4): a step, or the start before them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HistoryRow<'a> {
+    /// The step's name (`Move`), or `Start`.
+    pub name: &'a str,
+    /// The scene it was made in, when another tab's (empty for the one shown).
+    pub scene: &'a str,
+    /// Done: before or at the current state; else undone, to redo.
+    pub done: bool,
+    /// The current state: the last step done.
+    pub current: bool,
+}
+
+/// A row of the Tasks panel (ADR 0107 E6-3): background work under way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TaskRow<'a> {
+    /// What runs (`Compressing textures`).
+    pub name: &'a str,
+    /// How far it is (`12 left`); empty when nothing is counted.
+    pub detail: &'a str,
+    /// How long it has run (`4 s`).
+    pub elapsed: &'a str,
+}
+
 /// A row of the Output.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OutputRow<'a> {
@@ -384,6 +408,11 @@ pub struct ShellModel<'a> {
     pub bottom_tabs: &'a [&'a str],
     /// The Output panel above the bottom bar, while its tab is open.
     pub output: Option<OutputView<'a>>,
+    /// The Tasks panel there instead, while its tab is open.
+    pub tasks: Option<&'a [TaskRow<'a>]>,
+    /// The scene dock's History tab (E6-4) instead of the tree, while it is chosen: its
+    /// rows, oldest first.
+    pub history: Option<&'a [HistoryRow<'a>]>,
     /// The open bottom panel.
     pub active_bottom: Option<usize>,
     /// The game is running.
@@ -483,6 +512,10 @@ pub struct ShellResponse {
     pub output_clear: bool,
     /// An Output row was clicked: its place among the rows shown.
     pub output_row: Option<usize>,
+    /// The scene dock's tab was clicked (0 the tree, 1 History).
+    pub scene_dock_tab: Option<usize>,
+    /// A History row was clicked: its place.
+    pub history_row: Option<usize>,
     /// Play (F5).
     pub play: bool,
     /// Pause (F7).
@@ -590,6 +623,9 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
         );
         if let Some(view) = &model.output {
             output_panel(ui, view, p, &mut out);
+        }
+        if let Some(rows) = model.tasks {
+            tasks_panel(ui, rows, p);
         }
         bottom_bar(ui, model, p, &mut out);
         if let Some(view) = &model.palette {
@@ -1275,7 +1311,8 @@ fn scene_dock(
 ) {
     dock_column(ui, "scene dock", Size::Fixed(SCENE_WIDTH), p, |ui| {
         ui.row("tabs", bar(p, 30.0), |ui| {
-            tabs(ui, &["Scene", "History"], Some(0), p);
+            let chosen = usize::from(model.history.is_some());
+            out.scene_dock_tab = tabs(ui, &["Scene", "History"], Some(chosen), p);
             ui.spacer("fill");
             let opener = ui.container(
                 "add",
@@ -1311,6 +1348,10 @@ fn scene_dock(
                 out.add = true;
             }
         });
+        if let Some(rows) = model.history {
+            history_rows(ui, rows, p, out);
+            return;
+        }
         out.tree_filter = filter(ui, model.tree_filter, "Filter nodes", p);
         let tree = ui.scroll_column("tree", |ui| {
             let rows = tree_rows(
@@ -1331,6 +1372,43 @@ fn scene_dock(
         ui.mark_region(tree);
         out.tree_hovered = ui.in_region(tree);
     });
+}
+
+/// The History panel's rows (E6-4): every step by name, oldest first; those undone dimmed
+/// below the current one; another tab's steps with their scene's name. A click goes to
+/// that state.
+fn history_rows(ui: &mut Ui, rows: &[HistoryRow<'_>], p: &Palette, out: &mut ShellResponse) {
+    let mut current = None;
+    ui.scroll_column("history", |ui| {
+        for (i, row) in rows.iter().enumerate() {
+            ui.push_id(i as u64);
+            let line = Style {
+                size: [Size::Grow(1.0), Size::Fixed(22.0)],
+                padding: [10.0, 0.0, 8.0, 0.0],
+                gap: 8.0,
+                align_cross: Align::Center,
+                background: row.current.then_some(p.selection),
+                ..Style::default()
+            };
+            let id = ui.container("step", line, |ui| {
+                let color = if row.done { p.text } else { p.text_dim };
+                text(ui, "name", row.name, TEXT, color);
+                if !row.scene.is_empty() {
+                    text(ui, "scene", row.scene, SMALL, p.text_dim);
+                }
+            });
+            if row.current {
+                current = Some(id);
+            }
+            if ui.sense(id, false).clicked {
+                out.history_row = Some(i);
+            }
+            ui.pop_id();
+        }
+    });
+    if let Some(id) = current {
+        ui.reveal(id);
+    }
 }
 
 /// A floating hint at `at`: what a keyboard transform does.
@@ -2132,6 +2210,48 @@ fn output_panel(ui: &mut Ui, view: &OutputView<'_>, p: &Palette, out: &mut Shell
             && let Some(id) = last
         {
             ui.reveal(id);
+        }
+    });
+}
+
+/// The Tasks panel (ADR 0107 E6-3): what runs in the background, how far it is and for how
+/// long; nothing blocks the editor meanwhile.
+fn tasks_panel(ui: &mut Ui, rows: &[TaskRow<'_>], p: &Palette) {
+    let panel = Style {
+        size: [Size::Grow(1.0), Size::Fixed(160.0)],
+        direction: Direction::Column,
+        padding: [0.0, 4.0, 0.0, 4.0],
+        background: Some(p.dock),
+        ..Style::default()
+    };
+    ui.container("tasks", panel, |ui| {
+        if rows.is_empty() {
+            ui.row("idle", bar(p, 24.0).background(p.dock), |ui| {
+                text(
+                    ui,
+                    "label",
+                    "Nothing runs in the background",
+                    SMALL,
+                    p.text_dim,
+                );
+            });
+        }
+        for (i, row) in rows.iter().enumerate() {
+            ui.push_id(i as u64);
+            let line = Style {
+                size: [Size::Grow(1.0), Size::Fixed(22.0)],
+                padding: [8.0, 0.0, 8.0, 0.0],
+                gap: 12.0,
+                align_cross: Align::Center,
+                ..Style::default()
+            };
+            ui.container("task", line, |ui| {
+                text(ui, "name", row.name, SMALL, p.text);
+                text(ui, "detail", row.detail, SMALL, p.text_dim);
+                ui.spacer("fill");
+                text(ui, "elapsed", row.elapsed, SMALL, p.text_dim);
+            });
+            ui.pop_id();
         }
     });
 }

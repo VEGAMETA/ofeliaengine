@@ -417,6 +417,8 @@ fn main() {
         ],
         active_bottom: None,
         output: None,
+        tasks: None,
+        history: None,
         playing,
         paused: false,
         status: &status,
