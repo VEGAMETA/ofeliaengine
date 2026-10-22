@@ -514,7 +514,7 @@ Last updated: 2026-10-22.
     a hook's `self` typed from `component`, with Luau's old solver (the new one of 0.736
     leaves it unknown). The editor writes them to `types/ofelia.d.luau`, and `ofeliaengine
     new` points luau-lsp in VS Code at it.
-  - **E7-1c, the views' fast path** (#PR, ADR 0114's as-built): `self`, views and
+  - **E7-1c, the views' fast path** (#354, ADR 0114's as-built): `self`, views and
     entities are tagged userdata whose metamethods are C functions on Luau's own API,
     fields found by their names' atoms; the time budget's interrupt is a C function that
     reads the clock every 64 calls. A prop's read and write 386 → 71 ns the pair, a
