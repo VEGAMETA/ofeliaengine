@@ -76,7 +76,7 @@ fn exact_text_of_a_small_scene() {
     let mut out = String::new();
     assert_eq!(save(&mut w, &registry(), &mut out).unwrap(), 2);
     let expected = "\
-[scene version=3]
+[scene version=4]
 
 [entity 00000000000000000000000000000002]
 Marker = {}
@@ -286,7 +286,7 @@ fn roots_keep_their_order_and_their_blocks_stay_in_id_order() {
     let mut w2 = World::new();
     let report = load(&mut w2, &registry(), &out).unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
-    assert_eq!(report.version, 3);
+    assert_eq!(report.version, 4);
     let order = |i: usize| w2.get::<RootOrder>(report.entities[i]).copied();
     assert_eq!(
         [order(0), order(1), order(2), order(3)],

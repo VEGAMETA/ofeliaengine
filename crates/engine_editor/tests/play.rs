@@ -109,6 +109,7 @@ fn write_scene(dir: &Path) -> String {
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
+        prefabs: None,
     };
     let mut text = String::new();
     save_with(

@@ -34,10 +34,15 @@ for (line, warning) in &report.warnings {
 
 // Save it back with its own id and the paths its asset references were written with.
 let mut text = String::new();
-let options = SaveOptions { id: report.id, assets: Some(&report.assets) };
+let options = SaveOptions { id: report.id, assets: Some(&report.assets), prefabs: None };
 save_with(&mut world, &registry, &options, &mut text)?;
 std::fs::write("level.scene", &text)?;
 ```
+
+A scene that places prefabs ([below](#prefabs)) is loaded and saved with where they come
+from: `load_with(&mut world, &registry, &text, &LoadOptions { prefabs: Some(&PrefabFiles(project)) })`,
+and `prefabs: Some(&PrefabFiles(project))` in the `SaveOptions`. The player does this for
+you (`player.load_scene`).
 
 - Only entities with a `SceneId` are saved. Give new entities one with `SceneId::new()`,
   or call `assign_ids(&mut world)` before saving. Entities without an id are runtime
@@ -229,6 +234,43 @@ double_sided = false
 - A scene finds the file by the path written beside its id, relative to the game's folder.
   A material file has no textures; a glTF's materials do (above).
 
+## Prefabs
+
+Any scene can be placed in another (ADR 0108, "any scene is a prefab"): a crate, a lamp,
+a room, a whole level.
+
+```text
+[instance 7d2e0f1a9b3c4d5e8f6a7b1c2d3e4f50]
+prefab = asset("props/crate.scene", 9b41d07c2e8a4f6b8d3c1a5e7f902b64)
+Transform.translation = (3, 0, 1)
+remove = @0b12e4f8c3a94d5e9f7a6b1c2d3e4f50
+
+[override 7d2e0f1a9b3c4d5e8f6a7b1c2d3e4f50/a13f5c2e8b7d4e1f9a6b3c0d2e5f8a71]
+Health = 50
+remove = Light
+```
+
+- **`[instance <id>]`** places the scene `prefab` names.
+  - A prefab of one root: that root is the instance's entity, with the instance's id; the
+    instance's lines change its values (here its place).
+  - A prefab of several roots: an entity of the instance's own holds them.
+  - `parent` and `order` place the instance as an entity's block does.
+- **`[override <instance>/<entity>]`** changes the values of an entity the instance placed,
+  named by its id in the prefab's file. Only what differs is written: change the prefab,
+  and every instance follows except where it says otherwise.
+- **Removing:** `remove = Component` in an override takes a component away;
+  `remove = @<entity>` in an instance leaves an entity of the prefab out, with its
+  children.
+- **Ids inside an instance** are made from the instance's and the entity's own
+  (`SceneId::derive`), the same at every load, so references and undo find them. Refer
+  to one as `@<instance>/<entity>`; through instances inside instances the path goes on
+  (`@7d2e…/0b12…/a13f…`).
+- **A variant** (a red door from the door) is a scene whose only root is an instance of
+  the door with its overrides.
+- **What cannot be placed is kept:** a prefab that cannot be read (or that would place
+  itself), and an override of an entity the prefab no longer has, are warnings; their
+  blocks stay in the file as they were until you remove them.
+
 ## Changing components safely
 
 - **Adding a field:** old scenes load with the field's default value.
@@ -251,7 +293,7 @@ there is no hidden structure to repair.
 - **Version 3** (ADR 0108, format 3) added the roots' order: `order = <n>` in a root's
   block (`RootOrder` in the world), spaced so moving a root changes its own line only.
   Root blocks stay in id order. `order` on a child is a warning and is ignored.
-- **Versions 1 and 2 load as they are** (their roots have no order). Saving writes
-  version 3.
-- **Prefab instances** (any scene placed in another, with its overrides) come with the
-  editor's prefabs (ADR 0107, phase E5).
+- **Version 4** (ADR 0108, E5) added prefab instances: `[instance]` and `[override]`
+  blocks.
+- **Versions 1 to 3 load as they are** (those of 1 and 2: their roots have no order).
+  Saving writes version 4.

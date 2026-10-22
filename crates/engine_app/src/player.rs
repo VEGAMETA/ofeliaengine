@@ -1226,9 +1226,10 @@ impl Player {
 
     /// Loads a scene file (ADR 0108; a path relative to `PlayerSettings::project`) into the
     /// world beside what it holds: its entities with every reflected component the program
-    /// has (`SceneRegistry::from_program`), the hierarchy, and the meshes and materials its
-    /// `Model`s name, made in the next frame. Lines the types no longer match are warnings
-    /// in the log and in the report.
+    /// has (`SceneRegistry::from_program`), the hierarchy, the prefabs its instances place
+    /// (read from the project's folder, E5), and the meshes and materials its `Model`s
+    /// name, made in the next frame. Lines the types no longer match are warnings in the
+    /// log and in the report.
     ///
     /// # Errors
     ///
@@ -1240,7 +1241,11 @@ impl Player {
         let path = self.assets.root().join(path);
         let text = std::fs::read_to_string(&path).map_err(AppError::at("the scene file"))?;
         let registry = engine_scene::SceneRegistry::from_program();
-        let report = engine_scene::load(&mut self.runtime.world, &registry, &text)
+        let prefabs = engine_scene::PrefabFiles(self.assets.root());
+        let options = engine_scene::LoadOptions {
+            prefabs: Some(&prefabs),
+        };
+        let report = engine_scene::load_with(&mut self.runtime.world, &registry, &text, &options)
             .map_err(AppError::at("the scene file"))?;
         for (line, warning) in &report.warnings {
             log::warn!(target: "engine_app::scene", "{}:{line}: {warning}", path.display());

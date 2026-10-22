@@ -1,8 +1,8 @@
-//! Text scenes (ADR 0029; formats 2 and 3: ADR 0108): a line-oriented format for entities
+//! Text scenes (ADR 0029; formats 2 to 4: ADR 0108): a line-oriented format for entities
 //! and their reflected components, built to diff and merge well in version control.
 //!
 //! ```text
-//! [scene version=3 id=9b41d07c2e8a4f6b8d3c1a5e7f902b64]
+//! [scene version=4 id=9b41d07c2e8a4f6b8d3c1a5e7f902b64]
 //!
 //! [entity 6c1f0a3e9d2b47c88e51f0d4a7b3c912]
 //! order = 1024
@@ -35,13 +35,15 @@
 //!   - A struct of one unnamed field is written as that field (`Health = 80`).
 //!   - Asset references are written with their path, then the file's id ([`AssetRef`]).
 //! - A component with no saved fields is written as `Component = {}`.
+//! - Prefab instances (format 4, [`prefab`]): `[instance <id>]` places another scene, and
+//!   `[override <instance>/<entity>]` changes the values of what it placed.
 //!
 //! Loading is tolerant of schema changes:
 //! - fields missing from the file keep the component's `Default`;
 //! - fields the type no longer has are reported as warnings, not errors.
 //!
-//! Unknown components are errors, reported with their line number. Files of formats 1 and
-//! 2 load as they are (their roots have no order).
+//! Unknown components are errors, reported with their line number. Files of formats 1 to
+//! 3 load as they are (those of 1 and 2: their roots have no order).
 //!
 //! ```
 //! use engine_ecs::{GlobalTransform, Transform, World};
@@ -64,6 +66,7 @@
 
 mod assets;
 pub mod database;
+pub mod prefab;
 pub mod text;
 
 pub use assets::{AssetId, AssetPaths, AssetRef};
@@ -71,6 +74,7 @@ pub use database::{
     AssetDatabase, AssetEntry, AssetKind, AssetMeta, ModelImport, ScanReport, TextureCompression,
     TextureImport,
 };
+pub use prefab::{KeptBlocks, PrefabFiles, PrefabInstance, PrefabPart, Prefabs};
 
 use engine_ecs::reflected::WriteDefault;
 use engine_ecs::{
@@ -81,8 +85,8 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use text::{ReadRefs, Seg, is_asset_ref, is_entity, is_single, newtype_field, vector_fields};
 
-/// Current format version, written in the header.
-pub const VERSION: u32 = 3;
+/// Current format version, written in the header (4: prefab instances).
+pub const VERSION: u32 = 4;
 
 /// How written entity references find their scene ids.
 type Ids<'a> = &'a dyn Fn(Entity) -> Option<SceneId>;
@@ -90,6 +94,62 @@ type Ids<'a> = &'a dyn Fn(Entity) -> Option<SceneId>;
 /// No entity has a scene id: references are written `@none`.
 fn no_ids(_: Entity) -> Option<SceneId> {
     None
+}
+
+/// How written entity references are spelled.
+#[derive(Clone, Copy)]
+enum Refs<'a> {
+    /// By the scene ids a function gives (undo's form).
+    Ids(Ids<'a>),
+    /// By scene id, or by path for an entity a prefab instance placed (a scene's form).
+    Paths(&'a Paths<'a>),
+}
+
+impl Refs<'_> {
+    /// Appends `e`'s reference after its `@`; false when it has none (`@none`).
+    fn write(self, e: Entity, out: &mut String) -> bool {
+        match self {
+            Self::Ids(ids) => ids(e).is_some_and(|id| write!(out, "{id}").is_ok()),
+            Self::Paths(paths) => paths.write(e, out),
+        }
+    }
+}
+
+/// The paths of a world's entities: a scene id, or for an entity a prefab instance placed,
+/// its instance's path and its own id in the prefab (`7d2e…/a13f…`).
+struct Paths<'a> {
+    world: &'a World,
+    ids: &'a HashMap<Entity, SceneId>,
+    by_id: &'a HashMap<SceneId, Entity>,
+}
+
+impl Paths<'_> {
+    fn write(&self, e: Entity, out: &mut String) -> bool {
+        let Some(&id) = self.ids.get(&e) else {
+            return false;
+        };
+        match self.world.get::<PrefabPart>(e) {
+            Some(part) => {
+                let instance = self.by_id.get(&part.instance).copied();
+                if !instance.is_some_and(|i| i != e && self.write(i, out)) {
+                    let _ = write!(out, "{}", part.instance);
+                }
+                let _ = write!(out, "/{}", part.local);
+            }
+            None => {
+                let _ = write!(out, "{id}");
+            }
+        }
+        true
+    }
+
+    /// `e`'s path below its outermost instance (`j/e` for `I/j/e`), for `remove = @…`.
+    fn below_instance(&self, e: Entity) -> String {
+        let mut full = String::new();
+        self.write(e, &mut full);
+        full.split_once('/')
+            .map_or(String::new(), |(_, rest)| rest.to_owned())
+    }
 }
 
 /// 128 random bits: the OS-seeded hasher, a process-wide counter and the time.
@@ -165,6 +225,34 @@ impl SceneId {
             return None;
         }
         u128::from_str_radix(s, 16).ok().map(Self::from_u128)
+    }
+
+    /// The id of entity `local` (its id in a prefab's file) of the prefab placed as
+    /// instance `instance` (ADR 0108's E5): the same at every load, so references into an
+    /// instance and undo find it.
+    pub fn derive(instance: Self, local: Self) -> Self {
+        let mut h = engine_core::hash::StableHasher::new();
+        h.write_str("prefab part");
+        h.write(&instance.as_u128().to_le_bytes());
+        h.write(&local.as_u128().to_le_bytes());
+        Self::from_u128(h.finish())
+    }
+
+    /// The id a path of ids names (`instance/…/entity`): the last one, placed by each
+    /// instance before it ([`Self::derive`]); a path of one id is that id.
+    pub fn of_path(path: &[Self]) -> Self {
+        let Some((&last, instances)) = path.split_last() else {
+            return Self::from_u128(0);
+        };
+        instances
+            .iter()
+            .rev()
+            .fold(last, |id, &instance| Self::derive(instance, id))
+    }
+
+    /// A path of ids from its text: ids of 32 hex digits apart by `/`.
+    pub fn parse_path(s: &str) -> Option<Vec<Self>> {
+        s.split('/').map(|p| Self::parse(p.trim())).collect()
     }
 }
 
@@ -245,6 +333,7 @@ enum Access {
         type_name: fn() -> &'static str,
         get: fn(&World, Entity) -> Option<*const u8>,
         insert: fn(&mut World, Entity, &mut Fill<'_>),
+        remove: fn(&mut World, Entity),
     },
     /// From the program's list of reflected types (ADR 0104 step 1), by component id.
     Listed {
@@ -346,6 +435,9 @@ impl SceneRegistry {
                 let mut value = T::default();
                 fill((&raw mut value).cast::<u8>());
                 w.insert(e, value);
+            },
+            remove: |w, e| {
+                w.remove::<T>(e);
             },
         };
         if let Some(&i) = self.by_name.get(info.name) {
@@ -464,16 +556,32 @@ pub struct LoadReport {
     /// The paths the file's asset references were written with: give them back to
     /// [`save_with`] to write the references the same way.
     pub assets: AssetPaths,
+    /// The prefabs its instances placed (and theirs), by id: what to watch.
+    pub prefabs: Vec<AssetId>,
 }
 
 /// How [`save_with`] writes a scene.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Copy, Default)]
 pub struct SaveOptions<'a> {
     /// The scene's own id, written in the header.
     pub id: Option<AssetId>,
     /// The paths asset references are written with. A reference without one is written
     /// with its id alone (and its part's hash).
     pub assets: Option<&'a AssetPaths>,
+    /// Where the prefabs its instances place come from: each instance is written as what
+    /// its entities change from its prefab's. None (or a prefab that cannot be read):
+    /// every line of an instance's entities is written as an override.
+    pub prefabs: Option<&'a dyn Prefabs>,
+}
+
+impl core::fmt::Debug for SaveOptions<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SaveOptions")
+            .field("id", &self.id)
+            .field("assets", &self.assets)
+            .field("prefabs", &self.prefabs.is_some())
+            .finish()
+    }
 }
 
 /// Gives every entity without a [`SceneId`] a new one. Returns how many were added.
@@ -497,7 +605,9 @@ pub fn save(
     save_with(world, registry, &SaveOptions::default(), out)
 }
 
-/// [`save`] with the scene's id and the paths of its asset references.
+/// [`save`] with the scene's id, the paths of its asset references, and the prefabs its
+/// instances place: each instance is written as the lines where its entities differ from
+/// its prefab's ([`prefab`]).
 pub fn save_with(
     world: &mut World,
     registry: &SceneRegistry,
@@ -521,6 +631,31 @@ pub fn save_with(
         }
     }
     roots.sort_unstable();
+    // Instances: what their entities' paths and their prefabs' values need. A scene
+    // without any is written as before, an entity's lines straight to `out`.
+    let mut instances = QueryState::<(Entity, &PrefabInstance)>::new(world);
+    let mut roots_of: Vec<(Entity, PrefabInstance)> = instances
+        .iter_readonly(world)
+        .map(|(e, i)| (e, *i))
+        .collect();
+    let mut parts = QueryState::<&PrefabPart>::new(world);
+    let prefabs = !roots_of.is_empty() || parts.iter_readonly(world).next().is_some();
+    let by_id: HashMap<SceneId, Entity> = if prefabs {
+        ids.iter().map(|(&e, &id)| (id, e)).collect()
+    } else {
+        HashMap::new()
+    };
+    // Each outermost instance's prefab placed alone: what its entities are without the
+    // scene's overrides.
+    let mut bases: HashMap<Entity, Base> = HashMap::new();
+    roots_of.retain(|&(e, i)| !i.is_missing() && world.get::<PrefabPart>(e).is_none());
+    for (e, instance) in roots_of {
+        if let Some(&id) = ids.get(&e)
+            && let Some(base) = Base::of(registry, options, id, instance.prefab)
+        {
+            bases.insert(e, base);
+        }
+    }
     match options.id {
         Some(id) => {
             let _ = writeln!(out, "[scene version={VERSION} id={id}]");
@@ -529,34 +664,401 @@ pub fn save_with(
             let _ = writeln!(out, "[scene version={VERSION}]");
         }
     }
-    // How each registered type is read, its id found once for this world.
-    let getters: Vec<Getter> = registry
+    let getters = getters_of(registry, world);
+    let paths = Paths {
+        world,
+        ids: &ids,
+        by_id: &by_id,
+    };
+    let refs = Refs::Paths(&paths);
+    let mut count = 0;
+    // Depth first; an outermost instance's kept blocks after its whole subtree.
+    let mut stack: Vec<(Entity, bool)> = roots.iter().rev().map(|&(_, e)| (e, true)).collect();
+    let mut children: Vec<Entity> = Vec::new();
+    // The writer's path, its room kept from one entity to the next.
+    let mut path = String::new();
+    while let Some((e, enter)) = stack.pop() {
+        let (instance, part) = if prefabs {
+            (
+                world.get::<PrefabInstance>(e).copied(),
+                world.get::<PrefabPart>(e).copied(),
+            )
+        } else {
+            (None, None)
+        };
+        if !enter {
+            if let Some(kept) = world.get::<KeptBlocks>(e)
+                && !kept.blocks.trim().is_empty()
+            {
+                out.push('\n');
+                out.push_str(kept.blocks.trim_end());
+                out.push('\n');
+            }
+            continue;
+        }
+        let id = ids[&e];
+        // Its parent: by path inside an instance, else by id.
+        let parent = world.parent(e).and_then(|p| {
+            let &id = ids.get(&p)?;
+            Some(if prefabs && world.get::<PrefabPart>(p).is_some() {
+                ParentRef::Path(p)
+            } else {
+                ParentRef::Id(id)
+            })
+        });
+        let lines = if prefabs && (part.is_some() || instance.is_some()) {
+            component_lines(world, registry, &getters, e, refs, options.assets)
+        } else {
+            Vec::new()
+        };
+        match (part, instance) {
+            (Some(_), _) => {
+                // Inside an instance: an override where it differs from the prefab's.
+                let outermost = outermost(world, &by_id, e);
+                let base = outermost.and_then(|r| bases.get(&r));
+                let (changed, removed) = match base.and_then(|b| b.lines(registry, id, options)) {
+                    Some(prefab) => diff(&lines, &prefab),
+                    None => (lines.iter().map(|(_, t)| t.as_str()).collect(), Vec::new()),
+                };
+                if !changed.is_empty() || !removed.is_empty() {
+                    out.push_str("\n[override ");
+                    paths.write(e, out);
+                    out.push_str("]\n");
+                    out.push_str(&changed);
+                    for component in removed {
+                        let _ = writeln!(out, "remove = {component}");
+                    }
+                }
+            }
+            (None, Some(instance)) => {
+                let _ = write!(out, "\n[instance {id}]\nprefab = ");
+                instance.prefab.write(options.assets, out);
+                out.push('\n');
+                match parent {
+                    Some(p) => p.write(&paths, out),
+                    None => {
+                        if let Some(order) = world.get::<RootOrder>(e) {
+                            let _ = writeln!(out, "order = {}", order.0);
+                        }
+                    }
+                }
+                if !instance.is_missing() {
+                    let base = bases.get(&e);
+                    match base.and_then(|b| b.lines(registry, id, options)) {
+                        Some(prefab) => {
+                            let (changed, removed) = diff(&lines, &prefab);
+                            out.push_str(&changed);
+                            for component in removed {
+                                let _ = writeln!(out, "remove = {component}");
+                            }
+                        }
+                        None => {
+                            for (_, text) in &lines {
+                                out.push_str(text);
+                            }
+                        }
+                    }
+                    // The prefab's entities this scene has deleted (the topmost of each
+                    // deleted subtree).
+                    if let Some(base) = base {
+                        for removed in base.removed(&by_id) {
+                            let _ = writeln!(out, "remove = @{removed}");
+                        }
+                    }
+                }
+                if let Some(kept) = world.get::<KeptBlocks>(e) {
+                    out.push_str(&kept.lines);
+                }
+                stack.push((e, false));
+            }
+            (None, None) => {
+                let _ = writeln!(out, "\n[entity {id}]");
+                match parent {
+                    Some(p) => p.write(&paths, out),
+                    None => {
+                        if let Some(order) = world.get::<RootOrder>(e) {
+                            let _ = writeln!(out, "order = {}", order.0);
+                        }
+                    }
+                }
+                let writer = Writer {
+                    out,
+                    path: core::mem::take(&mut path),
+                    refs,
+                    assets: options.assets,
+                };
+                path = write_components(world, registry, &getters, e, writer);
+            }
+        }
+        count += 1;
+        children.clear();
+        children.extend(world.children(e).filter(|c| ids.contains_key(c)));
+        stack.extend(children.iter().rev().map(|&c| (c, true)));
+    }
+    Ok(count)
+}
+
+/// The outermost instance `e` is inside: its instance's root, then that one's, until an
+/// entity no instance placed.
+fn outermost(world: &World, by_id: &HashMap<SceneId, Entity>, e: Entity) -> Option<Entity> {
+    let mut at = e;
+    for _ in 0..64 {
+        let part = world.get::<PrefabPart>(at)?;
+        let instance = *by_id.get(&part.instance)?;
+        if world.get::<PrefabPart>(instance).is_none() {
+            return Some(instance);
+        }
+        at = instance;
+    }
+    None
+}
+
+/// How each registered type is read, its id found once for `world`.
+fn getters_of(registry: &SceneRegistry, world: &mut World) -> Vec<Getter> {
+    registry
         .entries
         .iter()
         .map(|entry| match entry.access {
             Access::Typed { get, .. } => Getter::Typed(get),
             Access::Listed { id, .. } => Getter::Id(id(world)),
         })
-        .collect();
-    let lookup = |e: Entity| ids.get(&e).copied();
-    let mut writer = Writer {
-        out,
-        path: String::new(),
-        ids: &lookup,
-        assets: options.assets,
-    };
-    let mut count = 0;
-    let mut stack: Vec<Entity> = roots.iter().rev().map(|&(_, e)| e).collect();
-    let mut children: Vec<Entity> = Vec::new();
-    while let Some(e) = stack.pop() {
-        let parent = world.parent(e).and_then(|p| ids.get(&p).copied());
-        writer.entity(world, registry, &getters, e, ids[&e], parent);
-        count += 1;
-        children.clear();
-        children.extend(world.children(e).filter(|c| ids.contains_key(c)));
-        stack.extend(children.iter().rev());
+        .collect()
+}
+
+/// How a block names its parent: by id, or by path for one an instance placed.
+#[derive(Clone, Copy)]
+enum ParentRef {
+    Id(SceneId),
+    Path(Entity),
+}
+
+impl ParentRef {
+    /// Writes `parent = …`.
+    fn write(self, paths: &Paths<'_>, out: &mut String) {
+        match self {
+            Self::Id(id) => {
+                let _ = writeln!(out, "parent = {id}");
+            }
+            Self::Path(p) => {
+                out.push_str("parent = ");
+                paths.write(p, out);
+                out.push('\n');
+            }
+        }
     }
-    Ok(count)
+}
+
+/// Writes the lines of the registered components `e` has through `writer`
+/// (`Component = {}` for one without); gives its path's room back.
+fn write_components(
+    world: &World,
+    registry: &SceneRegistry,
+    getters: &[Getter],
+    e: Entity,
+    mut writer: Writer<'_>,
+) -> String {
+    for (entry, getter) in registry.entries.iter().zip(getters) {
+        let ptr = match *getter {
+            Getter::Typed(get) => get(world, e),
+            Getter::Id(id) => world.get_raw(e, id).map(|p| p.as_ptr().cast_const()),
+        };
+        let Some(ptr) = ptr else {
+            continue;
+        };
+        writer.path.clear();
+        writer.path.push_str(entry.info.name);
+        let before = writer.out.len();
+        // SAFETY: `ptr` points to a live value of the registered type.
+        unsafe { writer.value(entry.info, ptr) };
+        if writer.out.len() == before {
+            let _ = writeln!(writer.out, "{} = {{}}", entry.info.name);
+        }
+    }
+    writer.path
+}
+
+/// The registered components `e` has, each with its lines (`Component = {}` for one
+/// without).
+fn component_lines(
+    world: &World,
+    registry: &SceneRegistry,
+    getters: &[Getter],
+    e: Entity,
+    refs: Refs<'_>,
+    assets: Option<&AssetPaths>,
+) -> Vec<(&'static str, String)> {
+    let mut lines = Vec::new();
+    for (entry, getter) in registry.entries.iter().zip(getters) {
+        let ptr = match *getter {
+            Getter::Typed(get) => get(world, e),
+            Getter::Id(id) => world.get_raw(e, id).map(|p| p.as_ptr().cast_const()),
+        };
+        let Some(ptr) = ptr else {
+            continue;
+        };
+        let mut text = String::new();
+        let mut writer = Writer {
+            out: &mut text,
+            path: String::from(entry.info.name),
+            refs,
+            assets,
+        };
+        // SAFETY: `ptr` points to a live value of the registered type.
+        unsafe { writer.value(entry.info, ptr) };
+        if text.is_empty() {
+            let _ = writeln!(text, "{} = {{}}", entry.info.name);
+        }
+        lines.push((entry.info.name, text));
+    }
+    lines
+}
+
+/// What `lines` (an entity's) change from `prefab`'s (the same entity as its prefab places
+/// it): their lines that differ, a component's whole after `Component = {}` when its lines
+/// name other fields (a list grown or shrunk), and the components the prefab's has that it
+/// has not.
+fn diff(
+    lines: &[(&'static str, String)],
+    prefab: &[(&'static str, String)],
+) -> (String, Vec<&'static str>) {
+    let fields = |text: &str| -> Vec<String> {
+        text.lines()
+            .map(|l| l.split_once(" = ").map_or(l, |(p, _)| p).to_owned())
+            .collect()
+    };
+    let mut out = String::new();
+    for (name, text) in lines {
+        match prefab.iter().find(|(n, _)| n == name) {
+            None => out.push_str(text),
+            Some((_, theirs)) if theirs == text => {}
+            Some((_, theirs)) if fields(text) == fields(theirs) => {
+                let same: std::collections::HashSet<&str> = theirs.lines().collect();
+                for line in text.lines().filter(|l| !same.contains(l)) {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            Some(_) => {
+                let _ = writeln!(out, "{name} = {{}}");
+                let empty = format!("{name} = {{}}");
+                for line in text.lines().filter(|&l| l != empty) {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    let removed = prefab
+        .iter()
+        .filter(|(n, _)| !lines.iter().any(|(m, _)| m == n))
+        .map(|&(n, _)| n)
+        .collect();
+    (out, removed)
+}
+
+/// An outermost instance's prefab placed alone, under the same ids: what its entities
+/// are without the scene's overrides.
+struct Base {
+    world: World,
+    ids: HashMap<Entity, SceneId>,
+    by_id: HashMap<SceneId, Entity>,
+    getters: Vec<Getter>,
+    /// The instance's own id.
+    instance: SceneId,
+}
+
+impl Base {
+    /// Prefab `prefab` placed alone as instance `instance`, through `options`' prefabs;
+    /// none when it cannot be read now.
+    fn of(
+        registry: &SceneRegistry,
+        options: &SaveOptions<'_>,
+        instance: SceneId,
+        prefab: AssetRef,
+    ) -> Option<Self> {
+        let prefabs = options.prefabs?;
+        let mut text = format!("[scene version={VERSION}]\n\n[instance {instance}]\nprefab = ");
+        prefab.write(options.assets, &mut text);
+        text.push('\n');
+        let mut world = World::new();
+        let load = LoadOptions {
+            prefabs: Some(prefabs),
+        };
+        let report = load_with(&mut world, registry, &text, &load).ok()?;
+        let mut ids = HashMap::with_capacity(report.entities.len());
+        for &e in &report.entities {
+            if let Some(&id) = world.get::<SceneId>(e) {
+                ids.insert(e, id);
+            }
+        }
+        let by_id: HashMap<SceneId, Entity> = ids.iter().map(|(&e, &id)| (id, e)).collect();
+        let root = *by_id.get(&instance)?;
+        if world
+            .get::<PrefabInstance>(root)
+            .is_none_or(PrefabInstance::is_missing)
+        {
+            return None;
+        }
+        let getters = getters_of(registry, &mut world);
+        Some(Self {
+            world,
+            ids,
+            by_id,
+            getters,
+            instance,
+        })
+    }
+
+    /// The lines of entity `id` as the prefab places it; none when it places no such
+    /// entity.
+    fn lines(
+        &self,
+        registry: &SceneRegistry,
+        id: SceneId,
+        options: &SaveOptions<'_>,
+    ) -> Option<Vec<(&'static str, String)>> {
+        let e = *self.by_id.get(&id)?;
+        let paths = Paths {
+            world: &self.world,
+            ids: &self.ids,
+            by_id: &self.by_id,
+        };
+        Some(component_lines(
+            &self.world,
+            registry,
+            &self.getters,
+            e,
+            Refs::Paths(&paths),
+            options.assets,
+        ))
+    }
+
+    /// The paths below the instance of the entities the prefab places that the scene
+    /// (`by_id`) no longer has: the topmost of each such subtree.
+    fn removed(&self, by_id: &HashMap<SceneId, Entity>) -> Vec<String> {
+        let paths = Paths {
+            world: &self.world,
+            ids: &self.ids,
+            by_id: &self.by_id,
+        };
+        let mut out: Vec<(SceneId, String)> = Vec::new();
+        for (&e, &id) in &self.ids {
+            if id == self.instance || by_id.contains_key(&id) {
+                continue;
+            }
+            // Under one also removed: that one's line covers it.
+            let parent_gone = self
+                .world
+                .parent(e)
+                .and_then(|p| self.ids.get(&p))
+                .is_some_and(|&p| p != self.instance && !by_id.contains_key(&p));
+            if !parent_gone {
+                out.push((id, paths.below_instance(e)));
+            }
+        }
+        out.sort_unstable();
+        out.into_iter().map(|(_, path)| path).collect()
+    }
 }
 
 /// How [`save_with`] reads a registered type's value.
@@ -571,50 +1073,11 @@ struct Writer<'a> {
     out: &'a mut String,
     /// The path of the value being written, `Component.field…`.
     path: String,
-    ids: Ids<'a>,
+    refs: Refs<'a>,
     assets: Option<&'a AssetPaths>,
 }
 
 impl Writer<'_> {
-    fn entity(
-        &mut self,
-        world: &World,
-        registry: &SceneRegistry,
-        getters: &[Getter],
-        e: Entity,
-        id: SceneId,
-        parent: Option<SceneId>,
-    ) {
-        let _ = writeln!(self.out, "\n[entity {id}]");
-        match parent {
-            Some(p) => {
-                let _ = writeln!(self.out, "parent = {p}");
-            }
-            None => {
-                if let Some(order) = world.get::<RootOrder>(e) {
-                    let _ = writeln!(self.out, "order = {}", order.0);
-                }
-            }
-        }
-        for (entry, getter) in registry.entries.iter().zip(getters) {
-            let ptr = match *getter {
-                Getter::Typed(get) => get(world, e),
-                Getter::Id(id) => world.get_raw(e, id).map(|p| p.as_ptr().cast_const()),
-            };
-            let Some(ptr) = ptr else {
-                continue;
-            };
-            self.path.clear();
-            self.path.push_str(entry.info.name);
-            let before = self.out.len();
-            // SAFETY: `ptr` points to a live value of the registered type.
-            unsafe { self.value(entry.info, ptr) };
-            if self.out.len() == before {
-                let _ = writeln!(self.out, "{} = {{}}", entry.info.name);
-            }
-        }
-    }
-
     /// Writes `path = text`.
     fn line(&mut self, text: &str) {
         let _ = writeln!(self.out, "{} = {text}", self.path);
@@ -631,7 +1094,7 @@ impl Writer<'_> {
         unsafe {
             if is_single(ty) {
                 let _ = write!(self.out, "{} = ", self.path);
-                single(self.out, ty, ptr, self.ids, self.assets);
+                single(self.out, ty, ptr, self.refs, self.assets);
                 self.out.push('\n');
                 return;
             }
@@ -697,7 +1160,7 @@ impl Writer<'_> {
                     let mut entries: Vec<(String, *const u8)> = Vec::with_capacity((map.len)(ptr));
                     (map.for_each)(ptr, &mut |k, v| {
                         let mut key = String::new();
-                        single(&mut key, map.key, k, self.ids, self.assets);
+                        single(&mut key, map.key, k, self.refs, self.assets);
                         entries.push((key, v));
                     });
                     if !map.ordered {
@@ -743,7 +1206,7 @@ impl Writer<'_> {
                 self.out.push_str(", ");
             }
             // SAFETY: element `i` of the run.
-            unsafe { single(self.out, ty, first.add(i * ty.size), self.ids, self.assets) };
+            unsafe { single(self.out, ty, first.add(i * ty.size), self.refs, self.assets) };
         }
         self.out.push_str("]\n");
     }
@@ -758,18 +1221,16 @@ unsafe fn single(
     out: &mut String,
     ty: &'static TypeInfo,
     ptr: *const u8,
-    ids: Ids<'_>,
+    refs: Refs<'_>,
     assets: Option<&AssetPaths>,
 ) {
     // SAFETY: for the block, as the caller guarantees.
     unsafe {
         if is_entity(ty) {
             let e = ptr.cast::<Entity>().read_unaligned();
-            match ids(e) {
-                Some(id) => {
-                    let _ = write!(out, "@{id}");
-                }
-                None => out.push_str("@none"),
+            out.push('@');
+            if !refs.write(e, out) {
+                out.push_str("none");
             }
             return;
         }
@@ -789,7 +1250,7 @@ unsafe fn single(
             return;
         }
         if let Some(f) = newtype_field(ty) {
-            single(out, f.ty, ptr.add(f.offset), ids, assets);
+            single(out, f.ty, ptr.add(f.offset), refs, assets);
             return;
         }
         match ty.kind {
@@ -844,24 +1305,94 @@ unsafe fn write_primitive(out: &mut String, ty: &TypeInfo, ptr: *const u8) {
     }
 }
 
-struct Block<'a> {
-    line: usize,
-    id: SceneId,
-    parent: Option<(usize, SceneId)>,
+/// What a block of a scene file is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// `[entity <id>]`: an entity of the scene.
+    Entity,
+    /// `[instance <id>]`: a prefab placed ([`prefab`]).
+    Instance,
+    /// `[override <instance>/<entity>…]`: lines for an entity an instance placed.
+    Override,
+}
+
+pub(crate) struct Block<'a> {
+    pub(crate) line: usize,
+    pub(crate) kind: Kind,
+    /// The entity's id: its own, the instance's, or an override's target's
+    /// ([`SceneId::of_path`] of its target).
+    pub(crate) id: SceneId,
+    pub(crate) parent: Option<(usize, SceneId)>,
     /// `order = <n>`: the root's place among the roots.
-    order: Option<(usize, u32)>,
+    pub(crate) order: Option<(usize, u32)>,
     /// (line, component, path after the component, value)
-    fields: Vec<(usize, &'a str, &'a str, &'a str)>,
+    pub(crate) fields: Vec<(usize, &'a str, &'a str, &'a str)>,
+    /// What instances and overrides have besides (none for an entity's).
+    more: Option<Box<BlockMore<'a>>>,
+}
+
+/// What an instance's or an override's block has besides an entity's.
+#[derive(Default)]
+struct BlockMore<'a> {
+    /// An override's target as written, its instance first.
+    target: Vec<SceneId>,
+    /// An instance's `prefab = asset(…)` value.
+    prefab: Option<(usize, &'a str)>,
+    /// An instance's `remove = @<entity>` lines, an override's `remove = <Component>`.
+    removes: Vec<(usize, &'a str)>,
+    /// The block as written, from its header to the next one.
+    text: &'a str,
+    /// An instance's lines but its header, prefab, parent and order, as written.
+    body: String,
+}
+
+impl<'a> Block<'a> {
+    fn new(line: usize, kind: Kind, id: SceneId) -> Self {
+        Self {
+            line,
+            kind,
+            id,
+            parent: None,
+            order: None,
+            fields: Vec::new(),
+            more: (kind != Kind::Entity).then(Box::default),
+        }
+    }
+
+    /// An override's target as written, its instance first.
+    pub(crate) fn target(&self) -> &[SceneId] {
+        self.more.as_ref().map_or(&[], |m| &m.target)
+    }
+
+    /// An instance's `prefab = asset(…)` value.
+    pub(crate) fn prefab(&self) -> Option<(usize, &'a str)> {
+        self.more.as_ref().and_then(|m| m.prefab)
+    }
+
+    /// An instance's `remove = @<entity>` lines, an override's `remove = <Component>`.
+    pub(crate) fn removes(&self) -> &[(usize, &'a str)] {
+        self.more.as_ref().map_or(&[], |m| &m.removes)
+    }
+
+    /// The block as written (an instance's or an override's).
+    pub(crate) fn text(&self) -> &'a str {
+        self.more.as_ref().map_or("", |m| m.text)
+    }
+
+    /// An instance's lines but its header, prefab, parent and order, as written.
+    pub(crate) fn body(&self) -> &str {
+        self.more.as_ref().map_or("", |m| &m.body)
+    }
 }
 
 /// A parsed file: its header and its blocks.
-struct Parsed<'a> {
-    version: u32,
-    id: Option<AssetId>,
-    blocks: Vec<Block<'a>>,
+pub(crate) struct Parsed<'a> {
+    pub(crate) version: u32,
+    pub(crate) id: Option<AssetId>,
+    pub(crate) blocks: Vec<Block<'a>>,
 }
 
-fn err(line: usize, message: impl Into<String>) -> LoadError {
+pub(crate) fn err(line: usize, message: impl Into<String>) -> LoadError {
     LoadError {
         line,
         message: message.into(),
@@ -929,11 +1460,17 @@ pub fn scene_header(text: &str) -> Result<(u32, Option<AssetId>), LoadError> {
     ))
 }
 
-fn parse(text: &str) -> Result<Parsed<'_>, LoadError> {
+pub(crate) fn parse(text: &str) -> Result<Parsed<'_>, LoadError> {
     let mut blocks: Vec<Block<'_>> = Vec::new();
     let mut head = None;
-    for (i, raw) in text.lines().enumerate() {
+    // Where the last block began, in bytes.
+    let mut start = 0;
+    let mut offset = 0;
+    for (i, raw) in text.split_inclusive('\n').enumerate() {
         let line = i + 1;
+        let at = offset;
+        offset += raw.len();
+        let raw = raw.trim_end_matches(['\n', '\r']);
         let s = raw.trim();
         if s.is_empty() || s.starts_with('#') {
             continue;
@@ -942,18 +1479,41 @@ fn parse(text: &str) -> Result<Parsed<'_>, LoadError> {
             head = Some(header("scene", VERSION, line, s)?);
             continue;
         }
-        if let Some(rest) = s.strip_prefix("[entity ") {
-            let id = rest
-                .strip_suffix(']')
-                .and_then(|h| SceneId::parse(h.trim()))
-                .ok_or_else(|| err(line, "expected `[entity <32 hex digits>]`"))?;
-            blocks.push(Block {
-                line,
-                id,
-                parent: None,
-                order: None,
-                fields: Vec::new(),
-            });
+        if s.starts_with('[') {
+            let block = if let Some(rest) = s.strip_prefix("[entity ") {
+                let id = rest
+                    .strip_suffix(']')
+                    .and_then(|h| SceneId::parse(h.trim()))
+                    .ok_or_else(|| err(line, "expected `[entity <32 hex digits>]`"))?;
+                Block::new(line, Kind::Entity, id)
+            } else if let Some(rest) = s.strip_prefix("[instance ") {
+                let id = rest
+                    .strip_suffix(']')
+                    .and_then(|h| SceneId::parse(h.trim()))
+                    .ok_or_else(|| err(line, "expected `[instance <32 hex digits>]`"))?;
+                Block::new(line, Kind::Instance, id)
+            } else if let Some(rest) = s.strip_prefix("[override ") {
+                let target = rest
+                    .strip_suffix(']')
+                    .and_then(|h| SceneId::parse_path(h.trim()))
+                    .filter(|path| path.len() > 1)
+                    .ok_or_else(|| err(line, "expected `[override <instance id>/<entity id>…]`"))?;
+                let mut block = Block::new(line, Kind::Override, SceneId::of_path(&target));
+                if let Some(more) = &mut block.more {
+                    more.target = target;
+                }
+                block
+            } else {
+                return Err(err(
+                    line,
+                    "expected `[entity <id>]`, `[instance <id>]` or `[override <path>]`",
+                ));
+            };
+            if let Some(more) = blocks.last_mut().and_then(|b| b.more.as_mut()) {
+                more.text = &text[start..at];
+            }
+            start = at;
+            blocks.push(block);
             continue;
         }
         let block = blocks
@@ -961,20 +1521,46 @@ fn parse(text: &str) -> Result<Parsed<'_>, LoadError> {
             .ok_or_else(|| err(line, "a field before the first `[entity ...]`"))?;
         let (key, value) =
             text::split_assignment(s).ok_or_else(|| err(line, "expected `key = value`"))?;
-        if key == "parent" {
-            let id = SceneId::parse(value).ok_or_else(|| err(line, "expected a scene id"))?;
-            block.parent = Some((line, id));
-            continue;
+        let kind = block.kind;
+        match key {
+            "parent" if kind != Kind::Override => {
+                let path = SceneId::parse_path(value)
+                    .ok_or_else(|| err(line, "expected a scene id, or a path of them"))?;
+                block.parent = Some((line, SceneId::of_path(&path)));
+                continue;
+            }
+            "order" if kind != Kind::Override => {
+                let n = value
+                    .parse::<u32>()
+                    .map_err(|_| err(line, "expected a whole number from 0 to 4294967295"))?;
+                block.order = Some((line, n));
+                continue;
+            }
+            "prefab" if kind == Kind::Instance => {
+                if let Some(more) = &mut block.more {
+                    more.prefab = Some((line, value));
+                }
+                continue;
+            }
+            "remove" if kind != Kind::Entity => {
+                if let Some(more) = &mut block.more {
+                    more.removes.push((line, value));
+                }
+            }
+            _ => {
+                let (component, path) = text::component_of(key);
+                block.fields.push((line, component, path, value));
+            }
         }
-        if key == "order" {
-            let n = value
-                .parse::<u32>()
-                .map_err(|_| err(line, "expected a whole number from 0 to 4294967295"))?;
-            block.order = Some((line, n));
-            continue;
+        if kind == Kind::Instance
+            && let Some(more) = &mut block.more
+        {
+            more.body.push_str(raw);
+            more.body.push('\n');
         }
-        let (component, path) = text::component_of(key);
-        block.fields.push((line, component, path, value));
+    }
+    if let Some(more) = blocks.last_mut().and_then(|b| b.more.as_mut()) {
+        more.text = &text[start..];
     }
     let (version, id) = head.ok_or_else(|| {
         err(
@@ -991,8 +1577,11 @@ fn parse(text: &str) -> Result<Parsed<'_>, LoadError> {
 
 /// How a scene's values name entities and assets.
 struct SceneRefs<'a> {
-    by_id: &'a HashMap<SceneId, usize>,
-    entities: &'a [Entity],
+    index: &'a HashMap<SceneId, usize>,
+    /// The entities placed, by their index in the plan (none: left out).
+    entities: &'a [Option<Entity>],
+    /// The namespace the current line's references are read in.
+    chain: &'a [prefab::Step],
     /// An entity reference not in the scene, on the current line.
     warning: Option<String>,
     assets: &'a mut AssetPaths,
@@ -1000,12 +1589,17 @@ struct SceneRefs<'a> {
 
 impl ReadRefs for SceneRefs<'_> {
     fn entity(&mut self, label: &str) -> Result<Entity, String> {
-        let id = SceneId::parse(label)
-            .ok_or_else(|| format!("expected `@<scene id>` or `@none`, found `@{label}`"))?;
-        match self.by_id.get(&id) {
-            Some(&i) => Ok(self.entities[i]),
+        if label == "none" {
+            return Ok(Entity::NULL);
+        }
+        let path = SceneId::parse_path(label).ok_or_else(|| {
+            format!("expected `@<scene id>`, a path of them, or `@none`, found `@{label}`")
+        })?;
+        let id = prefab::map(self.chain, SceneId::of_path(&path));
+        match self.index.get(&id).and_then(|&i| self.entities[i]) {
+            Some(e) => Ok(e),
             None => {
-                self.warning = Some(format!("entity {id} is not in this scene"));
+                self.warning = Some(format!("entity {label} is not in this scene"));
                 Ok(Entity::NULL)
             }
         }
@@ -1017,97 +1611,239 @@ impl ReadRefs for SceneRefs<'_> {
 }
 
 /// Whether `Component = value` sets a whole component (one written as a single value).
-fn whole_value(info: &TypeInfo) -> bool {
+pub(crate) fn whole_value(info: &TypeInfo) -> bool {
     is_single(info) || newtype_field(info).is_some()
 }
 
+/// How [`load_with`] loads a scene.
+#[derive(Clone, Copy, Default)]
+pub struct LoadOptions<'a> {
+    /// Where the prefabs its instances place come from ([`PrefabFiles`] reads them from a
+    /// folder). None: each instance is kept as written, its prefab not placed, with a
+    /// warning.
+    pub prefabs: Option<&'a dyn Prefabs>,
+}
+
 /// Loads a scene into `world`: spawns its entities (with their [`SceneId`]s), their
-/// components and the hierarchy. On error nothing is kept.
+/// components and the hierarchy. On error nothing is kept. Its prefab instances are kept
+/// as written, their prefabs not placed: [`load_with`] places them.
 pub fn load(
     world: &mut World,
     registry: &SceneRegistry,
     text: &str,
 ) -> Result<LoadReport, LoadError> {
+    load_with(world, registry, text, &LoadOptions::default())
+}
+
+/// [`load`], the prefabs its instances place read through `options` ([`prefab`]).
+pub fn load_with(
+    world: &mut World,
+    registry: &SceneRegistry,
+    text: &str,
+    options: &LoadOptions<'_>,
+) -> Result<LoadReport, LoadError> {
     engine_profiler::zone!("scene::load");
     let parsed = parse(text)?;
-    let blocks = &parsed.blocks;
-    let mut by_id: HashMap<SceneId, usize> = HashMap::with_capacity(blocks.len());
-    for (i, b) in blocks.iter().enumerate() {
-        if by_id.insert(b.id, i).is_some() {
-            return Err(err(b.line, format!("scene id {} appears twice", b.id)));
-        }
-    }
-    // Validate everything that can fail before touching the world.
-    for b in blocks {
-        if let Some((line, p)) = b.parent
-            && !by_id.contains_key(&p)
-        {
-            return Err(err(line, format!("parent {p} is not in this scene")));
-        }
-        for &(line, component, path, value) in &b.fields {
-            let Some(&entry) = registry.by_name.get(component) else {
-                return Err(err(line, format!("unknown component `{component}`")));
-            };
-            if path.is_empty() && value != "{}" && !whole_value(registry.entries[entry].info) {
-                return Err(err(
-                    line,
-                    format!("expected `{component}.<field> = value` or `{component} = {{}}`"),
-                ));
+    let texts = prefab::read_texts(&parsed, options.prefabs);
+    let prefabs = prefab::parse_texts(&texts, registry);
+    let mut plan = prefab::Plan::new();
+    let mut planning = prefab::Planning {
+        prefabs: &prefabs,
+        stack: Vec::new(),
+    };
+    let place = prefab::Place {
+        chain: 0,
+        at: None,
+        file: None,
+    };
+    prefab::plan_scene(&mut plan, &mut planning, &parsed, place)?;
+    spawn(world, registry, plan, parsed.id, parsed.version)
+}
+
+/// Spawns what `plan` places: its entities, their components (a prefab's lines first,
+/// then the overrides), the hierarchy. On error nothing is kept.
+fn spawn(
+    world: &mut World,
+    registry: &SceneRegistry,
+    plan: prefab::Plan<'_, '_>,
+    id: Option<AssetId>,
+    version: u32,
+) -> Result<LoadReport, LoadError> {
+    let prefab::Plan {
+        entities: planned,
+        chains,
+        files,
+        mut warnings,
+        prefabs,
+        paths,
+        index,
+    } = plan;
+    // What is left out: an entity gone, and everything under one (nothing, mostly).
+    let any_gone = planned.iter().any(|p| p.gone);
+    let mut gone: Vec<Option<bool>> =
+        vec![if any_gone { None } else { Some(false) }; planned.len()];
+    let mut chain = Vec::new();
+    for i in 0..if any_gone { planned.len() } else { 0 } {
+        chain.clear();
+        let mut at = i;
+        let out = loop {
+            if let Some(known) = gone[at] {
+                break known;
             }
+            chain.push(at);
+            if planned[at].gone {
+                break true;
+            }
+            match planned[at].parent.and_then(|(_, p)| index.get(&p).copied()) {
+                // A loop of parents ends at the entity it started from.
+                Some(p) if !chain.contains(&p) => at = p,
+                _ => break false,
+            }
+        };
+        for &k in &chain {
+            gone[k] = Some(out);
         }
     }
-    let entities: Vec<Entity> = blocks.iter().map(|b| world.spawn((b.id,))).collect();
+    let gone: Vec<bool> = gone.into_iter().map(|g| g == Some(true)).collect();
+    // Parents: the scene's own entities' must be there; a prefab's go on as roots.
+    for (p, &g) in planned.iter().zip(&gone) {
+        if g {
+            continue;
+        }
+        if let Some((line, parent)) = p.parent
+            && index.get(&parent).is_none_or(|&i| gone[i])
+        {
+            if p.own && !index.contains_key(&parent) {
+                return Err(err(line, format!("parent {parent} is not in this scene")));
+            }
+            warnings.push((
+                line,
+                format!("entity {}: its parent is not in this scene", p.id),
+            ));
+        }
+    }
+    let entities: Vec<Option<Entity>> = planned
+        .iter()
+        .zip(&gone)
+        .map(|(p, &g)| (!g).then(|| world.spawn((p.id,))))
+        .collect();
+    let spawned: Vec<Entity> = entities.iter().flatten().copied().collect();
     let mut assets = AssetPaths::new();
-    let mut warnings: Vec<(usize, String)> = Vec::new();
+    for (prefab, path) in &paths {
+        assets.insert(AssetRef::file(*prefab), path);
+    }
     let mut first_error: Option<LoadError> = None;
     let mut segs: Vec<Seg<'_>> = Vec::new();
     let mut scratches: Vec<Option<Scratch>> = registry.entries.iter().map(|_| None).collect();
-    for (bi, b) in blocks.iter().enumerate() {
-        let e = entities[bi];
+    let mut lines: Vec<prefab::Line<'_>> = Vec::new();
+    for (i, p) in planned.iter().enumerate() {
+        let Some(e) = entities[i] else {
+            continue;
+        };
+        // Each component's lines together, in the order they come: the prefab's, then
+        // the overrides, sorted together; `Component = {}` starts it again from its
+        // default. A block's own lines alone come grouped (as a scene writes them) and are
+        // read where they are.
+        let (fields, place) = p.block.unwrap_or((&[], prefab::Place::SCENE));
+        let more = p.more.as_ref().filter(|m| !m.lines.is_empty());
+        lines.clear();
+        if let Some(more) = more {
+            lines.extend(fields.iter().map(|&f| place.line(f)));
+            lines.extend(more.lines.iter().copied());
+            lines.sort_by_key(|l| l.component);
+        }
+        let count = if more.is_some() {
+            lines.len()
+        } else {
+            fields.len()
+        };
+        let line = |k: usize| {
+            if more.is_some() {
+                lines[k]
+            } else {
+                place.line(fields[k])
+            }
+        };
         let mut start = 0;
-        while start < b.fields.len() {
-            let component = b.fields[start].1;
-            let end = start
-                + b.fields[start..]
-                    .iter()
-                    .take_while(|f| f.1 == component)
-                    .count();
-            let index = registry.by_name[component];
-            let entry = &registry.entries[index];
-            let lines = &b.fields[start..end];
+        while start < count {
+            let component = line(start).component;
+            let mut end = start + 1;
+            while end < count && line(end).component == component {
+                end += 1;
+            }
+            let from = (start..end)
+                .rev()
+                .find(|&k| {
+                    let l = line(k);
+                    l.path.is_empty() && l.value == "{}"
+                })
+                .unwrap_or(start);
+            let Some(&entry_index) = registry.by_name.get(component) else {
+                // The scene's own unknown component fails the load; a prefab's was refused
+                // before it was placed.
+                let l = line(from);
+                let message = format!("unknown component `{component}`");
+                if l.from.is_none() {
+                    first_error.get_or_insert_with(|| err(l.at, message));
+                } else {
+                    warnings.push((l.at, message));
+                }
+                start = end;
+                continue;
+            };
+            let entry = &registry.entries[entry_index];
             let mut fill = |ptr: *mut u8| {
-                let mut refs = SceneRefs {
-                    by_id: &by_id,
-                    entities: &entities,
-                    warning: None,
-                    assets: &mut assets,
-                };
-                for &(line, _, path, value) in lines {
-                    if path.is_empty() && value == "{}" {
+                for k in from..end {
+                    let l = line(k);
+                    if l.path.is_empty() && l.value == "{}" {
                         continue;
                     }
-                    let result = text::segments_into(path, &mut segs).and_then(|()| {
-                        // SAFETY: `ptr` is a valid value of the component, described by
-                        // its registered type.
-                        let target = unsafe { text::resolve(&segs, entry.info, ptr, &mut refs) }?;
-                        match target {
-                            None => Ok(Some(format!("`{component}` has no field `{path}`"))),
-                            Some((ty, attrs, at)) => {
-                                // SAFETY: `at` is a valid, writable value of `ty`.
-                                unsafe { text::set_text(ty, &attrs, at, value, &mut refs) }
-                                    .map(|()| None)
+                    let mut refs = SceneRefs {
+                        index: &index,
+                        entities: &entities,
+                        chain: &chains[l.chain as usize],
+                        warning: None,
+                        assets: &mut assets,
+                    };
+                    let path = l.path;
+                    let value = l.value;
+                    let result = if path.is_empty() && !whole_value(entry.info) {
+                        Err(format!(
+                            "expected `{component}.<field> = value` or `{component} = {{}}`"
+                        ))
+                    } else {
+                        text::segments_into(path, &mut segs).and_then(|()| {
+                            // SAFETY: `ptr` is a valid value of the component, described
+                            // by its registered type.
+                            let target =
+                                unsafe { text::resolve(&segs, entry.info, ptr, &mut refs) }?;
+                            match target {
+                                None => Ok(Some(format!("`{component}` has no field `{path}`"))),
+                                Some((ty, attrs, at)) => {
+                                    // SAFETY: `at` is a valid, writable value of `ty`.
+                                    unsafe { text::set_text(ty, &attrs, at, value, &mut refs) }
+                                        .map(|()| None)
+                                }
                             }
-                        }
-                    });
+                        })
+                    };
+                    // A prefab's line is named by its file and line.
+                    let named = |m: String| match l.from {
+                        Some((f, line)) => format!("{}:{line}: {m}", files[f as usize]),
+                        None => m,
+                    };
                     if let Some(w) = refs.warning.take() {
-                        warnings.push((line, w));
+                        warnings.push((l.at, named(w)));
                     }
                     match result {
-                        Ok(Some(w)) => warnings.push((line, w)),
+                        Ok(Some(w)) => warnings.push((l.at, named(w))),
                         Ok(None) => {}
+                        // The scene's own bad value fails the load; a prefab's is its own
+                        // problem, said.
+                        Err(m) if l.from.is_some() => warnings.push((l.at, named(m))),
                         Err(m) => {
                             if first_error.is_none() {
-                                first_error = Some(err(line, m));
+                                first_error = Some(err(l.at, m));
                             }
                         }
                     }
@@ -1117,10 +1853,10 @@ pub fn load(
                 Access::Typed { insert, .. } => insert(world, e, &mut fill),
                 Access::Listed { id, default } => {
                     let id = id(world);
-                    if scratches[index].is_none() {
-                        scratches[index] = Scratch::new(entry.info);
+                    if scratches[entry_index].is_none() {
+                        scratches[entry_index] = Scratch::new(entry.info);
                     }
-                    if let Some(scratch) = &scratches[index] {
+                    if let Some(scratch) = &scratches[entry_index] {
                         // SAFETY: the scratch is room for one value of the type; its default
                         // makes it valid, reading keeps it valid, and `insert_raw` moves it
                         // into the world (the entity was just spawned), leaving the room
@@ -1138,44 +1874,75 @@ pub fn load(
             }
             start = end;
         }
+        let Some(more) = &p.more else {
+            continue;
+        };
+        // Components an override takes away.
+        for &(line, component) in &more.removed {
+            match registry.by_name.get(component.trim()) {
+                Some(&k) => match registry.entries[k].access {
+                    Access::Typed { remove, .. } => remove(world, e),
+                    Access::Listed { id, .. } => {
+                        let id = id(world);
+                        world.remove_raw(e, id);
+                    }
+                },
+                None => warnings.push((line, format!("unknown component `{component}`"))),
+            }
+        }
+        if let Some(instance) = more.instance {
+            world.insert(e, instance);
+            if p.own && !(more.kept.lines.is_empty() && more.kept.blocks.is_empty()) {
+                world.insert(e, more.kept.clone());
+            }
+        }
+        if let Some(part) = more.part {
+            world.insert(e, part);
+        }
     }
     if let Some(e) = first_error {
-        for &entity in &entities {
+        for &entity in &spawned {
             world.despawn(entity);
         }
         return Err(e);
     }
-    for (bi, b) in blocks.iter().enumerate() {
-        if let Some((line, p)) = b.parent {
-            let child = entities[bi];
-            let parent = entities[by_id[&p]];
-            if let Err(e) = world.set_parent(child, Some(parent)) {
-                for &entity in &entities {
-                    world.despawn(entity);
-                }
-                return Err(err(line, e.to_string()));
+    for (i, p) in planned.iter().enumerate() {
+        let (Some(child), Some((line, parent))) = (entities[i], p.parent) else {
+            continue;
+        };
+        let Some(parent) = index.get(&parent).and_then(|&k| entities[k]) else {
+            continue;
+        };
+        if let Err(e) = world.set_parent(child, Some(parent)) {
+            for &entity in &spawned {
+                world.despawn(entity);
             }
+            return Err(err(line, e.to_string()));
         }
     }
     // The roots' order; a child's is meaningless.
-    for (bi, b) in blocks.iter().enumerate() {
-        match (b.order, b.parent) {
+    for (i, p) in planned.iter().enumerate() {
+        let Some(e) = entities[i] else {
+            continue;
+        };
+        match (p.order, p.parent) {
             (Some((_, n)), None) => {
-                world.insert(entities[bi], RootOrder(n));
+                world.insert(e, RootOrder(n));
             }
-            (Some((line, _)), Some(_)) => warnings.push((
+            (Some((line, _)), Some(_)) if p.own => warnings.push((
                 line,
                 String::from("`order` places roots; this entity has a parent"),
             )),
-            (None, _) => {}
+            _ => {}
         }
     }
     Ok(LoadReport {
-        entities,
+        entities: spawned,
         warnings,
-        id: parsed.id,
-        version: parsed.version,
+        id,
+        version,
         assets,
+        prefabs,
     })
 }
 
@@ -1215,7 +1982,7 @@ pub fn write_value<T: Reflect>(
     let mut writer = Writer {
         out,
         path: String::new(),
-        ids: &no_ids,
+        refs: Refs::Ids(&no_ids),
         assets,
     };
     // SAFETY: `value` is a live `T`, which its description lays out.
@@ -1335,7 +2102,7 @@ pub unsafe fn write_lines_with(
     let mut writer = Writer {
         out,
         path: String::new(),
-        ids,
+        refs: Refs::Ids(ids),
         assets,
     };
     // SAFETY: as the caller guarantees.
