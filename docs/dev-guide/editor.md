@@ -624,6 +624,15 @@ will do:
     scene (its transform, and a model of its mesh and material).
 - **Fields:** a model's `mesh` takes a model file of one mesh, its `material` a material
   file or a model file of one material.
+
+**Asset fields in the inspector** show the asset as Godot's do:
+- a square preview the engine draws: a mesh with its own material, a material on a
+  sphere, an image as itself;
+- the asset's name beside it.
+
+A click opens the palette on the project's assets of the field's kind (`#model:`,
+`#material:`), and Enter puts the one picked in the field, on every selected entity. A
+file dropped on the field takes its place.
 - **Meshes of several materials:** a model draws one material, so such a mesh draws with
   its first. The status line names the meshes this affects.
 
