@@ -1537,3 +1537,38 @@ so not SQLite. The editor opens it at its start and follows the folder.
   spaces left out.
 - **Left:** semantic colors from Luau's analysis (E8-3); an interpolated string's code
   across lines resets at the line's end.
+
+## As built (E8-2, 2026-10-22): find, replace, go to a line
+
+- **The find bar** is VS Code's, under the code bar of a script's tab:
+  - **opening it:** Ctrl+F; with one line selected, that text is put in the field.
+    Ctrl+H adds the replace field;
+  - **typing** finds from where the caret was, selecting the first match from there;
+  - **lit:** every match in view, the one it is on brighter;
+  - **the count:** `2 of 9`, or `No results`;
+  - **Enter** goes to the next match and Shift+Enter to the one before, around the text's
+    ends; the field keeps the keys. F3 and Shift+F3 do the same from the code;
+  - **Alt+C** matches case and **Alt+W** whole words, as do the two toggles;
+  - **Alt+Enter** makes every match a caret and closes the bar;
+  - **Escape** closes it, from a field or from the code.
+- **Replacing:**
+  - Enter in the replace field (or its first button) replaces the match the caret is on,
+    then goes to the next;
+  - Ctrl+Alt+Enter (or the second button) replaces every match as one undo step: every
+    match a caret, then one edit (`Document::select_ranges`, `Document::insert`).
+- **Finding** (`find::Find`):
+  - matches are found as text, line by line, again only when the text's version, the query
+    or an option changed;
+  - without case, a line is compared in lower case when that keeps its characters'
+    lengths (others, such as `İ`, as they are);
+  - a whole word is one no letter, digit or `_` touches.
+- **Ctrl+G** opens the palette on `:`. `:12` or `:12:5` goes to that line and column of the
+  shown script, as in VS Code.
+- **The keys of a script's tab** (Ctrl+F, Ctrl+H, F3, Shift+F3, Ctrl+G) are a key context
+  of their own (`CODE_KEYS`), before the editor's global ones. Ctrl+H hollows a brush
+  everywhere else. F3, Ctrl+F and Ctrl+H work from the bar's fields too.
+- **Left:**
+  - regular expressions;
+  - keeping the case when replacing;
+  - finding in a selection;
+  - find in files (Ctrl+Shift+F, with E8-3's work on the project's scripts).

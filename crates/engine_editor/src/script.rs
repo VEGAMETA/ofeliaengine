@@ -5,6 +5,7 @@
 use crate::Chord;
 use crate::app::is_function_key;
 use crate::code::{Document, Motion, Pos, char_column, col_at};
+use crate::find::Find;
 use crate::highlight::Highlight;
 use crate::session::Base;
 use crate::shell::{CODE_LINE, CODE_PAD};
@@ -23,6 +24,8 @@ pub(crate) struct Script {
     pub(crate) doc: Document,
     /// The states its lines start in, for highlighting.
     pub(crate) highlight: Highlight,
+    /// Its find bar, while open (Ctrl+F).
+    pub(crate) find: Option<Find>,
     /// How far its view is scrolled: logical pixels across and down.
     pub(crate) scroll: [f32; 2],
     /// The primary caret is brought into view at the next frame: it moved, or the text
@@ -53,6 +56,7 @@ impl Script {
             path,
             doc: Document::new(body.unwrap_or(text)),
             highlight: Highlight::default(),
+            find: None,
             scroll: [0.0; 2],
             reveal: false,
             base,
