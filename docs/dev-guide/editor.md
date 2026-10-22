@@ -705,10 +705,16 @@ room.
   - "Prefab: Apply Overrides" writes the instance into its prefab: its values, and the
     components and entities it added or removed. The prefab's other instances follow at
     once. Undo puts the scene back; the file stays as written.
-- **A prefab written anew** (by Apply, by another editor, by hand) is followed by the
-  open scene's instances: they take its new values where they did not change them, its
-  new entities and components, and lose what it no longer has where they kept it as it
-  was. What they changed stays theirs. While the scene plays, this waits for Stop.
+- **Edit the prefab itself:** "Prefab: Open", or Open in the inspector's title beside
+  "instance of…" or "in…", opens the prefab of the nearest instance in a
+  [tab](#scenes-in-tabs) of its own, the entity you had selected selected there (an
+  instance's root: the prefab's root). Edit it as any scene and press Ctrl+S: the other
+  tabs' instances take it when you go back to them.
+- **A prefab written anew** (by Apply, by its own tab, by another editor, by hand) is
+  followed by the open scene's instances: they take its new values where they did not
+  change them, its new entities and components, and lose what it no longer has where they
+  kept it as it was. What they changed stays theirs. While the scene plays, this waits
+  for Stop.
 
 ## Scenes in tabs
 

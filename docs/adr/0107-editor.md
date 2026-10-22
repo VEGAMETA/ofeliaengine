@@ -1245,8 +1245,18 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
   one shown (`active`); a start opens them all, the inactive ones from their autosaves
   (unsaved, marked when their files changed since) or their files, and shows that one.
 - **Not while playing:** switching, opening and closing wait for Stop.
-- **Left:** E5-5b, a prefab opened in a tab from its instance; tabs dragged into
-  another order; a scene open in two tabs.
+- **Left:** tabs dragged into another order; a scene open in two tabs.
+
+## As built (E5-5b, 2026-10-22): a prefab in a tab
+
+- "Prefab: Open" (and Open in the inspector's title, shown while the selection is in an
+  instance) opens the prefab of the active entity's nearest instance (its own, or the
+  innermost whose part it is) as a scene tab, or shows its tab; the entity picked is
+  selected there by its id in the prefab's file (an instance's root: the prefab's single
+  root).
+- Ctrl+S there writes the file. The other tabs keep their scenes as text, instances as
+  their overrides, so shown again they load the prefab as it is now: no merge needed; the
+  scene in the world follows a file written anew as before (E5-4). **E5 is done.**
 
 ## As built (E4-1, 2026-10-22): the local cache's index
 

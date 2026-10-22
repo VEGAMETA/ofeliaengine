@@ -327,6 +327,8 @@ pub struct ShellModel<'a> {
     pub tree: &'a [TreeItem<'a>],
     /// Inspector heading: the selection's name and type.
     pub selection: &'a str,
+    /// The selection is in a prefab's instance: the heading offers to open the prefab.
+    pub prefab: bool,
     /// Inspector sections.
     pub inspector: &'a [Section<'a>],
     /// The current folder's path.
@@ -399,6 +401,8 @@ pub struct ShellResponse {
     pub tree_filter: Option<TextFieldResponse>,
     /// The inspector's filter field was used.
     pub inspector_filter: Option<TextFieldResponse>,
+    /// The inspector heading's Open was clicked: the selection's prefab in a tab.
+    pub open_prefab: bool,
     /// The inspector field under the mouse (section, field): Backspace resets it, Ctrl+C
     /// and Ctrl+V copy and paste its value.
     pub hovered_field: Option<(usize, usize)>,
@@ -1782,6 +1786,27 @@ fn inspector_dock(
                 },
                 |ui| {
                     text(ui, "name", model.selection, 14.0, p.text);
+                    if model.prefab {
+                        ui.spacer("fill");
+                        let id = ui.container(
+                            "open prefab",
+                            Style {
+                                padding: [8.0, 3.0, 8.0, 3.0],
+                                gap: 4.0,
+                                radius: 3.0,
+                                background: Some(p.header),
+                                align_cross: Align::Center,
+                                ..Style::default()
+                            },
+                            |ui| {
+                                text(ui, "icon", icons::SCENE, ICON, p.text_dim);
+                                text(ui, "label", "Open", TEXT, p.text_dim);
+                            },
+                        );
+                        if ui.sense(id, false).clicked {
+                            out.open_prefab = true;
+                        }
+                    }
                 },
             );
             out.inspector_filter = filter(ui, model.inspector_filter, "Filter properties", p);
