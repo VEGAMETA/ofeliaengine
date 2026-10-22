@@ -1283,6 +1283,23 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
 - **Left (E6's further steps):** causes taken from a row's text (asset paths, scene ids,
   `file:line`), Tasks, History, and the profiler's first panel.
 
+## As built (E6-2, 2026-10-22): errors next to their causes
+
+- **A row's cause from its text** (`output::cause_of`, the first one, word by word):
+  - 32 hex digits: a scene entity's id, else an asset's;
+  - `path:line[:column]` (a Windows drive's colon allowed);
+  - a path with an extension, when it holds a folder or has a project file's extension
+    (`scene`, `material`, `glb`, `luau`, `rs`, …), so "12.5 ms" and "and/or" name
+    nothing.
+
+  Nothing in the logging calls changes: the engine's messages already name their files.
+- **A click on a row with a cause** (marked by a link sign): an entity's id selects it (an
+  asset's shows it in the FileSystem dock); a project asset's path shows it in the dock;
+  another file, or a file's line, opens in VS Code (found under the project, then the
+  game's crate, then as written).
+- **Build errors in the Output:** a failed build logs each error (`build`), its place
+  relative to the game's crate, so a click opens it; "Build: Show Errors…" stays.
+
 ## As built (E4-1, 2026-10-22): the local cache's index
 
 §5 left the index's form to a measurement: our own text file, read in 3.2 ms and an

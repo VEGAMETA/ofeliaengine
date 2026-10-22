@@ -12,6 +12,8 @@ pub const PAUSE: &str = "\u{F03E4}";
 pub const STOP: &str = "\u{F04DB}";
 /// Closes a scene's tab (`md-close`).
 pub const CLOSE: &str = "\u{F0156}";
+/// An Output row whose text names its cause: a click shows it (`md-open_in_new`).
+pub const LINK: &str = "\u{F03CC}";
 /// An entity that is on, in the scene tree (`md-eye`).
 pub const EYE: &str = "\u{F0208}";
 /// An entity that is off (`md-eye_off`).

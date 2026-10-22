@@ -732,6 +732,15 @@ start (`log::warn!(target: "doors", "door {id} is stuck")`).
 - **A line marks each Play's start.** Follow keeps the newest row in view, and Clear empties
   the panel.
 - **The tab** says how many errors came, even while the panel is closed.
+- **A row that names its cause** carries a link sign; a click shows it:
+  - a scene entity's id (32 hex digits) selects it, and an asset's id shows it in the
+    FileSystem dock;
+  - a project file's path (`props/lamp.scene`) shows it in the dock;
+  - a file and line (`src/main.rs:12:5`, `scripts/door.luau:7`) opens in VS Code.
+
+  Your own messages work the same: name the file or the entity's id in the text
+  (`log::warn!("{}: no door here", path)`). A failed build of your game's code puts each
+  error there too.
 
 ## Scenes in tabs
 

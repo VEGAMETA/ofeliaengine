@@ -1461,6 +1461,8 @@ struct Editor {
     bottom: Option<usize>,
     /// The Output tab's label (its errors counted), made with the frame.
     output_label: String,
+    /// The rows the Output showed last, by serial: a click names one by its place.
+    output_shown: Vec<u64>,
     /// The last click on a file in the dock, for double clicks (a scene opens).
     last_file_click: Option<(AssetId, Instant)>,
     /// The session in the project's `.ofelia/` (ADR 0107 §4): none until
@@ -2061,6 +2063,7 @@ impl Editor {
             output: crate::output::Output::new(),
             bottom: None,
             output_label: String::new(),
+            output_shown: Vec::new(),
             last_file_click: None,
             session: None,
             game_crate: None,
@@ -3120,6 +3123,8 @@ impl Editor {
         } else {
             Vec::new()
         };
+        self.output_shown.clear();
+        self.output_shown.extend(shown.iter().map(|r| r.serial));
         let output_rows: Vec<crate::shell::OutputRow<'_>> = shown
             .iter()
             .map(|r| crate::shell::OutputRow {
@@ -3128,6 +3133,7 @@ impl Editor {
                 target: &r.target,
                 message: &r.message,
                 count: r.count,
+                link: r.cause.is_some(),
             })
             .collect();
         let output_view = (self.bottom == Some(0)).then(|| crate::shell::OutputView {
@@ -3298,6 +3304,12 @@ impl Editor {
         }
         if response.output_clear {
             self.run(world, self.ids.clear_output);
+        }
+        if let Some(i) = response.output_row
+            && let Some(&serial) = self.output_shown.get(i)
+            && let Some(cause) = self.output.row(serial).and_then(|r| r.cause.clone())
+        {
+            self.show_cause(world, cause);
         }
         if response.play {
             self.run(world, self.ids.play);
@@ -10436,6 +10448,10 @@ impl Editor {
             (None, None) => String::from("Build failed"),
         };
         log::warn!(target: "engine_editor", "{text}");
+        // Each error in the Output, its place a click opens (E6-2).
+        for problem in &built.errors {
+            log::error!(target: "build", "{}: {}", problem.location(&game), problem.message);
+        }
         self.problems = built.errors;
         self.build_state = BuildState::Failed(text);
     }
@@ -10490,8 +10506,71 @@ impl Editor {
             return;
         };
         let place = format!("{}:{line}:{column}", path.display());
+        self.open_in_code(&place);
+    }
+
+    /// A click on an Output row naming its cause (E6-2): an entity's id selects it (an
+    /// asset's shows it in the dock), a project asset's path shows it in the dock, another
+    /// file and a file's line open in VS Code (found under the project, then the game's
+    /// crate, then as written).
+    fn show_cause(&mut self, world: &mut World, cause: crate::output::Cause) {
+        use crate::output::Cause;
+        let found = |root: &Path, crate_dir: Option<&Path>, path: &str| {
+            let given = PathBuf::from(path);
+            [
+                Some(root.join(&given)),
+                crate_dir.map(|d| d.join(&given)),
+                Some(given),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|p| p.is_file())
+        };
+        let crate_dir = self.game_crate.as_ref().map(|g| g.manifest_dir.clone());
+        match cause {
+            Cause::Id(bits) => {
+                let scene = SceneId::from_u128(bits);
+                let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
+                let entity = q
+                    .iter_readonly(world)
+                    .find(|&(_, &id)| id == scene)
+                    .map(|(e, _)| e);
+                let asset = AssetId::from_u128(bits);
+                match entity {
+                    Some(e) => self.show(world, e),
+                    None if self.asset_db.get(asset).is_some() => self.reveal_asset(asset),
+                    None => self.say(format!(
+                        "No entity of the open scene, nor asset of the project, is {scene}"
+                    )),
+                }
+            }
+            Cause::Path(path) => {
+                let relative = path.replace('\\', "/");
+                let relative = relative.trim_start_matches("./");
+                match self.asset_db.find(relative).map(|e| e.id) {
+                    Some(id) => self.reveal_asset(id),
+                    None => match found(&self.root, crate_dir.as_deref(), &path) {
+                        Some(file) => self.open_in_code(&format!("{}:1:1", file.display())),
+                        None => self.say(format!("{path}: no such file in the project")),
+                    },
+                }
+            }
+            Cause::Place { path, line, column } => {
+                match found(&self.root, crate_dir.as_deref(), &path) {
+                    Some(file) => {
+                        self.open_in_code(&format!("{}:{line}:{column}", file.display()));
+                    }
+                    None => self.say(format!("{path}: no such file in the project")),
+                }
+            }
+        }
+    }
+
+    /// Opens `place` (`file:line:column`) in VS Code, or copies it when `code` is not on
+    /// PATH.
+    fn open_in_code(&mut self, place: &str) {
         let mut command = std::process::Command::new("code.cmd");
-        command.args(["-g", &place]);
+        command.args(["-g", place]);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -10501,7 +10580,7 @@ impl Editor {
         if command.spawn().is_ok() {
             self.say(format!("Opened {place} in VS Code"));
         } else {
-            self.input.clipboard.set_text(&place);
+            self.input.clipboard.set_text(place);
             self.say(format!("VS Code (`code`) is not on PATH: copied {place}"));
         }
     }
@@ -14125,6 +14204,28 @@ mod tests {
         assert!(child(&world, b, moth_id).is_none());
         let moth = engine_scene::find_named(&mut world, "Moth").unwrap();
         assert_eq!(world.get::<SceneId>(moth), Some(&moth_id));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_output_rows_cause_is_shown_by_a_click() {
+        use crate::output::Cause;
+        let (dir, mut world, mut ed, boxed) = drop_project("output-causes");
+        // An entity's id: selected.
+        let id = *world.get::<SceneId>(boxed).unwrap();
+        ed.show_cause(&mut world, Cause::Id(id.as_u128()));
+        assert_eq!(ed.active(), Some(boxed));
+        // A project asset's path, with Windows' separator too: shown in the dock.
+        let gltf = ed.asset_db.find("props/crate.gltf").unwrap().id;
+        ed.show_cause(&mut world, Cause::Path(String::from(r"props\crate.gltf")));
+        assert_eq!(ed.browser.selected, Some(gltf));
+        // An asset's id, not an entity's: shown in the dock too.
+        ed.browser.selected = None;
+        ed.show_cause(&mut world, Cause::Id(gltf.as_u128()));
+        assert_eq!(ed.browser.selected, Some(gltf));
+        // Nothing of that name: said.
+        ed.show_cause(&mut world, Cause::Path(String::from("props/none.scene")));
+        assert!(message(&ed).contains("no such file"), "{}", message(&ed));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
