@@ -1572,3 +1572,45 @@ so not SQLite. The editor opens it at its start and follows the folder.
   - keeping the case when replacing;
   - finding in a selection;
   - find in files (Ctrl+Shift+F, with E8-3's work on the project's scripts).
+
+## As built (E8-3a, 2026-10-22): Luau's analysis, measured and built in
+
+§6 left its build time and size to measurement before it landed. Measured on ref-1
+(16 threads, MSVC 14.51, release):
+
+| What | Measured |
+|---|---|
+| Luau 0.736's `Analysis` | 77 files, 83,400 lines; 3.6 MB vendored with the headers it needs |
+| Building it, cold | 20.6 s, once per content hash, shared by every profile (as Jolt is) |
+| An executable with Luau's VM and compiler, and with them and Analysis | 0.35 MB, and 3.58 MB: Analysis with what it pulls in is at most 3.2 MB, in the editor only |
+| A checker started (the built-in definitions) | 2.7 ms (old solver), 3.4 ms (new) |
+| A 220-line module checked again after an edit | median 0.16 ms with either solver, the slowest 0.3 ms |
+| A strict 200-line module with errors | 1.0 ms (old), 3.3 ms (new) |
+
+- **The decision holds:** Analysis is called in process, and the luau-lsp fallback is not
+  needed.
+- **The new solver** is the default, as it is for `luau-analyze`, Luau's own command line,
+  in 0.736. `Solver::Old` stays a choice.
+- **The build** (`engine_luau_analysis`):
+  - `third_party/luau-analysis` holds the release mlua builds (0.736): Analysis and the
+    headers of the parts it uses. `VM/include` is luau0-src's own, which mlua patches;
+  - only Analysis and a C glue (`csrc/analysis.cpp`) are compiled, with mlua-sys's
+    defines (`LUA_API`, vectors of 3, a C stack of a million);
+  - it links against the Luau libraries mlua-sys already builds (Ast, Config, Compiler,
+    VM), so nothing is linked twice;
+  - mlua-sys is asked for the features `engine_script`'s mlua gives it, so no build
+    resolves it otherwise (ADR 0077).
+- **The API** (`Analysis`):
+  - modules named by their path from the project (`scripts/door.luau`);
+  - a tab's text set in memory, the rest read from the folder;
+  - `require("./door")` and `require("../shared/math")` resolved by string (`name.luau`
+    or `name/init.luau`);
+  - type definitions (the engine's `.d.luau`, E7) loaded into every module's globals;
+  - `check(name)` gives type errors, syntax errors and lint findings, each placed by line
+    and byte.
+
+  Luau's exceptions are caught in the glue and become one finding. A checker is used
+  from one thread at a time.
+- **Next (E8-3b):** a worker thread in the editor checks a tab's text a moment after it
+  changes. Its findings are underlined in the code, with the message at the line's end
+  and the count in the code bar. Completion and hover come after.

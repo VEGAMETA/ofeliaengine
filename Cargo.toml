@@ -27,6 +27,7 @@ engine_ecs = { path = "crates/engine_ecs" }
 engine_input = { path = "crates/engine_input" }
 engine_latency = { path = "crates/engine_latency" }
 engine_log = { path = "crates/engine_log" }
+engine_luau_analysis = { path = "crates/engine_luau_analysis" }
 engine_net = { path = "crates/engine_net" }
 engine_net_transport = { path = "crates/engine_net_transport" }
 engine_crash = { path = "crates/engine_crash" }
