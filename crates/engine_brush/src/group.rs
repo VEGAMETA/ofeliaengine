@@ -71,6 +71,9 @@ pub struct Group {
     large: Vec<PieceRef>,
     /// Brushes whose polygons may have changed since [`Group::take_changed`].
     changed: Vec<bool>,
+    /// For each brush, the brush whose pieces its faces were last found on: itself, or the
+    /// brush its children's faces live in ([`Brush::made`]); `u32::MAX` before any.
+    homes: Vec<u32>,
 }
 
 /// What an edit redid, to measure it.
@@ -114,6 +117,7 @@ impl Group {
         self.brushes.push(brush);
         self.state.push(BrushState::default());
         self.changed.push(true);
+        self.homes.push(u32::MAX);
         self.solids(index);
         let s = &self.state[index];
         let mut dirty = self.dirty(index, self.brushes[index].op, s.bounds, s.inside_bounds);
@@ -160,6 +164,7 @@ impl Group {
         self.large.clear();
         self.state = vec![BrushState::default(); brushes.len()];
         self.changed = vec![true; brushes.len()];
+        self.homes = vec![u32::MAX; brushes.len()];
         self.brushes = brushes;
         for i in 0..self.brushes.len() {
             self.solids(i);
@@ -179,10 +184,16 @@ impl Group {
         out
     }
 
-    /// The visible polygons on brush `index`'s faces, each with the face.
+    /// The visible polygons on brush `index`'s faces, each with the face: a brush whose
+    /// solids another's children made (inside [`Brush::made`]) has them where that one is.
     pub fn polygons_of(&self, index: usize, out: &mut Vec<(Owner, Polygon)>) {
         out.clear();
-        let Some(bounds) = self.state.get(index).and_then(|s| s.bounds) else {
+        let home = match self.homes.get(index) {
+            Some(&h) if (h as usize) < self.state.len() => h as usize,
+            _ => index,
+        };
+        let own = self.state.get(index).and_then(|s| s.bounds);
+        let Some(bounds) = own.or_else(|| self.state.get(home).and_then(|s| s.bounds)) else {
             return;
         };
         let mut near = Vec::new();
@@ -317,6 +328,14 @@ impl Group {
                     },
                     solid,
                 );
+            }
+            // Where the faces of its children's brushes live.
+            for solid in &pieces {
+                for f in &solid.faces {
+                    if let Some(h) = self.homes.get_mut(f.owner.brush as usize) {
+                        *h = a as u32;
+                    }
+                }
             }
             self.state[a].pieces = pieces
                 .into_iter()
@@ -610,6 +629,7 @@ mod tests {
             op,
             parts: vec![box_planes(lo, hi, planes).unwrap_or_else(|| panic!())],
             inside: Vec::new(),
+            made: None,
         }
     }
 
@@ -687,6 +707,7 @@ mod tests {
                 .map(|p| p.into_iter().map(|q| planes.add(q)).collect())
                 .collect(),
             inside: vec![inside.into_iter().map(|q| planes.add(q)).collect()],
+            made: None,
         }
     }
 
@@ -751,6 +772,43 @@ mod tests {
     }
 
     #[test]
+    fn a_brush_whose_children_made_it_finds_their_polygons_and_stays_in_step() {
+        let mut p = Planes::new();
+        let floor = cuboid(Op::Add, [0, -10, 0], [100, 0, 100], &mut p);
+        let wall = cuboid(Op::Add, [40, 0, 40], [60, 50, 50], &mut p);
+        let window = |x: i64, p: &mut Planes| cuboid(Op::Cut, [x, -5, 39], [x + 10, 20, 51], p);
+        let walled = |w: &Brush, p: &Planes| Brush {
+            made: Some(crate::csg::combine(&[wall.clone(), w.clone()], &[1, 2], p).0),
+            ..wall.clone()
+        };
+        let w = window(45, &mut p);
+        // Brush 2, the window, is combined into the wall: an empty brush in its place.
+        let mut g = Group::new();
+        *g.planes_mut() = p.clone();
+        g.rebuild(vec![floor.clone(), walled(&w, &p), Brush::default()]);
+        let (volume, _, by_brush) = of_group(&g);
+        assert_eq!(volume, (100_000 + 10_000 - 2_000) * 1000);
+        assert!(by_brush.get(&2).is_some_and(|&a| a > 0), "{by_brush:?}");
+        let mut polygons = Vec::new();
+        g.polygons_of(2, &mut polygons);
+        assert!(
+            !polygons.is_empty(),
+            "the window's walls are found where they live"
+        );
+        assert!(polygons.iter().all(|(o, _)| o.brush == 2));
+        // The window moved: the wall made again; as a rebuild from nothing.
+        let w = window(41, &mut p);
+        *g.planes_mut() = p.clone();
+        g.set(1, walled(&w, &p));
+        let changed = g.take_changed();
+        assert!(changed.contains(&2), "{changed:?}");
+        let mut fresh = Group::new();
+        *fresh.planes_mut() = p.clone();
+        fresh.rebuild(g.brushes().to_vec());
+        assert_eq!(of_group(&g), of_group(&fresh));
+    }
+
+    #[test]
     fn a_group_shows_what_evaluating_from_nothing_does() {
         let mut g = Group::new();
         let brushes = rooms(5, g.planes_mut());
@@ -806,6 +864,7 @@ mod tests {
                     op,
                     parts: vec![moved],
                     inside: Vec::new(),
+                    made: None,
                 },
             );
             assert!(g.take_changed().contains(&(index as u32)));
