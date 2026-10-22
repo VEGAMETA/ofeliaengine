@@ -57,8 +57,8 @@ fn the_editor_knows_the_projects_assets_and_follows_the_folder() {
     let settings = PlayerSettings {
         title: String::from("editor assets test"),
         window: Window::Offscreen {
-            width: 640,
-            height: 360,
+            width: 1280,
+            height: 720,
         },
         scene: Some("main.scene".into()),
         project: Some(dir.clone()),
@@ -92,6 +92,25 @@ fn the_editor_knows_the_projects_assets_and_follows_the_folder() {
         dir.join(".ofelia/assets.index").is_file(),
         "the index written"
     );
+    // The FileSystem dock lists them (`ENGINE_EDITOR_BROWSER_PNG`).
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_BROWSER_PNG") {
+        for _ in 0..3 {
+            frame(&mut player, &mut game, &mut overlay);
+        }
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let extent = player.extent();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
     // A new file in the folder: found, given a `.meta`, its path told to the player.
     std::fs::write(dir.join("props/crate.glb"), b"a crate").unwrap();
     until(&mut player, &mut game, &mut overlay, |g| {

@@ -252,8 +252,11 @@ Last updated: 2026-10-20.
     again by path or content), the index in `.ofelia/` (our own text file: 10,000 files
     read in 3.2 ms, scanned unchanged in 20 ms), followed live by the editor,
     `ofeliaengine assets [--json]`.
-  - **Next:** E4-2, the asset browser (the FileSystem dock: the folder tree, the files
-    with their kinds, search with type filters).
+  - **E4-2, the asset browser** (#305): the FileSystem dock lists the project's folders and
+    each folder's files from the database; `#` in the palette finds assets by path, a kind
+    narrowing it (`#model:crate`), Enter showing it in the dock.
+  - **Next:** E4-3, drag and drop from the dock: a model into the viewport (on the surface
+    under the cursor) or the tree, a material onto an object.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
@@ -1405,6 +1408,16 @@ grown, divide and conquer); the old labels stay in parentheses.
 - **Frame pacing (the owner, 2026-10-21, for later):** a release build's player capped at
   the display's refresh rate by default (CLAUDE.md §7's limiter just below it under VRR),
   not uncapped.
+
+- **The editor's frame allocates** (found 2026-10-22, E4-2). ADR 0107 §8 asks for 0
+  allocations per frame in steady state, panels included. The zero-allocation test covers
+  the shell's frame with fixed rows, not the editor's own:
+  - the editor's frame collects the tree's and the FileSystem dock's rows into `Vec`s
+    every frame it builds.
+
+  An idle editor builds no frame, so the cost is only while something changes. To do:
+  measure the editor's frame with the counting allocator, keep its rows in reused
+  buffers.
 
 - **Rendering:**
   - **the meshlet draws' order follows the GPU's scheduling** (atomic appends). A meshlet

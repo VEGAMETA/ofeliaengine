@@ -68,8 +68,9 @@ use crate::inspector::{self, Defaults, Inspector, Kind, Property};
 use crate::paint::{UiText, paint};
 use crate::session::{self, Base, Document, EditorState, LastRun, Lock, SessionFile, View, Writer};
 use crate::shell::{
-    Field, FieldAction, FieldEvent, MenuEntry, MenuItem, Palette, PaletteAction, PaletteRow,
-    PaletteView, Section, ShellModel, TreeItem, Widget, build, dismissed,
+    Field, FieldAction, FieldEvent, FileItem, FileKind, MenuEntry, MenuItem, Palette,
+    PaletteAction, PaletteRow, PaletteView, Section, ShellModel, TreeItem, Widget, build,
+    dismissed,
 };
 use crate::snap::{Quantity, Snapping};
 use crate::transform::{self, KeyTransform};
@@ -1244,6 +1245,8 @@ struct CommandPalette {
     commands: Vec<Match>,
     /// After `@`: the objects matching the query, best first.
     objects: Vec<Found>,
+    /// After `#`: the assets matching the query, best first.
+    assets: Vec<FoundAsset>,
     highlights: Vec<u16>,
     fuzzy: Fuzzy,
     /// The scene's entities in tree order, and a stack for walking it (kept: searching
@@ -1260,12 +1263,19 @@ impl CommandPalette {
         self.choices.is_none() && self.query.trim_start().starts_with('@')
     }
 
+    /// Whether the query looks for the project's assets (`#`).
+    fn finds_assets(&self) -> bool {
+        self.choices.is_none() && self.query.trim_start().starts_with('#')
+    }
+
     /// How many results there are.
     fn len(&self) -> usize {
         if let Some(choices) = &self.choices {
             choices.shown.len()
         } else if self.finds_objects() {
             self.objects.len()
+        } else if self.finds_assets() {
+            self.assets.len()
         } else {
             self.commands.len()
         }
@@ -1383,6 +1393,8 @@ struct Editor {
     asset_db: engine_scene::AssetDatabase,
     asset_watch: Option<engine_platform::fs_watch::DirectoryWatcher>,
     assets_changed: Option<Instant>,
+    /// The asset browser (the FileSystem dock, E4-2).
+    browser: Browser,
     /// Asset paths of a scene the editor loaded, for the player (`sync_assets`).
     pending_assets: AssetPaths,
     history: History,
@@ -1840,6 +1852,7 @@ impl Editor {
             asset_db: engine_scene::AssetDatabase::default(),
             asset_watch: None,
             assets_changed: None,
+            browser: Browser::default(),
             pending_assets: AssetPaths::new(),
             history: History::new(),
             commands,
@@ -2514,6 +2527,42 @@ impl Editor {
             self.scene_label.push(' ');
             self.scene_label.push_str(icons::ALERT);
         }
+        // The asset browser's rows.
+        let folder_items: Vec<TreeItem<'_>> = self
+            .browser
+            .folders
+            .iter()
+            .map(|(path, depth)| TreeItem {
+                depth: *depth,
+                icon: if *path == self.browser.folder {
+                    icons::FOLDER_OPEN
+                } else {
+                    icons::FOLDER
+                },
+                name: if path.is_empty() {
+                    "res://"
+                } else {
+                    path.rsplit('/').next().unwrap_or(path)
+                },
+                kind: "",
+                expanded: None,
+                selected: *path == self.browser.folder,
+                active: false,
+                renaming: false,
+                disabled: false,
+                off: false,
+            })
+            .collect();
+        let file_items: Vec<FileItem<'_>> = self
+            .browser
+            .listing
+            .iter()
+            .map(|l| FileItem {
+                name: &l.name,
+                kind: l.kind,
+                selected: l.asset.is_some() && l.asset == self.browser.selected,
+            })
+            .collect();
         // The command palette's results in view.
         let mut palette_rows: Vec<PaletteRow<'_>> = Vec::new();
         if let Some(cp) = &self.command_palette {
@@ -2538,6 +2587,16 @@ impl Editor {
                         matched: &cp.highlights[found.matched.0 as usize..found.matched.1 as usize],
                         category: 0,
                         detail: kind,
+                    }
+                } else if cp.finds_assets() {
+                    let found = cp.assets[i];
+                    let entry = self.asset_db.get(found.id);
+                    PaletteRow {
+                        icon: entry.map_or(icons::FILE, |e| file_icon_of(e.kind)),
+                        label: entry.map_or("", |e| e.path.as_str()),
+                        matched: &cp.highlights[found.matched.0 as usize..found.matched.1 as usize],
+                        category: 0,
+                        detail: entry.map_or("", |e| e.kind.name()),
                     }
                 } else {
                     let m = &cp.commands[i];
@@ -2564,10 +2623,10 @@ impl Editor {
         }
         let palette = self.command_palette.as_ref().map(|cp| PaletteView {
             query: &cp.query,
-            hint: cp
-                .choices
-                .as_ref()
-                .map_or("Type a command, or @ and an object's name", |c| c.hint),
+            hint: cp.choices.as_ref().map_or(
+                "Type a command, @ and an object's name, or # and an asset's (model:, texture:…)",
+                |c| c.hint,
+            ),
             rows: &palette_rows,
             selected: cp.selected.saturating_sub(cp.first),
         });
@@ -2594,9 +2653,9 @@ impl Editor {
             tree: &items,
             selection: &self.selection_label,
             inspector: &sections,
-            path: "res://",
-            folders: &[],
-            files: &[],
+            path: &self.browser.label,
+            folders: &folder_items,
+            files: &file_items,
             bottom_tabs: &[
                 "Output",
                 "Debugger",
@@ -2629,6 +2688,23 @@ impl Editor {
 
         if let Some(i) = response.tool {
             self.active_tool = i;
+        }
+        // The browser: a folder opened, a file picked (a folder in the listing opened).
+        if let Some(i) = response.folder
+            && let Some((path, _)) = self.browser.folders.get(i).cloned()
+        {
+            self.open_folder(&path);
+        }
+        if let Some(i) = response.file
+            && let Some(l) = self.browser.listing.get(i)
+        {
+            match l.asset {
+                Some(id) => self.reveal_asset(id),
+                None => {
+                    let path = l.path.clone();
+                    self.open_folder(&path);
+                }
+            }
         }
         if response.play {
             self.run(world, self.ids.play);
@@ -3208,6 +3284,7 @@ impl Editor {
         cp.selected = 0;
         cp.first = 0;
         cp.objects.clear();
+        cp.assets.clear();
         cp.highlights.clear();
         let query = cp.query.trim_start();
         if let Some(choices) = &mut cp.choices {
@@ -3244,6 +3321,38 @@ impl Editor {
             }
             cp.objects
                 .sort_unstable_by_key(|f| (core::cmp::Reverse(f.score), f.order));
+        } else if let Some(text) = query.strip_prefix('#') {
+            cp.commands.clear();
+            // `model:rock`: a kind first narrows it (`mesh:` and `audio:` too).
+            let (kind, name) = match text.split_once(':') {
+                Some((k, rest)) => match asset_kind_named(k.trim()) {
+                    Some(kind) => (Some(kind), rest.trim_start()),
+                    None => (None, text),
+                },
+                None => (None, text),
+            };
+            cp.fuzzy.set_query(name);
+            for e in self.asset_db.entries() {
+                if kind.is_some_and(|k| k != e.kind) {
+                    continue;
+                }
+                if let Some(score) = cp.fuzzy.score(&e.path) {
+                    let start = cp.highlights.len() as u32;
+                    cp.highlights.extend_from_slice(cp.fuzzy.positions());
+                    cp.assets.push(FoundAsset {
+                        id: e.id,
+                        score,
+                        matched: (start, cp.highlights.len() as u32),
+                    });
+                }
+            }
+            let db = &self.asset_db;
+            cp.assets.sort_unstable_by(|a, b| {
+                b.score.cmp(&a.score).then_with(|| {
+                    let path = |f: &FoundAsset| db.get(f.id).map_or("", |e| e.path.as_str());
+                    path(a).cmp(path(b))
+                })
+            });
         } else {
             let query = query.strip_prefix('>').unwrap_or(query);
             self.commands.search(query, &mut cp.commands);
@@ -3289,6 +3398,10 @@ impl Editor {
                 } else if cp.finds_objects() {
                     if let Some(found) = cp.objects.get(i) {
                         self.show(world, found.entity);
+                    }
+                } else if cp.finds_assets() {
+                    if let Some(found) = cp.assets.get(i) {
+                        self.reveal_asset(found.id);
                     }
                 } else if let Some(m) = cp.commands.get(i) {
                     self.run(world, m.id);
@@ -6557,6 +6670,7 @@ impl Editor {
         self.assets.extend(&paths);
         self.pending_assets.extend(&paths);
         self.asset_db = db;
+        self.refresh_browser();
         self.asset_watch = engine_platform::fs_watch::DirectoryWatcher::new(&self.root, true).ok();
         for (path, why) in self.asset_db.problems() {
             log::warn!(target: "engine_editor", "asset {path}: {why}");
@@ -6599,6 +6713,84 @@ impl Editor {
         for (path, why) in self.asset_db.problems() {
             log::warn!(target: "engine_editor", "asset {path}: {why}");
         }
+        self.refresh_browser();
+    }
+
+    /// The browser's lists from the database: the project's folders, and the shown
+    /// folder's subfolders and files (once a scan or a click changed them, not every frame).
+    fn refresh_browser(&mut self) {
+        let b = &mut self.browser;
+        let mut folders: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for e in self.asset_db.entries() {
+            let mut at = e.path.as_str();
+            while let Some((parent, _)) = at.rsplit_once('/') {
+                folders.insert(parent.to_owned());
+                at = parent;
+            }
+        }
+        if !b.folder.is_empty() && !folders.contains(&b.folder) {
+            b.folder.clear();
+        }
+        b.folders.clear();
+        b.folders.push((String::new(), 0));
+        b.folders.extend(
+            folders
+                .iter()
+                .map(|f| (f.clone(), f.matches('/').count() as u16 + 1)),
+        );
+        b.listing.clear();
+        let inside = |path: &str| match path.rsplit_once('/') {
+            Some((parent, _)) => parent == b.folder,
+            None => b.folder.is_empty(),
+        };
+        for f in &folders {
+            if inside(f) {
+                let name = f.rsplit('/').next().unwrap_or(f).to_owned();
+                b.listing.push(Listed {
+                    name,
+                    kind: FileKind::Folder,
+                    path: f.clone(),
+                    asset: None,
+                });
+            }
+        }
+        let mut files: Vec<&engine_scene::AssetEntry> = self
+            .asset_db
+            .entries()
+            .iter()
+            .filter(|e| inside(&e.path))
+            .collect();
+        files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        for e in files {
+            b.listing.push(Listed {
+                name: e.path.rsplit('/').next().unwrap_or(&e.path).to_owned(),
+                kind: file_kind(e.kind),
+                path: e.path.clone(),
+                asset: Some(e.id),
+            });
+        }
+        b.label.clear();
+        b.label.push_str("res://");
+        b.label.push_str(&b.folder);
+    }
+
+    /// Shows folder `folder` in the browser (`""`: the project's top).
+    fn open_folder(&mut self, folder: &str) {
+        self.browser.folder.clear();
+        self.browser.folder.push_str(folder);
+        self.refresh_browser();
+    }
+
+    /// Picks asset `id` in the browser, its folder shown: what `#` in the palette does.
+    fn reveal_asset(&mut self, id: AssetId) {
+        let Some(e) = self.asset_db.get(id) else {
+            return;
+        };
+        let (path, kind) = (e.path.clone(), e.kind);
+        let folder = path.rsplit_once('/').map_or("", |(f, _)| f).to_owned();
+        self.open_folder(&folder);
+        self.browser.selected = Some(id);
+        self.say(format!("{path} ({})", kind.name()));
     }
 
     /// Starts the session in the project's `.ofelia/`: takes its lock, then brings back the
@@ -8427,6 +8619,76 @@ fn blockout_key(blockout: &engine_app::Blockout, world: &World) -> BlockoutKey {
 /// file in several steps; a copy of many files comes in a burst).
 const ASSETS_QUIET: Duration = Duration::from_millis(150);
 
+/// The asset browser's state (E4-2).
+#[derive(Debug, Default)]
+struct Browser {
+    /// The folder shown, under the project's (`""`: its top), and how the dock titles it.
+    folder: String,
+    label: String,
+    /// The asset picked.
+    selected: Option<AssetId>,
+    /// The project's folders with assets in them, in tree order: each one's path and
+    /// depth (the top first).
+    folders: Vec<(String, u16)>,
+    /// The shown folder's subfolders, then its files.
+    listing: Vec<Listed>,
+}
+
+/// A line of the browser's listing: a subfolder or a file.
+#[derive(Debug, Clone)]
+struct Listed {
+    name: String,
+    kind: FileKind,
+    /// Its path under the project's folder.
+    path: String,
+    /// The file's asset (none for a folder).
+    asset: Option<AssetId>,
+}
+
+/// An asset `#` in the palette found.
+#[derive(Debug, Clone, Copy)]
+struct FoundAsset {
+    id: AssetId,
+    score: i32,
+    /// Its matched characters: a range of the palette's `highlights`.
+    matched: (u32, u32),
+}
+
+/// The browser's kind of an asset's kind.
+fn file_kind(kind: engine_scene::AssetKind) -> FileKind {
+    use engine_scene::AssetKind as K;
+    match kind {
+        K::Scene => FileKind::Scene,
+        K::Model => FileKind::Mesh,
+        K::Texture => FileKind::Texture,
+        K::Sound => FileKind::Audio,
+        K::Script => FileKind::Script,
+        K::Material | K::Video | K::Font => FileKind::Other,
+    }
+}
+
+/// The palette's icon of an asset's kind.
+fn file_icon_of(kind: engine_scene::AssetKind) -> &'static str {
+    match file_kind(kind) {
+        FileKind::Folder => icons::FOLDER,
+        FileKind::Scene => icons::SCENE,
+        FileKind::Script => icons::SCRIPT,
+        FileKind::Texture => icons::TEXTURE,
+        FileKind::Mesh => icons::MESH,
+        FileKind::Audio => icons::AUDIO,
+        FileKind::Other => icons::FILE,
+    }
+}
+
+/// The asset kind a `#` filter names: the kinds' own names, and `mesh` and `audio`.
+fn asset_kind_named(name: &str) -> Option<engine_scene::AssetKind> {
+    match name {
+        "mesh" => Some(engine_scene::AssetKind::Model),
+        "audio" => Some(engine_scene::AssetKind::Sound),
+        other => engine_scene::AssetKind::named(other),
+    }
+}
+
 /// What the Play controls asked for (ADR 0107 E3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlayRequest {
@@ -9703,6 +9965,60 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn the_browser_lists_the_projects_assets_and_the_palette_finds_them() {
+        let dir = std::env::temp_dir().join(format!("ofelia-browser-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("props/rocks")).unwrap();
+        std::fs::write(dir.join("props/crate.glb"), b"a crate").unwrap();
+        std::fs::write(dir.join("props/rocks/rock.png"), b"a rock").unwrap();
+        std::fs::write(dir.join("props/rocks/rock.glb"), b"a rock mesh").unwrap();
+        std::fs::write(dir.join("theme.ogg"), b"music").unwrap();
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        let report = ed.open_assets();
+        assert_eq!(report.files, 4);
+        // The folders in tree order, the top first; the top's listing: its subfolder, then
+        // its file.
+        let folders: Vec<&str> = ed.browser.folders.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(folders, ["", "props", "props/rocks"]);
+        let listing: Vec<(&str, FileKind)> = ed
+            .browser
+            .listing
+            .iter()
+            .map(|l| (l.name.as_str(), l.kind))
+            .collect();
+        assert_eq!(
+            listing,
+            [("props", FileKind::Folder), ("theme.ogg", FileKind::Audio)]
+        );
+        assert_eq!(ed.browser.label, "res://");
+        // A folder opened from the listing.
+        ed.open_folder("props/rocks");
+        let names: Vec<&str> = ed.browser.listing.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["rock.glb", "rock.png"]);
+        // `#rock` finds both rocks; `#texture:rock` the image alone; Enter reveals it.
+        ed.open_palette(&mut world, "#rock");
+        assert_eq!(ed.command_palette.as_ref().unwrap().assets.len(), 2);
+        ed.open_palette(&mut world, "#texture:rock");
+        let cp = ed.command_palette.as_ref().unwrap();
+        assert_eq!(cp.assets.len(), 1);
+        let rock = cp.assets[0].id;
+        ed.open_folder("");
+        ed.palette_action(&mut world, PaletteAction::Run(0));
+        assert_eq!(ed.browser.folder, "props/rocks");
+        assert_eq!(ed.browser.selected, Some(rock));
+        assert_eq!(ed.asset_db.get(rock).unwrap().path, "props/rocks/rock.png");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
