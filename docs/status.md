@@ -417,9 +417,20 @@ Last updated: 2026-10-22.
   - **The freed mouse** (#335, ADR 0021's addendum): `DeviceFilter` filters the keyboard
     and the mouse apart; a game whose mouse is freed (Shift+F1, paused) stops hearing it
     and keeps the keyboard, and `set_devices` lets go of what it stops hearing.
-  - **Next:** E7 waits for the owner's answers to ADR 0114's questions. The code editor's
-    leftovers (go to definition, signature help, find in files) wait behind E10
-    (materials, the owner's order of tools).
+  - **E10, materials: the UX note** (#336, `docs/research/ux/materials.md`). It studies
+    Unreal, Unity, Godot, Blender and Roblox, and proposes E10's steps:
+    1. materials in the inspector, edited live;
+    2. Slang in the editor;
+    3. the graph;
+    4. previews and cost.
+
+    It found that typed materials (ADR 0092's `.material.ron`) do not draw in the editor
+    or the player, which read only ADR 0108's `.material`. Four questions are with the
+    owner: one material file, variants with a base, numbers on graph nodes, where
+    generated Slang lives.
+  - **Next:** E7 waits for the owner's answers to ADR 0114's questions, and E10-1 for the
+    answer on the material file. The code editor's leftovers (go to definition, signature
+    help, find in files) come meanwhile.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
