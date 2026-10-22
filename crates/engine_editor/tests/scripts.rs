@@ -294,6 +294,7 @@ fn a_script_changed_on_disk_runs_again_its_values_kept_by_name() {
         .replace("self.rate * dt", "self.rate * self.boost * dt");
     std::fs::write(dir.join("scripts/spin.luau"), changed).unwrap();
     let started = std::time::Instant::now();
+    let timer = engine_platform::time::HighResTimer::new().unwrap();
     loop {
         frame(&mut player, &mut game, &mut overlay);
         let said = game.message().unwrap_or_default();
@@ -303,7 +304,7 @@ fn a_script_changed_on_disk_runs_again_its_values_kept_by_name() {
             break;
         }
         assert!(started.elapsed().as_secs() < 10, "no reload: {said}");
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = timer.sleep(std::time::Duration::from_millis(20));
     }
     let world = player.world_mut();
     let moved = world
