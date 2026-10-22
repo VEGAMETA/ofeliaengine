@@ -213,7 +213,7 @@ impl World {
             return Ok(());
         };
         let count = self.get::<Children>(p).map_or(0, |c| c.count as usize);
-        if index + 1 >= count {
+        if index.saturating_add(1) >= count {
             return Ok(()); // already last
         }
         // `child` was appended; move it before the child now at `index`.

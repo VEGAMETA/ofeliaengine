@@ -610,9 +610,12 @@ pub struct ShellModel<'a> {
     pub add_menu: Option<(&'a [MenuEntry<'a>], Option<usize>)>,
     /// The scene tree's row to scroll into view.
     pub reveal_row: Option<usize>,
-    /// The scene tree's row a file dragged from the FileSystem dock would drop onto
-    /// (outlined).
+    /// The scene tree's row a file dragged from the FileSystem dock, or rows dragged in the
+    /// tree, would drop onto (outlined).
     pub drop_row: Option<usize>,
+    /// The scene tree's row dragged rows would go next to: a line above it, or below it
+    /// with `true`.
+    pub drop_line: Option<(usize, bool)>,
     /// What the scene tree is filtered by.
     pub tree_filter: &'a str,
     /// What the inspector is filtered by.
@@ -701,6 +704,10 @@ pub struct ShellResponse {
     /// The scene tree's row under the pointer, whatever the mouse holds: where a drop
     /// lands.
     pub tree_under: Option<usize>,
+    /// That row's node: where the pointer is in it (its top, its middle, its bottom).
+    pub tree_under_id: Option<u64>,
+    /// A scene tree's row held and moved past [`DRAG_START`]: rows dragged.
+    pub tree_drag: Option<usize>,
     /// A bottom panel tab was clicked.
     pub bottom_tab: Option<usize>,
     /// The Output's filter field was used (`Ui::edited_text` while it changes).
@@ -1509,7 +1516,7 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
         dock_column(ui, "folders", Size::Fixed(220.0), p, |ui| {
             dock_title(ui, "FileSystem", p);
             ui.scroll_column("tree", |ui| {
-                let rows = tree_rows(ui, model.folders, p, None, None, false, true);
+                let rows = tree_rows(ui, model.folders, p, None, None, None, false, true);
                 out.folder = rows.clicked;
                 out.folder_under = rows.under;
             });
@@ -1765,22 +1772,29 @@ fn filter(ui: &mut Ui, text_now: &str, hint: &str, p: &Palette) -> Option<TextFi
 #[derive(Default)]
 struct RowsResponse {
     clicked: Option<usize>,
-    /// The row under the pointer (by the last layout, whatever the mouse holds).
+    /// The row under the pointer (by the last layout, whatever the mouse holds), and its
+    /// node.
     under: Option<usize>,
+    under_id: Option<u64>,
+    /// A row held and moved past [`DRAG_START`].
+    dragged: Option<usize>,
     toggled: Option<usize>,
     eye: Option<usize>,
     rename: Option<bool>,
 }
 
 /// Tree rows: a click on a row, on its arrow, on its eye (`eyes`: the scene tree's rows
-/// end in one), and renaming in place; row `target` outlined as where a drop lands; with
+/// end in one), a row dragged, and renaming in place; row `target` outlined as where a
+/// drop lands, and a line above or below row `line` where dragged rows would go; with
 /// `regions` each row a hover region (the row under a drag, [`RowsResponse::under`]).
+#[allow(clippy::too_many_arguments)]
 fn tree_rows(
     ui: &mut Ui,
     rows: &[TreeItem<'_>],
     p: &Palette,
     reveal: Option<usize>,
     target: Option<usize>,
+    line: Option<(usize, bool)>,
     eyes: bool,
     regions: bool,
 ) -> RowsResponse {
@@ -1803,6 +1817,21 @@ fn tree_rows(
                 ..Style::default()
             },
             |ui| {
+                // Where dragged rows would go: a line at the row's top or bottom, from its
+                // indentation on.
+                if let Some((_, below)) = line.filter(|&(at, _)| at == i) {
+                    let indent = 6.0 + INDENT * f32::from(item.depth);
+                    ui.container(
+                        "drop line",
+                        Style {
+                            size: [Size::Fixed(SCENE_WIDTH - indent - 6.0), Size::Fixed(2.0)],
+                            placed: Some([indent, if below { 20.0 } else { 0.0 }]),
+                            background: Some(p.accent),
+                            ..Style::default()
+                        },
+                        |_| {},
+                    );
+                }
                 let arrow = match item.expanded {
                     Some(true) => icons::EXPANDED,
                     Some(false) => icons::COLLAPSED,
@@ -1875,14 +1904,21 @@ fn tree_rows(
         if ui.sense(id, false).clicked && out.toggled != Some(i) && out.eye != Some(i) {
             out.clicked = Some(i);
         }
+        if ui
+            .drag_delta(id)
+            .is_some_and(|[x, y]| x * x + y * y > DRAG_START * DRAG_START)
+        {
+            out.dragged = Some(i);
+        }
         if reveal == Some(i) {
             ui.reveal(id);
         }
-        // Hover regions: where a dragged file would drop.
+        // Hover regions: where a dragged file or row would drop.
         if regions {
             ui.mark_region(id);
             if ui.in_region(id) {
                 out.under = Some(i);
+                out.under_id = Some(id);
             }
         }
         ui.pop_id();
@@ -1949,11 +1985,14 @@ fn scene_dock(
                 p,
                 model.reveal_row,
                 model.drop_row,
+                model.drop_line,
                 true,
                 true,
             );
             out.tree_row = rows.clicked;
             out.tree_under = rows.under;
+            out.tree_under_id = rows.under_id;
+            out.tree_drag = rows.dragged;
             out.tree_toggle = rows.toggled;
             out.tree_eye = rows.eye;
             out.rename = rows.rename;

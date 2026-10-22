@@ -433,6 +433,7 @@ fn main() {
         add_menu: show_menu.then_some((&add_menu[..], Some(1))),
         reveal_row: None,
         drop_row: None,
+        drop_line: None,
         tree_filter: "",
         inspector_filter: "",
         palette: show_palette.then_some(PaletteView {

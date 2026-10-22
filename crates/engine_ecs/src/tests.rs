@@ -1245,6 +1245,13 @@ fn set_parent_at_inserts_at_an_index() {
         w.children(p).collect::<Vec<_>>(),
         [kids[1], kids[3], kids[2], kids[0]]
     );
+    // Any index past the end is the end (`usize::MAX` too).
+    w.set_parent_at(kids[1], Some(p), usize::MAX).unwrap();
+    w.set_parent_at(kids[1], Some(p), 0).unwrap();
+    assert_eq!(
+        w.children(p).collect::<Vec<_>>(),
+        [kids[1], kids[3], kids[2], kids[0]]
+    );
     assert_eq!(w.child_index(kids[2]), Some(2));
     // Walking backwards through the links agrees.
     let last = w.get::<Children>(p).map(|c| c.last).unwrap();
