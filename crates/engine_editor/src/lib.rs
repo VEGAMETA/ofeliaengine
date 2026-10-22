@@ -12,6 +12,7 @@ mod build;
 pub mod camera;
 mod checker;
 mod code;
+mod complete;
 mod draw;
 mod drop;
 pub mod expr;

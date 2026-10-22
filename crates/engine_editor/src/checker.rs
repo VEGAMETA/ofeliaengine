@@ -3,7 +3,7 @@
 //! text a moment after the text changes; the findings come back with the text's version,
 //! so findings made for older text are known as such.
 
-use engine_luau_analysis::{Analysis, Diagnostic, Solver};
+use engine_luau_analysis::{Analysis, Completion, Diagnostic, Solver};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -19,6 +19,38 @@ enum Job {
     },
     /// Module `name` is read from the project's folder again (its tab closed).
     Forget(String),
+    /// What may be written at a place in module `name` holding `text` (Ctrl+Space).
+    Complete {
+        name: String,
+        text: String,
+        stamp: Stamp,
+        at: (u32, u32),
+    },
+    /// What is at a place in it (the mouse resting there).
+    Hover {
+        name: String,
+        text: String,
+        stamp: Stamp,
+        at: (u32, u32),
+    },
+}
+
+/// What the checker answers.
+pub(crate) enum Answer {
+    /// A check's findings.
+    Checked(Checked),
+    /// What may be written at `at` (a line and a byte) in the text of `stamp`.
+    Completed {
+        stamp: Stamp,
+        at: (u32, u32),
+        items: Vec<Completion>,
+    },
+    /// What is at `at`: its type, as Luau writes it.
+    Hovered {
+        stamp: Stamp,
+        at: (u32, u32),
+        text: Option<String>,
+    },
 }
 
 /// Which text a check was of: its tab's generation (a tab opened or read again anew is
@@ -44,7 +76,7 @@ pub(crate) struct Checked {
 /// The checker's thread and its two queues.
 pub(crate) struct Checker {
     jobs: Option<mpsc::Sender<Job>>,
-    done: mpsc::Receiver<Checked>,
+    done: mpsc::Receiver<Answer>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -76,6 +108,33 @@ impl Checker {
                                 pending.retain(|p| p.0 != name);
                                 analysis.forget_source(&name);
                             }
+                            // Asked now, answered now: the text as it is then.
+                            Job::Complete {
+                                name,
+                                text,
+                                stamp,
+                                at,
+                            } => {
+                                analysis.set_source(&name, &text);
+                                let items = analysis.complete(&name, at.0, at.1);
+                                let answer = Answer::Completed { stamp, at, items };
+                                if finished.send(answer).is_err() {
+                                    return;
+                                }
+                            }
+                            Job::Hover {
+                                name,
+                                text,
+                                stamp,
+                                at,
+                            } => {
+                                analysis.set_source(&name, &text);
+                                let text = analysis.type_at(&name, at.0, at.1);
+                                let answer = Answer::Hovered { stamp, at, text };
+                                if finished.send(answer).is_err() {
+                                    return;
+                                }
+                            }
                         }
                     }
                     for (name, text, stamp) in pending.drain(..) {
@@ -88,7 +147,7 @@ impl Checker {
                             found,
                             took: t.elapsed(),
                         };
-                        if finished.send(checked).is_err() {
+                        if finished.send(Answer::Checked(checked)).is_err() {
                             return;
                         }
                     }
@@ -113,6 +172,30 @@ impl Checker {
         }
     }
 
+    /// What may be written at `at` in module `name`'s `text`, of `stamp`.
+    pub(crate) fn complete(&self, name: &str, text: String, stamp: Stamp, at: (u32, u32)) {
+        if let Some(jobs) = &self.jobs {
+            let _ = jobs.send(Job::Complete {
+                name: name.to_owned(),
+                text,
+                stamp,
+                at,
+            });
+        }
+    }
+
+    /// What is at `at` in module `name`'s `text`, of `stamp`.
+    pub(crate) fn hover(&self, name: &str, text: String, stamp: Stamp, at: (u32, u32)) {
+        if let Some(jobs) = &self.jobs {
+            let _ = jobs.send(Job::Hover {
+                name: name.to_owned(),
+                text,
+                stamp,
+                at,
+            });
+        }
+    }
+
     /// Module `name` is the folder's again.
     pub(crate) fn forget(&self, name: &str) {
         if let Some(jobs) = &self.jobs {
@@ -120,8 +203,8 @@ impl Checker {
         }
     }
 
-    /// The checks finished since this was last asked.
-    pub(crate) fn finished(&self) -> impl Iterator<Item = Checked> + '_ {
+    /// The answers since this was last asked.
+    pub(crate) fn finished(&self) -> impl Iterator<Item = Answer> + '_ {
         self.done.try_iter()
     }
 }

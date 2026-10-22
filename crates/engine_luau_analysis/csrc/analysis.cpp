@@ -3,11 +3,14 @@
 // lint warnings), the engine's type definitions loaded into its globals. Nothing throws
 // across: Luau's own exceptions become one diagnostic.
 
+#include "Luau/AstQuery.h"
+#include "Luau/Autocomplete.h"
 #include "Luau/BuiltinDefinitions.h"
 #include "Luau/Error.h"
 #include "Luau/FileResolver.h"
 #include "Luau/Frontend.h"
 #include "Luau/Linter.h"
+#include "Luau/ToString.h"
 #include "Luau/TypeArena.h"
 
 #include <cstdint>
@@ -123,7 +126,22 @@ struct EngineAnalysis
     ProjectFiles files;
     Luau::NullConfigResolver configs;
     std::unique_ptr<Luau::Frontend> frontend;
+    bool new_solver = true;
     std::vector<std::string> messages;
+};
+
+struct EngineCompletion
+{
+    const char* label;
+    size_t label_len;
+    // Luau's AutocompleteEntryKind.
+    uint32_t kind;
+    // 1 deprecated, 2 of the type wanted there, 4 a function (parentheses after it), 8
+    // one that takes no arguments (the caret after them).
+    uint32_t flags;
+    // Its type, as Luau writes it.
+    const char* detail;
+    size_t detail_len;
 };
 
 struct EngineDiagnostic
@@ -145,6 +163,7 @@ EngineAnalysis* engine_analysis_new(const char* root, size_t root_len, int new_s
     {
         auto* a = new EngineAnalysis();
         a->files.root.assign(root, root_len);
+        a->new_solver = new_solver != 0;
         Luau::FrontendOptions options;
         options.retainFullTypeGraphs = true;
         options.runLintChecks = true;
@@ -153,6 +172,12 @@ EngineAnalysis* engine_analysis_new(const char* root, size_t root_len, int new_s
         );
         Luau::registerBuiltinGlobals(*a->frontend, a->frontend->globals);
         Luau::freeze(a->frontend->globals.globalTypes);
+        // The old solver completes from globals of its own.
+        if (!new_solver)
+        {
+            Luau::registerBuiltinGlobals(*a->frontend, a->frontend->globalsForAutocomplete, true);
+            Luau::freeze(a->frontend->globalsForAutocomplete.globalTypes);
+        }
         return a;
     }
     catch (...)
@@ -203,6 +228,15 @@ size_t engine_analysis_add_definitions(
             globals, globals.globalScope, std::string_view(text, text_len), std::string(name, name_len), false
         );
         Luau::freeze(globals.globalTypes);
+        if (!a->new_solver)
+        {
+            Luau::GlobalTypes& completing = a->frontend->globalsForAutocomplete;
+            Luau::unfreeze(completing.globalTypes);
+            a->frontend->loadDefinitionFile(
+                completing, completing.globalScope, std::string_view(text, text_len), std::string(name, name_len), false, true
+            );
+            Luau::freeze(completing.globalTypes);
+        }
         for (const Luau::ParseError& e : result.parseResult.errors)
         {
             if (a->messages.empty())
@@ -302,6 +336,139 @@ size_t engine_analysis_check(EngineAnalysis* a, const char* name, size_t name_le
         };
     }
     return found.size();
+}
+
+// What may be written at `line` and `column` (from 0, a byte) of module `name`, checked
+// first where it changed: into `out`, at most `cap`. Returns how many there are; their
+// texts stay valid until the next call.
+size_t engine_analysis_complete(
+    EngineAnalysis* a,
+    const char* name,
+    size_t name_len,
+    uint32_t line,
+    uint32_t column,
+    EngineCompletion* out,
+    size_t cap
+)
+{
+    a->messages.clear();
+    std::string module(name, name_len);
+    struct Found
+    {
+        uint32_t kind;
+        uint32_t flags;
+    };
+    std::vector<Found> found;
+    try
+    {
+        if (a->new_solver)
+            a->frontend->check(module);
+        else
+        {
+            Luau::FrontendOptions options;
+            options.retainFullTypeGraphs = true;
+            options.forAutocomplete = true;
+            a->frontend->check(module, options);
+        }
+        // Strings for tagged functions (a `.d.luau`'s `@tag`): none yet.
+        auto strings = [](std::string, std::optional<const Luau::ExternType*>, std::optional<std::string>
+                       ) -> std::optional<Luau::AutocompleteEntryMap>
+        {
+            return std::nullopt;
+        };
+        Luau::AutocompleteResult result = Luau::autocomplete(*a->frontend, module, Luau::Position{line, column}, strings);
+        Luau::ToStringOptions shown;
+        shown.maxTypeLength = 160;
+        shown.hideFunctionSelfArgument = true;
+        for (const auto& [label, entry] : result.entryMap)
+        {
+            if (label == Luau::kGeneratedAnonymousFunctionEntryName)
+                continue;
+            uint32_t flags = 0;
+            if (entry.deprecated)
+                flags |= 1;
+            if (entry.typeCorrect != Luau::TypeCorrectKind::None)
+                flags |= 2;
+            if (entry.parens != Luau::ParenthesesRecommendation::None)
+                flags |= 4;
+            if (entry.parens == Luau::ParenthesesRecommendation::CursorAfter)
+                flags |= 8;
+            found.push_back({uint32_t(entry.kind), flags});
+            a->messages.push_back(label);
+            a->messages.push_back(entry.type ? Luau::toString(*entry.type, shown) : std::string());
+        }
+    }
+    catch (...)
+    {
+        found.clear();
+        a->messages.clear();
+    }
+    size_t n = found.size() < cap ? found.size() : cap;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const std::string& label = a->messages[2 * i];
+        const std::string& detail = a->messages[2 * i + 1];
+        out[i] = EngineCompletion{label.data(), label.size(), found[i].kind, found[i].flags, detail.data(), detail.size()};
+    }
+    return found.size();
+}
+
+// What is at `line` and `column` of module `name` (as last checked): the name's or the
+// expression's type, as Luau writes it, into `text` (valid until the next call); 0 when
+// nothing is there.
+size_t engine_analysis_hover(
+    EngineAnalysis* a,
+    const char* name,
+    size_t name_len,
+    uint32_t line,
+    uint32_t column,
+    const char** text
+)
+{
+    a->messages.clear();
+    std::string module(name, name_len);
+    try
+    {
+        a->frontend->check(module);
+        const Luau::SourceModule* source = a->frontend->getSourceModule(module);
+        Luau::ModulePtr checked = a->frontend->moduleResolver.getModule(module);
+        if (!source || !checked)
+            return 0;
+        Luau::Position at{line, column};
+        Luau::ToStringOptions shown;
+        shown.maxTypeLength = 400;
+        shown.useLineBreaks = false;
+        // A table's fields, not the name the solver gave it after its local.
+        shown.ignoreSyntheticName = true;
+        std::optional<Luau::TypeId> type;
+        // A name where it is declared (`local door`, a parameter): its own binding, which
+        // findBindingAtPosition leaves out inside its definition.
+        if (Luau::AstLocal* local = Luau::findExprOrLocalAtPosition(*source, at).getLocal())
+        {
+            for (Luau::ScopePtr scope = Luau::findScopeAtPosition(*checked, at); scope && !type; scope = scope->parent)
+            {
+                auto it = scope->bindings.find(Luau::Symbol(local));
+                if (it != scope->bindings.end())
+                    type = it->second.typeId;
+            }
+        }
+        if (!type)
+        {
+            if (std::optional<Luau::Binding> binding = Luau::findBindingAtPosition(*checked, *source, at))
+                type = binding->typeId;
+            else
+                type = Luau::findTypeAtPosition(*checked, *source, at);
+        }
+        if (!type)
+            return 0;
+        a->messages.push_back(Luau::toString(*type, shown));
+    }
+    catch (...)
+    {
+        return 0;
+    }
+    *text = a->messages[0].data();
+    return a->messages[0].size();
 }
 
 } // extern "C"

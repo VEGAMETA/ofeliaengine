@@ -105,6 +105,22 @@ pub const NEXT: &str = "\u{EA9A}";
 pub const REPLACE: &str = "\u{EB3D}";
 /// Replace every match (`cod-replace_all`).
 pub const REPLACE_ALL: &str = "\u{EB3C}";
+/// A table's field, in the completion list (`cod-symbol_field`).
+pub const FIELD: &str = "\u{EB5F}";
+/// A function (`cod-symbol_method`).
+pub const METHOD: &str = "\u{EA8C}";
+/// A local or a global (`cod-symbol_variable`).
+pub const VARIABLE: &str = "\u{EA88}";
+/// A keyword (`cod-symbol_keyword`).
+pub const KEYWORD: &str = "\u{EB62}";
+/// A type (`cod-symbol_class`).
+pub const TYPE: &str = "\u{EB5B}";
+/// A module (`cod-symbol_namespace`).
+pub const MODULE: &str = "\u{EA8B}";
+/// A string (`cod-symbol_string`).
+pub const STRING: &str = "\u{EB8D}";
+/// Anything else (`cod-symbol_misc`).
+pub const MISC: &str = "\u{EB63}";
 /// Add (`md-plus`).
 pub const PLUS: &str = "\u{F0415}";
 /// A checked box's mark (`md-check`).

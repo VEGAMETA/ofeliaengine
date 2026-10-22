@@ -6,6 +6,7 @@ use crate::Chord;
 use crate::app::is_function_key;
 use crate::checker::Stamp;
 use crate::code::{Document, Motion, Pos, char_column, col_at};
+use crate::complete::Completing;
 use crate::find::Find;
 use crate::highlight::Highlight;
 use crate::session::Base;
@@ -44,6 +45,10 @@ pub(crate) struct Script {
     /// The first line changed since the findings were made: theirs from there on are not
     /// shown until new ones come, as they could be another text's.
     pub(crate) stale_from: Option<usize>,
+    /// The completion list, while open (E8-3c).
+    pub(crate) completing: Option<Completing>,
+    /// What the mouse rests on, while shown: the word's start and its text.
+    pub(crate) hover: Option<(Pos, String)>,
     /// How far its view is scrolled: logical pixels across and down.
     pub(crate) scroll: [f32; 2],
     /// The primary caret is brought into view at the next frame: it moved, or the text
@@ -81,6 +86,8 @@ impl Script {
             sent: None,
             changed_at: None,
             stale_from: None,
+            completing: None,
+            hover: None,
             scroll: [0.0; 2],
             reveal: false,
             base,
@@ -128,6 +135,17 @@ impl Script {
         let line = line.min(self.doc.line_count() - 1);
         let column = ((at[0] - gutter - CODE_PAD + self.scroll[0]) / advance.max(1.0))
             .round()
+            .max(0.0) as usize;
+        Pos::new(line, col_at(self.doc.line(line), column))
+    }
+
+    /// The character under `at` (a [`Self::pos_at`] that does not round): what the mouse
+    /// rests on.
+    pub(crate) fn char_at(&self, at: [f32; 2], advance: f32, gutter: f32) -> Pos {
+        let line = ((at[1] + self.scroll[1]) / CODE_LINE).floor().max(0.0) as usize;
+        let line = line.min(self.doc.line_count() - 1);
+        let column = ((at[0] - gutter - CODE_PAD + self.scroll[0]) / advance.max(1.0))
+            .floor()
             .max(0.0) as usize;
         Pos::new(line, col_at(self.doc.line(line), column))
     }

@@ -410,8 +410,13 @@ Last updated: 2026-10-22.
     given each tab's text 150 ms after it rests; findings stamped by tab and version,
     underlined, each line's first message after its text, counted in the code bar (a
     click goes to the next).
-  - **Next:** E7 waits for the owner's answers to ADR 0114's questions; E8-3c,
-    completion and hover from the same analysis.
+  - **E8-3c, completion and hover** (#334, ADR 0107's as-built): Luau's `autocomplete`
+    after `.`, `:`, a word's first letter and Ctrl+Space, narrowed as the word grows,
+    written with parentheses as one undo step; the mouse resting on a name shows its
+    type.
+  - **Next:** E7 waits for the owner's answers to ADR 0114's questions. The code editor's
+    leftovers (go to definition, signature help, find in files) wait behind E10
+    (materials, the owner's order of tools).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

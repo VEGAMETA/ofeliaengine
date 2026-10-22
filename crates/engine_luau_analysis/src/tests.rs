@@ -101,6 +101,59 @@ fn definitions_give_every_module_the_engines_names() {
 }
 
 #[test]
+fn completions_and_types_come_from_the_checked_module() {
+    for solver in [Solver::New, Solver::Old] {
+        let dir = folder("complete");
+        let mut a = Analysis::new(&dir, solver).unwrap();
+        let text = "--!strict\nlocal Door = { speed = 2.5, open_angle = 90 }\nfunction Door.open(self, by: number): number\n    return by\nend\nlocal n = Door.\nreturn Door\n";
+        a.set_source("door.luau", text);
+        let _ = a.check("door.luau");
+        // After `Door.`: its fields and its function.
+        let found = a.complete("door.luau", 5, 15);
+        let labels: Vec<&str> = found.iter().map(|c| c.label.as_str()).collect();
+        for field in ["open", "open_angle", "speed"] {
+            assert!(labels.contains(&field), "{solver:?}: {labels:?}");
+        }
+        assert!(
+            found.iter().all(|c| c.kind == CompletionKind::Property),
+            "{solver:?}: {found:?}"
+        );
+        let speed = found.iter().find(|c| c.label == "speed").unwrap();
+        assert_eq!(speed.detail, "number");
+        // What `by` is where it is used and where it is declared, and `Door` where it is.
+        assert_eq!(
+            a.type_at("door.luau", 3, 12).as_deref(),
+            Some("number"),
+            "{solver:?}"
+        );
+        assert_eq!(
+            a.type_at("door.luau", 2, 26).as_deref(),
+            Some("number"),
+            "{solver:?}"
+        );
+        let door = a.type_at("door.luau", 1, 7).unwrap_or_default();
+        assert!(door.contains("speed"), "{solver:?}: {door}");
+        // On a line of its own: the locals and the keywords, `Door` among them.
+        a.set_source(
+            "door.luau",
+            "--!strict\nlocal Door = { speed = 2.5 }\n\nreturn Door\n",
+        );
+        let _ = a.check("door.luau");
+        let found = a.complete("door.luau", 2, 0);
+        assert!(
+            found.iter().any(|c| c.label == "Door"),
+            "{solver:?}: {found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.label == "local" && c.kind == CompletionKind::Keyword)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
 fn the_new_solver_finds_the_same() {
     let dir = folder("new");
     let mut a = Analysis::new(&dir, Solver::New).unwrap();

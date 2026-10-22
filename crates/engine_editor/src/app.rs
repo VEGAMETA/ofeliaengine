@@ -58,7 +58,9 @@ use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
 use crate::camera::OrbitCamera;
+use crate::checker::Stamp;
 use crate::code::{Pos, char_column, col_at};
+use crate::complete::{self, Completing, ListKey};
 use crate::draw::{self, Draw, Landed, Made, ROOM_WALLS, Stage};
 use crate::drop::{ModelPlan, resting_point, snap_along};
 use crate::faces::{self, CornerDrag, Face, FaceDrag, PartCorners};
@@ -1539,6 +1541,9 @@ struct Editor {
     /// generation it tells apart.
     checker: Option<crate::checker::Checker>,
     generations: u64,
+    /// The word the mouse rests on in the code (its start), since when, and whether the
+    /// checker was asked what it is (E8-3c).
+    hover_probe: Option<(Pos, Instant, bool)>,
     /// The log as the Output panel shows it (E6), and the bottom panel open (0: Output).
     output: crate::output::Output,
     bottom: Option<usize>,
@@ -1861,6 +1866,9 @@ struct Session {
 /// How long the carets show, then hide, while they blink (milliseconds).
 const CARET_BLINK_MS: u128 = 530;
 
+/// How long the mouse rests on a word before what it is shows (VS Code's hover delay).
+const HOVER_AFTER: Duration = Duration::from_millis(500);
+
 /// The shown script's view, made before the UI's frame (`Editor::code_frame`): the lines in
 /// view, their numbers one after another, the selections and the carets among them, and
 /// the bar's text.
@@ -1882,6 +1890,11 @@ struct CodeShown {
     /// one), and its count.
     matches: Vec<(usize, usize, usize, bool)>,
     count: String,
+    /// The completion list's rows in view (an icon, the ranges of what is written and of
+    /// its type in `list_text`), and the picked one among them.
+    list: Vec<(&'static str, usize, usize, usize, usize)>,
+    list_text: String,
+    list_selected: usize,
     /// The checker's findings in view (a line, its columns, an error), each line's first
     /// message (a line, the column after its text, the message's range in `messages`,
     /// an error), and the code bar's count.
@@ -2209,6 +2222,7 @@ impl Editor {
             scripts_checked: Instant::now(),
             checker: None,
             generations: 0,
+            hover_probe: None,
             output: crate::output::Output::new(),
             bottom: None,
             output_label: String::new(),
@@ -3456,6 +3470,17 @@ impl Editor {
                 (line, column, shown.messages.get(a..b).unwrap_or(""), error)
             })
             .collect();
+        let code_rows: Vec<(&str, &str, &str)> = shown
+            .list
+            .iter()
+            .map(|&(icon, a, b, c, d)| {
+                (
+                    icon,
+                    shown.list_text.get(a..b).unwrap_or(""),
+                    shown.list_text.get(c..d).unwrap_or(""),
+                )
+            })
+            .collect();
         let in_view = if code_script.is_some() {
             shown.last - shown.first
         } else {
@@ -3496,6 +3521,23 @@ impl Editor {
             problems: &shown.problems,
             notes: &code_notes,
             problem_count: &shown.problem_count,
+            completion: s
+                .completing
+                .as_ref()
+                .filter(|_| !code_rows.is_empty())
+                .map(|list| crate::shell::CompletionView {
+                    line: list.start.line,
+                    column: char_column(s.doc.line(list.start.line), list.start.col),
+                    rows: &code_rows,
+                    selected: shown.list_selected,
+                }),
+            hover: s.hover.as_ref().map(|(at, text)| {
+                (
+                    at.line,
+                    char_column(s.doc.line(at.line), at.col),
+                    text.as_str(),
+                )
+            }),
         });
         let model = ShellModel {
             scenes: &scenes,
@@ -3629,6 +3671,16 @@ impl Editor {
         self.find_frame(&response);
         if response.next_problem {
             self.next_problem();
+        }
+        // A completion row clicked: written as Enter would.
+        if let Some(row) = response.completion_row
+            && let Some(s) = self.active_script.and_then(|k| self.scripts.get_mut(k))
+            && let Some(mut list) = s.completing.take()
+        {
+            list.selected = list.first + row;
+            list.accept(&mut s.doc);
+            s.reveal = true;
+            self.code_focus = true;
         }
         if response.open_prefab {
             self.run(world, self.ids.open_prefab);
@@ -7183,13 +7235,52 @@ impl Editor {
             ((r.size[1] / CODE_LINE) as usize).saturating_sub(1).max(1)
         });
         let mut touched = false;
+        // A completion list asked for this frame (`.`, `:`, Ctrl+Space, a word's first
+        // letter).
+        let mut ask_list = false;
         if keys {
             let mut bytes = [0u8; 4];
             for i in 0..self.input.strokes().len() {
-                let effect = match self.input.strokes()[i] {
+                let stroke = self.input.strokes()[i];
+                script.hover = None;
+                // The completion list's keys, while it is open.
+                if let Stroke::Key(chord) = stroke
+                    && let Some(k) = script.completing.as_mut().and_then(|l| l.key(chord))
+                {
+                    match k {
+                        ListKey::Moved => {}
+                        ListKey::Accept => {
+                            if let Some(list) = script.completing.take() {
+                                list.accept(&mut script.doc);
+                                script.reveal = true;
+                            }
+                        }
+                        ListKey::Close => script.completing = None,
+                    }
+                    touched = true;
+                    continue;
+                }
+                let effect = match stroke {
                     Stroke::Char(c) => {
                         script.doc.type_text(c.encode_utf8(&mut bytes));
+                        // After `.` and `:`, what follows; at a word's first letter, what
+                        // it may be (VS Code's quick suggestions).
+                        let head = script.doc.primary().head;
+                        let word = head.col - complete::word_start(&script.doc, head).col;
+                        let first_letter = (c.is_alphanumeric() || c == '_')
+                            && script.completing.is_none()
+                            && word == c.len_utf8();
+                        ask_list |= c == '.' || c == ':' || first_letter;
                         Effect::Edited
+                    }
+                    Stroke::Key(Chord {
+                        ctrl: true,
+                        shift: false,
+                        alt: false,
+                        key: Key::Space,
+                    }) => {
+                        ask_list = true;
+                        Effect::Taken
                     }
                     // Escape closes the find bar first, as in VS Code.
                     Stroke::Key(chord)
@@ -7223,12 +7314,69 @@ impl Editor {
             }
             self.input.take_ui_keys();
         }
+        if ask_list && let Some(checker) = &self.checker {
+            let head = script.doc.primary().head;
+            let start = complete::word_start(&script.doc, head);
+            let stamp = Stamp {
+                generation: script.generation,
+                version: script.doc.version(),
+            };
+            let at = (start.line as u32, start.col as u32);
+            checker.complete(&script.module(), script.doc.text(), stamp, at);
+            script.completing = Some(Completing::new(start));
+        }
+        // Open while the caret is in its word, narrowed to what is typed of it.
+        if let Some(list) = &mut script.completing {
+            let head = script.doc.primary().head;
+            let line = script.doc.line(head.line);
+            let typed = (head.line == list.start.line && head.col >= list.start.col)
+                .then(|| &line[list.start.col..head.col])
+                .filter(|t| t.chars().all(|c| c.is_alphanumeric() || c == '_'));
+            match typed {
+                Some(typed) => {
+                    list.narrow(typed);
+                    if list.answered && list.shown.is_empty() {
+                        script.completing = None;
+                    }
+                }
+                None => script.completing = None,
+            }
+        }
         if let (Some(r), Some(at)) = (rect, cursor)
             && !popup
         {
             let local = [at[0] - r.pos[0], at[1] - r.pos[1]];
             let inside = r.contains(at);
+            if inside && !self.input.held(Button::Left) {
+                let pos = script.char_at(local, advance, gutter);
+                let (a, b) = script.doc.word_range(pos);
+                let on_word = a != b && pos.col < b.col;
+                match self.hover_probe {
+                    Some((p, since, asked)) if on_word && p == a => {
+                        if !asked
+                            && since.elapsed() >= HOVER_AFTER
+                            && let Some(checker) = &self.checker
+                        {
+                            let stamp = Stamp {
+                                generation: script.generation,
+                                version: script.doc.version(),
+                            };
+                            let at = (a.line as u32, a.col as u32);
+                            checker.hover(&script.module(), script.doc.text(), stamp, at);
+                            self.hover_probe = Some((p, since, true));
+                        }
+                    }
+                    _ => {
+                        self.hover_probe = on_word.then(|| (a, Instant::now(), false));
+                        script.hover = None;
+                    }
+                }
+            } else {
+                self.hover_probe = None;
+                script.hover = None;
+            }
             if inside && self.input.pressed(Button::Left) {
+                script.completing = None;
                 let pos = script.pos_at(local, advance, gutter);
                 let now = Instant::now();
                 // Presses in a row on one line: a word, then the line.
@@ -7428,7 +7576,21 @@ impl Editor {
                 at(u32::MAX)
             };
             shown.problems.push((line, at(d.start.1), to, error));
-            if shown.notes.last().is_none_or(|n| n.0 != line) {
+        }
+        // One message a line, after its text: its first error, else its first warning.
+        for wanted in [
+            engine_luau_analysis::Severity::Error,
+            engine_luau_analysis::Severity::Warning,
+        ] {
+            for d in script.found.iter().filter(|d| d.severity == wanted) {
+                let line = d.start.0 as usize;
+                if !(shown.first..shown.last).contains(&line)
+                    || script.stale_from.is_some_and(|s| line >= s)
+                    || shown.notes.iter().any(|n| n.0 == line)
+                {
+                    continue;
+                }
+                let text = doc.line(line);
                 let first = d.message.lines().next().unwrap_or("");
                 let cut = first
                     .char_indices()
@@ -7437,6 +7599,7 @@ impl Editor {
                 let start = shown.messages.len();
                 shown.messages.push_str(&first[..cut]);
                 let column = char_column(text, text.len()) + 4;
+                let error = wanted == engine_luau_analysis::Severity::Error;
                 shown
                     .notes
                     .push((line, column, start, shown.messages.len(), error));
@@ -7459,6 +7622,22 @@ impl Editor {
                     s(w)
                 );
             }
+        }
+        // The completion list's rows in view.
+        shown.list.clear();
+        shown.list_text.clear();
+        shown.list_selected = 0;
+        if let Some(list) = &script.completing {
+            for &i in list.shown.iter().skip(list.first).take(complete::ROWS) {
+                let c = &list.items[i];
+                let a = shown.list_text.len();
+                shown.list_text.push_str(&c.label);
+                let b = shown.list_text.len();
+                shown.list_text.push_str(&c.detail);
+                let d = shown.list_text.len();
+                shown.list.push((complete::icon(c), a, b, b, d));
+            }
+            shown.list_selected = list.selected - list.first;
         }
         let head = doc.primary().head;
         shown.place.clear();
@@ -7541,7 +7720,47 @@ impl Editor {
                 s.sent = Some(version);
             }
         }
-        for checked in checker.finished() {
+        for answer in checker.finished() {
+            let checked = match answer {
+                crate::checker::Answer::Checked(checked) => checked,
+                // A completion list's, while it is open at that word.
+                crate::checker::Answer::Completed { stamp, at, items } => {
+                    if let Some(s) = self
+                        .scripts
+                        .iter_mut()
+                        .find(|s| s.generation == stamp.generation)
+                        && let Some(list) = &mut s.completing
+                        && (list.start.line as u32, list.start.col as u32) == at
+                    {
+                        list.answer(items);
+                    }
+                    continue;
+                }
+                // What the mouse rests on, while it still does.
+                crate::checker::Answer::Hovered { stamp, at, text } => {
+                    let resting = self
+                        .hover_probe
+                        .is_some_and(|(p, _, _)| (p.line as u32, p.col as u32) == at);
+                    if resting
+                        && let Some(text) = text
+                        && let Some(s) = self
+                            .scripts
+                            .iter_mut()
+                            .find(|s| s.generation == stamp.generation)
+                    {
+                        let pos = Pos::new(at.0 as usize, at.1 as usize);
+                        let (a, b) = s.doc.word_range(pos);
+                        let word = &s.doc.line(a.line)[a.col..b.col];
+                        let shown = if word.is_empty() {
+                            text
+                        } else {
+                            format!("{word}: {text}")
+                        };
+                        s.hover = Some((pos, shown));
+                    }
+                    continue;
+                }
+            };
             let Some(s) = self
                 .scripts
                 .iter_mut()
@@ -19799,6 +20018,87 @@ mod tests {
         });
         assert_eq!(ed.scripts[0].found, []);
         assert!(texts(&ed, "1 error").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Frames until `done`, a few milliseconds apart (the checker answers from its
+    /// thread), at most 20 seconds.
+    fn wait_for(ed: &mut Editor, world: &mut World, done: impl Fn(&Editor) -> bool) {
+        let timer = engine_platform::time::HighResTimer::new().unwrap();
+        let t = Instant::now();
+        while !done(ed) && t.elapsed() < Duration::from_secs(20) {
+            ed.update(world);
+            let _ = timer.sleep(Duration::from_millis(5));
+        }
+        ed.update(world);
+    }
+
+    #[test]
+    fn completion_offers_what_luau_knows_and_hover_tells_a_type() {
+        let dir = project("script-complete");
+        std::fs::write(
+            dir.join("door.luau"),
+            "--!strict\nlocal Door = { speed = 2.5, spin = 1 }\nreturn Door\n",
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.update(&mut world);
+        ed.open_script(&world, Path::new("door.luau"), None);
+        ed.update(&mut world);
+        // `.` after `Door` asks what follows.
+        ed.scripts[0].doc.place(Pos::new(2, 11), false, false);
+        chars(&mut ed, ".");
+        ed.update(&mut world);
+        wait_for(&mut ed, &mut world, |ed| {
+            ed.scripts[0]
+                .completing
+                .as_ref()
+                .is_some_and(|l| l.answered)
+        });
+        let labels = |ed: &Editor| -> Vec<String> {
+            let list = ed.scripts[0].completing.as_ref().unwrap();
+            list.shown
+                .iter()
+                .map(|&i| list.items[i].label.clone())
+                .collect()
+        };
+        assert_eq!(labels(&ed), ["speed", "spin"]);
+        assert!(!texts(&ed, "speed").is_empty(), "the list drawn");
+        // Typing narrows it; Enter writes the picked one.
+        chars(&mut ed, "spe");
+        ed.update(&mut world);
+        assert_eq!(labels(&ed), ["speed"]);
+        chord(&mut ed, &mut world, &[ENTER]);
+        assert_eq!(ed.scripts[0].doc.line(2), "return Door.speed");
+        assert!(ed.scripts[0].completing.is_none());
+        // Escape closes a list; a word's first letter opens one.
+        chord(&mut ed, &mut world, &[CTRL, (0x20, 0x39)]);
+        wait_for(&mut ed, &mut world, |ed| {
+            ed.scripts[0]
+                .completing
+                .as_ref()
+                .is_some_and(|l| l.answered)
+        });
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert!(ed.scripts[0].completing.is_none());
+        assert_eq!(
+            ed.scripts[0].doc.line(2),
+            "return Door.speed",
+            "nothing written"
+        );
+        // The mouse resting on `Door` tells what it is.
+        let r = ed.code_rect.unwrap();
+        let gutter = script::gutter_width(4, ed.code_advance);
+        let at = [
+            r.pos[0] + gutter + crate::shell::CODE_PAD + 7.5 * ed.code_advance,
+            r.pos[1] + 1.5 * CODE_LINE,
+        ];
+        mouse(&mut ed, at, None);
+        wait_for(&mut ed, &mut world, |ed| ed.scripts[0].hover.is_some());
+        let (_, text) = ed.scripts[0].hover.clone().unwrap();
+        assert!(text.starts_with("Door: "), "{text}");
+        assert!(text.contains("speed"), "{text}");
+        assert!(!texts(&ed, &text).is_empty(), "shown by the word");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -838,7 +838,13 @@ ones `luau-analyze` and VS Code's luau-lsp use:
 - the code bar counts errors and warnings, and a click there goes to the next one;
 - `--!strict` at the top checks every type.
 
-Completion and hover come next.
+**Completion** opens after `.` and `:`, at a word's first letter, and on Ctrl+Space:
+
+- Up and Down pick an item, and Enter or Tab writes it;
+- a function gets its parentheses;
+- Escape closes the list.
+
+**Rest the mouse on a name** for half a second to see its type.
 
 ## Autosave and the session
 
@@ -921,7 +927,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 |---|---|
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau in the game: the script component, its hooks, bindings and hot reload (its public API waits for the team's answers, ADR 0114) |
-| E8 | the code editor: completion and hover, find in files (scripts in tabs, highlighting, find and replace, Luau's findings as you type are done) |
+| E8 | the code editor: go to definition, signature help, find in files (scripts in tabs, highlighting, find and replace, Luau's findings, completion and hover are done) |
 
 The whole plan is ADR 0107 §7.
 

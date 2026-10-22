@@ -1,7 +1,8 @@
 //! A script's tab on the player (ADR 0107 E8-1b): the session brings the tab back, its
 //! code draws where the viewport is, Luau's checker underlines its mistake, and keys edit
 //! it. `ENGINE_EDITOR_CODE_PNG=<file>` writes the frame; `ENGINE_EDITOR_FIND_PNG=<file>`
-//! the find bar's (E8-2).
+//! the find bar's (E8-2); `ENGINE_EDITOR_COMPLETE_PNG=<file>` the completion list's
+//! (E8-3c).
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -72,7 +73,8 @@ fn write_png(
 }
 
 fn key<G: Game>(game: &mut engine_editor::EditorGame<G>, vk: u16, scancode: u16, down: bool) {
-    let extended = matches!(vk, 0x25..=0x28);
+    // Page Up to Down, End, Home, the arrows, Insert and Delete are extended keys.
+    let extended = matches!(vk, 0x21..=0x28 | 0x2D | 0x2E);
     game.event(&WindowEvent {
         window: WindowId(0),
         time: Instant::now(),
@@ -177,6 +179,36 @@ fn a_scripts_tab_draws_its_code_where_the_viewport_is() {
         &mut game,
         &mut overlay,
         "ENGINE_EDITOR_FIND_PNG",
+    );
+    // Completion (E8-3c): Escape back to the code, a new line under the first, `math.`.
+    key(&mut game, 0x1B, 0x01, true);
+    key(&mut game, 0x1B, 0x01, false);
+    player
+        .frame_overlaid(&mut game, Some(&mut overlay))
+        .unwrap();
+    key(&mut game, 0x11, 0x1D, true);
+    key(&mut game, 0x24, 0x47, true);
+    key(&mut game, 0x24, 0x47, false);
+    key(&mut game, 0x11, 0x1D, false);
+    key(&mut game, 0x23, 0x4F, true);
+    key(&mut game, 0x23, 0x4F, false);
+    key(&mut game, 0x0D, 0x1C, true);
+    key(&mut game, 0x0D, 0x1C, false);
+    player
+        .frame_overlaid(&mut game, Some(&mut overlay))
+        .unwrap();
+    typed(&mut game, "local r = math.");
+    for _ in 0..12 {
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
+            .unwrap();
+        let _ = timer.sleep(std::time::Duration::from_millis(20));
+    }
+    write_png(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        "ENGINE_EDITOR_COMPLETE_PNG",
     );
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
