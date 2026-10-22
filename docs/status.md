@@ -366,7 +366,7 @@ Last updated: 2026-10-22.
     inspector title's Open open the nearest instance's prefab as a tab, the entity
     picked selected there; Ctrl+S writes it, and the other tabs' instances take it when
     shown again (their text holds only overrides). **E5 is done.**
-  - **Material slots** (#PR, ADR 0115; team decision, 2026-10-22): `MaterialSlots` beside
+  - **Material slots** (#324, ADR 0115; team decision, 2026-10-22): `MaterialSlots` beside
     `Model` holds the materials of a mesh's further primitives; the player draws each
     further primitive on a child it makes (`Derived`: never saved, left out of undo,
     picks name the model), the renderer and the extraction untouched; a model dropped
