@@ -481,7 +481,7 @@ Last updated: 2026-10-22.
     on with their state; props that changed move by name to a new layout
     (`engine_ecs::Relayout`, `script::Door#2`), and the editor's history and Play's
     snapshot follow. 1,000 instances: 0.21 ms in place, 0.33 ms moved (target 100).
-  - **The owner's notes of 2026-10-22** (#PR): a transform's scale keeps its proportions
+  - **The owner's notes of 2026-10-22** (#347): a transform's scale keeps its proportions
     while the lock beside its name is shut (the default, kept in the session); Ctrl+A
     opens the add menu under the pointer, inside the window.
   - **Next, in this order:**
