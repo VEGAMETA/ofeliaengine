@@ -692,6 +692,13 @@ room.
   - "Prefab: Revert Overrides" puts the whole instance back to its prefab's values, in
     one undo step, and takes away the components it added. Entities and components it
     removed stay removed.
+  - "Prefab: Apply Overrides" writes the instance into its prefab: its values, and the
+    components and entities it added or removed. The prefab's other instances follow at
+    once. Undo puts the scene back; the file stays as written.
+- **A prefab written anew** (by Apply, by another editor, by hand) is followed by the
+  open scene's instances: they take its new values where they did not change them, its
+  new entities and components, and lose what it no longer has where they kept it as it
+  was. What they changed stays theirs. While the scene plays, this waits for Stop.
 
 ## Autosave and the session
 

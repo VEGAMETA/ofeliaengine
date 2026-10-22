@@ -996,6 +996,8 @@ pub struct PrefabBase {
     getters: Vec<Getter>,
     /// The instance's own id.
     instance: SceneId,
+    /// Every prefab placing it placed (its own and those inside it).
+    prefabs: Vec<AssetId>,
 }
 
 /// The name [`SaveOptions`] keeps for it.
@@ -1052,6 +1054,7 @@ impl PrefabBase {
             by_id,
             getters,
             instance,
+            prefabs: report.prefabs,
         })
     }
 
@@ -1078,6 +1081,61 @@ impl PrefabBase {
             .copied()
             .find(|&c| components.name(c) == Some(name))?;
         self.world.get_raw(e, found)
+    }
+
+    /// Every prefab placing it placed: its own, and those inside it (what it follows).
+    pub fn prefabs(&self) -> &[AssetId] {
+        &self.prefabs
+    }
+
+    /// The scene ids of the entities it places.
+    pub fn ids(&self) -> impl Iterator<Item = SceneId> + '_ {
+        self.by_id.keys().copied()
+    }
+
+    /// The scene id of entity `e` of its world.
+    pub fn scene_id(&self, e: Entity) -> Option<SceneId> {
+        self.ids.get(&e).copied()
+    }
+
+    /// The scene id of entity `id`'s parent, as the prefab places it.
+    pub fn parent(&self, id: SceneId) -> Option<SceneId> {
+        let e = self.entity(id)?;
+        self.scene_id(self.world.parent(e)?)
+    }
+
+    /// How deep entity `id` is under the instance's root (0: the root).
+    pub fn depth(&self, id: SceneId) -> usize {
+        let mut depth = 0;
+        let mut at = id;
+        while let Some(p) = self.parent(at) {
+            depth += 1;
+            at = p;
+        }
+        depth
+    }
+
+    /// The components entity `id` has as the prefab places it, with reflection: each its
+    /// type's name (as `engine_ecs::Components::name` gives it), its description, its value.
+    pub fn components(
+        &self,
+        id: SceneId,
+    ) -> Vec<(&str, &'static TypeInfo, core::ptr::NonNull<u8>)> {
+        let Some(e) = self.entity(id) else {
+            return Vec::new();
+        };
+        let components = self.world.components();
+        self.world.component_ids_of(e).map_or_else(Vec::new, |ids| {
+            ids.iter()
+                .filter_map(|&c| {
+                    Some((
+                        components.name(c)?,
+                        components.type_info(c)?,
+                        self.world.get_raw(e, c)?,
+                    ))
+                })
+                .collect()
+        })
     }
 
     /// The names of the components entity `id` has as the prefab places it.

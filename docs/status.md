@@ -263,9 +263,9 @@ Last updated: 2026-10-20.
       field;
     - the model's entities come from its glTF's outline (`engine_assets::GltfOutline`, the
       JSON alone).
-  - **Asked (2026-10-22):** meshes of several materials draw with their first. Two ways
-    out: per-primitive parts, an entity each; or material slots on `Model`, one entity per
-    mesh, as in Unity and Godot.
+  - **Decided (team decision, 2026-10-22):** meshes of several materials draw with their
+    first; `Model` gets material slots, one entity per mesh, as in Unity and Godot (not a
+    part per primitive). Queued after E5.
   - **E4-4, glTF files load in the background** (#307, ADR 0108's as-built):
     - a loading thread with a pool below normal priority reads and imports files, puts
       meshes together (their vertices encoded too) and decodes textures with their mip
@@ -335,8 +335,17 @@ Last updated: 2026-10-20.
     entities measured against their prefab (`PrefabBase`, cached per outermost instance
     until the prefab's file changes), names and assets too; ↺ and Backspace put the
     prefab's value back; "Prefab: Revert Overrides"; the title names the prefab.
-  - **Next:** E5-4, prefabs followed live: applying overrides to the prefab, the open
-    scene's instances following a prefab written anew, the prefab opened in its own tab.
+  - **E5-4, prefabs followed, overrides applied** (#319, ADR 0108's as-built):
+    - a prefab file written anew is followed by the open scene's instances, in place
+      (references kept), keeping what they changed: values merged three ways against the
+      base kept, entities and components it added placed, those it dropped gone; at Stop
+      while playing;
+    - "Prefab: Apply Overrides" writes an instance into its prefab (values, added and
+      removed components and entities); the others follow at once.
+  - **Next:** E5's last item, a prefab opened in a tab of its own (the editor holding
+    several scenes); then material slots on `Model` (team decision, 2026-10-22: each
+    primitive of a mesh drawn with its own material); then E6 (output, errors, history;
+    ADR 0107 §7).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
@@ -487,10 +496,11 @@ Last updated: 2026-10-20.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner:** meshes of several materials (2026-10-22, E4-3):
-  per-primitive parts or material slots on `Model` (§0, E4). Earlier ones are settled
-  (2026-10-16: the virtual shadow pages stay off by default on discrete GPUs; the monitor
-  was lent for exclusive full screen, see §6).
+- **Questions open with the owner:** none. Settled 2026-10-22 (team decisions): meshes of
+  several materials get material slots on `Model` (queued after E5); ADR 0108's prefab
+  root rule stays; the Radeon's CPU check baseline is not refreshed for now (§6).
+  Earlier: 2026-10-16, the virtual shadow pages stay off by default on discrete GPUs; the
+  monitor was lent for exclusive full screen (§6).
 - **Agents** (team decision, 2026-10-20): at most 2 at a time, when there is a need, for
   tasks that need no full test runs (research notes, surveys, drafts). Gates and merges
   stay the coordinator's (§2).
@@ -699,7 +709,8 @@ water and impostors stay in §6):
      and restart;
    - **E2:** viewport tools; **E2b:** blockout (CSG brushes, the owner's addition);
      **E3:** Play on a copy of the world; **E4:** assets (ids,
-     cache, import, browser); **E5:** prefabs; **E6:** output, errors, history;
+     cache, import, browser; material slots on `Model` after E5, team decision
+     2026-10-22); **E5:** prefabs; **E6:** output, errors, history;
    - **E7:** Luau in the game (bindings, `.d.luau`, script components; the public API to
      the owner); **E8:** the code editor; **E9:** the debugger (core, DAP, panel);
    - **E10:** materials; **E11:** sound; **E12:** animation; **E13:** 2D; **E14:** the rest
@@ -1500,6 +1511,14 @@ grown, divide and conquer); the old labels stay in parentheses.
   An idle editor builds no frame, so the cost is only while something changes. To do:
   measure the editor's frame with the counting allocator, keep its rows in reused
   buffers.
+
+- **The Radeon's CPU check runs 70–85 % above its baseline** (2026-10-22, from #307 on):
+  `perf_gate --cpu`'s cpu frame 374 → 640–693 µs, every stage alike (`simulate` and
+  `pools` too), on main and the branches the same (A/B with prebuilt binaries: main
+  649/644, branch 644/639), while NVIDIA's CPU check stays within 1 %: the machine's
+  state, not code. Team decision, 2026-10-22: `tests/golden/perf/amd.cpu.tsv` is not
+  refreshed for now; its flags are known noise while NVIDIA's CPU check is clean.
+  Refresh it if the shift stays once the machine is quiet.
 
 - **`zero_alloc_probes` still fails under the gate's load now and then** (again on
   2026-10-22, #314's gate): 6 allocations in 593 frames after 203 warm-up frames, the GI

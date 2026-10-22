@@ -568,7 +568,7 @@ The section "Prefab instances" above, built in `engine_scene` (`prefab` module),
   a fold from the right, so placing a prefab under instance `I` maps each of its ids
   `x` to `derive(I, x)` and a path written in a scene names the same entity that nesting
   places.
-- **The root (decided here; the format did not say):**
+- **The root (team decision, 2026-10-22; the format did not say):**
   - a prefab of one root: that root is the instance's entity and takes the instance's
     id, so `[instance]`'s lines override its values, as the format reads;
   - a prefab of several roots ("any scene is a prefab": a level of many roots): an
@@ -673,3 +673,36 @@ The section "Prefab instances" above, built in `engine_scene` (`prefab` module),
   instances of the prefab to follow it at once: saving measures them against the prefab
   as it is on disk, so their values from the old one would be written as overrides. A
   prefab edited live in its own tab, which every open scene follows, comes with it.
+
+## As built (E5-4, 2026-10-22): prefabs followed, overrides applied
+
+- **Following** (`prefabs::follow`): when the asset database finds a scene file written
+  anew, every outermost instance whose base placed it (`PrefabBase::prefabs`: its prefab
+  and those inside it) goes from the base kept for it (the prefab as it was) to the
+  prefab as it is, in one undo step ("Follow Prefabs"), entities changed in place so what
+  refers to them still does:
+  - an entity both versions place: each value the instance left as the old prefab had it
+    takes the new one (a component's lines merged three ways; one whose fields changed
+    shape is taken whole when the instance had not changed it); components the prefab
+    added are added, those it took away go where the instance had them as they were;
+  - an entity the prefab no longer places goes, with what is under it; one it added is
+    placed, parents first, its components copied through their lines;
+  - what the instance changed, removed or added stays.
+
+  So that the old version is known, every outermost instance's base is built when the
+  instance appears (not only when the inspector shows it), and kept while the scene
+  plays: a prefab written anew during Play is followed at Stop.
+- **"Prefab: Apply Overrides"** writes the outermost instance into its prefab:
+  - the instance is written as a scene of its own (`save_subtree`), placed alone in a
+    world of its own, and made the prefab's own entities again: the root takes the id of
+    the prefab's single root (several roots: the instance's holder goes), what the
+    instance placed takes its id in the file, instances inside keep theirs, what it added
+    keeps its id; that world is saved under the prefab's id over the file;
+  - in the scene, in one undo step ("Apply Overrides"): the entities the instance added
+    take derived ids and `PrefabPart` (they are the prefab's now), then every instance
+    follows the file written anew, so this one has nothing left to override and the
+    others take what was applied;
+  - undo puts the scene back; the file stays as written.
+- **Left:** opening a prefab to edit it in a tab of its own, which needs the editor to
+  hold several scenes (their sessions, histories and autosaves); revert bringing back
+  removed entities and components.
