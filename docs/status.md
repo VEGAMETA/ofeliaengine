@@ -378,7 +378,7 @@ Last updated: 2026-10-22.
   - **E6-2, errors next to their causes** (#326, ADR 0107's as-built): a row's text names
     its cause (an id, `path:line[:column]`, a file); a click selects the entity, shows the
     asset in the dock or opens the line in VS Code; a failed build's errors are rows.
-  - **E6-3 and E6-4, Tasks and History** (#PR, ADR 0107's as-built): a Tasks tab lists
+  - **E6-3 and E6-4, Tasks and History** (#327, ADR 0107's as-built): a Tasks tab lists
     the background work (the build, assets, compression, thumbnails, navigation) with how
     far and how long; the scene dock's History lists every step, the current one marked,
     and a click goes to it.
