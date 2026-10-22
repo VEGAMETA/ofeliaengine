@@ -53,8 +53,10 @@ Option 3.
   - a file written anew is cooked again when next asked;
   - the convex parts are cached in the derived data cache already (ADR 0101); the rest of
     a cook is a copy of triangles or a fit, and is not cached.
-- **A game's bodies:** `ScenePhysics::sync_models`, called from `Game::tick` as
-  `sync_blockout` is:
+- **A game's bodies:** `ScenePhysics::sync_models`, through `ScenePhysics::sync_scene`
+  from a new hook, `Game::before_ticks(scene)` (amended at step 2: `Game::tick` has only
+  the world, so neither this call nor the guide's `sync_blockout` could be written
+  there):
   - a static model gets a fixed body at its entity's place, made again when the entity
     moves or its collider changes, and gone with the entity or when it is turned off;
   - a dynamic or kinematic model gets `RigidBody` and `PhysicsPose`: the physics moves the
@@ -97,7 +99,8 @@ Option 3.
 
 1. `Shape::edges`; `Assets::collider`, the models' colliders cooked when asked; the
    editor draws them (ADR 0116 V2b).
-2. `ScenePhysics::sync_models`: the models' bodies, static and moving; the physics guide.
+2. `ScenePhysics::sync_models` and `sync_scene`, `Game::before_ticks`: the models' bodies,
+   static and moving; the physics guide.
 
 ## As built (step 1, 2026-10-22): the models' colliders, drawn
 
@@ -144,4 +147,32 @@ Option 3.
     would take both costs away;
   - a glTF physics body whose colliders are on other nodes than the one drawing the mesh
     gives that mesh no collider.
+
+## As built (step 2, 2026-10-22): the models' bodies
+
+- **`Game::before_ticks(&mut self, scene: &mut SceneParts) -> Result<(), AppError>`**:
+  every frame while the world simulates (or a paused tick is stepped), before the ticks.
+  `SceneParts` holds the world, the assets and the blockout. An error goes to the log
+  once while it stays the same, and the frame goes on. The editor's Play forwards it to
+  the game.
+- **`ScenePhysics::sync_scene(scene)`**: `sync_blockout` and `sync_models` in one call;
+  the physics guide's blockout example uses it now.
+- **`ScenePhysics::sync_models(world, assets)`**:
+  - visits the models whose `Model` or world transform changed (the ECS's change ticks),
+    those waiting for their colliders, and every active model once the assets' collider
+    epoch, the world's `ActivityEpoch` or its `resync_epoch` changes;
+  - a despawned model, or one that lost its `Model`, loses its body (the world's removal
+    log of `Model`);
+  - each mesh's shape is built once from its collider and shared by its models; shapes
+    placed for a scale are shared by mesh and scale;
+  - a static model's body is made again when the entity moves;
+  - a dynamic or kinematic model becomes a hierarchy root where it is in the world, its
+    scale kept, with `RigidBody`, `PhysicsPose` (and `KinematicTarget`): the physics moves
+    it, and saves carry it by its own `SceneId`;
+  - nothing allocates while nothing changes; `sync_blockout` now keeps its scratch too.
+- **`ScenePhysics::model_body(entity)`**: the body a model was given.
+- **Tests** (the player, both GPUs): a crate whose rules make it a prop falls 3 m onto a
+  built-in cube scaled into a floor and rests on it (at 0.48 m, Jolt's 2 cm penetration
+  slop); a ray beside it hits the floor's top; moved 2 m down, the floor's body follows;
+  despawned, its body goes.
 

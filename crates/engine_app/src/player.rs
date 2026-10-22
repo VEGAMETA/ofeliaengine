@@ -576,6 +576,8 @@ pub struct Player {
     previews: crate::previews::Previews,
     /// Ticks to run while the world is kept still ([`Player::step_tick`]).
     steps: u32,
+    /// The game's last error in [`Game::before_ticks`], said once.
+    scene_error: Option<String>,
 }
 
 /// The view in a window of its own (ADR 0107 E3-4: the editor's Play): the scene drawn
@@ -1199,6 +1201,7 @@ impl Player {
             wait_for_assets: true,
             previews: crate::previews::Previews::new(settings.frames_in_flight),
             steps: 0,
+            scene_error: None,
             assets: assets(settings),
             blockout: crate::Blockout::new(),
             scripts: None,
@@ -2589,6 +2592,24 @@ impl Player {
             }
             None => false,
         };
+        // The scene's parts the game's physics follows (ADR 0117), before the ticks.
+        if self.simulating || self.steps > 0 {
+            let mut scene = crate::SceneParts {
+                world: &mut self.runtime.world,
+                assets: &mut self.assets,
+                blockout: &self.blockout,
+            };
+            match game.before_ticks(&mut scene) {
+                Ok(()) => self.scene_error = None,
+                Err(e) => {
+                    let said = e.to_string();
+                    if self.scene_error.as_deref() != Some(said.as_str()) {
+                        log::warn!(target: "engine_app::player", "the game's scene: {said}");
+                        self.scene_error = Some(said);
+                    }
+                }
+            }
+        }
         // Ticks, presentation, interpolation (ADR 0064).
         // The network session's requests (host, join, leave) at the frame's start (ADR 0106).
         if let Some(net) = &mut self.net {

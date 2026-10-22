@@ -331,14 +331,17 @@ your ticks; joined, the client runs them (its predictions); offline, nothing cha
 1. Window events go to `Game::event`.
 2. Latency control waits, so that input is read as late as possible.
 3. The frame waits for its slot and its swapchain image.
-4. The due ticks run: `Game::tick`, then transforms propagate to the GPU scene.
-5. `Game::present` runs (the camera, from the latest input).
-6. `Game::animate` runs (skinning matrices); the player places the skinned meshes and
+4. `Game::before_ticks` runs while the world simulates, with the scene's parts outside
+   the world (its assets, its brushes): the game's physics follows them there
+   ([physics.md](physics.md#models-in-scene-files)).
+5. The due ticks run: `Game::tick`, then transforms propagate to the GPU scene.
+6. `Game::present` runs (the camera, from the latest input).
+7. `Game::animate` runs (skinning matrices); the player places the skinned meshes and
    mirrors the probes and the GI volume. Then sound follows the sources and the listener,
    and the videos play.
-7. Streaming, then the frame's rendering and its UI (`player.ui_mut()`: 2D and 3D
+8. Streaming, then the frame's rendering and its UI (`player.ui_mut()`: 2D and 3D
    canvases).
-8. Submission and presentation.
+9. Submission and presentation.
 
 `player.frame(&mut game)` runs one frame and returns where its time went
 (`FrameReport`); `player.run` loops until the window closes. Neither allocates once the

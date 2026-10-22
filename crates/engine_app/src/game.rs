@@ -16,16 +16,28 @@ use crate::videos::Videos;
 ///
 /// One frame:
 /// 1. [`Self::event`] for each window event since the last frame;
-/// 2. [`Self::tick`] for each fixed tick due (none in some frames, several after a
+/// 2. [`Self::before_ticks`] while the world simulates: the scene's parts outside the
+///    world (its brushes, its models' colliders), for the game's physics;
+/// 3. [`Self::tick`] for each fixed tick due (none in some frames, several after a
 ///    hitch);
-/// 3. [`Self::present`]: what follows input every frame, after the ticks;
-/// 4. [`Self::animate`]: work on the renderer's parts with the frame's interpolated
+/// 4. [`Self::present`]: what follows input every frame, after the ticks;
+/// 5. [`Self::animate`]: work on the renderer's parts with the frame's interpolated
 ///    transforms (skinned poses);
-/// 5. [`Self::ui`]: the frame's UI layer, drawn on every presented frame.
+/// 6. [`Self::ui`]: the frame's UI layer, drawn on every presented frame.
 pub trait Game {
     /// A window event (input, focus, size), as the window thread reported it.
     fn event(&mut self, event: &WindowEvent) {
         let _ = event;
+    }
+
+    /// Every frame while the world simulates, before the ticks, with the scene's parts
+    /// outside the world: what a [`ScenePhysics`](crate::ScenePhysics) follows, in one
+    /// line (`self.physics.sync_scene(scene)?;`: the blockout's bodies and the models',
+    /// ADR 0117). An error is said in the log (once while it stays the same) and the
+    /// frame goes on.
+    fn before_ticks(&mut self, scene: &mut SceneParts<'_>) -> Result<(), crate::AppError> {
+        let _ = scene;
+        Ok(())
     }
 
     /// A fixed tick of the simulation, `dt` seconds long (movement, physics, AI). The
@@ -123,6 +135,17 @@ pub struct PlayFrom {
     pub position: engine_core::math::Vec3,
     /// Which way it looked.
     pub rotation: engine_core::math::Quat,
+}
+
+/// The parts of the player outside the world that a scene's physics follows
+/// ([`Game::before_ticks`]).
+pub struct SceneParts<'a> {
+    /// The game's world.
+    pub world: &'a mut World,
+    /// The scene's assets: its models' colliders ([`crate::Assets::collider`]).
+    pub assets: &'a mut crate::Assets,
+    /// The scene's brushes, as last evaluated.
+    pub blockout: &'a crate::Blockout,
 }
 
 /// The parts of the player [`Game::animate`] works on.

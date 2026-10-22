@@ -14516,6 +14516,11 @@ impl<G: Game> Game for EditorGame<G> {
         }
     }
 
+    fn before_ticks(&mut self, scene: &mut engine_app::SceneParts<'_>) -> Result<(), AppError> {
+        self.guarded("before_ticks", |game| game.before_ticks(scene))
+            .unwrap_or(Ok(()))
+    }
+
     fn tick(&mut self, world: &mut World, dt: f32) {
         self.guarded("tick", |game| game.tick(world, dt));
     }
