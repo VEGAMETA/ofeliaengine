@@ -10,7 +10,7 @@
 
 use crate::texture_compress::{ENCODER, EncodedTexture, TextureFormat, compress};
 use crate::texture_import::{ImageError, TextureUsage, build_mips, decode_image};
-use engine_core::hash::{StableHasher, hash128, to_hex};
+use engine_core::hash::{StableHasher, content_hash128, to_hex};
 use engine_core::jobs::ThreadPool;
 use std::fs;
 use std::io;
@@ -74,7 +74,8 @@ const TEXTURE_MAGIC: &[u8; 8] = b"ENGTEX01";
 /// The cache key of `encoded` (an image file) imported for `usage`.
 pub fn texture_key(encoded: &[u8], usage: TextureUsage) -> u128 {
     let mut h = StableHasher::new();
-    h.write_str("engine texture 1");
+    // 2: the file's bytes by `content_hash128` (ADR 0113).
+    h.write_str("engine texture 2");
     h.write_str(ENCODER);
     // Mip filtering is part of the result too.
     h.write_str("kaiser 3 4; linear light; coverage; renormalized");
@@ -87,7 +88,7 @@ pub fn texture_key(encoded: &[u8], usage: TextureUsage) -> u128 {
         TextureUsage::Data => h.write_str("data"),
         TextureUsage::Normal => h.write_str("normal"),
     }
-    h.write(&hash128(encoded).to_le_bytes());
+    h.write(&content_hash128(encoded).to_le_bytes());
     h.finish()
 }
 

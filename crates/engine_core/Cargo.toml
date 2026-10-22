@@ -25,6 +25,9 @@ glam = { version = "0.33", features = ["bytemuck"] }
 # The global allocator (ADR 0086; MIT, the mimalloc 2.3.2 C sources built by cc, about
 # 5 s): 3.3-4.7x the Windows heap on allocation-heavy work (bench/alloc-compare).
 mimalloc = { version = "=0.1.52", default-features = false, features = ["v2"], optional = true }
+# XXH3-128, the content hash of cache keys (ADR 0113; MIT, no dependencies with these
+# features): AVX2 or SSE2 chosen at run time.
+twox-hash = { version = "2.1.5", default-features = false, features = ["std", "xxhash3_128"] }
 
 
 [dev-dependencies]

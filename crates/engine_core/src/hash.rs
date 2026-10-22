@@ -4,8 +4,11 @@
 //! Cache keys must never change between builds, toolchains or machines: they name files in
 //! caches shared across the team. `std::hash::DefaultHasher` makes no such promise, so
 //! [`StableHasher`] is 128-bit FNV-1a (Fowler–Noll–Vo, public domain), which is simple,
-//! deterministic and more than wide enough for cache keys. [`StateHasher`] trades that
-//! width for speed on megabytes of simulation state. Neither is a cryptographic hash.
+//! deterministic and more than wide enough for cache keys. It reads a byte at a time
+//! (about 1.1 GB/s), so keys that cover whole source files (images, panoramas, meshes)
+//! hash them with [`content_hash128`] (XXH3-128, ADR 0113) and feed that to it.
+//! [`StateHasher`] trades width for speed on megabytes of simulation state. None is a
+//! cryptographic hash.
 
 /// FNV-1a 128-bit offset basis.
 const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
@@ -81,6 +84,21 @@ pub fn hash128(bytes: &[u8]) -> u128 {
     let mut h = StableHasher::new();
     h.write(bytes);
     h.finish()
+}
+
+/// The content hash of cache keys (ADR 0113): XXH3-128 with seed 0, from xxHash's
+/// specification (frozen since xxHash 0.8.0), through the twox-hash crate. Many times
+/// [`hash128`]'s speed on large inputs: what keys use for whole source files. Like
+/// [`StableHasher`] it never changes, since cache entries are named by keys made from it.
+///
+/// ```
+/// use engine_core::hash::content_hash128;
+///
+/// // xxHash's own value for no bytes.
+/// assert_eq!(content_hash128(b""), 0x99aa_06d3_0147_98d8_6001_c324_468d_497f);
+/// ```
+pub fn content_hash128(bytes: &[u8]) -> u128 {
+    twox_hash::XxHash3_128::oneshot(bytes)
 }
 
 /// Lower-case hexadecimal form of a 128-bit hash (32 characters), for file names.
@@ -252,6 +270,42 @@ mod tests {
         padded.push(0);
         assert_ne!(state_hash64(&padded), whole);
         assert_ne!(state_hash64(&[]), state_hash64(&[0]));
+    }
+
+    /// [`content_hash128`] of the first bytes of `content_hashes_never_change`'s data, when
+    /// it was chosen (twox-hash 2.1.5).
+    const CONTENT_3: u128 = 0x95c7_0506_0a31_3bf8_a1c4_a825_9b82_7291;
+    const CONTENT_100: u128 = 0x0938_6db4_4501_f7e4_aced_ade9_575c_6f25;
+    const CONTENT_200: u128 = 0xfc85_6e65_38fc_9e49_293b_2bb6_2ee3_d385;
+    const CONTENT_5000: u128 = 0x9719_56c2_a9ec_b28a_8533_77ef_13ce_c7bd;
+    const CONTENT_1M: u128 = 0x490d_2e48_8006_6606_e278_6b35_8eab_4a67;
+
+    #[test]
+    fn content_hashes_never_change() {
+        // xxHash's value for no bytes (its sanity checks).
+        assert_eq!(
+            content_hash128(b""),
+            0x99aa_06d3_0147_98d8_6001_c324_468d_497f
+        );
+        // Cache entries are named by these: a dependency update that changes them would
+        // orphan every entry (ADR 0113). Inputs on every path of XXH3: short, mid, long.
+        let data: Vec<u8> = (0..(1u32 << 20))
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let pinned = [
+            (3, CONTENT_3),
+            (100, CONTENT_100),
+            (200, CONTENT_200),
+            (5000, CONTENT_5000),
+            (1 << 20, CONTENT_1M),
+        ];
+        for (len, expected) in pinned {
+            assert_eq!(content_hash128(&data[..len]), expected, "{len} bytes");
+        }
+        // Every byte counts.
+        let mut changed = data.clone();
+        changed[777_777] ^= 1;
+        assert_ne!(content_hash128(&changed), CONTENT_1M);
     }
 
     #[test]

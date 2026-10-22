@@ -305,8 +305,11 @@ Last updated: 2026-10-20.
       on the GPU;
     - FlightHelmet: shown from the cache in 31–34 ms (273–321 ms without), its textures
       272 → 68 MB; the first time, compressed in the background in 8 s.
-  - **Next:** E4-8b, a faster content hash for the cache's keys (FNV-1a is 70 % of a load
-    from it); E4's last item, import settings in the inspector (a texture's use and
+  - **E4-8b, the content hash of the cache's keys** (#PR, ADR 0113): XXH3-128 (twox-hash,
+    MIT) as `engine_core::hash::content_hash128` for the keys of textures, panoramas and
+    colliders' parts, 55–64 GB/s against FNV-1a's 1.13; FlightHelmet's keys 42 → 1 ms,
+    from the cache 31 → 27 ms; the old entries computed once more.
+  - **Next:** E4's last item, import settings in the inspector (a texture's use and
     compression, a model's scale). Then E5, prefabs.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):

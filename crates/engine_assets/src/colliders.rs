@@ -45,7 +45,7 @@ use engine_collision::fit;
 use engine_collision::hull::{Hull, HullSettings};
 use engine_collision::mesh::weld_vertices;
 use engine_collision::{Collider, ColliderShape, Origin, Shape};
-use engine_core::hash::{StableHasher, hash128};
+use engine_core::hash::{StableHasher, content_hash128};
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat3, Mat4, Quat, Vec3};
 use std::collections::{BTreeMap, HashMap};
@@ -581,7 +581,8 @@ const PARTS_MAGIC: &[u8; 8] = b"ENGPRT01";
 /// The cache key of a mesh's convex parts under `settings`.
 fn parts_key(vertices: &[Vec3], triangles: &[[u32; 3]], settings: &DecomposeSettings) -> u128 {
     let mut h = StableHasher::new();
-    h.write_str("engine collider parts 1");
+    // 2: the mesh's bytes by `content_hash128` (ADR 0113).
+    h.write_str("engine collider parts 2");
     h.write_u64(u64::from(decompose::REVISION));
     // Every setting, in a fixed order.
     h.write_u64(settings.threshold.to_bits());
@@ -609,7 +610,7 @@ fn parts_key(vertices: &[Vec3], triangles: &[[u32; 3]], settings: &DecomposeSett
             bytes.extend_from_slice(&i.to_le_bytes());
         }
     }
-    h.write(&hash128(&bytes).to_le_bytes());
+    h.write(&content_hash128(&bytes).to_le_bytes());
     h.finish()
 }
 
