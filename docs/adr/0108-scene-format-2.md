@@ -447,7 +447,9 @@ time.
   is whole: a mesh once made, a material once its textures are.
   - A model drawing a stale part keeps waiting, and is tried again when results come or a
     material settles.
-  - A stale part goes once no model draws it: at its replacement, or once nothing waits.
+  - A stale part goes once no model draws it: at its replacement, or once nothing waits,
+    and then only once the scene has been extracted since (a tick): until then the
+    model's instance still draws it (2026-10-22, with ADR 0110's note on brushes).
   - A file read again while already being read lets the older stale parts go.
   - A broken new version keeps the old one drawn, its problem in the log.
 - **Checked:**

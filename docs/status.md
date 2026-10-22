@@ -342,6 +342,13 @@ Last updated: 2026-10-20.
       while playing;
     - "Prefab: Apply Overrides" writes an instance into its prefab (values, added and
       removed components and entities); the others follow at once.
+  - **The owner's notes, 2026-10-22** (#PR):
+    - brushes no longer flicker while edited: a mesh made again is freed only once the
+      scene has been extracted since (a tick), models read again likewise (ADR 0110's
+      note);
+    - the game has the mouse from Play on, the cursor hidden; Shift+F1 frees it and gives
+      it back, a click in the game gives it back (ADR 0107's note);
+    - the game's window at least 1280 × 720, opened where it was left.
   - **Next:** E5's last item, a prefab opened in a tab of its own (the editor holding
     several scenes); then material slots on `Model` (team decision, 2026-10-22: each
     primitive of a mesh drawn with its own material); then E6 (output, errors, history;

@@ -1092,7 +1092,8 @@ fn locked_at(state: &ThreadState, hwnd: HWND) -> Option<POINT> {
         .map(|(_, p)| *p)
 }
 
-/// Locks `hwnd`'s cursor where it is, hidden, kept within the client area.
+/// Locks `hwnd`'s cursor where it is, hidden, kept within the client area; off the
+/// client area (a window just opened, the cursor over another), in its middle.
 fn lock_cursor(state: &ThreadState, hwnd: HWND) {
     if locked_at(state, hwnd).is_some() {
         return;
@@ -1130,6 +1131,16 @@ fn lock_cursor(state: &ThreadState, hwnd: HWND) {
         };
         ClipCursor(&clip);
         ScreenToClient(hwnd, &mut at);
+        if at.x < client.left || at.y < client.top || at.x >= client.right || at.y >= client.bottom
+        {
+            at = POINT {
+                x: (client.left + client.right) / 2,
+                y: (client.top + client.bottom) / 2,
+            };
+            let mut screen = at;
+            ClientToScreen(hwnd, &mut screen);
+            SetCursorPos(screen.x, screen.y);
+        }
         SetCursor(null_mut());
     }
     state.locked.borrow_mut().push((hwnd, at));

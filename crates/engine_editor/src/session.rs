@@ -246,6 +246,8 @@ pub(crate) struct EditorState {
     pub(crate) overlays: Option<bool>,
     /// Where the editor's window was.
     pub(crate) window: Option<WindowPlacement>,
+    /// Where the game's own window was when Play last ended (Play in a window).
+    pub(crate) game_window: Option<WindowPlacement>,
 }
 
 /// `.ofelia/session`: what the editor brings back at its next start.
@@ -303,12 +305,17 @@ impl SessionFile {
             quote_into(&mut out, pivot);
             out.push('\n');
         }
-        if let Some(w) = self.editor.window {
-            let _ = writeln!(
-                out,
-                "window = ({}, {}, {}, {}, {})",
-                w.left, w.top, w.right, w.bottom, w.maximized
-            );
+        for (key, placement) in [
+            ("window", self.editor.window),
+            ("game_window", self.editor.game_window),
+        ] {
+            if let Some(w) = placement {
+                let _ = writeln!(
+                    out,
+                    "{key} = ({}, {}, {}, {}, {})",
+                    w.left, w.top, w.right, w.bottom, w.maximized
+                );
+            }
         }
         for d in &self.documents {
             out.push_str("\n[document]\n");
@@ -452,18 +459,23 @@ impl SessionFile {
                             other => return Err(at(format!("`{other}` is not true or false"))),
                         });
                     }
-                    "window" => {
+                    "window" | "game_window" => {
                         let parts = items(value, '(', ')').map_err(at)?;
                         let [left, top, right, bottom, maximized] = parts[..] else {
                             return Err(at(format!("`{value}` is not a window's place")));
                         };
-                        file.editor.window = Some(WindowPlacement {
+                        let placement = Some(WindowPlacement {
                             left: parse_number(left).map_err(at)?,
                             top: parse_number(top).map_err(at)?,
                             right: parse_number(right).map_err(at)?,
                             bottom: parse_number(bottom).map_err(at)?,
                             maximized: maximized == "true",
                         });
+                        if key == "window" {
+                            file.editor.window = placement;
+                        } else {
+                            file.editor.game_window = placement;
+                        }
                     }
                     _ => {}
                 },
@@ -896,6 +908,13 @@ mod tests {
                     right: 1601,
                     bottom: 908,
                     maximized: true,
+                }),
+                game_window: Some(WindowPlacement {
+                    left: 200,
+                    top: 100,
+                    right: 1500,
+                    bottom: 860,
+                    maximized: false,
                 }),
             },
         };

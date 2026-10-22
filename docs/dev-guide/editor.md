@@ -147,6 +147,7 @@ editor = ["dep:engine_editor"]
 | Play from the editor's camera; restart | Shift+F5; Ctrl+F5 |
 | Pause or go on; step one tick | F7; Shift+F7 |
 | Eject (the editor's camera and tools on the running game), return | Shift+F8 |
+| While playing: free the mouse from the game, give it back | Shift+F1 |
 | While playing: keep the selection's changes at Stop; pick from what changed | Ctrl+K; Ctrl+Shift+K |
 
 These are our keys, the default (team decision, 2026-10-21): the left hand stays beside
@@ -544,6 +545,12 @@ Keeping the scene and putting it back take milliseconds: 7 and 8 ms for 10,000 e
     last frame.
 
   Shift+F8 again returns to the game.
+- **The mouse is the game's** from Play on: the cursor is hidden and held over the game's
+  view, as in the game. **Shift+F1** frees it (in the game's window too), and Shift+F1
+  or a click in the game gives it back. Pausing, ejecting, and switching to another
+  window free it as well; going on and returning give it back.
+- **The game's window** opens at least 1280 × 720 the first time, and then where you left
+  it.
 
 ### Keeping changes
 

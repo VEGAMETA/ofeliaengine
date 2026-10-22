@@ -589,3 +589,21 @@ Proposed (question 3):
 - **Left:** the cook's path (a shipped game's groups evaluated by the cook, with the
   one-button build, ADR 0107 E14), colliders for models from scenes (with E4 and ADR
   0101), reading files off the frame's thread and compressing their textures (E4).
+
+## As built (2026-10-22, the owner's note): brushes edited between ticks
+
+- **Seen** (the owner): a brush stretched by a side, and every brush its edit reached,
+  flickered while it changed; so did any brush moved in a group (its mesh is made in the
+  group's space).
+- **Why:** the player's frame extracts the scene in its ticks, then presents: brushes are
+  meshed again in the presentation, so a brush's instance takes its new mesh at the next
+  tick's extraction. The old mesh was freed at once, so the instance drew a freed mesh
+  (nothing) until then: on a display faster than the ticks, every frame between an edit
+  and the next tick; while dragging, nearly all of them.
+- **Fixed:** a mesh made again or dropped is freed once the scene has been extracted
+  since (`Blockout::sync`'s `extracted`: a tick ran this frame, or a joined client's
+  frame, which always extracts). The instance draws the old shape until the tick, then
+  the new one.
+- **Checked:** three blocks drawn at four frames a tick, one edited every frame (taller,
+  moved, grown into another): each block shows in every frame; before the fix the edited
+  one was gone from the first.
