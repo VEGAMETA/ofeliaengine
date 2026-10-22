@@ -279,7 +279,7 @@ Last updated: 2026-10-20.
       (`Player::asset_changed`);
     - the old version is drawn until the new one is whole (a material with its textures);
     - an image makes the glTF files that read it again.
-  - **E4-6a, the dock's tiles and image thumbnails** (#PR, ADR 0112):
+  - **E4-6a, the dock's tiles and image thumbnails** (#309, ADR 0112):
     - `engine_ui` draws pictures (`Style::image`);
     - the dock shows tiles sized with Ctrl+wheel;
     - images are made smaller on a thread of their own, cached in `.ofelia/thumbnails/`,
