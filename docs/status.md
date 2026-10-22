@@ -315,7 +315,7 @@ Last updated: 2026-10-20.
     the dock's pick is shown in the inspector with its settings, an edit written at once
     and the asset made again. **E4 is done.**
   - **E5, prefabs** (ADR 0108's "Prefab instances"; the owner: any scene is a prefab):
-  - **E5-1, instances in the format** (#PR, ADR 0108's as-built, format 4):
+  - **E5-1, instances in the format** (#316, ADR 0108's as-built, format 4):
     - `[instance]` places a scene, `[override <instance>/<entity>]` changes what it
       placed, `remove` takes a component or an entity away; ids inside derived from the
       instance's, paths through nested instances;
