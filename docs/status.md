@@ -520,8 +520,11 @@ Last updated: 2026-10-22.
     reads the clock every 64 calls. A prop's read and write 386 → 71 ns the pair, a
     field's 296 → 75 ns, 1,000 doors 3.4 → 0.65 ms (target 1 ms). Found: the shipping
     profile aborts on a binding's error (Luau's C++ exceptions through mlua's callbacks
-    under `panic = "abort"`): ADR 0118 proposes `unwind` (+5 % executable, +3.5 % in
-    mlua-heavy code), for the team.
+    under `panic = "abort"`): ADR 0118 proposed `unwind` (+5 % executable, +3.5 % in
+    mlua-heavy code).
+  - **The shipping profile unwinds** (#355, ADR 0118 accepted: team decision of
+    2026-10-22, option 1): a script's error stops its instance in what players get too.
+    `check.ps1 -Profiles` runs a probe of three script errors built with `shipping`.
   - **Next, in this order:**
     1. E7 on: E7-3's player-owned physics for scripts builds on `ScenePhysics::sync_scene`;
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material

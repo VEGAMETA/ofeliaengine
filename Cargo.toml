@@ -112,4 +112,6 @@ debug = "full"
 inherits = "release"
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# Unwinds, as every other profile (ADR 0118): Luau's errors are C++ exceptions, and under
+# `abort` one raised through the engine's callbacks would end the game.
+panic = "unwind"
