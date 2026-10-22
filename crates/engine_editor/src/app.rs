@@ -89,8 +89,9 @@ use crate::undo::{PlayChange, PlayMark, WorldSnapshot};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
 use core::any::TypeId;
 use engine_app::{
-    AppError, AssetMeta, Brush, BrushGroup, BrushOp, BrushShape, Game, Model, Overlay,
-    OverlayOutput, OverlayPass, Player, PlayerSettings, Setup, Window, builtin,
+    AppError, AssetMeta, Brush, BrushGroup, BrushOp, BrushShape, ColliderState, Game, Model,
+    ModelCollider, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup, Window,
+    builtin,
 };
 use engine_core::math::{Affine3A, Quat, Vec2, Vec3, Vec4, look_at, vulkan_orthographic};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
@@ -2041,6 +2042,15 @@ struct Editor {
     last_loose_click: Option<(String, Instant)>,
     collider_edges: Vec<[Vec3; 2]>,
     collider_key: BlockoutKey,
+    /// The models' colliders (ADR 0117) as lines in the world, by how their bodies move
+    /// ([`motion_batch`]); each mesh's lines in its own space, as made from its collider;
+    /// what the world's lines were made from (the assets' collider epoch, each model's
+    /// mesh and place), and the models now.
+    model_lines: [Vec<[Vec3; 2]>; 4],
+    mesh_lines: HashMap<AssetRef, (std::sync::Arc<ModelCollider>, Vec<[Vec3; 2]>)>,
+    model_key: (u64, ModelKey),
+    model_now: ModelKey,
+    model_query: Option<ModelQuery>,
     /// The navigation mesh shown over the viewport (View: Navigation, E2b-4b): its edges as
     /// last baked (their ends, and whether each is a boundary), what that bake was made
     /// from, a bake running in the background, and since when the brushes have been as they
@@ -2657,6 +2667,11 @@ impl Editor {
             last_loose_click: None,
             collider_edges: Vec::new(),
             collider_key: Vec::new(),
+            model_lines: Default::default(),
+            mesh_lines: HashMap::new(),
+            model_key: (u64::MAX, Vec::new()),
+            model_now: Vec::new(),
+            model_query: None,
             show_nav: false,
             nav_edges: Vec::new(),
             nav_lines: Default::default(),
@@ -9716,6 +9731,57 @@ impl Editor {
         self.say(message);
     }
 
+    /// The models' colliders as lines in the world (View: Colliders, ADR 0117): made
+    /// again when a model moved, came or went, or the player's assets made or forgot a
+    /// collider (one still coming is drawn once it comes). Each mesh's lines are made once
+    /// from its collider, in its own space.
+    fn model_colliders_frame(&mut self, player: &mut Player) {
+        let epoch = player.assets().collider_epoch();
+        let world = player.world_mut();
+        let models = self
+            .model_query
+            .get_or_insert_with(|| QueryState::new(world));
+        self.model_now.clear();
+        self.model_now.extend(
+            models
+                .iter_readonly(world)
+                .map(|(e, m, g)| (e, m.mesh, g.0.to_cols_array())),
+        );
+        if self.model_key.0 == epoch && self.model_key.1 == self.model_now {
+            return;
+        }
+        core::mem::swap(&mut self.model_key.1, &mut self.model_now);
+        self.model_key.0 = epoch;
+        for lines in &mut self.model_lines {
+            lines.clear();
+        }
+        let assets = player.assets_mut();
+        for &(_, mesh, place) in &self.model_key.1 {
+            let ColliderState::Made(collider) = assets.collider(mesh) else {
+                continue;
+            };
+            if self
+                .mesh_lines
+                .get(&mesh)
+                .is_none_or(|(made, _)| !std::sync::Arc::ptr_eq(made, &collider))
+            {
+                let mut lines = Vec::new();
+                collider.collider.edges(&mut lines);
+                self.mesh_lines
+                    .insert(mesh, (std::sync::Arc::clone(&collider), lines));
+            }
+            let Some((_, local)) = self.mesh_lines.get(&mesh) else {
+                continue;
+            };
+            let place = Affine3A::from_cols_array(&place);
+            self.model_lines[motion_batch(&collider)].extend(
+                local
+                    .iter()
+                    .map(|[a, b]| [place.transform_point3(*a), place.transform_point3(*b)]),
+            );
+        }
+    }
+
     /// The navigation's frame (ADR 0110 E2b-4b): a bake's answer taken; a bake started in
     /// the background once the brushes have stayed as they are for [`NAV_WAIT`] and no
     /// gesture runs, from the visible surface of the brushes that collide, for a human-sized
@@ -14160,6 +14226,15 @@ impl<G> EditorGame<G> {
             let reloaded = player.reload_script(&shared.root.join(&path));
             shared.script_reloaded(&path, reloaded);
         }
+        // The models' colliders (ADR 0117): their lines again when one moved or a
+        // collider came.
+        if shared.show_colliders {
+            shared.model_colliders_frame(player);
+        } else if !shared.model_key.1.is_empty() {
+            shared.model_lines = Default::default();
+            shared.model_key = (u64::MAX, Vec::new());
+            shared.mesh_lines.clear();
+        }
         // The newest pick's entity, and what to outline (ADR 0109), through the
         // extraction's slots.
         let runtime = player.runtime();
@@ -14340,6 +14415,14 @@ impl<G> EditorGame<G> {
             .asset_db
             .find(path)
             .is_some_and(|e| shared.thumbnails.made(Subject::File(e.id)))
+    }
+
+    /// How many lines the colliders' overlay draws now (View: Colliders): the blockout's,
+    /// then the models' by how they move (static, dynamic, kinematic, sensors). For tests.
+    pub fn collider_lines(&self) -> [usize; 5] {
+        let shared = self.shared.borrow();
+        let [s, d, k, t] = shared.model_lines.each_ref().map(Vec::len);
+        [shared.collider_edges.len(), s, d, k, t]
     }
 
     /// The navigation mesh's edges the overlay shows now (View: Navigation): for tests.
@@ -14911,6 +14994,34 @@ fn draw_faces(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canvas
 
 /// What the blockout's groups are: each group, its epoch and its place, by group.
 type BlockoutKey = Vec<(Entity, u64, [f32; 12])>;
+
+/// The models whose colliders the overlay draws (ADR 0117): each one's mesh and place.
+type ModelKey = Vec<(Entity, AssetRef, [f32; 12])>;
+type ModelQuery = QueryState<
+    (Entity, &'static Model, &'static GlobalTransform),
+    engine_ecs::Without<engine_runtime::Inactive>,
+>;
+
+/// Which of the models' line batches a collider's lines go in: static, dynamic,
+/// kinematic, sensors.
+fn motion_batch(collider: &ModelCollider) -> usize {
+    use engine_assets::colliders::Motion;
+    match (collider.sensor, collider.motion) {
+        (true, _) => 3,
+        (false, Motion::Static) => 0,
+        (false, Motion::Dynamic) => 1,
+        (false, Motion::Kinematic) => 2,
+    }
+}
+
+/// The models' colliders' colors by [`motion_batch`] (linear, straight alpha): static cyan
+/// as the blockout's, dynamic orange, kinematic violet, sensors yellow.
+const MOTION_COLORS: [[f32; 4]; 4] = [
+    [0.35, 0.95, 1.0, 0.85],
+    [1.0, 0.55, 0.15, 0.9],
+    [0.7, 0.45, 1.0, 0.9],
+    [1.0, 0.9, 0.25, 0.8],
+];
 
 /// What the blockout's groups are now. Colliders and the navigation are made again when it
 /// changes.
@@ -15870,12 +15981,22 @@ impl Overlay for EditorOverlay {
                 if !editor.game_view() {
                     // Empty when hidden.
                     let [boundary, inner] = &editor.nav_lines;
+                    let [statics, dynamics, kinematics, sensors] = &editor.model_lines;
+                    let models = |lines, motion: usize| LineBatch {
+                        lines,
+                        color: MOTION_COLORS[motion],
+                        hidden: 0.2,
+                    };
                     let batches = [
                         LineBatch {
                             lines: &editor.collider_edges,
-                            color: [0.35, 0.95, 1.0, 0.85],
+                            color: MOTION_COLORS[0],
                             hidden: 0.2,
                         },
+                        models(statics, 0),
+                        models(dynamics, 1),
+                        models(kinematics, 2),
+                        models(sensors, 3),
                         LineBatch {
                             lines: boundary,
                             color: [0.35, 1.0, 0.45, 0.9],

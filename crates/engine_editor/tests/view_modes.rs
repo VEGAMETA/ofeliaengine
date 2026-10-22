@@ -1,8 +1,8 @@
 //! The viewport's view modes (ADR 0116) in the editor's frame: Wireframe fills the view
 //! with its background and draws the cube's edges; Lit + Wireframe draws its edges over the
 //! lit cube; Unlit draws it in one flat color. The blockout's colliders are lines in the
-//! world, steady on the surfaces they lie on. `ENGINE_EDITOR_VIEW_MODES_PNG=<prefix>` writes
-//! the frames.
+//! world, steady on the surfaces they lie on; the models' colliders too, by how they move
+//! (ADR 0117). `ENGINE_EDITOR_VIEW_MODES_PNG=<prefix>` writes the frames.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -13,7 +13,7 @@ use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Transform, World};
 use engine_editor::{EditorGame, EditorOverlay};
 use engine_runtime::Sun;
-use engine_scene::{AssetId, Name, SaveOptions, SceneId, SceneRegistry, save_with};
+use engine_scene::{AssetId, AssetRef, Name, SaveOptions, SceneId, SceneRegistry, save_with};
 use std::path::{Path, PathBuf};
 
 struct Still;
@@ -87,7 +87,13 @@ fn write_blockout(dir: &Path) {
 }
 
 /// `world` with the sun, saved as the project's `main.scene`.
-fn save_lit(dir: &Path, mut world: World) {
+fn save_lit(dir: &Path, world: World) {
+    save_lit_with(dir, world, &[]);
+}
+
+/// [`save_lit`], the scene naming assets `files` (each one's reference and path, as
+/// `file.glb#Part`) besides the built-in ones.
+fn save_lit_with(dir: &Path, mut world: World, files: &[(AssetRef, String)]) {
     world.spawn((
         SceneId::new(),
         Name::new("Sun"),
@@ -97,7 +103,10 @@ fn save_lit(dir: &Path, mut world: World) {
             ambient: Vec3::splat(0.04),
         },
     ));
-    let paths = Assets::new(dir.to_path_buf()).paths().clone();
+    let mut paths = Assets::new(dir.to_path_buf()).paths().clone();
+    for (asset, path) in files {
+        paths.insert(*asset, path.clone());
+    }
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
@@ -112,6 +121,42 @@ fn save_lit(dir: &Path, mut world: World) {
     )
     .unwrap();
     std::fs::write(dir.join("main.scene"), &text).unwrap();
+}
+
+/// A cube of side 1 around the origin as a bake's brush, a vertex of its own at each face's
+/// corners.
+fn cube_brush() -> engine_app::BakedBrush {
+    let mut b = engine_app::BakedBrush {
+        tint: [0.8, 0.5, 0.2, 1.0],
+        positions: Vec::new(),
+        normals: Vec::new(),
+        uvs: Vec::new(),
+        indices: Vec::new(),
+    };
+    for axis in 0..3 {
+        for sign in [-1.0f32, 1.0] {
+            let mut n = [0.0; 3];
+            n[axis] = sign;
+            let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+            let first = b.positions.len() as u32;
+            for (a, c) in [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
+                let mut p = [0.0f32; 3];
+                p[axis] = sign * 0.5;
+                p[u] = a;
+                p[v] = c;
+                b.positions.push(p);
+                b.normals.push(n);
+                b.uvs.push([a, c]);
+            }
+            let quad: [u32; 6] = if sign > 0.0 {
+                [0, 1, 2, 0, 2, 3]
+            } else {
+                [0, 2, 1, 0, 3, 2]
+            };
+            b.indices.extend(quad.iter().map(|i| first + i));
+        }
+    }
+    b
 }
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -360,6 +405,104 @@ fn colliders_are_steady_lines_in_the_world() {
 }
 
 #[test]
+fn models_colliders_are_drawn_by_how_they_move() {
+    let dir = temp_dir("model-colliders");
+    // A floor brush; a built-in cube, level geometry; a crate from a glTF file whose rules
+    // make it a prop.
+    let baked = engine_app::bake::glb("Crate", &[cube_brush()], &engine_app::grid_png());
+    let (mesh, material) = baked.parts[0].clone();
+    std::fs::write(dir.join("crate.glb"), &baked.bytes).unwrap();
+    std::fs::write(dir.join("crate.colliders.ron"), "(bodies: Dynamic)").unwrap();
+    let id = engine_app::AssetMeta::ensure(&dir.join("crate.glb")).unwrap();
+    let mut world = World::new();
+    let group = world.spawn((
+        SceneId::new(),
+        Name::new("Blockout"),
+        Transform::IDENTITY,
+        BrushGroup::default(),
+    ));
+    let floor = world.spawn((
+        SceneId::new(),
+        Name::new("Floor"),
+        Transform::from_xyz(0.0, -1.0, 0.0),
+        Brush::new(BrushShape::Box, Vec3::new(8.0, 1.0, 8.0)),
+    ));
+    world.set_parent(floor, Some(group)).unwrap();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Block"),
+        Transform::from_xyz(2.0, 0.5, 0.0),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Crate"),
+        Transform::from_xyz(-2.0, 0.5, 0.0),
+        Model::new(AssetRef::part(id, &mesh), AssetRef::part(id, &material)),
+    ));
+    let parts = [
+        (AssetRef::file(id), String::from("crate.glb")),
+        (AssetRef::part(id, &mesh), format!("crate.glb#{mesh}")),
+        (
+            AssetRef::part(id, &material),
+            format!("crate.glb#{material}"),
+        ),
+    ];
+    save_lit_with(&dir, world, &parts);
+    let settings = PlayerSettings {
+        title: String::from("editor model colliders test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(
+        game.collider_lines(),
+        [0; 5],
+        "none drawn before View: Colliders"
+    );
+    frame_the_scene(&mut player, &mut game, &mut overlay);
+    assert!(game.run_command(player.world_mut(), "view.colliders"));
+    // The crate's collider is cooked in the background.
+    let start_at = std::time::Instant::now();
+    while game.collider_lines()[2] == 0 {
+        assert!(
+            start_at.elapsed() < std::time::Duration::from_secs(20),
+            "the crate's collider never came: {:?}",
+            game.collider_lines()
+        );
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    let _ = capture(&mut player, &mut game, &mut overlay, "model-colliders");
+    // The floor's twelve; the block's box, static; the crate's box fitted to it, a prop.
+    assert_eq!(game.collider_lines(), [12, 12, 12, 0, 0]);
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 #[ignore = "a measurement"]
 fn measure_the_view_modes_over_ten_thousand_cubes() {
     let dir = temp_dir("view-modes-measure");
@@ -538,6 +681,92 @@ fn measure_the_collider_lines() {
             if shown { "shown" } else { "hidden" },
             median(&mut gpu),
             median(&mut cpu)
+        );
+    }
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "a measurement"]
+fn measure_the_model_colliders() {
+    let dir = temp_dir("model-colliders-measure");
+    // 10,000 built-in cubes: 120,000 edges.
+    let mut world = World::new();
+    for i in 0..10_000 {
+        let (x, z) = ((i % 100) as f32 * 1.5 - 75.0, (i / 100) as f32 * 1.5 - 75.0);
+        world.spawn((
+            SceneId::new(),
+            Name::new(format!("Cube {i}")),
+            Transform::from_xyz(x, 0.0, z).with_scale(Vec3::splat(0.5)),
+            Model::new(builtin::CUBE, builtin::MATERIAL),
+        ));
+    }
+    save_lit(&dir, world);
+    let settings = PlayerSettings {
+        title: String::from("editor model colliders measurement"),
+        window: Window::Offscreen {
+            width: 1920,
+            height: 1080,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let mut player = Player::new(&settings).unwrap();
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame_the_scene(&mut player, &mut game, &mut overlay);
+    println!("adapter: {}", player.device().adapter().summary());
+    for shown in [false, true] {
+        if shown {
+            assert!(game.run_command(player.world_mut(), "view.colliders"));
+        }
+        let (mut gpu, mut cpu, mut sync, mut made) = (Vec::new(), Vec::new(), Vec::new(), 0.0);
+        for k in 0..120 {
+            let started = std::time::Instant::now();
+            let report = player
+                .frame_overlaid(&mut game, Some(&mut overlay))
+                .unwrap();
+            player.set_view_rect(game.view_rect());
+            let syncing = std::time::Instant::now();
+            game.sync_assets(&mut player);
+            let synced = syncing.elapsed().as_secs_f64() * 1e6;
+            if k == 0 {
+                made = started.elapsed().as_secs_f64() * 1e3;
+            }
+            if k >= 20 {
+                sync.push(synced);
+                cpu.push(report.map_or(0.0, |r| r.compose));
+                let lines = player
+                    .graph()
+                    .gpu_pass_times()
+                    .iter()
+                    .filter(|t| t.name == "lines")
+                    .map(|t| t.gpu_us)
+                    .fold(0.0, |a, b| a + b);
+                gpu.push(f64::from(lines));
+            }
+        }
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        println!(
+            "colliders {}: the lines' pass {:.0} µs on the GPU; composing the frame {:.0} µs, \
+             the editor's sync {:.0} µs (medians of 100); the first frame {made:.1} ms; \
+             lines {:?}",
+            if shown { "shown" } else { "hidden" },
+            median(&mut gpu),
+            median(&mut cpu),
+            median(&mut sync),
+            game.collider_lines()
         );
     }
     overlay.destroy(&mut player).unwrap();

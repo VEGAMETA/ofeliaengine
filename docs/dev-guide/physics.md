@@ -428,6 +428,18 @@ for the engine:
   collides with the shear, but is drawn without it (ADR 0101, 8c-4).
 - **A scene of level geometry** (the default rules) splits nothing and costs nothing more.
 
+### Models in scene files
+
+A scene saved by the editor names each model's mesh in a glTF file (no pack). Its collider
+is made the same way: by the rules beside its file (`yard.colliders.ron` next to
+`yard.glb`), level geometry by default (ADR 0117).
+- `player.assets_mut().collider(model.mesh)` gives it: `ColliderState::Made` with the
+  collider in the mesh's space and its body's settings (motion, layer, friction…),
+  `Coming` while the file is cooked in the background, `None` when nothing collides.
+- A built-in mesh's collider is its own shape: the cube a box, the sphere a sphere.
+- The editor draws them (View: Colliders, Alt+C).
+- Bodies for them in the game come next (`ScenePhysics::sync_models`).
+
 ### Loading them
 
 ```rust
