@@ -75,9 +75,9 @@ use crate::session::{
     self, Base, Document, EditorState, LastRun, Lock, ScriptDoc, SessionFile, View, Writer,
 };
 use crate::shell::{
-    CODE_LINE, CODE_TEXT, CodeView, Field, FieldAction, FieldEvent, FileItem, FileKind, MenuEntry,
-    MenuItem, Palette, PaletteAction, PaletteRow, PaletteView, Section, ShellModel, ShellResponse,
-    TreeItem, Widget, build, dismissed,
+    CODE_LINE, CODE_TEXT, CodeRun, CodeView, Field, FieldAction, FieldEvent, FileItem, FileKind,
+    MenuEntry, MenuItem, Palette, PaletteAction, PaletteRow, PaletteView, Section, ShellModel,
+    ShellResponse, Token, TreeItem, Widget, build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
 use crate::thumbnails::{self, Subject, Thumbnails};
@@ -1828,10 +1828,12 @@ const CARET_BLINK_MS: u128 = 530;
 struct CodeShown {
     first: usize,
     last: usize,
-    /// The lines in view one after another, tabs as spaces to their columns, and where
-    /// each ends.
+    /// The lines in view one after another, tabs as spaces to their columns.
     text: String,
-    ends: Vec<usize>,
+    /// Their runs: a line, a column, a range of `text`, what it is.
+    runs: Vec<(usize, usize, usize, usize, Token)>,
+    /// A line's highlighted runs, while it is cut.
+    cut: Vec<(usize, usize, Token)>,
     numbers: String,
     gutter: f32,
     selections: Vec<(usize, usize, usize, bool)>,
@@ -3370,17 +3372,28 @@ impl Editor {
         // The shown script's lines in view, their numbers, its selections and carets.
         let shown = &self.code_shown;
         let code_script = self.active_script.and_then(|k| self.scripts.get(k));
-        let mut code_lines: Vec<&str> = Vec::with_capacity(shown.ends.len());
-        if code_script.is_some() {
-            let mut start = 0;
-            for &end in &shown.ends {
-                code_lines.push(shown.text.get(start..end).unwrap_or(""));
-                start = end;
-            }
-        }
-        let mut code_numbers: Vec<&str> = Vec::with_capacity(code_lines.len());
+        let code_runs: Vec<CodeRun<'_>> = if code_script.is_some() {
+            shown
+                .runs
+                .iter()
+                .map(|&(line, column, a, b, token)| CodeRun {
+                    line,
+                    column,
+                    text: shown.text.get(a..b).unwrap_or(""),
+                    token,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let in_view = if code_script.is_some() {
+            shown.last - shown.first
+        } else {
+            0
+        };
+        let mut code_numbers: Vec<&str> = Vec::with_capacity(in_view);
         let mut at = 0;
-        for line in shown.first..shown.first + code_lines.len() {
+        for line in shown.first..shown.first + in_view {
             let digits = (line + 1).ilog10() as usize + 1;
             code_numbers.push(shown.numbers.get(at..at + digits).unwrap_or(""));
             at += digits;
@@ -3390,7 +3403,7 @@ impl Editor {
         let code = code_script.map(|s| CodeView {
             path: &shown.path,
             place: &shown.place,
-            lines: &code_lines,
+            runs: &code_runs,
             first: shown.first,
             numbers: &code_numbers,
             scroll: s.scroll,
@@ -7120,6 +7133,9 @@ impl Editor {
         if !self.input.held(Button::Left) {
             self.code_drag = false;
         }
+        if let Some(line) = script.doc.take_changed() {
+            script.highlight.changed(line);
+        }
         if script.reveal
             && let Some(r) = rect
         {
@@ -7139,9 +7155,12 @@ impl Editor {
         shown.last = (shown.first + (height / CODE_LINE).ceil() as usize + 1).min(doc.line_count());
         shown.gutter = gutter;
         shown.text.clear();
-        shown.ends.clear();
+        shown.runs.clear();
         shown.numbers.clear();
+        // Each line's runs from the state the lines before leave it in.
+        let mut state = script.highlight.state_at(shown.first, |i| doc.line(i));
         for line in shown.first..shown.last {
+            let start = shown.text.len();
             let mut column = 0;
             for c in doc.line(line).chars() {
                 let next = crate::code::next_column(column, c);
@@ -7152,7 +7171,35 @@ impl Editor {
                 }
                 column = next;
             }
-            shown.ends.push(shown.text.len());
+            let text = &shown.text[start..];
+            shown.cut.clear();
+            state = crate::highlight::line(text, state, &mut shown.cut);
+            // The plain code between the runs, its spaces left out at either end.
+            let mut at = 0;
+            let column = |byte: usize| text[..byte].chars().count();
+            for k in 0..=shown.cut.len() {
+                let (a, b, token) =
+                    shown
+                        .cut
+                        .get(k)
+                        .copied()
+                        .unwrap_or((text.len(), text.len(), Token::Text));
+                let gap = &text[at..a];
+                let trimmed = gap.trim();
+                if !trimmed.is_empty() {
+                    let from = at + (gap.len() - gap.trim_start().len());
+                    let to = from + trimmed.len();
+                    shown
+                        .runs
+                        .push((line, column(from), start + from, start + to, Token::Text));
+                }
+                if a < b {
+                    shown
+                        .runs
+                        .push((line, column(a), start + a, start + b, token));
+                }
+                at = b;
+            }
             let _ = write!(shown.numbers, "{}", line + 1);
         }
         shown.selections.clear();
@@ -19015,7 +19062,8 @@ mod tests {
         ed.update(&mut world);
         ed.update(&mut world);
         assert_eq!(ed.active_script, Some(0));
-        assert!(!texts(&ed, "local speed = 2").is_empty(), "its code drawn");
+        assert!(!texts(&ed, "speed =").is_empty(), "its code drawn");
+        assert!(!texts(&ed, "local").is_empty(), "its keyword apart");
         assert!(!texts(&ed, "door.luau").is_empty(), "its tab");
         assert!(ed.view_rect.is_some_and(|_| ed.code_rect.is_some()));
         // Typed at the caret, the line's end.

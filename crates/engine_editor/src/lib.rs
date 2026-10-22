@@ -17,6 +17,7 @@ pub mod expr;
 mod faces;
 mod gizmo;
 mod handles;
+mod highlight;
 pub mod icons;
 mod import;
 pub mod input;
