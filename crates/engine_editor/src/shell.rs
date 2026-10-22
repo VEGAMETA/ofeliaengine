@@ -205,6 +205,9 @@ pub struct TreeItem<'a> {
     pub disabled: bool,
     /// It is off (disabled, or below a disabled entity): drawn dim.
     pub off: bool,
+    /// It has a script component: the script's mark at its end, a click on which opens
+    /// the script.
+    pub script: bool,
 }
 
 /// A code tab's panel (`code-editor.md`, "The code's side panel"): the open files and the
@@ -422,6 +425,11 @@ pub struct Section<'a> {
     pub title: &'a str,
     /// Its fields.
     pub fields: &'a [Field<'a>],
+    /// A script component's file (`scripts/door.luau`), shown under its title: a click
+    /// opens it. Empty for the others.
+    pub script: &'a str,
+    /// Its header's × takes the component away.
+    pub removable: bool,
 }
 
 /// What a file is, for its icon color.
@@ -615,6 +623,8 @@ pub struct ShellModel<'a> {
     pub prefab: bool,
     /// Inspector sections.
     pub inspector: &'a [Section<'a>],
+    /// The inspector shows entities: its Add Component button after the sections.
+    pub add_component: bool,
     /// The current folder's path.
     pub path: &'a str,
     /// Folder tree rows.
@@ -719,6 +729,8 @@ pub struct ShellResponse {
     pub tree_toggle: Option<usize>,
     /// A scene tree row's eye was clicked: turn it off or on.
     pub tree_eye: Option<usize>,
+    /// A scene tree row's script mark was clicked: its script opens.
+    pub tree_script: Option<usize>,
     /// The mouse is over the scene tree (where its keys go after a click).
     pub tree_hovered: bool,
     /// Renaming in the tree ended: committed (the name is `Ui::edited_text`) or cancelled.
@@ -729,6 +741,12 @@ pub struct ShellResponse {
     pub inspector_filter: Option<TextFieldResponse>,
     /// The inspector heading's Open was clicked: the selection's prefab in a tab.
     pub open_prefab: bool,
+    /// The inspector's Add Component button was clicked.
+    pub add_component: bool,
+    /// A section's script file was clicked (the section's place): the script opens.
+    pub section_script: Option<usize>,
+    /// A section's × was clicked: its component is taken away.
+    pub remove_section: Option<usize>,
     /// The inspector field under the mouse (section, field): Backspace resets it, Ctrl+C
     /// and Ctrl+V copy and paste its value.
     pub hovered_field: Option<(usize, usize)>,
@@ -794,6 +812,8 @@ pub struct ShellResponse {
     pub field: Option<FieldEvent>,
     /// The scene dock's add button.
     pub add: bool,
+    /// The scene dock's Attach Script button.
+    pub attach_script: bool,
     /// A kind picked in the open add menu.
     pub add_item: Option<usize>,
     /// The add menu's group the pointer is over: opened beside it.
@@ -1847,6 +1867,7 @@ struct RowsResponse {
     dragged: Option<usize>,
     toggled: Option<usize>,
     eye: Option<usize>,
+    script: Option<usize>,
     rename: Option<bool>,
 }
 
@@ -1946,6 +1967,23 @@ fn tree_rows(
                     return;
                 }
                 ui.spacer("fill");
+                // A script's mark (Godot's): a click opens the script.
+                if item.script {
+                    let mark = ui.container(
+                        "script",
+                        Style {
+                            size: [Size::Fixed(ICON + 4.0), Size::Fit],
+                            align_main: Align::Center,
+                            ..Style::default()
+                        },
+                        |ui| {
+                            text(ui, "glyph", icons::SCRIPT_MARK, ICON, p.text_dim);
+                        },
+                    );
+                    if ui.sense(mark, false).clicked {
+                        out.script = Some(i);
+                    }
+                }
                 // The eye: on or off, as Godot's.
                 let eye = ui.container(
                     "eye",
@@ -1968,7 +2006,11 @@ fn tree_rows(
                 }
             },
         );
-        if ui.sense(id, false).clicked && out.toggled != Some(i) && out.eye != Some(i) {
+        if ui.sense(id, false).clicked
+            && out.toggled != Some(i)
+            && out.eye != Some(i)
+            && out.script != Some(i)
+        {
             out.clicked = Some(i);
         }
         if ui
@@ -2091,6 +2133,23 @@ fn scene_dock(
             let chosen = usize::from(model.history.is_some());
             out.scene_dock_tab = tabs(ui, &["Scene", "History"], Some(chosen), p);
             ui.spacer("fill");
+            // Attach Script (Godot's place for it): the selection's script, new or made.
+            let attach = ui.container(
+                "attach script",
+                Style {
+                    size: [Size::Fixed(24.0), Size::Fixed(22.0)],
+                    radius: 3.0,
+                    align_main: Align::Center,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    text(ui, "icon", icons::SCRIPT_MARK, ICON, p.text);
+                },
+            );
+            if ui.sense(attach, false).clicked {
+                out.attach_script = true;
+            }
             let opener = ui.container(
                 "add",
                 Style {
@@ -2147,6 +2206,7 @@ fn scene_dock(
             out.tree_drag = rows.dragged;
             out.tree_toggle = rows.toggled;
             out.tree_eye = rows.eye;
+            out.tree_script = rows.script;
             out.rename = rows.rename;
         });
         ui.mark_region(tree);
@@ -2738,8 +2798,49 @@ fn inspector_dock(
                         |ui| {
                             text(ui, "arrow", icons::EXPANDED, ICON, p.text_dim);
                             text(ui, "title", section.title, TEXT, p.text);
+                            if section.removable {
+                                ui.spacer("fill");
+                                let hovered = ui.is_hovered(ui.id("remove"));
+                                let id = ui.container(
+                                    "remove",
+                                    Style {
+                                        size: [Size::Fixed(18.0), Size::Fixed(18.0)],
+                                        radius: 3.0,
+                                        background: hovered.then_some(p.field_hover),
+                                        align_main: Align::Center,
+                                        align_cross: Align::Center,
+                                        ..Style::default()
+                                    },
+                                    |ui| {
+                                        text(ui, "icon", icons::CLOSE, 13.0, p.text_dim);
+                                    },
+                                );
+                                if ui.sense(id, false).clicked {
+                                    out.remove_section = Some(s);
+                                }
+                            }
                         },
                     );
+                    // A script's component: its file, as Godot's Script property.
+                    if !section.script.is_empty() {
+                        let id = ui.row(
+                            "script",
+                            Style {
+                                size: [Size::Grow(1.0), Size::Fixed(26.0)],
+                                padding: [12.0, 0.0, 8.0, 0.0],
+                                gap: 6.0,
+                                align_cross: Align::Center,
+                                ..Style::default()
+                            },
+                            |ui| {
+                                text(ui, "icon", icons::SCRIPT, ICON, p.text_dim);
+                                text(ui, "path", section.script, TEXT, p.accent);
+                            },
+                        );
+                        if ui.sense(id, false).clicked {
+                            out.section_script = Some(s);
+                        }
+                    }
                     for (f, field) in section.fields.iter().enumerate() {
                         ui.push_id(f as u64);
                         let mut action = None;
@@ -2865,6 +2966,38 @@ fn inspector_dock(
                         ui.pop_id();
                     }
                     ui.pop_id();
+                }
+                // Add Component, after the components (Unity's place).
+                if model.add_component {
+                    ui.row(
+                        "add component row",
+                        Style {
+                            size: [Size::Grow(1.0), Size::Fixed(48.0)],
+                            align_main: Align::Center,
+                            align_cross: Align::Center,
+                            ..Style::default()
+                        },
+                        |ui| {
+                            let id = ui.row(
+                                "add component",
+                                Style {
+                                    padding: [14.0, 4.0, 14.0, 4.0],
+                                    gap: 6.0,
+                                    radius: 3.0,
+                                    background: Some(p.header),
+                                    align_cross: Align::Center,
+                                    ..Style::default()
+                                },
+                                |ui| {
+                                    text(ui, "icon", icons::ADD_COMPONENT, ICON, p.text);
+                                    text(ui, "label", "Add Component", TEXT, p.text);
+                                },
+                            );
+                            if ui.sense(id, false).clicked {
+                                out.add_component = true;
+                            }
+                        },
+                    );
                 }
             });
         },

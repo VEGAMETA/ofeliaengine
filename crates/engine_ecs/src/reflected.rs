@@ -12,6 +12,7 @@ use core::alloc::Layout;
 use core::marker::PhantomData;
 use engine_reflect::TypeInfo;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Writes a type's `Default` value into uninitialized memory of its size and alignment.
 pub type WriteDefault = unsafe fn(*mut u8);
@@ -78,6 +79,8 @@ pub struct RuntimeType {
     pub layout: Layout,
     /// Its default value, laid out.
     pub defaults: Box<[u8]>,
+    /// Where it was declared, for the editor (`scripts/door.luau`); empty when nowhere.
+    pub source: Box<str>,
 }
 
 impl RuntimeType {
@@ -102,6 +105,9 @@ impl RuntimeType {
 /// The component types made at run time, by stable name.
 static RUNTIME: RwLock<Vec<RuntimeType>> = RwLock::new(Vec::new());
 
+/// How many times the list changed.
+static RUNTIME_VERSION: AtomicU64 = AtomicU64::new(0);
+
 /// Adds a component type made at run time, or replaces the one of its stable name.
 ///
 /// # Safety
@@ -116,6 +122,13 @@ pub unsafe fn add_runtime_type(t: RuntimeType) {
         Some(r) => *r = t,
         None => list.push(t),
     }
+    RUNTIME_VERSION.fetch_add(1, Ordering::Release);
+}
+
+/// How many times [`add_runtime_type`] changed the list (a type added or replaced): what
+/// tells a cache of [`runtime_types`] that it is stale, without copying the list.
+pub fn runtime_types_version() -> u64 {
+    RUNTIME_VERSION.load(Ordering::Acquire)
 }
 
 /// The component types made at run time so far.

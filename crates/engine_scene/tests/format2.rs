@@ -270,6 +270,50 @@ fn the_programs_types_need_no_registration() {
     assert_eq!(text, by_hand);
 }
 
+#[test]
+fn a_component_is_added_by_name_at_its_default_with_what_it_requires() {
+    static GAUGE: engine_reflect::TypeInfo = engine_reflect::TypeInfo {
+        name: "SceneTestGauge",
+        size: 4,
+        align: 4,
+        kind: engine_reflect::TypeKind::Primitive(engine_reflect::Primitive::F32),
+        attrs: engine_reflect::Attrs::NONE,
+    };
+    // A script's component, made at run time: its default bytes.
+    // SAFETY: an f32, plain data, its default one.
+    unsafe {
+        engine_ecs::add_runtime_type(engine_ecs::RuntimeType {
+            info: &GAUGE,
+            component: "script::SceneTestGauge".into(),
+            layout: core::alloc::Layout::new::<f32>(),
+            defaults: 0.5f32.to_le_bytes().into(),
+            source: "scripts/gauge.luau".into(),
+        });
+    }
+    let r = SceneRegistry::from_program();
+    let mut w = World::new();
+    let e = w.spawn((SceneId::from_u128(1),));
+    // The program's list, the engine's own types, and the script's.
+    assert!(r.insert_default(&mut w, e, "Inventory"));
+    assert_eq!(w.get::<Inventory>(e), Some(&Inventory::default()));
+    assert!(r.insert_default(&mut w, e, "Transform"));
+    assert!(
+        w.get::<engine_ecs::GlobalTransform>(e).is_some(),
+        "what a transform requires"
+    );
+    assert!(r.insert_default(&mut w, e, "SceneTestGauge"));
+    let id = w.components().id_by_name("script::SceneTestGauge").unwrap();
+    // SAFETY: the gauge is an f32.
+    assert_eq!(
+        unsafe { w.get_raw(e, id).unwrap().cast::<f32>().read() },
+        0.5
+    );
+    assert!(!r.insert_default(&mut w, e, "Nothing"));
+    let gone = w.spawn(());
+    w.despawn(gone);
+    assert!(!r.insert_default(&mut w, gone, "Health"));
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Reflect)]
 struct Paint {
     color: [f32; 4],

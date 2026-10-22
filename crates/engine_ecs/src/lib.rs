@@ -48,7 +48,7 @@ pub use linkme;
 pub use query::{Changed, Fetch, Filter, Or, QueryIter, QueryState, ReadOnlyFetch, With, Without};
 pub use reflected::{
     ReflectedKind, ReflectedType, RuntimeType, add_runtime_type, find_reflected, reflected_types,
-    runtime_types,
+    runtime_types, runtime_types_version,
 };
 pub use schedule::{
     Access, FnSystem, Res, ResMut, Schedule, System, SystemContext, SystemQuery, system,

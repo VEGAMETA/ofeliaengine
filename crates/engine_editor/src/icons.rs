@@ -31,6 +31,11 @@ pub const FOLDER_OPEN: &str = "\u{F0770}";
 pub const SCENE: &str = "\u{F0FCE}";
 /// Luau script (`md-language_lua`).
 pub const SCRIPT: &str = "\u{F08B1}";
+/// An entity's script: its mark on the tree row, and the scene dock's Attach Script
+/// (`md-script_text_outline`).
+pub const SCRIPT_MARK: &str = "\u{F0BC3}";
+/// The inspector's Add Component (`md-puzzle_plus_outline`).
+pub const ADD_COMPONENT: &str = "\u{F14D6}";
 /// Slang module (`md-file_code`).
 pub const SHADER: &str = "\u{F022E}";
 /// A text file: settings, data, notes (`md-file_document_outline`).

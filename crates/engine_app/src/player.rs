@@ -1495,6 +1495,37 @@ impl Player {
         self.scripts.as_ref()
     }
 
+    /// Loads script `file` (in the project's `scripts/`) made after the start, the editor's
+    /// New Script: the names of the components it declares.
+    ///
+    /// # Errors
+    ///
+    /// Without a project, when the file cannot be read or does not run, or when it is
+    /// loaded already.
+    pub fn load_script(&mut self, file: &Path) -> Result<Vec<String>, String> {
+        let Some(project) = self.settings.project.clone() else {
+            return Err(String::from("scripts need a project folder"));
+        };
+        let folder = project.join("scripts");
+        if self.scripts.is_none() {
+            let world = &mut self.runtime.world;
+            let scripts = crate::scripts::Scripts::load(world, &project, &folder)
+                .map_err(|e| e.to_string())?;
+            self.scripts = Some(scripts);
+            // The project's first script: the host made now loads every file, this one too.
+            let names: Vec<String> = self
+                .scripts
+                .as_ref()
+                .map(|s| s.component_names().map(str::to_owned).collect())
+                .unwrap_or_default();
+            return Ok(names);
+        }
+        let Some(scripts) = self.scripts.as_mut() else {
+            return Err(String::from("no scripts"));
+        };
+        scripts.load_file(&mut self.runtime.world, &project, &folder, file)
+    }
+
     /// Gives `entity` script component `name` (a script's `component("Door", …)`), its
     /// props at their defaults: the editor's Add Component. False without that component
     /// or for a dead entity.

@@ -677,6 +677,11 @@ struct CommandIds {
     apply_prefab: CommandId,
     /// The prefab of the selection's instance opened in a tab (E5-5b).
     open_prefab: CommandId,
+    /// Components and scripts for the selection (E7-4a): Add Component…, Attach Script…,
+    /// New Script….
+    add_component: CommandId,
+    attach_script: CommandId,
+    new_script: CommandId,
     /// Where Play shows the game (E3-4).
     play_where: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
@@ -800,6 +805,9 @@ fn commands() -> (Commands, CommandIds) {
         revert_prefab: c.register("prefab.revert", "Prefab", "Revert Overrides"),
         apply_prefab: c.register("prefab.apply", "Prefab", "Apply Overrides"),
         open_prefab: c.register("prefab.open", "Prefab", "Open Prefab"),
+        add_component: c.register("scene.add_component", "Scene", "Add Component…"),
+        attach_script: c.register("scene.attach_script", "Scene", "Attach Script…"),
+        new_script: c.register("scene.new_script", "Scene", "New Script…"),
         play_where: c.register("play.where", "Play", "In a Window or in the Viewport"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
@@ -874,6 +882,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("H", ids.disable),
         ("Ctrl+D", ids.duplicate),
         ("Ctrl+A", ids.add),
+        ("Ctrl+Shift+A", ids.add_component),
         ("F2", ids.rename),
         ("Ctrl+Shift+P", ids.palette),
         // VS Code's: the project's scripts searched (the palette's `%`).
@@ -1060,7 +1069,174 @@ enum Pick {
     Keep(KeepItem),
     /// Shows this asset in the FileSystem dock.
     Reveal(AssetId),
+    /// Gives the selection the component of this name at its default (Add Component…);
+    /// a script's, or the program's.
+    Component {
+        name: String,
+        script: bool,
+    },
+    /// A script from the template for the selection (New Script…).
+    NewScript,
+    /// Opens this script (one of an entity's several).
+    OpenScript(PathBuf),
 }
+
+impl Pick {
+    /// The icon its row shows.
+    fn icon(&self) -> &'static str {
+        match self {
+            Self::Component { script: true, .. } | Self::OpenScript(_) => icons::SCRIPT,
+            Self::Component { script: false, .. } => icons::ADD_COMPONENT,
+            Self::NewScript => icons::SCRIPT_MARK,
+            _ => icons::SCENE,
+        }
+    }
+}
+
+/// A script New Script… made (E7-4a), for the player's script host to load at the next
+/// frame: its file (relative to the project), its component, and the entities it goes to.
+#[derive(Debug, Clone)]
+struct ScriptRequest {
+    path: PathBuf,
+    component: String,
+    targets: Vec<Entity>,
+}
+
+/// The world's script components (E7-4a), found by their registry names (`script::Door`):
+/// each component's script file, made again when the world registers components or the
+/// scripts declare more.
+#[derive(Debug, Default)]
+struct ScriptFiles {
+    /// The world's component count and the run-time types' version it was made at.
+    made_at: (usize, u64),
+    /// By component index: its script's file (`scripts/door.luau`), if it is a script's.
+    files: Vec<Option<Box<str>>>,
+}
+
+impl ScriptFiles {
+    /// Made again if the world or the scripts have more components since.
+    fn refresh(&mut self, world: &World) {
+        let at = (
+            world.components().len(),
+            engine_ecs::runtime_types_version(),
+        );
+        if at == self.made_at {
+            return;
+        }
+        self.made_at = at;
+        self.files.clear();
+        self.files.resize(at.0, None);
+        for t in engine_ecs::runtime_types() {
+            if let Some(id) = world.components().id_by_name(&t.component)
+                && !t.source.is_empty()
+                && let Some(file) = self.files.get_mut(id.index() as usize)
+            {
+                *file = Some(t.source);
+            }
+        }
+    }
+
+    /// Component `id`'s script file, if it is a script's.
+    fn of(&self, id: ComponentId) -> Option<&str> {
+        self.files.get(id.index() as usize)?.as_deref()
+    }
+
+    /// The file of `e`'s first script component.
+    fn first_of(&self, world: &World, e: Entity) -> Option<&str> {
+        world
+            .component_ids_of(e)?
+            .iter()
+            .find_map(|&id| self.of(id))
+    }
+}
+
+/// Whether `e` has the component whose reflected name is `name`.
+fn has_component(world: &World, e: Entity, name: &str) -> bool {
+    world.component_ids_of(e).is_some_and(|ids| {
+        ids.iter().any(|&id| {
+            world
+                .components()
+                .type_info(id)
+                .is_some_and(|i| i.name == name)
+        })
+    })
+}
+
+/// A new script's component and file for an entity named `name` (E7-4a): `Front door`
+/// gives `FrontDoor` in `scripts/front_door.luau`. A name that does not start with a
+/// letter is put after `Script` (`Script` alone for one of no ASCII letters); while
+/// `taken(component, file)`, a number is added (`FrontDoor2` in
+/// `scripts/front_door_2.luau`).
+fn script_names(name: &str, taken: impl Fn(&str, &str) -> bool) -> (String, String) {
+    // Words: runs of letters and digits, and a capital after a small letter starts one.
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut after_small = false;
+    for c in name.chars() {
+        if !c.is_ascii_alphanumeric() {
+            if !word.is_empty() {
+                words.push(core::mem::take(&mut word));
+            }
+            after_small = false;
+            continue;
+        }
+        if c.is_ascii_uppercase() && after_small {
+            words.push(core::mem::take(&mut word));
+        }
+        after_small = !c.is_ascii_uppercase();
+        word.push(c.to_ascii_lowercase());
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    if words
+        .first()
+        .is_none_or(|w| w.starts_with(|c: char| c.is_ascii_digit()))
+    {
+        words.insert(0, String::from("script"));
+    }
+    let pascal: String = words
+        .iter()
+        .map(|w| w[..1].to_ascii_uppercase() + &w[1..])
+        .collect();
+    let snake = words.join("_");
+    let candidate = |n: u32| {
+        if n == 1 {
+            (pascal.clone(), format!("scripts/{snake}.luau"))
+        } else {
+            (format!("{pascal}{n}"), format!("scripts/{snake}_{n}.luau"))
+        }
+    };
+    (1..u32::MAX)
+        .map(&candidate)
+        .find(|(component, file)| !taken(component, file))
+        .unwrap_or_else(|| candidate(1))
+}
+
+/// A new script's text (E7-4a): component `name` without props yet, and the hooks most
+/// scripts start from.
+fn script_template(name: &str) -> String {
+    [
+        String::from("--!strict"),
+        format!("local {name} = component(\"{name}\", {{"),
+        String::from("    -- Its props: each instance's own data, in the inspector (`speed = 2`)."),
+        String::from("})"),
+        String::new(),
+        format!("function {name}.on_start(self)"),
+        String::from("end"),
+        String::new(),
+        format!("function {name}.on_tick(self, dt: number)"),
+        String::from("    "),
+        String::from("end"),
+        String::new(),
+        format!("return {name}"),
+        String::new(),
+    ]
+    .join("\n")
+}
+
+/// Where a new script opens: in `on_tick`, its line and column (1-based).
+const SCRIPT_CURSOR: (usize, usize) = (10, 5);
 
 /// What a line of the "Keep Changes…" list keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1700,9 +1876,10 @@ struct Editor {
     tree_filter: String,
     inspector_filter: String,
     /// The inspector's shown properties (indices into its properties) and the shown
-    /// sections' ranges in them: what a field event's section and field point at.
+    /// sections' ranges in them with their section's place in the inspector's: what a
+    /// field event's section and field point at.
     shown: Vec<usize>,
-    shown_sections: Vec<(usize, usize)>,
+    shown_sections: Vec<(usize, usize, usize)>,
     /// The enum whose list is open: its component and offset.
     open_choice: Option<(ComponentId, usize)>,
     /// The add menu is open.
@@ -1732,6 +1909,10 @@ struct Editor {
     view_window: Option<engine_platform::window::WindowId>,
     /// Play or Stop asked for, done once the player's frame is at hand.
     play_request: Option<PlayRequest>,
+    /// A script New Script… made, loaded once the player's frame is at hand (E7-4a).
+    script_request: Option<ScriptRequest>,
+    /// The world's script components and their files.
+    script_files: ScriptFiles,
     /// The active brush's side handles (ADR 0110 E2b-3c), the one under the pointer, and
     /// a side being dragged.
     handles: Handles,
@@ -2356,6 +2537,8 @@ impl Editor {
             in_view_window: false,
             view_window: None,
             play_request: None,
+            script_request: None,
+            script_files: ScriptFiles::default(),
             handles: Handles::default(),
             hovered_side: None,
             side_drag: None,
@@ -2843,6 +3026,7 @@ impl Editor {
         // A script shown: its keys, clicks and scroll before the UI is built, so a key
         // shows in this frame.
         let coding = self.code_frame();
+        self.script_files.refresh(world);
         let properties = self.inspector.properties();
         let mut values: Vec<&str> = Vec::with_capacity(properties.len() * 3);
         let mut spans: Vec<(usize, usize)> = Vec::with_capacity(properties.len());
@@ -2870,7 +3054,7 @@ impl Editor {
         let filter = self.inspector_filter.trim().to_lowercase();
         self.shown.clear();
         self.shown_sections.clear();
-        for section in self.inspector.sections() {
+        for (k, section) in self.inspector.sections().iter().enumerate() {
             let start = self.shown.len();
             let title_matches = section.title.to_lowercase().contains(&filter);
             for i in section.properties.clone() {
@@ -2879,8 +3063,9 @@ impl Editor {
                     self.shown.push(i);
                 }
             }
-            if self.shown.len() > start {
-                self.shown_sections.push((start, self.shown.len()));
+            // A component without fields (a tag, a script's without props) shows by name.
+            if self.shown.len() > start || filter.is_empty() || title_matches {
+                self.shown_sections.push((start, self.shown.len(), k));
             }
         }
         let typing = self.typing;
@@ -3000,26 +3185,30 @@ impl Editor {
             let mut sections = vec![Section {
                 title: "Asset",
                 fields: &asset_fields[..2],
+                script: "",
+                removable: false,
             }];
             if asset_fields.len() > 2 {
                 sections.push(Section {
                     title: "Import",
                     fields: &asset_fields[2..],
+                    script: "",
+                    removable: false,
                 });
             }
             sections
         } else {
             self.shown_sections
                 .iter()
-                .map(|&(a, b)| {
-                    let title = section_list
-                        .iter()
-                        .find(|s| s.properties.contains(&self.shown[a]))
-                        .map_or("", |s| s.title);
-                    Section {
-                        title,
+                .filter_map(|&(a, b, k)| {
+                    let s = section_list.get(k)?;
+                    Some(Section {
+                        title: s.title,
                         fields: &fields[a..b],
-                    }
+                        script: self.script_files.of(s.component).unwrap_or(""),
+                        // What places the entity stays (Unity's rule).
+                        removable: s.title != "Transform",
+                    })
                 })
                 .collect()
         };
@@ -3059,6 +3248,7 @@ impl Editor {
                     renaming: Some(row.entity) == self.renaming,
                     disabled: world.get::<Disabled>(row.entity).is_some(),
                     off: is_off(world, row.entity),
+                    script: self.script_files.first_of(world, row.entity).is_some(),
                 }
             })
             .collect();
@@ -3303,6 +3493,7 @@ impl Editor {
                 renaming: false,
                 disabled: false,
                 off: false,
+                script: false,
             })
             .collect();
         // The tiles, the thumbnails of those on screen (by last frame's scroll area).
@@ -3345,7 +3536,7 @@ impl Editor {
                     let (item, matched) = choices.shown[i];
                     let c = &choices.items[item];
                     PaletteRow {
-                        icon: icons::SCENE,
+                        icon: c.pick.icon(),
                         label: &c.label,
                         matched: &cp.highlights[matched.0 as usize..matched.1 as usize],
                         category: 0,
@@ -3708,6 +3899,7 @@ impl Editor {
             tree: &items,
             selection: &self.selection_label,
             inspector: &sections,
+            add_component: self.inspected.is_none() && !self.selection.is_empty(),
             path: &self.browser.label,
             folders: &folder_items,
             files: &file_items,
@@ -3862,6 +4054,15 @@ impl Editor {
         if response.open_prefab {
             self.run(world, self.ids.open_prefab);
         }
+        if response.add_component {
+            self.run(world, self.ids.add_component);
+        }
+        if let Some(s) = response.section_script {
+            self.open_section_script(world, s);
+        }
+        if let Some(s) = response.remove_section {
+            self.remove_section(world, s);
+        }
         // The bottom panel's tabs: Output opens and closes; the others come later.
         if let Some(i) = response.bottom_tab {
             match i {
@@ -3958,6 +4159,9 @@ impl Editor {
             self.add_open = !self.add_open;
             self.add_group = None;
         }
+        if response.attach_script {
+            self.run(world, self.ids.attach_script);
+        }
         if response.add_group.is_some() {
             self.add_group = response.add_group;
         }
@@ -3976,6 +4180,9 @@ impl Editor {
         if let Some(row) = response.tree_eye.and_then(|i| self.rows.get(i).copied()) {
             let on = world.get::<Disabled>(row.entity).is_none();
             self.set_disabled(world, &[row.entity], on);
+        }
+        if let Some(row) = response.tree_script.and_then(|i| self.rows.get(i).copied()) {
+            self.open_scripts_of(world, row.entity);
         }
         if let Some(row) = response.tree_row.and_then(|i| self.rows.get(i).copied()) {
             if self.input.shift() {
@@ -4260,18 +4467,13 @@ impl Editor {
     /// The property shown as field `field` of shown section `section` (what a field event
     /// points at), with its component's name.
     fn shown_property(&self, section: usize, field: usize) -> Option<(Property, &'static str)> {
-        let &(start, end) = self.shown_sections.get(section)?;
+        let &(start, end, k) = self.shown_sections.get(section)?;
         let &index = self
             .shown
             .get(start + field)
             .filter(|_| start + field < end)?;
         let p = *self.inspector.properties().get(index)?;
-        let component = self
-            .inspector
-            .sections()
-            .iter()
-            .find(|s| s.properties.contains(&index))?
-            .title;
+        let component = self.inspector.sections().get(k)?.title;
         Some((p, component))
     }
 
@@ -4881,6 +5083,9 @@ impl Editor {
                             Pick::Step(k, value) => self.set_step(world, k, value),
                             Pick::Keep(item) => self.toggle_keep(world, item),
                             Pick::Reveal(id) => self.reveal_asset(id),
+                            Pick::Component { name, .. } => self.add_component(world, &name),
+                            Pick::NewScript => self.new_script(world),
+                            Pick::OpenScript(path) => self.open_script(world, &path, None),
                         }
                     }
                 } else if cp.finds_objects() {
@@ -9932,6 +10137,10 @@ impl Editor {
             self.apply_prefab(world);
         } else if id == ids.open_prefab {
             self.open_prefab(world);
+        } else if id == ids.add_component || id == ids.attach_script {
+            self.offer_components(world, id == ids.attach_script);
+        } else if id == ids.new_script {
+            self.new_script(world);
         } else if id == ids.select_next || id == ids.select_previous {
             self.step(if id == ids.select_next { 1 } else { -1 }, false);
         } else if id == ids.extend_next || id == ids.extend_previous {
@@ -13058,6 +13267,250 @@ impl Editor {
         (self.keymap, self.shortcuts) = keymap(&self.ids, preset);
     }
 
+    /// "Add Component…" (Ctrl+Shift+A), or "Attach Script…" (`scripts`): the components
+    /// a selected entity lacks, in the palette by name. Add Component lists the program's
+    /// and the scripts' (each with its file), New Script… last; Attach Script the
+    /// scripts' after New Script….
+    fn offer_components(&mut self, world: &mut World, scripts: bool) {
+        if self.selection.is_empty() {
+            self.say(String::from(if scripts {
+                "Select an entity to attach a script to"
+            } else {
+                "Select an entity to add a component to"
+            }));
+            return;
+        }
+        let selection = &self.selection;
+        let all_have = |name: &str| selection.iter().all(|&e| has_component(world, e, name));
+        let mut items = Vec::new();
+        if !scripts {
+            for t in engine_ecs::reflected_types() {
+                let engine_ecs::ReflectedKind::Component { default, .. } = t.kind else {
+                    continue;
+                };
+                if t.info.attrs.hidden
+                    || t.info.attrs.skip
+                    || default().is_none()
+                    || all_have(t.info.name)
+                {
+                    continue;
+                }
+                items.push(Choice {
+                    label: t.info.name.to_owned(),
+                    detail: String::new(),
+                    pick: Pick::Component {
+                        name: t.info.name.to_owned(),
+                        script: false,
+                    },
+                });
+            }
+        }
+        for t in engine_ecs::runtime_types() {
+            if t.info.attrs.hidden || t.info.attrs.skip || all_have(t.info.name) {
+                continue;
+            }
+            items.push(Choice {
+                label: t.info.name.to_owned(),
+                detail: t.source.into(),
+                pick: Pick::Component {
+                    name: t.info.name.to_owned(),
+                    script: true,
+                },
+            });
+        }
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+        let new = Choice {
+            label: String::from("New Script…"),
+            detail: String::from("from the template, named after the selection"),
+            pick: Pick::NewScript,
+        };
+        if scripts {
+            items.insert(0, new);
+        } else {
+            items.push(new);
+        }
+        let hint = if scripts {
+            "Attach a script: a new one, or a component one declares"
+        } else {
+            "Add a component"
+        };
+        self.open_list(world, hint, items);
+    }
+
+    /// Gives every selected entity that lacks it component `name` at its default, with
+    /// what it requires, as one step.
+    fn add_component(&mut self, world: &mut World, name: &str) {
+        let targets = self.selection.clone();
+        match self.add_component_to(world, name, &targets) {
+            0 => self.say(format!("The selection has {name} already")),
+            1 => self.say(format!("Added {name}")),
+            n => self.say(format!("Added {name} to {n} entities")),
+        }
+    }
+
+    /// Gives those of `targets` that lack it component `name` at its default, with what it
+    /// requires, as one step: how many took it.
+    fn add_component_to(&mut self, world: &mut World, name: &str, targets: &[Entity]) -> usize {
+        let targets: Vec<Entity> = targets
+            .iter()
+            .copied()
+            .filter(|&e| world.contains(e) && !has_component(world, e, name))
+            .collect();
+        if targets.is_empty() {
+            return 0;
+        }
+        let registry = SceneRegistry::from_program();
+        self.history.begin(&format!("Add {name}"), None);
+        let mut added = 0;
+        for &e in &targets {
+            self.history.touch(world, e);
+            if registry.insert_default(world, e, name) {
+                added += 1;
+            }
+        }
+        if added == 0 {
+            self.history.cancel(world);
+        } else {
+            self.history.commit(world);
+        }
+        added
+    }
+
+    /// The × of shown section `section`: its component taken from the selected entities
+    /// that have it, as one step.
+    fn remove_section(&mut self, world: &mut World, section: usize) {
+        let Some(s) = self
+            .shown_sections
+            .get(section)
+            .and_then(|&(_, _, k)| self.inspector.sections().get(k))
+        else {
+            return;
+        };
+        let (id, title) = (s.component, s.title);
+        let targets = self.targets(world, id);
+        if targets.is_empty() {
+            return;
+        }
+        self.history.begin(&format!("Remove {title}"), None);
+        for &e in &targets {
+            self.history.touch(world, e);
+            world.remove_raw(e, id);
+        }
+        self.history.commit(world);
+        self.say(match targets.len() {
+            1 => format!("Removed {title}: Ctrl+Z puts it back"),
+            n => format!("Removed {title} from {n} entities: Ctrl+Z puts it back"),
+        });
+    }
+
+    /// Shown section `section`'s script, opened in a tab.
+    fn open_section_script(&mut self, world: &World, section: usize) {
+        let file = self
+            .shown_sections
+            .get(section)
+            .and_then(|&(_, _, k)| self.inspector.sections().get(k))
+            .and_then(|s| self.script_files.of(s.component))
+            .map(PathBuf::from);
+        if let Some(file) = file {
+            self.open_script(world, &file, None);
+        }
+    }
+
+    /// The scripts of `e`'s script components: one opened in a tab, several offered in the
+    /// palette.
+    fn open_scripts_of(&mut self, world: &mut World, e: Entity) {
+        let mut files: Vec<PathBuf> = world
+            .component_ids_of(e)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|&id| self.script_files.of(id))
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort_unstable();
+        files.dedup();
+        match files.as_slice() {
+            [] => {}
+            [one] => self.open_script(world, one, None),
+            _ => {
+                let items = files
+                    .into_iter()
+                    .map(|path| Choice {
+                        label: path.to_string_lossy().replace('\\', "/"),
+                        detail: String::new(),
+                        pick: Pick::OpenScript(path),
+                    })
+                    .collect();
+                self.open_list(world, "Open one of its scripts", items);
+            }
+        }
+    }
+
+    /// "New Script…": a script for the selection from the template, named after the active
+    /// entity ([`script_names`]). Written now; the player's script host loads it at the
+    /// next frame, and then its component goes to the selection as one step and the
+    /// script opens with the cursor in `on_tick` ([`Self::script_loaded`]).
+    fn new_script(&mut self, world: &World) {
+        let Some(active) = self.active() else {
+            self.say(String::from("Select an entity to give a new script"));
+            return;
+        };
+        let name = world
+            .get::<Name>(active)
+            .map_or(kind_of(world, active).1, Name::as_str);
+        let scripts = engine_ecs::runtime_types();
+        let root = &self.root;
+        let (component, path) = script_names(name, |component, file| {
+            engine_ecs::find_reflected(component).is_some()
+                || scripts.iter().any(|t| t.info.name == component)
+                || root.join(file).exists()
+        });
+        let file = self.root.join(&path);
+        let written = file
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&file, script_template(&component)));
+        if let Err(e) = written {
+            self.say(format!("{path} could not be written: {e}"));
+            return;
+        }
+        self.say(format!("Made {path}"));
+        self.script_request = Some(ScriptRequest {
+            path: PathBuf::from(path),
+            component,
+            targets: self.selection.clone(),
+        });
+    }
+
+    /// A script New Script… made, loaded by the player's script host (or not): its
+    /// component given to the entities it was made for that are still there, as one step;
+    /// the script opened with the cursor in `on_tick`.
+    fn script_loaded(
+        &mut self,
+        world: &mut World,
+        request: ScriptRequest,
+        loaded: Result<Vec<String>, String>,
+    ) {
+        let shown = request.path.to_string_lossy().replace('\\', "/");
+        let component = &request.component;
+        let message = match loaded {
+            Ok(names) if names.contains(component) => {
+                match self.add_component_to(world, component, &request.targets) {
+                    0 => format!("Made {shown}: nothing to attach it to"),
+                    _ => format!(
+                        "Made {shown} and attached {component}: Ctrl+Z takes it off, the file \
+                         stays"
+                    ),
+                }
+            }
+            Ok(_) => format!("Made {shown}, but it did not declare {component}"),
+            Err(e) => format!("Made {shown}, not attached: {e}"),
+        };
+        self.open_script(world, &request.path, Some(SCRIPT_CURSOR));
+        self.say(message);
+    }
+
     /// Opens the palette as a list to pick from.
     fn open_list(&mut self, world: &mut World, hint: &'static str, items: Vec<Choice>) {
         self.open_palette(world, "");
@@ -13420,6 +13873,12 @@ impl<G> EditorGame<G> {
             let groups = core::mem::take(&mut shared.bake_groups);
             let message = shared.bake(player, &groups);
             shared.say(message);
+        }
+        // A script New Script… made (E7-4a): loaded by the player's script host, then
+        // attached to what it was made for.
+        if let Some(request) = shared.script_request.take() {
+            let loaded = player.load_script(&shared.root.join(&request.path));
+            shared.script_loaded(player.world_mut(), request, loaded);
         }
         // The newest pick's entity, and what to outline (ADR 0109), through the
         // extraction's slots.
@@ -16808,7 +17267,7 @@ mod tests {
     /// its place in it, and whether it is marked changed.
     fn shown_field(ed: &Editor, component: &str, name: &str) -> Option<(usize, usize, bool)> {
         let props = ed.inspector.properties();
-        for (section, &(start, end)) in ed.shown_sections.iter().enumerate() {
+        for (section, &(start, end, _)) in ed.shown_sections.iter().enumerate() {
             for (field, &i) in ed.shown[start..end].iter().enumerate() {
                 let p = &props[i];
                 let title = ed
@@ -21589,5 +22048,285 @@ mod tests {
         chord(&mut ed, &mut world, &[ESCAPE]);
         assert!(ed.scripts[0].signature.is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const A: (u16, u16) = (0x41, 0x1E);
+
+    /// The labels of the palette's open list.
+    fn list_labels(ed: &Editor) -> Vec<String> {
+        ed.command_palette
+            .as_ref()
+            .and_then(|cp| cp.choices.as_ref())
+            .map(|c| c.items.iter().map(|i| i.label.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// What the editor said last.
+    fn said(ed: &Editor) -> &str {
+        ed.message.as_ref().map_or("", |(m, _)| m.as_str())
+    }
+
+    /// Types `label` into the open palette and takes the first item it keeps (Enter).
+    fn pick_item(ed: &mut Editor, world: &mut World, label: &str) {
+        ed.update(world);
+        chars(ed, label);
+        ed.update(world);
+        chord(ed, world, &[ENTER]);
+    }
+
+    /// A door and a lamp in project `dir`, the door selected.
+    fn door_project(dir: &Path) -> (World, Editor, Entity) {
+        let mut world = World::new();
+        let door = world.spawn((
+            SceneId::new(),
+            Name::new("Front door"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        world.spawn((
+            SceneId::new(),
+            Name::new("Lamp"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.to_path_buf(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.select_only(door);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        (world, ed, door)
+    }
+
+    #[test]
+    fn add_component_and_a_sections_cross_are_steps_undone_and_done_again() {
+        let (mut world, mut ed, cube, lamp) = two_entities();
+        // Ctrl+Shift+A: what the cube lacks, by name; New Script… last.
+        chord(&mut ed, &mut world, &[CTRL, SHIFT, A]);
+        let labels = list_labels(&ed);
+        assert!(labels.iter().any(|l| l == "PointLight"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "Transform"), "the cube has one");
+        assert_eq!(labels.last().map(String::as_str), Some("New Script…"));
+        pick_item(&mut ed, &mut world, "PointLight");
+        assert!(world.get::<PointLight>(cube).is_some());
+        assert!(
+            world.get::<PointLight>(lamp).is_none(),
+            "the selection's only"
+        );
+        assert_eq!(ed.history.steps().count(), 1);
+        assert_eq!(said(&ed), "Added PointLight");
+        // Its section has a × and a transform's none.
+        ed.update(&mut world);
+        let transform = texts(&ed, "Transform")[0];
+        assert!(
+            texts(&ed, icons::CLOSE)
+                .iter()
+                .all(|r| (r.pos[1] - transform.pos[1]).abs() > 8.0),
+            "what places the entity stays"
+        );
+        let cross = on_row(&ed, "PointLight", icons::CLOSE);
+        click(&mut ed, &mut world, cross);
+        assert!(world.get::<PointLight>(cube).is_none());
+        assert_eq!(ed.history.steps().count(), 2);
+        ed.run(&mut world, ed.ids.undo);
+        assert!(world.get::<PointLight>(cube).is_some(), "put back");
+        ed.run(&mut world, ed.ids.undo);
+        assert!(world.get::<PointLight>(cube).is_none(), "the add undone");
+        ed.run(&mut world, ed.ids.redo);
+        assert!(world.get::<PointLight>(cube).is_some(), "and done again");
+        // The button under the components opens the same list; with both selected, the
+        // one that lacks it takes it.
+        ed.toggle(lamp);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let button = middle(texts(&ed, "Add Component")[0]);
+        click(&mut ed, &mut world, button);
+        assert!(list_labels(&ed).iter().any(|l| l == "PointLight"));
+        pick_item(&mut ed, &mut world, "PointLight");
+        assert!(world.get::<PointLight>(lamp).is_some());
+        assert_eq!(said(&ed), "Added PointLight");
+    }
+
+    #[test]
+    fn a_script_attached_from_the_list_shows_its_file_and_mark_which_open_it() {
+        static FIELDS: [engine_reflect::Field; 1] = [engine_reflect::Field {
+            name: "pull",
+            offset: 0,
+            ty: <f32 as engine_reflect::Reflect>::TYPE_INFO,
+            attrs: engine_reflect::Attrs::NONE,
+        }];
+        static LEVER: engine_reflect::TypeInfo = engine_reflect::TypeInfo {
+            name: "EditorTestLever",
+            size: 4,
+            align: 4,
+            kind: TypeKind::Struct(&FIELDS),
+            attrs: engine_reflect::Attrs::NONE,
+        };
+        let dir = folder("attach");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/lever.luau"),
+            "local EditorTestLever = component(\"EditorTestLever\", { pull = 0.25 })\n\
+             return EditorTestLever\n",
+        )
+        .unwrap();
+        // What the player's script host makes of that file.
+        // SAFETY: an f32, plain data, its default one.
+        unsafe {
+            engine_ecs::add_runtime_type(engine_ecs::RuntimeType {
+                info: &LEVER,
+                component: "script::EditorTestLever".into(),
+                layout: core::alloc::Layout::new::<f32>(),
+                defaults: 0.25f32.to_le_bytes().into(),
+                source: "scripts/lever.luau".into(),
+            });
+        }
+        let (mut world, mut ed, door) = door_project(&dir);
+        // The scene dock's Attach Script: New Script… first, then the scripts' components.
+        let attach = middle(texts(&ed, icons::SCRIPT_MARK)[0]);
+        click(&mut ed, &mut world, attach);
+        let labels = list_labels(&ed);
+        assert_eq!(labels[0], "New Script…");
+        assert!(labels.iter().any(|l| l == "EditorTestLever"), "{labels:?}");
+        assert!(!labels.iter().any(|l| l == "PointLight"), "scripts only");
+        pick_item(&mut ed, &mut world, "EditorTestLever");
+        let id = world
+            .components()
+            .id_by_name("script::EditorTestLever")
+            .unwrap();
+        let pull = |world: &World| {
+            // SAFETY: the lever's one prop, an f32.
+            unsafe { world.get_raw(door, id).unwrap().cast::<f32>().read() }
+        };
+        assert_eq!(pull(&world), 0.25, "at its default");
+        assert_eq!(ed.history.steps().count(), 1);
+        // Its section shows the file, its row the script's mark; at its default, the
+        // prop is not marked changed, and away from it, it is.
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(texts(&ed, "scripts/lever.luau").len(), 1);
+        let mark = on_row(&ed, "Front door", icons::SCRIPT_MARK);
+        assert_eq!(
+            shown_field(&ed, "EditorTestLever", "pull").map(|f| f.2),
+            Some(false)
+        );
+        ed.set(&mut world, door, "EditorTestLever.pull", "2")
+            .unwrap();
+        ed.update(&mut world);
+        assert_eq!(pull(&world), 2.0);
+        assert_eq!(
+            shown_field(&ed, "EditorTestLever", "pull").map(|f| f.2),
+            Some(true)
+        );
+        // A click on the file opens it in a tab.
+        let file = middle(texts(&ed, "scripts/lever.luau")[0]);
+        click(&mut ed, &mut world, file);
+        assert_eq!(ed.scripts.len(), 1);
+        assert_eq!(ed.scripts[0].path, Path::new("scripts/lever.luau"));
+        assert_eq!(ed.active_script, Some(0));
+        // Back on the scene, the row's mark opens it too: the same tab.
+        ed.show_scene_tab(&mut world, 0);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(ed.active_script.is_none());
+        click(&mut ed, &mut world, mark);
+        assert_eq!(ed.active_script, Some(0));
+        assert_eq!(ed.scripts.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_script_writes_a_file_named_after_the_entity_and_attaches_it_once_loaded() {
+        static FRONT_DOOR: engine_reflect::TypeInfo = engine_reflect::TypeInfo {
+            name: "FrontDoor",
+            size: 0,
+            align: 1,
+            kind: TypeKind::Struct(&[]),
+            attrs: engine_reflect::Attrs::NONE,
+        };
+        let dir = folder("new-script");
+        let (mut world, mut ed, door) = door_project(&dir);
+        ed.run(&mut world, ed.ids.new_script);
+        let text = std::fs::read_to_string(dir.join("scripts/front_door.luau")).unwrap();
+        assert!(
+            text.starts_with("--!strict\nlocal FrontDoor = component(\"FrontDoor\", {\n"),
+            "{text}"
+        );
+        assert!(text.contains("\nfunction FrontDoor.on_tick(self, dt: number)\n    \nend\n"));
+        assert!(text.ends_with("\nreturn FrontDoor\n"));
+        let request = ed.script_request.take().unwrap();
+        assert_eq!(request.path, Path::new("scripts/front_door.luau"));
+        assert_eq!(request.component, "FrontDoor");
+        assert_eq!(request.targets, [door]);
+        // Again: the file has the name, a number goes after it.
+        ed.run(&mut world, ed.ids.new_script);
+        let again = ed.script_request.take().unwrap();
+        assert_eq!(again.path, Path::new("scripts/front_door_2.luau"));
+        assert_eq!(again.component, "FrontDoor2");
+        // The player's host loaded the first (as the player does at the next frame): its
+        // component goes to the door as one step, and the script opens in `on_tick`.
+        // SAFETY: no props: a value of no bytes.
+        unsafe {
+            engine_ecs::add_runtime_type(engine_ecs::RuntimeType {
+                info: &FRONT_DOOR,
+                component: "script::FrontDoor".into(),
+                layout: core::alloc::Layout::new::<()>(),
+                defaults: Box::new([]),
+                source: "scripts/front_door.luau".into(),
+            });
+        }
+        ed.script_loaded(&mut world, request, Ok(vec![String::from("FrontDoor")]));
+        let id = world.components().id_by_name("script::FrontDoor").unwrap();
+        assert!(world.get_raw(door, id).is_some());
+        assert_eq!(ed.history.steps().count(), 1);
+        assert!(said(&ed).contains("attached FrontDoor"), "{}", said(&ed));
+        assert_eq!(ed.active_script, Some(0));
+        assert_eq!(ed.scripts[0].path, Path::new("scripts/front_door.luau"));
+        assert_eq!(ed.scripts[0].doc.primary().head, Pos::new(9, 4));
+        ed.run(&mut world, ed.ids.undo);
+        assert!(world.get_raw(door, id).is_none(), "taken off");
+        assert!(
+            dir.join("scripts/front_door.luau").exists(),
+            "the file stays"
+        );
+        // A file that did not load attaches nothing, and says why.
+        ed.script_loaded(&mut world, again, Err(String::from("a syntax error")));
+        assert!(
+            said(&ed).ends_with("not attached: a syntax error"),
+            "{}",
+            said(&ed)
+        );
+        assert_eq!(ed.history.steps().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_scripts_are_named_after_their_entity() {
+        let free = |_: &str, _: &str| false;
+        let names = |name: &str, taken: &dyn Fn(&str, &str) -> bool| {
+            let (component, file) = script_names(name, taken);
+            format!("{component} {file}")
+        };
+        assert_eq!(
+            names("Front door", &free),
+            "FrontDoor scripts/front_door.luau"
+        );
+        assert_eq!(
+            names("PointLight 2", &free),
+            "PointLight2 scripts/point_light_2.luau"
+        );
+        assert_eq!(names("lamp_post", &free), "LampPost scripts/lamp_post.luau");
+        assert_eq!(
+            names("2nd door", &free),
+            "Script2ndDoor scripts/script_2nd_door.luau"
+        );
+        assert_eq!(names("Дверь", &free), "Script scripts/script.luau");
+        let taken = |c: &str, f: &str| c == "Door" || f == "scripts/door_2.luau";
+        assert_eq!(names("Door", &taken), "Door3 scripts/door_3.luau");
     }
 }

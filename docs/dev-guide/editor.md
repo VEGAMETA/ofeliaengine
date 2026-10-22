@@ -113,6 +113,25 @@ editor = ["dep:engine_editor"]
     A name has no reset;
   - **Ctrl+C and Ctrl+V** with the mouse over a field copy and paste its value (see
     copying values below).
+- **Components and scripts** (ADR 0114 E7-4a):
+  - **Add Component** (the button under the components, or Ctrl+Shift+A) lists the
+    components a selected entity lacks, by name: the engine's, your game's, and your
+    scripts' with their files. Pick one: each selected entity that lacks it gets it at its
+    default, as one undo step. New Script… ends the list;
+  - **the × on a component's header** takes it from the selected entities, as one step.
+    A transform has none: it places the entity;
+  - **Attach Script** (the script button beside the scene dock's +, as in Godot) lists New
+    Script… first, then your scripts' components;
+  - **New Script…** writes `scripts/<name>.luau` from a template, named after the active
+    entity: `Front door` gives `scripts/front_door.luau` declaring `FrontDoor`, with a
+    number when the name is taken. At the next frame it is loaded, its component goes to
+    the selection as one step, and it opens with the caret in `on_tick`. Undo takes the
+    component off; the file stays;
+  - **a script's component** shows its file under its header, and its entity's row ends in
+    the script's mark. A click on either opens the script; an entity with several scripts
+    offers them in the palette;
+  - a saved script takes effect when the editor starts again (reloading on save comes
+    next).
 - **The command palette** (Ctrl+Shift+P) finds and runs every command; Ctrl+P finds the
   scene's objects, `#` the project's assets (see below).
 - **Everything is undoable**, one step per action (a whole drag is one step). The scene's
@@ -137,6 +156,7 @@ editor = ["dep:engine_editor"]
 | Turn the selection off, or on (with its children) | H |
 | Duplicate the selection (with its children) | Ctrl+D |
 | Add an entity | Ctrl+A |
+| Add a component to the selection | Ctrl+Shift+A |
 | Snap by default, or not (Y is an axis in a keyboard transform) | G (Blender's keys: Shift+Tab; Godot's: Y) |
 | Rename the active entity | F2 |
 | The command palette | Ctrl+Shift+P |
@@ -970,7 +990,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | Phase | What |
 |---|---|
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
-| E7 | Luau in the game: the script component, its hooks, bindings and hot reload (its public API waits for the team's answers, ADR 0114) |
+| E7 | Luau: reloading a script on save, the engine's types in the editor and for luau-lsp, faster views, physics for scripts, the rest of v1 (ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
 | E10 | materials: completion, hover and definitions in Slang modules; then the material file, the graph, previews (the team's questions are open) |
 
