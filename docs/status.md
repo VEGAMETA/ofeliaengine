@@ -352,7 +352,7 @@ Last updated: 2026-10-22.
     - the game has the mouse from Play on, the cursor hidden; Shift+F1 frees it and gives
       it back, a click in the game gives it back (ADR 0107's note);
     - the game's window at least 1280 × 720, opened where it was left.
-  - **E5-5a, scenes in tabs** (#PR, ADR 0107's as-built; found 2026-10-22: the editor
+  - **E5-5a, scenes in tabs** (#321, ADR 0107's as-built; found 2026-10-22: the editor
     held one scene and could not open another):
     - an inactive tab is its scene's text, instances as their overrides, so it follows a
       prefab written anew by itself; switching a scene of 10,000 entities: shown again
