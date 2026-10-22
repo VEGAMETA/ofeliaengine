@@ -611,3 +611,40 @@ The section "Prefab instances" above, built in `engine_scene` (`prefab` module),
   unpacking instances, overrides in the inspector, prefabs edited live. Undo does not
   keep `KeptBlocks` (not plain data, not a scene type): deleting an instance that has
   them and undoing drops them.
+
+## As built (E5-2, 2026-10-22): prefabs in the editor
+
+- **Scenes load and save through their prefabs** (`ProjectPrefabs`): a prefab is found
+  by id through the asset database, so one moved or renamed in the editor is found where
+  it is, else by the path the scene wrote. The editor's autosave, its taking the disk's
+  version, and Find References go through them (Find References reads instance and
+  override blocks too).
+- **A scene dropped** from the dock is placed as an instance, in one undo step:
+  - into the view: placed while dragged and moved with the pointer, its root on the
+    surface under it (a scene's box is not known before it is placed, so its root's origin
+    rests there), Esc takes it back;
+  - into the tree: under the row, or after the roots;
+  - the open scene, or one that places it, is refused with why.
+
+  The placing is a scene of one instance block loaded into the world: the same code as a
+  scene's load.
+- **Make Prefab:** the active entity and its children are written with `save_subtree` to
+  `<dock's folder>/<name>.scene` (a free name), the root at its origin, then made an
+  instance of it in one undo step:
+  - the root keeps its id, now the instance's, and takes `PrefabInstance`;
+  - each other entity takes `SceneId::derive(root, old id)` and a `PrefabPart`; parts of
+    instances inside it keep their own, their instance's id mapped the same way;
+  - `History::change_ids` records the ids changed: to the history an old id is gone and
+    a new one made, and the entities that refer to them are recorded too, so undo puts the
+    old ids back with their references;
+  - an instance made a prefab is a variant of its prefab;
+  - undo leaves the file; a part of an instance cannot be made a prefab (unpack first).
+- **Unpack Prefab:** the instance's `PrefabInstance` and its parts' `PrefabPart` removed,
+  one undo step; instances inside it become instances of the scene; what it kept is
+  dropped (said).
+- **The tree** names an instance's root "Prefab".
+- **Left:**
+  - overrides shown in the inspector, reverting and applying them (E5-3); a prefab edited
+    live in its own tab, and open scenes following (E5-4);
+  - the player finds prefabs by the path a scene wrote: a scene not saved since its
+    prefab moved places it in the editor (by id) but not in the player until saved again.

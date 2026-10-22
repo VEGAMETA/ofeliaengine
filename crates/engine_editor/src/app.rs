@@ -97,7 +97,8 @@ use engine_render::pick::{
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, Disabled, PointLight, SpotLight, Sun, look_rotation};
 use engine_scene::{
-    AssetId, AssetPaths, AssetRef, Name, RootOrder, SaveOptions, SceneId, SceneRegistry,
+    AssetId, AssetPaths, AssetRef, KeptBlocks, LoadOptions, Name, PrefabInstance, PrefabPart,
+    RootOrder, SaveOptions, SceneId, SceneRegistry,
 };
 use engine_ui::{Theme, Ui, UiKey};
 use std::cell::RefCell;
@@ -621,6 +622,9 @@ struct CommandIds {
     keep: CommandId,
     keep_list: CommandId,
     find_references: CommandId,
+    /// Prefabs (E5-2): the selection made a prefab's instance, an instance unpacked.
+    make_prefab: CommandId,
+    unpack_prefab: CommandId,
     /// Where Play shows the game (E3-4).
     play_where: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
@@ -714,6 +718,8 @@ fn commands() -> (Commands, CommandIds) {
         keep: c.register("play.keep", "Play", "Keep the Selection's Changes"),
         keep_list: c.register("play.keep_list", "Play", "Keep Changes…"),
         find_references: c.register("assets.references", "Assets", "Find References"),
+        make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
+        unpack_prefab: c.register("scene.unpack_prefab", "Scene", "Unpack Prefab"),
         play_where: c.register("play.where", "Play", "In a Window or in the Viewport"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
@@ -1677,7 +1683,9 @@ fn ago(nanos: u64) -> String {
 
 /// An icon and a kind for an entity: its main component's.
 fn kind_of(world: &World, e: Entity) -> (&'static str, &'static str) {
-    if world.get::<Camera>(e).is_some() {
+    if world.get::<PrefabInstance>(e).is_some() {
+        (icons::SCENE, "Prefab")
+    } else if world.get::<Camera>(e).is_some() {
         (icons::CAMERA, "Camera")
     } else if world.get::<Sun>(e).is_some() {
         (icons::SUN, "Sun")
@@ -6809,6 +6817,10 @@ impl Editor {
             }
         } else if id == ids.find_references {
             self.find_references(world);
+        } else if id == ids.make_prefab {
+            self.make_prefab(world);
+        } else if id == ids.unpack_prefab {
+            self.unpack_prefab(world);
         } else if id == ids.select_next || id == ids.select_previous {
             self.step(if id == ids.select_next { 1 } else { -1 }, false);
         } else if id == ids.extend_next || id == ids.extend_previous {
@@ -7017,10 +7029,11 @@ impl Editor {
     fn scene_text(&self, world: &mut World) -> Result<String, String> {
         let registry = SceneRegistry::from_program();
         let mut text = String::new();
+        let prefabs = self.prefabs();
         let options = SaveOptions {
             id: Some(self.scene_id),
             assets: Some(&self.assets),
-            prefabs: None,
+            prefabs: Some(&prefabs),
         };
         engine_scene::save_with(world, &registry, &options, &mut text)
             .map_err(|e| e.to_string())?;
@@ -7195,6 +7208,7 @@ impl Editor {
                 path: entry.path.clone(),
                 name: l.name.clone(),
                 plan: None,
+                refused: None,
                 placed: None,
                 selection: self.selection.clone(),
                 over: DropTarget::Nowhere,
@@ -7246,7 +7260,11 @@ impl Editor {
             return;
         }
         match (drag.kind, drag.over, cursor) {
-            (engine_scene::AssetKind::Model, DropTarget::View, Some(at)) => {
+            (
+                engine_scene::AssetKind::Model | engine_scene::AssetKind::Scene,
+                DropTarget::View,
+                Some(at),
+            ) => {
                 self.place_dragged(world, &mut drag, at);
             }
             _ => self.take_back_placed(world, &mut drag),
@@ -7267,8 +7285,15 @@ impl Editor {
         let Some(rect) = self.view_rect else {
             return;
         };
-        let Ok(plan) = self.model_plan(drag) else {
-            return;
+        // A model rests on its box; a scene (its box not known before it is placed) on its
+        // root's origin.
+        let plan = match drag.kind {
+            engine_scene::AssetKind::Model => match self.model_plan(drag) {
+                Ok(plan) => Some(plan),
+                Err(_) => return,
+            },
+            engine_scene::AssetKind::Scene if drag.refused.is_none() => None,
+            _ => return,
         };
         let view = ViewProj::new(&self.orbit, rect);
         let local = (at - Vec2::new(rect[0] as f32, rect[1] as f32)).max(Vec2::ZERO);
@@ -7292,7 +7317,7 @@ impl Editor {
         } else {
             snap_along(point, normal, self.snapping.position as f32)
         };
-        let to = resting_point(point, normal, plan.bounds);
+        let to = resting_point(point, normal, plan.as_ref().and_then(|p| p.bounds));
         match drag.placed.filter(|p| world.contains(p.root)) {
             Some(p) => {
                 if world
@@ -7313,7 +7338,19 @@ impl Editor {
                 let merge = self.gestures;
                 self.history
                     .begin(&format!("Place {}", drag.name), Some(merge));
-                let root = self.spawn_plan(world, &plan, None, to);
+                let root = match &plan {
+                    Some(plan) => self.spawn_plan(world, plan, None, to),
+                    None => {
+                        match self.spawn_instance(world, drag.asset, &drag.path, None, Some(to)) {
+                            Ok(root) => root,
+                            Err(why) => {
+                                self.history.cancel(world);
+                                drag.refused = Some(why);
+                                return;
+                            }
+                        }
+                    }
+                };
                 self.history.commit(world);
                 // Selected: surface picks leave it out, so it never lands on itself.
                 self.select_only(root);
@@ -7427,6 +7464,16 @@ impl Editor {
             },
             (DropTarget::Row(e), K::Model) => self.add_model(world, &mut drag, Some(e)),
             (DropTarget::Tree, K::Model) => self.add_model(world, &mut drag, None),
+            (DropTarget::View, K::Scene) => match (drag.placed, drag.refused.take()) {
+                (Some(placed), _) => {
+                    self.show(world, placed.root);
+                    self.say(format!("{name} placed: an instance of it"));
+                }
+                (None, Some(why)) => self.say(why),
+                (None, None) => {}
+            },
+            (DropTarget::Row(e), K::Scene) => self.add_instance(world, &drag, Some(e)),
+            (DropTarget::Tree, K::Scene) => self.add_instance(world, &drag, None),
             (DropTarget::Row(e), K::Material) => self.give_material(world, e, &drag),
             (DropTarget::Field(section, field), _) => {
                 self.drop_on_field(world, section, field, &mut drag);
@@ -7442,7 +7489,8 @@ impl Editor {
                 }
             }
             (DropTarget::View | DropTarget::Row(_) | DropTarget::Tree, _) => self.say(format!(
-                "{name}: models and materials go into the scene; other assets onto fields"
+                "{name}: models, scenes and materials go into the scene; other assets onto \
+                 fields"
             )),
             (DropTarget::Nowhere, _) => {}
         }
@@ -7548,6 +7596,274 @@ impl Editor {
         self.history.commit(world);
         self.show(world, root);
         self.say(placed_message(&drag.name, &plan));
+    }
+
+    /// The project's prefabs, found through its asset database.
+    fn prefabs(&self) -> crate::prefabs::ProjectPrefabs<'_> {
+        crate::prefabs::ProjectPrefabs {
+            root: &self.root,
+            db: &self.asset_db,
+        }
+    }
+
+    /// A dragged scene placed as an instance in the tree: under `parent` (a new root after
+    /// the others for none), in one undo step.
+    fn add_instance(&mut self, world: &mut World, drag: &AssetDrag, parent: Option<Entity>) {
+        self.history.begin(&format!("Add {}", drag.name), None);
+        if let Some(p) = parent {
+            self.history.touch(world, p);
+        }
+        match self.spawn_instance(world, drag.asset, &drag.path, parent, None) {
+            Ok(root) => {
+                self.history.commit(world);
+                self.show(world, root);
+                self.say(format!("{} placed: an instance of it", drag.name));
+            }
+            Err(why) => {
+                self.history.cancel(world);
+                self.say(why);
+            }
+        }
+    }
+
+    /// Places scene `prefab` (at `path`) as a new instance, in the open history step:
+    /// under `parent` (a new root after the others for none), its root moved to `at` when
+    /// given. Its entities are new to the history; their assets' paths go to the player.
+    /// Returns its root; nothing is placed when the scene cannot be (the open scene itself,
+    /// one placing it, or one that cannot be read).
+    fn spawn_instance(
+        &mut self,
+        world: &mut World,
+        prefab: AssetId,
+        path: &str,
+        parent: Option<Entity>,
+        at: Option<Vec3>,
+    ) -> Result<Entity, String> {
+        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+        if prefab == self.scene_id {
+            return Err(format!(
+                "{name} is the open scene: it cannot be placed in itself"
+            ));
+        }
+        let instance = SceneId::new();
+        let text = crate::prefabs::instance_text(instance, prefab, path);
+        let prefabs = self.prefabs();
+        let options = LoadOptions {
+            prefabs: Some(&prefabs),
+        };
+        let report =
+            engine_scene::load_with(world, &SceneRegistry::from_program(), &text, &options)
+                .map_err(|e| format!("{name}: {e}"))?;
+        let root = report
+            .entities
+            .iter()
+            .copied()
+            .find(|&e| world.get::<SceneId>(e) == Some(&instance));
+        let placed = root.filter(|&r| {
+            world
+                .get::<PrefabInstance>(r)
+                .is_some_and(|i| !i.is_missing())
+        });
+        let Some(root) = placed else {
+            // Not placed (the open scene inside it, or a file that cannot be read): taken
+            // back, with why.
+            for &e in &report.entities {
+                world.despawn(e);
+            }
+            let why = report
+                .warnings
+                .first()
+                .map_or_else(|| String::from("nothing to place"), |(_, w)| w.clone());
+            return Err(format!("{name}: {why}"));
+        };
+        for &e in &report.entities {
+            self.history.touch_new(world, e);
+        }
+        match parent {
+            Some(p) => {
+                let _ = world.set_parent(root, Some(p));
+                self.collapsed.remove(&p);
+            }
+            None => {
+                let order = self.last_root_order(world);
+                world.insert(root, RootOrder(order));
+            }
+        }
+        if let Some(to) = at
+            && let Some(t) = world.get_mut::<Transform>(root)
+        {
+            t.translation = to;
+        }
+        self.assets.insert(AssetRef::file(prefab), path);
+        self.assets.extend(&report.assets);
+        self.pending_assets.extend(&report.assets);
+        Ok(root)
+    }
+
+    /// "Make Prefab": the active entity and its children written to a scene file of their
+    /// own (beside the open scene, in the dock's folder), then made an instance of it in
+    /// one undo step. The entity keeps its id, now the instance's; its children take ids
+    /// derived from it ([`SceneId::derive`]); references to them follow. The file's root
+    /// sits at its origin: the instance keeps its place as its own change. An instance
+    /// made a prefab is a variant of its prefab. Undo leaves the file.
+    fn make_prefab(&mut self, world: &mut World) {
+        let Some(root) = self.active() else {
+            self.say(String::from("Select the entity to make a prefab of"));
+            return;
+        };
+        if world.get::<PrefabPart>(root).is_some() {
+            self.say(String::from(
+                "It is part of an instance: unpack that instance first (Scene: Unpack Prefab)",
+            ));
+            return;
+        }
+        let Some(&id) = world.get::<SceneId>(root) else {
+            return;
+        };
+        let name = world
+            .get::<Name>(root)
+            .map_or_else(|| String::from("Prefab"), |n| n.as_str().to_owned());
+        let path = crate::prefabs::prefab_path(&self.root, &self.browser.folder, &name);
+        let file = self.root.join(&path);
+        // The file: the subtree with its root at the origin.
+        let prefab = AssetId::new();
+        let place = world.get::<Transform>(root).copied();
+        if let Some(t) = world.get_mut::<Transform>(root) {
+            t.translation = Vec3::ZERO;
+        }
+        let mut text = String::new();
+        let saved = {
+            let prefabs = self.prefabs();
+            let options = SaveOptions {
+                id: Some(prefab),
+                assets: Some(&self.assets),
+                prefabs: Some(&prefabs),
+            };
+            engine_scene::save_subtree(
+                world,
+                &SceneRegistry::from_program(),
+                &options,
+                root,
+                &mut text,
+            )
+        };
+        if let (Some(place), Some(t)) = (place, world.get_mut::<Transform>(root)) {
+            *t = place;
+        }
+        if let Err(e) = saved {
+            self.say(format!("No prefab made: {e}"));
+            return;
+        }
+        if let Some(dir) = file.parent()
+            && let Err(e) = std::fs::create_dir_all(dir)
+        {
+            self.say(format!("No prefab made: {}: {e}", dir.display()));
+            return;
+        }
+        if let Err(e) = std::fs::write(&file, &text) {
+            self.say(format!("No prefab made: {}: {e}", file.display()));
+            return;
+        }
+        // The subtree made the instance: the root's id the instance's, the rest derived.
+        let mut subtree = Vec::new();
+        let mut stack: Vec<Entity> = world.children(root).collect();
+        while let Some(e) = stack.pop() {
+            subtree.push(e);
+            stack.extend(world.children(e));
+        }
+        let map = |old: SceneId| {
+            if old == id {
+                id
+            } else {
+                SceneId::derive(id, old)
+            }
+        };
+        let changes: Vec<(Entity, SceneId)> = subtree
+            .iter()
+            .filter_map(|&e| Some((e, map(*world.get::<SceneId>(e)?))))
+            .collect();
+        let parts: Vec<(Entity, PrefabPart)> = subtree
+            .iter()
+            .filter_map(|&e| {
+                let old = *world.get::<SceneId>(e)?;
+                Some((
+                    e,
+                    match world.get::<PrefabPart>(e) {
+                        // Inside an instance inside it: its instance's new id.
+                        Some(part) => PrefabPart {
+                            instance: map(part.instance),
+                            local: part.local,
+                        },
+                        None => PrefabPart {
+                            instance: id,
+                            local: old,
+                        },
+                    },
+                ))
+            })
+            .collect();
+        self.history.begin("Make Prefab", None);
+        self.history.touch(world, root);
+        world.insert(root, PrefabInstance::new(AssetRef::file(prefab)));
+        world.remove::<KeptBlocks>(root);
+        self.history.change_ids(world, &changes);
+        for (e, part) in parts {
+            world.insert(e, part);
+        }
+        self.history.commit(world);
+        self.assets.insert(AssetRef::file(prefab), &path);
+        let mut paths = AssetPaths::new();
+        paths.insert(AssetRef::file(prefab), &path);
+        self.pending_assets.extend(&paths);
+        self.asset_db.scan();
+        self.refresh_browser();
+        self.say(format!(
+            "{name} made the prefab {path}, and this an instance of it"
+        ));
+    }
+
+    /// "Unpack Prefab": the active instance's entities made plain ones in one undo step;
+    /// instances inside it stay instances (of their own prefabs).
+    fn unpack_prefab(&mut self, world: &mut World) {
+        let Some(root) = self.active() else {
+            self.say(String::from("Select the instance to unpack"));
+            return;
+        };
+        if world.get::<PrefabInstance>(root).is_none() || world.get::<PrefabPart>(root).is_some() {
+            self.say(String::from(
+                "Not an instance in this scene: select an instance's root to unpack it",
+            ));
+            return;
+        }
+        let Some(&id) = world.get::<SceneId>(root) else {
+            return;
+        };
+        let mut parts = Vec::new();
+        let mut stack: Vec<Entity> = world.children(root).collect();
+        while let Some(e) = stack.pop() {
+            if world.get::<PrefabPart>(e).is_some_and(|p| p.instance == id) {
+                parts.push(e);
+            }
+            stack.extend(world.children(e));
+        }
+        let kept = world
+            .get::<KeptBlocks>(root)
+            .is_some_and(|k| !(k.lines.is_empty() && k.blocks.is_empty()));
+        self.history.begin("Unpack Prefab", None);
+        self.history.touch(world, root);
+        world.remove::<PrefabInstance>(root);
+        world.remove::<KeptBlocks>(root);
+        for &e in &parts {
+            self.history.touch(world, e);
+            world.remove::<PrefabPart>(e);
+        }
+        self.history.commit(world);
+        let name = world.get::<Name>(root).map_or("The instance", Name::as_str);
+        self.say(if kept {
+            format!("{name} unpacked: its plain entities now (what it could not apply is dropped)")
+        } else {
+            format!("{name} unpacked: its plain entities now")
+        });
     }
 
     /// A dragged material file given to entity `e`'s model, as one undo step.
@@ -7754,15 +8070,16 @@ impl Editor {
         let needle = id.to_string();
         let mut items = Vec::new();
         // The open scene as it is: its entities whose lines name the asset.
+        let prefabs = self.prefabs();
         let options = SaveOptions {
             id: Some(self.scene_id),
             assets: Some(&self.assets),
-            prefabs: None,
+            prefabs: Some(&prefabs),
         };
         let mut text = String::new();
-        if engine_scene::save_with(world, &SceneRegistry::from_program(), &options, &mut text)
-            .is_ok()
-        {
+        let saved =
+            engine_scene::save_with(world, &SceneRegistry::from_program(), &options, &mut text);
+        if saved.is_ok() {
             let index: HashMap<SceneId, Entity> = {
                 let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
                 q.iter_readonly(world).map(|(e, &id)| (id, e)).collect()
@@ -7770,12 +8087,14 @@ impl Editor {
             let mut current: Option<Entity> = None;
             let mut fields: Vec<(Entity, Vec<String>)> = Vec::new();
             for line in text.lines() {
-                if let Some(rest) = line.strip_prefix("[entity ") {
-                    current = rest
-                        .trim_end_matches(']')
-                        .split_whitespace()
-                        .next()
-                        .and_then(SceneId::parse)
+                // An entity's block, an instance's (its root), or an override's (an entity
+                // inside an instance, by its path).
+                let block = ["[entity ", "[instance ", "[override "]
+                    .iter()
+                    .find_map(|head| line.strip_prefix(head));
+                if let Some(rest) = block {
+                    current = SceneId::parse_path(rest.trim_end_matches(']').trim())
+                        .map(|path| SceneId::of_path(&path))
                         .and_then(|s| index.get(&s).copied());
                 } else if line.contains(&needle)
                     && let Some(e) = current
@@ -7846,6 +8165,7 @@ impl Editor {
                 .unwrap_or(&entry.path)
                 .to_owned(),
             plan: None,
+            refused: None,
             placed: None,
             selection: Vec::new(),
             over: DropTarget::Field(section, field),
@@ -7873,6 +8193,19 @@ impl Editor {
             }
             (DropTarget::Row(e), K::Material) => format!("{name} → {}", named(e)),
             (DropTarget::Tree, K::Model) => format!("{name}: let go to add it to the scene"),
+            (DropTarget::View, K::Scene) => match &drag.refused {
+                Some(why) => why.clone(),
+                None => format!("{name}: let go to place an instance of it  ·  Esc takes it back"),
+            },
+            (DropTarget::Row(e), K::Scene) => {
+                format!(
+                    "{name}: let go to place an instance of it under {}",
+                    named(e)
+                )
+            }
+            (DropTarget::Tree, K::Scene) => {
+                format!("{name}: let go to place an instance of it in the scene")
+            }
             (DropTarget::Field(section, field), _) => match self.shown_property(section, field) {
                 Some((p, component)) => format!("{name} → {}", self.path_of(&p, component)),
                 None => name.clone(),
@@ -8148,8 +8481,13 @@ impl Editor {
     fn restore(&mut self, world: &mut World, autosave: &Path) -> Result<AssetPaths, String> {
         let text = std::fs::read_to_string(autosave).map_err(|e| e.to_string())?;
         let old = self.roots(world, None);
-        let report = engine_scene::load(world, &SceneRegistry::from_program(), &text)
-            .map_err(|e| e.to_string())?;
+        let prefabs = self.prefabs();
+        let options = LoadOptions {
+            prefabs: Some(&prefabs),
+        };
+        let report =
+            engine_scene::load_with(world, &SceneRegistry::from_program(), &text, &options)
+                .map_err(|e| e.to_string())?;
         for (line, warning) in &report.warnings {
             log::warn!(target: "engine_editor", "{}:{line}: {warning}", autosave.display());
         }
@@ -8442,7 +8780,16 @@ impl Editor {
         for e in old {
             self.history.delete_subtree(world, e);
         }
-        let report = match engine_scene::load(world, &SceneRegistry::from_program(), &text) {
+        let prefabs = crate::prefabs::ProjectPrefabs {
+            root: &self.root,
+            db: &self.asset_db,
+        };
+        let options = LoadOptions {
+            prefabs: Some(&prefabs),
+        };
+        let loaded =
+            engine_scene::load_with(world, &SceneRegistry::from_program(), &text, &options);
+        let report = match loaded {
             Ok(report) => report,
             Err(e) => {
                 self.history.cancel(world);
@@ -9810,7 +10157,10 @@ struct AssetDrag {
     name: String,
     /// A model file's entities, read the first time they are needed (or why not).
     plan: Option<Result<Rc<ModelPlan>, String>>,
-    /// The model where the pointer is in the view, in its undo step.
+    /// Why a dragged scene cannot be placed (the open scene, one placing it, one that
+    /// cannot be read), once tried.
+    refused: Option<String>,
+    /// The model (or scene) where the pointer is in the view, in its undo step.
     placed: Option<Placed>,
     /// The selection before the model was placed: back when it is taken back.
     selection: Vec<Entity>,
@@ -11653,6 +12003,195 @@ mod tests {
         ed.selection.clear();
         ed.update(&mut world);
         assert!(ed.inspected.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The scene entity with scene id `id`.
+    fn by_scene_id(world: &mut World, id: SceneId) -> Option<Entity> {
+        let mut q = QueryState::<(Entity, &SceneId)>::new(world);
+        q.iter_readonly(world)
+            .find(|&(_, &i)| i == id)
+            .map(|(e, _)| e)
+    }
+
+    #[test]
+    fn make_prefab_turns_a_subtree_into_an_instance_in_one_step() {
+        let (dir, mut world, mut ed, boxed) = drop_project("make-prefab");
+        let lid_id = SceneId::new();
+        let lid = world.spawn((
+            lid_id,
+            Name::new("Lid"),
+            Transform::from_xyz(0.0, 1.0, 0.0),
+            GlobalTransform::default(),
+        ));
+        world.set_parent(lid, Some(boxed)).unwrap();
+        let box_id = *world.get::<SceneId>(boxed).unwrap();
+        ed.select_only(boxed);
+        let steps = ed.history.steps().count();
+        ed.run(&mut world, ed.ids.make_prefab);
+        // The file: the box at its origin, the lid under it, with their own ids.
+        let file = std::fs::read_to_string(dir.join("props/Box.scene")).unwrap();
+        assert!(file.contains(&format!("[entity {box_id}]")), "{file}");
+        assert!(file.contains("Transform.translation = (0, 0, 0)"), "{file}");
+        assert!(
+            file.contains(&format!("[entity {lid_id}]\nparent = {box_id}")),
+            "{file}"
+        );
+        let (_, prefab) = engine_scene::scene_header(&file).unwrap();
+        // The box: the instance's root, its id kept; the lid: a part, its id derived.
+        assert_eq!(
+            world.get::<PrefabInstance>(boxed).map(|i| i.prefab.file),
+            prefab
+        );
+        let derived = SceneId::derive(box_id, lid_id);
+        assert_eq!(world.get::<SceneId>(lid), Some(&derived));
+        assert_eq!(
+            world.get::<PrefabPart>(lid),
+            Some(&PrefabPart {
+                instance: box_id,
+                local: lid_id,
+            })
+        );
+        assert_eq!(ed.history.steps().count(), steps + 1, "one step");
+        // Saved: an instance whose place is its own change.
+        let text = ed.scene_text(&mut world).unwrap();
+        assert!(
+            text.contains(&format!(
+                "[instance {box_id}]\nprefab = asset(\"props/Box.scene\""
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("Transform.translation = (0, 0, -3)"),
+            "{text}"
+        );
+        assert!(!text.contains("[override"), "nothing else changed: {text}");
+        assert!(
+            ed.asset_db.find("props/Box.scene").is_some(),
+            "the dock knows the file"
+        );
+        // Undone: the plain box and lid again, with their ids.
+        ed.run(&mut world, ed.ids.undo);
+        let boxed = by_scene_id(&mut world, box_id).unwrap();
+        assert!(world.get::<PrefabInstance>(boxed).is_none());
+        let lid = by_scene_id(&mut world, lid_id).expect("the lid's old id back");
+        assert!(world.get::<PrefabPart>(lid).is_none());
+        assert_eq!(world.parent(lid), Some(boxed));
+        assert!(by_scene_id(&mut world, derived).is_none());
+        // Redone.
+        ed.run(&mut world, ed.ids.redo);
+        let lid = by_scene_id(&mut world, derived).expect("the derived id again");
+        assert!(world.get::<PrefabPart>(lid).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scene_dropped_into_the_tree_is_placed_as_an_instance() {
+        let (dir, mut world, mut ed, _) = drop_project("drop-scene");
+        // A lamp: a pole and its bulb, a scene of their own.
+        let (lamp, pole, bulb) = (AssetId::new(), SceneId::new(), SceneId::new());
+        std::fs::write(
+            dir.join("props/lamp.scene"),
+            format!(
+                "[scene version=4 id={lamp}]\n\n[entity {pole}]\nName = \"Lamp\"\n\n\
+                 [entity {bulb}]\nparent = {pole}\nName = \"Bulb\"\n"
+            ),
+        )
+        .unwrap();
+        ed.asset_db.scan();
+        ed.refresh_browser();
+        let drag = |asset: AssetId, path: &str| AssetDrag {
+            asset,
+            kind: engine_scene::AssetKind::Scene,
+            path: path.to_owned(),
+            name: path.rsplit('/').next().unwrap().to_owned(),
+            plan: None,
+            refused: None,
+            placed: None,
+            selection: Vec::new(),
+            over: DropTarget::Tree,
+        };
+        let steps = ed.history.steps().count();
+        ed.drop_asset(&mut world, drag(lamp, "props/lamp.scene"));
+        assert_eq!(ed.history.steps().count(), steps + 1, "one step");
+        let root = engine_scene::find_named(&mut world, "Lamp").expect("the lamp placed");
+        assert!(world.get::<PrefabInstance>(root).is_some());
+        assert!(
+            world.get::<RootOrder>(root).is_some(),
+            "a root after the others"
+        );
+        let bulb_e = engine_scene::find_named(&mut world, "Bulb").unwrap();
+        assert_eq!(world.parent(bulb_e), Some(root));
+        let instance = *world.get::<SceneId>(root).unwrap();
+        assert_eq!(
+            world.get::<PrefabPart>(bulb_e),
+            Some(&PrefabPart {
+                instance,
+                local: bulb,
+            })
+        );
+        // Saved and taken back from the file: still an instance, placed from its prefab.
+        let text = ed.scene_text(&mut world).unwrap();
+        assert!(text.contains(&format!("[instance {instance}]")), "{text}");
+        assert!(
+            !text.contains("Bulb"),
+            "the prefab's own values stay in it: {text}"
+        );
+        let scene = dir.join("main.scene");
+        std::fs::write(&scene, &text).unwrap();
+        ed.replace_scene(&mut world, &scene, "Reload").unwrap();
+        let root = engine_scene::find_named(&mut world, "Lamp").unwrap();
+        assert!(
+            world
+                .get::<PrefabInstance>(root)
+                .is_some_and(|i| !i.is_missing())
+        );
+        assert!(engine_scene::find_named(&mut world, "Bulb").is_some());
+        // The open scene itself cannot be placed in it.
+        let own = ed.scene_id;
+        ed.drop_asset(&mut world, drag(own, "main.scene"));
+        assert!(
+            ed.message
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("cannot be placed in itself")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unpack_makes_an_instances_entities_plain() {
+        let (dir, mut world, mut ed, boxed) = drop_project("unpack");
+        let lid = world.spawn((
+            SceneId::new(),
+            Name::new("Lid"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        world.set_parent(lid, Some(boxed)).unwrap();
+        ed.select_only(boxed);
+        ed.run(&mut world, ed.ids.make_prefab);
+        assert!(world.get::<PrefabPart>(lid).is_some());
+        let steps = ed.history.steps().count();
+        ed.run(&mut world, ed.ids.unpack_prefab);
+        assert!(world.get::<PrefabInstance>(boxed).is_none());
+        assert!(world.get::<PrefabPart>(lid).is_none());
+        assert_eq!(ed.history.steps().count(), steps + 1);
+        let text = ed.scene_text(&mut world).unwrap();
+        assert!(!text.contains("[instance"), "{text}");
+        // A part cannot be made a prefab of its own; undo brings the instance back.
+        ed.run(&mut world, ed.ids.undo);
+        let lid = engine_scene::find_named(&mut world, "Lid").unwrap();
+        ed.select_only(lid);
+        ed.run(&mut world, ed.ids.make_prefab);
+        assert!(
+            ed.message
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("unpack that instance first")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

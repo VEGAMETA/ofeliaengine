@@ -665,6 +665,26 @@ file dropped on the field takes its place.
 - **Meshes of several materials:** a model draws one material, so such a mesh draws with
   its first. The status line names the meshes this affects.
 
+## Prefabs
+
+Any scene can be placed in another ([scenes.md](scenes.md#prefabs)): a crate, a lamp, a
+room.
+
+- **Place one:** drag a `.scene` from the FileSystem dock into the view (its root lands
+  on the surface under the pointer, Esc takes it back) or into the tree (under the row it
+  is dropped on, or after the roots). It is an instance: the tree calls its root
+  "Prefab".
+- **Make one** (Ctrl+Shift+P, "Scene: Make Prefab"): the selected entity and its children
+  are written to a scene of their own in the dock's folder (named after the entity), and
+  become an instance of it, in one undo step.
+  - The file's root sits at its origin; the instance keeps its place as its own change.
+  - An instance made a prefab is a variant of its prefab.
+  - Undo puts the plain entities back; the file stays.
+- **Unpack one** ("Scene: Unpack Prefab" on an instance's root): its entities become plain
+  entities, one undo step; instances inside it stay instances.
+- **What is saved:** an instance writes only what you changed from its prefab. Change the
+  prefab and every instance follows, except where it says otherwise.
+
 ## Autosave and the session
 
 The editor keeps its own files in the project's `.ofelia/` folder (ADR 0107 §4). They are
