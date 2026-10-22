@@ -449,7 +449,7 @@ Last updated: 2026-10-22.
     world placement kept (Alt: local), one undo step; an instance's parts stay.
   - **ADR 0114 accepted** (the owner, 2026-10-22: "да" to all seven recommendations): E7
     can start.
-  - **Brushes inside brushes** (#PR, ADR 0110's addendum; the owner's request): Godot's
+  - **Brushes inside brushes** (#341, ADR 0110's addendum; the owner's request): Godot's
     rule, a brush's children act on it first and what they make of it acts in its place
     (`Brush::made`, `csg::combine`). A window below a wall cuts that wall only. A shape
     added with a brush active goes inside it, a cut drawn on a brush into it. Nested 400
