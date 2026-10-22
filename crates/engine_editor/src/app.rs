@@ -264,6 +264,11 @@ fn run_inner<G: Game>(
         .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
+    // Textures compressed into the project's derived data cache (E4-8), unless the game
+    // gives another.
+    if settings.derived_data.is_none() {
+        settings.derived_data = Some(root.join(session::DIR).join("ddc"));
+    }
     if let Some(placement) = session::peek_window(&root.join(session::DIR)) {
         settings.window_placement = Some(placement);
     }
@@ -1430,6 +1435,9 @@ struct Editor {
     listing: Option<(engine_ui::Rect, f32)>,
     /// Asset files written anew since the player was told (E4-5): made again.
     changed_assets: Vec<AssetId>,
+    /// Textures the player is compressing into the derived data cache (E4-8), for the
+    /// status bar.
+    compressing: usize,
     /// Asset paths of a scene the editor loaded, for the player (`sync_assets`).
     pending_assets: AssetPaths,
     history: History,
@@ -1896,6 +1904,7 @@ impl Editor {
             tile: DEFAULT_TILE,
             listing: None,
             changed_assets: Vec::new(),
+            compressing: 0,
             pending_assets: AssetPaths::new(),
             history: History::new(),
             commands,
@@ -2582,6 +2591,13 @@ impl Editor {
                 "{} changed on disk since your unsaved changes: Take Disk Version or Save \
                  Over Disk Version (Ctrl+Shift+P)  ·  ",
                 self.file_name()
+            );
+        }
+        if self.compressing > 0 {
+            let _ = write!(
+                self.status,
+                "Compressing textures: {}  ·  ",
+                self.compressing
             );
         }
         if let Some((message, at)) = &self.message
@@ -8770,6 +8786,7 @@ impl<G> EditorGame<G> {
         for preview in previews {
             shared.thumbnails.drawn(preview.key, preview.pixels);
         }
+        shared.compressing = player.assets().compressing();
         // Files written anew (E4-5): made again, the old versions drawn until then.
         for id in core::mem::take(&mut shared.changed_assets) {
             if let Some(entry) = shared.asset_db.get(id) {

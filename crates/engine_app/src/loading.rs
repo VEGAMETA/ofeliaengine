@@ -4,11 +4,20 @@
 //! gives the jobs and takes back each result as soon as it is done; it makes the GPU's
 //! meshes and textures from them, whose copies the pools spread over frames.
 //!
-//! The thread is started with the first job: a player whose scenes use no glTF file never
-//! has it.
+//! With a derived data cache (E4-8) a texture is loaded from it compressed when an earlier
+//! run stored it there. Otherwise it is made uncompressed as before, and compressed (BC7,
+//! BC5 for normal maps) on a second thread whose pool runs below the loading's priority,
+//! so compression never holds a load back; the result goes into the cache and comes back
+//! to the frame, which swaps it in.
+//!
+//! Each thread is started with its first job: a player whose scenes use no glTF file never
+//! has them.
 
 use crate::assets::{GltfFile, TextureKey, gltf_mesh, open_gltf};
-use engine_assets::{TextureImage, build_mips, decode_image, read_texture};
+use engine_assets::{
+    DerivedDataCache, EncodedTexture, TextureImage, TextureSource, build_mips, cached_texture,
+    decode_image, import_texture, read_texture,
+};
 use engine_core::jobs::ThreadPool;
 use engine_core::spsc;
 use engine_render::mesh::{OwnedMeshData, VertexAttributes, encode_attributes};
@@ -20,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
-/// Jobs the loader's queue holds at once (more wait on the frame's side).
+/// Jobs a thread's queue holds at once (more wait on the frame's side).
 const QUEUE: usize = 256;
 
 /// Work for the loader. `generation` is the file's when the job was given: a file read
@@ -40,12 +49,41 @@ pub(crate) enum Job {
         mesh: usize,
         generation: u32,
     },
-    /// A texture of an imported file read, decoded and given its levels for its use.
+    /// A texture of an imported file read, decoded and given its levels for its use, or
+    /// loaded compressed from `cache` when an earlier run stored it there.
     Texture {
         key: TextureKey,
         file: Arc<GltfFile>,
+        cache: Option<Arc<DerivedDataCache>>,
         generation: u32,
     },
+    /// A texture made uncompressed, compressed into `cache` (on the compressing thread):
+    /// its image read again from `source`, beside the glTF file in `dir`.
+    Compress {
+        key: TextureKey,
+        source: Source,
+        cache: Arc<DerivedDataCache>,
+        generation: u32,
+    },
+}
+
+/// Where a texture's image is read from: the glTF file's texture, and the file's folder
+/// (its file itself not kept: a texture waiting to be compressed holds its image only).
+pub(crate) struct Source {
+    texture: TextureSource,
+    dir: PathBuf,
+}
+
+/// A texture as the loader made it.
+pub(crate) enum Made {
+    /// Decoded and given its levels, uncompressed. `compress`: where its image is, to be
+    /// compressed from, when there is a cache (which did not have it).
+    Decoded {
+        image: TextureImage,
+        compress: Option<Source>,
+    },
+    /// Compressed, from the cache.
+    Cached(EncodedTexture),
 }
 
 /// A job's result.
@@ -64,19 +102,43 @@ pub(crate) enum Done {
     Texture {
         key: TextureKey,
         generation: u32,
-        result: Result<TextureImage, String>,
+        result: Result<Made, String>,
+    },
+    Compressed {
+        key: TextureKey,
+        generation: u32,
+        result: Result<EncodedTexture, String>,
     },
 }
 
-/// The loader: its thread, the jobs going to it and the results coming back.
+/// What a thread of the loader does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Reads, imports and decodes: each job on a worker of its pool.
+    Load,
+    /// Compresses textures two at a time, each over every worker of its pool (one reads
+    /// and filters its levels while the other's blocks keep the workers busy), the thread
+    /// helping; it runs below the loading's priority.
+    Compress,
+}
+
+/// The loader: its threads, the jobs going to them and the results coming back.
 pub(crate) struct Loader {
     root: PathBuf,
+    loading: Lane,
+    compressing: Lane,
+}
+
+/// A thread of the loader, its jobs and its results.
+struct Lane {
+    kind: Kind,
     running: Option<Running>,
     /// Jobs not yet in the queue (it was full).
     backlog: VecDeque<Job>,
     /// Jobs given and not yet taken back.
     in_flight: usize,
-    /// No thread could start: jobs are done where they are given, their results kept here.
+    /// No thread could start: jobs are done where they are given (compression fails),
+    /// their results kept here.
     here: Option<VecDeque<Done>>,
 }
 
@@ -88,10 +150,62 @@ struct Running {
 }
 
 impl Loader {
-    /// A loader for files under `root` (its thread not started yet).
+    /// A loader for files under `root` (its threads not started yet).
     pub(crate) fn new(root: PathBuf) -> Self {
         Self {
             root,
+            loading: Lane::new(Kind::Load),
+            compressing: Lane::new(Kind::Compress),
+        }
+    }
+
+    /// Gives `job` to the loader: compression to its compressing thread, the rest to its
+    /// loading thread.
+    pub(crate) fn give(&mut self, job: Job) {
+        let lane = match job {
+            Job::Compress { .. } => &mut self.compressing,
+            _ => &mut self.loading,
+        };
+        lane.in_flight += 1;
+        lane.backlog.push_back(job);
+        lane.send(&self.root);
+    }
+
+    /// Whether loading jobs are given and not taken back (compression aside).
+    pub(crate) fn busy(&self) -> bool {
+        self.loading.in_flight > 0
+    }
+
+    /// Textures given to be compressed and not taken back.
+    pub(crate) fn compressing(&self) -> usize {
+        self.compressing.in_flight
+    }
+
+    /// Appends the results come back since the last call to `out`.
+    pub(crate) fn take(&mut self, out: &mut Vec<Done>) {
+        self.loading.take(out, &self.root);
+        self.compressing.take(out, &self.root);
+    }
+
+    /// Waits a moment for loading results (the frame waiting for its assets): until one
+    /// comes or a fraction of a millisecond passes.
+    pub(crate) fn wait(&mut self, out: &mut Vec<Done>) {
+        if let Some(running) = &self.loading.running
+            && let Ok(done) = running
+                .done
+                .recv_timeout(std::time::Duration::from_micros(500))
+        {
+            self.loading.in_flight -= 1;
+            out.push(done);
+        }
+        self.take(out);
+    }
+}
+
+impl Lane {
+    fn new(kind: Kind) -> Self {
+        Self {
+            kind,
             running: None,
             backlog: VecDeque::new(),
             in_flight: 0,
@@ -99,20 +213,8 @@ impl Loader {
         }
     }
 
-    /// Gives `job` to the loader.
-    pub(crate) fn give(&mut self, job: Job) {
-        self.in_flight += 1;
-        self.backlog.push_back(job);
-        self.send();
-    }
-
-    /// Whether jobs are given and not taken back.
-    pub(crate) fn busy(&self) -> bool {
-        self.in_flight > 0
-    }
-
-    /// Appends the results come back since the last call to `out`.
-    pub(crate) fn take(&mut self, out: &mut Vec<Done>) {
+    /// Appends the lane's results come back to `out`.
+    fn take(&mut self, out: &mut Vec<Done>, root: &Path) {
         if let Some(running) = &self.running {
             while let Ok(done) = running.done.try_recv() {
                 self.in_flight -= 1;
@@ -123,43 +225,33 @@ impl Loader {
             self.in_flight -= here.len();
             out.extend(here.drain(..));
         }
-        self.send();
-    }
-
-    /// Waits a moment for results (the frame waiting for its assets): until one comes or
-    /// a fraction of a millisecond passes.
-    pub(crate) fn wait(&mut self, out: &mut Vec<Done>) {
-        if let Some(running) = &self.running
-            && let Ok(done) = running
-                .done
-                .recv_timeout(std::time::Duration::from_micros(500))
-        {
-            self.in_flight -= 1;
-            out.push(done);
-        }
-        self.take(out);
+        self.send(root);
     }
 
     /// The backlog into the queue, the thread started for the first job.
-    fn send(&mut self) {
+    fn send(&mut self, root: &Path) {
         if self.backlog.is_empty() {
             return;
         }
         if let Some(here) = &mut self.here {
             for job in self.backlog.drain(..) {
-                here.push_back(run_caught(job, &self.root));
+                here.push_back(match job {
+                    // Not on the frame's thread: seconds a texture.
+                    Job::Compress { .. } => failed(&job, "no thread to compress it on"),
+                    job => run_caught(job, root, None),
+                });
             }
             return;
         }
         let running = match &mut self.running {
             Some(running) => running,
-            None => match start(self.root.clone()) {
+            None => match start(root.to_path_buf(), self.kind) {
                 Ok(running) => self.running.insert(running),
                 Err(e) => {
                     // No thread: the jobs are done where they are given.
                     log::warn!(target: "engine_app::assets", "the loading thread: {e}");
                     self.here = Some(VecDeque::new());
-                    return self.send();
+                    return self.send(root);
                 }
             },
         };
@@ -178,27 +270,45 @@ impl Loader {
 }
 
 impl Drop for Loader {
+    /// Both threads told to stop. The loading one is waited for (its jobs are short); the
+    /// compressing one is not: it stops after the textures it is compressing, which can
+    /// take seconds, and an exit does not wait for them (a cache entry is written whole
+    /// or not at all, ADR 0041).
     fn drop(&mut self) {
-        if let Some(mut running) = self.running.take() {
-            running.stop.store(true, Ordering::Release);
-            if let Some(thread) = running.thread.take() {
-                thread.thread().unpark();
-                let _ = thread.join();
+        for lane in [&self.loading, &self.compressing] {
+            if let Some(running) = &lane.running {
+                running.stop.store(true, Ordering::Release);
+                if let Some(thread) = &running.thread {
+                    thread.thread().unpark();
+                }
             }
+        }
+        if let Some(thread) = self
+            .loading
+            .running
+            .as_mut()
+            .and_then(|running| running.thread.take())
+        {
+            let _ = thread.join();
         }
     }
 }
 
-/// The loading thread: takes every job given, runs them on its pool and sends each result
-/// back once done; parks while there is nothing to do.
-fn start(root: PathBuf) -> std::io::Result<Running> {
+/// A loader's thread: takes every job given, runs them on its pool and sends each result
+/// back once done; parks while there is nothing to do. The compressing thread stops
+/// between two pairs of textures when the loader goes.
+fn start(root: PathBuf, kind: Kind) -> std::io::Result<Running> {
+    let (name, priority) = match kind {
+        Kind::Load => ("engine-load", Priority::BelowNormal),
+        Kind::Compress => ("engine-compress", Priority::Lowest),
+    };
     let workers = std::thread::available_parallelism()
         .map_or(2, |n| n.get() / 2)
         .clamp(1, 8);
     let pool = ThreadPool::builder()
         .workers(workers)
-        .thread_name("engine-load")
-        .on_thread_start(|_| lower_priority())
+        .thread_name(name)
+        .on_thread_start(move |_| set_priority(priority))
         .build()
         .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     let (jobs, mut incoming) = spsc::channel::<Job>(QUEUE);
@@ -206,9 +316,13 @@ fn start(root: PathBuf) -> std::io::Result<Running> {
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = Arc::clone(&stop);
     let thread = std::thread::Builder::new()
-        .name(String::from("engine-load"))
+        .name(String::from(name))
         .spawn(move || {
-            lower_priority();
+            set_priority(priority);
+            if kind == Kind::Compress {
+                // It helps while it waits for its textures. Not registered: it waits idle.
+                let _ = pool.register_current_thread();
+            }
             let mut batch = Vec::new();
             loop {
                 while let Some(job) = incoming.pop() {
@@ -222,14 +336,31 @@ fn start(root: PathBuf) -> std::io::Result<Running> {
                     continue;
                 }
                 let (root, done) = (&root, &done);
-                pool.scope(|s| {
-                    for job in batch.drain(..) {
-                        s.spawn(move || {
-                            // The frame's side gone: nobody to tell.
-                            let _ = done.send(run_caught(job, root));
-                        });
+                match kind {
+                    Kind::Load => pool.scope(|s| {
+                        for job in batch.drain(..) {
+                            s.spawn(move || {
+                                // The frame's side gone: nobody to tell.
+                                let _ = done.send(run_caught(job, root, None));
+                            });
+                        }
+                    }),
+                    Kind::Compress => {
+                        while !batch.is_empty() && !stopping.load(Ordering::Acquire) {
+                            let pool = &pool;
+                            let two = batch.len().min(2);
+                            pool.scope(|s| {
+                                for job in batch.drain(..two) {
+                                    s.spawn(move || {
+                                        let _ = done.send(run_caught(job, root, Some(pool)));
+                                    });
+                                }
+                            });
+                        }
+                        // The loader gone: the rest is not compressed.
+                        batch.clear();
                     }
-                });
+                }
             }
         })?;
     Ok(Running {
@@ -240,9 +371,10 @@ fn start(root: PathBuf) -> std::io::Result<Running> {
     })
 }
 
-/// A job done, a panic in it (a file the importer or a decoder trips on) its failure.
-fn run_caught(job: Job, root: &Path) -> Done {
-    let failed = |why: String| match &job {
+/// The failure of `job`, for `why`.
+fn failed(job: &Job, why: &str) -> Done {
+    let why = String::from(why);
+    match job {
         Job::Import {
             file, generation, ..
         } => Done::Imported {
@@ -264,13 +396,31 @@ fn run_caught(job: Job, root: &Path) -> Done {
             generation: *generation,
             result: Err(why),
         },
-    };
-    let failure = failed(String::from("loading it failed (a panic, in the log)"));
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(job, root))).unwrap_or(failure)
+        Job::Compress {
+            key, generation, ..
+        } => Done::Compressed {
+            key: *key,
+            generation: *generation,
+            result: Err(why),
+        },
+    }
+}
+
+/// A job done, a panic in it (a file the importer or a decoder trips on) its failure.
+/// Compression runs over `pool`'s workers when given.
+fn run_caught(job: Job, root: &Path, pool: Option<&ThreadPool>) -> Done {
+    let failure = failed(&job, "loading it failed (a panic, in the log)");
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(job, root, pool)))
+        .unwrap_or(failure)
+}
+
+/// The encoded image at `source`.
+fn texture_bytes(source: &Source) -> Result<Vec<u8>, String> {
+    read_texture(&source.texture, Some(&source.dir)).map_err(|e| e.to_string())
 }
 
 /// A job done.
-fn run(job: Job, root: &Path) -> Done {
+fn run(job: Job, root: &Path, pool: Option<&ThreadPool>) -> Done {
     match job {
         Job::Import {
             file,
@@ -311,6 +461,7 @@ fn run(job: Job, root: &Path) -> Done {
         Job::Texture {
             key,
             file,
+            cache,
             generation,
         } => {
             engine_profiler::zone!("assets::load::texture");
@@ -319,10 +470,53 @@ fn run(job: Job, root: &Path) -> Done {
                 .textures
                 .get(key.texture)
                 .ok_or_else(|| String::from("the file has no such texture"))
-                .and_then(|t| read_texture(&t.source, Some(&file.dir)).map_err(|e| e.to_string()))
-                .and_then(|bytes| decode_image(&bytes).map_err(|e| e.to_string()))
-                .map(|image| build_mips(&image, key.usage()));
+                .and_then(|texture| {
+                    let bytes = read_texture(&texture.source, Some(&file.dir))
+                        .map_err(|e| e.to_string())?;
+                    if let Some(texture) = cache
+                        .as_deref()
+                        .and_then(|cache| cached_texture(cache, &bytes, key.usage()))
+                    {
+                        return Ok(Made::Cached(texture));
+                    }
+                    let image = decode_image(&bytes).map_err(|e| e.to_string())?;
+                    let compress = cache.map(|_| Source {
+                        texture: match &texture.source {
+                            TextureSource::Uri(uri) => TextureSource::Uri(uri.clone()),
+                            // Its image read already: kept, without its file.
+                            TextureSource::Embedded { mime, .. } => TextureSource::Embedded {
+                                bytes,
+                                mime: mime.clone(),
+                            },
+                        },
+                        dir: file.dir.clone(),
+                    });
+                    Ok(Made::Decoded {
+                        image: build_mips(&image, key.usage()),
+                        compress,
+                    })
+                });
             Done::Texture {
+                key,
+                generation,
+                result,
+            }
+        }
+        Job::Compress {
+            key,
+            source,
+            cache,
+            generation,
+        } => {
+            engine_profiler::zone!("assets::load::compress");
+            // A texture compressed meanwhile (the same image in another file, or by
+            // another run) is the cache's.
+            let result = texture_bytes(&source).and_then(|bytes| {
+                import_texture(&bytes, key.usage(), Some(&cache), pool)
+                    .map(|(texture, _)| texture)
+                    .map_err(|e| e.to_string())
+            });
+            Done::Compressed {
                 key,
                 generation,
                 result,
@@ -331,9 +525,22 @@ fn run(job: Job, root: &Path) -> Done {
     }
 }
 
-fn lower_priority() {
+/// A thread's priority on Windows.
+#[derive(Clone, Copy)]
+enum Priority {
+    BelowNormal,
+    Lowest,
+}
+
+fn set_priority(priority: Priority) {
     #[cfg(windows)]
-    let _ = engine_platform::thread::set_current_thread_priority(
-        engine_platform::thread::ThreadPriority::BelowNormal,
-    );
+    {
+        use engine_platform::thread::{ThreadPriority, set_current_thread_priority};
+        let _ = set_current_thread_priority(match priority {
+            Priority::BelowNormal => ThreadPriority::BelowNormal,
+            Priority::Lowest => ThreadPriority::Lowest,
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = priority;
 }

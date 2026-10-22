@@ -461,3 +461,56 @@ time.
     costs a reload of a file just made;
   - scenes and scripts written anew are not reloaded here (scripts come with Luau,
     scenes with the session's conflict rules, ADR 0107 §4).
+
+## As built (E4-8, 2026-10-22): textures through the derived data cache
+
+The textures of glTF files the player makes go through ADR 0041's cache, as Unreal's
+editor compiles textures in the background and Unity's caches its imports:
+- **Where:** `PlayerSettings::derived_data` (`Assets::set_derived_data`), a folder.
+  - The editor gives its project's `.ofelia/ddc` (ignored by version control, as all of
+    `.ofelia/`).
+  - `None` (the default, a game run without it): textures stay uncompressed, as before.
+- **A texture in the cache** (`engine_assets::cached_texture`: the key of its image file's
+  bytes and its use, the cooker's own) is loaded from it compressed: BC7 for color and
+  data, BC5 for normal maps. Nothing is decoded and no mip level is computed.
+- **A texture not in it** is made as before, uncompressed, so the model shows as fast as
+  without the cache. Then it is compressed on a second thread of the loader:
+  - its pool runs at the lowest priority but one (`Lowest`), below the loading's workers
+    (`BelowNormal`) and the frame (`Normal`): compression never holds a load or a frame
+    back;
+  - two textures at a time, each over every worker (one decodes and filters its levels
+    while the other's blocks keep the workers busy), the thread helping;
+  - the job keeps the texture's image only (its path, or the bytes of an embedded one),
+    not its glTF file;
+  - the result goes into the cache and back to the frame.
+- **The swap:** the compressed texture is made beside the uncompressed one and swapped in
+  once every level is uploaded and shown (`TexturePool::shown_level` is 0), so the picture
+  neither blurs nor loses the texture for a frame. The materials using the old one are
+  pointed at the new one; the old one is freed from the next frame on.
+- **Not loading:** compression is not counted in `Assets::loading` (the frame after a
+  scene is loaded does not wait for it); `Assets::compressing` counts it, and the editor's
+  status bar shows "Compressing textures: N".
+- **Files written anew** (E4-5): what was compressed from the old version is not swapped
+  in; the new image is made and compressed as a new entry.
+- **Measured** (ref-1, release; FlightHelmet: 6 meshes, 15 textures of 2048²):
+
+  | FlightHelmet | Without a cache | Empty cache | Filled cache |
+  |---|---|---|---|
+  | Shown, in the first frame (it waits) | 273 ms | 279 ms | **34 ms** |
+  | Shown, added later (a drop) | 321 ms | 363 ms | **31 ms** |
+  | Worst frame while loading, added later | 6.2 ms | 8.0 ms | 9.0 ms |
+  | Textures' GPU memory | 272 MB | 272 → **68 MB** after 8.1 s | **68 MB** |
+
+  - The worst frame while compressing in the background is 5.2 ms (a drop): the frame's
+    own work for a swap is under 1 ms.
+  - From the cache a dropped model's meshes and textures arrive within a few frames, so
+    their uploads come together (9.0 ms at worst, once); making the 15 textures in one
+    frame costs under 1 ms.
+  - On one thread, the 15 textures cost 297 ms to decode and 600 ms for their levels
+    uncompressed; from the cache, 42 ms of keys (FNV-1a over 45 MB of files at 1.1 GB/s)
+    and 19 ms of entries read.
+- **Left:**
+  - the keys' hash is 70 % of a load from the cache: a faster content hash for keys
+    (ADR 0008's `StableHasher` stays as promised) is the next step;
+  - compressing on the GPU (ADR 0041's next) would make the 8 s of the first time
+    vanish.

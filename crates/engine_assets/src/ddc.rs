@@ -147,6 +147,18 @@ pub fn texture_from_bytes(bytes: &[u8]) -> Option<EncodedTexture> {
     })
 }
 
+/// The compressed texture an earlier import of `encoded` (an image file) for `usage` stored
+/// in `cache`, if any: [`import_texture`]'s lookup alone, nothing imported on a miss.
+pub fn cached_texture(
+    cache: &DerivedDataCache,
+    encoded: &[u8],
+    usage: TextureUsage,
+) -> Option<EncodedTexture> {
+    cache
+        .get(texture_key(encoded, usage), TEXTURE_KIND)
+        .and_then(|bytes| texture_from_bytes(&bytes))
+}
+
 /// Imports an image file (PNG or JPEG) as a compressed texture for `usage`: decoded, given
 /// its mip chain and block-compressed, or loaded from `cache` when an earlier import of the
 /// same bytes with the same settings stored it. Work runs on `jobs` when given.
@@ -250,6 +262,12 @@ mod tests {
         // Other settings, other bytes: other entries.
         let (_, outcome) = import_texture(&source, TextureUsage::Data, Some(&cache), None).unwrap();
         assert_eq!(outcome, CacheOutcome::Miss);
+        // The lookup alone finds what an import stored, and nothing else.
+        assert_eq!(
+            cached_texture(&cache, &source, TextureUsage::Color).as_ref(),
+            Some(&first)
+        );
+        assert_eq!(cached_texture(&cache, &source, TextureUsage::Normal), None);
         let (_, outcome) =
             import_texture(&png(16, 8), TextureUsage::Color, Some(&cache), None).unwrap();
         assert_eq!(outcome, CacheOutcome::Miss);

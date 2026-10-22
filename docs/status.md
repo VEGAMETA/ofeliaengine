@@ -298,9 +298,16 @@ Last updated: 2026-10-20.
       with it, and its parts' paths follow;
     - Shift+F12 finds where an asset is used: the open scene's entities, then the scenes
       and materials on disk.
-  - **Next:** E4's last items: import settings in the inspector (a texture's use and
-    compression, a model's scale), and the cook's DDC behind the editor's textures
-    (BC7). Then E5, prefabs.
+  - **E4-8, textures through the derived data cache** (#313, ADR 0108's as-built, ADR
+    0041's addendum):
+    - a texture in `.ofelia/ddc` loads compressed (BC7, BC5); another shows uncompressed,
+      is compressed on a thread below the loading's priority and swapped in once whole
+      on the GPU;
+    - FlightHelmet: shown from the cache in 31–34 ms (273–321 ms without), its textures
+      272 → 68 MB; the first time, compressed in the background in 8 s.
+  - **Next:** E4-8b, a faster content hash for the cache's keys (FNV-1a is 70 % of a load
+    from it); E4's last item, import settings in the inspector (a texture's use and
+    compression, a model's scale). Then E5, prefabs.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

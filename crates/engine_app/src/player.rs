@@ -1194,7 +1194,7 @@ impl Player {
             wait_for_assets: true,
             previews: crate::previews::Previews::new(settings.frames_in_flight),
             steps: 0,
-            assets: crate::Assets::new(settings.project.clone().unwrap_or_default()),
+            assets: assets(settings),
             blockout: crate::Blockout::new(),
             view_rect: None,
             cursor_locked: false,
@@ -1272,6 +1272,11 @@ impl Player {
     /// The meshes and materials scenes name (ADR 0108).
     pub fn assets(&self) -> &crate::Assets {
         &self.assets
+    }
+
+    /// The GPU memory of the textures: the live ones', and the retired ones' not freed yet.
+    pub fn texture_memory(&self) -> (u64, u64) {
+        self.textures.memory()
     }
 
     /// The same, to learn asset paths or make an asset ahead of its first use.
@@ -3996,4 +4001,21 @@ impl PlayerInput {
             pads.poll(Instant::now(), |event| input.handle(&event));
         }
     }
+}
+
+/// The assets of `settings`' project, with its derived data cache when it gives one (a
+/// cache that cannot be opened leaves textures uncompressed, said in the log).
+fn assets(settings: &PlayerSettings) -> crate::Assets {
+    let mut assets = crate::Assets::new(settings.project.clone().unwrap_or_default());
+    if let Some(dir) = &settings.derived_data {
+        match engine_assets::DerivedDataCache::new(dir) {
+            Ok(cache) => assets.set_derived_data(Some(cache)),
+            Err(e) => log::warn!(
+                target: "engine_app::assets",
+                "the derived data cache {}: {e}; textures stay uncompressed",
+                dir.display()
+            ),
+        }
+    }
+    assets
 }
