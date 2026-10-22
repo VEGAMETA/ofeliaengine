@@ -266,7 +266,7 @@ Last updated: 2026-10-20.
   - **Asked (2026-10-22):** meshes of several materials draw with their first. Two ways
     out: per-primitive parts, an entity each; or material slots on `Model`, one entity per
     mesh, as in Unity and Godot.
-  - **E4-4, glTF files load in the background** (#PR, ADR 0108's as-built):
+  - **E4-4, glTF files load in the background** (#307, ADR 0108's as-built):
     - a loading thread with a pool below normal priority reads and imports files, puts
       meshes together (their vertices encoded too) and decodes textures with their mip
       levels;
