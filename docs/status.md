@@ -21,9 +21,9 @@ Last updated: 2026-10-22.
   - asset ids: ids inside our own files, a `.meta` beside foreign ones, references by id
     and path, the local database only a cache;
   - any scene can be a prefab.
-  - **Where it stands (2026-10-22):** E1, E2, E3 and E4 are done (E2b but for the cook's
-    path, E3 but for the tree's marks on what changed); E5 but for a prefab opened in a
-    tab of its own (E5-5b; scenes in tabs are done, E5-5a, at the end of this list). The entries below are in the order merged.
+  - **Where it stands (2026-10-22):** E1 to E5 are done (E2b but for the cook's path, E3
+    but for the tree's marks on what changed); next, material slots on `Model`, then E6
+    (at the end of this list). The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
@@ -362,11 +362,13 @@ Last updated: 2026-10-22.
     - Ctrl+O (the palette's scenes, a double click in the dock), Ctrl+N, Ctrl+W (no
       question: unsaved changes kept), Ctrl+Shift+T, Ctrl+Tab; the session keeps the tabs
       and the one shown.
-  - **Next: E5-5b, a prefab in a tab:** "Prefab: Open" (and a double click on an
-    instance's row) opens its file; Ctrl+S there writes it, and the other tabs'
-    instances follow. Then material slots on `Model` (team decision, 2026-10-22: each
-    primitive of a mesh drawn with its own material), then E6 (output, errors, history;
-    ADR 0107 §7).
+  - **E5-5b, a prefab in a tab** (#PR, ADR 0107's as-built): "Prefab: Open" and the
+    inspector title's Open open the nearest instance's prefab as a tab, the entity
+    picked selected there; Ctrl+S writes it, and the other tabs' instances take it when
+    shown again (their text holds only overrides). **E5 is done.**
+  - **Next:** material slots on `Model` (team decision, 2026-10-22: each primitive of a
+    mesh drawn with its own material), then E6 (output, errors, history; ADR 0107 §7),
+    then E7 (Luau, its API signed off by the owner first).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
@@ -719,7 +721,7 @@ water and impostors stay in §6):
      `ofeliaengine new`, `engine_app::prelude`, the quick start's game tested offscreen.
 5. **9:** editor tools, Luau bindings and debugger, other tooling. **Designed 2026-10-17**
    (ADR 0107, ADR 0108; the owner's choices are in §0). The phases (ADR 0107 §7; as of
-   2026-10-22, E1 to E4 done, E5 but for a prefab in a tab, §0):
+   2026-10-22, E1 to E5 done, §0):
    - **E1:** foundation: the editor linked into a game, the player split so the editor
      drives it, scene format 2, the tree and the inspector, commands, sessions, rebuild
      and restart;

@@ -642,6 +642,8 @@ struct CommandIds {
     /// An instance's values back to its prefab's (E5-3), or written into it (E5-4).
     revert_prefab: CommandId,
     apply_prefab: CommandId,
+    /// The prefab of the selection's instance opened in a tab (E5-5b).
+    open_prefab: CommandId,
     /// Where Play shows the game (E3-4).
     play_where: CommandId,
     /// The snapping steps (position, angle, scale), each a list of values in the palette;
@@ -750,6 +752,7 @@ fn commands() -> (Commands, CommandIds) {
         unpack_prefab: c.register("scene.unpack_prefab", "Scene", "Unpack Prefab"),
         revert_prefab: c.register("prefab.revert", "Prefab", "Revert Overrides"),
         apply_prefab: c.register("prefab.apply", "Prefab", "Apply Overrides"),
+        open_prefab: c.register("prefab.open", "Prefab", "Open Prefab"),
         play_where: c.register("play.where", "Play", "In a Window or in the Viewport"),
         steps: [
             c.register("snap.position_step", "Snapping", "Position Step…"),
@@ -1809,6 +1812,25 @@ fn kind_of(world: &World, e: Entity) -> (&'static str, &'static str) {
 /// The outermost prefab instance `e` is in: its root (`e` itself when it is one), found up
 /// the hierarchy through the entities instances placed; none for an entity no instance
 /// placed.
+/// The nearest instance `e` belongs to: itself when it is one, else the one whose part it
+/// is (inside nested instances, the innermost), with `e`'s id in that prefab's file.
+fn nearest_instance(world: &World, e: Entity) -> Option<(PrefabInstance, Option<SceneId>)> {
+    if let Some(&instance) = world.get::<PrefabInstance>(e) {
+        return Some((instance, None));
+    }
+    let part = *world.get::<PrefabPart>(e)?;
+    let mut at = world.parent(e);
+    while let Some(a) = at {
+        if world.get::<SceneId>(a) == Some(&part.instance) {
+            return world
+                .get::<PrefabInstance>(a)
+                .map(|&instance| (instance, Some(part.local)));
+        }
+        at = world.parent(a);
+    }
+    None
+}
+
 fn outermost_instance(world: &World, e: Entity) -> Option<Entity> {
     let mut at = e;
     loop {
@@ -3106,6 +3128,10 @@ impl Editor {
             drop_row,
             tree_filter: &self.tree_filter,
             inspector_filter: &self.inspector_filter,
+            prefab: self.inspected.is_none()
+                && self
+                    .active()
+                    .is_some_and(|e| nearest_instance(world, e).is_some()),
             palette,
             hint: (self.key_transform.is_some()
                 || self.draw.is_some()
@@ -3174,6 +3200,9 @@ impl Editor {
             self.close_tab(world, i);
         } else if let Some(i) = response.scene_tab {
             self.show_tab(world, i);
+        }
+        if response.open_prefab {
+            self.run(world, self.ids.open_prefab);
         }
         if response.play {
             self.run(world, self.ids.play);
@@ -6652,6 +6681,48 @@ impl Editor {
         }
     }
 
+    /// "Prefab: Open" (the inspector's Open): the prefab of the active entity's nearest
+    /// instance in a tab, the entity it is there selected (an instance's own entity: the
+    /// prefab's single root). Ctrl+S there writes it, and the other tabs' instances take
+    /// it when shown again.
+    fn open_prefab(&mut self, world: &mut World) {
+        let Some((instance, local)) = self.active().and_then(|e| nearest_instance(world, e)) else {
+            self.say(String::from(
+                "Select an instance, or an entity in one, to open its prefab",
+            ));
+            return;
+        };
+        let Some(path) = self
+            .asset_db
+            .get(instance.prefab.file)
+            .map(|e| PathBuf::from(&e.path))
+        else {
+            self.say(String::from("Its prefab is not in the project"));
+            return;
+        };
+        self.open_scene(world, &path);
+        if self.scene_path.as_deref() != Some(path.as_path()) {
+            return;
+        }
+        let target = match local {
+            Some(id) => {
+                let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
+                let world = &*world;
+                q.iter_readonly(world)
+                    .find(|&(_, &s)| s == id)
+                    .map(|(e, _)| e)
+            }
+            None => match self.roots(world, None).as_slice() {
+                [root] => Some(*root),
+                _ => None,
+            },
+        };
+        if let Some(t) = target {
+            self.select_only(t);
+            self.reveal = Some(t);
+        }
+    }
+
     /// Whether the viewport is the game's: playing and not ejected.
     fn game_view(&self) -> bool {
         self.play.as_ref().is_some_and(|p| p.ejected.is_none())
@@ -7631,6 +7702,8 @@ impl Editor {
             self.revert_prefab(world);
         } else if id == ids.apply_prefab {
             self.apply_prefab(world);
+        } else if id == ids.open_prefab {
+            self.open_prefab(world);
         } else if id == ids.select_next || id == ids.select_previous {
             self.step(if id == ids.select_next { 1 } else { -1 }, false);
         } else if id == ids.extend_next || id == ids.extend_previous {
@@ -13832,6 +13905,97 @@ mod tests {
         assert!(child(&world, b, moth_id).is_none());
         let moth = engine_scene::find_named(&mut world, "Moth").unwrap();
         assert_eq!(world.get::<SceneId>(moth), Some(&moth_id));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_prefab_opens_in_a_tab_and_its_instances_take_what_is_saved_there() {
+        let (dir, mut world, mut ed, _) = drop_project("prefab-open");
+        let lamp = AssetId::new();
+        let ids = [SceneId::new(), SceneId::new(), SceneId::new()];
+        let file = dir.join("props/lamp.scene");
+        std::fs::write(&file, lamp_scene(lamp, ids, 1.0, "Bulb", false)).unwrap();
+        ed.asset_db.scan();
+        ed.refresh_browser();
+        for _ in 0..2 {
+            let drag = AssetDrag {
+                asset: lamp,
+                kind: engine_scene::AssetKind::Scene,
+                path: String::from("props/lamp.scene"),
+                name: String::from("lamp.scene"),
+                plan: None,
+                refused: None,
+                placed: None,
+                selection: Vec::new(),
+                over: DropTarget::Tree,
+            };
+            ed.drop_asset(&mut world, drag);
+        }
+        let lamps = |world: &mut World| {
+            let mut q = QueryState::<(Entity, &PrefabInstance)>::new(world);
+            q.iter_readonly(world)
+                .map(|(e, _)| e)
+                .collect::<Vec<Entity>>()
+        };
+        let bulb_of = |world: &World, root: Entity| {
+            let id = SceneId::derive(*world.get::<SceneId>(root).unwrap(), ids[1]);
+            world
+                .children(root)
+                .find(|&c| world.get::<SceneId>(c) == Some(&id))
+                .unwrap()
+        };
+        let roots = lamps(&mut world);
+        // One lamp's bulb renamed: its override.
+        let bulb_a = bulb_of(&world, roots[0]);
+        world.get_mut::<Name>(bulb_a).unwrap().0 = String::from("Red bulb");
+        // Its prefab opened from that bulb: a tab of its own, the bulb selected there, as
+        // the prefab has it.
+        ed.select_only(bulb_a);
+        ed.update(&mut world);
+        ed.run(&mut world, ed.ids.open_prefab);
+        assert_eq!((ed.tabs.len(), ed.active_tab()), (2, 1));
+        assert_eq!(
+            ed.scene_path.as_deref(),
+            Some(Path::new("props/lamp.scene"))
+        );
+        let bulb = ed.active().unwrap();
+        assert_eq!(world.get::<SceneId>(bulb), Some(&ids[1]));
+        assert_eq!(world.get::<Name>(bulb).map(Name::as_str), Some("Bulb"));
+        assert!(
+            world.get::<PrefabPart>(bulb).is_none(),
+            "the prefab's own entity"
+        );
+        // The bulb raised there and saved.
+        ed.set(&mut world, bulb, "Transform.translation", "(0, 2, 0)")
+            .unwrap();
+        ed.run(&mut world, ed.ids.save);
+        ed.asset_db.scan();
+        // Back in the scene: both lamps take it, and the renamed bulb keeps its name.
+        ed.run(&mut world, ed.ids.previous_tab);
+        assert_eq!(ed.active_tab(), 0);
+        let roots = lamps(&mut world);
+        assert_eq!(roots.len(), 2);
+        let mut names = Vec::new();
+        for root in roots {
+            let bulb = bulb_of(&world, root);
+            assert_eq!(world.get::<Transform>(bulb).unwrap().translation.y, 2.0);
+            names.push(world.get::<Name>(bulb).unwrap().as_str().to_owned());
+        }
+        names.sort();
+        assert_eq!(names, ["Bulb", "Red bulb"]);
+        // An instance's own entity opens its prefab's root; nothing to open off instances.
+        let root = lamps(&mut world)[0];
+        ed.select_only(root);
+        ed.run(&mut world, ed.ids.open_prefab);
+        assert_eq!(ed.active_tab(), 1, "the prefab's tab, open already");
+        assert_eq!(world.get::<SceneId>(ed.active().unwrap()), Some(&ids[0]));
+        ed.selection.clear();
+        ed.run(&mut world, ed.ids.open_prefab);
+        assert!(
+            message(&ed).starts_with("Select an instance"),
+            "{}",
+            message(&ed)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

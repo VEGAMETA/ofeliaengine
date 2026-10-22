@@ -177,6 +177,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         active_tool: 1,
         tree: &tree,
         selection: "Player  ·  CharacterBody",
+        prefab: false,
         inspector: &sections,
         path: "res://levels",
         folders: &folders,

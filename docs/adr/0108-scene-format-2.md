@@ -705,6 +705,6 @@ The section "Prefab instances" above, built in `engine_scene` (`prefab` module),
     follows the file written anew, so this one has nothing left to override and the
     others take what was applied;
   - undo puts the scene back; the file stays as written.
-- **Left:** opening a prefab to edit it in a tab of its own, which needs the editor to
-  hold several scenes (their sessions, histories and autosaves); revert bringing back
-  removed entities and components.
+- **Done since (E5-5b, 2026-10-22):** a prefab opened in a tab of its own (ADR 0107's
+  E5-5 as-builts).
+- **Left:** revert bringing back removed entities and components.
