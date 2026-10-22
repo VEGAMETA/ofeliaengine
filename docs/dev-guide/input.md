@@ -127,7 +127,7 @@ Give each player their own `Input` and the devices they use:
 ```rust
 use engine_input::DeviceFilter;
 
-player_one.set_devices(DeviceFilter { keyboard_mouse: true, gamepads: 0b01 });
+player_one.set_devices(DeviceFilter { keyboard: true, mouse: true, gamepads: 0b01 });
 player_two.set_devices(DeviceFilter::gamepad(1));
 ```
 

@@ -2632,6 +2632,7 @@ impl Editor {
             world.despawn(camera);
         }
         let camera = (!game_view).then(|| self.camera(world));
+        self.sync_game_mouse(world);
         self.collect_rows(world);
         self.frames += 1;
         let elapsed = self.since.elapsed().as_secs_f64();
@@ -6715,6 +6716,7 @@ impl Editor {
             keep_gone: Vec::new(),
             ejected: None,
             mouse: true,
+            freed_mouse: None,
         }
     }
 
@@ -8455,6 +8457,41 @@ impl Editor {
             .is_some_and(|p| p.mouse && !p.paused && p.ejected.is_none())
     }
 
+    /// The game's input hears the mouse only while the game has it ([`Self::game_has_mouse`]):
+    /// freed (Shift+F1, paused, the window's keyboard lost), the game's input stops
+    /// listening to it and lets go of its buttons; given back, it listens as it did.
+    /// Ejected, the editor holds every device anyway.
+    fn sync_game_mouse(&mut self, world: &mut World) {
+        let Some(p) = self.play.as_mut() else {
+            return;
+        };
+        if p.ejected.is_some() {
+            return;
+        }
+        let has = p.mouse && !p.paused;
+        let Some(input) = world.resource_mut::<engine_input::Input>() else {
+            return;
+        };
+        let devices = input.devices();
+        match (has, p.freed_mouse) {
+            (false, None) => {
+                p.freed_mouse = Some(devices.mouse);
+                input.set_devices(engine_input::DeviceFilter {
+                    mouse: false,
+                    ..devices
+                });
+            }
+            (true, Some(had)) => {
+                p.freed_mouse = None;
+                input.set_devices(engine_input::DeviceFilter {
+                    mouse: had,
+                    ..devices
+                });
+            }
+            _ => {}
+        }
+    }
+
     /// Gives the game the mouse, or frees it: the panels forget the pointer while the
     /// game has it.
     fn set_game_mouse(&mut self, has: bool) {
@@ -8532,11 +8569,7 @@ impl Editor {
                 let input = world.resource_mut::<engine_input::Input>();
                 let devices = input.map(|input| {
                     let devices = input.devices();
-                    input.set_devices(engine_input::DeviceFilter {
-                        keyboard_mouse: false,
-                        gamepads: 0,
-                    });
-                    input.release_all();
+                    input.set_devices(engine_input::DeviceFilter::NONE);
                     devices
                 });
                 p.ejected = Some(devices);
@@ -8563,6 +8596,16 @@ impl Editor {
             && let Some(input) = world.resource_mut::<engine_input::Input>()
         {
             input.set_devices(devices);
+        }
+        // The mouse as the game had it before it was freed.
+        if let Some(had) = playing.freed_mouse
+            && let Some(input) = world.resource_mut::<engine_input::Input>()
+        {
+            let devices = input.devices();
+            input.set_devices(engine_input::DeviceFilter {
+                mouse: had,
+                ..devices
+            });
         }
         let now: Vec<TypeId> = world.resource_types().collect();
         for kind in now {
@@ -13631,6 +13674,9 @@ struct Playing {
     /// and the window it is held over losing the keyboard; a click in the game or
     /// Shift+F1 gives it back.
     mouse: bool,
+    /// While the mouse is not the game's: whether the game's input listened to it before,
+    /// given back with it (a game's own filter, local multiplayer's, is kept).
+    freed_mouse: Option<bool>,
 }
 
 /// Whether `key` is one of F1 to F12 (the editor's keys while playing).

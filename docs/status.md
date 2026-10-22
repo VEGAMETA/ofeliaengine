@@ -414,6 +414,9 @@ Last updated: 2026-10-22.
     after `.`, `:`, a word's first letter and Ctrl+Space, narrowed as the word grows,
     written with parentheses as one undo step; the mouse resting on a name shows its
     type.
+  - **The freed mouse** (#PR, ADR 0021's addendum): `DeviceFilter` filters the keyboard
+    and the mouse apart; a game whose mouse is freed (Shift+F1, paused) stops hearing it
+    and keeps the keyboard, and `set_devices` lets go of what it stops hearing.
   - **Next:** E7 waits for the owner's answers to ADR 0114's questions. The code editor's
     leftovers (go to definition, signature help, find in files) wait behind E10
     (materials, the owner's order of tools).
@@ -1576,11 +1579,6 @@ grown, divide and conquer); the old labels stay in parentheses.
 - **Frame pacing (the owner, 2026-10-21, for later):** a release build's player capped at
   the display's refresh rate by default (CLAUDE.md §7's limiter just below it under VRR),
   not uncapped.
-
-- **Play: the game still hears a freed mouse** (2026-10-22): Shift+F1 frees the cursor,
-  but the game's input listens to raw input, and `engine_input::DeviceFilter` has one
-  switch for the keyboard and the mouse together. Unreal stops the game's mouse there.
-  To do: a switch for the mouse alone, off while the mouse is free.
 
 - **Prefabs** (E5, 2026-10-22):
   - undoing a following puts the old prefab's values back while the file is new: saving

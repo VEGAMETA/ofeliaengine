@@ -345,6 +345,45 @@ fn encoded_ticks_decode_to_the_same_state() {
 }
 
 #[test]
+fn a_mouse_not_listened_to_lets_go_and_is_not_heard_but_the_keyboard_is() {
+    let mut map = InputMap::new();
+    let fire = map.add_button("fire").unwrap();
+    map.bind(fire, Binding::button(crate::MouseButton::Left))
+        .unwrap();
+    let jump = map.add_button("jump").unwrap();
+    map.bind(jump, Binding::button(Key::Space)).unwrap();
+    let mut input = Input::new(map);
+    let c = Clock(Instant::now());
+    let button = |at, pressed| InputEvent {
+        time: c.at(at),
+        kind: EventKind::MouseButton {
+            button: crate::MouseButton::Left,
+            pressed,
+        },
+    };
+    input.handle(&button(1, true));
+    assert!(input.sample_tick(c.at(16)).pressed(fire));
+    // The editor frees the mouse: what it held is let go, what it does is not heard.
+    input.set_devices(DeviceFilter {
+        mouse: false,
+        ..DeviceFilter::ALL
+    });
+    assert!(!input.sample_tick(c.at(32)).pressed(fire), "let go");
+    input.handle(&button(40, false));
+    input.handle(&button(41, true));
+    assert!(!input.sample_tick(c.at(48)).pressed(fire), "not heard");
+    key(&mut input, c.at(50), Key::Space, true);
+    assert!(
+        input.sample_tick(c.at(64)).pressed(jump),
+        "the keyboard still is"
+    );
+    // Given back, it is heard again.
+    input.set_devices(DeviceFilter::ALL);
+    input.handle(&button(70, true));
+    assert!(input.sample_tick(c.at(80)).pressed(fire));
+}
+
+#[test]
 fn local_players_listen_to_their_own_pads() {
     let (map, jump, ..) = game();
     let mut p1 = Input::new(map.clone());

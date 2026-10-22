@@ -456,7 +456,7 @@ fn eject_gives_the_editor_its_camera_on_the_running_game() {
     let world = player.world_mut();
     assert_eq!(cameras(world), [0, i32::MAX]);
     let input = world.resource::<engine_input::Input>().unwrap();
-    assert!(!input.devices().keyboard_mouse);
+    assert_eq!(input.devices(), engine_input::DeviceFilter::NONE);
     let (x, _) = state(world);
     for _ in 0..5 {
         frame(&mut player, &mut game, &mut overlay);
@@ -469,13 +469,8 @@ fn eject_gives_the_editor_its_camera_on_the_running_game() {
     }
     let world = player.world_mut();
     assert_eq!(cameras(world), [0]);
-    assert!(
-        world
-            .resource::<engine_input::Input>()
-            .unwrap()
-            .devices()
-            .keyboard_mouse
-    );
+    let devices = world.resource::<engine_input::Input>().unwrap().devices();
+    assert!(devices.keyboard && devices.mouse);
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -613,10 +608,23 @@ fn the_game_plays_in_a_window_of_its_own_or_in_the_viewport() {
     // The game has the mouse there; Shift+F1 frees it and gives it back, pausing frees
     // it until going on.
     assert!(game.view_cursor_locked() && !game.cursor_locked());
+    let devices = |player: &mut Player| {
+        player
+            .world_mut()
+            .resource::<engine_input::Input>()
+            .unwrap()
+            .devices()
+    };
     assert!(game.run_command(player.world_mut(), "play.mouse"));
+    frame(&mut player, &mut game, &mut overlay);
     assert!(!game.view_cursor_locked());
+    // Freed, the game no longer hears the mouse, the keyboard still.
+    let freed = devices(&mut player);
+    assert!(!freed.mouse && freed.keyboard, "{freed:?}");
     assert!(game.run_command(player.world_mut(), "play.mouse"));
+    frame(&mut player, &mut game, &mut overlay);
     assert!(game.view_cursor_locked());
+    assert!(devices(&mut player).mouse, "given back");
     assert!(game.run_command(player.world_mut(), "play.pause"));
     frame(&mut player, &mut game, &mut overlay);
     assert!(!game.view_cursor_locked());

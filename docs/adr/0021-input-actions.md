@@ -106,3 +106,17 @@ The engine also needs:
   - rumble.
 - **The simulation reads input only through `ActionState`,** which is what the server
   sees. Prediction and replays reproduce the same inputs.
+
+## Addendum (2026-10-22): the keyboard and the mouse filtered apart
+
+- **`DeviceFilter`** has a switch each for the keyboard and the mouse (`keyboard`,
+  `mouse`), where it had one for both. `DeviceFilter::NONE` hears nothing.
+- **Why:** the editor frees the mouse from a running game (Shift+F1, pausing, the window
+  losing the keyboard, ADR 0107 E3). The game then stops hearing the mouse and keeps
+  the keyboard, as in Unreal. Before, the game still heard the freed mouse through raw
+  input.
+- **`Input::set_devices`** lets go of what it stops listening to: keys, mouse buttons, a
+  gamepad's buttons and sticks. No release would reach them, so nothing stays held, and
+  callers need no `release_all` after it.
+- **The editor gives back what the game had:** a game that set its own filter (a
+  gamepad-only player) keeps it.
