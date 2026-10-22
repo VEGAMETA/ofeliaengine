@@ -684,6 +684,14 @@ room.
   entities, one undo step; instances inside it stay instances.
 - **What is saved:** an instance writes only what you changed from its prefab. Change the
   prefab and every instance follows, except where it says otherwise.
+- **Overrides in the inspector:** select an instance (the inspector's title says
+  "instance of props/lamp.scene") or an entity in one ("in props/lamp.scene"). A field is
+  marked changed (↺) where it differs from the prefab's value: its name and its assets
+  count too.
+  - ↺, or Backspace over the field, puts the prefab's value back.
+  - "Prefab: Revert Overrides" puts the whole instance back to its prefab's values, in
+    one undo step, and takes away the components it added. Entities and components it
+    removed stay removed.
 
 ## Autosave and the session
 

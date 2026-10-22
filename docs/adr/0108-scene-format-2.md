@@ -648,3 +648,28 @@ The section "Prefab instances" above, built in `engine_scene` (`prefab` module),
     live in its own tab, and open scenes following (E5-4);
   - the player finds prefabs by the path a scene wrote: a scene not saved since its
     prefab moved places it in the editor (by id) but not in the player until saved again.
+
+## As built (E5-3, 2026-10-22): overrides in the inspector
+
+- **The measure:** `engine_scene::PrefabBase` (what saving compares with: the outermost
+  instance's prefab placed alone under the same ids) is public; its `component(id, name)`
+  gives an entity's component as the prefab places it, found by the type's name (a
+  component's id is a world's own). The editor keeps one per outermost instance, built
+  again when the prefab's file changes (its size and time in the asset database).
+- **The inspector** measures an entity an instance placed (found up the hierarchy through
+  `PrefabPart` to the outermost instance's root) against the prefab's values instead of
+  its types' defaults:
+  - a field that differs is an override, marked changed;
+  - names count (a name has no reset against a default) and so do asset references
+    (plain data; against a default they stay unmarked, or every asset field would be);
+  - its title says "instance of <prefab>" on an instance's root, "in <prefab>" inside one.
+- **Reset** (↺, Backspace) puts the prefab's value back on such an entity
+  (`inspector::revert`), the type's default on others; with several selected, each its
+  own.
+- **"Prefab: Revert Overrides"** puts the outermost instance back in one undo step: every
+  field that differs (as the inspector measures it) and the scene components the instance
+  added. Entities and components it removed are not brought back yet.
+- **Left for E5-4:** applying overrides to the prefab. It needs the open scene's other
+  instances of the prefab to follow it at once: saving measures them against the prefab
+  as it is on disk, so their values from the old one would be written as overrides. A
+  prefab edited live in its own tab, which every open scene follows, comes with it.

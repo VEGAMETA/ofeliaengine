@@ -987,8 +987,9 @@ fn diff(
 }
 
 /// An outermost instance's prefab placed alone, under the same ids: what its entities
-/// are without the scene's overrides.
-struct Base {
+/// are without the scene's overrides. Saving compares an instance with it; an editor shows
+/// which values are overrides and puts them back from it ([`Self::component`]).
+pub struct PrefabBase {
     world: World,
     ids: HashMap<Entity, SceneId>,
     by_id: HashMap<SceneId, Entity>,
@@ -997,7 +998,10 @@ struct Base {
     instance: SceneId,
 }
 
-impl Base {
+/// The name [`SaveOptions`] keeps for it.
+type Base = PrefabBase;
+
+impl PrefabBase {
     /// Prefab `prefab` placed alone as instance `instance`, through `options`' prefabs;
     /// none when it cannot be read now.
     fn of(
@@ -1006,9 +1010,21 @@ impl Base {
         instance: SceneId,
         prefab: AssetRef,
     ) -> Option<Self> {
-        let prefabs = options.prefabs?;
+        Self::new(registry, options.prefabs?, options.assets, instance, prefab)
+    }
+
+    /// Prefab `prefab` placed alone, read through `prefabs` (its path from `assets`, or
+    /// the one `prefabs` finds by id), as instance `instance`: under the ids the instance's
+    /// entities have. None when it cannot be read or placed now.
+    pub fn new(
+        registry: &SceneRegistry,
+        prefabs: &dyn Prefabs,
+        assets: Option<&AssetPaths>,
+        instance: SceneId,
+        prefab: AssetRef,
+    ) -> Option<Self> {
         let mut text = format!("[scene version={VERSION}]\n\n[instance {instance}]\nprefab = ");
-        prefab.write(options.assets, &mut text);
+        prefab.write(assets, &mut text);
         text.push('\n');
         let mut world = World::new();
         let load = LoadOptions {
@@ -1037,6 +1053,41 @@ impl Base {
             getters,
             instance,
         })
+    }
+
+    /// The world it is placed in.
+    pub fn world(&self) -> &World {
+        &self.world
+    }
+
+    /// The entity with scene id `id`, as the prefab places it.
+    pub fn entity(&self, id: SceneId) -> Option<Entity> {
+        self.by_id.get(&id).copied()
+    }
+
+    /// The value of the component named `name` (its type's name, as
+    /// `engine_ecs::Components::name` gives it) on entity `id`, as the prefab places it;
+    /// none when the prefab places no such entity, or it has no such component.
+    pub fn component(&self, id: SceneId, name: &str) -> Option<core::ptr::NonNull<u8>> {
+        let e = self.entity(id)?;
+        let components = self.world.components();
+        let found = self
+            .world
+            .component_ids_of(e)?
+            .iter()
+            .copied()
+            .find(|&c| components.name(c) == Some(name))?;
+        self.world.get_raw(e, found)
+    }
+
+    /// The names of the components entity `id` has as the prefab places it.
+    pub fn component_names(&self, id: SceneId) -> Vec<&str> {
+        let components = self.world.components();
+        self.entity(id)
+            .and_then(|e| self.world.component_ids_of(e))
+            .map_or_else(Vec::new, |ids| {
+                ids.iter().filter_map(|&c| components.name(c)).collect()
+            })
     }
 
     /// The lines of entity `id` as the prefab places it; none when it places no such
@@ -1468,6 +1519,21 @@ fn header(
         ));
     }
     Ok((version, id))
+}
+
+/// The ids of a scene's roots (its entity and instance blocks without a parent), in the
+/// file's order: what a prefab's single root is written as.
+///
+/// # Errors
+///
+/// It is not a scene (with the line).
+pub fn scene_roots(text: &str) -> Result<Vec<SceneId>, LoadError> {
+    Ok(parse(text)?
+        .blocks
+        .iter()
+        .filter(|b| b.kind != Kind::Override && b.parent.is_none())
+        .map(|b| b.id)
+        .collect())
 }
 
 /// A scene file's version and own id, from its header, without loading it: what an

@@ -8,7 +8,9 @@
 //! - **Booleans** are checkboxes; **enums** pick a variant from a list.
 //! - **Strings** are typed; references and containers are shown as text.
 //! - **A changed field** (one that differs from its type's `Default`) can be reset
-//!   ([`Defaults`], [`reset`]).
+//!   ([`Defaults`], [`reset`]). On an entity a prefab instance placed (ADR 0108's E5-3), a
+//!   changed field is one that differs from the prefab's (an override: its name and its
+//!   assets too), and reset puts the prefab's back ([`revert`]).
 //! - **A selection of several entities** shows the components they all have; a part
 //!   where they hold different values is marked ([`Inspector::compare`], shown "—").
 
@@ -108,7 +110,8 @@ pub struct Property {
     /// name alone.
     pub whole: bool,
     /// It differs from its type's default and can be reset ([`reset`]); with several
-    /// entities, in any of them.
+    /// entities, in any of them. On an entity a prefab instance placed: it differs from
+    /// the prefab's value (an override), and reset puts that back ([`revert`]).
     pub changed: bool,
     /// The parts (bit `i` for part `i`) where the other selected entities hold another
     /// value ([`Inspector::compare`]): shown "—".
@@ -162,13 +165,15 @@ impl Inspector {
 
     /// The entity's components and their properties, sorted by component name: those
     /// scenes show (not `hidden`, not `skip`); each property marked changed when it differs
-    /// from its type's default.
+    /// from its type's default, or with `prefab` (the entity's components as its prefab
+    /// places them, by component) from the prefab's value.
     pub fn build(
         &mut self,
         world: &World,
         entity: Entity,
         assets: &AssetPaths,
         defaults: &mut Defaults,
+        prefab: Option<&dyn Fn(ComponentId) -> Option<NonNull<u8>>>,
     ) {
         self.clear();
         let Some(ids) = world.component_ids_of(entity) else {
@@ -199,9 +204,20 @@ impl Inspector {
                     &mut path,
                 );
             }
-            // A name is what the entity is called, not a value away from a default: it
-            // has no reset.
-            if info.name != "Name"
+            // Against the prefab's value, a name and assets too; against a default, a name
+            // is what the entity is called, not a value away from it: it has no reset.
+            if let Some(base) = prefab.and_then(|f| f(id)) {
+                for p in &mut self.properties[first..] {
+                    // SAFETY: both point to live values of the component.
+                    p.changed = unsafe {
+                        differs_from_prefab(
+                            p,
+                            ptr.as_ptr().cast_const(),
+                            base.as_ptr().cast_const(),
+                        )
+                    };
+                }
+            } else if info.name != "Name"
                 && let Some(default) = defaults.of(world, id)
             {
                 for p in &mut self.properties[first..] {
@@ -822,6 +838,44 @@ unsafe fn differs(p: &Property, a: *const u8, b: *const u8) -> bool {
     }
 }
 
+/// Whether the property differs from the prefab's value (`base`, a value of its component
+/// as the prefab places it): what [`differs`] compares, and asset references.
+///
+/// # Safety
+///
+/// Both point to live values of the property's component.
+unsafe fn differs_from_prefab(p: &Property, a: *const u8, base: *const u8) -> bool {
+    // SAFETY: as the caller guarantees; an asset reference is plain data.
+    unsafe {
+        if is_asset_ref(p.ty) {
+            let (a, b) = (a.add(p.offset), base.add(p.offset));
+            return core::slice::from_raw_parts(a, p.ty.size)
+                != core::slice::from_raw_parts(b, p.ty.size);
+        }
+        differs(p, a, base)
+    }
+}
+
+/// Puts a property back to the prefab's value (`base`, a value of its component as the
+/// prefab places it): what [`reset`] puts back, and asset references. False for a property
+/// that cannot be.
+///
+/// # Safety
+///
+/// `component` points to a live, writable value of the property's component, `base` to a
+/// live value of it.
+pub unsafe fn revert(p: &Property, component: *mut u8, base: *const u8) -> bool {
+    // SAFETY: as the caller guarantees; an asset reference is plain data, valid as any
+    // copy of a valid one.
+    unsafe {
+        if is_asset_ref(p.ty) {
+            core::ptr::copy_nonoverlapping(base.add(p.offset), component.add(p.offset), p.ty.size);
+            return true;
+        }
+        reset(p, component, base)
+    }
+}
+
 /// Puts a property back to its value in `default` (a value of its component): plain values
 /// by their bytes, strings by their text. False for a property that cannot be reset.
 ///
@@ -895,7 +949,7 @@ mod tests {
         ));
         let mut inspector = Inspector::new();
         let mut defaults = Defaults::new();
-        inspector.build(&world, e, &AssetPaths::new(), &mut defaults);
+        inspector.build(&world, e, &AssetPaths::new(), &mut defaults, None);
         let titles: Vec<&str> = inspector.sections().iter().map(|s| s.title).collect();
         assert_eq!(titles, ["Name", "Transform"]);
         let props = inspector.properties();
@@ -943,7 +997,7 @@ mod tests {
 
         // All three transform fields differ from the default; reset puts the scale back
         // to 1.
-        inspector.build(&world, e, &AssetPaths::new(), &mut defaults);
+        inspector.build(&world, e, &AssetPaths::new(), &mut defaults, None);
         let props = inspector.properties();
         assert!(props[1..].iter().all(|p| p.changed));
         let scale = props[3];
@@ -953,7 +1007,7 @@ mod tests {
         // SAFETY: the entity's live `Transform` and the default one.
         assert!(unsafe { reset(&scale, ptr, default.as_ptr()) });
         assert_eq!(world.get::<Transform>(e).unwrap().scale, Vec3::ONE);
-        inspector.build(&world, e, &AssetPaths::new(), &mut defaults);
+        inspector.build(&world, e, &AssetPaths::new(), &mut defaults, None);
         assert!(!inspector.properties()[3].changed);
         // The name differs from the empty default, but has no reset.
         assert!(!inspector.properties()[0].changed);
