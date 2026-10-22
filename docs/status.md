@@ -290,7 +290,7 @@ Last updated: 2026-10-20.
     - `Player::request_preview` / `take_previews`: one a frame, drawn at twice the side
       and averaged down, read back;
     - models' and materials' tiles in the dock.
-  - **E4-6c, the inspector's asset fields as in Godot** (#PR, ADR 0112): a square
+  - **E4-6c, the inspector's asset fields as in Godot** (#311, ADR 0112): a square
     preview the engine draws (a mesh with its material, a material on a sphere) beside
     the asset's name; a click picks another through the palette, a drop puts one in.
   - **Next:** E4-7, renames and moves inside the editor (F2 in the dock: the file and its
