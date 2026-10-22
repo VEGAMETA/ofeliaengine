@@ -458,7 +458,7 @@ Last updated: 2026-10-22.
     Files and the file's Outline on the left of the code, the scene's tree and inspector
     aside (View: Scene Docks Beside Code keeps them). Text files open in code tabs too
     (TOML, RON, JSON, Fluent, Markdown, plain), listed in the FileSystem dock without ids.
-  - **E7-1a, the script host** (#PR, ADR 0114's as-built; `docs/dev-guide/scripting.md`):
+  - **E7-1a, the script host** (#343, ADR 0114's as-built; `docs/dev-guide/scripting.md`):
     the project's `scripts/` loaded before any scene. `component(name, props)` registers a
     plain-data component with a `TypeInfo` made at run time. `on_start`, `on_tick` (before
     `Game::tick`), `on_frame` and `on_stop` run while the world simulates. `self` holds
