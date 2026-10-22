@@ -492,7 +492,7 @@ Last updated: 2026-10-22.
   - **View modes, V1b** (#349, ADR 0116): Unlit on Alt+3, a pass of its own
     (`engine_render::unlit`) drawing each material's base color and emission over a dark
     background; the forward pass untouched. 10,000 cubes: 0.28 / 1.15 ms on the GPUs.
-  - **View modes, V2a** (#PR, ADR 0116): the blockout's colliders (Alt+C) and the
+  - **View modes, V2a** (#350, ADR 0116): the blockout's colliders (Alt+C) and the
     navigation mesh are lines in the world (`engine_render::wire::LineLists`), tested
     against the scene's depth as the wireframes are: faint behind surfaces, steady on the
     ones they lie on; the X-ray overlay is gone. 19,200 edges: 10 / 82 µs on the GPUs,
