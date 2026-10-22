@@ -331,7 +331,7 @@ Last updated: 2026-10-20.
     - "Make Prefab" writes the selection's subtree to a scene of its own and makes it an
       instance of it (the root keeps its id, the rest derived; `History::change_ids`
       undoes it with the references); "Unpack Prefab"; the tree names instances.
-  - **E5-3, overrides in the inspector** (#PR, ADR 0108's as-built): an instance's
+  - **E5-3, overrides in the inspector** (#318, ADR 0108's as-built): an instance's
     entities measured against their prefab (`PrefabBase`, cached per outermost instance
     until the prefab's file changes), names and assets too; ↺ and Backspace put the
     prefab's value back; "Prefab: Revert Overrides"; the title names the prefab.
