@@ -804,10 +804,23 @@ for a small one (ref-1, release): the scene left is kept as its text and the oth
 
 ## Scripts
 
-Scripts open in tabs after the scenes' (ADR 0107 E8), their code where the viewport is:
+Scripts open in tabs after the scenes' (ADR 0107 E8), their code where the viewport is.
+A code tab has a panel of its own on the left, and the scene's tree and inspector step
+aside (**View: Scene Docks Beside Code** keeps them):
+
+- **Open Files:** your open scripts, Slang modules and text files. A dot marks unsaved
+  ones; the count is what Luau or Slang found. Click one to show it, its close mark to
+  close it, and type in the filter to narrow the list.
+- **Outline:** the file's functions, components and types (a text file's sections and
+  headings). The one the caret is in is lit; click one to go there.
+
+Tabs:
 
 - **Opening one:**
   - a double click on a `.luau` file (or a `.slang` module) in the FileSystem dock;
+  - a double click on a text file there: TOML, RON, JSON, Fluent (`.ftl`), Markdown,
+    plain text. They are colored as in VS Code; nothing checks them, and they get no
+    `.meta`;
   - "File: Open Script…" in the palette;
   - a click on an error at a script's line in the Output, which opens it at that line.
 - **A scene's tab** brings the scene back in front; Ctrl+Tab goes through the scenes'

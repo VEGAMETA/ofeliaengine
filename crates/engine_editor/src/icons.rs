@@ -33,6 +33,12 @@ pub const SCENE: &str = "\u{F0FCE}";
 pub const SCRIPT: &str = "\u{F08B1}";
 /// Slang module (`md-file_code`).
 pub const SHADER: &str = "\u{F022E}";
+/// A text file: settings, data, notes (`md-file_document_outline`).
+pub const TEXT_FILE: &str = "\u{F09EE}";
+/// A text file's section or heading in the outline (`md-format_header_pound`).
+pub const HEADING: &str = "\u{F0274}";
+/// An open file with unsaved changes (`md-circle_medium`).
+pub const UNSAVED: &str = "\u{F09DE}";
 /// Texture (`md-image`).
 pub const TEXTURE: &str = "\u{F02E9}";
 /// A model's file (`md-shape`): the icon a model has everywhere.

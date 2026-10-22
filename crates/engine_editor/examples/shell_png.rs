@@ -434,6 +434,8 @@ fn main() {
         reveal_row: None,
         drop_row: None,
         drop_line: None,
+        code_side: None,
+        docks_beside_code: false,
         tree_filter: "",
         inspector_filter: "",
         palette: show_palette.then_some(PaletteView {

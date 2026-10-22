@@ -63,3 +63,31 @@ the cut in `editor-layout.md` ("A full built-in code editor").
 - An IDE: version control, extensions, terminals (VS Code does that).
 - A language-server protocol between our own editor and the analysis library: it is
   called in process.
+
+## The code's side panel (the owner's request, 2026-10-22)
+
+The owner asked why a code tab shows the scene's tree and inspector, and proposed the open
+scripts and other text files on the left. Checked 2026-10-22, as products:
+
+| Tool | What is beside the code | What works | What annoys |
+|---|---|---|---|
+| Godot 4 (script editor) | on its left, the open scripts (a filter above them, the current one lit, a dot on unsaved ones) and below them the current script's methods; the scene and inspector docks stay around the editor | the list is the tabs, so many scripts stay findable; the methods list jumps | the docks around it take the width; two lists in one narrow column |
+| VS Code (Explorer) | Open Editors (unsaved ones marked, closed on hover), the folder tree, the Outline (symbols of the current file, the one at the caret followed) | everything about the code in one column, collapsible sections | three sections fight for the height |
+| JetBrains IDEs (Rider) | the project tree and Structure (the current file's members) as tool windows, hidden with one key | the code takes the window when they are hidden | many tool windows to learn |
+
+**What we take:**
+- **In a code tab, the left side holds the code's own lists, and the scene's docks go.**
+  - Open Files: the code tabs in their order, each its icon, its name and its folder
+    dimmed, a dot while unsaved, its error count. A click shows it; the close mark on
+    hover closes it.
+  - Outline: the current file's functions, components and types, as its language
+    declares them. The one the caret is in is lit; a click goes to it.
+- **The tree and the inspector come back with a scene's tab.** View: Scene Docks Beside
+  Code shows them in a code tab too, kept in the session.
+- **Other text files open in code tabs** with plain colors: TOML, RON, Fluent, Markdown,
+  JSON, plain text. Comments, strings and numbers are colored, and sections and headings
+  are listed in the outline. The browser lists them without ids (no `.meta`: they are not
+  assets). Scenes and materials keep their own editors.
+
+**What we do not take:** a folder tree beside the code (the FileSystem dock under the code
+is that tree), and a third list.

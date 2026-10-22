@@ -4,7 +4,7 @@
 //! Luau's lexical rules. What a line starts inside (a long comment or string, a string
 //! going on past its line's end) comes from the lines before it: kept per line, and made
 //! again from the first line changed up to the lines shown. A tab's [`Language`] picks the
-//! rules: Slang's are `crate::slang_highlight`'s.
+//! rules: Slang's are `crate::slang_highlight`'s, text files' `crate::text_highlight`'s.
 
 use crate::shell::Token;
 use std::path::Path;
@@ -17,19 +17,42 @@ pub(crate) enum Language {
     Luau,
     /// A Slang module (`.slang`, ADR 0107's E10-2a).
     Slang,
+    /// A text file of the project: settings, data, localization, notes.
+    Text(TextKind),
+}
+
+/// A text file's format, by its extension: how it is colored and outlined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextKind {
+    /// `.toml`.
+    Toml,
+    /// `.ron`.
+    Ron,
+    /// `.json`.
+    Json,
+    /// Fluent's `.ftl` (the game's text, ADR 0084).
+    Fluent,
+    /// `.md`.
+    Markdown,
+    /// `.txt`, `.cfg`, `.ini`, `.yaml`, `.csv`: as it is.
+    Plain,
 }
 
 impl Language {
     /// The language of the file at `path`, if the code editor opens it.
     pub(crate) fn of(path: &Path) -> Option<Self> {
-        let ext = path.extension()?.to_str()?;
-        if ext.eq_ignore_ascii_case("luau") {
-            Some(Self::Luau)
-        } else if ext.eq_ignore_ascii_case("slang") {
-            Some(Self::Slang)
-        } else {
-            None
-        }
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        Some(match ext.as_str() {
+            "luau" => Self::Luau,
+            "slang" => Self::Slang,
+            "toml" => Self::Text(TextKind::Toml),
+            "ron" => Self::Text(TextKind::Ron),
+            "json" => Self::Text(TextKind::Json),
+            "ftl" => Self::Text(TextKind::Fluent),
+            "md" | "markdown" => Self::Text(TextKind::Markdown),
+            "txt" | "cfg" | "ini" | "yaml" | "yml" | "csv" => Self::Text(TextKind::Plain),
+            _ => return None,
+        })
     }
 
     /// Whether its checker answers more than a check: completion, hover, definitions and
@@ -49,6 +72,7 @@ impl Language {
         match self {
             Self::Luau => self::line(line, state, out),
             Self::Slang => crate::slang_highlight::line(line, state, out),
+            Self::Text(kind) => crate::text_highlight::line(kind, line, state, out),
         }
     }
 }

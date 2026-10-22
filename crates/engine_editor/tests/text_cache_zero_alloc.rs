@@ -225,6 +225,8 @@ fn a_steady_shell_frame_does_not_allocate() {
         reveal_row: Some(3),
         drop_row: None,
         drop_line: None,
+        code_side: None,
+        docks_beside_code: false,
         tree_filter: "",
         inspector_filter: "",
         palette: Some(PaletteView {

@@ -78,9 +78,9 @@ use crate::session::{
     self, Base, Document, EditorState, LastRun, Lock, ScriptDoc, SessionFile, View, Writer,
 };
 use crate::shell::{
-    CODE_LINE, CODE_TEXT, CodeRun, CodeView, Field, FieldAction, FieldEvent, FileItem, FileKind,
-    MenuEntry, MenuItem, Palette, PaletteAction, PaletteRow, PaletteView, Section, ShellModel,
-    ShellResponse, Token, TreeItem, Widget, build, dismissed,
+    CODE_LINE, CODE_TEXT, CodeRun, CodeSide, CodeView, Field, FieldAction, FieldEvent, FileItem,
+    FileKind, MenuEntry, MenuItem, OpenFile, OutlineRow, Palette, PaletteAction, PaletteRow,
+    PaletteView, Section, ShellModel, ShellResponse, Token, TreeItem, Widget, build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
 use crate::thumbnails::{self, Subject, Thumbnails};
@@ -687,6 +687,7 @@ struct CommandIds {
     overlays: CommandId,
     /// The blockout's colliders over the viewport (ADR 0110 E2b-4).
     colliders: CommandId,
+    docks_beside_code: CommandId,
     /// The navigation mesh baked from the brushes, over the viewport (E2b-4b).
     navigation: CommandId,
     /// Which keys the editor uses: Blender's or Godot's.
@@ -808,6 +809,7 @@ fn commands() -> (Commands, CommandIds) {
         pivot: c.register("transform.pivot", "Transform", "Next Pivot"),
         overlays: c.register("view.overlays", "View", "Overlays"),
         colliders: c.register("view.colliders", "View", "Colliders"),
+        docks_beside_code: c.register("view.docks_beside_code", "View", "Scene Docks Beside Code"),
         navigation: c.register("view.navigation", "View", "Navigation"),
         keys: c.register("editor.keys", "Editor", "Key Map…"),
         pick_transparent: c.register(
@@ -1751,6 +1753,17 @@ struct Editor {
     /// the world as the player last evaluated them, and what those were made from (each
     /// group's epoch and place) to make them again only when that changes.
     show_colliders: bool,
+    /// The scene's tree and inspector beside a code tab too (View: Scene Docks Beside Code).
+    docks_beside_code: bool,
+    /// What the code panel's open files are filtered by.
+    code_filter: String,
+    /// The shown code tab's outline, and which of its texts it was read from.
+    outline: Option<((u64, u64), Vec<crate::outline::Symbol>)>,
+    /// The project's text files that are no assets (`Cargo.toml`, `loc/en/hud.ftl`), as the
+    /// browser lists them.
+    loose_files: Vec<String>,
+    /// A loose file's click, for its double click.
+    last_loose_click: Option<(String, Instant)>,
     collider_edges: Vec<(Vec3, Vec3)>,
     collider_key: BlockoutKey,
     /// The navigation mesh shown over the viewport (View: Navigation, E2b-4b): its edges as
@@ -2353,6 +2366,11 @@ impl Editor {
             guides: Vec::new(),
             hint: String::new(),
             show_colliders: false,
+            docks_beside_code: false,
+            code_filter: String::new(),
+            outline: None,
+            loose_files: Vec::new(),
+            last_loose_click: None,
             collider_edges: Vec::new(),
             collider_key: Vec::new(),
             show_nav: false,
@@ -3606,6 +3624,79 @@ impl Editor {
                 )
             }),
         });
+        // A code tab's panel: the open files the filter keeps, and the shown file's outline.
+        let side_labels: Vec<(usize, String, String, String, bool)> = if code.is_some() {
+            let filter = self.code_filter.trim().to_lowercase();
+            self.scripts
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| {
+                    filter.is_empty() || s.path.to_string_lossy().to_lowercase().contains(&filter)
+                })
+                .map(|(k, s)| {
+                    let name = s
+                        .path
+                        .file_name()
+                        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                    let folder = s
+                        .path
+                        .parent()
+                        .map_or_else(String::new, |f| f.to_string_lossy().replace('\\', "/"));
+                    let current = s.found_for.is_some_and(|f| f.version == s.doc.version());
+                    let errors = s
+                        .found
+                        .iter()
+                        .filter(|d| d.severity == engine_luau_analysis::Severity::Error)
+                        .count();
+                    let problems = if current && !s.found.is_empty() {
+                        s.found.len().to_string()
+                    } else {
+                        String::new()
+                    };
+                    (k, name, folder, problems, errors > 0)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let open_files: Vec<OpenFile<'_>> = side_labels
+            .iter()
+            .map(|(k, name, folder, problems, error)| OpenFile {
+                icon: code_icon(self.scripts[*k].language),
+                name,
+                folder,
+                active: self.active_script == Some(*k),
+                unsaved: self.scripts[*k].doc.is_dirty(),
+                problems,
+                error: *error,
+            })
+            .collect();
+        let caret_line = self
+            .active_script
+            .and_then(|k| self.scripts.get(k))
+            .map(|s| s.doc.primary().head.line);
+        let symbols = self.outline.as_ref().map_or(&[][..], |(_, s)| s.as_slice());
+        let current = caret_line.and_then(|l| crate::outline::current(symbols, l));
+        let outline_rows: Vec<OutlineRow<'_>> = symbols
+            .iter()
+            .enumerate()
+            .map(|(i, s)| OutlineRow {
+                icon: match s.kind {
+                    crate::outline::SymbolKind::Function => icons::METHOD,
+                    crate::outline::SymbolKind::Type => icons::TYPE,
+                    crate::outline::SymbolKind::Component => icons::MODULE,
+                    crate::outline::SymbolKind::Heading => icons::HEADING,
+                },
+                name: &s.name,
+                depth: s.depth,
+                current: current == Some(i),
+            })
+            .collect();
+        let code_side = code.is_some().then_some(CodeSide {
+            files: &open_files,
+            outline: &outline_rows,
+            filter: &self.code_filter,
+        });
         let model = ShellModel {
             scenes: &scenes,
             active_scene: active_tab,
@@ -3647,6 +3738,8 @@ impl Editor {
             reveal_row,
             drop_row,
             drop_line,
+            code_side,
+            docks_beside_code: self.docks_beside_code,
             tree_filter: &self.tree_filter,
             inspector_filter: &self.inspector_filter,
             prefab: self.inspected.is_none()
@@ -3721,6 +3814,18 @@ impl Editor {
                             self.open_script(world, &path, None);
                         }
                         _ => {}
+                    }
+                }
+                None if l.kind == FileKind::Text => {
+                    // A second click soon after opens it in a code tab.
+                    let path = l.path.clone();
+                    let now = Instant::now();
+                    let double = self.last_loose_click.as_ref().is_some_and(|(p, at)| {
+                        *p == path && now.duration_since(*at).as_secs_f32() < 0.45
+                    });
+                    self.last_loose_click = (!double).then(|| (path.clone(), now));
+                    if double {
+                        self.open_script(world, Path::new(&path), None);
                     }
                 }
                 None => {
@@ -3898,6 +4003,43 @@ impl Editor {
                 self.rename(world, e, &name);
             }
             self.renaming = None;
+        }
+        if let Some(r) = response.code_filter {
+            if r.cancelled {
+                self.code_filter.clear();
+            } else if r.started || r.changed {
+                self.code_filter.clear();
+                self.code_filter.push_str(self.ui.edited_text());
+            }
+        }
+        // The panel's rows are the files the filter kept, in their order.
+        let shown_file = |ed: &Self, i: usize| {
+            let filter = ed.code_filter.trim().to_lowercase();
+            ed.scripts
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| {
+                    filter.is_empty() || s.path.to_string_lossy().to_lowercase().contains(&filter)
+                })
+                .nth(i)
+                .map(|(k, _)| k)
+        };
+        if let Some(k) = response.close_file.and_then(|i| shown_file(self, i)) {
+            self.close_script(world, k);
+        } else if let Some(k) = response.open_file.and_then(|i| shown_file(self, i)) {
+            self.show_script(world, k);
+        }
+        if let Some(i) = response.outline_row
+            && let Some(line) = self
+                .outline
+                .as_ref()
+                .and_then(|(_, s)| s.get(i))
+                .map(|s| s.line)
+            && let Some(s) = self.active_script.and_then(|k| self.scripts.get_mut(k))
+        {
+            s.doc.place(Pos::new(line, 0), false, false);
+            s.reveal = true;
+            self.code_focus = true;
         }
         if let Some(r) = response.tree_filter {
             if r.cancelled {
@@ -7347,8 +7489,18 @@ impl Editor {
     fn code_frame(&mut self) -> bool {
         let Some(k) = self.active_script.filter(|&k| k < self.scripts.len()) else {
             self.active_script = None;
+            self.outline = None;
             return false;
         };
+        // The outline of the shown text, read again once it changed.
+        {
+            let s = &self.scripts[k];
+            let key = (s.generation, s.doc.version());
+            if self.outline.as_ref().is_none_or(|(had, _)| *had != key) {
+                let lines = (0..s.doc.line_count()).map(|i| s.doc.line(i));
+                self.outline = Some((key, crate::outline::symbols(s.language, lines)));
+            }
+        }
         if self.code_advance <= 0.0 {
             self.code_advance = self.text.mono_advance(CODE_TEXT);
         }
@@ -9656,6 +9808,13 @@ impl Editor {
             } else {
                 "Navigation hidden"
             }));
+        } else if id == ids.docks_beside_code {
+            self.docks_beside_code = !self.docks_beside_code;
+            self.say(String::from(if self.docks_beside_code {
+                "The scene's tree and inspector stay beside code"
+            } else {
+                "Code tabs show their open files and outline"
+            }));
         } else if id == ids.colliders {
             self.show_colliders = !self.show_colliders;
             self.collider_key.clear();
@@ -10073,8 +10232,16 @@ impl Editor {
     /// The browser's lists from the database: the project's folders, and the shown
     /// folder's subfolders and files (once a scan or a click changed them, not every frame).
     fn refresh_browser(&mut self) {
+        self.loose_files = loose_text_files(&self.root);
         let b = &mut self.browser;
         let mut folders: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for path in &self.loose_files {
+            let mut at = path.as_str();
+            while let Some((parent, _)) = at.rsplit_once('/') {
+                folders.insert(parent.to_owned());
+                at = parent;
+            }
+        }
         for e in self.asset_db.entries() {
             let mut at = e.path.as_str();
             while let Some((parent, _)) = at.rsplit_once('/') {
@@ -10121,6 +10288,15 @@ impl Editor {
                 kind: file_kind(e.kind),
                 path: e.path.clone(),
                 asset: Some(e.id),
+            });
+        }
+        // Text files that are no assets, after them.
+        for path in self.loose_files.iter().filter(|p| inside(p)) {
+            b.listing.push(Listed {
+                name: path.rsplit('/').next().unwrap_or(path).to_owned(),
+                kind: FileKind::Text,
+                path: path.clone(),
+                asset: None,
             });
         }
         b.label.clear();
@@ -14265,6 +14441,7 @@ impl Checkers {
         match language {
             Language::Luau => self.luau.as_ref(),
             Language::Slang => self.slang.as_ref(),
+            Language::Text(_) => None,
         }
     }
 
@@ -14273,11 +14450,13 @@ impl Checkers {
         let slot = match language {
             Language::Luau => &mut self.luau,
             Language::Slang => &mut self.slang,
+            // Text files are not checked.
+            Language::Text(_) => return None,
         };
         if slot.is_none() {
             *slot = match language {
-                Language::Luau => Checker::luau(root),
                 Language::Slang => Checker::slang(root),
+                _ => Checker::luau(root),
             };
         }
         slot.as_ref()
@@ -14287,6 +14466,49 @@ impl Checkers {
     fn all(&self) -> impl Iterator<Item = &Checker> {
         self.luau.iter().chain(self.slang.iter())
     }
+}
+
+/// A code tab's icon, by its language.
+fn code_icon(language: Language) -> &'static str {
+    match language {
+        Language::Luau => icons::SCRIPT,
+        Language::Slang => icons::SHADER,
+        Language::Text(_) => icons::TEXT_FILE,
+    }
+}
+
+/// The text files under `root` that open in code tabs and are no assets (no `.meta`: their
+/// ids would mean nothing), relative with `/`, sorted; the editor's own folder, the build's
+/// and hidden ones left out.
+fn loose_text_files(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                if name != "target" {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if matches!(Language::of(&path), Some(Language::Text(_)))
+                && let Ok(relative) = path.strip_prefix(root)
+            {
+                out.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 /// The browser's kind of an asset's kind.
@@ -14310,6 +14532,7 @@ fn file_icon_of(kind: engine_scene::AssetKind) -> &'static str {
         FileKind::Scene => icons::SCENE,
         FileKind::Script => icons::SCRIPT,
         FileKind::Shader => icons::SHADER,
+        FileKind::Text => icons::TEXT_FILE,
         FileKind::Texture => icons::TEXTURE,
         FileKind::Mesh => icons::MESH,
         FileKind::Audio => icons::AUDIO,
@@ -20819,11 +21042,20 @@ mod tests {
         chars(&mut ed, "x");
         ed.update(&mut world);
         assert_eq!(ed.scripts[0].doc.line(1), "local xb = 2");
-        // A press in the scene tree gives the keys back: letters are the editor's again.
-        let tree = texts(&ed, "Cube")[0];
-        mouse(&mut ed, [tree.pos[0] + 2.0, tree.pos[1] + 2.0], Some(true));
+        // A press in another panel (the code's own, beside it) gives the keys back:
+        // letters are the editor's again.
+        let panel = texts(&ed, "Open Files")[0];
+        mouse(
+            &mut ed,
+            [panel.pos[0] + 2.0, panel.pos[1] + 2.0],
+            Some(true),
+        );
         ed.update(&mut world);
-        mouse(&mut ed, [tree.pos[0] + 2.0, tree.pos[1] + 2.0], Some(false));
+        mouse(
+            &mut ed,
+            [panel.pos[0] + 2.0, panel.pos[1] + 2.0],
+            Some(false),
+        );
         ed.update(&mut world);
         assert!(!ed.code_focus);
         chars(&mut ed, "y");
@@ -20989,6 +21221,90 @@ mod tests {
         });
         assert_eq!(ed.scripts[0].found, []);
         assert!(texts(&ed, "1 error").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_code_tab_shows_its_open_files_and_outline_and_text_files_open_too() {
+        let dir = project("code-mode");
+        std::fs::write(
+            dir.join("door.luau"),
+            "local Door = component(\"Door\", {})\n\nfunction Door.on_tick(self, dt)\nend\n\nfunction Door.open(self)\nend\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("notes")).unwrap();
+        std::fs::write(dir.join("notes/plan.md"), "# Plan\n\n## Doors\ntext\n").unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        ed.update(&mut world);
+        // A scene's tab: the tree and the inspector.
+        assert!(!texts(&ed, "Filter nodes").is_empty(), "the tree's filter");
+        ed.open_script(&world, Path::new("door.luau"), None);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        // A code tab: its files and outline on the left, the scene's docks gone.
+        assert!(!texts(&ed, "Open Files").is_empty());
+        assert!(
+            texts(&ed, "Filter nodes").is_empty(),
+            "no scene tree beside code"
+        );
+        for name in ["Door", "Door.on_tick", "Door.open"] {
+            assert!(!texts(&ed, name).is_empty(), "{name} in the outline");
+        }
+        // A click on the outline's row: the caret to its line.
+        let at = middle(texts(&ed, "Door.open")[0]);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        press_release(&mut ed, &mut world, at);
+        assert_eq!(ed.scripts[0].doc.primary().head.line, 5);
+        // The scene's docks back beside code when asked.
+        ed.run(&mut world, ed.ids.docks_beside_code);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Filter nodes").is_empty());
+        ed.run(&mut world, ed.ids.docks_beside_code);
+        // A text file that is no asset: listed in its folder, no `.meta` made, opened by a
+        // double click, Markdown's colors.
+        assert!(
+            ed.loose_files.contains(&String::from("notes/plan.md")),
+            "{:?}",
+            ed.loose_files
+        );
+        assert!(!dir.join("notes/plan.md.meta").exists());
+        ed.open_folder("notes");
+        ed.update(&mut world);
+        let row = ed
+            .browser
+            .listing
+            .iter()
+            .position(|l| l.name == "plan.md")
+            .unwrap();
+        assert_eq!(ed.browser.listing[row].kind, FileKind::Text);
+        let at = middle(texts(&ed, "plan.md")[0]);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        press_release(&mut ed, &mut world, at);
+        press_release(&mut ed, &mut world, at);
+        let k = ed
+            .scripts
+            .iter()
+            .position(|s| s.path == Path::new("notes/plan.md"))
+            .expect("opened in a code tab");
+        assert_eq!(
+            ed.scripts[k].language,
+            Language::Text(crate::highlight::TextKind::Markdown)
+        );
+        ed.update(&mut world);
+        let shown = &ed.code_shown;
+        let heading = shown
+            .runs
+            .iter()
+            .find(|r| &shown.text[r.2..r.3] == "# Plan")
+            .map(|r| r.4);
+        assert_eq!(heading, Some(Token::Keyword));
+        assert!(
+            !texts(&ed, "Doors").is_empty(),
+            "its headings in the outline"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
