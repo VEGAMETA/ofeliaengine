@@ -444,7 +444,7 @@ Last updated: 2026-10-22.
     front end checks a tab as it is typed (`Compiler::check_source`): a material type
     inside `forward.slang`, as it compiles. A misspelt field shows at its place 0.28 s
     after typing.
-  - **Rows dragged in the tree** (#PR, ADR 0107's as-built; the owner's request): onto a
+  - **Rows dragged in the tree** (#340, ADR 0107's as-built; the owner's request): onto a
     row into it, near its edges before or after it, below the rows last among the roots;
     world placement kept (Alt: local), one undo step; an instance's parts stay.
   - **ADR 0114 accepted** (the owner, 2026-10-22: "да" to all seven recommendations): E7
