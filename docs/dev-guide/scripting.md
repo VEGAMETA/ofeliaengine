@@ -49,8 +49,18 @@ Door.lift = 3
 ```
 
 A prop the file leaves out takes its default. Scripts load before the scene, so the scene
-finds its components. From Rust, `player.add_script(door, "Door")` gives one with its
-defaults; the editor's Add Component and Attach Script come with their own step.
+finds its components.
+
+In the editor, select the entity, then:
+- **Attach Script** (the script button above the scene tree) or **Add Component**
+  (Ctrl+Shift+A): pick `Door`;
+- or **New Script…**, which makes `scripts/<name>.luau` from a template, named after the
+  entity, attaches it at once and opens it in `on_tick`.
+
+The inspector shows the component's props and its file. A click on the file, or on the
+script's mark at the end of the entity's row, opens the script.
+
+From Rust, `player.add_script(door, "Door")` gives one with its defaults.
 
 ## Components and props
 
@@ -67,7 +77,8 @@ defaults; the editor's Add Component and Attach Script come with their own step.
 
   Strings come in a later step.
 - **Props are laid out by name** (a Luau table's keys have no order), and the inspector
-  will show them that way.
+  shows them that way. A prop away from its default is marked, and its reset puts the
+  default back.
 
 ## Hooks
 
@@ -131,10 +142,11 @@ later step. Logic over thousands of objects every tick belongs in Rust.
 
 ## Coming next
 
-- the editor's Add Component, Attach Script and the script's path in the inspector;
 - script components in saves;
 - systems over queries, `input`, `world.spawn`, `world.query`, entity methods (`has`, `add`,
   `remove`, `despawn`);
-- reloading a script while the game runs, its state kept;
-- the types file for luau-lsp and the editor (completion of the engine's API);
+- reloading a script when it is saved, while the game runs too, its state kept (until
+  then, a saved script takes effect when the editor starts again);
+- the types file for luau-lsp and the editor: completion of the engine's API. Until then,
+  the editor marks `component` and the engine's other globals as unknown;
 - `send`, `after` timers, `audio`, `random`, physics queries and triggers.

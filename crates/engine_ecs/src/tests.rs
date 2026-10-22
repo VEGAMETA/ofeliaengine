@@ -1339,6 +1339,7 @@ fn a_type_made_at_run_time_registers_by_name_in_any_world() {
         component: "test::RuntimeTestThing".into(),
         layout: core::alloc::Layout::new::<f32>(),
         defaults: 2.5f32.to_le_bytes().into(),
+        source: "".into(),
     };
     // SAFETY: an f32, plain data, its default one.
     unsafe { add_runtime_type(t.clone()) };

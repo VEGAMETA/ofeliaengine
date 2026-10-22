@@ -498,6 +498,57 @@ impl SceneRegistry {
         self.by_name.contains_key(name)
     }
 
+    /// Gives `entity` component `name` at its default value, and what it requires
+    /// ([`Self::require`]): what a scene's `Name = {}` line does, the editor's Add
+    /// Component. False for a name not registered (or a script's that `world` holds with
+    /// another layout), or for a dead entity.
+    pub fn insert_default(&self, world: &mut World, entity: Entity, name: &str) -> bool {
+        let Some(entry) = self.by_name.get(name).map(|&k| &self.entries[k]) else {
+            return false;
+        };
+        if !world.contains(entity) {
+            return false;
+        }
+        let inserted = match &entry.access {
+            Access::Typed { insert, .. } => {
+                insert(world, entity, &mut |_| {});
+                true
+            }
+            Access::Dynamic(t) => match (t.id(world), Scratch::new(entry.info)) {
+                // SAFETY: the scratch is room for one value of the type, its default bytes
+                // a valid one (plain data), which `insert_raw` copies into the world.
+                (Some(id), Some(scratch)) => unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        t.defaults.as_ptr(),
+                        scratch.ptr,
+                        t.defaults.len().min(entry.info.size),
+                    );
+                    world.insert_raw(entity, id, scratch.ptr)
+                },
+                _ => false,
+            },
+            Access::Listed { id, default } => {
+                let id = id(world);
+                match Scratch::new(entry.info) {
+                    // SAFETY: the scratch is room for one value of the type; its default
+                    // makes it valid, and `insert_raw` moves it into the world (the entity
+                    // lives), leaving the room free again.
+                    Some(scratch) => unsafe {
+                        default(scratch.ptr);
+                        world.insert_raw(entity, id, scratch.ptr)
+                    },
+                    None => false,
+                }
+            }
+        };
+        if inserted {
+            for companion in &entry.companions {
+                companion(world, entity);
+            }
+        }
+        inserted
+    }
+
     /// The registered types' descriptions, by name.
     pub fn types(&self) -> impl Iterator<Item = &'static TypeInfo> + '_ {
         self.entries.iter().map(|e| e.info)

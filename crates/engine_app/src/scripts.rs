@@ -252,6 +252,55 @@ impl Scripts {
         Ok(scripts)
     }
 
+    /// A script made after the start (the editor's New Script): file `file` under `folder`
+    /// (the project's `scripts/`, `root` the project) loaded as a module of its own. The
+    /// names of the components it declared, or why it did not load.
+    ///
+    /// # Errors
+    ///
+    /// When it cannot be read, is not under `folder`, is loaded already (reloading is its
+    /// own step), or does not run.
+    pub fn load_file(
+        &mut self,
+        world: &mut World,
+        root: &Path,
+        folder: &Path,
+        file: &Path,
+    ) -> Result<Vec<String>, String> {
+        let relative = file
+            .strip_prefix(folder)
+            .map_err(|_| format!("{} is not in {}", file.display(), folder.display()))?;
+        let module = relative
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if self.vm.has_module(&module) {
+            return Err(format!("{module} is loaded already"));
+        }
+        let shown = file
+            .strip_prefix(root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = std::fs::read_to_string(file).map_err(|e| format!("{shown}: {e}"))?;
+        self.files.insert(module.clone(), PathBuf::from(&shown));
+        if let Some(mut files) = self.vm.lua().app_data_mut::<Files>() {
+            files.0.insert(module.clone(), shown);
+        }
+        let before = self.components.len();
+        self.load_module(world, &module, &source);
+        if !self.vm.has_module(&module) {
+            return Err(format!(
+                "{} did not load (the log says why)",
+                self.file(&module)
+            ));
+        }
+        Ok(self.components[before..]
+            .iter()
+            .map(|c| c.name.clone())
+            .collect())
+    }
+
     /// Runs module `module`'s `source` and registers what it declares.
     fn load_module(&mut self, world: &mut World, module: &str, source: &str) {
         let lua = self.vm.lua();
@@ -332,6 +381,7 @@ impl Scripts {
             component: format!("script::{name}").into(),
             layout,
             defaults: defaults.clone().into_boxed_slice(),
+            source: self.file(module).into(),
         };
         let id = runtime
             .id(world)
@@ -1731,6 +1781,70 @@ return Counter
         world.remove_raw(e, id);
         scripts.tick(&mut world, 0.1);
         assert!(scripts.instances.is_empty());
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_script_made_after_the_start_loads_once_and_the_editor_finds_its_file() {
+        let dir = project(
+            "later",
+            &[(
+                "first.luau",
+                "local LaterFirst = component(\"LaterFirst\", {})\nreturn LaterFirst\n",
+            )],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let folder = dir.join("scripts");
+        // The editor's New Script: a file written after the start.
+        let file = folder.join("tools/lever.luau");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            r#"local LaterLever = component("LaterLever", { pulled = false })
+function LaterLever.on_tick(self, dt)
+    self.pulled = true
+end
+return LaterLever
+"#,
+        )
+        .unwrap();
+        let names = scripts.load_file(&mut world, &dir, &folder, &file).unwrap();
+        assert_eq!(names, ["LaterLever"]);
+        assert_eq!(
+            scripts.file_of("LaterLever"),
+            Some(Path::new("scripts/tools/lever.luau"))
+        );
+        let again = scripts.load_file(&mut world, &dir, &folder, &file);
+        assert!(again.unwrap_err().contains("loaded already"));
+        // Beside the program's types, with its file: what the editor shows and opens.
+        let listed = engine_ecs::runtime_types()
+            .into_iter()
+            .find(|t| t.info.name == "LaterLever")
+            .unwrap();
+        assert_eq!(&*listed.source, "scripts/tools/lever.luau");
+        // Its hooks run as the others'.
+        let e = world.spawn((Transform::IDENTITY,));
+        assert!(scripts.add(&mut world, e, "LaterLever"));
+        scripts.tick(&mut world, 0.1);
+        let id = scripts.component("LaterLever").unwrap();
+        // SAFETY: the lever's one prop, a bool.
+        assert_eq!(unsafe { world.get_raw(e, id).unwrap().as_ptr().read() }, 1);
+        // A name the program's components hold is refused (scenes could not tell them
+        // apart), and a file outside the folder is not a script.
+        let clash = folder.join("clash.luau");
+        std::fs::write(&clash, "local T = component(\"Transform\", {})\nreturn T\n").unwrap();
+        let names = scripts
+            .load_file(&mut world, &dir, &folder, &clash)
+            .unwrap();
+        assert!(names.is_empty());
+        let outside = dir.join("outside.luau");
+        assert!(
+            scripts
+                .load_file(&mut world, &dir, &folder, &outside)
+                .is_err()
+        );
         assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -470,9 +470,16 @@ Last updated: 2026-10-22.
     `engine_ecs::RuntimeType`, a process-wide list of component types made at run time.
     `SceneRegistry::from_program` reads it (`Access::Dynamic`), so `Door.lift = 3` lines
     load and save in the player and the editor, and undo keeps them.
-  - **Next, the owner's requests of 2026-10-22, in this order:**
-    1. E7 on: the editor's Attach Script as in Godot (E7-4: a script's mark on its row
-       opens it, the inspector shows its path), then views' fast path (E7-1c);
+  - **E7-4a, scripts in the editor** (#345, the owner's request of 2026-10-22, ADR 0114's
+    as-built): Add Component… (Ctrl+Shift+A, a button under the components), the × on a
+    component's header, Attach Script… (the scene dock's script button), New Script… from
+    a template named after the entity, loaded by the player's host and attached as one
+    step. A script component shows its file under its header and a mark on its row; a
+    click opens the script. `SceneRegistry::insert_default`, `Player::load_script`.
+  - **Next, in this order:**
+    1. E7 on: reload on save (E7-4b, values moved by name when the props change), then
+       the engine's types in the editor and for luau-lsp (E7-2: `component` reads as an
+       unknown global until then), then views' fast path (E7-1c);
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 

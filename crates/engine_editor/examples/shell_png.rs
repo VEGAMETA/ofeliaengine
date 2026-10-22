@@ -56,6 +56,7 @@ fn tree_item<'a>(
         renaming: false,
         disabled: false,
         off: false,
+        script: false,
     }
 }
 
@@ -187,14 +188,18 @@ fn main() {
         tree_item(2, icons::MODEL, "Ground", "MeshInstance", None, false),
         tree_item(2, icons::NODE_3D, "Crates", "Node3D", Some(false), false),
         tree_item(2, icons::MODEL, "Tower", "MeshInstance", None, false),
-        tree_item(
-            1,
-            icons::CHARACTER,
-            "Player",
-            "CharacterBody",
-            Some(true),
-            true,
-        ),
+        // The player has a script: its mark at the row's end.
+        TreeItem {
+            script: true,
+            ..tree_item(
+                1,
+                icons::CHARACTER,
+                "Player",
+                "CharacterBody",
+                Some(true),
+                true,
+            )
+        },
         tree_item(2, icons::CAMERA, "Camera", "Camera3D", None, false),
         tree_item(2, icons::MODEL, "Model", "MeshInstance", None, false),
         tree_item(
@@ -296,18 +301,26 @@ fn main() {
         Section {
             title: "Transform",
             fields: &transform,
+            script: "",
+            removable: false,
         },
         Section {
             title: "Character Body",
             fields: &body,
+            script: "",
+            removable: true,
         },
         Section {
             title: "Script",
             fields: &script,
+            script: "scripts/player.luau",
+            removable: true,
         },
         Section {
             title: "Physics",
             fields: &physics,
+            script: "",
+            removable: true,
         },
     ];
     let folders = [
@@ -405,6 +418,7 @@ fn main() {
         selection: "Player  ·  CharacterBody",
         prefab: false,
         inspector: &inspector,
+        add_component: true,
         path: "res://levels",
         folders: &folders,
         files: &files,

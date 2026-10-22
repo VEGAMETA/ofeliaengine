@@ -84,6 +84,7 @@ fn item<'a>(depth: u16, icon: &'a str, name: &'a str, kind: &'a str) -> TreeItem
         renaming: false,
         disabled: false,
         off: false,
+        script: false,
     }
 }
 
@@ -132,6 +133,8 @@ fn a_steady_shell_frame_does_not_allocate() {
     let sections = [Section {
         title: "Transform",
         fields: &fields,
+        script: "",
+        removable: false,
     }];
     let folders = [
         item(0, icons::FOLDER_OPEN, "res://", ""),
@@ -182,6 +185,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         selection: "Player  ·  CharacterBody",
         prefab: false,
         inspector: &sections,
+        add_component: true,
         path: "res://levels",
         folders: &folders,
         files: &files,

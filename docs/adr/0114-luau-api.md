@@ -907,3 +907,49 @@ Questions 1 to 7 are decisions a to g above, with their options in the same orde
   `Door.*` lines find their component.
 - **Saves** (ADR 0104) and the network schema read their own registries: script components
   join them in E7-5.
+
+## As built (E7-4a, 2026-10-22): scripts in the editor
+
+The owner's request (2026-10-22): attach a script to any entity as in Godot, open it from
+there, and see the script's file in the inspector.
+
+- **Add Component…** (Ctrl+Shift+A, or the button under the inspector's components, Unity's
+  place) lists the components a selected entity lacks, by name:
+  - the program's reflected components that have a default;
+  - the scripts' (`engine_ecs::runtime_types`), each with its file;
+  - New Script… last.
+
+  A pick gives each selected entity that lacks it the component at its default, with what
+  it requires, as one undo step. `SceneRegistry::insert_default(world, entity, name)` does
+  what a scene's `Name = {}` line does, for each way a type reaches a registry: its Rust
+  type, the program's list, or made at run time.
+- **The × on a component's header** takes it from the selected entities, as one step. A
+  transform has none, since it places the entity (Unity's rule).
+- **Attach Script…** (the scene dock's script button, Godot's place) lists New Script…
+  first, then the scripts' components.
+- **New Script…** writes `scripts/<snake>.luau` from a template: `--!strict`, the component
+  without props, `on_start` and `on_tick`.
+  - It is named after the active entity: `Front door` gives `FrontDoor` in
+    `scripts/front_door.luau`, with a number added when a component or a file has the name.
+  - The player's host loads it at its next frame (`Player::load_script`,
+    `Scripts::load_file`), as a module of its own, refused when loaded already.
+  - The editor then gives the component to the selection as one step, and opens the file
+    with the caret in `on_tick`. Undo takes the component off; the file stays.
+- **Where the file shows:**
+  - `RuntimeType::source` holds a script component's file;
+  - the editor keeps a table from component id to file (`runtime_types_version` tells it is
+    stale);
+  - the inspector shows the file under the component's header, and the tree a script's mark
+    on its entity's row;
+  - a click on either opens the script (an entity with several offers them in the palette).
+- **A component without fields** (a tag, a script's without props) shows in the inspector
+  by its name, so it can be seen and taken off.
+- **Script props' defaults** come from the type's default bytes: a prop away from its
+  default is marked changed, and reset puts the default back.
+- **Tested with the real player** (`engine_editor/tests/scripts.rs`): New Script loaded and
+  attached; a project's script attached from the list turns its entity in Play, and Stop
+  puts the entity back.
+- **Not yet:**
+  - a saved script takes effect when the editor starts again; reloading on save is E7-4b;
+  - the editor's Luau analysis does not know the engine's API, so `component` reads as an
+    unknown global until the types file (E7-2).
