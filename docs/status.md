@@ -454,7 +454,7 @@ Last updated: 2026-10-22.
     (`Brush::made`, `csg::combine`). A window below a wall cuts that wall only. A shape
     added with a brush active goes inside it, a cut drawn on a brush into it. Nested 400
     rooms: a door dragged 0.63 ms (flat 0.59).
-  - **A code tab's own panel** (#PR, ADR 0107's as-built; the owner's request): Open
+  - **A code tab's own panel** (#342, ADR 0107's as-built; the owner's request): Open
     Files and the file's Outline on the left of the code, the scene's tree and inspector
     aside (View: Scene Docks Beside Code keeps them). Text files open in code tabs too
     (TOML, RON, JSON, Fluent, Markdown, plain), listed in the FileSystem dock without ids.
