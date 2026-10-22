@@ -672,8 +672,9 @@ will do:
 A click opens the palette on the project's assets of the field's kind (`#model:`,
 `#material:`), and Enter puts the one picked in the field, on every selected entity. A
 file dropped on the field takes its place.
-- **Meshes of several materials:** a model draws one material, so such a mesh draws with
-  its first. The status line names the meshes this affects.
+- **Meshes of several materials** draw each primitive with its own: the drop gives the
+  model the further primitives' materials in its `MaterialSlots` (ADR 0115). Slots are
+  not editable in the inspector yet; the scene file holds them as a list.
 
 ## Prefabs
 

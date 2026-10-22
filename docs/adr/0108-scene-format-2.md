@@ -430,7 +430,8 @@ The mip levels were mostly the linear → sRGB encoding (a walk through a table 
 - a model read again shows nothing until its new version is made (the old one could stay
   until then);
 - the Sponza here is one mesh of 25 materials, which draws with its first (the format
-  question of E4-3), so 3 of its textures are made;
+  question of E4-3, answered by ADR 0115's material slots), so 3 of its textures are
+  made;
 - a loading screen's progress (`Assets::loading` counts what is in flight).
 
 ## As built (E4-5, 2026-10-22): files written anew are made again

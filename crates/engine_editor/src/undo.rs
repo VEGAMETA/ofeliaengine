@@ -213,6 +213,15 @@ struct Open {
     seen: HashSet<SceneId>,
 }
 
+/// Entity `e`'s children of the scene: not those the engine made for it
+/// (`engine_runtime::Derived`, ADR 0115: a model's further materials), which undo neither
+/// records nor copies; the engine makes them again for what undo puts back.
+fn scene_children(world: &World, e: Entity) -> impl Iterator<Item = Entity> + '_ {
+    world
+        .children(e)
+        .filter(move |&c| world.get::<engine_runtime::Derived>(c).is_none())
+}
+
 /// Components never captured: the hierarchy links are restored from `parent`.
 struct Skip {
     parent: Option<ComponentId>,
@@ -441,12 +450,12 @@ impl History {
     }
 
     /// [`History::touch`] for `entity` and all its descendants (before despawning or
-    /// moving a subtree).
+    /// moving a subtree), those the engine made for them left out.
     pub fn touch_subtree(&mut self, world: &mut World, entity: Entity) {
         let mut stack = vec![entity];
         while let Some(e) = stack.pop() {
             self.touch(world, e);
-            stack.extend(world.children(e));
+            stack.extend(scene_children(world, e));
         }
     }
 
@@ -458,10 +467,14 @@ impl History {
         let mut stack = vec![entity];
         while let Some(e) = stack.pop() {
             doomed.insert(e);
-            stack.extend(world.children(e));
+            stack.extend(scene_children(world, e));
         }
         for r in referrers(world, &mut self.codecs, &doomed) {
-            self.touch(world, r);
+            // A part the engine made for a doomed entity refers to it as its parent: it
+            // goes with it, unrecorded.
+            if world.get::<engine_runtime::Derived>(r).is_none() {
+                self.touch(world, r);
+            }
         }
         self.touch_subtree(world, entity);
         world.despawn_recursive(entity);
@@ -480,7 +493,7 @@ impl History {
         let mut stack = vec![entity];
         while let Some(e) = stack.pop() {
             order.push(e);
-            let kids: Vec<Entity> = world.children(e).collect();
+            let kids: Vec<Entity> = scene_children(world, e).collect();
             stack.extend(kids.into_iter().rev());
         }
         let mut renamed: HashMap<SceneId, SceneId> = HashMap::with_capacity(order.len());

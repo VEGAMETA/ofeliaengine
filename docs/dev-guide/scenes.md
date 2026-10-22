@@ -172,8 +172,20 @@ Model.material = asset("models/yard.glb#Yard 2 grid", 5f2c0a3e9d2b47c88e51f0d4a7
 - **A part** is a mesh or a material, by its name in the file or by `#index` (from 0:
   `models/yard.glb##1`). A file of one mesh may be named whole, without a part.
 - **A mesh's primitives** are drawn as one mesh with the model's material, in the mesh's
-  own space: the file's node transforms are not applied. A mesh of several materials is
-  several models.
+  own space: the file's node transforms are not applied.
+- **A mesh of several materials** draws each primitive with its own when the model has
+  `MaterialSlots` (ADR 0115): the materials of the primitives after the first, in the
+  mesh's order; the first is `Model.material`, and a primitive past the list draws with it
+  too. The editor fills them when you drop the file into the scene.
+
+  ```text
+  Model.mesh = asset("props/lamp.glb#Lamp", 5f2c0a3e9d2b47c88e51f0d4a7b3c912)
+  Model.material = asset("props/lamp.glb#Metal", 5f2c0a3e9d2b47c88e51f0d4a7b3c912)
+  MaterialSlots = [asset("props/lamp.glb#Glass", 5f2c0a3e9d2b47c88e51f0d4a7b3c912)]
+  ```
+
+  The player draws the further primitives on children it makes (`engine_runtime::Derived`,
+  without scene ids): scenes never save them, and your code can leave them be.
 - **Textures** (base color, metallic-roughness, normal, occlusion, emissive), embedded or
   beside the file, are decoded the first time a material uses them, uncompressed.
   - With a derived data cache (`PlayerSettings::derived_data`; the editor uses the

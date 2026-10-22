@@ -34,6 +34,13 @@ pub struct MeshRenderer {
 
 reflect_component!(pod MeshRenderer);
 
+/// An entity the engine made for its parent: a model's further material, drawn by its own
+/// `MeshRenderer` (ADR 0115). It has no scene id, so scenes never save it; the editor's
+/// undo and tree leave it out, and a pick on it names the parent.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Derived;
+engine_ecs::component!(Derived);
+
 /// Nothing drawn: what a save's values are read into.
 impl Default for MeshRenderer {
     fn default() -> Self {
