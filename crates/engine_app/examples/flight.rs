@@ -60,8 +60,9 @@
 //!     [--low-latency off|on|boost]   latency control (ADR 0023; default on)
 //!     [--no-process-setup]  the process as Windows starts it: power throttling, no MMCSS
 //!                           for the frame thread
-//!     [--cap <fps>]         at most this many real frames per second (a game's limiter;
-//!                           frame generation shows twice as many)
+//!     [--cap <fps>|display] at most this many real frames per second (a game's limiter;
+//!                           frame generation shows twice as many), or the display's
+//!                           refresh rate as a release game's default (default: uncapped)
 //!     [--present apart|direct]   the frame into an image of its own copied into the
 //!                                swapchain image, or straight into it (default: apart
 //!                                only when presenting across adapters)
@@ -910,10 +911,16 @@ mod windowed {
                 _ => LowLatency::On,
             },
             // `--cap`: real frames at most this often, as a game's limiter (ADR 0091: it
-            // caps real frames; frame generation shows twice as many).
-            fps_limit: option("--cap")
-                .and_then(|v| v.parse::<f64>().ok())
-                .filter(|fps| *fps > 0.0),
+            // caps real frames; frame generation shows twice as many), or the display's
+            // rate, a release game's default. Uncapped without it: the example measures
+            // latency.
+            frame_cap: match option("--cap") {
+                Some("display") => engine_app::FrameCap::Display,
+                cap => cap
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .filter(|fps| *fps > 0.0)
+                    .map_or(engine_app::FrameCap::Uncapped, engine_app::FrameCap::Fps),
+            },
             frame_generation,
             ambient_occlusion: flag("--no-ao").then_some(None),
             meshlet_culling: match option("--meshlet-culling") {

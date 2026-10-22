@@ -23,8 +23,9 @@ Last updated: 2026-10-22.
   - any scene can be a prefab.
   - **Where it stands (2026-10-22):** E1 to E6 are done (E2b but for the cook's path, E3
     but for the tree's marks on what changed), and material slots on `Model`. E8, the
-    code editor, is under way (scripts in tabs); E7 waits for the owner's answers to ADR
-    0114. The entries below are in the order merged.
+    code editor, is done but for rename and references across the project. E7 waits for
+    the owner's answers to ADR 0114, and E10-1 for the answer on the material file. The
+    entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
@@ -432,6 +433,11 @@ Last updated: 2026-10-22.
     and Ctrl+click across `require`s; Ctrl+Shift+F, the palette's `%` over the project's
     scripts; a call's signature above the line, the argument at the caret lit. E8 is done
     but for rename and references across the project.
+  - **The frame cap by default** (#338, ADR 0023's addendum): a release build's player
+    keeps a few frames under the display's refresh rate (`hz − hz²/3600`; 224 on ref-1's
+    240 Hz, 4,463 µs frames against 2,003 uncapped), and as far over it with vsync, a
+    backstop for a display that does not pace. `FrameCap`, `Player::set_frame_cap`; the
+    cap follows the window to another monitor.
   - **Next:** E7 waits for the owner's answers to ADR 0114's questions, and E10-1 for the
     answer on the material file.
 
@@ -1590,9 +1596,10 @@ grown, divide and conquer); the old labels stay in parentheses.
   - IME composition is not shown in place;
   - wide (East Asian) characters take one column of the grid but two on screen.
 
-- **Frame pacing (the owner, 2026-10-21, for later):** a release build's player capped at
-  the display's refresh rate by default (CLAUDE.md §7's limiter just below it under VRR),
-  not uncapped.
+- **FIFO did not pace on ref-1** (2026-10-22, ADR 0023's addendum): the flight with
+  `--vsync` in a window drew 570 frames a second (500 with Reflex). On 2026-10-12 and 15
+  it paced at 240 Hz. Not looked into: a driver setting forcing vsync off would do it;
+  PresentMon would tell.
 
 - **Prefabs** (E5, 2026-10-22):
   - undoing a following puts the old prefab's values back while the file is new: saving

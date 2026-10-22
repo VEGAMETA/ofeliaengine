@@ -85,8 +85,9 @@ pub struct PlayerSettings {
     pub hdr: OutputColor,
     /// Latency reduction (Reflex, Anti-Lag 2 or the engine's own; ADR 0023).
     pub low_latency: LowLatency,
-    /// At most this many real frames a second (frame generation shows twice as many).
-    pub fps_limit: Option<f64>,
+    /// How many frames a second at most ([`FrameCap`]): release builds keep to the
+    /// display's refresh rate, debug builds go as fast as they can.
+    pub frame_cap: FrameCap,
     /// Frames the CPU may record ahead of the GPU.
     pub frames_in_flight: usize,
     /// Frame generation (ADR 0091): FSR's through a paced presenter, or DLSS's through
@@ -167,6 +168,52 @@ pub struct PlayerSettings {
     pub network: Option<crate::NetConfig>,
 }
 
+/// How many frames a second the player draws at most (ADR 0023's addendum of 2026-10-22).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FrameCap {
+    /// The display's refresh rate `hz`, release builds' default (the team, 2026-10-21):
+    /// - with vsync off, a few frames under it (`hz - hz² / 3600`, Godot's rule: 138 on
+    ///   144 Hz, 224 on 240 Hz), so a variable-refresh display stays in its range;
+    /// - with vsync on, as far over it (`hz + hz² / 3600`): the display paces, and the
+    ///   cap only stops what does not wait for it (presenting across adapters, a driver
+    ///   forcing vsync off).
+    ///
+    /// Frame generation halves it in real frames. Offscreen there is no display and no
+    /// cap.
+    Display,
+    /// At most this many real frames a second (frame generation shows twice as many).
+    Fps(f64),
+    /// As fast as it goes: measurements, and debug builds' default.
+    Uncapped,
+}
+
+impl FrameCap {
+    /// The build's default: [`FrameCap::Display`] in release builds, uncapped in debug
+    /// ones.
+    pub const fn for_build() -> Self {
+        if cfg!(debug_assertions) {
+            Self::Uncapped
+        } else {
+            Self::Display
+        }
+    }
+
+    /// The real frames a second it allows: `refresh_hz` is the display's (none
+    /// offscreen), `generated` whether frame generation is on.
+    pub fn fps(self, vsync: bool, refresh_hz: Option<u32>, generated: bool) -> Option<f64> {
+        match self {
+            Self::Uncapped => None,
+            Self::Fps(fps) => Some(fps),
+            Self::Display => {
+                let hz = f64::from(refresh_hz?);
+                let margin = hz * hz / 3600.0;
+                let cap = if vsync { hz + margin } else { hz - margin };
+                Some(if generated { cap / 2.0 } else { cap })
+            }
+        }
+    }
+}
+
 impl Default for PlayerSettings {
     fn default() -> Self {
         Self {
@@ -184,7 +231,7 @@ impl Default for PlayerSettings {
             vsync: false,
             hdr: OutputColor::ScRgb,
             low_latency: LowLatency::On,
-            fps_limit: None,
+            frame_cap: FrameCap::for_build(),
             frames_in_flight: 2,
             frame_generation: FrameGeneration::Off,
             render: None,
@@ -211,5 +258,48 @@ impl Default for PlayerSettings {
             audio: crate::AudioSettings::default(),
             network: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_display_cap_keeps_a_few_frames_under_the_refresh_rate_without_vsync() {
+        // Godot's rule: 144 Hz → 138.24, 60 Hz → 59.
+        let cap = FrameCap::Display.fps(false, Some(144), false).unwrap();
+        assert!((cap - 138.24).abs() < 1e-9, "{cap}");
+        let cap = FrameCap::Display.fps(false, Some(60), false).unwrap();
+        assert!((cap - 59.0).abs() < 1e-9, "{cap}");
+        // Frame generation shows twice the real frames it caps.
+        let cap = FrameCap::Display.fps(false, Some(144), true).unwrap();
+        assert!((cap - 69.12).abs() < 1e-9, "{cap}");
+    }
+
+    #[test]
+    fn the_display_cap_stays_over_the_refresh_rate_with_vsync_and_is_none_offscreen() {
+        // Over the rate: the display paces, the cap stops what does not wait for it.
+        let cap = FrameCap::Display.fps(true, Some(240), false).unwrap();
+        assert!((cap - 256.0).abs() < 1e-9, "{cap}");
+        // 59.94 Hz is reported as 59: still over it.
+        let cap = FrameCap::Display.fps(true, Some(59), false).unwrap();
+        assert!(cap > 59.94, "{cap}");
+        assert_eq!(FrameCap::Display.fps(false, None, false), None);
+        assert_eq!(FrameCap::Display.fps(true, None, false), None);
+    }
+
+    #[test]
+    fn a_rate_is_kept_as_it_is_and_uncapped_is_none() {
+        assert_eq!(FrameCap::Fps(100.0).fps(true, Some(144), true), Some(100.0));
+        assert_eq!(FrameCap::Uncapped.fps(false, Some(144), false), None);
+        assert_eq!(
+            PlayerSettings::default().frame_cap,
+            if cfg!(debug_assertions) {
+                FrameCap::Uncapped
+            } else {
+                FrameCap::Display
+            }
+        );
     }
 }
