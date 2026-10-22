@@ -292,6 +292,9 @@ pub enum Widget<'a> {
         labels: &'a [&'a str],
         /// The part being typed (a click without a drag): a text field instead.
         typing: Option<u8>,
+        /// A lock beside the name, shut or open: a scale whose parts keep their
+        /// proportions (Unity's, Unreal's). None for no lock.
+        lock: Option<bool>,
     },
     /// A checkbox; `None` while the selected entities differ.
     Check(Option<bool>),
@@ -397,6 +400,8 @@ pub enum FieldAction {
     },
     /// The reset button (↺): back to the type's default.
     Reset,
+    /// The field's lock was clicked: shut or opened.
+    Lock,
     /// The checkbox was clicked.
     Toggle,
     /// The choice was clicked: its list opens or closes.
@@ -625,6 +630,9 @@ pub struct ShellModel<'a> {
     pub inspector: &'a [Section<'a>],
     /// The inspector shows entities: its Add Component button after the sections.
     pub add_component: bool,
+    /// Where the add menu opens, in logical pixels of the window: at the pointer when
+    /// Ctrl+A opened it, so it is not far away. None: under the scene dock's +.
+    pub add_at: Option<[f32; 2]>,
     /// The current folder's path.
     pub path: &'a str,
     /// Folder tree rows.
@@ -925,6 +933,20 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
             profiler_panel(ui, view, p);
         }
         bottom_bar(ui, model, p, &mut out);
+        if let (Some((entries, open)), Some(at)) = (model.add_menu, model.add_at) {
+            let at = menu_place(at, entries, ui.viewport());
+            let (popup, beside) = group_menu(
+                ui,
+                entries,
+                open,
+                p,
+                at,
+                &mut out.add_item,
+                &mut out.add_group,
+            );
+            popups.open = Some((popup, popup));
+            popups.beside = beside;
+        }
         if let Some(view) = &model.palette {
             palette(ui, view, p, &mut out, &mut popups);
         }
@@ -935,6 +957,25 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
     out.popup = popups.open;
     out.popup_beside = popups.beside;
     out
+}
+
+/// Where a group menu opened at `at` goes so that it and the group opened beside it (to
+/// its right) stay in a window of `size` (logical pixels): moved left near the right edge,
+/// up near the bottom.
+fn menu_place(at: [f32; 2], entries: &[MenuEntry<'_>], size: [f32; 2]) -> [f32; 2] {
+    const ROW: f32 = 24.0;
+    // The menu, and the tallest group beside its row.
+    let rows = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| i + e.children.len().max(1))
+        .max()
+        .unwrap_or(0)
+        .max(entries.len());
+    let height = rows as f32 * ROW + 8.0;
+    let x = at[0].min(size[0] - 2.0 * MENU_WIDTH - 4.0);
+    let y = at[1].min(size[1] - height - 4.0);
+    [x.max(4.0), y.max(4.0)]
 }
 
 /// Whether the mouse went down this frame outside the open popup and its opener: the
@@ -2155,14 +2196,16 @@ fn scene_dock(
                 Style {
                     size: [Size::Fixed(24.0), Size::Fixed(22.0)],
                     radius: 3.0,
-                    background: model.add_menu.is_some().then_some(p.selection),
+                    background: (model.add_menu.is_some() && model.add_at.is_none())
+                        .then_some(p.selection),
                     align_main: Align::Center,
                     align_cross: Align::Center,
                     ..Style::default()
                 },
                 |ui| {
                     text(ui, "icon", icons::PLUS, ICON, p.text);
-                    if let Some((entries, open)) = model.add_menu {
+                    if let Some((entries, open)) = model.add_menu.filter(|_| model.add_at.is_none())
+                    {
                         let (popup, beside) = group_menu(
                             ui,
                             entries,
@@ -2859,14 +2902,42 @@ fn inspector_dock(
                                 ..Style::default()
                             },
                             |ui| {
-                                ui.container(
+                                ui.row(
                                     "name",
                                     Style {
                                         size: [Size::Fixed(96.0), Size::Fit],
+                                        align_cross: Align::Center,
                                         ..Style::default()
                                     },
                                     |ui| {
                                         text(ui, "text", field.name, TEXT, p.text_dim);
+                                        if let Widget::Numbers {
+                                            lock: Some(shut), ..
+                                        } = field.widget
+                                        {
+                                            ui.spacer("fill");
+                                            let glyph =
+                                                if shut { icons::LOCK } else { icons::UNLOCK };
+                                            let color = if shut { p.text } else { p.text_dim };
+                                            let hovered = ui.is_hovered(ui.id("lock"));
+                                            let id = ui.container(
+                                                "lock",
+                                                Style {
+                                                    size: [Size::Fixed(18.0), Size::Fixed(18.0)],
+                                                    radius: 3.0,
+                                                    background: hovered.then_some(p.field_hover),
+                                                    align_main: Align::Center,
+                                                    align_cross: Align::Center,
+                                                    ..Style::default()
+                                                },
+                                                |ui| {
+                                                    text(ui, "icon", glyph, 13.0, color);
+                                                },
+                                            );
+                                            if ui.sense(id, false).clicked {
+                                                action = Some(FieldAction::Lock);
+                                            }
+                                        }
                                     },
                                 );
                                 match field.widget {
@@ -2900,6 +2971,7 @@ fn inspector_dock(
                                         values,
                                         labels,
                                         typing,
+                                        ..
                                     } => {
                                         numbers(ui, values, labels, typing, p, &mut action);
                                     }

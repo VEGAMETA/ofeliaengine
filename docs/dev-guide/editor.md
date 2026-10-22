@@ -74,8 +74,10 @@ editor = ["dep:engine_editor"]
     - a part of a prefab instance keeps its place (unpack the instance to move it);
     - brushes moved to another blockout group join it at once;
   - the filter box keeps the rows whose names match, with their parents;
-  - **`+`** (or Ctrl+A) adds an entity where the camera looks, on the grid. Its menu
-    groups the kinds; a group opens beside it under the pointer:
+  - **`+`** (or Ctrl+A) adds an entity where the camera looks, on the grid. Ctrl+A opens
+    its menu under the pointer, kept inside the window with room for a group beside it;
+    `+` opens it under itself. The menu groups the kinds; a group opens beside it under
+    the pointer:
     - **Point** (an entity with a place and nothing else), **Camera**;
     - **Mesh:** a cube, sphere, plane or cylinder;
     - **Blockout:** brushes ([blockout.md](blockout.md)): a box, wedge, stairs, cylinder,
@@ -100,6 +102,10 @@ editor = ["dep:engine_editor"]
   - **numbers** are dragged sideways (see snapping below), or clicked and typed (see
     typing values below); vectors show their parts with colored `x y z` labels, colors
     `r g b a`;
+  - **a transform's scale has a lock** beside its name, shut at first. Shut, a part dragged
+    or typed takes the other two along in proportion (from a zero, they take its value), as
+    Unity's constrained proportions and Unreal's scale lock do. A click opens it, and each
+    part goes on its own. The session keeps it;
   - **a rotation** shows as Euler angles in degrees (applied Y, X, Z: yaw, pitch, roll);
   - **checkboxes** for booleans, **a list** for enums;
   - **strings** (the name too) are typed in place;
@@ -156,7 +162,7 @@ editor = ["dep:engine_editor"]
 | Delete the selection (with its children) | Delete |
 | Turn the selection off, or on (with its children) | H |
 | Duplicate the selection (with its children) | Ctrl+D |
-| Add an entity | Ctrl+A |
+| Add an entity (the menu under the pointer) | Ctrl+A |
 | Add a component to the selection | Ctrl+Shift+A |
 | Snap by default, or not (Y is an axis in a keyboard transform) | G (Blender's keys: Shift+Tab; Godot's: Y) |
 | Rename the active entity | F2 |

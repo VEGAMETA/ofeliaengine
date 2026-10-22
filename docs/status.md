@@ -481,10 +481,17 @@ Last updated: 2026-10-22.
     on with their state; props that changed move by name to a new layout
     (`engine_ecs::Relayout`, `script::Door#2`), and the editor's history and Play's
     snapshot follow. 1,000 instances: 0.21 ms in place, 0.33 ms moved (target 100).
+  - **The owner's notes of 2026-10-22** (#347): a transform's scale keeps its proportions
+    while the lock beside its name is shut (the default, kept in the session); Ctrl+A
+    opens the add menu under the pointer, inside the window.
   - **Next, in this order:**
-    1. E7 on: the engine's types in the editor and for luau-lsp (E7-2: `component` reads as
-       an unknown global until then), then views' fast path (E7-1c);
-    2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
+    1. The viewport's view modes, the owner's request of 2026-10-22: lit, unlit, wireframe
+       and colliders shown for every body, drawn so that lines on surfaces do not z-fight
+       (research first: Godot, Unreal, Blender);
+    2. E7 on: the engine's types in the editor and for luau-lsp (E7-2, under way on
+       `feat/script-types`: the old solver types a hook's `self` from `component`'s
+       declaration, the new one of Luau 0.736 does not), then views' fast path (E7-1c);
+    3. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
