@@ -847,6 +847,12 @@ ones `luau-analyze` and VS Code's luau-lsp use:
 
 **Rest the mouse on a name** for half a second to see its type.
 
+- **F12** (or Ctrl+click) goes to where a name is defined, in another script too.
+- **Ctrl+Shift+F** finds text in every script of the project. The palette lists each line
+  that has it; Enter opens one there, the match selected.
+- **Inside a call's parentheses**, its signature shows above the line, the argument you
+  are at lit. Ctrl+Shift+Space shows it, Escape hides it.
+
 ## Autosave and the session
 
 The editor keeps its own files in the project's `.ofelia/` folder (ADR 0107 §4). They are
@@ -928,7 +934,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 |---|---|
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau in the game: the script component, its hooks, bindings and hot reload (its public API waits for the team's answers, ADR 0114) |
-| E8 | the code editor: go to definition, signature help, find in files (scripts in tabs, highlighting, find and replace, Luau's findings, completion and hover are done) |
+| E8 | the code editor: rename and references across the project (everything else is done) |
 
 The whole plan is ADR 0107 §7.
 

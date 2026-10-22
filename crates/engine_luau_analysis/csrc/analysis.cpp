@@ -11,6 +11,7 @@
 #include "Luau/Frontend.h"
 #include "Luau/Linter.h"
 #include "Luau/ToString.h"
+#include "Luau/TypePack.h"
 #include "Luau/TypeArena.h"
 
 #include <cstdint>
@@ -469,6 +470,180 @@ size_t engine_analysis_hover(
     }
     *text = a->messages[0].data();
     return a->messages[0].size();
+}
+
+// Where what is at `line` and `column` of module `name` is defined: its module (into
+// `module`, valid until the next call) and its place. Returns 1 when found: a local's or a
+// global's binding, a field's place in its table, a function where it was written.
+int engine_analysis_definition(
+    EngineAnalysis* a,
+    const char* name,
+    size_t name_len,
+    uint32_t line,
+    uint32_t column,
+    const char** module_out,
+    size_t* module_len,
+    uint32_t* out_line,
+    uint32_t* out_column
+)
+{
+    a->messages.clear();
+    std::string module(name, name_len);
+    try
+    {
+        a->frontend->check(module);
+        const Luau::SourceModule* source = a->frontend->getSourceModule(module);
+        Luau::ModulePtr checked = a->frontend->moduleResolver.getModule(module);
+        if (!source || !checked)
+            return 0;
+        Luau::Position at{line, column};
+        std::optional<std::pair<std::string, Luau::Location>> found;
+        // A built-in's place is nowhere in the project.
+        auto placed = [](const Luau::Location& l)
+        {
+            return !(l.begin.line == 0 && l.begin.column == 0 && l.end.line == 0 && l.end.column == 0);
+        };
+        if (std::optional<Luau::Binding> binding = Luau::findBindingAtPosition(*checked, *source, at);
+            binding && placed(binding->location))
+            found = {module, binding->location};
+        Luau::AstExpr* expr = found ? nullptr : Luau::findExprAtPosition(*source, at);
+        if (auto* index = expr ? expr->as<Luau::AstExprIndexName>() : nullptr)
+        {
+            if (const Luau::TypeId* object = checked->astTypes.find(index->expr))
+            {
+                if (const Luau::TableType* table = Luau::getTableType(Luau::follow(*object)))
+                {
+                    auto it = table->props.find(std::string(index->index.value));
+                    if (it != table->props.end() && it->second.location && placed(*it->second.location))
+                        found = {table->definitionModuleName.empty() ? module : table->definitionModuleName, *it->second.location};
+                }
+            }
+        }
+        if (!found && expr)
+        {
+            if (const Luau::TypeId* type = checked->astTypes.find(expr))
+            {
+                const Luau::FunctionType* function = Luau::get<Luau::FunctionType>(Luau::follow(*type));
+                if (function && function->definition && function->definition->definitionModuleName &&
+                    placed(function->definition->originalNameLocation))
+                    found = {*function->definition->definitionModuleName, function->definition->originalNameLocation};
+            }
+        }
+        // Luau's own definitions (`@luau`) are not the project's.
+        if (!found || found->first.rfind("@", 0) == 0)
+            return 0;
+        a->messages.push_back(found->first);
+        *module_out = a->messages[0].data();
+        *module_len = a->messages[0].size();
+        *out_line = found->second.begin.line;
+        *out_column = found->second.begin.column;
+        return 1;
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+// The signature of the call whose parentheses `line` and `column` of module `name` are
+// in: `name(a: number, b: string): boolean` into `text` (valid until the next call), and
+// the byte range of the argument the place is at. Returns 1 when there is one.
+int engine_analysis_signature(
+    EngineAnalysis* a,
+    const char* name,
+    size_t name_len,
+    uint32_t line,
+    uint32_t column,
+    const char** text_out,
+    size_t* text_len,
+    uint32_t* active_start,
+    uint32_t* active_end
+)
+{
+    a->messages.clear();
+    std::string module(name, name_len);
+    try
+    {
+        a->frontend->check(module);
+        const Luau::SourceModule* source = a->frontend->getSourceModule(module);
+        Luau::ModulePtr checked = a->frontend->moduleResolver.getModule(module);
+        if (!source || !checked)
+            return 0;
+        Luau::Position at{line, column};
+        // The innermost call whose parentheses hold the place.
+        Luau::AstExprCall* call = nullptr;
+        std::vector<Luau::AstNode*> ancestry = Luau::findAstAncestryOfPosition(*source, at);
+        for (auto it = ancestry.rbegin(); it != ancestry.rend() && !call; ++it)
+        {
+            auto* c = (*it)->as<Luau::AstExprCall>();
+            // The arguments' place starts after `(` and ends at `)`.
+            if (c && c->argLocation.begin <= at && at <= c->argLocation.end)
+                call = c;
+        }
+        if (!call)
+            return 0;
+        const Luau::TypeId* type = checked->astTypes.find(call->func);
+        const Luau::FunctionType* function = type ? Luau::get<Luau::FunctionType>(Luau::follow(*type)) : nullptr;
+        if (!function)
+            return 0;
+        // The argument the place is at: how many end before it.
+        size_t active = 0;
+        for (Luau::AstExpr* arg : call->args)
+            if (arg->location.end < at)
+                active++;
+        std::string callee = "function";
+        if (auto* g = call->func->as<Luau::AstExprGlobal>())
+            callee = g->name.value;
+        else if (auto* l = call->func->as<Luau::AstExprLocal>())
+            callee = l->local->name.value;
+        else if (auto* i = call->func->as<Luau::AstExprIndexName>())
+            callee = i->index.value;
+        Luau::ToStringOptions shown;
+        shown.maxTypeLength = 120;
+        auto [params, tail] = Luau::flatten(function->argTypes);
+        // A method called with `:` does not show its `self`.
+        size_t first = call->self && function->hasSelf && !params.empty() ? 1 : 0;
+        std::string text = callee + "(";
+        uint32_t start = 0, end = 0;
+        size_t shown_args = 0;
+        for (size_t i = first; i < params.size(); ++i)
+        {
+            if (shown_args > 0)
+                text += ", ";
+            if (shown_args == active)
+                start = uint32_t(text.size());
+            if (i < function->argNames.size() && function->argNames[i] && !function->argNames[i]->name.empty())
+                text += function->argNames[i]->name + ": ";
+            text += Luau::toString(params[i], shown);
+            if (shown_args == active)
+                end = uint32_t(text.size());
+            shown_args++;
+        }
+        // A variadic tail (`...number`), but the `...any` that non-strict code infers for
+        // every function.
+        std::string rest = tail ? Luau::toString(*tail, shown) : std::string();
+        if (!rest.empty() && rest != "...any")
+        {
+            if (shown_args > 0)
+                text += ", ";
+            if (active >= shown_args)
+                start = uint32_t(text.size());
+            text += rest;
+            if (active >= shown_args)
+                end = uint32_t(text.size());
+        }
+        text += "): " + Luau::toString(function->retTypes, shown);
+        a->messages.push_back(text);
+        *text_out = a->messages[0].data();
+        *text_len = a->messages[0].size();
+        *active_start = start;
+        *active_end = end;
+        return 1;
+    }
+    catch (...)
+    {
+        return 0;
+    }
 }
 
 } // extern "C"

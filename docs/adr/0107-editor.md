@@ -1676,3 +1676,34 @@ so not SQLite. The editor opens it at its start and follows the folder.
   - the documentation of the engine's API in the list (with E7's `.d.luau`);
   - `require` paths in the list;
   - find in files.
+
+## As built (E8-4, 2026-10-22): go to definition, find in files, signatures
+
+- **Go to Definition** (F12, Ctrl+click; `Analysis::definition`) finds, in turn:
+  - a local's or a global's binding;
+  - a field where its table got it, with the table's module;
+  - a function where it was written, with its module.
+
+  The answer opens that module's script at the line: across `require`s too. Luau's own
+  definitions (`@luau`) are not the project's, and the editor says so.
+- **Find in Files** (Ctrl+Shift+F) opens the palette on `%`, as VS Code's Quick Search
+  does, with the selection's text when one line is selected:
+  - the project's scripts are read once a search; an open tab is searched as it is,
+    unsaved;
+  - every line holding the text is a row (`path:line`, dimmed, then the line), any case
+    unless the query has a capital (VS Code's smart case), at most 200;
+  - Enter opens the script at the line with the match selected.
+- **Signature help** (`Analysis::signature`) works inside a call's parentheses. It shows
+  `name(a: number, b: string): result` above the caret line, the argument the caret is at
+  lit:
+  - `(` and `,` ask for it, and Ctrl+Shift+Space does (VS Code's parameter hints);
+  - while it shows, each key asks again, so it follows the caret;
+  - Escape closes it, after a completion list;
+  - a method called with `:` hides `self`; the `...any` that non-strict code gives every
+    function is left out.
+- **A completion list** opens on a name's first letter only (a letter or `_`), not on
+  a digit.
+- **E8 is done but for:**
+  - Rename (F2) and references (Shift+F12) of a name across the project;
+  - "Open in VS Code" at the caret;
+  - the engine API's documentation in the completion list (with E7's `.d.luau`).

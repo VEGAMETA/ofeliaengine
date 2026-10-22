@@ -154,6 +154,73 @@ fn completions_and_types_come_from_the_checked_module() {
 }
 
 #[test]
+fn definitions_are_found_in_the_module_and_across_requires() {
+    for solver in [Solver::New, Solver::Old] {
+        let dir = folder("definition");
+        std::fs::create_dir_all(dir.join("shared")).unwrap();
+        std::fs::write(
+            dir.join("shared/math.luau"),
+            "local M = {}\nfunction M.double(n: number): number\n    return n * 2\nend\nreturn M\n",
+        )
+        .unwrap();
+        let mut a = Analysis::new(&dir, solver).unwrap();
+        a.set_source(
+            "door.luau",
+            "local M = require(\"./shared/math\")\nlocal speed = 2\nreturn M.double(speed)\n",
+        );
+        let _ = a.check("door.luau");
+        // `speed` where it is used: its local.
+        assert_eq!(
+            a.definition("door.luau", 2, 17),
+            Some((String::from("door.luau"), 1, 6)),
+            "{solver:?}"
+        );
+        // `double` of the required module: there.
+        let (module, line, _) = a.definition("door.luau", 2, 11).unwrap();
+        assert_eq!(
+            (module.as_str(), line),
+            ("shared/math.luau", 1),
+            "{solver:?}"
+        );
+        // `print`, Luau's own: nowhere in the project.
+        a.set_source("door.luau", "print(1)\n");
+        let _ = a.check("door.luau");
+        assert_eq!(a.definition("door.luau", 0, 2), None, "{solver:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn a_calls_signature_shows_the_argument_being_written() {
+    for solver in [Solver::New, Solver::Old] {
+        let dir = folder("signature");
+        let mut a = Analysis::new(&dir, solver).unwrap();
+        a.set_source(
+            "door.luau",
+            "local function open(by: number, speed: number): boolean\n    return by > speed\nend\nlocal ok = open(1, 2)\nreturn ok\n",
+        );
+        let _ = a.check("door.luau");
+        // In `open(1, 2)`: the second argument.
+        let (text, (start, end)) = a.signature("door.luau", 3, 19).unwrap();
+        assert_eq!(
+            text, "open(by: number, speed: number): boolean",
+            "{solver:?}"
+        );
+        assert_eq!(&text[start..end], "speed: number", "{solver:?}");
+        let (_, (start, end)) = a.signature("door.luau", 3, 16).unwrap();
+        assert_eq!(&text[start..end], "by: number", "{solver:?}");
+        // Outside the parentheses: none.
+        assert_eq!(a.signature("door.luau", 3, 3), None, "{solver:?}");
+        assert_eq!(
+            a.signature("door.luau", 3, 21),
+            None,
+            "after `)`: {solver:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
 fn the_new_solver_finds_the_same() {
     let dir = folder("new");
     let mut a = Analysis::new(&dir, Solver::New).unwrap();

@@ -592,6 +592,8 @@ struct CommandIds {
     find_next: CommandId,
     find_previous: CommandId,
     go_to_line: CommandId,
+    go_to_definition: CommandId,
+    find_in_files: CommandId,
     new_scene: CommandId,
     close_scene: CommandId,
     reopen_scene: CommandId,
@@ -714,6 +716,8 @@ fn commands() -> (Commands, CommandIds) {
         find_next: c.register("code.find_next", "Code", "Find Next"),
         find_previous: c.register("code.find_previous", "Code", "Find Previous"),
         go_to_line: c.register("code.go_to_line", "Code", "Go to Line…"),
+        go_to_definition: c.register("code.definition", "Code", "Go to Definition"),
+        find_in_files: c.register("code.find_in_files", "Code", "Find in Files…"),
         new_scene: c.register("file.new", "File", "New Scene"),
         close_scene: c.register("file.close", "File", "Close Tab"),
         reopen_scene: c.register("file.reopen", "File", "Reopen Closed Scene"),
@@ -869,6 +873,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+A", ids.add),
         ("F2", ids.rename),
         ("Ctrl+Shift+P", ids.palette),
+        // VS Code's: the project's scripts searched (the palette's `%`).
+        ("Ctrl+Shift+F", ids.find_in_files),
         // VS Code's key for its panel.
         ("Ctrl+J", ids.output),
         ("Ctrl+P", ids.find),
@@ -945,6 +951,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("F3", ids.find_next),
         ("Shift+F3", ids.find_previous),
         ("Ctrl+G", ids.go_to_line),
+        ("F12", ids.go_to_definition),
     ]
     .map(|(chord, id)| (chord, id, CODE_KEYS));
     for (chord, id, context) in global.chain(tree).chain(code) {
@@ -1390,6 +1397,25 @@ struct CommandPalette {
     /// that says so.
     line: Option<(usize, usize)>,
     line_label: String,
+    /// After `%`: the project's scripts' texts (read when the search starts, a tab's as it
+    /// is), and the lines found in them with their rows' labels.
+    sources: Option<Vec<(PathBuf, String)>>,
+    texts: Vec<FoundText>,
+    text_labels: Vec<String>,
+}
+
+/// A line of a script that holds what `%` looks for.
+#[derive(Debug, Clone, Copy)]
+struct FoundText {
+    /// Its script, among the palette's sources.
+    source: usize,
+    /// The match: its line, and its byte range in it.
+    line: usize,
+    start: usize,
+    end: usize,
+    /// The label's characters that are the place (dimmed) and that matched.
+    place: usize,
+    matched: (u32, u32),
 }
 
 impl CommandPalette {
@@ -1401,6 +1427,11 @@ impl CommandPalette {
     /// Whether the query looks for the scene's objects (`@`) rather than commands.
     fn finds_objects(&self) -> bool {
         self.choices.is_none() && self.query.trim_start().starts_with('@')
+    }
+
+    /// Whether the query looks for text in the project's scripts (`%`, Ctrl+Shift+F).
+    fn finds_text(&self) -> bool {
+        self.choices.is_none() && self.query.trim_start().starts_with('%')
     }
 
     /// Whether the query looks for the project's assets (`#`).
@@ -1416,6 +1447,8 @@ impl CommandPalette {
             self.objects.len()
         } else if self.goes_to_line() {
             usize::from(!self.line_label.is_empty())
+        } else if self.finds_text() {
+            self.texts.len()
         } else if self.finds_assets() {
             self.assets.len()
         } else {
@@ -2616,7 +2649,7 @@ impl Editor {
         self.tick_builds(world);
         self.tick_assets(world);
         self.tick_scripts();
-        self.tick_checker();
+        self.tick_checker(world);
         self.keep_script_autosaves(world, false);
         if !playing {
             self.ensure_prefab_bases(world);
@@ -3295,6 +3328,15 @@ impl Editor {
                         category: 0,
                         detail: kind,
                     }
+                } else if cp.finds_text() {
+                    let found = cp.texts[i];
+                    PaletteRow {
+                        icon: icons::SCRIPT,
+                        label: &cp.text_labels[i],
+                        matched: &cp.highlights[found.matched.0 as usize..found.matched.1 as usize],
+                        category: found.place,
+                        detail: "",
+                    }
                 } else if cp.goes_to_line() {
                     PaletteRow {
                         icon: icons::SCRIPT,
@@ -3532,6 +3574,15 @@ impl Editor {
                     rows: &code_rows,
                     selected: shown.list_selected,
                 }),
+            signature: s.signature.as_ref().map(|(text, (a, b))| {
+                let head = s.doc.primary().head;
+                let (a, b) = ((*a).min(text.len()), (*b).min(text.len()));
+                (
+                    head.line,
+                    char_column(s.doc.line(head.line), head.col),
+                    [&text[..a], &text[a..b], &text[b..]],
+                )
+            }),
             hover: s.hover.as_ref().map(|(at, text)| {
                 (
                     at.line,
@@ -4489,6 +4540,7 @@ impl Editor {
         cp.choices = None;
         cp.for_field = None;
         cp.opens = false;
+        cp.sources = None;
         cp.query.clear();
         cp.query.push_str(query);
         self.search_palette(world);
@@ -4572,6 +4624,28 @@ impl Editor {
                     path(a).cmp(path(b))
                 })
             });
+        } else if let Some(text) = query.strip_prefix('%') {
+            cp.commands.clear();
+            // The scripts read once a search, the open tabs as they are.
+            if cp.sources.is_none() {
+                let mut sources = Vec::new();
+                for e in self.asset_db.entries() {
+                    if e.kind != engine_scene::AssetKind::Script {
+                        continue;
+                    }
+                    let path = PathBuf::from(&e.path);
+                    let open = self.scripts.iter().find(|s| s.path == path);
+                    let text = match open {
+                        Some(s) => s.doc.text(),
+                        None => std::fs::read_to_string(self.root.join(&path)).unwrap_or_default(),
+                    };
+                    sources.push((path, text));
+                }
+                sources.sort_by(|a, b| a.0.cmp(&b.0));
+                cp.sources = Some(sources);
+            }
+            let text = text.to_owned();
+            find_text(cp, &text);
         } else if let Some(text) = query.strip_prefix(':') {
             // `:12` or `:12:5`, as VS Code's Ctrl+G reads them.
             cp.commands.clear();
@@ -4667,6 +4741,21 @@ impl Editor {
                         }
                         (Some(found), None) => self.reveal_asset(found.id),
                         (None, _) => {}
+                    }
+                } else if cp.finds_text() {
+                    if let (Some(found), Some(sources)) = (cp.texts.get(i), &cp.sources) {
+                        let path = sources[found.source].0.clone();
+                        let at = Some((found.line + 1, 1));
+                        self.open_script(world, &path, at);
+                        // The match selected, as VS Code's search leaves it.
+                        if let Some(s) = self.active_script.and_then(|k| self.scripts.get_mut(k)) {
+                            let (a, b) = (
+                                Pos::new(found.line, found.start),
+                                Pos::new(found.line, found.end),
+                            );
+                            s.doc.select(a, b, false);
+                            s.reveal = true;
+                        }
                     }
                 } else if cp.goes_to_line() {
                     if let Some((line, column)) = cp.line {
@@ -7204,6 +7293,8 @@ impl Editor {
             ids.find_next,
             ids.find_previous,
             ids.go_to_line,
+            ids.go_to_definition,
+            ids.find_in_files,
         ]
         .contains(&id)
     }
@@ -7238,8 +7329,9 @@ impl Editor {
         });
         let mut touched = false;
         // A completion list asked for this frame (`.`, `:`, Ctrl+Space, a word's first
-        // letter).
+        // letter), and a signature (`(`, `,`).
         let mut ask_list = false;
+        let mut ask_signature = false;
         if keys {
             let mut bytes = [0u8; 4];
             for i in 0..self.input.strokes().len() {
@@ -7269,10 +7361,13 @@ impl Editor {
                         // it may be (VS Code's quick suggestions).
                         let head = script.doc.primary().head;
                         let word = head.col - complete::word_start(&script.doc, head).col;
-                        let first_letter = (c.is_alphanumeric() || c == '_')
+                        // A name's first letter: names start with a letter or `_`.
+                        let first_letter = (c.is_alphabetic() || c == '_')
                             && script.completing.is_none()
                             && word == c.len_utf8();
                         ask_list |= c == '.' || c == ':' || first_letter;
+                        // Inside a call's parentheses, its signature.
+                        ask_signature |= c == '(' || c == ',';
                         Effect::Edited
                     }
                     Stroke::Key(Chord {
@@ -7282,6 +7377,23 @@ impl Editor {
                         key: Key::Space,
                     }) => {
                         ask_list = true;
+                        Effect::Taken
+                    }
+                    // Ctrl+Shift+Space: the call's signature (VS Code's parameter hints).
+                    Stroke::Key(Chord {
+                        ctrl: true,
+                        shift: true,
+                        alt: false,
+                        key: Key::Space,
+                    }) => {
+                        ask_signature = true;
+                        Effect::Taken
+                    }
+                    // Escape closes a signature first.
+                    Stroke::Key(chord)
+                        if chord == Chord::key(Key::Escape) && script.signature.is_some() =>
+                    {
+                        script.signature = None;
                         Effect::Taken
                     }
                     // Escape closes the find bar first, as in VS Code.
@@ -7315,6 +7427,18 @@ impl Editor {
                 script.closing = false;
             }
             self.input.take_ui_keys();
+        }
+        // A signature shown follows the caret (the argument it is at).
+        if (ask_signature || (touched && script.signature.is_some()))
+            && let Some(checker) = &self.checker
+        {
+            let head = script.doc.primary().head;
+            let stamp = Stamp {
+                generation: script.generation,
+                version: script.doc.version(),
+            };
+            let at = (head.line as u32, head.col as u32);
+            checker.signature(&script.module(), script.doc.text(), stamp, at);
         }
         if ask_list && let Some(checker) = &self.checker {
             let head = script.doc.primary().head;
@@ -7380,6 +7504,17 @@ impl Editor {
             if inside && self.input.pressed(Button::Left) {
                 script.completing = None;
                 let pos = script.pos_at(local, advance, gutter);
+                // Ctrl+click: where it is defined, as F12.
+                if self.input.ctrl()
+                    && let Some(checker) = &self.checker
+                {
+                    let at = script.char_at(local, advance, gutter);
+                    checker.definition(
+                        &script.module(),
+                        script.doc.text(),
+                        (at.line as u32, at.col as u32),
+                    );
+                }
                 let now = Instant::now();
                 // Presses in a row on one line: a word, then the line.
                 let count = match self.code_clicks {
@@ -7697,7 +7832,7 @@ impl Editor {
     /// Luau's checker's frame (E8-3b): each open script's text given to it a moment after
     /// it changed ([`script::CHECK_AFTER`]), and what came back put with the text it was
     /// of; the checker started with the first script.
-    fn tick_checker(&mut self) {
+    fn tick_checker(&mut self, world: &World) {
         if self.scripts.is_empty() {
             return;
         }
@@ -7722,9 +7857,24 @@ impl Editor {
                 s.sent = Some(version);
             }
         }
+        let mut defined = None;
         for answer in checker.finished() {
             let checked = match answer {
                 crate::checker::Answer::Checked(checked) => checked,
+                crate::checker::Answer::Defined(found) => {
+                    defined = Some(found);
+                    continue;
+                }
+                crate::checker::Answer::Signature { stamp, found } => {
+                    if let Some(s) = self
+                        .scripts
+                        .iter_mut()
+                        .find(|s| s.generation == stamp.generation)
+                    {
+                        s.signature = found;
+                    }
+                    continue;
+                }
                 // A completion list's, while it is open at that word.
                 crate::checker::Answer::Completed { stamp, at, items } => {
                     if let Some(s) = self
@@ -7788,6 +7938,30 @@ impl Editor {
                 s.stale_from = None;
             }
         }
+        match defined {
+            Some(Some((module, line, column))) => {
+                let at = Some((line as usize + 1, column as usize + 1));
+                self.open_script(world, Path::new(&module), at);
+            }
+            Some(None) => self.say(String::from(
+                "No definition in the project: Luau's own, or not found",
+            )),
+            None => {}
+        }
+    }
+
+    /// F12 and Ctrl+click: the checker asked where what is at `at` (the shown script's
+    /// caret when `None`) is defined; [`Self::tick_checker`] opens the answer.
+    fn ask_definition(&mut self, at: Option<Pos>) {
+        let Some(s) = self.active_script.and_then(|k| self.scripts.get(k)) else {
+            self.say(String::from("Go to Definition works in a script's tab"));
+            return;
+        };
+        let Some(checker) = &self.checker else {
+            return;
+        };
+        let pos = at.unwrap_or(s.doc.primary().head);
+        checker.definition(&s.module(), s.doc.text(), (pos.line as u32, pos.col as u32));
     }
 
     /// The code bar's count clicked: the caret to the next thing the checker found after
@@ -9246,6 +9420,21 @@ impl Editor {
             self.find_step(id == ids.find_previous);
         } else if id == ids.go_to_line {
             self.open_palette(world, ":");
+        } else if id == ids.go_to_definition {
+            self.ask_definition(None);
+        } else if id == ids.find_in_files {
+            // What one line selected holds is what is looked for, as VS Code does.
+            let selected = self
+                .active_script
+                .and_then(|k| self.scripts.get(k))
+                .map(|s| s.doc.primary().range())
+                .filter(|(a, b)| a.line == b.line && a != b)
+                .and_then(|(a, b)| {
+                    let s = self.scripts.get(self.active_script?)?;
+                    Some(s.doc.line(a.line)[a.col..b.col].to_owned())
+                });
+            let query = format!("%{}", selected.unwrap_or_default());
+            self.open_palette(world, &query);
         } else if id == ids.open_script {
             self.open_palette(world, "#script:");
             if let Some(cp) = self.command_palette.as_mut() {
@@ -13576,6 +13765,72 @@ struct FoundAsset {
     score: i32,
     /// Its matched characters: a range of the palette's `highlights`.
     matched: (u32, u32),
+}
+
+/// The most lines `%` lists.
+const TEXT_FOUND: usize = 200;
+
+/// The lines of the palette's sources holding `query` (any case unless it has a capital,
+/// VS Code's smart case), into its found texts and their labels: `path:line  text`, the
+/// place dimmed and the match lit.
+fn find_text(cp: &mut CommandPalette, query: &str) {
+    cp.texts.clear();
+    cp.text_labels.clear();
+    let Some(sources) = &cp.sources else {
+        return;
+    };
+    if query.is_empty() {
+        return;
+    }
+    let case = query.chars().any(char::is_uppercase);
+    let needle = if case {
+        query.to_owned()
+    } else {
+        query.to_lowercase()
+    };
+    'files: for (source, (path, text)) in sources.iter().enumerate() {
+        for (line, content) in text.lines().enumerate() {
+            let at = if case {
+                content.find(&needle)
+            } else {
+                // A line whose lower case changes its length is matched as it is.
+                let lowered = content.to_lowercase();
+                if lowered.len() == content.len() {
+                    lowered.find(&needle)
+                } else {
+                    content.find(query)
+                }
+            };
+            let Some(at) = at else {
+                continue;
+            };
+            let place = format!(
+                "{}:{}  ",
+                path.to_string_lossy().replace('\\', "/"),
+                line + 1
+            );
+            let trimmed = content.trim_start();
+            let cut = content.len() - trimmed.len();
+            let first = place.chars().count() + content[cut..at.max(cut)].chars().count();
+            let start = cp.highlights.len() as u32;
+            cp.highlights.extend(
+                (first..first + query.chars().count())
+                    .map(|c| u16::try_from(c).unwrap_or(u16::MAX)),
+            );
+            cp.texts.push(FoundText {
+                source,
+                line,
+                start: at,
+                end: (at + needle.len()).min(content.len()),
+                place: place.chars().count(),
+                matched: (start, cp.highlights.len() as u32),
+            });
+            cp.text_labels.push(format!("{place}{trimmed}"));
+            if cp.texts.len() >= TEXT_FOUND {
+                break 'files;
+            }
+        }
+    }
 }
 
 /// What placing model file `name` says.
@@ -20145,6 +20400,130 @@ mod tests {
         assert!(text.starts_with("Door: "), "{text}");
         assert!(text.contains("speed"), "{text}");
         assert!(!texts(&ed, &text).is_empty(), "shown by the word");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn f12_opens_where_a_name_is_defined_in_another_script_too() {
+        const F12: (u16, u16) = (0x7B, 0x58);
+        let dir = project("script-definition");
+        std::fs::create_dir_all(dir.join("shared")).unwrap();
+        std::fs::write(
+            dir.join("shared/math.luau"),
+            "local M = {}\nfunction M.double(n: number): number\n    return n * 2\nend\nreturn M\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("door.luau"),
+            "local M = require(\"./shared/math\")\nreturn M.double(2)\n",
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.update(&mut world);
+        ed.open_script(&world, Path::new("door.luau"), None);
+        ed.update(&mut world);
+        // F12 on `double`: the module requiring it opens there.
+        ed.scripts[0].doc.place(Pos::new(1, 11), false, false);
+        chord(&mut ed, &mut world, &[F12]);
+        wait_for(&mut ed, &mut world, |ed| ed.scripts.len() == 2);
+        assert_eq!(ed.active_script, Some(1));
+        assert_eq!(ed.scripts[1].path, Path::new("shared/math.luau"));
+        assert_eq!(
+            ed.scripts[1].doc.primary().head.line,
+            1,
+            "the function's line"
+        );
+        // On Luau's own `require`: nothing to open, and it says so.
+        ed.show_script(&world, 0);
+        ed.scripts[0].doc.place(Pos::new(0, 12), false, false);
+        chord(&mut ed, &mut world, &[F12]);
+        wait_for(&mut ed, &mut world, |ed| {
+            message(ed).starts_with("No definition")
+        });
+        assert_eq!(ed.scripts.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_in_files_lists_the_scripts_lines_and_opens_one_at_its_match() {
+        const F: (u16, u16) = (0x46, 0x21);
+        let dir = project("script-search");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/door.luau"),
+            "local speed = 2\nreturn speed\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("scripts/lamp.luau"),
+            "local glow = 1\n    -- Speed of the flicker\nreturn glow\n",
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        ed.update(&mut world);
+        // Ctrl+Shift+F: the palette on `%`; any case while the query has no capital.
+        chord(&mut ed, &mut world, &[CTRL, SHIFT, F]);
+        ed.update(&mut world);
+        chars(&mut ed, "speed");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let found = |ed: &Editor| ed.command_palette.as_ref().map_or(0, |cp| cp.texts.len());
+        assert_eq!(found(&ed), 3);
+        let cp = ed.command_palette.as_ref().unwrap();
+        assert_eq!(
+            cp.text_labels[2], "scripts/lamp.luau:2  -- Speed of the flicker",
+            "the place, then the line without its indentation"
+        );
+        let (a, b) = cp.texts[2].matched;
+        assert_eq!(
+            cp.highlights[a as usize..b as usize],
+            [24, 25, 26, 27, 28],
+            "`Speed` lit"
+        );
+        // The third row: the lamp's line opens, its match selected.
+        chord(&mut ed, &mut world, &[DOWN]);
+        chord(&mut ed, &mut world, &[DOWN]);
+        chord(&mut ed, &mut world, &[ENTER]);
+        let s = &ed.scripts[ed.active_script.unwrap()];
+        assert_eq!(s.path, Path::new("scripts/lamp.luau"));
+        assert_eq!(s.doc.primary().range(), (Pos::new(1, 7), Pos::new(1, 12)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_signature_shows_while_a_calls_arguments_are_typed() {
+        const SPACE: (u16, u16) = (0x20, 0x39);
+        let dir = project("script-signature");
+        std::fs::write(
+            dir.join("door.luau"),
+            "local function open(by: number, speed: number): boolean\n    return by > speed\nend\nlocal ok = open()\nreturn ok\n",
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.update(&mut world);
+        ed.open_script(&world, Path::new("door.luau"), None);
+        ed.update(&mut world);
+        // Between the parentheses, Ctrl+Shift+Space: the first argument.
+        ed.scripts[0].doc.place(Pos::new(3, 16), false, false);
+        chord(&mut ed, &mut world, &[CTRL, SHIFT, SPACE]);
+        wait_for(&mut ed, &mut world, |ed| ed.scripts[0].signature.is_some());
+        let (text, (a, b)) = ed.scripts[0].signature.clone().unwrap();
+        assert_eq!(text, "open(by: number, speed: number): boolean");
+        assert_eq!(&text[a..b], "by: number");
+        assert!(!texts(&ed, "by: number").is_empty(), "drawn above the line");
+        // A comma: the next argument.
+        chars(&mut ed, "1,");
+        wait_for(&mut ed, &mut world, |ed| {
+            ed.scripts[0]
+                .signature
+                .as_ref()
+                .is_some_and(|(t, (a, b))| &t[*a..*b] == "speed: number")
+        });
+        assert!(ed.scripts[0].signature.is_some());
+        // Escape closes it.
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert!(ed.scripts[0].signature.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

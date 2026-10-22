@@ -537,6 +537,9 @@ pub struct CodeView<'a> {
     pub completion: Option<CompletionView<'a>>,
     /// What the mouse rests on: its line, its column, and what it is.
     pub hover: Option<(usize, usize, &'a str)>,
+    /// The signature of the call the caret is in, above the caret: its line and column,
+    /// the text before the argument at the caret, that argument, and the rest.
+    pub signature: Option<(usize, usize, [&'a str; 3])>,
 }
 
 /// Everything the shell shows.
@@ -1249,6 +1252,26 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
                 y(list.line) + CODE_LINE + 2.0,
             ];
             completion_list(ui, list, at, p, &mut out.completion_row);
+        }
+        if let Some((line, column, [before, now, after])) = view.signature {
+            let above = if line > view.first {
+                -26.0
+            } else {
+                CODE_LINE + 4.0
+            };
+            let style = Style {
+                floating: Some([x(column as f32), y(line) + above]),
+                padding: [8.0, 3.0, 8.0, 3.0],
+                radius: 3.0,
+                background: Some(p.header),
+                border: Some((p.selection_dim, 1.0)),
+                ..Style::default()
+            };
+            ui.row("signature", style, |ui| {
+                ui.mono_text_node("before", Style::default(), before, CODE_TEXT, p.text_dim);
+                ui.mono_text_node("now", Style::default(), now, CODE_TEXT, p.accent);
+                ui.mono_text_node("after", Style::default(), after, CODE_TEXT, p.text_dim);
+            });
         }
         if let Some((line, column, what)) = view.hover {
             let above = if line > view.first {
