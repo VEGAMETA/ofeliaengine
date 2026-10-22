@@ -414,7 +414,7 @@ Last updated: 2026-10-22.
     after `.`, `:`, a word's first letter and Ctrl+Space, narrowed as the word grows,
     written with parentheses as one undo step; the mouse resting on a name shows its
     type.
-  - **The freed mouse** (#PR, ADR 0021's addendum): `DeviceFilter` filters the keyboard
+  - **The freed mouse** (#335, ADR 0021's addendum): `DeviceFilter` filters the keyboard
     and the mouse apart; a game whose mouse is freed (Shift+F1, paused) stops hearing it
     and keeps the keyboard, and `set_devices` lets go of what it stops hearing.
   - **Next:** E7 waits for the owner's answers to ADR 0114's questions. The code editor's
