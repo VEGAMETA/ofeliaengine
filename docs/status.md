@@ -335,7 +335,7 @@ Last updated: 2026-10-20.
     entities measured against their prefab (`PrefabBase`, cached per outermost instance
     until the prefab's file changes), names and assets too; ↺ and Backspace put the
     prefab's value back; "Prefab: Revert Overrides"; the title names the prefab.
-  - **E5-4, prefabs followed, overrides applied** (#PR, ADR 0108's as-built):
+  - **E5-4, prefabs followed, overrides applied** (#319, ADR 0108's as-built):
     - a prefab file written anew is followed by the open scene's instances, in place
       (references kept), keeping what they changed: values merged three ways against the
       base kept, entities and components it added placed, those it dropped gone; at Stop
