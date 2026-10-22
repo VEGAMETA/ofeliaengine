@@ -20,7 +20,10 @@ fn frames<G: Game>(
     n: usize,
 ) {
     for _ in 0..n {
-        player.frame_overlaid(game, Some(overlay)).unwrap();
+        // As the editor's own loop does: the frame's report for the profiler's panel.
+        if let Some(report) = player.frame_overlaid(game, Some(overlay)).unwrap() {
+            game.note_frame(&report, player);
+        }
         player.set_view_rect(game.view_rect());
     }
 }
@@ -94,6 +97,23 @@ fn the_output_shows_the_log_under_the_viewport() {
     assert!(game.run_command(player.world_mut(), "view.output"));
     frames(&mut player, &mut game, &mut overlay, 3);
     assert_eq!(game.view_rect().unwrap()[3], closed);
+    // The profiler's panel: the frames drawn since, their stages and the GPU's passes.
+    assert!(game.run_command(player.world_mut(), "view.profiler"));
+    frames(&mut player, &mut game, &mut overlay, 10);
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_PROFILER_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
     // The Tasks below and the History in the tree's place (`ENGINE_EDITOR_PANELS_PNG=<file>`).
     assert!(game.run_command(player.world_mut(), "view.tasks"));
     assert!(game.run_command(player.world_mut(), "view.history"));

@@ -188,6 +188,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         active_bottom: None,
         output: None,
         tasks: None,
+        profiler: None,
         history: None,
         playing: false,
         paused: false,

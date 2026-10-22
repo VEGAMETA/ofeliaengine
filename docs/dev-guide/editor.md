@@ -752,6 +752,18 @@ start (`log::warn!(target: "doors", "door {id} is stuck")`).
   current one highlighted, those undone below it dimmed, another tab's steps with their
   scene's name. A click goes back or forward to that step; `Start` takes back everything.
 
+## The profiler's panel
+
+The bottom bar's **Profiler** tab ("View: Profiler") shows how long the frames take:
+
+- the latest frame's CPU and GPU milliseconds;
+- a bar a frame for the last 120, those longer than a 60 Hz frame (16.7 ms) in yellow;
+- the costliest CPU stages (simulate, extract, record, submit, …) and GPU passes (shadows,
+  forward, bloom, …) of the latest frame, a pass that runs several times summed with its
+  count.
+
+For a whole timeline, run under Tracy with the profiling build ([profiling.md](profiling.md)).
+
 ## Scenes in tabs
 
 Several scenes open at once, each in a tab above the viewport (ADR 0107 §4), with Godot's
