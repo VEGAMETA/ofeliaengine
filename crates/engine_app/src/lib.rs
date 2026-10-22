@@ -64,6 +64,7 @@ pub mod bake;
 mod blockout;
 mod entry;
 mod game;
+mod loading;
 mod net;
 mod overlay;
 mod physics;

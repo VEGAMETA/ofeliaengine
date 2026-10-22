@@ -66,7 +66,9 @@ let mut player = Player::new(&PlayerSettings {
   the built-in material is `builtin::MATERIAL`. Your own materials are `.material` files
   ([scenes.md](scenes.md#materials)); meshes and materials can also be a glTF file's parts
   (`models/crate.glb#Crate`, [scenes.md](scenes.md#meshes-and-materials-from-gltf-files)).
-- **`player.load_scene(path)`** adds another scene to the world (a level, a room).
+- **`player.load_scene(path)`** adds another scene to the world (a level, a room); the
+  next frame waits until its assets are made. Models you add yourself load in the
+  background; `player.wait_for_assets()` makes the next frame wait for them too.
 - **`player.reload_asset(id)`** reads a file again after you wrote it anew: the models
   that use it are made again in the next frame.
 - **`player.open_view_window(title, width, height)`** draws the scene in a window of its own

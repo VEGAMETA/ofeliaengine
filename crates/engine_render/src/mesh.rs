@@ -868,6 +868,29 @@ impl GeometryPool {
         data: &MeshData<'_>,
         lods: &[LodIndices<'_>],
     ) -> Result<MeshId, MeshError> {
+        self.add_mesh_inner(data, lods, None)
+    }
+
+    /// Adds a mesh whose attributes were encoded ahead with [`encode_attributes`] (off the
+    /// frame's thread, where a loader made the mesh): as [`Self::add_mesh`], to the bit,
+    /// without the encoding.
+    pub fn add_mesh_with_attributes(
+        &mut self,
+        data: &MeshData<'_>,
+        attributes: &[VertexAttributes],
+    ) -> Result<MeshId, MeshError> {
+        if attributes.len() != data.positions.len() {
+            return Err(MeshError::MismatchedLengths);
+        }
+        self.add_mesh_inner(data, &[], Some(attributes))
+    }
+
+    fn add_mesh_inner(
+        &mut self,
+        data: &MeshData<'_>,
+        lods: &[LodIndices<'_>],
+        attributes: Option<&[VertexAttributes]>,
+    ) -> Result<MeshId, MeshError> {
         if lods.len() >= MAX_LODS {
             return Err(MeshError::TooManyLods);
         }
@@ -926,20 +949,10 @@ impl GeometryPool {
             staged_index: self.staged_indices.len() as u32,
         };
         self.staged_positions.extend_from_slice(data.positions);
-        self.staged_attributes
-            .extend((0..vertex_count as usize).map(|v| {
-                let normal = data.normals[v];
-                let tangent = data
-                    .tangents
-                    .get(v)
-                    .copied()
-                    .unwrap_or_else(|| any_tangent(Vec3::from(normal)).extend(1.0).to_array());
-                VertexAttributes {
-                    normal: encode_octahedral(normal),
-                    tangent: encode_tangent(tangent),
-                    uv: data.uvs.get(v).copied().unwrap_or([0.0; 2]),
-                }
-            }));
+        match attributes {
+            Some(attributes) => self.staged_attributes.extend_from_slice(attributes),
+            None => encode_attributes(data, &mut self.staged_attributes),
+        }
         let mut levels_info = [MeshLod::default(); MAX_LODS];
         let mut next = upload.first_index;
         // The levels' meshlets follow every level's indices, from a 32-byte boundary.

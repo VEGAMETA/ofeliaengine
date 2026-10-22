@@ -266,9 +266,16 @@ Last updated: 2026-10-20.
   - **Asked (2026-10-22):** meshes of several materials draw with their first. Two ways
     out: per-primitive parts, an entity each; or material slots on `Model`, one entity per
     mesh, as in Unity and Godot.
-  - **Next:** E4-4, the player's assets loaded in the background: glTF import, texture
-    decoding and mip levels off the frame's thread, uploads within a budget a frame
-    (today a large model stalls the frame where it first shows). Then E4-5, thumbnails.
+  - **E4-4, glTF files load in the background** (#PR, ADR 0108's as-built):
+    - a loading thread with a pool below normal priority reads and imports files, puts
+      meshes together (their vertices encoded too) and decodes textures with their mip
+      levels;
+    - models draw once their parts are made, and the frame after a scene is loaded waits
+      for it;
+    - FlightHelmet dropped while running: the worst frame went from 1,110 ms to 7 ms;
+    - mip levels 1.1–1.9× faster, to the bit (ADR 0040's addendum).
+  - **Next:** E4-5, thumbnails in the dock (offscreen renders of models and materials,
+    images as themselves, cached).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

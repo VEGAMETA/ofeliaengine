@@ -5819,6 +5819,8 @@ impl Editor {
         for m in &made {
             player.reload_asset(m.file);
         }
+        // The next frame waits for the files: the models show as the brushes go.
+        player.wait_for_assets();
         let world = player.world_mut();
         self.history.begin("Bake to Mesh", None);
         for m in &made {

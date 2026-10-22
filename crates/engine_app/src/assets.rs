@@ -22,12 +22,17 @@
 //!   emissive) are decoded on first use and kept uncompressed (RGBA8 with their levels);
 //!   textures the cooker compresses come with the asset browser (ADR 0107 E4). Shading
 //!   models from extensions (unlit, clearcoat, sheen) are plain PBR here.
+//! - **glTF files load in the background** (ADR 0108's E4-4, [`crate::loading`]): read,
+//!   imported, their meshes put together and their textures decoded off the frame's
+//!   thread. A model draws once its mesh and material are made; its material's textures
+//!   fill in as they come. The frame after a scene is loaded waits for its assets, so a
+//!   scene shows whole.
 //! - **The file's id** is its `.meta`'s ([`AssetMeta`]); a file without one is found by
 //!   its path alone.
 
+use crate::loading::{Done, Job, Loader};
 use engine_assets::{
-    ImportedScene, MaterialData, MeshData, TextureData, TextureUsage, TextureWrap, build_mips,
-    decode_image, read_texture,
+    ImportedScene, MaterialData, MeshData, TextureData, TextureImage, TextureUsage, TextureWrap,
 };
 use engine_ecs::{Changed, Entity, GlobalTransform, QueryState, With, Without, World};
 use engine_reflect::Reflect;
@@ -37,8 +42,9 @@ use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, Textu
 use engine_rhi::{Allocator, Bindless, Device, Wrap};
 use engine_runtime::MeshRenderer;
 use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, LoadError, ValueReport};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A mesh drawn with a material, both by asset (ADR 0108): what scenes and the editor hold.
 /// The player gives the entity a `MeshRenderer` with the mesh and material made from the
@@ -278,14 +284,14 @@ fn find_part<'a>(part: u64, names: impl Iterator<Item = &'a str>) -> Option<usiz
 
 /// A glTF file read for its parts: what the importer made of it, and the folder its
 /// external files are in.
-struct GltfFile {
-    scene: ImportedScene,
-    dir: PathBuf,
+pub(crate) struct GltfFile {
+    pub(crate) scene: ImportedScene,
+    pub(crate) dir: PathBuf,
 }
 
 /// glTF file `id` at `path` under `root`, its id checked against its `.meta` when it has
 /// one.
-fn open_gltf(root: &Path, path: &str, id: AssetId) -> Result<GltfFile, String> {
+pub(crate) fn open_gltf(root: &Path, path: &str, id: AssetId) -> Result<GltfFile, String> {
     let full = root.join(path);
     let meta = AssetMeta::path(&full);
     match std::fs::read_to_string(&meta) {
@@ -307,20 +313,6 @@ fn open_gltf(root: &Path, path: &str, id: AssetId) -> Result<GltfFile, String> {
     let scene =
         engine_assets::import_gltf(&bytes, Some(&dir)).map_err(|e| format!("{path}: {e}"))?;
     Ok(GltfFile { scene, dir })
-}
-
-/// glTF file `id` at `path`, read the first time a frame asks for it.
-fn gltf_file<'a>(
-    files: &'a mut HashMap<AssetId, Result<GltfFile, String>>,
-    root: &Path,
-    path: &str,
-    id: AssetId,
-) -> Result<&'a GltfFile, String> {
-    files
-        .entry(id)
-        .or_insert_with(|| open_gltf(root, path, id))
-        .as_ref()
-        .map_err(Clone::clone)
 }
 
 /// Which of a glTF's meshes part `part` is.
@@ -352,7 +344,7 @@ fn material_part(scene: &ImportedScene, part: u64) -> Result<usize, String> {
 /// A glTF mesh as one mesh: its primitives one after another. Texture coordinates and
 /// tangents are kept when any primitive has them (zero coordinates and +X tangents for
 /// those without).
-fn gltf_mesh(mesh: &MeshData) -> OwnedMeshData {
+pub(crate) fn gltf_mesh(mesh: &MeshData) -> OwnedMeshData {
     let mut data = OwnedMeshData::default();
     let uvs = mesh.primitives.iter().any(|p| !p.uvs.is_empty());
     let tangents = mesh.primitives.iter().any(|p| !p.tangents.is_empty());
@@ -383,9 +375,9 @@ fn gltf_mesh(mesh: &MeshData) -> OwnedMeshData {
 /// A texture of a glTF file as a material's slot uses it: the file, the texture, and its
 /// use, which decides how its levels are filtered (a mask's cutoff in bits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct TextureKey {
-    file: AssetId,
-    texture: usize,
+pub(crate) struct TextureKey {
+    pub(crate) file: AssetId,
+    pub(crate) texture: usize,
     usage: u8,
     cutoff: u32,
 }
@@ -406,7 +398,7 @@ impl TextureKey {
         }
     }
 
-    fn usage(self) -> TextureUsage {
+    pub(crate) fn usage(self) -> TextureUsage {
         match self.usage {
             0 => TextureUsage::Color,
             1 => TextureUsage::ColorMasked {
@@ -470,12 +462,20 @@ fn gltf_material(
     (desc, slots)
 }
 
-/// A texture to make once the device is at hand: its encoded image, and the file it is
-/// from (for what to say when it cannot be made).
-struct PendingTexture {
-    key: TextureKey,
-    bytes: Vec<u8>,
-    path: String,
+/// The longest a frame waits for its assets ([`Assets::sync`]'s `wait`).
+const WAIT_AT_MOST: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A glTF file as loading has it.
+enum GltfState {
+    /// Being read and imported.
+    Reading,
+    /// Read: parts are made from it while any is wanted, and it is let go a frame after
+    /// its last use (`used`, a frame number).
+    Read {
+        file: Arc<GltfFile>,
+        used: u64,
+    },
+    Failed(String),
 }
 
 /// A glTF material made without its textures, given them once they are made.
@@ -496,15 +496,28 @@ pub struct Assets {
     paths: AssetPaths,
     meshes: HashMap<AssetRef, MeshId>,
     materials: HashMap<AssetRef, MaterialId>,
-    /// glTF files read for their parts in this frame, by id: dropped at the end of
-    /// [`Self::sync`], the parts made from them kept.
-    files: HashMap<AssetId, Result<GltfFile, String>>,
+    /// glTF files by id: being read, read, or failed.
+    gltf: HashMap<AssetId, GltfState>,
+    /// The background's loading (E4-4), and its results taken this frame.
+    loader: Loader,
+    done: Vec<Done>,
+    /// Each file's generation, raised when it is read again ([`Self::reload`]): what was
+    /// made from an older one is dropped when it comes back.
+    generations: HashMap<AssetId, u32>,
+    /// Meshes and textures being made in the background.
+    building: HashSet<AssetRef>,
+    decoding: HashSet<TextureKey>,
+    /// Textures decoded, made where the device is at hand ([`Self::make_textures`]).
+    decoded: Vec<(TextureKey, Result<TextureImage, String>)>,
     /// glTF materials' textures, made or (`None`) failed.
     textures: HashMap<TextureKey, Option<TextureId>>,
-    /// Textures to make where the device is at hand ([`Self::make_textures`]).
-    pending_textures: Vec<PendingTexture>,
     /// glTF materials waiting for their textures.
     pending_materials: Vec<PendingMaterial>,
+    /// Models waiting for their meshes and materials, given renderers once those are made.
+    waiting: HashSet<Entity>,
+    retry: Vec<Entity>,
+    /// The frame of the last [`Self::sync`].
+    frame: u64,
     /// Parts of files read again ([`Self::reload`]), freed in the next frame: meshes and
     /// materials in [`Self::sync`], textures in [`Self::make_textures`].
     retired_meshes: Vec<MeshId>,
@@ -526,14 +539,22 @@ impl Assets {
             paths.insert(asset, format!("{}#{name}", builtin::PATH));
         }
         Self {
-            root,
+            root: root.clone(),
             paths,
             meshes: HashMap::new(),
             materials: HashMap::new(),
-            files: HashMap::new(),
+            gltf: HashMap::new(),
+            loader: Loader::new(root.clone()),
+            done: Vec::new(),
+            generations: HashMap::new(),
+            building: HashSet::new(),
+            decoding: HashSet::new(),
+            decoded: Vec::new(),
             textures: HashMap::new(),
-            pending_textures: Vec::new(),
             pending_materials: Vec::new(),
+            waiting: HashSet::new(),
+            retry: Vec::new(),
+            frame: 0,
             retired_meshes: Vec::new(),
             retired_materials: Vec::new(),
             retired_textures: Vec::new(),
@@ -593,9 +614,15 @@ impl Assets {
             }
             keep
         });
-        self.pending_textures.retain(|t| t.key.file != file);
+        let retired = &self.retired_materials;
+        self.pending_materials
+            .retain(|m| !retired.contains(&m.material));
+        *self.generations.entry(file).or_default() += 1;
+        self.building.retain(|a| a.file != file);
+        self.decoding.retain(|k| k.file != file);
+        self.decoded.retain(|(k, _)| k.file != file);
         self.problems.retain(|asset, _| asset.file != file);
-        self.files.remove(&file);
+        self.gltf.remove(&file);
         let mut models = QueryState::<(Entity, &Model)>::new(world);
         let using: Vec<Entity> = models
             .iter_readonly(world)
@@ -605,6 +632,26 @@ impl Assets {
         for e in using {
             world.mark_changed::<Model>(e);
         }
+    }
+
+    /// How many assets are still being made: files being read, meshes and textures being
+    /// made, and materials waiting for their textures.
+    pub fn loading(&self) -> usize {
+        let reading = self
+            .gltf
+            .values()
+            .filter(|s| matches!(s, GltfState::Reading))
+            .count();
+        reading
+            + self.building.len()
+            + self.decoding.len()
+            + self.decoded.len()
+            + self.pending_materials.len()
+    }
+
+    /// How many textures have been made from glTF files so far.
+    pub fn textures_made(&self) -> usize {
+        self.textures.values().filter(|t| t.is_some()).count()
     }
 
     fn fail(&mut self, asset: AssetRef, why: String) {
@@ -621,28 +668,50 @@ impl Assets {
         if asset.is_none() || self.problems.contains_key(&asset) {
             return None;
         }
-        let data = match builtin_mesh(asset) {
-            Some(data) => Ok(data),
-            None => match file_path(&self.paths, asset) {
-                Some(path) if is_gltf(path) => {
-                    gltf_file(&mut self.files, &self.root, path, asset.file).and_then(|file| {
-                        let k = mesh_part(&file.scene, asset.part)?;
-                        Ok(gltf_mesh(&file.scene.meshes[k]))
-                    })
-                }
-                Some(path) => Err(format!(
-                    "{path} is not a mesh: meshes are built in or in glTF files (.glb, .gltf)"
-                )),
-                None => Err(String::from("no path known for it")),
-            },
-        };
-        let data = match data {
-            Ok(data) => data,
-            Err(why) => {
-                self.fail(asset, why);
-                return None;
+        if self.building.contains(&asset) {
+            return None;
+        }
+        if let Some(data) = builtin_mesh(asset) {
+            return self.add_mesh(asset, &data, geometry);
+        }
+        // A glTF's: made in the background, once its file is read.
+        let given = match file_path(&self.paths, asset) {
+            Some(path) if is_gltf(path) => {
+                let path = path.to_owned();
+                self.gltf(asset.file, &path).and_then(|file| {
+                    let Some(file) = file else {
+                        return Ok(());
+                    };
+                    let mesh = mesh_part(&file.scene, asset.part)?;
+                    let generation = self.generation(asset.file);
+                    self.building.insert(asset);
+                    self.loader.give(Job::Mesh {
+                        asset,
+                        file,
+                        mesh,
+                        generation,
+                    });
+                    Ok(())
+                })
             }
+            Some(path) => Err(format!(
+                "{path} is not a mesh: meshes are built in or in glTF files (.glb, .gltf)"
+            )),
+            None => Err(String::from("no path known for it")),
         };
+        if let Err(why) = given {
+            self.fail(asset, why);
+        }
+        None
+    }
+
+    /// Mesh `asset` made from `data` in the geometry pool.
+    fn add_mesh(
+        &mut self,
+        asset: AssetRef,
+        data: &OwnedMeshData,
+        geometry: &mut GeometryPool,
+    ) -> Option<MeshId> {
         match geometry.add_mesh(&data.as_data()) {
             Ok(mesh) => {
                 self.meshes.insert(asset, mesh);
@@ -667,7 +736,7 @@ impl Assets {
         }
         if asset != builtin::MATERIAL && file_path(&self.paths, asset).is_some_and(is_gltf) {
             return match self.gltf_material(asset, table) {
-                Ok(material) => Some(material),
+                Ok(material) => material,
                 Err(why) => {
                     self.fail(asset, why);
                     None
@@ -692,36 +761,32 @@ impl Assets {
         }
     }
 
-    /// A glTF file's material, added without its textures: their encoded images are read
-    /// now, the textures made after the frame's stages.
+    /// A glTF file's material, once its file is read (none before): added without its
+    /// textures, which are decoded in the background and given to it as they are made.
     fn gltf_material(
         &mut self,
         asset: AssetRef,
         table: &mut MaterialTable,
-    ) -> Result<MaterialId, String> {
-        let path = file_path(&self.paths, asset).ok_or("no path known for it")?;
-        let file = gltf_file(&mut self.files, &self.root, path, asset.file)?;
+    ) -> Result<Option<MaterialId>, String> {
+        let path = file_path(&self.paths, asset)
+            .ok_or("no path known for it")?
+            .to_owned();
+        let Some(file) = self.gltf(asset.file, &path)? else {
+            return Ok(None);
+        };
         let k = material_part(&file.scene, asset.part)?;
         let (desc, slots) =
             gltf_material(asset.file, &file.scene.materials[k], &file.scene.textures);
+        let generation = self.generation(asset.file);
         for (key, _) in slots.iter().flatten() {
-            if self.textures.contains_key(key)
-                || self.pending_textures.iter().any(|t| t.key == *key)
-            {
+            if self.textures.contains_key(key) || !self.decoding.insert(*key) {
                 continue;
             }
-            let source = &file.scene.textures[key.texture].source;
-            match read_texture(source, Some(&file.dir)) {
-                Ok(bytes) => self.pending_textures.push(PendingTexture {
-                    key: *key,
-                    bytes,
-                    path: path.to_owned(),
-                }),
-                Err(e) => {
-                    log::warn!(target: "engine_app::assets", "{path}: texture {}: {e}", key.texture);
-                    self.textures.insert(*key, None);
-                }
-            }
+            self.loader.give(Job::Texture {
+                key: *key,
+                file: Arc::clone(&file),
+                generation,
+            });
         }
         let material = table.add(desc);
         self.materials.insert(asset, material);
@@ -732,7 +797,95 @@ impl Assets {
                 slots,
             });
         }
-        Ok(material)
+        Ok(Some(material))
+    }
+
+    /// glTF file `file` at `path` as loading has it: read (and marked used this frame),
+    /// not yet (its reading begun the first time), or failed.
+    fn gltf(&mut self, file: AssetId, path: &str) -> Result<Option<Arc<GltfFile>>, String> {
+        let frame = self.frame;
+        match self.gltf.get_mut(&file) {
+            Some(GltfState::Read { file, used }) => {
+                *used = frame;
+                Ok(Some(Arc::clone(file)))
+            }
+            Some(GltfState::Reading) => Ok(None),
+            Some(GltfState::Failed(why)) => Err(why.clone()),
+            None => {
+                let generation = self.generation(file);
+                self.gltf.insert(file, GltfState::Reading);
+                self.loader.give(Job::Import {
+                    file,
+                    path: path.to_owned(),
+                    generation,
+                });
+                Ok(None)
+            }
+        }
+    }
+
+    fn generation(&self, file: AssetId) -> u32 {
+        self.generations.get(&file).copied().unwrap_or(0)
+    }
+
+    /// The loader's results taken: files read, meshes made, textures decoded (made in
+    /// [`Self::make_textures`]). Waits a moment for one with `wait`. Whether any came.
+    fn take_done(&mut self, geometry: &mut GeometryPool, wait: bool) -> bool {
+        let mut done = core::mem::take(&mut self.done);
+        if wait {
+            self.loader.wait(&mut done);
+        } else {
+            self.loader.take(&mut done);
+        }
+        let came = !done.is_empty();
+        for result in done.drain(..) {
+            match result {
+                Done::Imported {
+                    file,
+                    generation,
+                    result,
+                } if generation == self.generation(file) => {
+                    let state = match result {
+                        Ok(read) => GltfState::Read {
+                            file: read,
+                            used: self.frame,
+                        },
+                        Err(why) => GltfState::Failed(why),
+                    };
+                    self.gltf.insert(file, state);
+                }
+                Done::Mesh {
+                    asset,
+                    generation,
+                    result,
+                } if generation == self.generation(asset.file) => {
+                    self.building.remove(&asset);
+                    let made = result.and_then(|(data, attributes)| {
+                        geometry
+                            .add_mesh_with_attributes(&data.as_data(), &attributes)
+                            .map_err(|e| e.to_string())
+                    });
+                    match made {
+                        Ok(mesh) => {
+                            self.meshes.insert(asset, mesh);
+                        }
+                        Err(why) => self.fail(asset, why),
+                    }
+                }
+                Done::Texture {
+                    key,
+                    generation,
+                    result,
+                } if generation == self.generation(key.file) => {
+                    self.decoding.remove(&key);
+                    self.decoded.push((key, result));
+                }
+                // From a file read again since.
+                _ => {}
+            }
+        }
+        self.done = done;
+        came
     }
 
     /// Makes the textures glTF materials made this frame use, and gives the materials
@@ -749,56 +902,66 @@ impl Assets {
         for texture in self.retired_textures.drain(..) {
             textures.remove(texture, retire.1, retire.0);
         }
-        if self.pending_materials.is_empty() && self.pending_textures.is_empty() {
+        if self.pending_materials.is_empty() && self.decoded.is_empty() {
             return;
         }
         engine_profiler::zone!("assets::make_textures");
-        for pending in self.pending_textures.drain(..) {
-            let made = decode_image(&pending.bytes)
-                .map_err(|e| e.to_string())
-                .and_then(|image| {
-                    let t = build_mips(&image, pending.key.usage());
-                    let levels = TextureLevels {
-                        width: t.width,
-                        height: t.height,
-                        format: if t.srgb {
-                            TextureFormat::Rgba8Srgb
-                        } else {
-                            TextureFormat::Rgba8Unorm
-                        },
-                        levels: t.levels,
-                    };
-                    textures
-                        .add(device, allocator, levels)
-                        .map_err(|e| e.to_string())
-                });
+        let decoded = !self.decoded.is_empty();
+        for (key, result) in self.decoded.drain(..) {
+            let made = result.and_then(|t| {
+                let levels = TextureLevels {
+                    width: t.width,
+                    height: t.height,
+                    format: if t.srgb {
+                        TextureFormat::Rgba8Srgb
+                    } else {
+                        TextureFormat::Rgba8Unorm
+                    },
+                    levels: t.levels,
+                };
+                textures
+                    .add(device, allocator, levels)
+                    .map_err(|e| e.to_string())
+            });
             let made = match made {
                 Ok(id) => Some(id),
                 Err(why) => {
-                    let (path, texture) = (pending.path, pending.key.texture);
+                    let path = self.paths.get(AssetRef::file(key.file)).unwrap_or("");
+                    let texture = key.texture;
                     log::warn!(target: "engine_app::assets", "{path}: texture {texture}: {why}");
                     None
                 }
             };
-            self.textures.insert(pending.key, made);
+            self.textures.insert(key, made);
         }
-        for pending in self.pending_materials.drain(..) {
+        // Materials given the textures made so far; one leaves the list once each of its
+        // slots is made or failed.
+        let made_so_far = &self.textures;
+        self.pending_materials.retain(|pending| {
             let made = |slot: Option<(TextureKey, [Wrap; 2])>| {
                 let (key, wrap) = slot?;
-                let texture = (*self.textures.get(&key)?)?;
+                let texture = (*made_so_far.get(&key)?)?;
                 Some(TextureRef { texture, wrap })
             };
-            let [color, metallic_roughness, normal, occlusion, emissive] = pending.slots;
-            let desc = MaterialDesc {
-                base_color_texture: made(color),
-                metallic_roughness_texture: made(metallic_roughness),
-                normal_texture: made(normal),
-                occlusion_texture: made(occlusion),
-                emissive_texture: made(emissive),
-                ..pending.desc
-            };
-            materials.set(pending.material, desc);
-        }
+            let settled = pending
+                .slots
+                .iter()
+                .flatten()
+                .all(|(key, _)| made_so_far.contains_key(key));
+            if decoded || settled {
+                let [color, metallic_roughness, normal, occlusion, emissive] = pending.slots;
+                let desc = MaterialDesc {
+                    base_color_texture: made(color),
+                    metallic_roughness_texture: made(metallic_roughness),
+                    normal_texture: made(normal),
+                    occlusion_texture: made(occlusion),
+                    emissive_texture: made(emissive),
+                    ..pending.desc
+                };
+                materials.set(pending.material, desc);
+            }
+            !settled
+        });
     }
 
     fn read_material(&self, asset: AssetRef) -> Result<MaterialFile, String> {
@@ -838,46 +1001,58 @@ impl Assets {
         geometry: &mut GeometryPool,
         materials: &mut MaterialTable,
         frame: u64,
+        wait: bool,
     ) {
+        self.frame = frame;
         for mesh in self.retired_meshes.drain(..) {
             geometry.remove_mesh(mesh, frame);
         }
         for material in self.retired_materials.drain(..) {
             materials.remove(material);
         }
+        let mut came = self.take_done(geometry, false);
         let changes = self.changes.get_or_insert_with(|| QueryState::new(world));
         self.changed.clear();
         self.changed
             .extend(changes.iter_readonly(world).map(|(e, model)| (e, *model)));
         for i in 0..self.changed.len() {
             let (e, model) = self.changed[i];
-            let mesh = self.mesh(model.mesh, geometry);
-            let material = self.material(model.material, materials);
-            match (mesh, material) {
-                (Some(mesh), Some(material)) => {
-                    let renderer = MeshRenderer {
-                        mesh,
-                        material,
-                        visible: u32::from(!model.hidden),
-                    };
-                    if world.get::<MeshRenderer>(e) != Some(&renderer) {
-                        world.insert(e, renderer);
-                    }
-                    if world.get::<FromModel>(e).is_none() {
-                        world.insert(e, FromModel);
-                        // Drawn where its transform puts it: a model spawned with a
-                        // `Transform` alone gets the world transform propagation fills.
-                        if world.get::<GlobalTransform>(e).is_none() {
-                            world.insert(e, GlobalTransform::IDENTITY);
-                        }
-                    }
-                }
-                _ => {
-                    if world.remove::<FromModel>(e).is_some() {
-                        world.remove::<MeshRenderer>(e);
+            if self.give_renderer(world, e, model, geometry, materials) {
+                self.waiting.remove(&e);
+            } else {
+                self.waiting.insert(e);
+            }
+        }
+        let since = std::time::Instant::now();
+        loop {
+            // The models waiting, again once something came back.
+            if came && !self.waiting.is_empty() {
+                self.retry.clear();
+                self.retry.extend(self.waiting.drain());
+                // In the entities' order, so materials are numbered the same each run.
+                self.retry.sort_unstable_by_key(|e| e.to_bits());
+                for i in 0..self.retry.len() {
+                    let e = self.retry[i];
+                    if let Some(model) = world.get::<Model>(e).copied()
+                        && !self.give_renderer(world, e, model, geometry, materials)
+                    {
+                        self.waiting.insert(e);
                     }
                 }
             }
+            // The frame after a scene was loaded waits for its assets, up to a point.
+            if !wait || !self.loader.busy() {
+                break;
+            }
+            if since.elapsed() > WAIT_AT_MOST {
+                log::warn!(
+                    target: "engine_app::assets",
+                    "assets still loading after {} s: the frame goes on, they come later",
+                    WAIT_AT_MOST.as_secs()
+                );
+                break;
+            }
+            came = self.take_done(geometry, true);
         }
         let orphans = self.orphans.get_or_insert_with(|| QueryState::new(world));
         self.gone.clear();
@@ -885,9 +1060,60 @@ impl Assets {
         for &e in &self.gone {
             world.remove::<FromModel>(e);
             world.remove::<MeshRenderer>(e);
+            self.waiting.remove(&e);
         }
-        // The glTF files read this frame: their parts are made.
-        self.files.clear();
+        // Files no part is made from any more: let go a frame on (their parts kept).
+        if !self.gltf.is_empty() {
+            self.gltf.retain(|_, state| match state {
+                GltfState::Read { used, .. } => *used + 1 >= frame,
+                GltfState::Reading | GltfState::Failed(_) => true,
+            });
+        }
+    }
+
+    /// Entity `e`'s renderer from its model: given, or taken away while its mesh or
+    /// material cannot be had. False while one is still being made (the model waits).
+    fn give_renderer(
+        &mut self,
+        world: &mut World,
+        e: Entity,
+        model: Model,
+        geometry: &mut GeometryPool,
+        materials: &mut MaterialTable,
+    ) -> bool {
+        let mesh = self.mesh(model.mesh, geometry);
+        let material = self.material(model.material, materials);
+        match (mesh, material) {
+            (Some(mesh), Some(material)) => {
+                let renderer = MeshRenderer {
+                    mesh,
+                    material,
+                    visible: u32::from(!model.hidden),
+                };
+                if world.get::<MeshRenderer>(e) != Some(&renderer) {
+                    world.insert(e, renderer);
+                }
+                if world.get::<FromModel>(e).is_none() {
+                    world.insert(e, FromModel);
+                    // Drawn where its transform puts it: a model spawned with a
+                    // `Transform` alone gets the world transform propagation fills.
+                    if world.get::<GlobalTransform>(e).is_none() {
+                        world.insert(e, GlobalTransform::IDENTITY);
+                    }
+                }
+                true
+            }
+            (mesh, material) => {
+                if world.remove::<FromModel>(e).is_some() {
+                    world.remove::<MeshRenderer>(e);
+                }
+                // Still to come unless it failed.
+                let coming = |made: bool, asset: AssetRef| {
+                    !made && !asset.is_none() && !self.problems.contains_key(&asset)
+                };
+                !(coming(mesh.is_some(), model.mesh) || coming(material.is_some(), model.material))
+            }
+        }
     }
 }
 
@@ -1097,8 +1323,8 @@ mod tests {
         let meshes: Vec<OwnedMeshData> = scene.meshes.iter().map(gltf_mesh).collect();
         let merge = t.elapsed();
         let t = std::time::Instant::now();
-        let image = decode_image(&png).unwrap();
-        let levels = build_mips(&image, TextureUsage::Color);
+        let image = engine_assets::decode_image(&png).unwrap();
+        let levels = engine_assets::build_mips(&image, TextureUsage::Color);
         let texture = t.elapsed();
         let triangles: usize = meshes.iter().map(|m| m.indices.len() / 3).sum();
         println!(
