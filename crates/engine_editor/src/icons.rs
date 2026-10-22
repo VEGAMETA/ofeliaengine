@@ -31,6 +31,8 @@ pub const FOLDER_OPEN: &str = "\u{F0770}";
 pub const SCENE: &str = "\u{F0FCE}";
 /// Luau script (`md-language_lua`).
 pub const SCRIPT: &str = "\u{F08B1}";
+/// Slang module (`md-file_code`).
+pub const SHADER: &str = "\u{F022E}";
 /// Texture (`md-image`).
 pub const TEXTURE: &str = "\u{F02E9}";
 /// A model's file (`md-shape`): the icon a model has everywhere.

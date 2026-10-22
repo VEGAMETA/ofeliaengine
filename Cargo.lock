@@ -468,6 +468,7 @@ dependencies = [
  "engine_runtime",
  "engine_save",
  "engine_scene",
+ "engine_shader",
  "engine_text",
  "engine_ui",
  "log",

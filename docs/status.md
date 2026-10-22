@@ -438,8 +438,16 @@ Last updated: 2026-10-22.
     240 Hz, 4,463 µs frames against 2,003 uncapped), and as far over it with vsync, a
     backstop for a display that does not pace. `FrameCap`, `Player::set_frame_cap`; the
     cap follows the window to another monitor.
-  - **Next:** E7 waits for the owner's answers to ADR 0114's questions, and E10-1 for the
-    answer on the material file.
+  - **E10-2a, Slang in the code editor** (#339, ADR 0107's as-built; research
+    `docs/research/slang-in-the-editor.md`): `.slang` files are assets
+    (`AssetKind::Shader`) and open in code tabs, with Slang's lexical colors. Slang's
+    front end checks a tab as it is typed (`Compiler::check_source`): a material type
+    inside `forward.slang`, as it compiles. A misspelt field shows at its place 0.28 s
+    after typing.
+  - **Next:** E10-2b, completion, hover and definitions in Slang through `slangd`. A
+    material type must first be readable alone: the engine's material API as a module
+    that types import, its registers measured. E7 waits for the owner's answers to ADR
+    0114's questions, and E10-1 for the answer on the material file.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

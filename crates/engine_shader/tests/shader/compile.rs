@@ -8,7 +8,7 @@ use common::{slang, temp_dir};
 
 use engine_shader::{
     CacheOutcome, CompileOptions, Compiler, CompilerPool, EntryPoint, ShaderCache, ShaderError,
-    Stage,
+    Stage, findings,
 };
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -95,6 +95,53 @@ fn compiles_the_bootstrap_triangle_and_matches_the_committed_spirv() {
     } else {
         println!("not comparing with committed SPIR-V (made with Slang 2026.18.3)");
     }
+}
+
+#[test]
+fn a_check_finds_errors_by_line_and_column_in_text_not_yet_saved() {
+    let Some(library) = slang() else { return };
+    let dir = temp_dir("check");
+    let path = dir.join("tint.slang");
+    // On disk the module is clean; the text checked has two mistakes, after a tab and an
+    // accented letter (columns are in characters).
+    std::fs::write(&path, "struct P { float a; };\n").unwrap();
+    let text = "struct P { float a; };\n\tfloat f(P p) { return p.b; }\nfloat g(P p) { /* é */ return p.c; }\n";
+    let mut compiler = Compiler::new(library).unwrap();
+    let t = Instant::now();
+    let found = compiler.check_source(&path, text, &CompileOptions::default());
+    println!(
+        "checked in {:.1} ms: {found:#?}",
+        t.elapsed().as_secs_f64() * 1e3
+    );
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert!(found.iter().all(|f| f.error && f.code == "E30027"));
+    assert!(found[0].path.ends_with("tint.slang"), "{}", found[0].path);
+    assert_eq!((found[0].start, found[0].end), ((2, 26), (2, 27)));
+    assert_eq!(found[0].message, "'b' is not a member of 'P'.");
+    assert_eq!(found[1].start, (3, 33));
+    // Clean text: nothing.
+    let clean = compiler.check_source(
+        &path,
+        "struct P { float a; };\n",
+        &CompileOptions::default(),
+    );
+    assert!(clean.is_empty(), "{clean:#?}");
+}
+
+#[test]
+fn machine_readable_diagnostics_become_findings_with_their_details() {
+    let text = "E30027\terror\tC:/p/a.slang\t4\t17\t4\t25\tmember not found\r\n\
+                E30027\tspan\tC:/p/a.slang\t4\t17\t4\t25\t'roughnes' is not a member of 'Params'.\r\n\
+                E39019\twarning\tC:/p/b.slang\t2\t1\t2\t5\timplicit conversion\n\
+                1 error generated\n";
+    let found = findings(text);
+    assert_eq!(found.len(), 2);
+    assert_eq!(found[0].message, "'roughnes' is not a member of 'Params'.");
+    assert_eq!((found[0].start, found[0].end), ((4, 17), (4, 25)));
+    assert!(found[0].error);
+    assert_eq!(found[1].path, "C:/p/b.slang");
+    assert_eq!(found[1].message, "implicit conversion");
+    assert!(!found[1].error);
 }
 
 #[test]
