@@ -274,10 +274,13 @@ Last updated: 2026-10-20.
       for it;
     - FlightHelmet dropped while running: the worst frame went from 1,110 ms to 7 ms;
     - mip levels 1.1–1.9× faster, to the bit (ADR 0040's addendum).
-  - **Next:** E4-5, assets read again when their files change (the database's scan
-    names them; a model keeps its old version until the new one is made; a texture file
-    reloads the glTF files that use it). Then E4-6, thumbnails (the UI needs an image
-    command, models an offscreen view).
+  - **E4-5, files written anew are made again** (#308, ADR 0108's as-built):
+    - the database's scan names them, and the editor tells the player
+      (`Player::asset_changed`);
+    - the old version is drawn until the new one is whole (a material with its textures);
+    - an image makes the glTF files that read it again.
+  - **Next:** E4-6, thumbnails in the dock (the UI needs an image command, models an
+    offscreen view).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

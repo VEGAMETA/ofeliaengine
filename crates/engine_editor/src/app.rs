@@ -1400,6 +1400,8 @@ struct Editor {
     browser: Browser,
     /// A file dragged out of the browser (E4-3).
     asset_drag: Option<AssetDrag>,
+    /// Asset files written anew since the player was told (E4-5): made again.
+    changed_assets: Vec<AssetId>,
     /// Asset paths of a scene the editor loaded, for the player (`sync_assets`).
     pending_assets: AssetPaths,
     history: History,
@@ -1859,6 +1861,7 @@ impl Editor {
             assets_changed: None,
             browser: Browser::default(),
             asset_drag: None,
+            changed_assets: Vec::new(),
             pending_assets: AssetPaths::new(),
             history: History::new(),
             commands,
@@ -6728,6 +6731,12 @@ impl Editor {
         if report.read == 0 && report.gone == 0 {
             return;
         }
+        // Files written anew: what the player made from them is made again.
+        for id in report.changed {
+            if !self.changed_assets.contains(&id) {
+                self.changed_assets.push(id);
+            }
+        }
         if let Err(e) = self.asset_db.save() {
             log::warn!(target: "engine_editor", "the asset index: {e}");
         }
@@ -8295,6 +8304,13 @@ impl<G> EditorGame<G> {
         let paths = player.assets().paths();
         if shared.assets.len() != paths.len() {
             shared.assets = paths.clone();
+        }
+        // Files written anew (E4-5): made again, the old versions drawn until then.
+        for id in core::mem::take(&mut shared.changed_assets) {
+            if let Some(entry) = shared.asset_db.get(id) {
+                let path = entry.path.clone();
+                player.asset_changed(id, &path);
+            }
         }
         // Groups baked (E2b-6): their files written and read, their models in place.
         if !shared.bake_groups.is_empty() {

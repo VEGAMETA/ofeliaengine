@@ -310,6 +310,34 @@ fn a_model_dragged_from_the_browser_rests_on_the_floor_and_draws() {
     assert_eq!(player.assets().problem(model.mesh), None);
     assert_eq!(player.assets().problem(model.material), None);
     assert_eq!(game.selection(), [e]);
+    // The file written anew outside the editor (a re-export): seen by the folder's
+    // watcher, made again, drawn as it was until the new one is whole.
+    let before = *player
+        .world_mut()
+        .get::<engine_runtime::MeshRenderer>(e)
+        .unwrap();
+    let mut taller = box_brush();
+    for p in &mut taller.positions {
+        p[1] *= 2.0;
+    }
+    let again = engine_app::bake::glb("crate", &[taller], &engine_app::grid_png());
+    std::fs::write(dir.join("props/crate.glb"), again.bytes).unwrap();
+    let started = Instant::now();
+    loop {
+        frame(&mut player, &mut game, &mut overlay);
+        let r = player
+            .world_mut()
+            .get::<engine_runtime::MeshRenderer>(e)
+            .copied()
+            .expect("drawn while it is made again");
+        if r.mesh != before.mesh && player.assets().loading() == 0 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "made again from the new file"
+        );
+    }
     if let Ok(path) = std::env::var("ENGINE_EDITOR_DROP_PNG") {
         let rgba = player
             .capture_overlaid(&mut game, Some(&mut overlay))

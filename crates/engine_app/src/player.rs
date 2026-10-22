@@ -1304,6 +1304,14 @@ impl Player {
         self.assets.reload(&mut self.runtime.world, file);
     }
 
+    /// Asset file `file` at `path` (under the project) was written anew, as a watcher of
+    /// the folder sees it ([`crate::Assets::changed`]): what was made from it is made again
+    /// in the background, the old version drawn until the new one is whole; an image makes
+    /// the glTF files that use it again.
+    pub fn asset_changed(&mut self, file: engine_scene::AssetId, path: &str) {
+        self.assets.changed(&mut self.runtime.world, file, path);
+    }
+
     /// The blockout brushes' meshes (ADR 0110).
     pub fn blockout(&self) -> &crate::Blockout {
         &self.blockout
