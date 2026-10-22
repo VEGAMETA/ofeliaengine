@@ -274,7 +274,7 @@ Last updated: 2026-10-20.
       for it;
     - FlightHelmet dropped while running: the worst frame went from 1,110 ms to 7 ms;
     - mip levels 1.1–1.9× faster, to the bit (ADR 0040's addendum).
-  - **E4-5, files written anew are made again** (#PR, ADR 0108's as-built):
+  - **E4-5, files written anew are made again** (#308, ADR 0108's as-built):
     - the database's scan names them, and the editor tells the player
       (`Player::asset_changed`);
     - the old version is drawn until the new one is whole (a material with its textures);
