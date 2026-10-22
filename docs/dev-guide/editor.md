@@ -129,6 +129,7 @@ editor = ["dep:engine_editor"]
 | Snap by default, or not (Y is an axis in a keyboard transform) | G (Blender's keys: Shift+Tab; Godot's: Y) |
 | Rename the active entity | F2 |
 | The command palette | Ctrl+Shift+P |
+| The Output (the engine's and your game's log), open or closed | Ctrl+J |
 | Go to a scene object (the palette with `@`) | Ctrl+P |
 | Find an asset (the palette with `#`) | Ctrl+Shift+P, then `#` |
 | Rename the picked file (after a click in the FileSystem dock) | F2 |
@@ -716,6 +717,21 @@ room.
   change them, its new entities and components, and lose what it no longer has where they
   kept it as it was. What they changed stays theirs. While the scene plays, this waits
   for Stop.
+
+## The Output
+
+**Ctrl+J** (or the Output tab in the bottom bar) opens the log under the viewport. It holds
+what the engine and your game log through the `log` crate's macros, from the editor's
+start (`log::warn!(target: "doors", "door {id} is stuck")`).
+
+- **Each level's toggle** in its header shows how many came: errors, warnings, information,
+  and debugging (off until you turn it on). The filter keeps the rows whose target or
+  message holds what you type.
+- **A message that comes again** folds into its row, with a count (×30): an error each
+  frame takes one row.
+- **A line marks each Play's start.** Follow keeps the newest row in view, and Clear empties
+  the panel.
+- **The tab** says how many errors came, even while the panel is closed.
 
 ## Scenes in tabs
 
