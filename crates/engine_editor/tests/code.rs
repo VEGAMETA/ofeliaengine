@@ -1,6 +1,6 @@
 //! A script's tab on the player (ADR 0107 E8-1b): the session brings the tab back, its
 //! code draws where the viewport is, and keys edit it. `ENGINE_EDITOR_CODE_PNG=<file>`
-//! writes the frame.
+//! writes the frame; `ENGINE_EDITOR_FIND_PNG=<file>` the find bar's (E8-2).
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -35,6 +35,39 @@ end
 
 return Door
 ";
+
+fn typed<G: Game>(game: &mut engine_editor::EditorGame<G>, text: &str) {
+    for c in text.chars() {
+        game.event(&WindowEvent {
+            window: WindowId(0),
+            time: Instant::now(),
+            kind: WindowEventKind::Char(c),
+        });
+    }
+}
+
+fn write_png(
+    player: &mut Player,
+    game: &mut engine_editor::EditorGame<NoGame>,
+    overlay: &mut engine_editor::EditorOverlay,
+    var: &str,
+) {
+    if let Ok(path) = std::env::var(var) {
+        let extent = player.extent();
+        let rgba = player
+            .capture_overlaid(game, Some(overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+}
 
 fn key<G: Game>(game: &mut engine_editor::EditorGame<G>, vk: u16, scancode: u16, down: bool) {
     let extended = matches!(vk, 0x25..=0x28);
@@ -109,20 +142,37 @@ fn a_scripts_tab_draws_its_code_where_the_viewport_is() {
     frame(&mut player, &mut game);
     let said = game.message().unwrap_or_default();
     assert!(!said.contains("could not"), "{said}");
-    if let Ok(path) = std::env::var("ENGINE_EDITOR_CODE_PNG") {
-        let rgba = player
-            .capture_overlaid(&mut game, Some(&mut overlay))
-            .unwrap()
+    write_png(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        "ENGINE_EDITOR_CODE_PNG",
+    );
+    // The find bar, replacing: every `angle` lit, the one it is on more.
+    assert!(game.run_command(player.world_mut(), "code.replace"));
+    for _ in 0..2 {
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
             .unwrap();
-        let png = engine_render::png::encode_png(
-            width,
-            height,
-            engine_render::png::PngFormat::Rgba,
-            &rgba,
-        )
-        .unwrap();
-        std::fs::write(path, png).unwrap();
     }
+    assert!(game.run_command(player.world_mut(), "code.find"));
+    for _ in 0..2 {
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
+            .unwrap();
+    }
+    typed(&mut game, "angle");
+    for _ in 0..3 {
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
+            .unwrap();
+    }
+    write_png(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        "ENGINE_EDITOR_FIND_PNG",
+    );
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

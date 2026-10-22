@@ -153,6 +153,9 @@ const FIRST_BRUSH: usize = 9;
 
 /// Where the scene tree's keys apply: after a click in it.
 const TREE_KEYS: KeyContext = KeyContext::Panel(1);
+/// The keys of a script's tab (E8-2): its find bar and going to a line, over the
+/// editor's own (Ctrl+H hollows a brush elsewhere).
+const CODE_KEYS: KeyContext = KeyContext::Panel(2);
 
 /// What a part shows while the selected entities hold different values there.
 const MIXED: &str = "—";
@@ -582,6 +585,11 @@ struct CommandIds {
     /// Scenes in tabs (E5-5a): open, new, close, reopen, the next and previous tab.
     open_scene: CommandId,
     open_script: CommandId,
+    code_find: CommandId,
+    code_replace: CommandId,
+    find_next: CommandId,
+    find_previous: CommandId,
+    go_to_line: CommandId,
     new_scene: CommandId,
     close_scene: CommandId,
     reopen_scene: CommandId,
@@ -699,6 +707,11 @@ fn commands() -> (Commands, CommandIds) {
         save: c.register("file.save", "File", "Save Scene"),
         open_scene: c.register("file.open", "File", "Open Scene…"),
         open_script: c.register("file.open_script", "File", "Open Script…"),
+        code_find: c.register("code.find", "Code", "Find"),
+        code_replace: c.register("code.replace", "Code", "Replace"),
+        find_next: c.register("code.find_next", "Code", "Find Next"),
+        find_previous: c.register("code.find_previous", "Code", "Find Previous"),
+        go_to_line: c.register("code.go_to_line", "Code", "Go to Line…"),
         new_scene: c.register("file.new", "File", "New Scene"),
         close_scene: c.register("file.close", "File", "Close Tab"),
         reopen_scene: c.register("file.reopen", "File", "Reopen Closed Scene"),
@@ -923,7 +936,16 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         .into_iter()
         .chain(preset_keys.iter().copied())
         .map(|(chord, id)| (chord, id, KeyContext::Global));
-    for (chord, id, context) in global.chain(tree) {
+    // VS Code's, in a script's tab.
+    let code = [
+        ("Ctrl+F", ids.code_find),
+        ("Ctrl+H", ids.code_replace),
+        ("F3", ids.find_next),
+        ("Shift+F3", ids.find_previous),
+        ("Ctrl+G", ids.go_to_line),
+    ]
+    .map(|(chord, id)| (chord, id, CODE_KEYS));
+    for (chord, id, context) in global.chain(tree).chain(code) {
         if let Some(chord) = Chord::parse(chord) {
             let _ = keymap.bind(chord, context, id);
             shortcuts.entry(id).or_insert_with(|| chord.to_string());
@@ -1362,9 +1384,18 @@ struct CommandPalette {
     /// A scene picked here opens in a tab ("File: Open Scene…"), instead of being shown in
     /// the dock.
     opens: bool,
+    /// After `:`: the line (and column, from 1) of the shown script to go to, and the row
+    /// that says so.
+    line: Option<(usize, usize)>,
+    line_label: String,
 }
 
 impl CommandPalette {
+    /// Whether the query names a line of the shown script (`:`, Ctrl+G).
+    fn goes_to_line(&self) -> bool {
+        self.choices.is_none() && self.query.trim_start().starts_with(':')
+    }
+
     /// Whether the query looks for the scene's objects (`@`) rather than commands.
     fn finds_objects(&self) -> bool {
         self.choices.is_none() && self.query.trim_start().starts_with('@')
@@ -1381,6 +1412,8 @@ impl CommandPalette {
             choices.shown.len()
         } else if self.finds_objects() {
             self.objects.len()
+        } else if self.goes_to_line() {
+            usize::from(!self.line_label.is_empty())
         } else if self.finds_assets() {
             self.assets.len()
         } else {
@@ -1493,6 +1526,9 @@ struct Editor {
     /// The last press in the code: where, when, and how many came in a row (a double
     /// click selects a word, a triple one its line).
     code_clicks: Option<(Pos, Instant, u8)>,
+    /// The find bar's field to give the keys to at its next frame: the query's (`false`)
+    /// or the replacement's (Ctrl+H).
+    find_focus: Option<bool>,
     /// The mouse went down in the code and is held: it selects as it moves.
     code_drag: bool,
     /// The shown script's view, made before the UI's frame.
@@ -1838,6 +1874,10 @@ struct CodeShown {
     gutter: f32,
     selections: Vec<(usize, usize, usize, bool)>,
     carets: Vec<(usize, usize)>,
+    /// The find bar's matches in view (a line, its columns, whether it is the current
+    /// one), and its count.
+    matches: Vec<(usize, usize, usize, bool)>,
+    count: String,
     place: String,
     path: String,
 }
@@ -2153,6 +2193,7 @@ impl Editor {
             caret_since: Instant::now(),
             code_clicks: None,
             code_drag: false,
+            find_focus: None,
             code_shown: CodeShown::default(),
             scripts_checked: Instant::now(),
             output: crate::output::Output::new(),
@@ -3225,6 +3266,14 @@ impl Editor {
                         category: 0,
                         detail: kind,
                     }
+                } else if cp.goes_to_line() {
+                    PaletteRow {
+                        icon: icons::SCRIPT,
+                        label: &cp.line_label,
+                        matched: &[],
+                        category: 0,
+                        detail: "",
+                    }
                 } else if cp.finds_assets() {
                     let found = cp.assets[i];
                     let entry = self.asset_db.get(found.id);
@@ -3413,6 +3462,16 @@ impl Editor {
             carets: &shown.carets,
             blink,
             current: s.doc.primary().head.line,
+            find: s.find.as_ref().map(|f| crate::shell::FindView {
+                query: &f.query,
+                replace: f.replacing.then_some(f.replace.as_str()),
+                count: &shown.count,
+                case: f.case,
+                word: f.word,
+                focus: self.find_focus == Some(false),
+                focus_replace: self.find_focus == Some(true),
+            }),
+            matches: &shown.matches,
         });
         let model = ShellModel {
             scenes: &scenes,
@@ -3542,6 +3601,8 @@ impl Editor {
         } else if let Some(k) = response.script_tab {
             self.show_script(world, k);
         }
+        self.find_focus = None;
+        self.find_frame(&response);
         if response.open_prefab {
             self.run(world, self.ids.open_prefab);
         }
@@ -3761,7 +3822,19 @@ impl Editor {
         // The shortcuts; while a field is typed in, only saving (the keys are the field's),
         // and none while the right button flies the camera (the letters are the flight's).
         let typing_text = self.ui.editing().is_some();
-        let contexts: &[KeyContext] = if self.tree_focus { &[TREE_KEYS] } else { &[] };
+        // A script shown: its code's keys (Ctrl+F, F3, Ctrl+G) before the editor's.
+        let contexts: &[KeyContext] = match (self.tree_focus, self.active_script.is_some()) {
+            (true, true) => &[TREE_KEYS, CODE_KEYS],
+            (true, false) => &[TREE_KEYS],
+            (false, true) => &[CODE_KEYS],
+            (false, false) => &[],
+        };
+        // F3 goes on finding while the find bar's field has the keys, and Ctrl+F and Ctrl+H
+        // go from one of its fields to the other.
+        let finding = self
+            .active_script
+            .and_then(|k| self.scripts.get(k))
+            .is_some_and(|s| s.find.is_some());
         let chords = if self.flying() {
             0
         } else {
@@ -3775,7 +3848,16 @@ impl Editor {
                 continue;
             }
             if let Some(id) = self.keymap.lookup(chord, contexts)
-                && (!typing_text || id == self.ids.save)
+                && (!typing_text
+                    || id == self.ids.save
+                    || (finding
+                        && [
+                            self.ids.find_next,
+                            self.ids.find_previous,
+                            self.ids.code_find,
+                            self.ids.code_replace,
+                        ]
+                        .contains(&id)))
                 && (!coding || self.editor_command(id))
             {
                 self.run(world, id);
@@ -4410,6 +4492,34 @@ impl Editor {
                     path(a).cmp(path(b))
                 })
             });
+        } else if let Some(text) = query.strip_prefix(':') {
+            // `:12` or `:12:5`, as VS Code's Ctrl+G reads them.
+            cp.commands.clear();
+            cp.line_label.clear();
+            let mut parts = text.trim().splitn(2, [':', ',']);
+            let line = parts.next().and_then(|s| s.trim().parse::<usize>().ok());
+            let column = parts.next().and_then(|s| s.trim().parse::<usize>().ok());
+            let lines = self
+                .active_script
+                .and_then(|k| self.scripts.get(k))
+                .map(|s| s.doc.line_count());
+            cp.line = None;
+            match (line, lines) {
+                (_, None) => cp
+                    .line_label
+                    .push_str("Going to a line works in a script's tab"),
+                (None, Some(n)) => {
+                    let _ = write!(cp.line_label, "Type a line number, 1 to {n}");
+                }
+                (Some(line), Some(n)) => {
+                    let line = line.clamp(1, n);
+                    let _ = write!(cp.line_label, "Go to line {line} of {n}");
+                    if let Some(column) = column {
+                        let _ = write!(cp.line_label, ", column {column}");
+                    }
+                    cp.line = Some((line, column.unwrap_or(1)));
+                }
+            }
         } else {
             let query = query.strip_prefix('>').unwrap_or(query);
             self.commands.search(query, &mut cp.commands);
@@ -4477,6 +4587,10 @@ impl Editor {
                         }
                         (Some(found), None) => self.reveal_asset(found.id),
                         (None, _) => {}
+                    }
+                } else if cp.goes_to_line() {
+                    if let Some((line, column)) = cp.line {
+                        self.go_to_line(line, column);
                     }
                 } else if let Some(m) = cp.commands.get(i) {
                     self.run(world, m.id);
@@ -7004,6 +7118,11 @@ impl Editor {
             ids.step,
             ids.eject,
             ids.game_mouse,
+            ids.code_find,
+            ids.code_replace,
+            ids.find_next,
+            ids.find_previous,
+            ids.go_to_line,
         ]
         .contains(&id)
     }
@@ -7044,6 +7163,13 @@ impl Editor {
                     Stroke::Char(c) => {
                         script.doc.type_text(c.encode_utf8(&mut bytes));
                         Effect::Edited
+                    }
+                    // Escape closes the find bar first, as in VS Code.
+                    Stroke::Key(chord)
+                        if chord == Chord::key(Key::Escape) && script.find.is_some() =>
+                    {
+                        script.find = None;
+                        Effect::Taken
                     }
                     Stroke::Key(chord) => match script::key(&mut script.doc, chord, page) {
                         Some(effect) => effect,
@@ -7136,6 +7262,9 @@ impl Editor {
         if let Some(line) = script.doc.take_changed() {
             script.highlight.changed(line);
         }
+        if let Some(find) = &mut script.find {
+            find.refresh(&script.doc);
+        }
         if script.reveal
             && let Some(r) = rect
         {
@@ -7223,6 +7352,26 @@ impl Editor {
                 shown.carets.push((c.head.line, column));
             }
         }
+        // What the find bar found in view.
+        shown.matches.clear();
+        shown.count.clear();
+        if let Some(find) = &script.find {
+            let from = find.matches.partition_point(|m| m.0.line < shown.first);
+            for (i, &(a, b)) in find.matches.iter().enumerate().skip(from) {
+                if a.line >= shown.last {
+                    break;
+                }
+                let text = doc.line(a.line);
+                let on = find.current == Some(i);
+                shown.matches.push((
+                    a.line,
+                    char_column(text, a.col),
+                    char_column(text, b.col),
+                    on,
+                ));
+            }
+            find.count(&mut shown.count);
+        }
         let head = doc.primary().head;
         shown.place.clear();
         let _ = write!(
@@ -7237,6 +7386,174 @@ impl Editor {
         shown.path.clear();
         let _ = write!(shown.path, "{}", script.path.display());
         keys
+    }
+
+    /// Ctrl+F and Ctrl+H (`replacing`) in a script's tab: its find bar, what one line
+    /// selected holds in its field, the field given the keys.
+    fn open_find(&mut self, replacing: bool) {
+        let Some(script) = self.active_script.and_then(|k| self.scripts.get_mut(k)) else {
+            self.say(String::from("Find works in a script's tab"));
+            return;
+        };
+        let (a, b) = script.doc.primary().range();
+        let selected = (a.line == b.line && a != b).then(|| &script.doc.line(a.line)[a.col..b.col]);
+        let find = script.find.get_or_insert_with(Default::default);
+        if let Some(text) = selected {
+            text.clone_into(&mut find.query);
+        }
+        find.replacing |= replacing;
+        find.origin = a;
+        self.find_focus = Some(replacing);
+        // The keys are the field's now, not the code's.
+        self.code_focus = false;
+    }
+
+    /// F3 and Shift+F3 (`back`): the shown script's next match or the one before,
+    /// selected and shown.
+    fn find_step(&mut self, back: bool) {
+        let Some(script) = self.active_script.and_then(|k| self.scripts.get_mut(k)) else {
+            return;
+        };
+        let Some(find) = script.find.as_mut() else {
+            return;
+        };
+        find.refresh(&script.doc);
+        if let Some((a, b)) = find.step(&script.doc, back) {
+            script.doc.select(a, b, false);
+            find.origin = a;
+            script.reveal = true;
+        }
+    }
+
+    /// Ctrl+G's row: the caret to `line` and `column` (from 1) of the shown script.
+    fn go_to_line(&mut self, line: usize, column: usize) {
+        let Some(script) = self.active_script.and_then(|k| self.scripts.get_mut(k)) else {
+            return;
+        };
+        let doc = &mut script.doc;
+        let line = line.saturating_sub(1).min(doc.line_count() - 1);
+        let col = col_at(doc.line(line), column.saturating_sub(1));
+        doc.place(Pos::new(line, col), false, false);
+        script.reveal = true;
+        self.code_focus = true;
+        self.caret_since = Instant::now();
+    }
+
+    /// The find bar's frame, after the UI's (E8-2): its fields, toggles and buttons; and
+    /// Alt+C, Alt+W, Alt+Enter (every match a caret) and Ctrl+Alt+Enter (replace them all)
+    /// while it is open.
+    fn find_frame(&mut self, response: &ShellResponse) {
+        let Some(k) = self.active_script.filter(|&k| k < self.scripts.len()) else {
+            return;
+        };
+        if self.scripts[k].find.is_none() {
+            return;
+        }
+        let enter = self.ui.input().keys.contains(&UiKey::Enter);
+        let shift = self.input.shift();
+        let (mut case, mut word, mut carets) = (response.find_case, response.find_word, false);
+        let mut replace = response.replace;
+        for c in self.input.chords() {
+            match (c.ctrl, c.alt, c.key) {
+                (false, true, Key::KeyC) => case = true,
+                (false, true, Key::KeyW) => word = true,
+                (false, true, Key::Enter) => carets = true,
+                (true, true, Key::Enter) => replace = Some(true),
+                _ => {}
+            }
+        }
+        let script = &mut self.scripts[k];
+        let Some(find) = script.find.as_mut() else {
+            return;
+        };
+        let mut seek = case || word;
+        find.case ^= case;
+        find.word ^= word;
+        let mut step = response.find_step;
+        if let Some(r) = response.find_query {
+            if r.cancelled {
+                script.find = None;
+                self.code_focus = true;
+                return;
+            }
+            if r.started || r.changed {
+                find.query.clear();
+                find.query.push_str(self.ui.edited_text());
+                seek = true;
+            }
+            // Enter: the next match (Shift: the one before), the field keeping the keys.
+            if r.committed && enter {
+                step = Some(shift);
+                self.ui.edit_field(r.id);
+            }
+        }
+        if let Some(r) = response.find_replace {
+            if r.cancelled {
+                script.find = None;
+                self.code_focus = true;
+                return;
+            }
+            if r.started || r.changed {
+                find.replace.clear();
+                find.replace.push_str(self.ui.edited_text());
+            }
+            // Enter replaces the match (Ctrl+Alt+Enter all of them), the field keeping the
+            // keys.
+            if r.committed && enter {
+                replace = replace.or(Some(false));
+                self.ui.edit_field(r.id);
+            }
+        }
+        find.refresh(&script.doc);
+        let doc = &mut script.doc;
+        if seek && let Some((a, b)) = find.seek(find.origin) {
+            doc.select(a, b, false);
+            script.reveal = true;
+        }
+        match replace {
+            // Replace: the match the caret is on, then the next.
+            Some(false) => {
+                let (a, b) = doc.primary().range();
+                if doc.carets().len() == 1 && find.matches.contains(&(a, b)) {
+                    doc.insert(&find.replace);
+                    find.refresh(doc);
+                }
+                step = Some(false);
+            }
+            // Replace All: every match a caret, replaced at once (one step).
+            Some(true) => {
+                let n = find.matches.len();
+                if n > 0 {
+                    doc.select_ranges(&find.matches, 0);
+                    doc.insert(&find.replace);
+                    let first = doc.carets()[0].head;
+                    doc.place(first, false, false);
+                    find.refresh(doc);
+                    script.reveal = true;
+                }
+                let what = if n == 1 { "match" } else { "matches" };
+                let message = format!("Replaced {n} {what}");
+                log::info!(target: "engine_editor", "{message}");
+                self.message = Some((message, Instant::now()));
+            }
+            None => {}
+        }
+        if let Some(back) = step
+            && let Some((a, b)) = find.step(doc, back)
+        {
+            doc.select(a, b, false);
+            find.origin = a;
+            script.reveal = true;
+        }
+        if carets && !find.matches.is_empty() {
+            let current = find.current.unwrap_or(0);
+            doc.select_ranges(&find.matches, current);
+            script.find = None;
+            self.code_focus = true;
+        } else if response.find_close {
+            script.find = None;
+            self.code_focus = true;
+        }
     }
 
     /// Shows scene tab `index` (a click on it, Ctrl+Tab): a script shown goes behind.
@@ -8479,6 +8796,12 @@ impl Editor {
             }
         } else if id == ids.new_scene {
             self.new_scene(world);
+        } else if id == ids.code_find || id == ids.code_replace {
+            self.open_find(id == ids.code_replace);
+        } else if id == ids.find_next || id == ids.find_previous {
+            self.find_step(id == ids.find_previous);
+        } else if id == ids.go_to_line {
+            self.open_palette(world, ":");
         } else if id == ids.open_script {
             self.open_palette(world, "#script:");
             if let Some(cp) = self.command_palette.as_mut() {
@@ -19175,6 +19498,76 @@ mod tests {
             std::fs::read_to_string(dir.join("door.luau")).unwrap(),
             "-- return 1\n"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_script_is_searched_replaced_and_gone_through_by_line() {
+        const F: (u16, u16) = (0x46, 0x21);
+        const H: (u16, u16) = (0x48, 0x23);
+        const ALT: (u16, u16) = (0x12, 0x38);
+        let dir = project("script-find");
+        let original = "local door = 1\nprint(door)\nreturn door\n";
+        std::fs::write(dir.join("door.luau"), original).unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.update(&mut world);
+        ed.open_script(&world, Path::new("door.luau"), None);
+        ed.update(&mut world);
+        // Ctrl+F: the bar, its field given the keys; typing finds from the caret on.
+        chord(&mut ed, &mut world, &[CTRL, F]);
+        ed.update(&mut world);
+        chars(&mut ed, "door");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(ed.scripts[0].find.as_ref().unwrap().matches.len(), 3);
+        let range = |ed: &Editor| ed.scripts[0].doc.primary().range();
+        assert_eq!(
+            range(&ed),
+            (Pos::new(0, 6), Pos::new(0, 10)),
+            "the first match"
+        );
+        assert!(!texts(&ed, "1 of 3").is_empty(), "the count");
+        // Enter goes to the next one, and the field keeps the keys for the one after.
+        chord(&mut ed, &mut world, &[ENTER]);
+        ed.update(&mut world);
+        assert_eq!(range(&ed), (Pos::new(1, 6), Pos::new(1, 10)));
+        chord(&mut ed, &mut world, &[ENTER]);
+        ed.update(&mut world);
+        assert_eq!(range(&ed), (Pos::new(2, 7), Pos::new(2, 11)));
+        assert_eq!(
+            ed.scripts[0].doc.text(),
+            original,
+            "typing went to the field"
+        );
+        // Ctrl+H: the replace field takes the keys; Ctrl+Alt+Enter replaces every match.
+        chord(&mut ed, &mut world, &[CTRL, H]);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        chars(&mut ed, "gate");
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[CTRL, ALT, ENTER]);
+        assert_eq!(
+            ed.scripts[0].doc.text(),
+            "local gate = 1\nprint(gate)\nreturn gate\n"
+        );
+        assert_eq!(message(&ed), "Replaced 3 matches");
+        // Escape in a field closes the bar; Ctrl+Z takes the three back as one step.
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        ed.update(&mut world);
+        assert!(ed.scripts[0].find.is_none());
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        assert_eq!(ed.scripts[0].doc.text(), original);
+        // Ctrl+G, a number, Enter: that line.
+        chord(&mut ed, &mut world, &[CTRL, G]);
+        ed.update(&mut world);
+        chars(&mut ed, "3");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Go to line 3 of 4").is_empty());
+        chord(&mut ed, &mut world, &[ENTER]);
+        ed.update(&mut world);
+        assert_eq!(ed.scripts[0].doc.primary().head, Pos::new(2, 0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -711,6 +711,36 @@ impl Document {
         self.sealed = true;
     }
 
+    /// The carets selecting each of `ranges` (starts and ends, in the text's order), the
+    /// one at `primary` the primary: every match found at once.
+    pub(crate) fn select_ranges(&mut self, ranges: &[(Pos, Pos)], primary: usize) {
+        if ranges.is_empty() {
+            return;
+        }
+        self.carets = ranges
+            .iter()
+            .map(|&(a, b)| Caret {
+                anchor: self.clamp(a),
+                head: self.clamp(b),
+                goal: None,
+            })
+            .collect();
+        self.primary = primary.min(self.carets.len() - 1);
+        self.merge_carets();
+        self.sealed = true;
+    }
+
+    /// `text` in place of each caret's selection, one undo step of its own (a
+    /// replacement).
+    pub(crate) fn insert(&mut self, text: &str) {
+        self.sealed = true;
+        self.edit(Kind::Other, |_, c| {
+            let (a, b) = c.range();
+            Some((a, b, text.to_owned()))
+        });
+        self.sealed = true;
+    }
+
     /// The word at `pos`: its start and end (both `pos` off a word).
     pub(crate) fn word_range(&self, pos: Pos) -> (Pos, Pos) {
         let pos = self.clamp(pos);
@@ -1338,6 +1368,23 @@ mod tests {
         at(&mut doc, 2, 3);
         doc.paste(&a);
         assert_eq!(doc.line(2), "c()a");
+    }
+
+    #[test]
+    fn every_match_replaced_at_once_is_one_step() {
+        let mut doc = Document::new("door = door + door");
+        let ranges = [
+            (Pos::new(0, 0), Pos::new(0, 4)),
+            (Pos::new(0, 7), Pos::new(0, 11)),
+            (Pos::new(0, 14), Pos::new(0, 18)),
+        ];
+        doc.select_ranges(&ranges, 1);
+        assert_eq!(doc.carets().len(), 3);
+        assert_eq!(doc.primary().range(), ranges[1]);
+        doc.insert("gate");
+        assert_eq!(doc.text(), "gate = gate + gate");
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "door = door + door", "one step");
     }
 
     #[test]

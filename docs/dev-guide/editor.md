@@ -818,8 +818,20 @@ Scripts open in tabs after the scenes' (ADR 0107 E8), their code where the viewp
   carets and their unsaved text.
 
 Luau is highlighted as VS Code's luau-lsp extension colors it (keywords, strings,
-comments, numbers, function names, `self` and the standard library, types). Find and
-replace, and Luau's errors and completion as you type, come next.
+comments, numbers, function names, `self` and the standard library, types).
+
+**Finding and replacing** work as in VS Code:
+
+- **Ctrl+F** finds as you type, and lights every match. Enter goes to the next one,
+  Shift+Enter (or F3 and Shift+F3) the one before.
+- **Alt+C** matches case and **Alt+W** whole words.
+- **Alt+Enter** puts a caret on every match.
+- **Ctrl+H** adds the replace field. Enter replaces the match and goes on; Ctrl+Alt+Enter
+  replaces them all, and Ctrl+Z takes them back at once.
+- **Escape** closes the bar.
+- **Ctrl+G**, then a line number (`:12`, or `:12:5` for a column), goes there.
+
+Luau's errors and completion as you type come next.
 
 ## Autosave and the session
 
@@ -902,7 +914,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 |---|---|
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau in the game: the script component, its hooks, bindings and hot reload (its public API waits for the team's answers, ADR 0114) |
-| E8 | the code editor: find and replace, Luau's errors and completion as you type (scripts in tabs and highlighting are done) |
+| E8 | the code editor: Luau's errors and completion as you type, find in files (scripts in tabs, highlighting, find and replace are done) |
 
 The whole plan is ADR 0107 §7.
 

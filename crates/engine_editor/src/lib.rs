@@ -15,6 +15,7 @@ mod draw;
 mod drop;
 pub mod expr;
 mod faces;
+mod find;
 mod gizmo;
 mod handles;
 mod highlight;

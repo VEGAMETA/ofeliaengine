@@ -70,6 +70,10 @@ pub struct Palette {
     pub code_line: Color,
     /// Code's colors, by [`Token`].
     pub syntax: [Color; 8],
+    /// What the find bar found in the code.
+    pub find: Color,
+    /// The match it is on.
+    pub find_current: Color,
 }
 
 impl Default for Palette {
@@ -100,6 +104,8 @@ impl Default for Palette {
                 srgb(86, 156, 214),
                 srgb(78, 201, 176),
             ],
+            find: srgb(98, 64, 28),
+            find_current: srgb(156, 102, 36),
         }
     }
 }
@@ -453,6 +459,25 @@ pub struct CodeRun<'a> {
     pub token: Token,
 }
 
+/// The find bar over a script's code (ADR 0107 E8-2), while it is open.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FindView<'a> {
+    /// What is looked for.
+    pub query: &'a str,
+    /// What replaces it: the replace field shows while there is one (Ctrl+H).
+    pub replace: Option<&'a str>,
+    /// `3 of 17`, `No results`.
+    pub count: &'a str,
+    /// Upper and lower case apart.
+    pub case: bool,
+    /// Whole words only.
+    pub word: bool,
+    /// The query field takes the keys (the bar opened, Ctrl+F again).
+    pub focus: bool,
+    /// The replace field does (Ctrl+H).
+    pub focus_replace: bool,
+}
+
 /// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
 /// the carets among them, by line and column; the shell puts them on the monospace grid.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -482,6 +507,11 @@ pub struct CodeView<'a> {
     pub blink: bool,
     /// The primary caret's line: lit.
     pub current: usize,
+    /// The find bar, while open.
+    pub find: Option<FindView<'a>>,
+    /// What it found in view: a line, the first and last columns, and whether it is the
+    /// match it is on.
+    pub matches: &'a [(usize, usize, usize, bool)],
 }
 
 /// Everything the shell shows.
@@ -578,6 +608,20 @@ pub struct ShellResponse {
     pub close_script: Option<usize>,
     /// Id of the code area while a script is shown; its rectangle from [`Ui::rect_of`].
     pub code: u64,
+    /// The find bar's query field was used (`Ui::edited_text` while it changes).
+    pub find_query: Option<TextFieldResponse>,
+    /// Its replace field was.
+    pub find_replace: Option<TextFieldResponse>,
+    /// Its match case toggle was clicked.
+    pub find_case: bool,
+    /// Its whole words toggle was.
+    pub find_word: bool,
+    /// One of its arrows: the match before (`true`) or after.
+    pub find_step: Option<bool>,
+    /// Its close mark.
+    pub find_close: bool,
+    /// Its Replace (`false`) or Replace All (`true`).
+    pub replace: Option<bool>,
     /// A tool was clicked.
     pub tool: Option<usize>,
     /// A scene tree row was clicked.
@@ -812,6 +856,9 @@ fn center(
                 ui.spacer("fill");
                 text(ui, "place", view.place, TEXT, p.text_dim);
             });
+            if let Some(find) = &view.find {
+                find_bar(ui, find, p, out);
+            }
             out.code = code_view(ui, view, p);
             file_browser(ui, model, p, out);
             return;
@@ -1096,6 +1143,15 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette) -> u64 {
             );
             ui.pop_id();
         }
+        // What the find bar found, over the selections (the match it is on is one).
+        for (i, &(line, a, b, on)) in view.matches.iter().enumerate() {
+            ui.push_id(i as u64);
+            let color = if on { p.find_current } else { p.find };
+            let width = (b - a) as f32 * view.advance;
+            let at = [x(a as f32), y(line)];
+            ui.container("match", band(at, [width, CODE_LINE], color), |_| {});
+            ui.pop_id();
+        }
         for (k, run) in view.runs.iter().enumerate() {
             ui.push_id(k as u64);
             let style = Style {
@@ -1139,6 +1195,114 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette) -> u64 {
             ui.pop_id();
         }
     })
+}
+
+/// The find bar under the code bar: the query field, match case and whole words, the
+/// count, the arrows and the close mark; while replacing, the replace field and its two
+/// buttons under them.
+fn find_bar(ui: &mut Ui, view: &FindView<'_>, p: &Palette, out: &mut ShellResponse) {
+    let bar = Style {
+        direction: Direction::Column,
+        size: [Size::Grow(1.0), Size::Fit],
+        padding: [6.0, 4.0, 6.0, 4.0],
+        gap: 4.0,
+        background: Some(p.dock),
+        ..Style::default()
+    };
+    let row = Style {
+        size: [Size::Grow(1.0), Size::Fit],
+        gap: 2.0,
+        align_cross: Align::Center,
+        ..Style::default()
+    };
+    ui.container("find bar", bar, |ui| {
+        ui.row("find", row, |ui| {
+            out.find_query = find_field(ui, "query", view.query, "Find", view.focus, p);
+            out.find_case = find_button(ui, "case", icons::MATCH_CASE, view.case, p);
+            out.find_word = find_button(ui, "word", icons::WHOLE_WORD, view.word, p);
+            let count = Style {
+                size: [Size::Fixed(96.0), Size::Fit],
+                padding: [8.0, 0.0, 4.0, 0.0],
+                ..Style::default()
+            };
+            ui.container("count", count, |ui| {
+                text(ui, "label", view.count, SMALL, p.text_dim);
+            });
+            if find_button(ui, "previous", icons::PREVIOUS, false, p) {
+                out.find_step = Some(true);
+            }
+            if find_button(ui, "next", icons::NEXT, false, p) {
+                out.find_step = Some(false);
+            }
+            out.find_close = find_button(ui, "close", icons::CLOSE, false, p);
+        });
+        if let Some(replace) = view.replace {
+            ui.row("replace", row, |ui| {
+                out.find_replace =
+                    find_field(ui, "with", replace, "Replace", view.focus_replace, p);
+                if find_button(ui, "one", icons::REPLACE, false, p) {
+                    out.replace = Some(false);
+                }
+                if find_button(ui, "all", icons::REPLACE_ALL, false, p) {
+                    out.replace = Some(true);
+                }
+            });
+        }
+    });
+}
+
+/// One of the find bar's fields, with its hint; `focus` gives it the keys from the next
+/// frame, its text selected, even from the other field.
+fn find_field(
+    ui: &mut Ui,
+    key: &str,
+    text_now: &str,
+    hint: &str,
+    focus: bool,
+    p: &Palette,
+) -> Option<TextFieldResponse> {
+    let mut response = None;
+    let style = Style {
+        size: [Size::Fixed(300.0), Size::Fixed(24.0)],
+        padding: [8.0, 0.0, 4.0, 0.0],
+        radius: 3.0,
+        background: Some(p.field),
+        align_cross: Align::Center,
+        ..Style::default()
+    };
+    ui.row(key, style, |ui| {
+        let style = Style {
+            size: [Size::Grow(1.0), Size::Fixed(22.0)],
+            align_cross: Align::Center,
+            ..Style::default()
+        };
+        let r = ui.text_field("text", text_now, &field_look(p, style, hint, false));
+        if focus && !r.editing {
+            ui.edit_field(r.id);
+        }
+        response = used(r);
+    });
+    response
+}
+
+/// One of the find bar's buttons, lit while `on`: whether it was clicked.
+fn find_button(ui: &mut Ui, key: &str, glyph: &str, on: bool, p: &Palette) -> bool {
+    let id = ui.container(
+        key,
+        Style {
+            size: [Size::Fixed(24.0), Size::Fixed(22.0)],
+            radius: 3.0,
+            background: on.then_some(p.selection),
+            align_main: Align::Center,
+            align_cross: Align::Center,
+            ..Style::default()
+        },
+        |ui| {
+            let color = if on { p.text } else { p.text_dim };
+            text(ui, "icon", glyph, ICON, color);
+        },
+    );
+    ui.sense(id, false).clicked
 }
 
 /// Small monochrome play, pause and stop at the end of the tab row (not a colored group in

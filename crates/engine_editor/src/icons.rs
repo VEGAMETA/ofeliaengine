@@ -93,6 +93,18 @@ pub const TOOL_SCALE: &str = "\u{F0A68}";
 pub const SNAP: &str = "\u{F02C1}";
 /// Filter / search box (`md-magnify`).
 pub const SEARCH: &str = "\u{F0349}";
+/// Match case (`cod-case_sensitive`, VS Code's own).
+pub const MATCH_CASE: &str = "\u{EAB1}";
+/// Whole words (`cod-whole_word`).
+pub const WHOLE_WORD: &str = "\u{EB7E}";
+/// The match before (`cod-arrow_up`).
+pub const PREVIOUS: &str = "\u{EAA1}";
+/// The next match (`cod-arrow_down`).
+pub const NEXT: &str = "\u{EA9A}";
+/// Replace the match (`cod-replace`).
+pub const REPLACE: &str = "\u{EB3D}";
+/// Replace every match (`cod-replace_all`).
+pub const REPLACE_ALL: &str = "\u{EB3C}";
 /// Add (`md-plus`).
 pub const PLUS: &str = "\u{F0415}";
 /// A checked box's mark (`md-check`).
