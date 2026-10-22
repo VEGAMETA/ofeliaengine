@@ -803,3 +803,81 @@ Questions 1 to 7 are decisions a to g above, with their options in the same orde
    - b) **Anywhere on `self`,** as in Godot and Unity (`self.cooldown = 0` in any
      function). Quicker to start, but such data is not saved, not shown in the inspector,
      and the type checker cannot see it.
+
+## As built (E7-1a, 2026-10-22): the script host
+
+`engine_app::scripts::Scripts`, made by the player before any scene when the project has a
+`scripts/` folder (`PlayerSettings::project`). The dev guide's page:
+`docs/dev-guide/scripting.md`.
+
+- **Loading:** every `.luau` under `scripts/`, in path order, is a module named by its path
+  (`npc/guard`). The VM is `engine_script`'s. Its new `ScriptVm::new_with` installs the
+  host's globals before the sandbox seals them, and `call_function` calls a component's
+  hook under the time budget. A script that does not load is in the log, and the rest
+  load.
+- **`component(name, props)`** gathers the declaration while its module runs. Once the module
+  ran, the host:
+  - lays the props out by name;
+  - builds their `TypeInfo` at run time (leaked: one per component);
+  - registers the component (`World::register_dynamic`, named `script::<Name>`, plain data);
+  - finds its hooks on the component's table.
+
+  Props of this step:
+  - numbers (`f32`), `prop.integer` (`i32`), booleans, vectors (`Vec3`), `prop.entity()`;
+  - `prop.number`'s `min`, `max`, `step`, `tooltip`, `hidden` and `skip` go into the field's
+    `Attrs`, so a write is clamped as the inspector clamps.
+
+  Strings wait for a component layout that drops them (their own step).
+- **Stages:**
+  - in every fixed tick, after the timers advance and before `Game::tick`: instances that
+    came are started (`on_start`), then every `on_tick`;
+  - in every frame, before `Game::present`: `on_frame`;
+  - both only while the world simulates (a step asked for included).
+
+  The instances are kept in their entities' order (index, then component), so the order
+  is the spawn order, the same on every machine. The scene tree's order (§7) waits for
+  scenes to hold script components.
+- **`self`** is a userdata made once per instance:
+  - its props by lowercase name;
+  - its entity's components by PascalCase name, as views whose fields read and write the
+    world through reflection (`Vec3`, `Vec3A` and `Vec2` as vectors, `Quat` as a `quat`,
+    entities, enums by variant name, strings);
+  - `self.entity` and `self.locals` (a user value, never saved).
+
+  `on_stop` runs once the component went, so its props are gone.
+- **The world** is open to the scripts through a thread-local pointer for the length of a
+  stage.
+- **Libraries of this step:**
+  - `world.find`, through a name index made at a stage's first call;
+  - `time.now()`, `time.tick()`, `time.dt()` (functions, as the sandbox seals tables);
+  - `quat.identity`, `quat.axis_angle`, `quat.euler`; `*` on quats and vectors;
+  - `print` and `warn` to the log with `scripts/<file>.luau:<line>`.
+- **Errors** stop the instance. They go to the log once each, as `scripts/door.luau:4: too
+  fast (Door.on_tick)`, which the editor's Output turns into a click to the line.
+- **Measured** (§13; `engine_app` `scripts::tests::measure_hooks_and_views`, ref-1, release,
+  medians of 51 ticks):
+
+| What | Target | Now |
+|---|---|---|
+| an empty `on_tick`, per instance | ≤ 0.5 µs | **0.19 µs** |
+| a prop's read and write (`self.a = self.a + 1`) | ≤ 100 ns each | 354 ns the pair (about 177 each) |
+| a component field's read and write (`t.translation = t.translation + v`) | ≤ 100 ns each | 299 ns the pair (about 150 each) |
+| 1,000 doors (example 1), one tick | ≤ 1 ms | 3.3 ms |
+
+  The hooks meet their target; the views do not. Most of a view's access is mlua's
+  dispatch of a metamethod: references made for the userdata and the key, the arguments
+  converted. Two changes moved it a little: the world pointer in a thread-local instead
+  of the VM's app data (391 → 354 ns), and the name index (doors 3.55 → 3.29 ms). §13's
+  plan for this miss stands, as **E7-1c**:
+  - views as Luau tagged userdata with their own metatables;
+  - field names interned as Luau atoms (`useratom`), so an access is a switch on an atom
+    and an offset;
+  - `HostIrHooks` after that if needed.
+- **Not in this step:**
+  - systems;
+  - script components in scenes and saves (E7-1b);
+  - `input`, `world.spawn`, `world.query`, entity methods;
+  - the zero-allocation test (views and entities are still made per access);
+  - reloading;
+  - the types file (E7-2);
+  - the editor (E7-4).

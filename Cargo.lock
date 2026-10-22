@@ -288,6 +288,7 @@ dependencies = [
  "engine_runtime",
  "engine_save",
  "engine_scene",
+ "engine_script",
  "engine_streaming",
  "engine_video",
  "log",

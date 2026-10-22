@@ -458,9 +458,18 @@ Last updated: 2026-10-22.
     Files and the file's Outline on the left of the code, the scene's tree and inspector
     aside (View: Scene Docks Beside Code keeps them). Text files open in code tabs too
     (TOML, RON, JSON, Fluent, Markdown, plain), listed in the FileSystem dock without ids.
+  - **E7-1a, the script host** (#343, ADR 0114's as-built; `docs/dev-guide/scripting.md`):
+    the project's `scripts/` loaded before any scene. `component(name, props)` registers a
+    plain-data component with a `TypeInfo` made at run time. `on_start`, `on_tick` (before
+    `Game::tick`), `on_frame` and `on_stop` run while the world simulates. `self` holds
+    props and live views of the entity's components; `world.find`, `time`, `quat`,
+    `print`. Measured: an empty hook 0.19 µs per instance (target 0.5); a view's access
+    about 150–177 ns (target 100); 1,000 doors 3.3 ms a tick (target 1): views' fast
+    path is E7-1c.
   - **Next, the owner's requests of 2026-10-22, in this order:**
-    1. E7, starting with Attach Script as in Godot (a script's mark on its row opens it,
-       the inspector shows its path);
+    1. E7 on: script components in scenes (E7-1b), then the editor's Attach Script as in
+       Godot (E7-4: a script's mark on its row opens it, the inspector shows its path),
+       then views' fast path (E7-1c);
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 

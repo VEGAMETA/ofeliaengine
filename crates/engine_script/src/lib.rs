@@ -46,7 +46,7 @@
 pub use mlua;
 
 use mlua::chunk::Compiler;
-use mlua::{FromLuaMulti, IntoLuaMulti, Lua, Table, Value, VmState};
+use mlua::{FromLuaMulti, Function, IntoLuaMulti, Lua, Table, Value, VmState};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -158,6 +158,15 @@ pub struct ScriptVm {
 impl ScriptVm {
     /// A new VM: sandboxed standard library, native codegen per `settings`.
     pub fn new(settings: ScriptSettings) -> Result<Self, ScriptError> {
+        Self::new_with(settings, |_| Ok(()))
+    }
+
+    /// [`Self::new`], with `install` adding the host's globals (its libraries) before the
+    /// sandbox makes the global table read-only.
+    pub fn new_with(
+        settings: ScriptSettings,
+        install: impl FnOnce(&Lua) -> mlua::Result<()>,
+    ) -> Result<Self, ScriptError> {
         let lua = Lua::new();
         lua.set_compiler(
             Compiler::new()
@@ -178,11 +187,13 @@ impl ScriptVm {
             }
             Ok(VmState::Continue)
         });
-        lua.sandbox(true).map_err(|e| ScriptError::Runtime {
+        let host = |e: mlua::Error| ScriptError::Runtime {
             module: String::new(),
             line: None,
             message: e.to_string(),
-        })?;
+        };
+        install(&lua).map_err(host)?;
+        lua.sandbox(true).map_err(host)?;
         Ok(Self {
             lua,
             settings,
@@ -273,6 +284,20 @@ impl ScriptVm {
         };
         self.arm();
         let r = f.call::<R>(args);
+        self.disarm();
+        r.map_err(|e| self.map(module, e))
+    }
+
+    /// Calls `function`, a value of module `module` (a component's hook), with `args`
+    /// under the time budget; its errors name `module`.
+    pub fn call_function<A: IntoLuaMulti, R: FromLuaMulti>(
+        &self,
+        module: &str,
+        function: &Function,
+        args: A,
+    ) -> Result<R, ScriptError> {
+        self.arm();
+        let r = function.call::<R>(args);
         self.disarm();
         r.map_err(|e| self.map(module, e))
     }
