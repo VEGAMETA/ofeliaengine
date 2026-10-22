@@ -489,9 +489,12 @@ Last updated: 2026-10-22.
     `engine_render::wire` draws the edges after the frame in line mode, the scene's depth
     sampled against a tolerance, so lines never z-fight the surfaces they lie on. 10,000
     cubes: 0.41–0.99 ms on the GPUs, a lit view unchanged.
+  - **View modes, V1b** (#PR, ADR 0116): Unlit on Alt+3, a pass of its own
+    (`engine_render::unlit`) drawing each material's base color and emission over a dark
+    background; the forward pass untouched. 10,000 cubes: 0.28 / 1.15 ms on the GPUs.
   - **Next, in this order:**
-    1. View modes on (ADR 0116): Unlit as a material role (V1b), then the colliders of
-       every body over any mode (V2), replacing the blockout's X-ray overlay;
+    1. View modes on (ADR 0116): the colliders of every body over any mode (V2),
+       replacing the blockout's X-ray overlay;
     2. E7 on: the engine's types in the editor and for luau-lsp (E7-2, under way on
        `feat/script-types`: the old solver types a hook's `self` from `component`'s
        declaration, the new one of Luau 0.736 does not), then views' fast path (E7-1c);
@@ -732,9 +735,10 @@ decisions). In short:
 
 ## 3. What is done (merged to main)
 
-Estimate of 2026-10-20 (after E1-5a): the technical core about **93 %** done, the whole
-engine (editor, Luau and tooling included) about **66 %** (2026-10-17: 92 % and 61 %;
-2026-10-11: 74 % and 50 %). What comes after the base (queue item 10: terrain, water,
+Estimate of 2026-10-22 (after the view modes' V1b): the technical core about **94 %** done,
+the editor about **57 %** of its fifteen phases (E1 to E6 done, E8's core, E7 and E10
+begun), Luau about **45 %**, the whole engine about **80 %** (2026-10-20: 93 % and 66 %;
+2026-10-17: 92 % and 61 %; 2026-10-11: 74 % and 50 %). What comes after the base (queue item 10: terrain, water,
 foliage, HLOD and impostors, VST3 hosting) is not counted.
 
 Done since 2026-10-17:
