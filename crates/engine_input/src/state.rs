@@ -96,11 +96,14 @@ fn binding_slots(binding: &Binding, out: &mut SlotBits) {
     }
 }
 
-/// Which devices a player's [`Input`] listens to (local multiplayer).
+/// Which devices a player's [`Input`] listens to (local multiplayer; the editor freeing
+/// the mouse from a running game).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceFilter {
-    /// Keyboard and mouse.
-    pub keyboard_mouse: bool,
+    /// The keyboard.
+    pub keyboard: bool,
+    /// The mouse: its buttons, its motion and its wheel.
+    pub mouse: bool,
     /// Bit `n`: gamepad `n`.
     pub gamepads: u8,
 }
@@ -108,14 +111,23 @@ pub struct DeviceFilter {
 impl DeviceFilter {
     /// Every device (single player).
     pub const ALL: DeviceFilter = DeviceFilter {
-        keyboard_mouse: true,
+        keyboard: true,
+        mouse: true,
         gamepads: 0xFF,
+    };
+
+    /// No device (the editor's tools on a running game).
+    pub const NONE: DeviceFilter = DeviceFilter {
+        keyboard: false,
+        mouse: false,
+        gamepads: 0,
     };
 
     /// One gamepad only.
     pub const fn gamepad(index: u8) -> Self {
         Self {
-            keyboard_mouse: false,
+            keyboard: false,
+            mouse: false,
             gamepads: 1 << index,
         }
     }
@@ -522,9 +534,28 @@ impl Input {
         self.map.contexts[context.0 as usize].enabled
     }
 
-    /// Which devices this input listens to.
+    /// Which devices this input listens to. What it stops listening to lets go of what
+    /// it held: no release would reach it.
     pub fn set_devices(&mut self, filter: DeviceFilter) {
+        let before = self.filter;
         self.filter = filter;
+        if before.keyboard && !filter.keyboard {
+            for bit in 0..RAW_MOUSE {
+                self.down.set(bit, false);
+            }
+        }
+        if before.mouse && !filter.mouse {
+            for bit in RAW_MOUSE..RAW_PAD {
+                self.down.set(bit, false);
+            }
+        }
+        let gone = before.gamepads & !filter.gamepads;
+        for pad in (0..MAX_GAMEPADS).filter(|&p| gone & (1 << p) != 0) {
+            for b in 0..16 {
+                self.down.set(RAW_PAD + pad * 16 + b, false);
+            }
+            self.axes[pad] = [0.0; GAMEPAD_AXIS_COUNT];
+        }
     }
 
     /// The devices this input listens to ([`Self::set_devices`]).
@@ -553,19 +584,19 @@ impl Input {
     /// Applies one event. Call it for every event, in order, before sampling.
     pub fn handle(&mut self, event: &InputEvent) {
         match event.kind {
-            EventKind::Key { key, pressed } if self.filter.keyboard_mouse => {
+            EventKind::Key { key, pressed } if self.filter.keyboard => {
                 self.press(key as usize, pressed, event.time);
             }
-            EventKind::MouseButton { button, pressed } if self.filter.keyboard_mouse => {
+            EventKind::MouseButton { button, pressed } if self.filter.mouse => {
                 self.press(RAW_MOUSE + button as usize, pressed, event.time);
             }
-            EventKind::MouseMotion { dx, dy } if self.filter.keyboard_mouse => {
+            EventKind::MouseMotion { dx, dy } if self.filter.mouse => {
                 for view in [&mut self.tick, &mut self.frame] {
                     view.mouse[0] += dx;
                     view.mouse[1] += dy;
                 }
             }
-            EventKind::Wheel { y, .. } if self.filter.keyboard_mouse => {
+            EventKind::Wheel { y, .. } if self.filter.mouse => {
                 if y > 0.0 {
                     self.tick.press(RAW_WHEEL_UP, event.time);
                     self.frame.press(RAW_WHEEL_UP, event.time);

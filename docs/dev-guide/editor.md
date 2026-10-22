@@ -552,7 +552,8 @@ Keeping the scene and putting it back take milliseconds: 7 and 8 ms for 10,000 e
 - **The mouse is the game's** from Play on: the cursor is hidden and held over the game's
   view, as in the game. **Shift+F1** frees it (in the game's window too), and Shift+F1
   or a click in the game gives it back. Pausing, ejecting, and switching to another
-  window free it as well; going on and returning give it back.
+  window free it as well; going on and returning give it back. While it is free the game
+  does not hear it (its buttons, motion and wheel), but it still hears the keyboard.
 - **The game's window** opens at least 1280 × 720 the first time, and then where you left
   it.
 
