@@ -572,6 +572,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_luau_analysis"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "engine_core",
+ "mlua-sys",
+]
+
+[[package]]
 name = "engine_nav"
 version = "0.0.0"
 dependencies = [

@@ -11,11 +11,14 @@ under "Local modifications". Every entry is also listed in `THIRD_PARTY_NOTICES.
 | `FidelityFX-SDK/` (only `LICENSE.txt`, `sdk/LICENSE.txt` and the files of the FSR 3.1 upscaler, frame interpolation, optical flow, Brixelizer, Brixelizer GI, the Vulkan backend and their shared code, headers and GLSL; not the frame interpolation swapchain) | [AMD FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) | v1.1.4, commit `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55` | MIT | `engine_ffx` (built for `engine_fsr`: upscaling, ADR 0060, and frame generation's interpolation, ADR 0091; and Brixelizer GI, ADR 0090); `engine_render`'s FSR 1 (`shaders/fsr1.slang` ports `sdk/include/FidelityFX/gpu/fsr1/ffx_fsr1.h`, ADR 0075) |
 | `smaa/` (only `SMAA.hlsl` and `LICENSE.txt`) | [SMAA](https://github.com/iryoku/smaa) reference implementation | commit `71c806a838bdd7d517df19192a20f0c61b3ca29d` | MIT | `engine_render` (SMAA and MLAA after tone mapping, ADR 0075; included by `crates/engine_render/shaders/smaa_port.hlsli`; its area and search tables are `crates/engine_render/data/smaa_*.bin`, the bytes of the same commit's `Textures/AreaTex.h` and `SearchTex.h`) |
 | `recastnavigation/` (only `Recast/`, `Detour/`, `DetourCrowd/` without their `CMakeLists.txt`, and `License.txt`) | [Recast & Detour](https://github.com/recastnavigation/recastnavigation) | `main` after v1.6.0, commit `9f4ce64458dfae86e1239c525ddc219c4e9e06f1` (2026-02-27) | Zlib | `engine_nav` (ADR 0103) |
+| `luau-analysis/` (only `Analysis/`, the `include/` folders of `Ast/`, `Common/`, `Config/`, `Compiler/`, `Bytecode/`, and `LICENSE.txt`, `lua_LICENSE.txt`; `VM/include/` is luau0-src 0.21.0's, which mlua patches: `lua_newuserdatadtor`'s destructor type) | [Luau](https://github.com/luau-lang/luau) | 0.736, commit `c2ec0d4e5ca50796ba174a7565298f59aa572268` (the release `luau0-src` 0.21.0 builds for mlua) | MIT | `engine_luau_analysis` (the code editor's type checking and linting, ADR 0107 §6) |
 | `Vulkan-Headers/` (only `include/vulkan/{vulkan.h,vulkan_core.h,vk_platform.h}`, `include/vk_video/`, `LICENSE.md`, `LICENSES/`) | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | v1.4.350, commit `8864cdc896bbc2a9b6eb36b3218fc9ef57908d77` | Apache-2.0 OR MIT | `engine_ffx` (the FidelityFX SDK's Vulkan backend) |
 
 To update, replace the directory with the new version's files, record the version and
 commit here, and run the `engine_physics_jolt` tests: the FFI layout test catches struct
-changes. For the FidelityFX SDK, also regenerate the shaders
+changes. Luau Analysis follows the Luau that mlua-sys builds (`luau0-src`'s version in
+`Cargo.lock`): update both together, take `VM/include/` from the new luau0-src, and run
+the `engine_luau_analysis` tests. For the FidelityFX SDK, also regenerate the shaders
 (`cargo run -p engine_ffx --example ffx_shaders -- --glslang <the SDK's
 sdk/tools/binary_store/glslangValidator.exe>`) and run the `engine_ffx` and `engine_fsr`
 tests on both GPUs (ADR 0060, ADR 0090). Carry the local modifications over, or drop those

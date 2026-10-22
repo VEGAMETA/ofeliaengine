@@ -401,9 +401,14 @@ Last updated: 2026-10-22.
     in a script's tab (as you type, Enter and F3, Alt+C, Alt+W, Alt+Enter every match a
     caret, Ctrl+H replace and Ctrl+Alt+Enter all as one undo step), Ctrl+G's `:line`;
     the tab's keys a context of their own.
-  - **Next:** E7 waits for the owner's answers to ADR 0114's questions; E8-3, Luau's
-    analysis in the editor (diagnostics, completion, hover), needs its build measured
-    first (ADR 0107 §6).
+  - **E8-3a, Luau's analysis built in** (#PR, ADR 0107's as-built): Luau 0.736's Analysis
+    vendored (`third_party/luau-analysis`) and built by `engine_luau_analysis` against
+    mlua-sys's Luau libraries. Measured: 20.6 s cold once (cached across profiles), at
+    most 3.2 MB in the editor, a 220-line module checked again in 0.16 ms. Modules in
+    memory or on disk, require by string, definitions, findings placed by line and byte.
+  - **Next:** E7 waits for the owner's answers to ADR 0114's questions; E8-3b, the
+    editor's findings as you type (a worker thread, underlines, messages at the line's
+    end).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
