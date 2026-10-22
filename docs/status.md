@@ -252,7 +252,7 @@ Last updated: 2026-10-20.
     again by path or content), the index in `.ofelia/` (our own text file: 10,000 files
     read in 3.2 ms, scanned unchanged in 20 ms), followed live by the editor,
     `ofeliaengine assets [--json]`.
-  - **E4-2, the asset browser** (#PR): the FileSystem dock lists the project's folders and
+  - **E4-2, the asset browser** (#305): the FileSystem dock lists the project's folders and
     each folder's files from the database; `#` in the palette finds assets by path, a kind
     narrowing it (`#model:crate`), Enter showing it in the dock.
   - **Next:** E4-3, drag and drop from the dock: a model into the viewport (on the surface
