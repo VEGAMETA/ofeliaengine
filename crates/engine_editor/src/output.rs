@@ -1,7 +1,8 @@
 //! The Output panel's log (ADR 0107 E6, `docs/research/ux/output.md`): the records the
 //! engine's logger takes (`engine_log::LogReader`) kept as rows, the same message again
 //! folded into its row with a count (Unity's Collapse), a line where each Play starts;
-//! shown filtered by level and by text.
+//! shown filtered by level and by text. A row's text may name its cause (E6-2): an id, a
+//! file and line, or a file, which a click shows.
 
 use engine_log::log::Level;
 use std::collections::VecDeque;
@@ -24,9 +25,80 @@ pub(crate) fn level_index(level: Level) -> usize {
     }
 }
 
+/// What a row's text names, which a click shows (E6-2).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Cause {
+    /// 32 hex digits: a scene entity's id, else an asset's.
+    Id(u128),
+    /// A file and a line in it, and a column: opened in VS Code.
+    Place {
+        path: String,
+        line: u32,
+        column: u32,
+    },
+    /// A file: a project asset shows in the FileSystem dock, another file opens.
+    Path(String),
+}
+
+/// The first cause in `message`, word by word: 32 hex digits, `path:line[:column]`, or a
+/// path with an extension (a folder in it, or a project file's extension).
+pub(crate) fn cause_of(message: &str) -> Option<Cause> {
+    const KNOWN: [&str; 14] = [
+        "scene", "material", "glb", "gltf", "png", "jpg", "hdr", "exr", "ogg", "wav", "luau", "rs",
+        "slang", "toml",
+    ];
+    let words = message.split(|c: char| c.is_whitespace() || "()[]{},;\"'`<>=".contains(c));
+    for word in words {
+        // A sentence's end, a label's colon.
+        let word = word.trim_end_matches(['.', ':', '!', '?']);
+        if word.len() == 32
+            && let Ok(bits) = u128::from_str_radix(word, 16)
+        {
+            return Some(Cause::Id(bits));
+        }
+        let path_like = |p: &str| {
+            let name = p.rsplit(['/', '\\']).next().unwrap_or(p);
+            let Some((stem, ext)) = name.rsplit_once('.') else {
+                return false;
+            };
+            !stem.is_empty()
+                && !ext.is_empty()
+                && ext.len() <= 8
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && (p.contains(['/', '\\']) || KNOWN.contains(&ext.to_ascii_lowercase().as_str()))
+        };
+        // `path:line[:column]`, a Windows drive's colon in the path.
+        let mut parts = word.rsplitn(3, ':');
+        let (last, mid, first) = (parts.next(), parts.next(), parts.next());
+        let number = |s: Option<&str>| s.and_then(|s| s.parse::<u32>().ok());
+        let place = match (number(mid), number(last), first) {
+            (Some(line), Some(column), Some(path)) if path_like(path) => Some((path, line, column)),
+            _ => match (number(last), word.rsplit_once(':')) {
+                (Some(line), Some((path, _))) if path_like(path) => Some((path, line, 1)),
+                _ => None,
+            },
+        };
+        if let Some((path, line, column)) = place {
+            return Some(Cause::Place {
+                path: path.to_owned(),
+                line,
+                column,
+            });
+        }
+        if path_like(word) {
+            return Some(Cause::Path(word.to_owned()));
+        }
+    }
+    None
+}
+
 /// A row of the Output.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Row {
+    /// Its number among the rows ever made: a click names the row by it.
+    pub(crate) serial: u64,
+    /// What its text names, if anything (E6-2).
+    pub(crate) cause: Option<Cause>,
     /// Its level's place ([`level_index`]); none for a line marking an event (a Play).
     pub(crate) level: Option<usize>,
     pub(crate) target: String,
@@ -51,6 +123,7 @@ pub(crate) struct Output {
     pub(crate) follow: bool,
     /// Records the ring overwrote before the panel read them.
     pub(crate) lost: u64,
+    serials: u64,
 }
 
 impl Output {
@@ -72,7 +145,13 @@ impl Output {
             filter: String::new(),
             follow: true,
             lost: 0,
+            serials: 0,
         }
+    }
+
+    /// Row `serial`, if it is still kept.
+    pub(crate) fn row(&self, serial: u64) -> Option<&Row> {
+        self.rows.iter().rev().find(|r| r.serial == serial)
     }
 
     /// Takes the records logged since the last call. Whether any came.
@@ -113,7 +192,10 @@ impl Output {
             }
             return;
         }
+        self.serials += 1;
         self.rows.push_back(Row {
+            serial: self.serials,
+            cause: cause_of(message),
             level: Some(level),
             target: target.to_owned(),
             message: message.to_owned(),
@@ -127,7 +209,10 @@ impl Output {
 
     /// A line marking an event (`Play`): rows do not fold across it.
     pub(crate) fn mark(&mut self, text: &str) {
+        self.serials += 1;
         self.rows.push_back(Row {
+            serial: self.serials,
+            cause: None,
             level: None,
             target: String::new(),
             message: text.to_owned(),
@@ -227,6 +312,57 @@ mod tests {
         out.clear();
         assert!(out.shown().is_empty());
         assert_eq!(out.counts, [0; 4]);
+    }
+
+    #[test]
+    fn a_rows_text_names_its_cause() {
+        let id = "6c1f0a3e9d2b47c88e51f0d4a7b3c912";
+        assert_eq!(
+            cause_of(&format!("[entity {id}] has no parent")),
+            Some(Cause::Id(u128::from_str_radix(id, 16).unwrap()))
+        );
+        assert_eq!(
+            cause_of("props/lamp.scene: the file has no part named Shade"),
+            Some(Cause::Path(String::from("props/lamp.scene")))
+        );
+        assert_eq!(
+            cause_of("src/main.rs:12:5: expected `;`"),
+            Some(Cause::Place {
+                path: String::from("src/main.rs"),
+                line: 12,
+                column: 5
+            })
+        );
+        assert_eq!(
+            cause_of(r"C:\game\scripts\door.luau:7 attempt to index nil"),
+            Some(Cause::Place {
+                path: String::from(r"C:\game\scripts\door.luau"),
+                line: 7,
+                column: 1
+            })
+        );
+        assert_eq!(
+            cause_of("lamp.scene saved"),
+            Some(Cause::Path(String::from("lamp.scene"))),
+            "a project file's extension without a folder"
+        );
+        // Words that only look a little like paths: nothing.
+        for plain in [
+            "the level loaded in 12.5 ms",
+            "and/or",
+            "version 1.2.3 found",
+            "e.g. this",
+        ] {
+            assert_eq!(cause_of(plain), None, "{plain}");
+        }
+        // Pushed rows keep theirs, and a serial to be found by.
+        let mut out = Output::detached();
+        out.push(1, Level::Error, "assets", "props/lamp.scene: no part");
+        let serial = out.shown()[0].serial;
+        assert_eq!(
+            out.row(serial).and_then(|r| r.cause.clone()),
+            Some(Cause::Path(String::from("props/lamp.scene")))
+        );
     }
 
     #[test]

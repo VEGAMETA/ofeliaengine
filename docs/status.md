@@ -375,9 +375,12 @@ Last updated: 2026-10-22.
     `engine_log::LogReader` reads the ring since its last read without locks or
     allocation; the panel (Ctrl+J, its tab) folds repeated messages with a count, marks
     each Play, filters by level and text, follows the newest; its tab counts the errors.
-  - **Next:** E6-2, causes from a row's text (asset paths, scene ids, `file:line`); then
-    Tasks, History, the profiler's first panel; then E7 (Luau, once the owner has answered
-    ADR 0114's questions).
+  - **E6-2, errors next to their causes** (#PR, ADR 0107's as-built): a row's text names
+    its cause (an id, `path:line[:column]`, a file); a click selects the entity, shows the
+    asset in the dock or opens the line in VS Code; a failed build's errors are rows.
+  - **Next:** E6-3, Tasks (the background work with its progress); then History, the
+    profiler's first panel; then E7 (Luau, once the owner has answered ADR 0114's
+    questions).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

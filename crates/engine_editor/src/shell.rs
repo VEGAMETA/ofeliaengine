@@ -115,6 +115,8 @@ pub struct OutputRow<'a> {
     pub message: &'a str,
     /// How many times it came, folded into this row.
     pub count: u32,
+    /// Its text names its cause: a click shows it.
+    pub link: bool,
 }
 
 /// A row of the scene tree or of the folder tree.
@@ -479,6 +481,8 @@ pub struct ShellResponse {
     pub output_follow: bool,
     /// The Output's Clear was clicked.
     pub output_clear: bool,
+    /// An Output row was clicked: its place among the rows shown.
+    pub output_row: Option<usize>,
     /// Play (F5).
     pub play: bool,
     /// Pause (F7).
@@ -2109,11 +2113,17 @@ fn output_panel(ui: &mut Ui, view: &OutputView<'_>, p: &Palette, out: &mut Shell
                         color
                     };
                     text(ui, "message", row.message, SMALL, shown);
+                    if row.link {
+                        text(ui, "link", icons::LINK, SMALL, p.accent);
+                    }
                     if row.count > 1 {
                         ui.spacer("fill");
                         text(ui, "count", &format!("×{}", row.count), SMALL, p.text_dim);
                     }
                 });
+                if row.link && ui.sense(id, false).clicked {
+                    out.output_row = Some(i);
+                }
                 last = Some(id);
                 ui.pop_id();
             }
