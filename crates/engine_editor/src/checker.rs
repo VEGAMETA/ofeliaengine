@@ -33,6 +33,19 @@ enum Job {
         stamp: Stamp,
         at: (u32, u32),
     },
+    /// The signature of the call a place in it is inside (typing its arguments).
+    Signature {
+        name: String,
+        text: String,
+        stamp: Stamp,
+        at: (u32, u32),
+    },
+    /// Where what is at a place in it is defined (F12, Ctrl+click).
+    Definition {
+        name: String,
+        text: String,
+        at: (u32, u32),
+    },
 }
 
 /// What the checker answers.
@@ -50,6 +63,13 @@ pub(crate) enum Answer {
         stamp: Stamp,
         at: (u32, u32),
         text: Option<String>,
+    },
+    /// Where it is defined: a module, a line and a byte (none for Luau's own).
+    Defined(Option<(String, u32, u32)>),
+    /// The signature there and the byte range of the argument being written.
+    Signature {
+        stamp: Stamp,
+        found: Option<(String, (usize, usize))>,
     },
 }
 
@@ -122,6 +142,25 @@ impl Checker {
                                     return;
                                 }
                             }
+                            Job::Signature {
+                                name,
+                                text,
+                                stamp,
+                                at,
+                            } => {
+                                analysis.set_source(&name, &text);
+                                let found = analysis.signature(&name, at.0, at.1);
+                                if finished.send(Answer::Signature { stamp, found }).is_err() {
+                                    return;
+                                }
+                            }
+                            Job::Definition { name, text, at } => {
+                                analysis.set_source(&name, &text);
+                                let found = analysis.definition(&name, at.0, at.1);
+                                if finished.send(Answer::Defined(found)).is_err() {
+                                    return;
+                                }
+                            }
                             Job::Hover {
                                 name,
                                 text,
@@ -191,6 +230,29 @@ impl Checker {
                 name: name.to_owned(),
                 text,
                 stamp,
+                at,
+            });
+        }
+    }
+
+    /// The signature of the call `at` is inside in module `name`'s `text`, of `stamp`.
+    pub(crate) fn signature(&self, name: &str, text: String, stamp: Stamp, at: (u32, u32)) {
+        if let Some(jobs) = &self.jobs {
+            let _ = jobs.send(Job::Signature {
+                name: name.to_owned(),
+                text,
+                stamp,
+                at,
+            });
+        }
+    }
+
+    /// Where what is at `at` in module `name`'s `text` is defined.
+    pub(crate) fn definition(&self, name: &str, text: String, at: (u32, u32)) {
+        if let Some(jobs) = &self.jobs {
+            let _ = jobs.send(Job::Definition {
+                name: name.to_owned(),
+                text,
                 at,
             });
         }

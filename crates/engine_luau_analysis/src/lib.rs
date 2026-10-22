@@ -79,6 +79,28 @@ mod ffi {
             column: u32,
             text: *mut *const u8,
         ) -> usize;
+        pub(crate) fn engine_analysis_definition(
+            a: *mut EngineAnalysis,
+            name: *const u8,
+            name_len: usize,
+            line: u32,
+            column: u32,
+            module: *mut *const u8,
+            module_len: *mut usize,
+            out_line: *mut u32,
+            out_column: *mut u32,
+        ) -> i32;
+        pub(crate) fn engine_analysis_signature(
+            a: *mut EngineAnalysis,
+            name: *const u8,
+            name_len: usize,
+            line: u32,
+            column: u32,
+            text: *mut *const u8,
+            text_len: *mut usize,
+            active_start: *mut u32,
+            active_end: *mut u32,
+        ) -> i32;
         pub(crate) fn engine_analysis_new(
             root: *const u8,
             root_len: usize,
@@ -372,6 +394,68 @@ impl Analysis {
             ))
         });
         out
+    }
+
+    /// Where what is at `line` and `column` of module `name` is defined: its module (a
+    /// path from the project's folder) and a line and a byte, from 0. A local's or a
+    /// global's binding, a field where its table got it, a function where it was written;
+    /// `None` for what Luau itself defines.
+    pub fn definition(&mut self, name: &str, line: u32, column: u32) -> Option<(String, u32, u32)> {
+        let (mut module, mut module_len) = (core::ptr::null(), 0usize);
+        let (mut at_line, mut at_column) = (0u32, 0u32);
+        // SAFETY: `raw` is live, the name for the call, the out-pointers point at locals.
+        let found = unsafe {
+            ffi::engine_analysis_definition(
+                self.raw.as_ptr(),
+                name.as_ptr(),
+                name.len(),
+                line,
+                column,
+                &raw mut module,
+                &raw mut module_len,
+                &raw mut at_line,
+                &raw mut at_column,
+            )
+        };
+        if found == 0 {
+            return None;
+        }
+        // SAFETY: found: `module_len` bytes at `module`, valid until the next call.
+        let module = unsafe { text_of(module, module_len) };
+        Some((module, at_line, at_column))
+    }
+
+    /// The signature of the call whose parentheses `line` and `column` of module `name`
+    /// are in (`double(n: number): number`), and the byte range in it of the argument
+    /// the place is at (empty when the call has more arguments than the function).
+    pub fn signature(
+        &mut self,
+        name: &str,
+        line: u32,
+        column: u32,
+    ) -> Option<(String, (usize, usize))> {
+        let (mut text, mut len) = (core::ptr::null(), 0usize);
+        let (mut start, mut end) = (0u32, 0u32);
+        // SAFETY: `raw` is live, the name for the call, the out-pointers point at locals.
+        let found = unsafe {
+            ffi::engine_analysis_signature(
+                self.raw.as_ptr(),
+                name.as_ptr(),
+                name.len(),
+                line,
+                column,
+                &raw mut text,
+                &raw mut len,
+                &raw mut start,
+                &raw mut end,
+            )
+        };
+        if found == 0 {
+            return None;
+        }
+        // SAFETY: found: `len` bytes at `text`, valid until the next call.
+        let text = unsafe { text_of(text, len) };
+        Some((text, (start as usize, end as usize)))
     }
 
     /// What is at `line` and `column` of module `name`: its type, as Luau writes it.

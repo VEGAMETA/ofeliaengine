@@ -49,6 +49,9 @@ pub(crate) struct Script {
     pub(crate) completing: Option<Completing>,
     /// What the mouse rests on, while shown: the word's start and its text.
     pub(crate) hover: Option<(Pos, String)>,
+    /// The signature of the call the caret is in, while its arguments are typed: its
+    /// text and the byte range of the argument at the caret.
+    pub(crate) signature: Option<(String, (usize, usize))>,
     /// How far its view is scrolled: logical pixels across and down.
     pub(crate) scroll: [f32; 2],
     /// The primary caret is brought into view at the next frame: it moved, or the text
@@ -88,6 +91,7 @@ impl Script {
             stale_from: None,
             completing: None,
             hover: None,
+            signature: None,
             scroll: [0.0; 2],
             reveal: false,
             base,

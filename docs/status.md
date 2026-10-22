@@ -428,9 +428,12 @@ Last updated: 2026-10-22.
     or the player, which read only ADR 0108's `.material`. Four questions are with the
     owner: one material file, variants with a base, numbers on graph nodes, where
     generated Slang lives.
+  - **E8-4, go to definition, find in files, signatures** (#337, ADR 0107's as-built): F12
+    and Ctrl+click across `require`s; Ctrl+Shift+F, the palette's `%` over the project's
+    scripts; a call's signature above the line, the argument at the caret lit. E8 is done
+    but for rename and references across the project.
   - **Next:** E7 waits for the owner's answers to ADR 0114's questions, and E10-1 for the
-    answer on the material file. The code editor's leftovers (go to definition, signature
-    help, find in files) come meanwhile.
+    answer on the material file.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
