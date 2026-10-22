@@ -466,10 +466,13 @@ Last updated: 2026-10-22.
     `print`. Measured: an empty hook 0.19 µs per instance (target 0.5); a view's access
     about 150–177 ns (target 100); 1,000 doors 3.3 ms a tick (target 1): views' fast
     path is E7-1c.
+  - **E7-1b, script components in scene files** (#344, ADR 0114's as-built):
+    `engine_ecs::RuntimeType`, a process-wide list of component types made at run time.
+    `SceneRegistry::from_program` reads it (`Access::Dynamic`), so `Door.lift = 3` lines
+    load and save in the player and the editor, and undo keeps them.
   - **Next, the owner's requests of 2026-10-22, in this order:**
-    1. E7 on: script components in scenes (E7-1b), then the editor's Attach Script as in
-       Godot (E7-4: a script's mark on its row opens it, the inspector shows its path),
-       then views' fast path (E7-1c);
+    1. E7 on: the editor's Attach Script as in Godot (E7-4: a script's mark on its row
+       opens it, the inspector shows its path), then views' fast path (E7-1c);
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 

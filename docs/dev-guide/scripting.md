@@ -39,12 +39,18 @@ end
 return Door
 ```
 
-Give it to an entity from Rust (the editor's Add Component comes with its own step):
+Give it to an entity in a scene file, as any component's fields are written:
 
-```rust
-let door = player.world_mut().spawn((Name::new("Front door"), Transform::IDENTITY));
-player.add_script(door, "Door");
+```text
+[entity 6a0e…]
+Name = "Front door"
+Transform.translation = [4, 0, 0]
+Door.lift = 3
 ```
+
+A prop the file leaves out takes its default. Scripts load before the scene, so the scene
+finds its components. From Rust, `player.add_script(door, "Door")` gives one with its
+defaults; the editor's Add Component and Attach Script come with their own step.
 
 ## Components and props
 
@@ -125,8 +131,8 @@ later step. Logic over thousands of objects every tick belongs in Rust.
 
 ## Coming next
 
-- script components in scene files, and the editor's Add Component, Attach Script and the
-  script's path in the inspector;
+- the editor's Add Component, Attach Script and the script's path in the inspector;
+- script components in saves;
 - systems over queries, `input`, `world.spawn`, `world.query`, entity methods (`has`, `add`,
   `remove`, `despawn`);
 - reloading a script while the game runs, its state kept;

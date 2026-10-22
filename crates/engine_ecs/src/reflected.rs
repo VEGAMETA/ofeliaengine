@@ -6,10 +6,12 @@
 //! registered by hand). A save finds a type by its stable name before the world has seen
 //! it; the editor's "add component" and scripting can list them all.
 
-use crate::component::ComponentId;
+use crate::component::{ComponentDesc, ComponentId};
 use crate::world::World;
+use core::alloc::Layout;
 use core::marker::PhantomData;
 use engine_reflect::TypeInfo;
+use std::sync::RwLock;
 
 /// Writes a type's `Default` value into uninitialized memory of its size and alignment.
 pub type WriteDefault = unsafe fn(*mut u8);
@@ -61,6 +63,67 @@ pub fn reflected_types() -> &'static [ReflectedType] {
 /// The reflected type with this stable name.
 pub fn find_reflected(name: &str) -> Option<&'static ReflectedType> {
     REFLECTED.iter().find(|t| t.info.name == name)
+}
+
+/// A component type made while the program runs (a script's, ADR 0114): what a world needs
+/// to register it, and its default value. Scenes and the editor find these beside the
+/// program's [`reflected_types`].
+#[derive(Debug, Clone)]
+pub struct RuntimeType {
+    /// Its description; [`TypeInfo::name`] is the stable name files use.
+    pub info: &'static TypeInfo,
+    /// Its name in a world's registry, unique (`script::Door`).
+    pub component: Box<str>,
+    /// Size and alignment of one value.
+    pub layout: Layout,
+    /// Its default value, laid out.
+    pub defaults: Box<[u8]>,
+}
+
+impl RuntimeType {
+    /// Its id in `world`: found by its registry name, or registered there now. `None` when
+    /// another component holds the name with another layout.
+    pub fn id(&self, world: &mut World) -> Option<ComponentId> {
+        if let Some(id) = world.components().id_by_name(&self.component) {
+            return (world.components().layout(id) == Some(self.layout)).then_some(id);
+        }
+        let desc = ComponentDesc {
+            name: self.component.clone(),
+            layout: self.layout,
+            drop: None,
+            pod: true,
+            type_info: Some(self.info),
+        };
+        // SAFETY: `add_runtime_type`'s caller promised plain data of `layout`.
+        unsafe { world.register_dynamic(desc) }.ok()
+    }
+}
+
+/// The component types made at run time, by stable name.
+static RUNTIME: RwLock<Vec<RuntimeType>> = RwLock::new(Vec::new());
+
+/// Adds a component type made at run time, or replaces the one of its stable name.
+///
+/// # Safety
+///
+/// Its values are plain data of `layout`: no drop glue, `Send` and `Sync`, any bytes of
+/// `defaults` a valid value.
+pub unsafe fn add_runtime_type(t: RuntimeType) {
+    let mut list = RUNTIME
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match list.iter_mut().find(|r| r.info.name == t.info.name) {
+        Some(r) => *r = t,
+        None => list.push(t),
+    }
+}
+
+/// The component types made at run time so far.
+pub fn runtime_types() -> Vec<RuntimeType> {
+    RUNTIME
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// For the macros: whether a concrete type implements `Default`, found by method

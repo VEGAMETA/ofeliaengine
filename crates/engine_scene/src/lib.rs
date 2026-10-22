@@ -340,6 +340,8 @@ enum Access {
         id: fn(&mut World) -> ComponentId,
         default: WriteDefault,
     },
+    /// Made at run time (a script's component, ADR 0114), registered with a world by name.
+    Dynamic(engine_ecs::RuntimeType),
 }
 
 struct Entry {
@@ -416,6 +418,17 @@ impl SceneRegistry {
                 companions: Vec::new(),
             });
         }
+        // The scripts' components (ADR 0114), made since the program started.
+        for t in engine_ecs::runtime_types() {
+            if t.info.attrs.hidden || t.info.attrs.skip || r.by_name.contains_key(t.info.name) {
+                continue;
+            }
+            r.entries.push(Entry {
+                info: t.info,
+                access: Access::Dynamic(t),
+                companions: Vec::new(),
+            });
+        }
         r.index();
         r
     }
@@ -449,7 +462,7 @@ impl SceneRegistry {
                     info.name
                 ),
                 // The program's listing of the same type: reach it through its Rust type.
-                Access::Listed { .. } => {
+                Access::Listed { .. } | Access::Dynamic(_) => {
                     assert!(
                         entry.info.size == info.size,
                         "two scene types named `{}`",
@@ -848,9 +861,13 @@ fn getters_of(registry: &SceneRegistry, world: &mut World) -> Vec<Getter> {
     registry
         .entries
         .iter()
-        .map(|entry| match entry.access {
-            Access::Typed { get, .. } => Getter::Typed(get),
+        .map(|entry| match &entry.access {
+            Access::Typed { get, .. } => Getter::Typed(*get),
             Access::Listed { id, .. } => Getter::Id(id(world)),
+            Access::Dynamic(t) => match t.id(world) {
+                Some(id) => Getter::Id(id),
+                None => Getter::Typed(|_, _| None),
+            },
         })
         .collect()
 }
@@ -2003,9 +2020,31 @@ fn spawn(
                     }
                 }
             };
-            match entry.access {
+            match &entry.access {
                 Access::Typed { insert, .. } => insert(world, e, &mut fill),
+                Access::Dynamic(t) => {
+                    // A world where another component holds its name: nothing to fill.
+                    let id = t.id(world);
+                    if scratches[entry_index].is_none() {
+                        scratches[entry_index] = Scratch::new(entry.info);
+                    }
+                    if let (Some(id), Some(scratch)) = (id, &scratches[entry_index]) {
+                        // SAFETY: the scratch is room for one value of the type; its default
+                        // bytes make it valid (plain data), reading keeps it valid, and
+                        // `insert_raw` copies it into the world.
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                t.defaults.as_ptr(),
+                                scratch.ptr,
+                                t.defaults.len().min(entry.info.size),
+                            );
+                            fill(scratch.ptr);
+                            world.insert_raw(e, id, scratch.ptr);
+                        }
+                    }
+                }
                 Access::Listed { id, default } => {
+                    let (id, default) = (*id, *default);
                     let id = id(world);
                     if scratches[entry_index].is_none() {
                         scratches[entry_index] = Scratch::new(entry.info);
@@ -2034,11 +2073,16 @@ fn spawn(
         // Components an override takes away.
         for &(line, component) in &more.removed {
             match registry.by_name.get(component.trim()) {
-                Some(&k) => match registry.entries[k].access {
+                Some(&k) => match &registry.entries[k].access {
                     Access::Typed { remove, .. } => remove(world, e),
                     Access::Listed { id, .. } => {
                         let id = id(world);
                         world.remove_raw(e, id);
+                    }
+                    Access::Dynamic(t) => {
+                        if let Some(id) = t.id(world) {
+                            world.remove_raw(e, id);
+                        }
                     }
                 },
                 None => warnings.push((line, format!("unknown component `{component}`"))),

@@ -1324,3 +1324,48 @@ fn raw_chunk_access_reads_and_writes_plain_data_by_layout() {
     assert_eq!(w.get::<Pos>(es[3]), Some(&Pos(-1.0, -1.0)));
     assert!(w.pod_column_mut(99, 0, 0, false).is_none());
 }
+
+#[test]
+fn a_type_made_at_run_time_registers_by_name_in_any_world() {
+    static INFO: engine_reflect::TypeInfo = engine_reflect::TypeInfo {
+        name: "RuntimeTestThing",
+        size: 4,
+        align: 4,
+        kind: engine_reflect::TypeKind::Primitive(engine_reflect::Primitive::F32),
+        attrs: engine_reflect::Attrs::NONE,
+    };
+    let t = RuntimeType {
+        info: &INFO,
+        component: "test::RuntimeTestThing".into(),
+        layout: core::alloc::Layout::new::<f32>(),
+        defaults: 2.5f32.to_le_bytes().into(),
+    };
+    // SAFETY: an f32, plain data, its default one.
+    unsafe { add_runtime_type(t.clone()) };
+    assert!(
+        runtime_types()
+            .iter()
+            .any(|r| r.info.name == "RuntimeTestThing")
+    );
+    let mut a = World::new();
+    let mut b = World::new();
+    b.register::<Pos>();
+    let ia = t.id(&mut a).unwrap();
+    let ib = t.id(&mut b).unwrap();
+    assert_eq!(t.id(&mut a), Some(ia), "found again by name");
+    assert_eq!(
+        a.components().id_by_name("test::RuntimeTestThing"),
+        Some(ia)
+    );
+    assert_eq!(
+        b.components().id_by_name("test::RuntimeTestThing"),
+        Some(ib)
+    );
+    assert_eq!(a.components().id_by_name("test::Missing"), None);
+    // Another layout under the name: not this type.
+    let other = RuntimeType {
+        layout: core::alloc::Layout::new::<f64>(),
+        ..t
+    };
+    assert_eq!(other.id(&mut a), None);
+}

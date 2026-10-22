@@ -44,7 +44,7 @@
 //!   A script that does not load is reported, and the others load.
 
 use engine_core::math::{Quat, Vec2, Vec3, Vec3A};
-use engine_ecs::{ComponentDesc, ComponentId, Entity, World};
+use engine_ecs::{ComponentId, Entity, World};
 use engine_reflect::{Attrs, Field, Primitive, Reflect, TypeInfo, TypeKind};
 use engine_scene::Name;
 use engine_script::mlua::{
@@ -326,18 +326,19 @@ impl Scripts {
             write_default(&mut defaults[p.offset..], p.kind, &p.default);
         }
         let layout = std::alloc::Layout::from_size_align(size, align).map_err(|e| e.to_string())?;
+        // Beside the program's types, so scenes and the editor find it by name.
+        let runtime = engine_ecs::RuntimeType {
+            info,
+            component: format!("script::{name}").into(),
+            layout,
+            defaults: defaults.clone().into_boxed_slice(),
+        };
+        let id = runtime
+            .id(world)
+            .ok_or_else(|| String::from("the world holds another component of its name"))?;
         // SAFETY: the values are plain data of `layout` (numbers, booleans, vectors and
-        // entities by value), with no drop glue, `Send` and `Sync`.
-        let id = unsafe {
-            world.register_dynamic(ComponentDesc {
-                name: format!("script::{name}").into(),
-                layout,
-                drop: None,
-                pod: true,
-                type_info: Some(info),
-            })
-        }
-        .map_err(|e| e.to_string())?;
+        // entities by value), with no drop glue, `Send` and `Sync`; the defaults are one.
+        unsafe { engine_ecs::add_runtime_type(runtime) };
         let hook = |key: &str| table.get::<Option<Function>>(key).ok().flatten();
         let hooks = Hooks {
             start: hook("on_start"),
@@ -1552,6 +1553,67 @@ return Fields
             "| 1,000 doors (the door example) | tick | {:.3} ms |",
             doors / 1e3
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn script_components_are_saved_in_scene_files_and_loaded_from_them() {
+        use engine_scene::{SaveOptions, SceneId, SceneRegistry};
+        let dir = project("scenes", &[("door.luau", DOOR)]);
+        let mut world = World::new();
+        let scripts = load(&dir, &mut world);
+        let door = world.spawn((
+            SceneId::new(),
+            Name::new("Front door"),
+            Transform::from_xyz(4.0, 0.0, 0.0),
+        ));
+        assert!(scripts.add(&mut world, door, "Door"));
+        // Its lift set as the inspector would.
+        let id = scripts.component("Door").unwrap();
+        let TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind else {
+            unreachable!()
+        };
+        let lift = fields.iter().find(|f| f.name == "lift").unwrap().offset;
+        let base = world.get_raw_mut(door, id).unwrap().as_ptr();
+        // SAFETY: Door's `lift`, an f32 at its offset.
+        unsafe { base.add(lift).cast::<f32>().write_unaligned(3.0) };
+        let mut text = String::new();
+        let options = SaveOptions {
+            id: Some(engine_scene::AssetId::new()),
+            assets: None,
+            prefabs: None,
+        };
+        engine_scene::save_with(
+            &mut world,
+            &SceneRegistry::from_program(),
+            &options,
+            &mut text,
+        )
+        .unwrap();
+        assert!(text.contains("Door.lift = 3"), "{text}");
+        assert!(text.contains("Door.speed = 2"), "{text}");
+        // Another world, its scripts loaded first: the door comes back with its lift, and
+        // rises 3 m.
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        engine_scene::load(&mut world, &SceneRegistry::from_program(), &text).unwrap();
+        let mut q = engine_ecs::QueryState::<(Entity, &Name)>::new(&mut world);
+        let door = q
+            .iter_readonly(&world)
+            .find(|(_, n)| n.as_str() == "Front door")
+            .map(|(e, _)| e)
+            .unwrap();
+        let id = scripts.component("Door").unwrap();
+        let base = world.get_raw(door, id).unwrap().as_ptr();
+        // SAFETY: Door's `lift`, an f32 at its offset.
+        let read = unsafe { base.add(lift).cast::<f32>().read_unaligned() };
+        assert_eq!(read, 3.0);
+        world.spawn((Name::new("Player"), Transform::from_xyz(4.5, 0.0, 0.0)));
+        for _ in 0..64 {
+            scripts.tick(&mut world, 1.0 / 32.0);
+        }
+        let y = world.get::<Transform>(door).unwrap().translation.y;
+        assert!((y - 3.0).abs() < 1e-4, "{y}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
