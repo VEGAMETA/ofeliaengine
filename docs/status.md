@@ -284,7 +284,7 @@ Last updated: 2026-10-20.
     - the dock shows tiles sized with Ctrl+wheel;
     - images are made smaller on a thread of their own, cached in `.ofelia/thumbnails/`,
       and kept in an atlas of 64 cells.
-  - **E4-6b, previews the engine draws** (#PR, ADR 0112):
+  - **E4-6b, previews the engine draws** (#310, ADR 0112):
     - the frame renderer's views into images of their own format, their alpha kept (a new
       tone mapping entry point);
     - `Player::request_preview` / `take_previews`: one a frame, drawn at twice the side
