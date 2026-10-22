@@ -274,8 +274,10 @@ Last updated: 2026-10-20.
       for it;
     - FlightHelmet dropped while running: the worst frame went from 1,110 ms to 7 ms;
     - mip levels 1.1–1.9× faster, to the bit (ADR 0040's addendum).
-  - **Next:** E4-5, thumbnails in the dock (offscreen renders of models and materials,
-    images as themselves, cached).
+  - **Next:** E4-5, assets read again when their files change (the database's scan
+    names them; a model keeps its old version until the new one is made; a texture file
+    reloads the glTF files that use it). Then E4-6, thumbnails (the UI needs an image
+    command, models an offscreen view).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
