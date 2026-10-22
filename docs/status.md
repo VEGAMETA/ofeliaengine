@@ -503,9 +503,15 @@ Last updated: 2026-10-22.
     on a cooking thread of its own when first asked; built-in meshes have their own
     shapes. The editor draws them with the blockout's, colored by motion.
     `engine_collision::Shape::edges` gives any shape's lines.
+  - **Models' bodies, step 2** (#PR, ADR 0117): `Game::before_ticks(scene)` and
+    `ScenePhysics::sync_scene(scene)` give the blockout's brushes and the models their
+    bodies in one line (`Game::tick` had only the world, so the guide's `sync_blockout`
+    call could not be written there). Static models follow their entities, props fall
+    and roll moving theirs; it visits only what changed and allocates nothing while
+    nothing does.
   - **Next, in this order:**
-    1. ADR 0117 step 2: `ScenePhysics::sync_models`, the models' bodies (static, and
-       dynamic ones moving their entities), so a level built from models collides in Play;
+    1. The colliders' overlay: change detection and lines kept on the GPU while they do
+       not change (10,000 models: 0.1 ms of the editor's frame and 0.26 ms of copies now);
     2. E7 on: the engine's types in the editor and for luau-lsp (E7-2, under way on
        `feat/script-types`: the old solver types a hook's `self` from `component`'s
        declaration, the new one of Luau 0.736 does not), then views' fast path (E7-1c);

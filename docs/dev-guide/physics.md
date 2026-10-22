@@ -433,12 +433,20 @@ for the engine:
 A scene saved by the editor names each model's mesh in a glTF file (no pack). Its collider
 is made the same way: by the rules beside its file (`yard.colliders.ron` next to
 `yard.glb`), level geometry by default (ADR 0117).
-- `player.assets_mut().collider(model.mesh)` gives it: `ColliderState::Made` with the
-  collider in the mesh's space and its body's settings (motion, layer, friction…),
-  `Coming` while the file is cooked in the background, `None` when nothing collides.
+- **Bodies:** `self.physics.sync_scene(scene)?` in `Game::before_ticks` (above) gives
+  every model its body and keeps it in step:
+  - a static model's body is where its entity is, made again when the entity moves;
+  - a prop (dynamic or kinematic by its rules) gets `RigidBody` and `PhysicsPose` and
+    becomes a root of the hierarchy where it is: the physics moves it, its scale kept;
+  - a model turned off or despawned loses its body; one whose collider is still being
+    cooked gets it once it comes;
+  - it visits only the models that changed, and allocates nothing while nothing does.
+- `player.assets_mut().collider(model.mesh)` gives the collider itself:
+  `ColliderState::Made` with the collider in the mesh's space and its body's settings
+  (motion, layer, friction…), `Coming` while the file is cooked in the background
+  (convex parts can take seconds), `None` when nothing collides.
 - A built-in mesh's collider is its own shape: the cube a box, the sphere a sphere.
-- The editor draws them (View: Colliders, Alt+C).
-- Bodies for them in the game come next (`ScenePhysics::sync_models`).
+- The editor draws them (View: Colliders, Alt+C), colored by motion.
 
 ### Loading them
 
@@ -482,12 +490,18 @@ non-uniform, mirrored. Nothing is regenerated and nothing errors.
 
 ### Blockout brushes
 
-A scene's brushes ([blockout.md](blockout.md)) collide through the same world: one call
-after the player has drawn a frame of them, from `Game::tick`:
+A scene's brushes ([blockout.md](blockout.md)) collide through the same world, with its
+models (below): one call in `Game::before_ticks`, which the player calls every frame
+before the ticks with the scene's parts outside the world:
 
 ```rust
-physics.sync_blockout(&player.runtime().world, player.blockout())?;
+fn before_ticks(&mut self, scene: &mut SceneParts<'_>) -> Result<(), AppError> {
+    self.physics.sync_scene(scene)?; // the brushes' bodies and the models'
+    Ok(())
+}
 ```
+
+`sync_blockout(world, blockout)` alone does the brushes' part.
 
 - **A static body per brush group,** its brushes' pieces as sharp convex hulls in one
   compound; a brush with `collides: false` is left out.

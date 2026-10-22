@@ -30,12 +30,15 @@
 //!   matches it; [`ScenePhysics::save`] keeps gravity and the bodies' velocities,
 //!   [`ScenePhysics::restore`] puts the bodies where their entities were saved, at their
 //!   saved velocities (`Game::before_save` and `Game::after_load`, one line each).
+//! - **A scene file's models** (ADR 0117): [`ScenePhysics::sync_models`] gives each model
+//!   the body its collider asks for ([`crate::Assets::collider`]) and keeps it in step.
 
 use crate::AppError;
+use crate::assets::{Assets, ColliderState, Model, ModelCollider};
 use engine_assets::colliders::{CookedBody, CookedCollider, Motion};
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
-use engine_ecs::{Entity, GlobalTransform, Transform, World};
+use engine_ecs::{Changed, Entity, GlobalTransform, Or, QueryState, Transform, Without, World};
 use engine_physics::ecs::{KinematicTarget, PhysicsPose, PhysicsSync, RigidBody};
 use engine_physics::{
     BodyDesc, BodyId, CompoundChild, GravityMode, MotionType, PhysicsBackend, PhysicsError,
@@ -43,9 +46,11 @@ use engine_physics::{
 };
 use engine_physics_jolt::JoltBackend;
 use engine_reflect::Reflect;
-use engine_scene::SceneId;
-use std::collections::HashMap;
+use engine_runtime::{ActivityEpoch, Inactive};
+use engine_scene::{AssetRef, SceneId};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// What [`ScenePhysics::load_pack`] made.
@@ -83,8 +88,50 @@ pub struct ScenePhysics {
     settings: PhysicsSettings,
     /// The moving bodies with ids, for saves (made with the pack's bodies).
     saved: Option<engine_ecs::QueryState<(&'static RigidBody, &'static SceneId)>>,
-    /// The blockout's bodies, by brush group (ADR 0110).
+    /// The blockout's bodies, by brush group (ADR 0110), and the groups seen by the last
+    /// sync.
     blockout: HashMap<Entity, BlockoutBody>,
+    blockout_seen: Vec<Entity>,
+    /// The models' bodies (ADR 0117), by entity; each mesh's shape, made from its
+    /// collider and shared by its models; the shapes placed for a scale, by mesh and
+    /// scale; and what [`Self::sync_models`] follows of the world.
+    models: HashMap<Entity, ModelBody>,
+    model_shapes: HashMap<AssetRef, (Arc<ModelCollider>, ShapeId)>,
+    model_placed: HashMap<(AssetRef, [i32; 9]), (ShapeId, bool)>,
+    model_sync: Option<ModelSync>,
+}
+
+/// A model's body: the mesh, collider and place it was made for, and whether it moves its
+/// entity (dynamic or kinematic).
+#[derive(Debug)]
+struct ModelBody {
+    mesh: AssetRef,
+    collider: Arc<ModelCollider>,
+    placed: [f32; 12],
+    body: BodyId,
+    moving: bool,
+}
+
+type ModelRows = QueryState<
+    (Entity, &'static Model, &'static GlobalTransform),
+    (
+        Or<(Changed<Model>, Changed<GlobalTransform>)>,
+        Without<Inactive>,
+    ),
+>;
+type AllModels = QueryState<(Entity, &'static Model, &'static GlobalTransform), Without<Inactive>>;
+
+/// What [`ScenePhysics::sync_models`] follows of the world: the models that changed, all
+/// of them for a rescan, those waiting for their colliders, the epochs that ask for a
+/// rescan (the assets' colliders, the entities turned off or on, the world restored), and
+/// the frame's models (kept between calls).
+struct ModelSync {
+    changed: ModelRows,
+    all: AllModels,
+    waiting: Vec<Entity>,
+    epochs: (u64, u64, u64),
+    seen: Vec<(Entity, Model, Affine3A)>,
+    gone: Vec<Entity>,
 }
 
 /// A brush group's static body: the group's epoch and place it was made for, its body and
@@ -112,6 +159,11 @@ impl ScenePhysics {
             settings: settings.clone(),
             saved: None,
             blockout: HashMap::new(),
+            blockout_seen: Vec::new(),
+            models: HashMap::new(),
+            model_shapes: HashMap::new(),
+            model_placed: HashMap::new(),
+            model_sync: None,
         })
     }
 
@@ -346,7 +398,10 @@ impl ScenePhysics {
     ) -> Result<usize, AppError> {
         engine_profiler::zone!("app::physics::sync_blockout");
         let mut made = 0;
-        let mut seen = Vec::new();
+        // Kept between calls: called every frame, it allocates nothing while nothing
+        // changes.
+        let mut seen = core::mem::take(&mut self.blockout_seen);
+        seen.clear();
         let mut hulls = Vec::new();
         for (group, epoch) in blockout.groups() {
             seen.push(group);
@@ -423,12 +478,307 @@ impl ScenePhysics {
                 self.drop_blockout_body(old);
             }
         }
+        self.blockout_seen = seen;
         Ok(made)
     }
 
     /// The blockout's body of `group`, if it has one.
     pub fn blockout_body(&self, group: Entity) -> Option<BodyId> {
         self.blockout.get(&group).map(|b| b.body)
+    }
+
+    /// The bodies of a scene file's models (ADR 0117): each active model whose mesh has a
+    /// collider ([`Assets::collider`]: by the rules beside its glTF, level geometry by
+    /// default) gets the body it asks for, placed at any scale:
+    /// - a static one at its entity's place, made again when the entity moves or its
+    ///   collider changes;
+    /// - a dynamic or kinematic one gets `RigidBody` and `PhysicsPose`, and its entity
+    ///   becomes a root of the hierarchy where it is in the world: the physics moves it
+    ///   ([`Self::step`], [`Self::interpolate`]); a kinematic one also gets a
+    ///   `KinematicTarget`;
+    /// - a model turned off, despawned, or whose mesh no longer collides loses its body;
+    ///   one whose collider is still being cooked gets it once it comes.
+    ///
+    /// Call it from `Game::tick`, before [`Self::step`]: it visits only the models that
+    /// changed (and every one when colliders were made, entities turned off or on, or the
+    /// world restored). Returns how many bodies it made.
+    pub fn sync_models(
+        &mut self,
+        world: &mut World,
+        assets: &mut Assets,
+    ) -> Result<usize, AppError> {
+        engine_profiler::zone!("app::physics::sync_models");
+        let mut sync = match self.model_sync.take() {
+            Some(sync) => sync,
+            None => {
+                world.track_removals::<Model>();
+                ModelSync {
+                    changed: QueryState::new(world),
+                    all: QueryState::new(world),
+                    waiting: Vec::new(),
+                    epochs: (u64::MAX, u64::MAX, u64::MAX),
+                    seen: Vec::new(),
+                    gone: Vec::new(),
+                }
+            }
+        };
+        let made = self.sync_models_with(&mut sync, world, assets);
+        self.model_sync = Some(sync);
+        made
+    }
+
+    fn sync_models_with(
+        &mut self,
+        sync: &mut ModelSync,
+        world: &mut World,
+        assets: &mut Assets,
+    ) -> Result<usize, AppError> {
+        // Models gone: their bodies with them.
+        sync.gone.clear();
+        world.drain_removed::<Model>(|e| sync.gone.push(e));
+        for i in 0..sync.gone.len() {
+            let e = sync.gone[i];
+            if world.get::<Model>(e).is_none()
+                && let Some(old) = self.models.remove(&e)
+            {
+                self.drop_model_body(world, e, old);
+            }
+        }
+        let epochs = (
+            assets.collider_epoch(),
+            world.resource::<ActivityEpoch>().map_or(0, |a| a.0),
+            world.resync_epoch(),
+        );
+        sync.seen.clear();
+        if epochs != sync.epochs {
+            sync.epochs = epochs;
+            // Every active model; the bodies of the others go.
+            sync.seen
+                .extend(sync.all.iter_readonly(world).map(|(e, m, g)| (e, *m, g.0)));
+            let active: HashSet<Entity> = sync.seen.iter().map(|&(e, _, _)| e).collect();
+            let off: Vec<Entity> = self
+                .models
+                .keys()
+                .copied()
+                .filter(|e| !active.contains(e))
+                .collect();
+            for e in off {
+                if let Some(old) = self.models.remove(&e) {
+                    self.drop_model_body(world, e, old);
+                }
+            }
+        } else {
+            sync.seen.extend(
+                sync.changed
+                    .iter_readonly(world)
+                    .map(|(e, m, g)| (e, *m, g.0)),
+            );
+            for &e in &sync.waiting {
+                if let (Some(&m), Some(&g)) =
+                    (world.get::<Model>(e), world.get::<GlobalTransform>(e))
+                    && world.get::<Inactive>(e).is_none()
+                {
+                    sync.seen.push((e, m, g.0));
+                }
+            }
+        }
+        sync.waiting.clear();
+        let mut made = 0;
+        for i in 0..sync.seen.len() {
+            let (e, model, place) = sync.seen[i];
+            let collider = match assets.collider(model.mesh) {
+                ColliderState::Made(c) => c,
+                ColliderState::Coming => {
+                    sync.waiting.push(e);
+                    continue;
+                }
+                ColliderState::None => {
+                    if let Some(old) = self.models.remove(&e) {
+                        self.drop_model_body(world, e, old);
+                    }
+                    continue;
+                }
+            };
+            let key = place.to_cols_array();
+            if let Some(b) = self.models.get(&e)
+                && b.mesh == model.mesh
+                && Arc::ptr_eq(&b.collider, &collider)
+                // A moving body moves its entity: that is no change.
+                && (b.moving || b.placed == key)
+            {
+                continue;
+            }
+            if let Some(old) = self.models.remove(&e) {
+                self.drop_model_body(world, e, old);
+            }
+            if let Some(body) = self.make_model_body(world, e, model.mesh, &collider, place)? {
+                self.models.insert(e, body);
+                made += 1;
+            }
+        }
+        Ok(made)
+    }
+
+    /// The body model `e` of mesh `mesh` asks for with `collider`, at world `place`; none
+    /// at a zero scale.
+    fn make_model_body(
+        &mut self,
+        world: &mut World,
+        e: Entity,
+        mesh: AssetRef,
+        collider: &Arc<ModelCollider>,
+        place: Affine3A,
+    ) -> Result<Option<ModelBody>, AppError> {
+        // The mesh's shape, shared by its models (made again for a new collider; bodies
+        // made from the old one keep it alive until they go).
+        let base = match self.model_shapes.get(&mesh) {
+            Some((made, shape)) if Arc::ptr_eq(made, collider) => *shape,
+            _ => {
+                let shape = engine_physics::colliders::build(&mut self.physics, &collider.collider)
+                    .map_err(AppError::at("a model's collider"))?;
+                if let Some((_, old)) = self
+                    .model_shapes
+                    .insert(mesh, (Arc::clone(collider), shape))
+                {
+                    self.physics.destroy_shape(old);
+                    let physics = &mut self.physics;
+                    self.model_placed.retain(|(m, _), (s, _)| {
+                        let keep = *m != mesh;
+                        if !keep {
+                            physics.destroy_shape(*s);
+                        }
+                        keep
+                    });
+                }
+                shape
+            }
+        };
+        let (values, sheared) = placement_key(place);
+        let placed = match self.model_placed.get(&(mesh, values)) {
+            Some(&(shape, sheared)) => {
+                let (_, rotation, position) = place.to_scale_rotation_translation();
+                Some(engine_physics::colliders::Placed {
+                    shape,
+                    made: true,
+                    position: if sheared {
+                        Vec3::from(place.translation)
+                    } else {
+                        position
+                    },
+                    rotation: if sheared { Quat::IDENTITY } else { rotation },
+                })
+            }
+            None => engine_physics::colliders::placed(
+                &mut self.physics,
+                &collider.collider,
+                base,
+                place,
+                TOLERANCE,
+            )
+            .map_err(AppError::at("placing a model's collider"))?,
+        };
+        let Some(placed) = placed else {
+            // A zero scale: no body.
+            return Ok(None);
+        };
+        if placed.made {
+            self.model_placed
+                .entry((mesh, values))
+                .or_insert((placed.shape, sheared));
+        }
+        let motion = match collider.motion {
+            Motion::Static => MotionType::Static,
+            Motion::Kinematic => MotionType::Kinematic,
+            Motion::Dynamic => MotionType::Dynamic,
+        };
+        let mut desc = if motion == MotionType::Dynamic {
+            BodyDesc::dynamic(placed.shape, placed.position)
+        } else {
+            BodyDesc::fixed(placed.shape, placed.position)
+        };
+        desc.motion = motion;
+        if let Some(name) = &collider.layer {
+            desc.layer = self.settings.layer(name).ok_or_else(|| {
+                AppError::message(
+                    "a model's body",
+                    format!(
+                        "its collision layer `{name}` is not in the world's layer names {:?} \
+                         (PhysicsSettings::layer_names)",
+                        self.settings.layer_names
+                    ),
+                )
+            })?;
+        }
+        desc.rotation = placed.rotation;
+        desc.friction = collider.friction;
+        desc.restitution = collider.restitution;
+        desc.mass = collider.mass;
+        desc.sensor = collider.sensor;
+        if collider.gravity_factor != 1.0 {
+            desc.gravity = GravityMode::Scaled(collider.gravity_factor);
+        }
+        let body = self
+            .physics
+            .create_body(&desc)
+            .map_err(AppError::at("a model's body"))?;
+        let moving = collider.motion != Motion::Static;
+        if moving {
+            // A root where it is in the world, its scale kept: the body moves it.
+            let (scale, _, _) = place.to_scale_rotation_translation();
+            let _ = world.set_parent(e, None);
+            world.insert(e, RigidBody::new(body));
+            world.insert(e, PhysicsPose::at(placed.position, placed.rotation));
+            world.insert(
+                e,
+                Transform::from_translation(placed.position)
+                    .with_rotation(placed.rotation)
+                    .with_scale(scale),
+            );
+            if collider.motion == Motion::Kinematic {
+                world.insert(e, KinematicTarget::new(placed.position, placed.rotation));
+            }
+            if self.sync.is_none() {
+                self.sync = Some(PhysicsSync::new(world));
+            }
+            if self.saved.is_none() {
+                self.saved = Some(engine_ecs::QueryState::new(world));
+            }
+        }
+        Ok(Some(ModelBody {
+            mesh,
+            collider: Arc::clone(collider),
+            placed: place.to_cols_array(),
+            body,
+            moving,
+        }))
+    }
+
+    /// Model `e`'s body gone, and what it gave its entity (if the entity is still there).
+    fn drop_model_body(&mut self, world: &mut World, e: Entity, old: ModelBody) {
+        self.physics.destroy_body(old.body);
+        if old.moving
+            && world
+                .get::<RigidBody>(e)
+                .is_some_and(|r| r.body() == old.body)
+        {
+            world.remove::<RigidBody>(e);
+            world.remove::<PhysicsPose>(e);
+            world.remove::<KinematicTarget>(e);
+        }
+    }
+
+    /// The bodies of the scene's brushes and models in step ([`Self::sync_blockout`],
+    /// [`Self::sync_models`]): one call from `Game::before_ticks`. Returns how many bodies
+    /// it made.
+    pub fn sync_scene(&mut self, scene: &mut crate::SceneParts<'_>) -> Result<usize, AppError> {
+        let groups = self.sync_blockout(scene.world, scene.blockout)?;
+        let models = self.sync_models(scene.world, scene.assets)?;
+        Ok(groups + models)
+    }
+
+    /// The body of model `entity`, if it has one ([`Self::sync_models`]).
+    pub fn model_body(&self, entity: Entity) -> Option<BodyId> {
+        self.models.get(&entity).map(|b| b.body)
     }
 
     fn drop_blockout_body(&mut self, old: BlockoutBody) {

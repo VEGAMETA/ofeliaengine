@@ -102,7 +102,7 @@ pub use engine_save::{
 /// The file beside a foreign asset (ADR 0108), and the project's asset database.
 pub use engine_scene::{AssetDatabase, AssetMeta};
 pub use entry::{Start, run};
-pub use game::{FrameParts, Game, PlayFrom};
+pub use game::{FrameParts, Game, PlayFrom, SceneParts};
 pub use net::{
     HitCapsule, HostOptions, NetConfig, NetEvent, NetInput, NetState, Network, PlayerId, Predicted,
     SubTick, To,

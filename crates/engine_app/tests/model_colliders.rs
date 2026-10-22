@@ -1,14 +1,18 @@
 //! Models' colliders (ADR 0117): a built-in mesh's own shape at once; a glTF mesh's as the
 //! cook makes it by the rules beside its file, cooked in the background the first time it
 //! is asked for: level geometry by default, a box fitted to it for a prop, none when the
-//! rules turn it off, and cooked again each time the file is read again.
+//! rules turn it off, and cooked again each time the file is read again. Their bodies, from
+//! a game whose physics follows the scene: a prop falls onto a floor, a static model's body
+//! follows it when it moves and goes with it.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout, clippy::panic)]
 
+use engine_app::ScenePhysics;
 use engine_app::prelude::*;
-use engine_app::{AssetMeta, BakedBrush, ColliderState, ModelCollider};
+use engine_app::{AppError, AssetMeta, BakedBrush, ColliderState, ModelCollider, SceneParts};
 use engine_assets::colliders::Motion;
 use engine_collision::Shape;
+use engine_physics::{PhysicsBackend, PhysicsSettings, QueryFilter, Ray};
 use engine_scene::AssetPaths;
 use std::sync::Arc;
 
@@ -162,5 +166,139 @@ fn a_models_collider_is_its_meshs_by_its_files_rules() {
     std::fs::write(dir.join("crate.colliders.ron"), "(collides: false)").unwrap();
     player.reload_asset(id);
     assert_eq!(settled(&mut player, asset), ColliderState::None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A game whose physics follows the scene's models (ADR 0117).
+struct Physical {
+    physics: ScenePhysics,
+}
+
+impl Game for Physical {
+    fn before_ticks(&mut self, scene: &mut SceneParts<'_>) -> Result<(), AppError> {
+        self.physics.sync_scene(scene)?;
+        Ok(())
+    }
+
+    fn tick(&mut self, world: &mut World, dt: f32) {
+        self.physics.step(world, dt).unwrap();
+    }
+
+    fn present(&mut self, world: &mut World, alpha: f32) {
+        self.physics.interpolate(world, alpha);
+    }
+}
+
+#[test]
+fn models_bodies_follow_the_scene() {
+    let dir = std::env::temp_dir().join(format!("ofelia-model-bodies-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let baked = engine_app::bake::glb("Crate", &[cube()], &engine_app::grid_png());
+    let (mesh, material) = baked.parts[0].clone();
+    std::fs::write(dir.join("crate.glb"), &baked.bytes).unwrap();
+    std::fs::write(dir.join("crate.colliders.ron"), "(bodies: Dynamic)").unwrap();
+    let id = AssetMeta::ensure(&dir.join("crate.glb")).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("model bodies test"),
+        window: Window::Offscreen {
+            width: 160,
+            height: 90,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut paths = AssetPaths::new();
+    paths.insert(AssetRef::file(id), "crate.glb");
+    player.assets_mut().add_paths(&paths);
+    player.set_frame_time(Some(1.0 / 60.0));
+    // A floor of a built-in cube, 10 × 1 × 10 m, its top at 0; a crate 3 m above it.
+    let world = player.world_mut();
+    let floor = world.spawn((
+        SceneId::new(),
+        Transform::from_xyz(0.0, -0.5, 0.0).with_scale(Vec3::new(10.0, 1.0, 10.0)),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    let crate_ = world.spawn((
+        SceneId::new(),
+        Transform::from_xyz(0.0, 3.0, 0.0),
+        Model::new(AssetRef::part(id, &mesh), AssetRef::part(id, &material)),
+    ));
+    let mut game = Physical {
+        physics: ScenePhysics::new(&PhysicsSettings {
+            threads: 0,
+            ..PhysicsSettings::default()
+        })
+        .unwrap(),
+    };
+    let frames = |player: &mut Player, game: &mut Physical, n: usize| {
+        for _ in 0..n {
+            player.frame(game).unwrap();
+        }
+    };
+    // The crate falls once its collider is cooked, and rests on the floor.
+    frames(&mut player, &mut game, 240);
+    assert!(game.physics.model_body(floor).is_some(), "the floor's body");
+    assert!(
+        game.physics.model_body(crate_).is_some(),
+        "the crate's body"
+    );
+    let y = player
+        .world_mut()
+        .get::<Transform>(crate_)
+        .unwrap()
+        .translation
+        .y;
+    println!("the crate rests at {y}");
+    assert!((y - 0.5).abs() < 0.05, "on the floor: {y}");
+    // A ray down beside the crate hits the floor's top.
+    let down = |game: &Physical| {
+        game.physics
+            .backend()
+            .raycast(
+                &Ray {
+                    origin: Vec3::new(3.0, 10.0, 3.0),
+                    direction: Vec3::new(0.0, -20.0, 0.0),
+                },
+                QueryFilter::default(),
+            )
+            .map(|hit| hit.point.y)
+    };
+    assert!(
+        down(&game).is_some_and(|y| y.abs() < 1e-3),
+        "{:?}",
+        down(&game)
+    );
+    // Moved 2 m down, as the editor moves it: its body follows.
+    player
+        .world_mut()
+        .get_mut::<Transform>(floor)
+        .unwrap()
+        .translation
+        .y = -2.5;
+    frames(&mut player, &mut game, 2);
+    assert!(
+        down(&game).is_some_and(|y| (y + 2.0).abs() < 1e-3),
+        "{:?}",
+        down(&game)
+    );
+    // Despawned: its body goes with it.
+    player.world_mut().despawn(floor);
+    frames(&mut player, &mut game, 2);
+    assert!(game.physics.model_body(floor).is_none());
+    assert_eq!(down(&game), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
