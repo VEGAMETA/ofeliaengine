@@ -156,6 +156,9 @@ const MIXED: &str = "—";
 /// How long a message stays in the status bar, in seconds.
 const MESSAGE_SECONDS: f32 = 4.0;
 
+/// The bottom bar's Profiler tab (E6-5).
+const PROFILER_TAB: usize = 6;
+
 /// How many closed scenes "Reopen Closed Scene" can bring back.
 const CLOSED_KEPT: usize = 20;
 
@@ -290,9 +293,13 @@ fn run_inner<G: Game>(
     let mut result: Result<(), Error> = Ok(());
     loop {
         while !player.closing() && !game.quitting() && frames.is_none_or(|n| count < n) {
-            if let Err(e) = player.frame_overlaid(&mut game, Some(&mut overlay)) {
-                result = Err(e.into());
-                break;
+            match player.frame_overlaid(&mut game, Some(&mut overlay)) {
+                Ok(Some(report)) => game.note_frame(&report, &player),
+                Ok(None) => {}
+                Err(e) => {
+                    result = Err(e.into());
+                    break;
+                }
             }
             player.set_view_rect(game.view_rect());
             player.lock_cursor(game.cursor_locked());
@@ -588,6 +595,8 @@ struct CommandIds {
     tasks: CommandId,
     /// The scene dock's History (E6-4) shown, or the tree again.
     history: CommandId,
+    /// The profiler's panel (E6-5) opened or closed.
+    profiler: CommandId,
     find: CommandId,
     select_next: CommandId,
     select_previous: CommandId,
@@ -700,6 +709,7 @@ fn commands() -> (Commands, CommandIds) {
         clear_output: c.register("output.clear", "Output", "Clear"),
         tasks: c.register("view.tasks", "View", "Tasks"),
         history: c.register("view.history", "View", "History"),
+        profiler: c.register("view.profiler", "View", "Profiler"),
         find: c.register("scene.find", "Scene", "Go to Object"),
         select_next: c.register("scene.select_next", "Scene", "Select Next Row"),
         select_previous: c.register("scene.select_previous", "Scene", "Select Previous Row"),
@@ -1546,6 +1556,10 @@ struct Editor {
     /// frame.
     task_rows: Vec<(&'static str, String, String)>,
     tasks_label: String,
+    /// The frames for the profiler's panel (E6-5), and its text made with the frame: the
+    /// header, the bars, the stages' and passes' rows.
+    profile: crate::profile::Profile,
+    profiler_text: crate::profile::ProfilerText,
     /// The scene dock shows the History (E6-4) instead of the tree; its rows (name, the
     /// scene when another tab's, done, current), made with the frame.
     history_shown: bool,
@@ -2121,6 +2135,8 @@ impl Editor {
             tasks_label: String::new(),
             history_shown: false,
             history_rows: Vec::new(),
+            profile: crate::profile::Profile::default(),
+            profiler_text: crate::profile::ProfilerText::default(),
             pending_assets: AssetPaths::new(),
             history: {
                 let mut history = History::new();
@@ -2577,6 +2593,48 @@ impl Editor {
                 self.drag = None;
                 self.open_choice = None;
             }
+        }
+        // The profiler's panel (E6-5), while it is open: the latest frame's times, a bar a
+        // frame against the longest kept, the costliest stages and passes.
+        if self.bottom == Some(PROFILER_TAB) {
+            let crate::profile::ProfilerText {
+                header,
+                bars,
+                stages,
+                passes,
+            } = &mut self.profiler_text;
+            header.clear();
+            if let Some((cpu, gpu)) = self.profile.latest() {
+                let _ = write!(header, "CPU {cpu:.2} ms");
+                if let Some(gpu) = gpu {
+                    let _ = write!(header, "  ·  GPU {gpu:.2} ms");
+                }
+                let _ = write!(header, "  ·  the last {} frames", self.profile.frames.len());
+            } else {
+                header.push_str("No frame measured yet");
+            }
+            let scale = self.profile.scale();
+            bars.clear();
+            bars.extend(self.profile.frames.iter().map(|&(cpu, gpu)| {
+                let gpu = gpu.unwrap_or(0.0);
+                (cpu / scale, gpu / scale, cpu.max(gpu) > 1000.0 / 60.0)
+            }));
+            stages.clear();
+            stages.extend(
+                self.profile
+                    .stages
+                    .iter()
+                    .map(|&(name, us)| (name, format!("{us:.0} µs"))),
+            );
+            passes.clear();
+            passes.extend(self.profile.passes.iter().map(|&(name, us, n)| {
+                let time = if n > 1 {
+                    format!("{us:.0} µs ({n})")
+                } else {
+                    format!("{us:.0} µs")
+                };
+                (name, time)
+            }));
         }
         // The History (E6-4), while the scene dock shows it.
         if self.history_shown {
@@ -3189,6 +3247,25 @@ impl Editor {
                 current: *current,
             })
             .collect();
+        let stage_rows: Vec<(&str, &str)> = self
+            .profiler_text
+            .stages
+            .iter()
+            .map(|(n, t)| (*n, t.as_str()))
+            .collect();
+        let pass_rows: Vec<(&str, &str)> = self
+            .profiler_text
+            .passes
+            .iter()
+            .map(|(n, t)| (*n, t.as_str()))
+            .collect();
+        let profiler_view =
+            (self.bottom == Some(PROFILER_TAB)).then(|| crate::shell::ProfilerView {
+                header: &self.profiler_text.header,
+                bars: &self.profiler_text.bars,
+                stages: &stage_rows,
+                passes: &pass_rows,
+            });
         let task_rows: Vec<crate::shell::TaskRow<'_>> = self
             .task_rows
             .iter()
@@ -3248,6 +3325,7 @@ impl Editor {
             output: output_view,
             tasks: (self.bottom == Some(1)).then_some(task_rows.as_slice()),
             history: self.history_shown.then_some(history_rows.as_slice()),
+            profiler: profiler_view,
             playing,
             paused: self.play.as_ref().is_some_and(|p| p.paused),
             status: &self.status,
@@ -3341,8 +3419,10 @@ impl Editor {
             match i {
                 0 => self.run(world, self.ids.output),
                 1 => self.run(world, self.ids.tasks),
+                PROFILER_TAB => self.run(world, self.ids.profiler),
                 _ => self.say(String::from(
-                    "Only the Output and the Tasks are there yet (ADR 0107's phases)",
+                    "Only the Output, the Tasks and the Profiler are there yet (ADR 0107's \
+                     phases)",
                 )),
             }
         }
@@ -7748,6 +7828,12 @@ impl Editor {
             };
         } else if id == ids.history {
             self.history_shown = !self.history_shown;
+        } else if id == ids.profiler {
+            self.bottom = if self.bottom == Some(PROFILER_TAB) {
+                None
+            } else {
+                Some(PROFILER_TAB)
+            };
         } else if id == ids.open_scene {
             self.open_palette(world, "#scene:");
             if let Some(cp) = self.command_palette.as_mut() {
@@ -11106,6 +11192,17 @@ impl<G> EditorGame<G> {
     pub fn view_cursor_locked(&self) -> bool {
         let shared = self.shared.borrow();
         shared.game_has_mouse() && shared.in_view_window
+    }
+
+    /// A frame the player drew, for the profiler's panel (E6-5): its CPU stages, and the
+    /// GPU's last measured frame.
+    pub fn note_frame(&mut self, report: &engine_app::FrameReport, player: &Player) {
+        let graph = player.graph();
+        self.shared.borrow_mut().profile.note(
+            report,
+            graph.gpu_pass_times(),
+            graph.gpu_frame_time(),
+        );
     }
 
     /// Gives the player the asset paths of scenes the editor loaded, and learns the

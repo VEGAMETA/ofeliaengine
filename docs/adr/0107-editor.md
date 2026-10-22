@@ -1320,6 +1320,21 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
   step shows its tab as Ctrl+Z does. `Start` takes back every step it can (while
   playing, not past Play's start).
 
+## As built (E6-5, 2026-10-22): the profiler's first panel
+
+- **The editor's loop** hands each frame's `FrameReport` to the editor
+  (`EditorGame::note_frame`), with the frame graph's GPU times of the last measured frame
+  (`RenderGraph::gpu_pass_times`, `gpu_frame_time`).
+- **The panel** (the bottom bar's Profiler tab, "View: Profiler"):
+  - a header with the latest frame's CPU and GPU milliseconds;
+  - a bar per frame for the last 120, measured against the longest kept and at least a
+    60 Hz frame, those over 16.7 ms in the warning color;
+  - the nine costliest CPU stages and GPU passes side by side, passes of one name summed
+    with their count (a bloom's levels).
+- **Left:** "Open in Tracy" (CLAUDE.md §14) needs the profiling build's Tracy client; the
+  physics', sound's and scripts' own panels come with their phases (E11, E7). **E6 is
+  done.**
+
 ## As built (E4-1, 2026-10-22): the local cache's index
 
 §5 left the index's form to a measurement: our own text file, read in 3.2 ms and an

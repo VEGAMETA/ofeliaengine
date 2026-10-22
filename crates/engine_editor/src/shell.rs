@@ -114,6 +114,21 @@ pub struct HistoryRow<'a> {
     pub current: bool,
 }
 
+/// The profiler's first panel (ADR 0107 E6-5): the last frames as bars, the latest
+/// frame's CPU stages and GPU passes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProfilerView<'a> {
+    /// The latest frame's times (`CPU 2.1 ms · GPU 6.0 ms`).
+    pub header: &'a str,
+    /// The last frames, oldest first: each frame's CPU and GPU times as shares of the
+    /// graph's height, and whether it took longer than a 60 Hz frame.
+    pub bars: &'a [(f32, f32, bool)],
+    /// The CPU stages and the GPU passes, the longest first: a name and its time.
+    pub stages: &'a [(&'a str, &'a str)],
+    /// The GPU passes.
+    pub passes: &'a [(&'a str, &'a str)],
+}
+
 /// A row of the Tasks panel (ADR 0107 E6-3): background work under way.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TaskRow<'a> {
@@ -410,6 +425,8 @@ pub struct ShellModel<'a> {
     pub output: Option<OutputView<'a>>,
     /// The Tasks panel there instead, while its tab is open.
     pub tasks: Option<&'a [TaskRow<'a>]>,
+    /// The profiler's panel there instead, while its tab is open.
+    pub profiler: Option<ProfilerView<'a>>,
     /// The scene dock's History tab (E6-4) instead of the tree, while it is chosen: its
     /// rows, oldest first.
     pub history: Option<&'a [HistoryRow<'a>]>,
@@ -626,6 +643,9 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
         }
         if let Some(rows) = model.tasks {
             tasks_panel(ui, rows, p);
+        }
+        if let Some(view) = &model.profiler {
+            profiler_panel(ui, view, p);
         }
         bottom_bar(ui, model, p, &mut out);
         if let Some(view) = &model.palette {
@@ -2211,6 +2231,90 @@ fn output_panel(ui: &mut Ui, view: &OutputView<'_>, p: &Palette, out: &mut Shell
         {
             ui.reveal(id);
         }
+    });
+}
+
+/// The profiler's panel (ADR 0107 E6-5): the latest frame's times, a bar per frame kept
+/// (CPU, and the GPU behind it), then the longest CPU stages and GPU passes side by side.
+fn profiler_panel(ui: &mut Ui, view: &ProfilerView<'_>, p: &Palette) {
+    const GRAPH: f32 = 56.0;
+    let panel = Style {
+        size: [Size::Grow(1.0), Size::Fixed(240.0)],
+        direction: Direction::Column,
+        padding: [8.0, 4.0, 8.0, 4.0],
+        gap: 4.0,
+        background: Some(p.dock),
+        ..Style::default()
+    };
+    ui.container("profiler", panel, |ui| {
+        text(ui, "header", view.header, SMALL, p.text);
+        ui.row(
+            "graph",
+            Style {
+                size: [Size::Grow(1.0), Size::Fixed(GRAPH)],
+                gap: 1.0,
+                align_cross: Align::End,
+                background: Some(p.header),
+                ..Style::default()
+            },
+            |ui| {
+                for (i, &(cpu, gpu, over)) in view.bars.iter().enumerate() {
+                    ui.push_id(i as u64);
+                    let height = cpu.max(gpu).clamp(0.02, 1.0) * GRAPH;
+                    ui.container(
+                        "bar",
+                        Style {
+                            size: [Size::Fixed(4.0), Size::Fixed(height)],
+                            background: Some(if over { p.warning } else { p.accent }),
+                            ..Style::default()
+                        },
+                        |_| {},
+                    );
+                    ui.pop_id();
+                }
+            },
+        );
+        ui.row(
+            "tables",
+            Style {
+                size: [Size::Grow(1.0), Size::Grow(1.0)],
+                gap: 24.0,
+                ..Style::default()
+            },
+            |ui| {
+                for (key, title, rows) in [("cpu", "CPU", view.stages), ("gpu", "GPU", view.passes)]
+                {
+                    ui.container(
+                        key,
+                        Style {
+                            size: [Size::Fixed(300.0), Size::Grow(1.0)],
+                            direction: Direction::Column,
+                            ..Style::default()
+                        },
+                        |ui| {
+                            text(ui, "title", title, SMALL, p.text_dim);
+                            for (i, (name, time)) in rows.iter().enumerate() {
+                                ui.push_id(i as u64);
+                                ui.row(
+                                    "row",
+                                    Style {
+                                        size: [Size::Grow(1.0), Size::Fixed(15.0)],
+                                        align_cross: Align::Center,
+                                        ..Style::default()
+                                    },
+                                    |ui| {
+                                        text(ui, "name", name, SMALL, p.text);
+                                        ui.spacer("fill");
+                                        text(ui, "time", time, SMALL, p.text_dim);
+                                    },
+                                );
+                                ui.pop_id();
+                            }
+                        },
+                    );
+                }
+            },
+        );
     });
 }
 

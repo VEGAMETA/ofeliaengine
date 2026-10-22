@@ -382,8 +382,12 @@ Last updated: 2026-10-22.
     the background work (the build, assets, compression, thumbnails, navigation) with how
     far and how long; the scene dock's History lists every step, the current one marked,
     and a click goes to it.
-  - **Next:** E6-5, the profiler's first panel (the frame's stages and the GPU's passes);
-    then E7 (Luau, once the owner has answered ADR 0114's questions).
+  - **E6-5, the profiler's first panel** (#328, ADR 0107's as-built): the last 120 frames'
+    CPU and GPU times as bars, the costliest CPU stages (`FrameReport`) and GPU passes
+    (the frame graph's timestamps). **E6 is done.**
+  - **Next:** E7 waits for the owner's answers to ADR 0114's questions; meanwhile E8's
+    core, the multi-line text editor (it does not depend on the scripting API): editing,
+    selection, undo, scrolling, Luau's highlighting; then find and replace.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

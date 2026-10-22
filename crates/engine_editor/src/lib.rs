@@ -24,6 +24,7 @@ mod output;
 pub mod paint;
 mod palette;
 mod prefabs;
+mod profile;
 mod session;
 pub mod shell;
 mod snap;
