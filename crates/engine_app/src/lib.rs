@@ -74,6 +74,7 @@ mod previews;
 mod process;
 mod report;
 mod saves;
+pub mod script_types;
 pub mod scripts;
 mod settings;
 mod sound;

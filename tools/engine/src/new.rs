@@ -115,6 +115,20 @@ fn assets() -> Result<Vec<(&'static str, String)>, String> {
     Ok(files)
 }
 
+/// VS Code's settings for luau-lsp (checked with luau-lsp 1.70.1, 2026-10-22): Luau without
+/// Roblox's API, no Rojo sourcemap, the engine's types (`types/ofelia.d.luau`, written by
+/// the editor, ADR 0114 E7-2) under `@ofelia`, and the old type solver, which types a
+/// hook's `self` from `component` (as the editor's checker does).
+const VSCODE_SETTINGS: &str = r#"{
+    "luau-lsp.platform.type": "standard",
+    "luau-lsp.sourcemap.enabled": false,
+    "luau-lsp.types.definitionFiles": {
+        "@ofelia": "types/ofelia.d.luau"
+    },
+    "luau-lsp.fflags.enableNewSolver": false
+}
+"#;
+
 pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
     let dir = &args.dir;
     if dir.exists()
@@ -149,8 +163,13 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
         ("src/main.rs", MAIN.replace("pub(crate) ", "")),
         ("sounds/README.md", String::from(SOUNDS)),
         ("rust-toolchain.toml", String::from(TOOLCHAIN)),
-        // `.ofelia/` is the editor's: its autosaves, its session, the asset cache.
-        (".gitignore", String::from("/target\n*.pack\n/.ofelia/\n")),
+        // `.ofelia/` is the editor's: its autosaves, its session, the asset cache; `types/`
+        // the scripts' types it writes.
+        (
+            ".gitignore",
+            String::from("/target\n*.pack\n/.ofelia/\n/types/\n"),
+        ),
+        (".vscode/settings.json", String::from(VSCODE_SETTINGS)),
         ("README.md", readme(&name, &engine)),
     ];
     files.extend(assets()?);
@@ -350,6 +369,11 @@ mod tests {
             main.contains("engine_app::main!(settings, start);") && !main.contains("pub(crate)")
         );
         assert!(read(".gitignore").lines().any(|l| l == "/.ofelia/"));
+        assert!(read(".gitignore").lines().any(|l| l == "/types/"));
+        // luau-lsp in VS Code sees the engine's types as the editor writes them.
+        let settings = read(".vscode/settings.json");
+        assert!(settings.contains("\"@ofelia\": \"types/ofelia.d.luau\""));
+        assert!(settings.contains("\"luau-lsp.platform.type\": \"standard\""));
         // The engine's build, shared, and its dependencies' versions.
         let config = read(".cargo/config.toml");
         assert!(

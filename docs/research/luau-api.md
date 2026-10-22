@@ -227,3 +227,21 @@ fields are part of the scene), Defold's `self.closed` and Godot's `closed_y` are
   its state is kept, and the per-object state lives in components anyway.
 - **PascalCase** (Roblox): every name would differ from the scene files, the Rust code and
   the tween targets (`Transform.translation`).
+
+## Addendum (2026-10-22, E7-2): the solvers and luau-lsp's settings
+
+Checked with Luau 0.736 (the release mlua builds) and luau-lsp 1.70.1's settings.
+
+- **A hook's `self`.** With `declare function component<P>(name: string, props: P):
+  ScriptComponent<P>` and `ScriptComponent<P>`'s hooks typed `self: P & ScriptSelf`, the
+  old solver types the `self` of `function Door.on_tick(self, dt: number)` from the
+  table's field, and finds `self.Transform.translation = 5` an error. The new solver of
+  0.736 leaves that `self` unknown. The editor's checker and the settings `ofeliaengine
+  new` writes use the old solver.
+- **luau-lsp's settings:** `luau-lsp.types.definitionFiles` takes an object, a package
+  name to a path (`{"@ofelia": "types/ofelia.d.luau"}`); `luau-lsp.platform.type` is
+  `roblox` unless set to `standard`; `luau-lsp.sourcemap.enabled` asks Rojo for a
+  sourcemap unless turned off; `luau-lsp.fflags.enableNewSolver` is off by default.
+- **Definitions take names only:** a property named by a reserved word (`repeat`) is a
+  parse error in a definition file, so the generator leaves such fields out.
+- No code was carried over from luau-lsp (MIT) or Luau (MIT); their behaviour was read.

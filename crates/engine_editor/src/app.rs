@@ -2008,6 +2008,10 @@ struct Editor {
     script_reloads: Vec<PathBuf>,
     /// The world's script components and their files.
     script_files: ScriptFiles,
+    /// The engine's scripting API as Luau definitions (E7-2), and the run-time types'
+    /// version it was made at.
+    script_types: String,
+    script_types_at: Option<u64>,
     /// The active brush's side handles (ADR 0110 E2b-3c), the one under the pointer, and
     /// a side being dragged.
     handles: Handles,
@@ -2650,6 +2654,8 @@ impl Editor {
             script_request: None,
             script_reloads: Vec::new(),
             script_files: ScriptFiles::default(),
+            script_types: String::new(),
+            script_types_at: None,
             handles: Handles::default(),
             hovered_side: None,
             side_drag: None,
@@ -2974,6 +2980,7 @@ impl Editor {
         self.tick_builds(world);
         self.tick_assets(world);
         self.tick_scripts();
+        self.refresh_script_types();
         self.tick_checker(world);
         self.keep_script_autosaves(world, false);
         if !playing {
@@ -8423,6 +8430,48 @@ impl Editor {
         }
     }
 
+    /// The engine's scripting API as Luau definitions (E7-2), made again when the scripts
+    /// declared other components: given to Luau's checker (the open scripts checked
+    /// again), and written as `types/ofelia.d.luau` for luau-lsp when the project has
+    /// scripts.
+    fn refresh_script_types(&mut self) {
+        let version = engine_ecs::runtime_types_version();
+        if self.script_types_at == Some(version) {
+            return;
+        }
+        self.script_types_at = Some(version);
+        let text = engine_app::script_types::definitions();
+        if text == self.script_types {
+            return;
+        }
+        self.script_types = text;
+        if self.root.join("scripts").is_dir() {
+            let file = self.root.join("types/ofelia.d.luau");
+            let same = std::fs::read(&file).is_ok_and(|b| b == self.script_types.as_bytes());
+            let written = if same {
+                Ok(())
+            } else {
+                file.parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .map_err(|e| e.to_string())
+                    .and_then(|()| {
+                        session::write_whole(&file, self.script_types.as_bytes(), 0, Duration::ZERO)
+                    })
+            };
+            if let Err(e) = written {
+                log::warn!(target: "engine_editor", "types/ofelia.d.luau: {e}");
+            }
+        }
+        if let Some(checker) = &self.checkers.luau {
+            checker.set_definitions(self.script_types.clone());
+            for s in &mut self.scripts {
+                if s.language == Language::Luau {
+                    s.sent = None;
+                }
+            }
+        }
+    }
+
     /// The checkers' frame (E8-3b, E10-2a): each open tab's text given to its language's
     /// checker a moment after it changed ([`script::CHECK_AFTER`]), and what came back put
     /// with the text it was of; a checker started with its language's first tab.
@@ -8438,7 +8487,9 @@ impl Editor {
                 .is_none_or(|t| now.duration_since(t) >= script::CHECK_AFTER);
             if s.sent != Some(version)
                 && rested
-                && let Some(checker) = self.checkers.start(s.language, &self.root)
+                && let Some(checker) =
+                    self.checkers
+                        .start(s.language, &self.root, &self.script_types)
             {
                 let stamp = crate::checker::Stamp {
                     generation: s.generation,
@@ -15301,8 +15352,9 @@ impl Checkers {
         }
     }
 
-    /// The checker of `language`, started now for the project in `root` if it was not.
-    fn start(&mut self, language: Language, root: &Path) -> Option<&Checker> {
+    /// The checker of `language`, started now for the project in `root` if it was not
+    /// (Luau's with the engine's types, `definitions`).
+    fn start(&mut self, language: Language, root: &Path, definitions: &str) -> Option<&Checker> {
         let slot = match language {
             Language::Luau => &mut self.luau,
             Language::Slang => &mut self.slang,
@@ -15312,7 +15364,7 @@ impl Checkers {
         if slot.is_none() {
             *slot = match language {
                 Language::Slang => Checker::slang(root),
-                _ => Checker::luau(root),
+                _ => Checker::luau(root, definitions.to_owned()),
             };
         }
         slot.as_ref()
@@ -19054,6 +19106,68 @@ mod tests {
         mouse(&mut ed, to, Some(false));
         ed.update(&mut world);
         assert_eq!(ed.history.steps().count(), 2, "nothing more");
+    }
+
+    /// The guide's first script (`docs/dev-guide/scripting.md`).
+    const DOOR: &str = r#"--!strict
+local Door = component("Door", {
+    lift = 2.5,                    -- metres
+    speed = prop.number(2, { min = 0.1, tooltip = "Metres a second" }),
+    closed = vector.zero,          -- where it rests, taken at start
+})
+
+function Door.on_start(self)
+    self.closed = self.Transform.translation
+end
+
+function Door.on_tick(self, dt: number)
+    local player = world.find("Player")
+    local near = player ~= nil
+        and vector.magnitude(player.Transform.translation - self.closed) < 3
+    local goal = if near then self.closed + vector.create(0, self.lift, 0) else self.closed
+    local t = self.Transform
+    local to_goal = goal - t.translation
+    local step = math.min(vector.magnitude(to_goal), self.speed * dt)
+    if step > 0 then
+        t.translation += vector.normalize(to_goal) * step
+    end
+end
+
+return Door
+"#;
+
+    #[test]
+    fn the_engines_types_check_the_guides_door_and_a_new_script_clean() {
+        use crate::checker::Analyzer;
+        let dir = std::env::temp_dir().join(format!("ofelia-types-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        let types = engine_app::script_types::definitions();
+        let Some(mut luau) = crate::checker::LuauAnalyzer::new(&dir, &types) else {
+            panic!("Luau's analysis did not start");
+        };
+        assert!(luau.definitions_loaded(), "the definitions load");
+        luau.set_source("door", DOOR);
+        let found = luau.check("door");
+        assert!(found.is_empty(), "{found:?}");
+        luau.set_source("front_door", &script_template("FrontDoor"));
+        let found = luau.check("front_door");
+        assert!(found.is_empty(), "{found:?}");
+        // A field of the wrong type: an error where it is.
+        luau.set_source(
+            "bad",
+            "--!strict\nlocal Bad = component(\"Bad\", { speed = 1 })\n\
+             function Bad.on_tick(self, dt: number)\n    self.Transform.translation = 5\nend\n\
+             return Bad\n",
+        );
+        let found = luau.check("bad");
+        assert!(
+            found
+                .iter()
+                .any(|d| d.severity == engine_luau_analysis::Severity::Error && d.start.0 == 3),
+            "{found:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
