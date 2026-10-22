@@ -733,6 +733,14 @@ impl Assets {
             + self.pending_materials.len()
     }
 
+    /// Whether material `material` has its textures (or none to wait for).
+    pub(crate) fn settled(&self, material: MaterialId) -> bool {
+        !self
+            .pending_materials
+            .iter()
+            .any(|p| p.material == material)
+    }
+
     /// How many textures have been made from glTF files so far.
     pub fn textures_made(&self) -> usize {
         self.textures.values().filter(|t| t.is_some()).count()

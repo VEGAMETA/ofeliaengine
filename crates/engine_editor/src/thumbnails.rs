@@ -1,8 +1,11 @@
-//! The FileSystem dock's thumbnails (ADR 0112, E4-6a): images made smaller on a thread of
-//! their own and cached in `.ofelia/thumbnails/`, then kept in an atlas the UI draws from.
+//! The FileSystem dock's thumbnails (ADR 0112): images made smaller on a thread of their
+//! own (E4-6a), models and materials drawn by the player (E4-6b), all cached in
+//! `.ofelia/thumbnails/`, then kept in an atlas the UI draws from.
 //!
-//! - **A thumbnail** is the image fitted into a square of [`SIZE`] (never enlarged), its
-//!   proportions kept, centred on transparency. Its pixels are averaged in sRGB.
+//! - **An image's thumbnail** is the image fitted into a square of [`SIZE`] (never
+//!   enlarged), its proportions kept, centred on transparency, averaged in sRGB.
+//! - **A model's or a material's** is a preview the player draws (`Player::request_preview`)
+//!   when the cache has none for the file as it is.
 //! - **The cache** keeps a PNG per asset, named by its id, and beside it the key it was made
 //!   for (the file's size and modification time, the size, a version): a file written anew
 //!   is made again.
@@ -44,7 +47,7 @@ impl Key {
 }
 
 enum Thumb {
-    /// Being made, for this key.
+    /// Being made, for this key: on the thread, or (`rendering`) by the player.
     Making(Key),
     /// Made; in an atlas cell once on screen.
     Made {
@@ -56,15 +59,18 @@ enum Thumb {
     Without(Key),
 }
 
-/// A thumbnail made on the thread: for which asset and key, and its pixels (none: the
-/// file has none).
-type Made = (AssetId, Key, Option<Vec<u8>>);
+/// What the thread did: for which asset and key, its pixels (none: not cached, and for an
+/// image, not one the editor reads), and whether it was an image.
+type Made = (AssetId, Key, Option<Vec<u8>>, bool);
 
-/// A thumbnail to make: asset `id`'s file at `path` under the project.
+/// A thumbnail to make: asset `id`'s file at `path` under the project, from the cache or
+/// (`image`) from the image itself; or pixels the player drew, to cache.
 struct Job {
     id: AssetId,
     path: PathBuf,
     key: Key,
+    image: bool,
+    save: Option<Vec<u8>>,
 }
 
 /// The dock's thumbnails.
@@ -80,6 +86,10 @@ pub(crate) struct Thumbnails {
     /// The atlas's bindless index (none until the overlay made it).
     atlas: Option<u32>,
     frame: u64,
+    /// Models and materials the cache had nothing for: to ask the player for.
+    to_draw: Vec<(AssetId, Key)>,
+    /// Previews asked of the player, by their key.
+    drawing: HashMap<u64, (AssetId, Key)>,
 }
 
 impl Thumbnails {
@@ -94,6 +104,8 @@ impl Thumbnails {
             uploads: Vec::new(),
             atlas: None,
             frame: 0,
+            to_draw: Vec::new(),
+            drawing: HashMap::new(),
         }
     }
 
@@ -108,20 +120,71 @@ impl Thumbnails {
         let Some(done) = &self.done else {
             return;
         };
-        while let Ok((id, key, pixels)) = done.try_recv() {
+        while let Ok((id, key, pixels, image)) = done.try_recv() {
             // Made for the file as it still is.
-            if matches!(self.thumbs.get(&id), Some(Thumb::Making(k)) if *k == key) {
-                let thumb = match pixels {
-                    Some(pixels) => Thumb::Made {
-                        key,
-                        pixels,
-                        cell: None,
-                    },
-                    None => Thumb::Without(key),
-                };
-                self.thumbs.insert(id, thumb);
+            if !matches!(self.thumbs.get(&id), Some(Thumb::Making(k)) if *k == key) {
+                continue;
+            }
+            match (pixels, image) {
+                (Some(pixels), _) => {
+                    self.thumbs.insert(
+                        id,
+                        Thumb::Made {
+                            key,
+                            pixels,
+                            cell: None,
+                        },
+                    );
+                }
+                (None, true) => {
+                    self.thumbs.insert(id, Thumb::Without(key));
+                }
+                // Not in the cache: the player draws it.
+                (None, false) => self.to_draw.push((id, key)),
             }
         }
+    }
+
+    /// The models and materials to ask the player for, each with the key its preview is
+    /// asked by ([`preview_key`]).
+    pub(crate) fn take_to_draw(&mut self) -> Vec<(AssetId, Key)> {
+        let to_draw = core::mem::take(&mut self.to_draw);
+        for &(id, key) in &to_draw {
+            self.drawing.insert(preview_key(id), (id, key));
+        }
+        to_draw
+    }
+
+    /// A preview the player drew for `preview` (its key), or could not (`pixels` empty):
+    /// the thumbnail made, and cached on the thread.
+    pub(crate) fn drawn(&mut self, preview: u64, pixels: Vec<u8>) {
+        let Some((id, key)) = self.drawing.remove(&preview) else {
+            return;
+        };
+        if !matches!(self.thumbs.get(&id), Some(Thumb::Making(k)) if *k == key) {
+            return;
+        }
+        if pixels.len() != (SIZE * SIZE * 4) as usize {
+            self.thumbs.insert(id, Thumb::Without(key));
+            return;
+        }
+        if let Some(jobs) = &self.jobs {
+            let _ = jobs.send(Job {
+                id,
+                path: PathBuf::new(),
+                key,
+                image: false,
+                save: Some(pixels.clone()),
+            });
+        }
+        self.thumbs.insert(
+            id,
+            Thumb::Made {
+                key,
+                pixels,
+                cell: None,
+            },
+        );
     }
 
     /// Asset `id`'s thumbnail, on screen this frame: its picture in the atlas once made,
@@ -133,9 +196,11 @@ impl Thumbnails {
         kind: AssetKind,
         key: Key,
     ) -> Option<UiImage> {
-        if kind != AssetKind::Texture {
-            return None;
-        }
+        let image = match kind {
+            AssetKind::Texture => true,
+            AssetKind::Model | AssetKind::Material => false,
+            _ => return None,
+        };
         let atlas = self.atlas?;
         let current = match self.thumbs.get(&id) {
             Some(Thumb::Making(k) | Thumb::Without(k)) => *k == key,
@@ -143,7 +208,7 @@ impl Thumbnails {
             None => false,
         };
         if !current {
-            self.make(id, path, key);
+            self.make(id, path, key, image);
             return None;
         }
         let held = match self.thumbs.get(&id) {
@@ -197,8 +262,9 @@ impl Thumbnails {
         }
     }
 
-    /// The thumbnail of `id` made on the thread (started the first time).
-    fn make(&mut self, id: AssetId, path: &str, key: Key) {
+    /// The thumbnail of `id` made on the thread (started the first time): from the cache,
+    /// else from the image (`image`) or by the player.
+    fn make(&mut self, id: AssetId, path: &str, key: Key, image: bool) {
         if self.jobs.is_none() {
             let (jobs, incoming) = mpsc::channel::<Job>();
             let (done, results) = mpsc::channel();
@@ -207,8 +273,12 @@ impl Thumbnails {
                 .name(String::from("editor-thumbnails"))
                 .spawn(move || {
                     while let Ok(job) = incoming.recv() {
+                        if let Some(pixels) = &job.save {
+                            save(&cache, job.id, job.key, pixels);
+                            continue;
+                        }
                         let pixels = made(&cache, &job);
-                        if done.send((job.id, job.key, pixels)).is_err() {
+                        if done.send((job.id, job.key, pixels, job.image)).is_err() {
                             break;
                         }
                     }
@@ -225,6 +295,8 @@ impl Thumbnails {
                 id,
                 path: self.root.join(path),
                 key,
+                image,
+                save: None,
             };
             let thumb = if jobs.send(job).is_ok() {
                 Thumb::Making(key)
@@ -233,6 +305,11 @@ impl Thumbnails {
             };
             self.thumbs.insert(id, thumb);
         }
+    }
+
+    /// Whether asset `id` has its thumbnail made.
+    pub(crate) fn made(&self, id: AssetId) -> bool {
+        matches!(self.thumbs.get(&id), Some(Thumb::Made { .. }))
     }
 
     /// The thumbnails to upload this frame: each one's place in the atlas and its pixels
@@ -271,8 +348,9 @@ fn uv_of(c: usize) -> [f32; 4] {
     ]
 }
 
-/// A job's thumbnail: from the cache when it was made for the same file, else made from
-/// the image and cached. None when the file is not an image the editor reads.
+/// A job's thumbnail: from the cache when it was made for the same file, else, for an
+/// image, made from it and cached. None when it has to be drawn (not an image) or the
+/// file is not an image the editor reads.
 fn made(cache: &Path, job: &Job) -> Option<Vec<u8>> {
     let png = cache.join(format!("{}.png", job.id));
     let key_file = cache.join(format!("{}.key", job.id));
@@ -284,17 +362,32 @@ fn made(cache: &Path, job: &Job) -> Option<Vec<u8>> {
     {
         return Some(image.rgba);
     }
+    if !job.image {
+        return None;
+    }
     let bytes = std::fs::read(&job.path).ok()?;
     let image = engine_assets::decode_image(&bytes).ok()?;
     let pixels = fit(&image.rgba, image.width, image.height, SIZE);
+    save(cache, job.id, job.key, &pixels);
+    Some(pixels)
+}
+
+/// A thumbnail's pixels cached for the file as `key` says it is.
+fn save(cache: &Path, id: AssetId, key: Key, pixels: &[u8]) {
+    let png = cache.join(format!("{id}.png"));
     if std::fs::create_dir_all(cache).is_ok()
         && let Some(encoded) =
-            engine_render::png::encode_png(SIZE, SIZE, engine_render::png::PngFormat::Rgba, &pixels)
+            engine_render::png::encode_png(SIZE, SIZE, engine_render::png::PngFormat::Rgba, pixels)
         && std::fs::write(&png, encoded).is_ok()
     {
-        let _ = std::fs::write(&key_file, job.key.text());
+        let _ = std::fs::write(cache.join(format!("{id}.key")), key.text());
     }
-    Some(pixels)
+}
+
+/// The key a preview of asset `id` is asked of the player by.
+pub(crate) fn preview_key(id: AssetId) -> u64 {
+    let v = id.as_u128();
+    (v as u64) ^ ((v >> 64) as u64)
 }
 
 /// `rgba` (`width` × `height`) fitted into a square of `side`, never enlarged, its
@@ -400,6 +493,8 @@ mod tests {
                 bytes: 1,
                 modified: 2,
             },
+            image: true,
+            save: None,
         };
         let first = made(&cache, &job).unwrap();
         assert_eq!(first.len(), (SIZE * SIZE * 4) as usize);

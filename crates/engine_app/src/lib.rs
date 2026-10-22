@@ -70,6 +70,7 @@ mod overlay;
 mod physics;
 mod player;
 pub mod prelude;
+mod previews;
 mod process;
 mod report;
 mod saves;
@@ -106,6 +107,8 @@ pub use net::{
 pub use overlay::{Overlay, OverlayOutput, OverlayPass, OverlayView};
 pub use physics::{SceneBodies, ScenePhysics};
 pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Setup, UiLayer};
+/// Previews the player draws (ADR 0112): an asset's parts alone, read back.
+pub use previews::{PREVIEW_SIZE, Preview, PreviewRequest};
 pub use report::{FrameReport, Startup, StartupPipelines};
 pub use saves::{Autosave, QUICK_SLOT, SaveSettings, Saves};
 pub use settings::{PlayerSettings, Window};

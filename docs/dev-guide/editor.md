@@ -586,8 +586,12 @@ until the new one is whole.
 
 A click on a folder opens it, a click on a file picks it.
 
-- **Thumbnails:** an image is its own picture made smaller; other kinds show their icon
-  until the engine draws their previews (ADR 0112's next step).
+- **Thumbnails:**
+  - an image is its own picture made smaller;
+  - a model is drawn by the engine with its own materials, seen from the front and a
+    little above;
+  - a material is drawn on a sphere;
+  - other kinds show their icon.
 - **Sizing:** Ctrl+wheel over the tiles makes them larger or smaller.
 - **Cache:** thumbnails are made in the background and kept in `.ofelia/thumbnails/`, and
   made again when their file is written anew.

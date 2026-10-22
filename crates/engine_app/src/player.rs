@@ -569,6 +569,8 @@ pub struct Player {
     /// The next frame waits until the assets its models use are made (ADR 0108's E4-4):
     /// the first, the one after a scene is loaded, and one asked for.
     wait_for_assets: bool,
+    /// Previews asked for, drawn one a frame (ADR 0112).
+    previews: crate::previews::Previews,
     /// Ticks to run while the world is kept still ([`Player::step_tick`]).
     steps: u32,
 }
@@ -1190,6 +1192,7 @@ impl Player {
             timing,
             simulating: true,
             wait_for_assets: true,
+            previews: crate::previews::Previews::new(settings.frames_in_flight),
             steps: 0,
             assets: crate::Assets::new(settings.project.clone().unwrap_or_default()),
             blockout: crate::Blockout::new(),
@@ -1245,6 +1248,18 @@ impl Player {
         self.assets.add_paths(&report.assets);
         self.wait_for_assets = true;
         Ok(report)
+    }
+
+    /// Asks for a preview of `request`'s parts (ADR 0112): drawn in a later frame, once
+    /// each part is made with its textures, and handed out by [`Self::take_previews`]. It
+    /// replaces a request of the same key not drawn yet.
+    pub fn request_preview(&mut self, request: crate::PreviewRequest) {
+        self.previews.ask(request);
+    }
+
+    /// The previews drawn since the last call, appended to `out`.
+    pub fn take_previews(&mut self, out: &mut Vec<crate::Preview>) {
+        self.previews.take(out);
     }
 
     /// Makes the next frame wait until every asset its models use is made: what the frame
@@ -2661,6 +2676,28 @@ impl Player {
                 },
             )
             .map_err(AppError::at("the view"))?;
+        // A preview asked for, once its parts are made (ADR 0112): one a frame.
+        self.previews.collect(frame.number);
+        let preview = self.previews.pick(
+            &mut self.assets,
+            &mut self.geometry,
+            &mut self.materials,
+            &mut self.allocator,
+            frame.number,
+        );
+        if preview.is_some() {
+            self.previews.prepare(
+                &mut self.renderer,
+                PrepareContext {
+                    device: &self.device,
+                    allocator: &mut self.allocator,
+                    bindless: &self.bindless,
+                    materials: &mut self.materials,
+                    frame_number: frame.number,
+                    skinning: None,
+                },
+            )?;
+        }
         report.compose = us(t);
         let lod_bias = self.materials.texture_lod_bias();
         // The UI layer's canvases, in an array (no allocation).
@@ -2951,6 +2988,16 @@ impl Player {
                     )
                     .map_err(AppError::at("the view's passes"))?,
             };
+            if let Some(drawing) = &preview {
+                self.previews.declare(
+                    &mut fg,
+                    &mut context,
+                    &self.renderer,
+                    &geo,
+                    &mats,
+                    drawing,
+                )?;
+            }
             // The UI: on the real frame and on a generated one shown before it; with DLSS
             // frame generation alone into a layer of its own, cleared to nothing
             // (Streamline composites it over the frames it generates), then over the
@@ -3520,6 +3567,7 @@ impl Drop for Player {
             if let Some(mut view) = self.view.take() {
                 view.destroy(&mut self.allocator, &self.bindless);
             }
+            self.previews.destroy(&mut self.allocator, &self.bindless);
             self.scene.destroy(&mut self.allocator);
             self.skinning.destroy(&mut self.allocator);
             if let Some(feedback) = &mut self.feedback {

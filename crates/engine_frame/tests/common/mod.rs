@@ -211,7 +211,9 @@ impl Bed {
                 .geometry
                 .begin_frame(&mut fg, &self.device, &mut self.allocator, frame_number)
                 .unwrap();
-            let out = fg.create_texture("out", TextureDesc::new_2d(OUTPUT, width, height));
+            // The output's format, or the view's own (ADR 0112).
+            let format = settings.target_format.unwrap_or(OUTPUT);
+            let out = fg.create_texture("out", TextureDesc::new_2d(format, width, height));
             self.frame
                 .add_view_with(
                     &mut fg,
