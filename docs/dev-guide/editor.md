@@ -62,6 +62,17 @@ editor = ["dep:engine_editor"]
     the scene keeps it so (`Disabled`); the rows that are off are dim. **H** does the same
     for the selection (any of it on: all off; all off: all on), one undo step;
   - **F2** or a double click renames it in place (Enter keeps, Escape drops);
+  - **drag rows to move them,** the selection with them:
+    - onto a row's middle (outlined): they become its children, last;
+    - near a row's top or bottom edge (a line shows): before or after it, among its
+      siblings (the roots too);
+    - below the rows: last among the roots;
+    - each stays where it is in the world; hold **Alt** to keep its local placement
+      instead;
+    - one Ctrl+Z puts them back;
+    - a collapsed row opens when you hold them over it;
+    - a part of a prefab instance keeps its place (unpack the instance to move it);
+    - brushes moved to another blockout group join it at once;
   - the filter box keeps the rows whose names match, with their parents;
   - **`+`** (or Ctrl+A) adds an entity where the camera looks, on the grid. Its menu
     groups the kinds; a group opens beside it under the pointer:

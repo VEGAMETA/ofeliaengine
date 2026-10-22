@@ -1748,3 +1748,28 @@ process; `slangd` over LSP; Slang's server in process), the front end checks, an
 - **E10-2b:** `slangd` for those. First, material types must be readable alone: a module
   of the engine's material API, imported by `forward.slang` and by the types, with the
   registers measured (the research note's "What we take").
+
+## As built (2026-10-22, the owner's request): rows dragged in the tree
+
+The owner asked to drag entities to other parents. The tree's UX note had designed it
+(`docs/research/ux/scene-tree.md` §5, after Godot, Unity, Unreal, Blender and Figma):
+- **A row held and moved** past the drag threshold drags the selection's outermost
+  entities in the tree's order. The row joins the selection when it was not in it.
+- **Where they go,** by the pointer in the row under it:
+  - its middle: into it, last of its children; the row is outlined;
+  - its top or bottom quarter: before or after it, a line drawn there. Below an open row
+    with children, the bottom quarter is its first child's place, where the line is seen;
+  - below the rows: last among the roots.
+  - Nothing goes into or beside what is dragged, or below it.
+- **The move** is one undo step. Each entity keeps its world placement, its new local one
+  made from its parent's (Godot's rule); Alt keeps the local one. Roots take their order
+  as `RootOrder` again, numbered by steps; one that leaves the roots loses it.
+- **Undo** already put parents and places among siblings back (by recorded index).
+  `World::set_parent_at` now clamps an index past the end without overflowing, as it said.
+- **A prefab instance's parts** keep the places their prefab gives them, and the drag says
+  so. What is added under them, and instances' roots, move.
+- **Held over a collapsed row** for half a second, it opens. Escape, or a release
+  nowhere, moves nothing.
+- **Brushes moved** between blockout groups, or within one, are evaluated again by the
+  blockout's parent-change query, as an edit.
+- **Left:** Ctrl+drag to copy (the note's), scrolling the tree while a drag nears its edge.

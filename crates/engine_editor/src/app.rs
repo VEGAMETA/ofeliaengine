@@ -1631,6 +1631,8 @@ struct Editor {
     browser: Browser,
     /// A file dragged out of the browser (E4-3).
     asset_drag: Option<AssetDrag>,
+    /// Rows of the scene tree being dragged (`scene-tree.md` §5).
+    row_drag: Option<RowDrag>,
     /// The listing was clicked last (F2 renames its file), and the file renamed in place.
     dock_focus: bool,
     renaming_file: Option<AssetId>,
@@ -2283,6 +2285,7 @@ impl Editor {
             assets_changed: None,
             browser: Browser::default(),
             asset_drag: None,
+            row_drag: None,
             dock_focus: false,
             renaming_file: None,
             inspected: None,
@@ -3242,10 +3245,18 @@ impl Editor {
                 label.push_str(icons::ALERT);
             }
         }
-        // The tree's row a dragged file would drop onto.
-        let drop_row = match self.asset_drag.as_ref().map(|d| d.over) {
-            Some(DropTarget::Row(e)) => self.rows.iter().position(|r| r.entity == e),
-            _ => None,
+        // The tree's row a dragged file would drop onto, or dragged rows go into; the line
+        // where they would go beside a row.
+        let row_of = |e: Entity| self.rows.iter().position(|r| r.entity == e);
+        let (drop_row, drop_line) = match (
+            self.asset_drag.as_ref().map(|d| d.over),
+            self.row_drag.as_ref().and_then(|d| d.to),
+        ) {
+            (Some(DropTarget::Row(e)), _) | (_, Some(RowPlace::Into(e))) => (row_of(e), None),
+            (_, Some(RowPlace::Before(e))) => (None, row_of(e).map(|i| (i, false))),
+            (_, Some(RowPlace::After(e))) => (None, row_of(e).map(|i| (i, true))),
+            (_, Some(RowPlace::End)) => (None, self.rows.len().checked_sub(1).map(|i| (i, true))),
+            _ => (None, None),
         };
         // The asset browser's rows.
         let folder_items: Vec<TreeItem<'_>> = self
@@ -3632,6 +3643,7 @@ impl Editor {
             add_menu: self.add_open.then_some((&add_items[..], self.add_group)),
             reveal_row,
             drop_row,
+            drop_line,
             tree_filter: &self.tree_filter,
             inspector_filter: &self.inspector_filter,
             prefab: self.inspected.is_none()
@@ -3641,7 +3653,8 @@ impl Editor {
             palette,
             hint: (self.key_transform.is_some()
                 || self.draw.is_some()
-                || self.asset_drag.is_some())
+                || self.asset_drag.is_some()
+                || self.row_drag.is_some())
             .then_some((self.hint.as_str(), hint_at)),
         };
         let scale = self.scale.max(0.5);
@@ -3945,6 +3958,7 @@ impl Editor {
             self.palette_action(world, action);
         }
         self.asset_drag_frame(world, &response, game_view);
+        self.row_drag_frame(world, &response);
         // Escape during a drag puts the value back as it was.
         if self.ui.input().keys.contains(&UiKey::Escape)
             && let Some(drag) = self.drag.as_mut()
@@ -10116,6 +10130,281 @@ impl Editor {
         self.say(format!("{path} ({})", kind.name()));
     }
 
+    /// Rows of the scene tree dragged (`scene-tree.md` §5): started by a row held and
+    /// moved, which joins the selection if it was not in it. A release on a row's middle
+    /// puts the selection's outermost entities into it, near its top or bottom edge before
+    /// or after it, below the rows last among the roots: each keeps where it is in the
+    /// world (Alt keeps its local placement), in one undo step. Escape, or a release
+    /// nowhere, leaves everything as it was. A collapsed row held over opens.
+    fn row_drag_frame(&mut self, world: &mut World, response: &ShellResponse) {
+        if self.row_drag.is_none()
+            && self.asset_drag.is_none()
+            && self.draw.is_none()
+            && self.key_transform.is_none()
+            && let Some(row) = response.tree_drag.and_then(|i| self.rows.get(i).copied())
+        {
+            if !self.selection.contains(&row.entity) {
+                self.select_only(row.entity);
+            }
+            let entities = self.dragged_rows(world);
+            // An instance's parts keep the places its prefab gives them.
+            let refused = entities
+                .iter()
+                .any(|&e| world.get::<PrefabPart>(e).is_some())
+                .then(|| {
+                    String::from(
+                        "It is part of an instance: unpack that instance first (Scene: Unpack Prefab)",
+                    )
+                });
+            self.row_drag = Some(RowDrag {
+                entities,
+                to: None,
+                hover: None,
+                refused,
+            });
+        }
+        let Some(mut drag) = self.row_drag.take() else {
+            return;
+        };
+        let escape = self.ui.input().keys.contains(&UiKey::Escape);
+        self.input.consume_keys();
+        let released = self.input.released(Button::Left);
+        if escape || !(released || self.input.held(Button::Left)) {
+            return;
+        }
+        drag.to = match drag.refused {
+            Some(_) => None,
+            None => self.row_place(world, &drag.entities, response),
+        };
+        // Held over a collapsed row's middle a moment: it opens.
+        match drag.to {
+            Some(RowPlace::Into(e)) if self.collapsed.contains(&e) => match drag.hover {
+                Some((h, since)) if h == e => {
+                    if since.elapsed() >= ROW_OPENS_AFTER {
+                        self.collapsed.remove(&e);
+                        drag.hover = None;
+                    }
+                }
+                _ => drag.hover = Some((e, Instant::now())),
+            },
+            _ => drag.hover = None,
+        }
+        if released {
+            if let Some(to) = drag.to {
+                self.move_rows(world, &drag.entities, to, self.input.alt());
+            } else if let Some(why) = drag.refused {
+                self.say(why);
+            }
+            return;
+        }
+        self.hint = self.row_hint(world, &drag);
+        self.row_drag = Some(drag);
+    }
+
+    /// The selection's outermost entities, in the tree's order: what a row drag moves (a
+    /// child goes with its parent).
+    fn dragged_rows(&self, world: &World) -> Vec<Entity> {
+        let roots = self.selection_roots(world);
+        let mut order: Vec<Entity> = self
+            .rows
+            .iter()
+            .map(|r| r.entity)
+            .filter(|e| roots.contains(e))
+            .collect();
+        // Those not shown (in a collapsed branch, filtered out) after, as selected.
+        let hidden: Vec<Entity> = roots.into_iter().filter(|e| !order.contains(e)).collect();
+        order.extend(hidden);
+        order
+    }
+
+    /// Where rows `dragged` would go, by the pointer: into the row under it (its middle),
+    /// before or after it (its top or bottom quarter; below an open row with children, its
+    /// first child's place), or last among the roots below the rows. None where they
+    /// cannot go: into or beside themselves or what is below them.
+    fn row_place(
+        &self,
+        world: &World,
+        dragged: &[Entity],
+        response: &ShellResponse,
+    ) -> Option<RowPlace> {
+        let Some(k) = response.tree_under.filter(|&k| k < self.rows.len()) else {
+            return response.tree_hovered.then_some(RowPlace::End);
+        };
+        let row = self.rows[k];
+        let scale = self.scale.max(0.5);
+        let part = match (
+            response.tree_under_id.and_then(|id| self.ui.rect_of(id)),
+            self.input.cursor(),
+        ) {
+            (Some(r), Some([_, y])) if r.size[1] > 0.0 => (y / scale - r.pos[1]) / r.size[1],
+            _ => 0.5,
+        };
+        let place = if part < 0.25 {
+            RowPlace::Before(row.entity)
+        } else if part > 0.75 {
+            match self.rows.get(k + 1) {
+                Some(next) if row.children && next.depth > row.depth => {
+                    RowPlace::Before(next.entity)
+                }
+                _ => RowPlace::After(row.entity),
+            }
+        } else {
+            RowPlace::Into(row.entity)
+        };
+        // Below a dragged entity (or it) nothing goes, and beside one nothing moves.
+        let below_dragged = |e: Entity| {
+            let mut at = Some(e);
+            while let Some(x) = at {
+                if dragged.contains(&x) {
+                    return true;
+                }
+                at = world.parent(x);
+            }
+            false
+        };
+        let allowed = match place {
+            RowPlace::Into(p) => !below_dragged(p),
+            RowPlace::Before(r) | RowPlace::After(r) => {
+                !dragged.contains(&r) && scene_parent(world, r).is_none_or(|p| !below_dragged(p))
+            }
+            RowPlace::End => true,
+        };
+        allowed.then_some(place)
+    }
+
+    /// What a release would do now, by the pointer.
+    fn row_hint(&self, world: &World, drag: &RowDrag) -> String {
+        if let Some(why) = &drag.refused {
+            return why.clone();
+        }
+        let named = |e: Entity| world.get::<Name>(e).map_or("the entity", Name::as_str);
+        let what = match drag.entities.as_slice() {
+            [one] => named(*one).to_owned(),
+            many => format!("{} entities", many.len()),
+        };
+        let keep = if self.input.alt() {
+            "keeping their local placement"
+        } else {
+            "Alt keeps the local placement"
+        };
+        match drag.to {
+            Some(RowPlace::Into(p)) => format!("{what} into {}  ·  {keep}", named(p)),
+            Some(RowPlace::Before(r)) => format!("{what} before {}  ·  {keep}", named(r)),
+            Some(RowPlace::After(r)) => format!("{what} after {}  ·  {keep}", named(r)),
+            Some(RowPlace::End) => format!("{what} last among the roots  ·  {keep}"),
+            None => String::from("Not into itself  ·  Esc takes it back"),
+        }
+    }
+
+    /// Moves `entities` (outermost, in the tree's order) to `to`, together and in their
+    /// order, each keeping where it is in the world (its local placement with
+    /// `keep_local`), as one undo step; they stay selected, their new parent opened. Roots
+    /// keep their order by [`RootOrder`], numbered again by steps.
+    fn move_rows(
+        &mut self,
+        world: &mut World,
+        entities: &[Entity],
+        to: RowPlace,
+        keep_local: bool,
+    ) {
+        let parent = match to {
+            RowPlace::Into(p) => Some(p),
+            RowPlace::Before(r) | RowPlace::After(r) => scene_parent(world, r),
+            RowPlace::End => None,
+        };
+        let unchanged = match to {
+            RowPlace::Into(p) => entities.iter().all(|&e| world.parent(e) == Some(p)),
+            _ => false,
+        };
+        if unchanged || entities.is_empty() {
+            return;
+        }
+        let label = match (entities.len(), parent) {
+            (1, Some(p)) => format!(
+                "Move into {}",
+                world.get::<Name>(p).map_or("the entity", Name::as_str)
+            ),
+            (1, None) => String::from("Move to the roots"),
+            (n, _) => format!("Move {n} entities"),
+        };
+        self.history.begin(&label, None);
+        // Where each is in the world, before it moves.
+        let placed: Vec<Affine3A> = entities.iter().map(|&e| world_affine(world, e)).collect();
+        let roots_before = self.roots(world, None);
+        for &e in entities {
+            self.history.touch(world, e);
+        }
+        let parent_world = parent.map_or(Affine3A::IDENTITY, |p| world_affine(world, p));
+        for (&e, &at) in entities.iter().zip(&placed) {
+            if !keep_local {
+                let local = parent_world.inverse() * at;
+                let (scale, rotation, translation) = local.to_scale_rotation_translation();
+                if let Some(t) = world.get_mut::<Transform>(e) {
+                    t.translation = translation;
+                    t.rotation = rotation.normalize();
+                    t.scale = scale;
+                }
+            }
+        }
+        match parent {
+            Some(p) => {
+                // After the row they go after, or before the one they go before; last for
+                // into.
+                let mut after = match to {
+                    RowPlace::After(r) => Some(r),
+                    _ => None,
+                };
+                for &e in entities {
+                    world.remove::<RootOrder>(e);
+                    // Out of its old place first: its siblings there move up.
+                    let _ = world.set_parent(e, None);
+                    let index = match (to, after) {
+                        (_, Some(a)) => world.child_index(a).map_or(usize::MAX, |i| i + 1),
+                        (RowPlace::Before(r), None) => world.child_index(r).unwrap_or(usize::MAX),
+                        _ => usize::MAX,
+                    };
+                    let _ = world.set_parent_at(e, Some(p), index);
+                    if matches!(to, RowPlace::After(_)) {
+                        after = Some(e);
+                    }
+                }
+                self.collapsed.remove(&p);
+            }
+            None => {
+                for &e in entities {
+                    let _ = world.set_parent(e, None);
+                }
+                // The roots in their new order, numbered by steps again.
+                let mut order: Vec<Entity> = roots_before
+                    .iter()
+                    .copied()
+                    .filter(|r| !entities.contains(r))
+                    .collect();
+                let at = match to {
+                    RowPlace::Before(r) => order.iter().position(|&x| x == r),
+                    RowPlace::After(r) => order.iter().position(|&x| x == r).map(|i| i + 1),
+                    _ => None,
+                }
+                .unwrap_or(order.len());
+                for (k, &e) in entities.iter().enumerate() {
+                    order.insert(at + k, e);
+                }
+                for (k, &r) in order.iter().enumerate() {
+                    let wanted = RootOrder((k as u32 + 1).saturating_mul(RootOrder::STEP));
+                    if world.get::<RootOrder>(r) != Some(&wanted) {
+                        self.history.touch(world, r);
+                        world.insert(r, wanted);
+                    }
+                }
+            }
+        }
+        self.history.commit(world);
+        let before = self.active();
+        self.selection = entities.to_vec();
+        self.anchor = self.active();
+        self.selection_changed(before);
+    }
+
     /// A file dragged out of the browser (ADR 0107 E4-3): started by a file of the listing
     /// held and moved; over the view a model rests on the surface under the pointer, in an
     /// undo step; the release drops it where the pointer is, Escape takes it back. The
@@ -13733,6 +14022,57 @@ struct Listed {
     asset: Option<AssetId>,
 }
 
+/// Rows of the scene tree being dragged: the entities moved and where a release would put
+/// them.
+#[derive(Debug)]
+struct RowDrag {
+    /// The selection's outermost entities, in the tree's order.
+    entities: Vec<Entity>,
+    /// Where a release would put them; none where they cannot go.
+    to: Option<RowPlace>,
+    /// The collapsed row held over, and since when: it opens after [`ROW_OPENS_AFTER`].
+    hover: Option<(Entity, Instant)>,
+    /// Why they cannot move at all (an instance's parts).
+    refused: Option<String>,
+}
+
+/// How long dragged rows are held over a collapsed row before it opens (VS Code's half a
+/// second, Godot's about the same).
+const ROW_OPENS_AFTER: Duration = Duration::from_millis(500);
+
+/// Where dragged rows go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowPlace {
+    /// Last among this entity's children.
+    Into(Entity),
+    /// Right before or after this entity, among its siblings (a root's: the roots).
+    Before(Entity),
+    After(Entity),
+    /// Last among the roots.
+    End,
+}
+
+/// The parent of `e` that the tree shows (a scene entity); none for a root.
+fn scene_parent(world: &World, e: Entity) -> Option<Entity> {
+    world
+        .parent(e)
+        .filter(|&p| world.get::<SceneId>(p).is_some())
+}
+
+/// Where `e` is in the world, from the transforms up its hierarchy (the propagated one may
+/// be a frame old).
+fn world_affine(world: &World, e: Entity) -> Affine3A {
+    let mut affine = Affine3A::IDENTITY;
+    let mut at = Some(e);
+    while let Some(x) = at {
+        if let Some(t) = world.get::<Transform>(x) {
+            affine = t.to_affine() * affine;
+        }
+        at = world.parent(x);
+    }
+    affine
+}
+
 /// A file dragged out of the browser (ADR 0107 E4-3): what it is, where a release would
 /// drop it, and a model placed in the view while the pointer is there.
 #[derive(Debug)]
@@ -14918,6 +15258,166 @@ mod tests {
         assert_eq!(world.get::<Mover>(e).unwrap().gait, Gait::Walk);
         ed.run(&mut world, ed.ids.undo);
         assert!(!world.get::<Mover>(e).unwrap().enabled);
+    }
+
+    #[test]
+    fn rows_dragged_move_into_and_beside_others_keeping_their_world_place() {
+        let mut world = World::new();
+        let spawn = |world: &mut World, name: &str, x: f32, order: u32| {
+            world.spawn((
+                SceneId::new(),
+                Name::new(name),
+                Transform::from_xyz(x, 0.0, 0.0),
+                GlobalTransform::default(),
+                RootOrder(order),
+            ))
+        };
+        let a = spawn(&mut world, "Alpha", 1.0, 1);
+        let b = spawn(&mut world, "Bravo", 5.0, 2);
+        let c = spawn(&mut world, "Charlie", 0.0, 3);
+        let b1 = world.spawn((
+            SceneId::new(),
+            Name::new("Bravo one"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        world.set_parent(b1, Some(b)).unwrap();
+        let b2 = world.spawn((
+            SceneId::new(),
+            Name::new("Bravo two"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        world.set_parent(b2, Some(b)).unwrap();
+        let mut ed = Editor::new(
+            [1280, 720],
+            std::env::temp_dir(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        // The row of `name` in the tree (left of anything else with that text), at `part`
+        // of its height (0 its top, 1 its bottom).
+        let row = |ed: &Editor, name: &str, part: f32| {
+            let r = texts(ed, name)
+                .into_iter()
+                .min_by(|p, q| p.pos[0].total_cmp(&q.pos[0]))
+                .unwrap();
+            // The text sits in the middle of its 22-pixel row.
+            let top = r.pos[1] + r.size[1] / 2.0 - 11.0;
+            [r.pos[0] + r.size[0] / 2.0, top + 22.0 * part]
+        };
+        // Alpha into Bravo's middle: Bravo's child, still at x = 1 in the world.
+        let at = row(&ed, "Alpha", 0.5);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        mouse(&mut ed, at, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, [at[0] + 2.0, at[1] + 12.0], None);
+        ed.update(&mut world);
+        assert!(ed.row_drag.is_some(), "dragging Alpha");
+        let over = row(&ed, "Bravo", 0.5);
+        mouse(&mut ed, over, None);
+        ed.update(&mut world);
+        assert_eq!(ed.row_drag.as_ref().unwrap().to, Some(RowPlace::Into(b)));
+        assert_eq!(
+            ed.hint,
+            "Alpha into Bravo  ·  Alt keeps the local placement"
+        );
+        mouse(&mut ed, over, Some(false));
+        ed.update(&mut world);
+        assert!(ed.row_drag.is_none());
+        assert_eq!(world.parent(a), Some(b));
+        assert_eq!(
+            world.children(b).collect::<Vec<_>>(),
+            [b1, b2, a],
+            "last of its children"
+        );
+        let local = world.get::<Transform>(a).unwrap().translation;
+        assert!((local.x - -4.0).abs() < 1e-5, "{local:?}");
+        assert!(world.get::<RootOrder>(a).is_none(), "no root now");
+        assert_eq!(ed.selection, [a]);
+        assert_eq!(ed.history.steps().count(), 1);
+        // Undone: a root again, first, at x = 1.
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(world.parent(a), None);
+        assert_eq!(world.get::<Transform>(a).unwrap().translation.x, 1.0);
+        assert_eq!(ed.roots(&mut world, None), [a, b, c]);
+        ed.update(&mut world);
+        // Charlie before Alpha (its row's top quarter): the roots' order.
+        let at = row(&ed, "Charlie", 0.5);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        mouse(&mut ed, at, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, [at[0] + 2.0, at[1] - 12.0], None);
+        ed.update(&mut world);
+        let over = row(&ed, "Alpha", 0.1);
+        mouse(&mut ed, over, None);
+        ed.update(&mut world);
+        assert_eq!(ed.row_drag.as_ref().unwrap().to, Some(RowPlace::Before(a)));
+        mouse(&mut ed, over, Some(false));
+        ed.update(&mut world);
+        assert_eq!(ed.roots(&mut world, None), [c, a, b]);
+        // Bravo onto its own child: nowhere.
+        ed.update(&mut world);
+        let at = row(&ed, "Bravo", 0.5);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        mouse(&mut ed, at, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, [at[0] + 2.0, at[1] + 12.0], None);
+        ed.update(&mut world);
+        let over = row(&ed, "Bravo one", 0.5);
+        mouse(&mut ed, over, None);
+        ed.update(&mut world);
+        assert_eq!(ed.row_drag.as_ref().unwrap().to, None);
+        mouse(&mut ed, over, Some(false));
+        ed.update(&mut world);
+        assert_eq!(world.parent(b1), Some(b), "nothing moved");
+        // The move undone gave way to the roots' new order: one step.
+        assert_eq!(ed.history.steps().count(), 1);
+        // Bravo one after Bravo two (its row's bottom quarter), among Bravo's children.
+        let press = |ed: &mut Editor, world: &mut World, name: &str| {
+            let at = row(ed, name, 0.5);
+            mouse(ed, at, None);
+            ed.update(world);
+            mouse(ed, at, Some(true));
+            ed.update(world);
+            mouse(ed, [at[0] + 2.0, at[1] + 12.0], None);
+            ed.update(world);
+        };
+        press(&mut ed, &mut world, "Bravo one");
+        let over = row(&ed, "Bravo two", 0.9);
+        mouse(&mut ed, over, None);
+        ed.update(&mut world);
+        assert_eq!(ed.row_drag.as_ref().unwrap().to, Some(RowPlace::After(b2)));
+        mouse(&mut ed, over, Some(false));
+        ed.update(&mut world);
+        assert_eq!(world.children(b).collect::<Vec<_>>(), [b2, b1]);
+        // A prefab instance's part keeps its place: the drag says why and moves nothing.
+        world.insert(
+            b2,
+            PrefabPart {
+                instance: SceneId::new(),
+                local: SceneId::new(),
+            },
+        );
+        ed.update(&mut world);
+        press(&mut ed, &mut world, "Bravo two");
+        let over = row(&ed, "Charlie", 0.5);
+        mouse(&mut ed, over, None);
+        ed.update(&mut world);
+        assert!(
+            ed.hint.contains("unpack that instance first"),
+            "{}",
+            ed.hint
+        );
+        mouse(&mut ed, over, Some(false));
+        ed.update(&mut world);
+        assert_eq!(world.parent(b2), Some(b));
     }
 
     #[test]

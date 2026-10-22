@@ -1,7 +1,9 @@
 # 0114. The Luau scripting API: script components with hooks, systems over queries, live views, the engine's own names
 
-- Status: **Proposed (the owner signs it off).** The public scripting API is an irreversible
-  decision (CLAUDE.md §3); nothing here is built until the questions at the end are answered.
+- Status: **Accepted (team decision, 2026-10-22): every recommendation of the questions at
+  the end.** The owner's answer was "да" to all seven: script components and systems,
+  direct writes, the engine's own names, hooks by name, `on_tick` and `on_frame`, timers by
+  name, declared props.
 - Date: 2026-10-22
 - Related:
   - CLAUDE.md §10 (scripting), §5 (performance), §12 (the editor);
@@ -187,7 +189,7 @@ possible.
 
 Hard to change later: yes; it decides what saves and networking can promise.
 
-## Decision (proposed)
+## Decision
 
 ### 1. Files, components and systems
 
