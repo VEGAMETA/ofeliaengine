@@ -30,8 +30,9 @@ const CACHE_SOFT_LIMIT: usize = 4096;
 pub struct UiText {
     /// Loaded fonts.
     pub fonts: Fonts,
-    /// The fonts text uses, in fallback order.
+    /// The fonts text uses, in fallback order; code's, the monospace face first.
     stack: Vec<FontId>,
+    mono: Vec<FontId>,
     layout: TextLayout,
     cache: LayoutCache,
     /// Rendered glyphs; mirror it on the GPU with [`GlyphTexture::sync`] after painting.
@@ -57,6 +58,7 @@ impl UiText {
             s,
             size,
             None,
+            false,
         );
         let origin = center - Vec2::new(laid_out.extent[0], laid_out.extent[1]) * 0.5;
         draw_glyphs(
@@ -73,6 +75,21 @@ impl UiText {
     }
 }
 
+impl UiText {
+    /// A character's width in the monospace face at `size` pixels, not rounded: what a
+    /// code view's columns are placed by.
+    pub fn mono_advance(&mut self, size: f32) -> f32 {
+        let laid_out = self.cache.get(
+            (&mut self.fonts, &self.mono, &mut self.layout),
+            "0000000000",
+            size,
+            None,
+            true,
+        );
+        laid_out.extent[0] / 10.0
+    }
+}
+
 impl core::fmt::Debug for UiText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("UiText")
@@ -85,6 +102,8 @@ impl core::fmt::Debug for UiText {
 /// A string laid out once, reused while it stays on screen.
 struct CachedLayout {
     text: String,
+    /// Laid out in the monospace stack (code).
+    mono: bool,
     size: u32,
     /// Wrap width bits, `u32::MAX` for none.
     max_width: u32,
@@ -111,11 +130,14 @@ impl LayoutCache {
         text: &str,
         size: f32,
         max_width: Option<f32>,
+        mono: bool,
     ) -> &CachedLayout {
         let (size_bits, width_bits) = (size.to_bits(), max_width.map_or(u32::MAX, f32::to_bits));
         let mut h = StateHasher::new();
         h.write(text.as_bytes());
         h.write_u64(u64::from(size_bits) | (u64::from(width_bits) << 32));
+        // The monospace stack's layouts kept apart.
+        h.write_u64(u64::from(mono));
         let frame = self.frame;
         let lay_out = |fonts: &mut Fonts, layout: &mut TextLayout| {
             let style = TextStyle {
@@ -126,6 +148,7 @@ impl LayoutCache {
             layout.layout(fonts, stack, text, &style);
             CachedLayout {
                 text: text.to_owned(),
+                mono,
                 size: size_bits,
                 max_width: width_bits,
                 glyphs: layout.glyphs().to_vec(),
@@ -136,6 +159,7 @@ impl LayoutCache {
         let entry = match self.map.entry(h.finish()) {
             Entry::Occupied(o)
                 if o.get().text == text
+                    && o.get().mono == mono
                     && o.get().size == size_bits
                     && o.get().max_width == width_bits =>
             {
@@ -176,6 +200,7 @@ impl UiText {
         Ok(Self {
             fonts,
             stack: vec![text, symbols, icons],
+            mono: vec![symbols, text, icons],
             layout: TextLayout::new(),
             cache: LayoutCache::default(),
             atlas: GlyphAtlas::new(ATLAS_SIZE, ATLAS_SIZE),
@@ -200,6 +225,18 @@ impl TextMeasure for UiText {
             text,
             size,
             max_width,
+            false,
+        );
+        [e.extent[0].ceil(), e.extent[1].ceil()]
+    }
+
+    fn measure_mono(&mut self, text: &str, size: f32) -> [f32; 2] {
+        let e = self.cache.get(
+            (&mut self.fonts, &self.mono, &mut self.layout),
+            text,
+            size,
+            None,
+            true,
         );
         [e.extent[0].ceil(), e.extent[1].ceil()]
     }
@@ -273,16 +310,19 @@ pub fn paint(
                 size,
                 color,
                 wrap,
+                mono,
             } => {
                 let Some(string) = frame.text.get(range.clone()) else {
                     continue;
                 };
                 let size = size * scale;
+                let stack = if *mono { &text.mono } else { &text.stack };
                 let laid_out = text.cache.get(
-                    (&mut text.fonts, &text.stack, &mut text.layout),
+                    (&mut text.fonts, stack, &mut text.layout),
                     string,
                     size,
                     wrap.then_some(rect.size[0] * scale),
+                    *mono,
                 );
                 let origin = Vec2::new(rect.pos[0], rect.pos[1]) * scale;
                 stats.glyphs += draw_glyphs(

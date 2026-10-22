@@ -1,4 +1,5 @@
-//! Layout, interaction, keyboard focus, scrolling, floating layers and draw order.
+//! Layout, interaction, keyboard focus, scrolling, floating layers, placed nodes and draw
+//! order.
 
 #![allow(clippy::unwrap_used, clippy::float_cmp)]
 
@@ -590,4 +591,60 @@ fn a_nodes_image_is_drawn_over_its_fill() {
     };
     assert_eq!(drawn, image);
     assert_eq!(rect.size, [64.0, 48.0]);
+}
+
+#[test]
+fn placed_nodes_leave_the_flow_but_draw_in_order_inside_the_clip() {
+    let mut ui = Ui::new(Theme::default());
+    let (mut area, mut mark, mut first, mut after) = (0, 0, 0, 0);
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let cmds = frame(&mut ui, &UiInput::default(), |ui| {
+        ui.column("root", Style::fill(), |ui| {
+            area = ui.container(
+                "area",
+                Style {
+                    size: [Size::Fixed(100.0), Size::Fixed(50.0)],
+                    clip: true,
+                    ..Style::default()
+                },
+                |ui| {
+                    mark = ui.container(
+                        "mark",
+                        Style {
+                            size: [Size::Fixed(30.0), Size::Fixed(20.0)],
+                            placed: Some([80.0, 10.0]),
+                            background: Some(red),
+                            ..Style::default()
+                        },
+                        |_| {},
+                    );
+                    first = ui.text_node("first", Style::default(), "first", 10.0, [1.0; 4], false);
+                },
+            );
+            after = ui.text_node("after", Style::default(), "after", 10.0, [1.0; 4], false);
+        });
+    });
+    let rect = |id| ui.rect_of(id).unwrap();
+    assert_eq!(
+        rect(mark).pos,
+        [80.0, 10.0],
+        "at its offset from the parent's corner"
+    );
+    assert_eq!(rect(first).pos, [0.0, 0.0], "it takes no room in the flow");
+    assert_eq!(rect(after).pos, [0.0, 50.0]);
+    // Drawn where it was built, inside the area's clip (past its edge), not last.
+    let at = cmds
+        .iter()
+        .position(|c| matches!(c, DrawCmd::Rect { fill: Some(f), .. } if *f == red))
+        .unwrap();
+    let clip = cmds[..at].iter().rev().find_map(|c| match c {
+        DrawCmd::Clip(clip) => Some(*clip),
+        _ => None,
+    });
+    assert_eq!(clip, Some(Some(rect(area))));
+    let texts = cmds
+        .iter()
+        .position(|c| matches!(c, DrawCmd::Text { .. }))
+        .unwrap();
+    assert!(at < texts, "before the text built after it");
 }

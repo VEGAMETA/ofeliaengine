@@ -173,6 +173,9 @@ fn a_steady_shell_frame_does_not_allocate() {
     let model = ShellModel {
         scenes: &["main.scene", "меню.scene"],
         active_scene: 0,
+        scripts: &[],
+        active_script: None,
+        code: None,
         tools: &["Select", "Move"],
         active_tool: 1,
         tree: &tree,

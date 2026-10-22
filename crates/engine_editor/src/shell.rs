@@ -64,6 +64,10 @@ pub struct Palette {
     pub error: Color,
     /// Warnings in the Output.
     pub warning: Color,
+    /// Behind code (a script's tab).
+    pub code: Color,
+    /// The line of code the caret is on.
+    pub code_line: Color,
 }
 
 impl Default for Palette {
@@ -82,6 +86,8 @@ impl Default for Palette {
             playing: srgb(90, 200, 120),
             error: srgb(236, 104, 96),
             warning: srgb(230, 184, 84),
+            code: srgb(27, 28, 33),
+            code_line: srgb(37, 39, 47),
         }
     }
 }
@@ -390,6 +396,48 @@ pub struct FileItem<'a> {
     pub renaming: bool,
 }
 
+/// Code's text size (logical pixels).
+pub const CODE_TEXT: f32 = 13.0;
+/// A line of code's height.
+pub const CODE_LINE: f32 = 19.0;
+/// The room between the gutter and the code.
+pub const CODE_PAD: f32 = 10.0;
+/// The text's top within its line.
+const CODE_TEXT_TOP: f32 = 1.0;
+/// Wider and taller than any view: the current line's band, the gutter.
+const CODE_FAR: f32 = 1.0e5;
+
+/// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
+/// the carets among them, by line and column; the shell puts them on the monospace grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CodeView<'a> {
+    /// The script's file.
+    pub path: &'a str,
+    /// Where its caret is (`Ln 4, Col 12`).
+    pub place: &'a str,
+    /// The lines in view, from line `first` of the script.
+    pub lines: &'a [&'a str],
+    /// The first line in view (from 0).
+    pub first: usize,
+    /// Their numbers, as shown.
+    pub numbers: &'a [&'a str],
+    /// How far the view is scrolled: logical pixels across and down.
+    pub scroll: [f32; 2],
+    /// A character's width.
+    pub advance: f32,
+    /// The gutter's width, the numbers in it.
+    pub gutter: f32,
+    /// The selections in view: a line, its first and last columns selected (characters),
+    /// and whether the selection goes on past the line's end.
+    pub selections: &'a [(usize, usize, usize, bool)],
+    /// The carets in view: a line and a column.
+    pub carets: &'a [(usize, usize)],
+    /// The carets show this frame (they blink).
+    pub blink: bool,
+    /// The primary caret's line: lit.
+    pub current: usize,
+}
+
 /// Everything the shell shows.
 #[derive(Debug, Clone, Copy)]
 pub struct ShellModel<'a> {
@@ -397,6 +445,12 @@ pub struct ShellModel<'a> {
     pub scenes: &'a [&'a str],
     /// The current scene tab.
     pub active_scene: usize,
+    /// Open scripts (tabs after the scenes'); an unsaved one ends with `*`.
+    pub scripts: &'a [&'a str],
+    /// The script tab shown, if one is: its code instead of the viewport.
+    pub active_script: Option<usize>,
+    /// The shown script's code.
+    pub code: Option<CodeView<'a>>,
     /// Tools in the tool bar, and the active one.
     pub tools: &'a [&'a str],
     /// The active tool.
@@ -472,6 +526,12 @@ pub struct ShellResponse {
     pub scene_tab: Option<usize>,
     /// A scene tab's close mark was clicked.
     pub close_tab: Option<usize>,
+    /// A script tab was clicked.
+    pub script_tab: Option<usize>,
+    /// A script tab's close mark was clicked.
+    pub close_script: Option<usize>,
+    /// Id of the code area while a script is shown; its rectangle from [`Ui::rect_of`].
+    pub code: u64,
     /// A tool was clicked.
     pub tool: Option<usize>,
     /// A scene tree row was clicked.
@@ -695,9 +755,21 @@ fn center(
     ui.container("center", column, |ui| {
         ui.row("scene tabs", bar(p, 30.0), |ui| {
             scene_tabs(ui, model, p, out);
+            script_tabs(ui, model, p, out);
             ui.spacer("fill");
             play_controls(ui, model.playing, model.paused, p, out);
         });
+        // A script's tab: its code where the tool bar and the viewport are.
+        if let Some(view) = &model.code {
+            ui.row("code bar", bar(p, 30.0).background(p.dock), |ui| {
+                text(ui, "path", view.path, TEXT, p.text_dim);
+                ui.spacer("fill");
+                text(ui, "place", view.place, TEXT, p.text_dim);
+            });
+            out.code = code_view(ui, view, p);
+            file_browser(ui, model, p, out);
+            return;
+        }
         ui.row("tool bar", bar(p, 30.0).background(p.dock), |ui| {
             for (i, tool) in model.tools.iter().enumerate() {
                 ui.push_id(i as u64);
@@ -866,7 +938,7 @@ fn scene_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellR
     let closable = model.scenes.len() > 1;
     for (i, label) in model.scenes.iter().enumerate() {
         ui.push_id(i as u64);
-        let on = model.active_scene == i;
+        let on = model.active_scene == i && model.active_script.is_none();
         let mut close = None;
         let id = ui.container(
             "tab",
@@ -902,6 +974,124 @@ fn scene_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellR
         }
         ui.pop_id();
     }
+}
+
+/// The script tabs after the scenes': each its icon, its label and a close mark.
+fn script_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellResponse) {
+    for (i, label) in model.scripts.iter().enumerate() {
+        ui.push_id(i as u64);
+        let on = model.active_script == Some(i);
+        let mut close = 0;
+        let id = ui.container(
+            "script tab",
+            Style {
+                padding: [8.0, 5.0, 8.0, 5.0],
+                gap: 6.0,
+                radius: 3.0,
+                background: on.then_some(p.dock),
+                align_cross: Align::Center,
+                ..Style::default()
+            },
+            |ui| {
+                text(ui, "icon", icons::SCRIPT, ICON, srgb(222, 196, 96));
+                let color = if on { p.text } else { p.text_dim };
+                text(ui, "label", label, TEXT, color);
+                close = ui.container(
+                    "close",
+                    Style {
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        text(ui, "icon", icons::CLOSE, ICON, p.text_dim);
+                    },
+                );
+            },
+        );
+        if ui.sense(close, false).clicked {
+            out.close_script = Some(i);
+        } else if ui.sense(id, false).clicked {
+            out.script_tab = Some(i);
+        }
+        ui.pop_id();
+    }
+}
+
+/// A script's code: the primary caret's line lit, the selections, the lines in view on
+/// their grid, the carets over them, and the gutter with the lines' numbers over what is
+/// scrolled under it.
+fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette) -> u64 {
+    let area = Style {
+        background: Some(p.code),
+        clip: true,
+        ..Style::fill()
+    };
+    ui.container("code", area, |ui| {
+        let y = |line: usize| line as f32 * CODE_LINE - view.scroll[1];
+        let x = |column: f32| view.gutter + CODE_PAD + column * view.advance - view.scroll[0];
+        let band = |at: [f32; 2], size: [f32; 2], color: Color| Style {
+            size: [Size::Fixed(size[0]), Size::Fixed(size[1])],
+            placed: Some(at),
+            background: Some(color),
+            ..Style::default()
+        };
+        let lit = band([0.0, y(view.current)], [CODE_FAR, CODE_LINE], p.code_line);
+        ui.container("current", lit, |_| {});
+        for (i, &(line, a, b, on)) in view.selections.iter().enumerate() {
+            ui.push_id(i as u64);
+            // A selection going on past a line's end shows a bit of its line break.
+            let end = b as f32 + if on { 0.5 } else { 0.0 };
+            let width = (end - a as f32) * view.advance;
+            let at = [x(a as f32), y(line)];
+            ui.container(
+                "selection",
+                band(at, [width, CODE_LINE], p.selection),
+                |_| {},
+            );
+            ui.pop_id();
+        }
+        for (k, line) in view.lines.iter().enumerate() {
+            ui.push_id(k as u64);
+            let style = Style {
+                placed: Some([x(0.0), y(view.first + k) + CODE_TEXT_TOP]),
+                ..Style::default()
+            };
+            ui.mono_text_node("line", style, line, CODE_TEXT, p.text);
+            ui.pop_id();
+        }
+        if view.blink {
+            for (i, &(line, column)) in view.carets.iter().enumerate() {
+                ui.push_id(i as u64);
+                let at = [x(column as f32) - 1.0, y(line)];
+                ui.container("caret", band(at, [2.0, CODE_LINE], p.text), |_| {});
+                ui.pop_id();
+            }
+        }
+        ui.container(
+            "gutter",
+            band([0.0, 0.0], [view.gutter, CODE_FAR], p.code),
+            |_| {},
+        );
+        for (k, number) in view.numbers.iter().enumerate() {
+            ui.push_id(k as u64);
+            let line = view.first + k;
+            let width = number.chars().count() as f32 * view.advance;
+            let style = Style {
+                placed: Some([
+                    view.gutter - CODE_PAD * 0.5 - width,
+                    y(line) + CODE_TEXT_TOP,
+                ]),
+                ..Style::default()
+            };
+            let color = if line == view.current {
+                p.text
+            } else {
+                p.text_dim
+            };
+            ui.mono_text_node("number", style, number, CODE_TEXT, color);
+            ui.pop_id();
+        }
+    })
 }
 
 /// Small monochrome play, pause and stop at the end of the tab row (not a colored group in

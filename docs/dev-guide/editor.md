@@ -789,6 +789,36 @@ keys:
 Switching costs about 19 ms for a scene of 10,000 entities shown again, 11 ms to leave it
 for a small one (ref-1, release): the scene left is kept as its text and the other loaded.
 
+## Scripts
+
+Scripts open in tabs after the scenes' (ADR 0107 E8), their code where the viewport is:
+
+- **Opening one:**
+  - a double click on a `.luau` file in the FileSystem dock;
+  - "File: Open Script…" in the palette;
+  - a click on an error at a script's line in the Output, which opens it at that line.
+- **A scene's tab** brings the scene back in front; Ctrl+Tab goes through the scenes'
+  tabs, then the scripts'.
+- **The keys are VS Code's:**
+  - Ctrl+D selects the word, then its next match, each with a caret of its own;
+    Alt+click and Ctrl+Alt+Up or Down add carets; Escape leaves one;
+  - Ctrl+/ comments lines, Alt+Up and Alt+Down move them, Ctrl+Shift+K deletes them;
+  - Ctrl+C or Ctrl+X without a selection takes the whole line, and Ctrl+V puts it back
+    above yours;
+  - Enter keeps the indentation, one level more after `then`, `do` or `function (…)`;
+    Tab and Shift+Tab indent;
+  - Ctrl+Z undoes the script's own changes, not the scene's.
+- **While the code has the keys,** the scene's shortcuts are off. The editor's own still
+  work: Ctrl+S, the palette, the tabs, the Output (Ctrl+J), F5 to F8. Click a panel to
+  give the keys back to the editor.
+- **Ctrl+S** saves the script, also while the game plays. The file keeps its line endings.
+- **Closing a script** with unsaved changes takes a second Ctrl+W.
+- **Edits made elsewhere** (in VS Code) show up when the tab has nothing unsaved.
+- **The session keeps your scripts:** the next start opens their tabs again, with their
+  carets and their unsaved text.
+
+Highlighting, find and replace, and Luau's errors and completion as you type come next.
+
 ## Autosave and the session
 
 The editor keeps its own files in the project's `.ofelia/` folder (ADR 0107 §4). They are
@@ -868,8 +898,9 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 
 | Phase | What |
 |---|---|
-| E2b | blockout: brushes for greyboxing a level (box, wedge, stairs, cylinder; add, subtract), their colliders and navigation mesh |
-| E3 | Play: the tree's marks on what changed (Play and Stop, the game's own window, pause and step, play from here, restart, eject and keeping changes are done) |
+| E3 | Play: the tree's marks on what changed (the rest of Play is done) |
+| E7 | Luau in the game: the script component, its hooks, bindings and hot reload (its public API waits for the team's answers, ADR 0114) |
+| E8 | the code editor: highlighting, find and replace, Luau's errors and completion as you type (scripts in tabs are done) |
 
 The whole plan is ADR 0107 §7.
 
