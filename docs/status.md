@@ -346,7 +346,7 @@ Last updated: 2026-10-22.
       while playing;
     - "Prefab: Apply Overrides" writes an instance into its prefab (values, added and
       removed components and entities); the others follow at once.
-  - **The owner's notes, 2026-10-22** (#PR):
+  - **The owner's notes, 2026-10-22** (#320):
     - brushes no longer flicker while edited: a mesh made again is freed only once the
       scene has been extracted since (a tick), models read again likewise (ADR 0110's
       note);
