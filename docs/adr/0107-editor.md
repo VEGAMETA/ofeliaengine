@@ -1250,3 +1250,30 @@ so not SQLite. The editor opens it at its start and follows the folder.
   - live material previews while hovering;
   - aligning to the surface's normal;
   - scenes dropped as instances (prefabs).
+
+## As built (E4-7, 2026-10-22): renames, moves and references
+
+- **Renames:** F2, after a click in the listing (the dock's focus, as the tree's), turns
+  the picked tile's name into a text field. Enter renames the file in its folder, its
+  extension kept when left out; names with path characters are refused.
+- **Moves:** a file dragged onto a folder tile or a row of the folder tree moves into it
+  (the tiles and rows are hover regions under a drag).
+- **What follows a rename or a move** (`move_asset`):
+  - the file's `.meta` goes with it, so the database finds the same id at the new path at
+    once, without waiting for the watcher;
+  - the paths of its parts (`file#part`) are rewritten in the editor's and the player's
+    asset paths;
+  - an open scene renamed keeps being the open scene;
+  - scenes keep their references, which are ids, and a scene saved after it writes the
+    new path.
+
+  Neither a rename nor a move is an undo step: they change files on disk, as Godot's
+  and Unity's do.
+- **Find References** (Shift+F12, "Assets: Find References") lists where the dock's
+  picked asset is used, in the palette:
+  - the open scene's entities whose saved lines name its id, as the scene is now with
+    each line's field (Enter selects one);
+  - the project's scenes and materials on disk that name it, with how many times (Enter
+    shows the file in the dock).
+- **Left:** renaming folders; "Dependencies" (what an asset uses); references in
+  prefabs, which come with E5.

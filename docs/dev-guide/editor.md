@@ -128,6 +128,8 @@ editor = ["dep:engine_editor"]
 | The command palette | Ctrl+Shift+P |
 | Go to a scene object (the palette with `@`) | Ctrl+P |
 | Find an asset (the palette with `#`) | Ctrl+Shift+P, then `#` |
+| Rename the picked file (after a click in the FileSystem dock) | F2 |
+| Where the picked asset is used | Shift+F12 |
 | Move, scale, rotate the selection at once ([keyboard transforms](#keyboard-transforms)) | Q, E, R |
 | The gizmo's handles: move, scale, rotate (the same again: all of them) | Shift+Q, Shift+E, Shift+R |
 | The gizmo along the active entity's axes, or the world's | Space |
@@ -593,6 +595,17 @@ A click on a folder opens it, a click on a file picks it.
   - a material is drawn on a sphere;
   - other kinds show their icon.
 - **Sizing:** Ctrl+wheel over the tiles makes them larger or smaller.
+- **Renaming:** F2 after a click in the tiles renames the picked file in place (its
+  extension is kept when you leave it out). A file dropped on a folder, a tile or a row
+  of the folder tree, moves into it.
+  - The `.meta` goes with the file, so it keeps its id and every scene keeps its
+    references.
+  - A scene saved after it writes the new path.
+  - Neither is an undo step: they are files on disk.
+- **Find References** (Shift+F12) lists where the picked asset is used, in the palette:
+  - the open scene's entities, as the scene is now (Enter selects one);
+  - then the project's scenes and materials on disk, with how many times (Enter shows the
+    file).
 - **Cache:** thumbnails are made in the background and kept in `.ofelia/thumbnails/`, and
   made again when their file is written anew.
 

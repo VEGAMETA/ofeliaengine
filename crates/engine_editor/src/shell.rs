@@ -308,6 +308,8 @@ pub struct FileItem<'a> {
     pub selected: bool,
     /// Its thumbnail (ADR 0112), once made; its kind's icon until then.
     pub thumbnail: Option<UiImage>,
+    /// Its name is being edited in place (F2).
+    pub renaming: bool,
 }
 
 /// Everything the shell shows.
@@ -409,6 +411,16 @@ pub struct ShellResponse {
     /// The listing's scroll area: its rectangle and scroll after the frame say which tiles
     /// show.
     pub listing: u64,
+    /// The mouse is over the listing (where F2 renames a file after a click in it).
+    pub listing_hovered: bool,
+    /// The listing's tile under the pointer, whatever the mouse holds (a folder's: where
+    /// a dragged file would move to).
+    pub listing_under: Option<usize>,
+    /// The folder tree's row under the pointer, the same way.
+    pub folder_under: Option<usize>,
+    /// Renaming a file in place ended: committed (the name is `Ui::edited_text`) or
+    /// cancelled.
+    pub file_rename: Option<bool>,
     /// The scene tree's row under the pointer, whatever the mouse holds: where a drop
     /// lands.
     pub tree_under: Option<usize>,
@@ -770,7 +782,9 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
         dock_column(ui, "folders", Size::Fixed(220.0), p, |ui| {
             dock_title(ui, "FileSystem", p);
             ui.scroll_column("tree", |ui| {
-                out.folder = tree_rows(ui, model.folders, p, None, None, false).clicked;
+                let rows = tree_rows(ui, model.folders, p, None, None, false, true);
+                out.folder = rows.clicked;
+                out.folder_under = rows.under;
             });
         });
         dock_column(ui, "listing", Size::Grow(1.0), p, |ui| {
@@ -789,7 +803,11 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
                         for (k, file) in row.iter().enumerate() {
                             let i = r * columns + k;
                             ui.push_id(k as u64);
-                            let id = file_tile(ui, file, model.tile, p);
+                            let id = file_tile(ui, file, model.tile, p, &mut out.file_rename);
+                            ui.mark_region(id);
+                            if ui.in_region(id) {
+                                out.listing_under = Some(i);
+                            }
                             if ui.sense(id, false).clicked {
                                 out.file = Some(i);
                             }
@@ -805,6 +823,8 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
                     ui.pop_id();
                 }
             });
+            ui.mark_region(out.listing);
+            out.listing_hovered = ui.in_region(out.listing);
         });
     });
 }
@@ -845,8 +865,15 @@ fn asset_box(ui: &mut Ui, preview: Option<UiImage>, icon: &str, name: &str, p: &
     ui.sense(id, false).clicked
 }
 
-/// A file's tile: its thumbnail (its kind's icon until there is one) over its name.
-fn file_tile(ui: &mut Ui, file: &FileItem<'_>, tile: f32, p: &Palette) -> u64 {
+/// A file's tile: its thumbnail (its kind's icon until there is one) over its name, the
+/// name a text field while it is renamed (`rename` says how that ended).
+fn file_tile(
+    ui: &mut Ui,
+    file: &FileItem<'_>,
+    tile: f32,
+    p: &Palette,
+    rename: &mut Option<bool>,
+) -> u64 {
     ui.column(
         "tile",
         Style {
@@ -872,6 +899,24 @@ fn file_tile(ui: &mut Ui, file: &FileItem<'_>, tile: f32, p: &Palette) -> u64 {
                     text(ui, "icon", glyph, (tile * 0.45).max(ICON), color);
                 }
             });
+            if file.renaming {
+                let style = Style {
+                    size: [
+                        Size::Fixed(tile + 2.0 * TILE_PAD),
+                        Size::Fixed(TILE_LABEL + 2.0),
+                    ],
+                    padding: [3.0, 0.0, 3.0, 0.0],
+                    radius: 2.0,
+                    background: Some(p.field),
+                    align_cross: Align::Center,
+                    ..Style::default()
+                };
+                let r = ui.text_field("rename", file.name, &field_look(p, style, "", true));
+                if r.committed || r.cancelled {
+                    *rename = Some(r.committed);
+                }
+                return;
+            }
             ui.row(
                 "label",
                 Style {
@@ -992,8 +1037,7 @@ fn filter(ui: &mut Ui, text_now: &str, hint: &str, p: &Palette) -> Option<TextFi
 #[derive(Default)]
 struct RowsResponse {
     clicked: Option<usize>,
-    /// The scene tree's row under the pointer (by the last layout, whatever the mouse
-    /// holds).
+    /// The row under the pointer (by the last layout, whatever the mouse holds).
     under: Option<usize>,
     toggled: Option<usize>,
     eye: Option<usize>,
@@ -1001,7 +1045,8 @@ struct RowsResponse {
 }
 
 /// Tree rows: a click on a row, on its arrow, on its eye (`eyes`: the scene tree's rows
-/// end in one), and renaming in place; row `target` outlined as where a drop lands.
+/// end in one), and renaming in place; row `target` outlined as where a drop lands; with
+/// `regions` each row a hover region (the row under a drag, [`RowsResponse::under`]).
 fn tree_rows(
     ui: &mut Ui,
     rows: &[TreeItem<'_>],
@@ -1009,6 +1054,7 @@ fn tree_rows(
     reveal: Option<usize>,
     target: Option<usize>,
     eyes: bool,
+    regions: bool,
 ) -> RowsResponse {
     let mut out = RowsResponse::default();
     for (i, item) in rows.iter().enumerate() {
@@ -1104,8 +1150,8 @@ fn tree_rows(
         if reveal == Some(i) {
             ui.reveal(id);
         }
-        // The scene tree's rows are hover regions: where a dragged file would drop.
-        if eyes {
+        // Hover regions: where a dragged file would drop.
+        if regions {
             ui.mark_region(id);
             if ui.in_region(id) {
                 out.under = Some(i);
@@ -1164,7 +1210,15 @@ fn scene_dock(
         });
         out.tree_filter = filter(ui, model.tree_filter, "Filter nodes", p);
         let tree = ui.scroll_column("tree", |ui| {
-            let rows = tree_rows(ui, model.tree, p, model.reveal_row, model.drop_row, true);
+            let rows = tree_rows(
+                ui,
+                model.tree,
+                p,
+                model.reveal_row,
+                model.drop_row,
+                true,
+                true,
+            );
             out.tree_row = rows.clicked;
             out.tree_under = rows.under;
             out.tree_toggle = rows.toggled;
