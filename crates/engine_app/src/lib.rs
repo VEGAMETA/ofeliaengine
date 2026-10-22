@@ -75,6 +75,7 @@ mod process;
 mod report;
 mod saves;
 pub mod script_types;
+mod script_views;
 pub mod scripts;
 mod settings;
 mod sound;

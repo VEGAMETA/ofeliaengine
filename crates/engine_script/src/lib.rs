@@ -5,7 +5,9 @@
 //!   [`ScriptSettings::native`] is on (the default).
 //! - **Limits:** every call into a script runs under a time budget (a runaway loop is
 //!   stopped with [`ScriptError::Timeout`], the game keeps running) and the VM under a
-//!   memory limit.
+//!   memory limit. The budget is Luau's own interrupt, set as a C function: it counts the
+//!   interrupts (calls and loops' back edges) and reads the clock every
+//!   [`CHECK_EVERY`] of them, so a loop's iteration pays an increment (ADR 0114 E7-1c).
 //! - **Modules and hot reload:** a module is a chunk that returns a table of functions. It
 //!   receives a `state` table as its first argument; the same table is passed again when
 //!   the module is reloaded, so state survives code changes. A reloaded module's
@@ -46,11 +48,65 @@
 pub use mlua;
 
 use mlua::chunk::Compiler;
-use mlua::{FromLuaMulti, Function, IntoLuaMulti, Lua, Table, Value, VmState};
+use mlua::{FromLuaMulti, Function, IntoLuaMulti, Lua, Table, Value};
+use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::ffi::c_int;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+/// Interrupts between two reads of the clock in a call under its budget.
+pub const CHECK_EVERY: u32 = 64;
+
+thread_local! {
+    /// The deadline of the call running on this thread, in nanoseconds since
+    /// [`clock_epoch`] (0: none): a VM never leaves its thread (mlua's `Lua` is not `Send`
+    /// here), and calls into scripts do not nest.
+    static DEADLINE: Cell<u64> = const { Cell::new(0) };
+    /// Interrupts since the clock was last read.
+    static SINCE_CHECK: Cell<u32> = const { Cell::new(0) };
+}
+
+/// What deadlines are counted from.
+fn clock_epoch() -> Instant {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+/// Nanoseconds since [`clock_epoch`].
+fn now_ns() -> u64 {
+    clock_epoch().elapsed().as_nanos() as u64
+}
+
+/// Luau's interrupt, at calls and loops' back edges: a call past its deadline is stopped
+/// with an error, the clock read every [`CHECK_EVERY`] interrupts.
+///
+/// # Safety
+///
+/// Luau calls it with its state; `gc` is -1 outside the collector's steps.
+unsafe extern "C-unwind" fn interrupt(state: *mut mlua::ffi::lua_State, gc: c_int) {
+    if gc >= 0 {
+        return;
+    }
+    let deadline = DEADLINE.get();
+    if deadline == 0 {
+        return;
+    }
+    let since = SINCE_CHECK.get() + 1;
+    if since < CHECK_EVERY {
+        SINCE_CHECK.set(since);
+        return;
+    }
+    SINCE_CHECK.set(0);
+    if now_ns() <= deadline {
+        return;
+    }
+    // SAFETY: an interrupt may raise; nothing with a destructor is alive in this frame.
+    unsafe {
+        mlua::ffi::lua_pushlstring_(state, TIMEOUT_MARKER.as_ptr().cast(), TIMEOUT_MARKER.len());
+        mlua::ffi::lua_error(state);
+    }
+}
 
 /// VM options.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -149,9 +205,6 @@ struct Module {
 pub struct ScriptVm {
     lua: Lua,
     settings: ScriptSettings,
-    /// Deadline of the running call, in nanoseconds since `epoch` (0: none).
-    deadline: Arc<AtomicU64>,
-    epoch: Instant,
     modules: HashMap<String, Module>,
 }
 
@@ -177,16 +230,17 @@ impl ScriptVm {
         lua.enable_jit(settings.native);
         lua.set_memory_limit(settings.memory_limit)
             .map_err(|_| ScriptError::OutOfMemory)?;
-        let deadline = Arc::new(AtomicU64::new(0));
-        let epoch = Instant::now();
-        let d = Arc::clone(&deadline);
-        lua.set_interrupt(move |_| {
-            let limit = d.load(Ordering::Relaxed);
-            if limit != 0 && epoch.elapsed().as_nanos() as u64 > limit {
-                return Err(mlua::Error::runtime(TIMEOUT_MARKER));
-            }
-            Ok(VmState::Continue)
-        });
+        // SAFETY: the VM's state; the interrupt is a C function of this crate.
+        unsafe {
+            lua.exec_raw::<()>((), |state| {
+                (*mlua::ffi::lua_callbacks(state)).interrupt = Some(interrupt);
+            })
+        }
+        .map_err(|e| ScriptError::Runtime {
+            module: String::new(),
+            line: None,
+            message: e.to_string(),
+        })?;
         let host = |e: mlua::Error| ScriptError::Runtime {
             module: String::new(),
             line: None,
@@ -197,8 +251,6 @@ impl ScriptVm {
         Ok(Self {
             lua,
             settings,
-            deadline,
-            epoch,
             modules: HashMap::new(),
         })
     }
@@ -331,13 +383,13 @@ impl ScriptVm {
     }
 
     fn arm(&self) {
-        let limit = self.epoch.elapsed() + self.settings.call_budget;
-        self.deadline
-            .store(limit.as_nanos().max(1) as u64, Ordering::Relaxed);
+        let budget = self.settings.call_budget.as_nanos() as u64;
+        DEADLINE.set(now_ns().saturating_add(budget).max(1));
+        SINCE_CHECK.set(0);
     }
 
     fn disarm(&self) {
-        self.deadline.store(0, Ordering::Relaxed);
+        DEADLINE.set(0);
     }
 
     fn map(&self, module: &str, e: mlua::Error) -> ScriptError {

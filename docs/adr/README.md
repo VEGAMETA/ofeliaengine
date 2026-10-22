@@ -125,6 +125,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0115](0115-material-slots.md) | Material slots: `MaterialSlots` beside `Model` holds the materials of a mesh's further primitives (the team's decision); the player draws each further primitive on a child entity it makes (`Derived`: never saved, left out of undo, picks name the model), so the renderer and the extraction are untouched and a model of one material pays nothing | Accepted |
 | [0116](0116-view-modes.md) | The viewport's view modes (the owner's request): Lit, Unlit (a material role), Wireframe and Lit + Wireframe (a pass of its own after the frame, line mode, the scene's depth sampled against a tolerance so lines on surfaces never z-fight), the colliders of every body as an overlay; Unreal's keys; a lit view draws as before | Accepted (2026-10-22) |
 | [0117](0117-model-colliders.md) | Colliders of a scene's models: a model's mesh collides as the cook would make it from its glTF's rules (level geometry by default), cooked in the background when asked (`Assets::collider`); games give models bodies with `ScenePhysics::sync_scene` from `Game::before_ticks`; the editor draws them by motion | Accepted (2026-10-22) |
+| [0118](0118-shipping-panic-strategy.md) | The shipping profile unwinds: under `panic = "abort"` an error raised through an mlua callback (Luau's errors are C++ exceptions) aborts the game; `unwind` costs about 5 % of the executable and 3.5 % in mlua-heavy code, nothing elsewhere | Proposed |
 
 ## Template
 
