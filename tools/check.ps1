@@ -12,7 +12,8 @@
 #   powershell -File tools\check.ps1 -Deny      # + cargo-deny and feature drift (dependency or
 #                                               #   license changes)
 #   powershell -File tools\check.ps1 -Loom      # + loom model checks (lock-free code changes)
-#   powershell -File tools\check.ps1 -Profiles  # + builds of all four profiles (slow: fat LTO)
+#   powershell -File tools\check.ps1 -Profiles  # + builds of all four profiles (slow: fat LTO),
+#                                               and script errors in the shipping build
 #   powershell -File tools\check.ps1 -Full      # all of the above: what CI ran
 #   powershell -File tools\check.ps1 -Only clippy,test
 #   powershell -File tools\check.ps1 -Affected  # only the tests of the packages this branch
@@ -295,6 +296,8 @@ if ($Profiles) {
         'build --workspace --all-targets --locked --profile dev',
         'build --workspace --all-targets --locked --profile release',
         'build --workspace --all-targets --locked --profile shipping',
+        # Script errors stop their instances, not the game (ADR 0118).
+        'run --locked --profile shipping -p engine_app --example script_errors',
         'build --workspace --all-targets --locked --profile profiling --features engine_profiler/tracy'
     )
 }

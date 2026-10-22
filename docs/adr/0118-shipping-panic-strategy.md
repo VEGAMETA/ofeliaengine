@@ -1,7 +1,7 @@
 # 0118. The shipping profile unwinds
 
-- Status: Proposed (2026-10-22). It changes the stack's shipping profile (CLAUDE.md §15:
-  `panic = "abort"`); the team decides.
+- Status: Accepted (2026-10-22, team decision: option 1). It changes the stack's
+  shipping profile (CLAUDE.md §15, which said `panic = "abort"`).
 - Date: 2026-10-22
 - Builds on: [ADR 0032](0032-scripting.md) (Luau through mlua),
   [ADR 0114](0114-luau-api.md) (the script host), [ADR 0061](0061-logging-crash-reports-gpu-faults.md)
@@ -56,11 +56,17 @@ The difference is in code that goes through mlua's callbacks (their landing pads
 engine's own code is the same. E7-1c's fast path takes most script accesses out of mlua,
 which shrinks that share further.
 
-## Decision (proposed)
+## Decision
 
-Option 1: `shipping` unwinds. What players get then behaves as every build the team
-tests. The cost is about 5 % of the executable and nothing measurable outside mlua's
-callbacks.
+Option 1 (team decision, 2026-10-22): `shipping` unwinds. What players get then behaves
+as every build the team tests. The cost is about 5 % of the executable and nothing
+measurable outside mlua's callbacks.
+
+- `Cargo.toml`'s `[profile.shipping]` sets `panic = "unwind"`; CLAUDE.md §15 says so.
+- `tools/check.ps1 -Profiles` runs `engine_app`'s `script_errors` example built with
+  `shipping`: an error an engine function returns, one the fast path raises and one in
+  Luau itself each stop their instance, and the process ends normally. A profile whose
+  panics abort fails the step.
 
 ## Consequences
 

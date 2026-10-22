@@ -547,8 +547,10 @@ physics and navigation visualizers, 2D editor (tilemaps, sprites), viewport mana
 - `dev`: our crates at `opt-level = 1`, dependencies at `opt-level = 3`, fast linker (`lld-link`).
 - `profiling`: release + debug info + Tracy.
 - `release`: full optimization, Tracy disabled.
-- `shipping`: `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, PGO (evaluate and enable
-  if it improves scene benchmarks).
+- `shipping`: `lto = "fat"`, `codegen-units = 1`, `panic = "unwind"` (team decision
+  2026-10-22, ADR 0118: Luau's errors are C++ exceptions, and under `abort` one raised
+  through the engine's callbacks ends the game), PGO (evaluate and enable if it improves
+  scene benchmarks).
 
 ### Dependencies
 - `cargo-deny` in CI. Allowed: MIT, Apache-2.0, BSD-2/3, Zlib, ISC, Unicode, MIT-0, public domain.
