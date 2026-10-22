@@ -324,7 +324,7 @@ Last updated: 2026-10-20.
       prefab;
     - the player loads scenes with their prefabs; saving and loading plain scenes as fast
       as before (6.56 / 9.90 ms for 10,000 entities against 6.47 / 9.68).
-  - **E5-2, prefabs in the editor** (#PR, ADR 0108's as-built):
+  - **E5-2, prefabs in the editor** (#317, ADR 0108's as-built):
     - scenes load and save through their prefabs, found by id through the asset
       database;
     - a scene dragged from the dock into the view or the tree is placed as an instance;
