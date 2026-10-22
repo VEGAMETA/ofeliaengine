@@ -322,6 +322,7 @@ fn main() {
         name,
         kind,
         selected: false,
+        thumbnail: None,
     };
     let files = [
         file("main.scene", FileKind::Scene),
@@ -402,6 +403,8 @@ fn main() {
         path: "res://levels",
         folders: &folders,
         files: &files,
+        tile: 64.0,
+        columns: 6,
         bottom_tabs: &[
             "Output",
             "Debugger",

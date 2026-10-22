@@ -140,11 +140,13 @@ fn a_steady_shell_frame_does_not_allocate() {
     let files = [
         FileItem {
             selected: false,
+            thumbnail: None,
             name: "main.scene",
             kind: FileKind::Scene,
         },
         FileItem {
             selected: false,
+            thumbnail: None,
             name: "player.luau",
             kind: FileKind::Script,
         },
@@ -177,6 +179,8 @@ fn a_steady_shell_frame_does_not_allocate() {
         path: "res://levels",
         folders: &folders,
         files: &files,
+        tile: 64.0,
+        columns: 4,
         bottom_tabs: &["Output", "Debugger"],
         active_bottom: None,
         playing: false,

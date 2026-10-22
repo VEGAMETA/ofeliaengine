@@ -226,6 +226,21 @@ fn a_model_dragged_from_the_browser_rests_on_the_floor_and_draws() {
     let baked = engine_app::bake::glb("crate", &[box_brush()], &engine_app::grid_png());
     let (mesh, material) = baked.parts[0].clone();
     std::fs::write(dir.join("props/crate.glb"), baked.bytes).unwrap();
+    // An image beside it, red growing to the right and green downwards: its tile's
+    // thumbnail shows it upright.
+    let rgba: Vec<u8> = (0..96 * 64)
+        .flat_map(|i| {
+            [
+                ((i % 96) * 255 / 95) as u8,
+                ((i / 96) * 255 / 63) as u8,
+                40,
+                255,
+            ]
+        })
+        .collect();
+    let png =
+        engine_render::png::encode_png(96, 64, engine_render::png::PngFormat::Rgba, &rgba).unwrap();
+    std::fs::write(dir.join("props/paint.png"), png).unwrap();
     let settings = PlayerSettings {
         title: String::from("editor drop test"),
         window: Window::Offscreen {
