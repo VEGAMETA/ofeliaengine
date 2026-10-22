@@ -166,3 +166,69 @@ frames' timeline, on the CPU's clock.
   sleep on the precise timer until the GPU is predicted free, from the engine's own GPU
   times. The floor costs only above about 500 FPS, so this waits for a game that needs it.
 - **The exclusive full-screen hang** in a session that cannot take the foreground.
+
+## Addendum (2026-10-22): the player capped at the display's rate by default
+
+**Context.** A release game's player ran uncapped unless the game set a limit. On ref-1's
+240 Hz monitor the flight drew 500 frames a second, twice what the display shows. The
+owner asked (2026-10-21) for a release build capped at the display's refresh rate by
+default, with CLAUDE.md §7's limiter just under it under variable refresh.
+
+**Options.**
+- **a) Exactly the refresh rate.** Without vsync, frames at a variable-refresh display's
+  maximum leave its range now and then: tearing, or the vsync queue's latency.
+- **b) A few frames under it, `hz − hz²/3600`** (138 on 144 Hz, 224 on 240 Hz).
+  - Godot documents this formula for `Engine.max_fps` under variable refresh with vsync
+    (checked 2026-10-22).
+  - NVIDIA's driver is reported to cap about there under G-Sync with vsync and Reflex
+    (225 on 240 Hz, a Blur Busters forum post; NVIDIA does not document it).
+  - The margin, `1/(3600 − hz)` s a frame, is about 0.3 ms at every rate.
+- **c) Vsync on by default.** It caps too, but frames wait for the display's refresh:
+  latency the engine keeps off by default.
+
+**Decision: b without vsync.** The setting is `PlayerSettings::frame_cap: FrameCap`:
+- `Display`, release builds' default:
+  - `hz − hz²/3600` without vsync;
+  - `hz + hz²/3600` with vsync, a backstop (below);
+  - halved in real frames with frame generation;
+  - none offscreen.
+- `Fps(n)`: a game's own limit (the `fps_limit` it replaces).
+- `Uncapped`: debug builds' default, and the measurements' (the flight without `--cap`,
+  the stress tool).
+
+The rate is the window's display's (`DisplayInfo::refresh_hz`, from `EnumDisplaySettingsW`).
+It follows the window to another monitor, and `Player::set_frame_cap` changes it from a
+settings menu. It reaches the latency control as the limit did: Reflex's minimum interval,
+Streamline's frame limit, Anti-Lag 2's maximum, or the CPU limiter.
+
+**The backstop with vsync.** FIFO did not pace on ref-1 that day. The flight with
+`--vsync` in a window drew 570 frames a second with latency control off, and 500 with
+Reflex; on 2026-10-12 and 15 it paced at 240. Presenting across adapters does not pace
+either: the Radeon's frames tear on the RTX's monitor with vsync too
+(`docs/research/player.md`).
+- A cap under the rate would make a fixed-rate display repeat frames.
+- A cap as far over it stops a path that runs free. Where FIFO paces, it never acts: the
+  display's interval is longer than the cap's, so FIFO holds the frame loop first.
+- `refresh_hz` is a whole number (59.94 Hz reads 59), and the margin covers that:
+  59 + 0.97.
+
+**Measured:** the flight on Sponza, 900 frames in a 1797 × 1011 window on ref-1's RTX
+4060 Ti (driver 617.42, 240 Hz), Reflex on, the 120 warm-up frames left out.
+
+| run | frame interval µs: median / p99 / worst | Reflex's sleep µs | GPU frame µs |
+|---|---|---:|---:|
+| uncapped | 2,003 / 2,936 / 6,488 | 1,498 | 1,385 |
+| `--cap display` (224) | 4,463 / 4,656 / 5,353 | 3,923 | 1,406 |
+| `--vsync`, uncapped | 2,010 / 3,043 / 6,714 | 1,500 | 1,385 |
+| `--vsync --cap display` (256) | 3,904 / 4,079 / 4,861 | 3,389 | 1,389 |
+
+With FSR frame generation (`--fg --cap display`): 112.1 real frames and 224.1 shown a
+second.
+
+**Consequences.**
+- A game that wants every frame the GPU can draw sets `FrameCap::Uncapped`, for a
+  benchmark mode for one.
+- Whether a display has variable refresh is not known: Windows has no API for it. The cap
+  is the same either way.
+- Why FIFO did not pace on ref-1 is not looked into. A driver setting forcing vsync off
+  would do it; PresentMon would tell.

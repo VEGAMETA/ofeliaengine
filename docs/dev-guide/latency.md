@@ -15,15 +15,20 @@ use engine_latency::{LatencySettings, LowLatency};
 
 let settings = LatencySettings {
     mode: LowLatency::On,      // Off, On, or Boost (Boost keeps GPU clocks up, NVIDIA)
-    fps_limit: Some(141.0),    // with a variable-refresh (G-Sync/FreeSync) 144 Hz monitor
+    fps_limit: Some(138.0),    // with a variable-refresh (G-Sync/FreeSync) 144 Hz monitor
     max_queued_presents: 1,    // the generic path: how many frames may queue ahead
 };
 ```
 
 - **"Low latency" on** is the right default for every game with real-time input.
 - **With variable refresh rate,** cap the frame rate a few frames below the monitor's
-  maximum (141 on 144 Hz). That keeps the display in its variable range, and latency
-  stays low.
+  maximum (`hz − hz²/3600`: 138 on 144 Hz, 224 on 240 Hz). That keeps the display in its
+  variable range, and latency stays low.
+  - **The player does this by default in release builds** (`PlayerSettings::frame_cap`,
+    [player.md](player.md)).
+  - With vsync it caps as far over the rate instead. The display paces then, and the cap
+    stops only a path that does not wait for it: a laptop's GPUs presenting across
+    adapters, or a driver forcing vsync off.
 - **Without a cap and with a GPU-bound game,** latency reduction matters most: without
   it, the CPU runs ahead and frames wait in a queue. In the engine's flight on ref-1's
   RTX, input to GPU done took 3.6 ms without it and 2.0 ms with Reflex.

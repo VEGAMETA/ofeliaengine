@@ -1361,7 +1361,7 @@ impl Player {
         }
         let latency_settings = LatencySettings {
             mode: self.settings.low_latency,
-            fps_limit: self.settings.fps_limit,
+            fps_limit: self.fps_limit(),
             max_queued_presents: 1,
         };
         match self.settings.frame_generation {
@@ -1428,6 +1428,49 @@ impl Player {
             );
         }
         Ok(())
+    }
+
+    /// The frame cap's rate now ([`PlayerSettings::frame_cap`]): the window's display's
+    /// refresh rate decides [`crate::FrameCap::Display`].
+    fn fps_limit(&self) -> Option<f64> {
+        self.settings.frame_cap.fps(
+            self.settings.vsync,
+            self.display.as_ref().and_then(|d| d.refresh_hz),
+            self.settings.frame_generation != FrameGeneration::Off,
+        )
+    }
+
+    /// A frame cap from the next frame on (a game's settings menu).
+    ///
+    /// # Errors
+    ///
+    /// When the latency control cannot take the new rate.
+    pub fn set_frame_cap(&mut self, cap: crate::FrameCap) -> Result<(), AppError> {
+        self.settings.frame_cap = cap;
+        self.follow_frame_cap()
+    }
+
+    /// The latency control's rate made the frame cap's again: after a setting, and when
+    /// the window goes to a display of another refresh rate (`start_presentation` takes
+    /// it when the latency control is made).
+    fn follow_frame_cap(&mut self) -> Result<(), AppError> {
+        let fps = self.fps_limit();
+        let Some(latency) = &mut self.latency else {
+            return Ok(());
+        };
+        if latency.settings().fps_limit == fps {
+            return Ok(());
+        }
+        let settings = LatencySettings {
+            fps_limit: fps,
+            ..latency.settings()
+        };
+        let applied = match (&self.paced, &self.swapchain) {
+            (Some(paced), _) => latency.set_settings(paced, settings),
+            (None, Some(swapchain)) => latency.set_settings(swapchain, settings),
+            (None, None) => return Ok(()),
+        };
+        applied.map_err(AppError::at("latency control"))
     }
 
     /// Where the start-up spent its time, and what could not be done.
@@ -3523,7 +3566,9 @@ impl Player {
             }
             color_of(self.present_format)
         };
-        self.apply_levels(actual_levels(color, wanted))
+        self.apply_levels(actual_levels(color, wanted))?;
+        // Another monitor may run at another refresh rate.
+        self.follow_frame_cap()
     }
 
     /// Applies `levels` (ADR 0038): the formats drawn in and presented (the tone mapper,

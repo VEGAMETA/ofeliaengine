@@ -353,7 +353,7 @@ game is running.
 | `vsync` | wait for the display's refresh |
 | `hdr` | the output while the display runs in HDR: `ScRgb` (default), `Hdr10`, `Sdr` |
 | `low_latency` | `Off`, `On`, `Boost` (NVIDIA: clocks kept up) |
-| `fps_limit` | a frame cap (a few frames under the refresh rate with G-Sync/FreeSync) |
+| `frame_cap` | `FrameCap::Display`, release builds' default: a few frames under the display's refresh rate (with vsync, as far over it, in case the display does not pace); `Fps(n)`; `Uncapped`, debug builds' default. `player.set_frame_cap` changes it from a settings menu |
 | `frame_generation` | `Off`, `Fsr`, `Dlss` |
 | `antialiasing`, `quality` | TAAU, FSR, DLSS and the render size |
 | `screen_space_reflections` | off, or `SsrSettings` (half-resolution rays by default) |

@@ -423,6 +423,7 @@ mod windowed {
             title: String::from("engine stress"),
             // Uncapped: the frame's own cost, not a paced one.
             low_latency: LowLatency::Off,
+            frame_cap: engine_app::FrameCap::Uncapped,
             tick_hz: 240.0,
             ..PlayerSettings::default()
         })
