@@ -29,7 +29,12 @@ fn frames_with_probes_and_gi_do_not_allocate() {
     let world = player.world_mut();
     world.spawn((center, ReflectionProbe::new(Vec3::new(5.0, 2.0, 5.0))));
     world.spawn((center, GiVolume::new(Vec3::new(5.0, 2.0, 5.0), 1.0)));
-    counting::assert_steady_state(&mut player, &mut game);
+    // Measured once the volume has converged: under a loaded machine's slower frames its
+    // convergence (the probes captured again, once) came inside the measurement (6
+    // allocations after 180 warm-up frames, 2026-10-16 to 2026-10-22).
+    counting::assert_steady_state_once(&mut player, &mut game, |p| {
+        p.gi_volume().is_none_or(|gi| gi.is_converged())
+    });
     let stats = player.reflection_probes().unwrap().stats();
     println!(
         "probes: {stats:?}; GI volume: {:?}",

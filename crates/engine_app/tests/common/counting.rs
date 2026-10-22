@@ -86,6 +86,16 @@ unsafe impl GlobalAlloc for CountingAllocator {
 /// least 240 more (and 1.2 s: the window thread's display check, once a second, falls
 /// inside) and asserts there are none, naming the threads that allocated.
 pub fn assert_steady_state(player: &mut engine_app::Player, game: &mut crate::common::Cubes) {
+    assert_steady_state_once(player, game, |_| true);
+}
+
+/// [`assert_steady_state`], the warm-up also lasting until `settled` says the scene has
+/// settled (a GI volume converged: its convergence captures the probes again, once).
+pub fn assert_steady_state_once(
+    player: &mut engine_app::Player,
+    game: &mut crate::common::Cubes,
+    settled: impl Fn(&engine_app::Player) -> bool,
+) {
     // Warm-up, 120 frames and at least 1.5 s: pipelines, the view's state, the graph's
     // buffers and heaps, the window thread's first display checks (once a second). And
     // half a second past the last slow frame, 20 s at most: with a cold driver cache the
@@ -96,7 +106,8 @@ pub fn assert_steady_state(player: &mut engine_app::Player, game: &mut crate::co
     let mut warm = 0;
     while (warm < 120
         || started.elapsed() < Duration::from_millis(1500)
-        || last_slow.elapsed() < Duration::from_millis(500))
+        || last_slow.elapsed() < Duration::from_millis(500)
+        || !settled(player))
         && started.elapsed() < Duration::from_secs(20)
     {
         let frame = Instant::now();
