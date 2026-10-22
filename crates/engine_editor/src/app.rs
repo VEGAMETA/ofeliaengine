@@ -58,6 +58,7 @@ use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
 use crate::camera::OrbitCamera;
+use crate::code::{Pos, char_column, col_at};
 use crate::draw::{self, Draw, Landed, Made, ROOM_WALLS, Stage};
 use crate::drop::{ModelPlan, resting_point, snap_along};
 use crate::faces::{self, CornerDrag, Face, FaceDrag, PartCorners};
@@ -66,14 +67,17 @@ use crate::gizmo::{
 };
 use crate::handles::{Handles, Side, SideDrag};
 use crate::icons;
-use crate::input::{Button, InputCollector};
+use crate::input::{Button, InputCollector, Stroke};
 use crate::inspector::{self, Defaults, Inspector, Kind, Property};
 use crate::paint::{UiText, paint};
-use crate::session::{self, Base, Document, EditorState, LastRun, Lock, SessionFile, View, Writer};
+use crate::script::{self, Effect, Script};
+use crate::session::{
+    self, Base, Document, EditorState, LastRun, Lock, ScriptDoc, SessionFile, View, Writer,
+};
 use crate::shell::{
-    Field, FieldAction, FieldEvent, FileItem, FileKind, MenuEntry, MenuItem, Palette,
-    PaletteAction, PaletteRow, PaletteView, Section, ShellModel, ShellResponse, TreeItem, Widget,
-    build, dismissed,
+    CODE_LINE, CODE_TEXT, CodeView, Field, FieldAction, FieldEvent, FileItem, FileKind, MenuEntry,
+    MenuItem, Palette, PaletteAction, PaletteRow, PaletteView, Section, ShellModel, ShellResponse,
+    TreeItem, Widget, build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
 use crate::thumbnails::{self, Subject, Thumbnails};
@@ -577,6 +581,7 @@ struct CommandIds {
     save: CommandId,
     /// Scenes in tabs (E5-5a): open, new, close, reopen, the next and previous tab.
     open_scene: CommandId,
+    open_script: CommandId,
     new_scene: CommandId,
     close_scene: CommandId,
     reopen_scene: CommandId,
@@ -693,11 +698,12 @@ fn commands() -> (Commands, CommandIds) {
         redo: c.register("edit.redo", "Edit", "Redo"),
         save: c.register("file.save", "File", "Save Scene"),
         open_scene: c.register("file.open", "File", "Open Scene…"),
+        open_script: c.register("file.open_script", "File", "Open Script…"),
         new_scene: c.register("file.new", "File", "New Scene"),
-        close_scene: c.register("file.close", "File", "Close Scene"),
+        close_scene: c.register("file.close", "File", "Close Tab"),
         reopen_scene: c.register("file.reopen", "File", "Reopen Closed Scene"),
-        next_tab: c.register("file.next_tab", "File", "Next Scene Tab"),
-        previous_tab: c.register("file.previous_tab", "File", "Previous Scene Tab"),
+        next_tab: c.register("file.next_tab", "File", "Next Tab"),
+        previous_tab: c.register("file.previous_tab", "File", "Previous Tab"),
         delete: c.register("scene.delete", "Scene", "Delete Selection"),
         disable: c.register("scene.disable", "Scene", "Disable or Enable Selection"),
         duplicate: c.register("scene.duplicate", "Scene", "Duplicate Selection"),
@@ -1471,6 +1477,28 @@ struct Editor {
     closed: Vec<Doc>,
     /// The other tabs' labels, made with the frame.
     tab_labels: Vec<String>,
+    /// Scripts open in tabs after the scenes' (E8-1b), and the one shown, if any: its code
+    /// where the viewport is.
+    scripts: Vec<Script>,
+    active_script: Option<usize>,
+    /// The keys go to the shown script's code: its tab was shown, or a press landed in it.
+    /// A press anywhere else gives them back to the editor.
+    code_focus: bool,
+    /// The code area as the last frame placed it.
+    code_rect: Option<engine_ui::Rect>,
+    /// A character's width in code (logical pixels), measured once.
+    code_advance: f32,
+    /// The carets blink from then on: a key or a click shows them again.
+    caret_since: Instant,
+    /// The last press in the code: where, when, and how many came in a row (a double
+    /// click selects a word, a triple one its line).
+    code_clicks: Option<(Pos, Instant, u8)>,
+    /// The mouse went down in the code and is held: it selects as it moves.
+    code_drag: bool,
+    /// The shown script's view, made before the UI's frame.
+    code_shown: CodeShown,
+    /// When the open scripts' files were last compared with what was read.
+    scripts_checked: Instant,
     /// The log as the Output panel shows it (E6), and the bottom panel open (0: Output).
     output: crate::output::Output,
     bottom: Option<usize>,
@@ -1790,6 +1818,28 @@ struct Session {
     view_due: Instant,
 }
 
+/// How long the carets show, then hide, while they blink (milliseconds).
+const CARET_BLINK_MS: u128 = 530;
+
+/// The shown script's view, made before the UI's frame (`Editor::code_frame`): the lines in
+/// view, their numbers one after another, the selections and the carets among them, and
+/// the bar's text.
+#[derive(Debug, Default)]
+struct CodeShown {
+    first: usize,
+    last: usize,
+    /// The lines in view one after another, tabs as spaces to their columns, and where
+    /// each ends.
+    text: String,
+    ends: Vec<usize>,
+    numbers: String,
+    gutter: f32,
+    selections: Vec<(usize, usize, usize, bool)>,
+    carets: Vec<(usize, usize)>,
+    place: String,
+    path: String,
+}
+
 /// A scene open in a tab but not in the world (ADR 0107 §4, E5-5a): its text as its tab
 /// was left, what its file was, its autosave and its view; shown again from them.
 struct Doc {
@@ -2093,6 +2143,16 @@ impl Editor {
             next_doc_key: 2,
             closed: Vec::new(),
             tab_labels: Vec::new(),
+            scripts: Vec::new(),
+            active_script: None,
+            code_focus: false,
+            code_rect: None,
+            code_advance: 0.0,
+            caret_since: Instant::now(),
+            code_clicks: None,
+            code_drag: false,
+            code_shown: CodeShown::default(),
+            scripts_checked: Instant::now(),
             output: crate::output::Output::new(),
             bottom: None,
             output_label: String::new(),
@@ -2485,6 +2545,8 @@ impl Editor {
         }
         self.tick_builds(world);
         self.tick_assets(world);
+        self.tick_scripts();
+        self.keep_script_autosaves(world, false);
         if !playing {
             self.ensure_prefab_bases(world);
         }
@@ -2524,6 +2586,7 @@ impl Editor {
         });
         if over_view
             && !game_view
+            && self.active_script.is_none()
             && self.ui.editing().is_none()
             && self.key_transform.is_none()
             && self
@@ -2647,6 +2710,9 @@ impl Editor {
         if !self.task_rows.is_empty() {
             let _ = write!(self.tasks_label, " {}", self.task_rows.len());
         }
+        // A script shown: its keys, clicks and scroll before the UI is built, so a key
+        // shows in this frame.
+        let coding = self.code_frame();
         let properties = self.inspector.properties();
         let mut values: Vec<&str> = Vec::with_capacity(properties.len() * 3);
         let mut spans: Vec<(usize, usize)> = Vec::with_capacity(properties.len());
@@ -3299,9 +3365,48 @@ impl Editor {
                 (y + 20.0).min(h - 40.0).max(4.0),
             ]
         };
+        let script_labels: Vec<String> = self.scripts.iter().map(Script::label).collect();
+        let script_tabs: Vec<&str> = script_labels.iter().map(String::as_str).collect();
+        // The shown script's lines in view, their numbers, its selections and carets.
+        let shown = &self.code_shown;
+        let code_script = self.active_script.and_then(|k| self.scripts.get(k));
+        let mut code_lines: Vec<&str> = Vec::with_capacity(shown.ends.len());
+        if code_script.is_some() {
+            let mut start = 0;
+            for &end in &shown.ends {
+                code_lines.push(shown.text.get(start..end).unwrap_or(""));
+                start = end;
+            }
+        }
+        let mut code_numbers: Vec<&str> = Vec::with_capacity(code_lines.len());
+        let mut at = 0;
+        for line in shown.first..shown.first + code_lines.len() {
+            let digits = (line + 1).ilog10() as usize + 1;
+            code_numbers.push(shown.numbers.get(at..at + digits).unwrap_or(""));
+            at += digits;
+        }
+        let blink = self.code_focus
+            && (self.caret_since.elapsed().as_millis() / CARET_BLINK_MS).is_multiple_of(2);
+        let code = code_script.map(|s| CodeView {
+            path: &shown.path,
+            place: &shown.place,
+            lines: &code_lines,
+            first: shown.first,
+            numbers: &code_numbers,
+            scroll: s.scroll,
+            advance: self.code_advance,
+            gutter: shown.gutter,
+            selections: &shown.selections,
+            carets: &shown.carets,
+            blink,
+            current: s.doc.primary().head.line,
+        });
         let model = ShellModel {
             scenes: &scenes,
             active_scene: active_tab,
+            scripts: &script_tabs,
+            active_script: self.active_script,
+            code,
             tools: &tools,
             active_tool: self.active_tool,
             tree: &items,
@@ -3369,6 +3474,9 @@ impl Editor {
             .ui
             .rect_of(response.listing)
             .map(|r| (r, self.ui.scroll_offset(response.listing)));
+        self.code_rect = (response.code != 0)
+            .then(|| self.ui.rect_of(response.code))
+            .flatten();
 
         if let Some(i) = response.tool {
             self.active_tool = i;
@@ -3391,13 +3499,18 @@ impl Editor {
                     });
                     self.last_file_click = (!double).then_some((id, now));
                     self.reveal_asset(id);
-                    let scene = self
+                    let file = self
                         .asset_db
                         .get(id)
-                        .filter(|e| e.kind == engine_scene::AssetKind::Scene)
-                        .map(|e| PathBuf::from(&e.path));
-                    if double && let Some(path) = scene {
-                        self.open_scene(world, &path);
+                        .map(|e| (e.kind, PathBuf::from(&e.path)));
+                    match file {
+                        Some((engine_scene::AssetKind::Scene, path)) if double => {
+                            self.open_scene(world, &path);
+                        }
+                        Some((engine_scene::AssetKind::Script, path)) if double => {
+                            self.open_script(world, &path, None);
+                        }
+                        _ => {}
                     }
                 }
                 None => {
@@ -3409,7 +3522,12 @@ impl Editor {
         if let Some(i) = response.close_tab {
             self.close_tab(world, i);
         } else if let Some(i) = response.scene_tab {
-            self.show_tab(world, i);
+            self.show_scene_tab(world, i);
+        }
+        if let Some(k) = response.close_script {
+            self.close_script(world, k);
+        } else if let Some(k) = response.script_tab {
+            self.show_script(world, k);
         }
         if response.open_prefab {
             self.run(world, self.ids.open_prefab);
@@ -3471,6 +3589,10 @@ impl Editor {
         if self.ui.input().mouse_pressed {
             self.tree_focus = response.tree_hovered;
             self.dock_focus = response.listing_hovered;
+            // Anywhere but in the code, the keys are the editor's again.
+            if response.code == 0 || !self.ui.hovers(response.code) {
+                self.code_focus = false;
+            }
         }
         // A file renamed in place (F2 in the listing).
         if let Some(commit) = response.file_rename {
@@ -3641,9 +3763,15 @@ impl Editor {
             }
             if let Some(id) = self.keymap.lookup(chord, contexts)
                 && (!typing_text || id == self.ids.save)
+                && (!coding || self.editor_command(id))
             {
                 self.run(world, id);
             }
+        }
+        // A script's code covers the viewport: none of the viewport's tools this frame.
+        if self.active_script.is_some() {
+            self.input.next_frame();
+            return;
         }
 
         // The viewport: drags that start in it move the camera, the wheel over it zooms.
@@ -4322,9 +4450,15 @@ impl Editor {
                             self.give_field_asset(world, section, field, found.id);
                         }
                         (Some(found), None) if cp.opens => {
-                            let path = self.asset_db.get(found.id).map(|e| PathBuf::from(&e.path));
-                            match path {
-                                Some(path) => self.open_scene(world, &path),
+                            let file = self
+                                .asset_db
+                                .get(found.id)
+                                .map(|e| (e.kind, PathBuf::from(&e.path)));
+                            match file {
+                                Some((engine_scene::AssetKind::Script, path)) => {
+                                    self.open_script(world, &path, None);
+                                }
+                                Some((_, path)) => self.open_scene(world, &path),
                                 None => self.reveal_asset(found.id),
                             }
                         }
@@ -6051,6 +6185,7 @@ impl Editor {
 
     /// Selects `e` and opens its parents' rows, so the tree shows it.
     fn show(&mut self, world: &World, e: Entity) {
+        self.active_script = None;
         self.select_only(e);
         let mut at = world.parent(e);
         while let Some(p) = at {
@@ -6818,10 +6953,457 @@ impl Editor {
         self.write_session(world);
     }
 
+    /// Whether the keys go to the shown script's code this frame: it has them, and no
+    /// field, palette or tool of the editor takes them.
+    fn code_keys(&self) -> bool {
+        self.active_script.is_some()
+            && self.code_focus
+            && self.command_palette.is_none()
+            && self.ui.editing().is_none()
+            && self.renaming.is_none()
+            && self.renaming_file.is_none()
+            && self.key_transform.is_none()
+            && self.draw.is_none()
+    }
+
+    /// The editor's commands whose keys work while a script's code has the keys: saving,
+    /// the tabs, the palette and the Output, playing. The scene's are off: their keys are
+    /// the code's (Ctrl+D, Delete, the tools' letters).
+    fn editor_command(&self, id: CommandId) -> bool {
+        let ids = &self.ids;
+        [
+            ids.save,
+            ids.open_scene,
+            ids.open_script,
+            ids.new_scene,
+            ids.close_scene,
+            ids.reopen_scene,
+            ids.next_tab,
+            ids.previous_tab,
+            ids.palette,
+            ids.find,
+            ids.output,
+            ids.play,
+            ids.stop,
+            ids.play_from_here,
+            ids.restart_play,
+            ids.pause,
+            ids.step,
+            ids.eject,
+            ids.game_mouse,
+        ]
+        .contains(&id)
+    }
+
+    /// The shown script's frame, before the UI's (E8-1b): its keys and typed characters
+    /// in their order, a press, a drag and the wheel in its code, the scroll that shows the
+    /// caret, then the view the shell draws. Whether it took the keys: then the panels do
+    /// not see them, and the shortcuts run only the editor's own
+    /// ([`Self::editor_command`]).
+    fn code_frame(&mut self) -> bool {
+        let Some(k) = self.active_script.filter(|&k| k < self.scripts.len()) else {
+            self.active_script = None;
+            return false;
+        };
+        if self.code_advance <= 0.0 {
+            self.code_advance = self.text.mono_advance(CODE_TEXT);
+        }
+        let advance = self.code_advance;
+        let keys = self.code_keys();
+        let popup = self.command_palette.is_some()
+            || self.add_open
+            || self.step_menu.is_some()
+            || self.open_choice.is_some();
+        let rect = self.code_rect;
+        let scale = self.scale.max(0.5);
+        let cursor = self.input.cursor().map(|[x, y]| [x / scale, y / scale]);
+        let (shift, alt) = (self.input.shift(), self.input.alt());
+        let script = &mut self.scripts[k];
+        let gutter = script::gutter_width(script.doc.line_count(), advance);
+        let page = rect.map_or(20, |r| {
+            ((r.size[1] / CODE_LINE) as usize).saturating_sub(1).max(1)
+        });
+        let mut touched = false;
+        if keys {
+            let mut bytes = [0u8; 4];
+            for i in 0..self.input.strokes().len() {
+                let effect = match self.input.strokes()[i] {
+                    Stroke::Char(c) => {
+                        script.doc.type_text(c.encode_utf8(&mut bytes));
+                        Effect::Edited
+                    }
+                    Stroke::Key(chord) => match script::key(&mut script.doc, chord, page) {
+                        Some(effect) => effect,
+                        None => continue,
+                    },
+                };
+                match effect {
+                    Effect::Edited => script.reveal = true,
+                    Effect::Copy(text) => {
+                        self.input.clipboard.set_text(&text);
+                        script.reveal = true;
+                    }
+                    Effect::Paste => {
+                        if let Some(text) = self.input.clipboard.text() {
+                            script.doc.paste(&text);
+                        }
+                        script.reveal = true;
+                    }
+                    Effect::Scroll(lines) => script.scroll[1] += lines as f32 * CODE_LINE,
+                    Effect::Taken => {}
+                }
+                touched = true;
+                script.closing = false;
+            }
+            self.input.take_ui_keys();
+        }
+        if let (Some(r), Some(at)) = (rect, cursor)
+            && !popup
+        {
+            let local = [at[0] - r.pos[0], at[1] - r.pos[1]];
+            let inside = r.contains(at);
+            if inside && self.input.pressed(Button::Left) {
+                let pos = script.pos_at(local, advance, gutter);
+                let now = Instant::now();
+                // Presses in a row on one line: a word, then the line.
+                let count = match self.code_clicks {
+                    Some((p, t, n))
+                        if p.line == pos.line && now.duration_since(t).as_secs_f32() < 0.45 =>
+                    {
+                        n % 3 + 1
+                    }
+                    _ => 1,
+                };
+                self.code_clicks = Some((pos, now, count));
+                let doc = &mut script.doc;
+                match count {
+                    2 => {
+                        let (a, b) = doc.word_range(pos);
+                        doc.select(a, b, alt);
+                    }
+                    3 => {
+                        let end = if pos.line + 1 < doc.line_count() {
+                            Pos::new(pos.line + 1, 0)
+                        } else {
+                            Pos::new(pos.line, doc.line(pos.line).len())
+                        };
+                        doc.select(Pos::new(pos.line, 0), end, alt);
+                    }
+                    _ => doc.place(pos, shift, alt),
+                }
+                self.code_drag = true;
+                self.code_focus = true;
+                touched = true;
+                script.closing = false;
+            } else if self.code_drag && self.input.held(Button::Left) {
+                // Past the top or the bottom, the view follows the pointer.
+                let past = if local[1] < 0.0 {
+                    local[1]
+                } else {
+                    (local[1] - r.size[1]).max(0.0)
+                };
+                script.scroll[1] += past * 0.25;
+                let pos = script.pos_at(local, advance, gutter);
+                script.doc.drag_to(pos);
+                touched = true;
+            }
+            if inside {
+                let notches = self.input.take_wheel();
+                let by = notches * script::WHEEL_LINES * CODE_LINE;
+                if shift {
+                    script.scroll[0] -= by;
+                } else {
+                    script.scroll[1] -= by;
+                }
+            }
+        }
+        if !self.input.held(Button::Left) {
+            self.code_drag = false;
+        }
+        if script.reveal
+            && let Some(r) = rect
+        {
+            script.reveal_in(r.size, advance, gutter);
+            script.reveal = false;
+        }
+        script.clamp_scroll();
+        if touched {
+            self.caret_since = Instant::now();
+        }
+        // What the shell draws: the lines in view and their numbers, the selections and
+        // the carets among them, where the caret is.
+        let doc = &script.doc;
+        let height = rect.map_or(720.0, |r| r.size[1]);
+        let shown = &mut self.code_shown;
+        shown.first = ((script.scroll[1] / CODE_LINE) as usize).min(doc.line_count() - 1);
+        shown.last = (shown.first + (height / CODE_LINE).ceil() as usize + 1).min(doc.line_count());
+        shown.gutter = gutter;
+        shown.text.clear();
+        shown.ends.clear();
+        shown.numbers.clear();
+        for line in shown.first..shown.last {
+            let mut column = 0;
+            for c in doc.line(line).chars() {
+                let next = crate::code::next_column(column, c);
+                if c == '\t' {
+                    shown.text.extend(core::iter::repeat_n(' ', next - column));
+                } else {
+                    shown.text.push(c);
+                }
+                column = next;
+            }
+            shown.ends.push(shown.text.len());
+            let _ = write!(shown.numbers, "{}", line + 1);
+        }
+        shown.selections.clear();
+        shown.carets.clear();
+        for c in doc.carets() {
+            let (a, b) = c.range();
+            if a != b {
+                for line in a.line.max(shown.first)..=b.line.min(shown.last - 1) {
+                    let text = doc.line(line);
+                    let from = if line == a.line {
+                        char_column(text, a.col)
+                    } else {
+                        0
+                    };
+                    let to = char_column(text, if line == b.line { b.col } else { text.len() });
+                    shown.selections.push((line, from, to, line < b.line));
+                }
+            }
+            if (shown.first..shown.last).contains(&c.head.line) {
+                let column = char_column(doc.line(c.head.line), c.head.col);
+                shown.carets.push((c.head.line, column));
+            }
+        }
+        let head = doc.primary().head;
+        shown.place.clear();
+        let _ = write!(
+            shown.place,
+            "Ln {}, Col {}",
+            head.line + 1,
+            char_column(doc.line(head.line), head.col) + 1
+        );
+        if doc.carets().len() > 1 {
+            let _ = write!(shown.place, "  ·  {} carets", doc.carets().len());
+        }
+        shown.path.clear();
+        let _ = write!(shown.path, "{}", script.path.display());
+        keys
+    }
+
+    /// Shows scene tab `index` (a click on it, Ctrl+Tab): a script shown goes behind.
+    fn show_scene_tab(&mut self, world: &mut World, index: usize) {
+        self.active_script = None;
+        self.show_tab(world, index);
+        self.write_session(world);
+    }
+
+    /// Shows script tab `k`: its code where the viewport is, the keys to it.
+    fn show_script(&mut self, world: &World, k: usize) {
+        if k >= self.scripts.len() {
+            return;
+        }
+        self.active_script = Some(k);
+        self.code_focus = true;
+        self.caret_since = Instant::now();
+        self.write_session(world);
+    }
+
+    /// "File: Open Script…" (a double click in the dock, a click on an error at one's
+    /// line): the script at `path` (relative to the project) in a tab of its own after
+    /// the others, or its tab shown; the caret at `at` (line and column, from 1) when
+    /// given.
+    fn open_script(&mut self, world: &World, path: &Path, at: Option<(usize, usize)>) {
+        let k = match self.scripts.iter().position(|s| s.path == path) {
+            Some(k) => k,
+            None => {
+                let file = self.root.join(path);
+                match std::fs::read_to_string(&file) {
+                    Ok(text) => {
+                        let script = Script::new(path.to_path_buf(), &text, Base::of(&file));
+                        self.scripts.push(script);
+                        self.scripts.len() - 1
+                    }
+                    Err(e) => {
+                        self.say(format!("{} could not be read: {e}", path.display()));
+                        return;
+                    }
+                }
+            }
+        };
+        if let Some((line, column)) = at {
+            let doc = &mut self.scripts[k].doc;
+            let line = line.saturating_sub(1).min(doc.line_count() - 1);
+            let col = col_at(doc.line(line), column.saturating_sub(1));
+            doc.place(Pos::new(line, col), false, false);
+        }
+        self.scripts[k].reveal = true;
+        self.show_script(world, k);
+    }
+
+    /// Closes script tab `k`, the tab before it shown if it was (the scene before the
+    /// first). With unsaved changes it closes only when asked again: the first time
+    /// tells, as nothing keeps them after.
+    fn close_script(&mut self, world: &World, k: usize) {
+        let Some(s) = self.scripts.get_mut(k) else {
+            return;
+        };
+        if s.doc.is_dirty() && !s.closing {
+            s.closing = true;
+            let message = format!(
+                "{} has unsaved changes: close it again to drop them, or Ctrl+S saves them",
+                s.path.display()
+            );
+            self.say(message);
+            return;
+        }
+        let s = self.scripts.remove(k);
+        if s.autosaved.is_some()
+            && let Some(session) = &self.session
+        {
+            let name = session::script_autosave_name(&s.path);
+            session.writer.remove(vec![session.dir.join(name)]);
+        }
+        self.active_script = match self.active_script {
+            Some(a) if a == k => k.checked_sub(1),
+            Some(a) if a > k => Some(a - 1),
+            other => other,
+        };
+        self.code_focus = self.active_script.is_some();
+        self.write_session(world);
+    }
+
+    /// Ctrl+S on a script: its text into its file, its line endings kept, and its
+    /// autosave gone.
+    fn save_script(&mut self, world: &World, k: usize) {
+        let Some(s) = self.scripts.get_mut(k) else {
+            return;
+        };
+        let file = self.root.join(&s.path);
+        match session::write_whole(&file, s.file_text().as_bytes(), 0, Duration::ZERO) {
+            Ok(()) => {
+                s.doc.mark_saved();
+                s.base = Base::of(&file);
+                s.closing = false;
+                let message = format!("Saved {}", s.path.display());
+                self.keep_script_autosaves(world, false);
+                self.say(message);
+            }
+            Err(e) => self.say(format!("Not saved: {e}")),
+        }
+    }
+
+    /// Keeps the scripts' autosaves in step with their unsaved text: written once it has
+    /// waited `session::AUTOSAVE_AFTER` and a quiet moment came (at once with `now`), and
+    /// deleted once the script is saved. The game may be playing: scripts are not the
+    /// play world.
+    fn keep_script_autosaves(&mut self, world: &World, now: bool) {
+        let gesture = self.gesture();
+        let Some(s) = &mut self.session else {
+            return;
+        };
+        let at = Instant::now();
+        let mut changed = false;
+        for script in &mut self.scripts {
+            let file = || s.dir.join(session::script_autosave_name(&script.path));
+            if !script.doc.is_dirty() {
+                script.due = None;
+                if script.autosaved.take().is_some() {
+                    s.writer.remove(vec![file()]);
+                    changed = true;
+                }
+                continue;
+            }
+            if script.autosaved == Some(script.doc.version()) {
+                script.due = None;
+                continue;
+            }
+            let due = *script.due.get_or_insert(at + session::AUTOSAVE_AFTER);
+            if now || session::autosave_now(at, due, s.last_input, gesture) {
+                let path = file();
+                s.writer.write(path, script.file_text(), 0, Duration::ZERO);
+                script.autosaved = Some(script.doc.version());
+                script.due = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.write_session(world);
+        }
+    }
+
+    /// A script's tab from a session: its unsaved text from its autosave, else its file;
+    /// one whose file is gone with nothing unsaved is left out.
+    fn restore_script(&mut self, d: ScriptDoc) {
+        let Some(dir) = self.session.as_ref().map(|s| s.dir.clone()) else {
+            return;
+        };
+        let file = self.root.join(&d.path);
+        let unsaved = d
+            .autosave
+            .and_then(|a| std::fs::read_to_string(dir.join(a)).ok());
+        let mut script = match unsaved {
+            Some(text) => {
+                let mut s = Script::new(d.path, &text, Base::of(&file));
+                s.doc.mark_unsaved();
+                s.autosaved = Some(s.doc.version());
+                s
+            }
+            None => match std::fs::read_to_string(&file) {
+                Ok(text) => Script::new(d.path, &text, Base::of(&file)),
+                Err(_) => return,
+            },
+        };
+        let (line, col) = d.caret;
+        script.doc.place(Pos::new(line, col), false, false);
+        script.scroll = d.scroll;
+        script.clamp_scroll();
+        self.scripts.push(script);
+    }
+
+    /// Once a second, the open scripts' files against what was read: one changed outside
+    /// (in VS Code) is read again when its tab has nothing unsaved; with unsaved changes
+    /// the change is told once, and Ctrl+S writes them over it.
+    fn tick_scripts(&mut self) {
+        if self.scripts.is_empty() || self.scripts_checked.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.scripts_checked = Instant::now();
+        let mut told = None;
+        for s in &mut self.scripts {
+            let file = self.root.join(&s.path);
+            if s.base.and_then(|b| b.matches(&file)) != Some(false) {
+                continue;
+            }
+            let base = Base::of(&file);
+            if s.doc.is_dirty() {
+                s.base = base;
+                told = Some(format!(
+                    "{} changed on disk; your unsaved changes are kept, and Ctrl+S writes \
+                     them over it",
+                    s.path.display()
+                ));
+            } else if let Ok(text) = std::fs::read_to_string(&file) {
+                let mut fresh = Script::new(s.path.clone(), &text, base);
+                let head = s.doc.primary().head;
+                fresh.doc.place(head, false, false);
+                fresh.scroll = s.scroll;
+                fresh.clamp_scroll();
+                *s = fresh;
+                told = Some(format!("{} changed on disk: read again", s.path.display()));
+            }
+        }
+        if let Some(message) = told {
+            self.say(message);
+        }
+    }
+
     /// "File: Open Scene…" (and a double click in the dock): the scene file at `path`
     /// (relative to the project) in a tab of its own after the active one, or its tab
     /// shown when it is open; one closed with unsaved changes comes back with them.
     fn open_scene(&mut self, world: &mut World, path: &Path) {
+        self.active_script = None;
         if self.scene_path.as_deref() == Some(path) {
             return;
         }
@@ -6895,6 +7477,7 @@ impl Editor {
 
     /// "File: New Scene" (Ctrl+N): an empty untitled scene in a new tab; Ctrl+S names it.
     fn new_scene(&mut self, world: &mut World) {
+        self.active_script = None;
         if self.play.is_some() {
             self.say(String::from(
                 "Stop first: the scene that plays stays in front",
@@ -6972,6 +7555,7 @@ impl Editor {
     /// "File: Reopen Closed Scene" (Ctrl+Shift+T): the scene closed last, in a tab again,
     /// with its unsaved changes.
     fn reopen_scene(&mut self, world: &mut World) {
+        self.active_script = None;
         if self.play.is_some() {
             self.say(String::from(
                 "Stop first: the scene that plays stays in front",
@@ -7770,6 +8354,13 @@ impl Editor {
     fn run(&mut self, world: &mut World, id: CommandId) {
         self.commands.ran(id);
         let ids = self.ids;
+        // Ctrl+S on a script's tab saves the script, the game playing or not.
+        if id == ids.save
+            && let Some(k) = self.active_script
+        {
+            self.save_script(world, k);
+            return;
+        }
         // What writes the scene's files works on the scene, not on the play world.
         if self.play.is_some() && [ids.save, ids.restart, ids.bake].contains(&id) {
             self.say(String::from("The scene is playing: F8 stops it first"));
@@ -7841,16 +8432,38 @@ impl Editor {
             }
         } else if id == ids.new_scene {
             self.new_scene(world);
+        } else if id == ids.open_script {
+            self.open_palette(world, "#script:");
+            if let Some(cp) = self.command_palette.as_mut() {
+                cp.opens = true;
+            }
         } else if id == ids.close_scene {
-            let active = self.active_tab();
-            self.close_tab(world, active);
+            match self.active_script {
+                Some(k) => self.close_script(world, k),
+                None => {
+                    let active = self.active_tab();
+                    self.close_tab(world, active);
+                }
+            }
         } else if id == ids.reopen_scene {
             self.reopen_scene(world);
         } else if id == ids.next_tab || id == ids.previous_tab {
-            let n = self.tabs.len();
-            let step = if id == ids.next_tab { 1 } else { n - 1 };
-            let to = (self.active_tab() + step) % n;
-            self.show_tab(world, to);
+            // The scenes' tabs, then the scripts'.
+            let scenes = self.tabs.len();
+            let n = scenes + self.scripts.len();
+            let at = self
+                .active_script
+                .map_or_else(|| self.active_tab(), |k| scenes + k);
+            let to = if id == ids.next_tab {
+                (at + 1) % n
+            } else {
+                (at + n - 1) % n
+            };
+            if to < scenes {
+                self.show_scene_tab(world, to);
+            } else {
+                self.show_script(world, to - scenes);
+            }
         } else if id == ids.save || id == ids.save_over_disk {
             let conflict = self.session.as_ref().is_some_and(|s| s.conflict);
             if id == ids.save && conflict {
@@ -8515,6 +9128,7 @@ impl Editor {
         let scale = self.scale.max(0.5);
         let cursor = self.input.cursor().map(|[x, y]| Vec2::new(x, y));
         let over_view = !game_view
+            && response.viewport != 0
             && cursor.is_some_and(|at| {
                 self.ui.rect_of(response.viewport).is_some_and(|r| {
                     let (x, y) = (at.x / scale, at.y / scale);
@@ -10041,6 +10655,7 @@ impl Editor {
         let mut editor_state = None;
         // The session's other tabs, and where the scene opened goes among them.
         let mut others = Vec::new();
+        let mut script_docs = Vec::new();
         let mut at = 0;
         let doc = match std::fs::read_to_string(&previous) {
             Err(_) => None,
@@ -10048,6 +10663,7 @@ impl Editor {
                 Ok(f) => {
                     editor_state = Some(f.editor);
                     others = f.documents;
+                    script_docs = f.scripts;
                     let found = others.iter().position(|d| d.path == self.scene_path);
                     at = found.unwrap_or(0);
                     found.map(|i| others.remove(i))
@@ -10148,6 +10764,15 @@ impl Editor {
         {
             self.show_tab(world, i);
         }
+        // The session's scripts: their unsaved text from their autosaves, else their files.
+        for d in script_docs {
+            self.restore_script(d);
+        }
+        self.active_script = editor_state
+            .as_ref()
+            .and_then(|s| s.script)
+            .filter(|&k| k < self.scripts.len());
+        self.code_focus = self.active_script.is_some();
         self.write_session(world);
         if let Some(note) = note {
             self.say(note);
@@ -10326,7 +10951,21 @@ impl Editor {
             window: self.window,
             game_window: self.game_window,
             active: Some(self.active_tab()),
+            script: self.active_script,
         };
+        let scripts = self
+            .scripts
+            .iter()
+            .map(|s| {
+                let head = s.doc.primary().head;
+                ScriptDoc {
+                    path: s.path.clone(),
+                    autosave: s.autosaved.map(|_| session::script_autosave_name(&s.path)),
+                    caret: (head.line, head.col),
+                    scroll: s.scroll,
+                }
+            })
+            .collect();
         let mut view = Some(self.view(world));
         let Some(s) = &mut self.session else {
             return;
@@ -10355,7 +10994,11 @@ impl Editor {
                 },
             });
         }
-        let file = SessionFile { editor, documents };
+        let file = SessionFile {
+            editor,
+            documents,
+            scripts,
+        };
         let text = file.to_text();
         if text != s.last_text {
             s.writer
@@ -10483,6 +11126,7 @@ impl Editor {
     /// before Play and before a restart.
     fn save_session(&mut self, world: &mut World) {
         self.keep_autosave(world, true);
+        self.keep_script_autosaves(world, true);
         if let Some(s) = &self.session {
             s.writer.flush();
         }
@@ -10495,6 +11139,7 @@ impl Editor {
             return;
         }
         self.keep_autosave(world, true);
+        self.keep_script_autosaves(world, true);
         self.write_session(world);
         if let Some(mut s) = self.session.take() {
             s.writer.flush();
@@ -10812,11 +11457,24 @@ impl Editor {
                 }
             }
             Cause::Place { path, line, column } => {
-                match found(&self.root, crate_dir.as_deref(), &path) {
-                    Some(file) => {
+                let file = found(&self.root, crate_dir.as_deref(), &path);
+                // A script of the project in the editor's own code editor; the rest (the
+                // game's Rust) in VS Code.
+                let script = file.as_deref().and_then(|f| {
+                    let luau = f.extension().is_some_and(|e| e == "luau");
+                    f.strip_prefix(&self.root)
+                        .ok()
+                        .filter(|_| luau)
+                        .map(Path::to_path_buf)
+                });
+                match (script, file) {
+                    (Some(script), _) => {
+                        self.open_script(world, &script, Some((line as usize, column as usize)));
+                    }
+                    (None, Some(file)) => {
                         self.open_in_code(&format!("{}:{line}:{column}", file.display()));
                     }
-                    None => self.say(format!("{path}: no such file in the project")),
+                    (None, None) => self.say(format!("{path}: no such file in the project")),
                 }
             }
         }
@@ -12205,7 +12863,7 @@ struct Playing {
 }
 
 /// Whether `key` is one of F1 to F12 (the editor's keys while playing).
-fn is_function_key(key: Key) -> bool {
+pub(crate) fn is_function_key(key: Key) -> bool {
     matches!(
         key,
         Key::F1
@@ -18339,5 +18997,136 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn a_script_opens_in_a_tab_takes_its_keys_and_saves() {
+        const D: (u16, u16) = (0x44, 0x20);
+        let dir = project("script-tab");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        let door = dir.join("scripts/door.luau");
+        std::fs::write(&door, "local speed = 2\r\nreturn speed\r\n").unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.input.clipboard = Clipboard::Local(String::new());
+        ed.update(&mut world);
+        let cube = engine_scene::find_named(&mut world, "Cube").unwrap();
+        ed.select_only(cube);
+        ed.open_script(&world, Path::new("scripts/door.luau"), Some((1, 16)));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(ed.active_script, Some(0));
+        assert!(!texts(&ed, "local speed = 2").is_empty(), "its code drawn");
+        assert!(!texts(&ed, "door.luau").is_empty(), "its tab");
+        assert!(ed.view_rect.is_some_and(|_| ed.code_rect.is_some()));
+        // Typed at the caret, the line's end.
+        chars(&mut ed, "5");
+        ed.update(&mut world);
+        assert_eq!(ed.scripts[0].doc.line(0), "local speed = 25");
+        assert!(!texts(&ed, "door.luau *").is_empty(), "unsaved");
+        // Ctrl+D is the code's (the word at the caret), not the scene's duplicate.
+        chord(&mut ed, &mut world, &[CTRL, D]);
+        assert_eq!(row_names(&ed, &world), ["Cube"]);
+        assert_eq!(ed.scripts[0].doc.selected_text(), "25");
+        chars(&mut ed, "3");
+        ed.update(&mut world);
+        assert_eq!(ed.scripts[0].doc.line(0), "local speed = 3");
+        // Ctrl+S saves the script, its line endings as they were.
+        chord(&mut ed, &mut world, &[CTRL, S]);
+        assert_eq!(
+            std::fs::read_to_string(&door).unwrap(),
+            "local speed = 3\r\nreturn speed\r\n"
+        );
+        assert!(!ed.scripts[0].doc.is_dirty());
+        // Ctrl+Z takes back the code's step; the scene's history is not touched.
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        assert_eq!(ed.scripts[0].doc.line(0), "local speed = 25");
+        // Closing with unsaved changes asks first; asked again, it closes.
+        chord(&mut ed, &mut world, &[CTRL, W]);
+        assert_eq!(ed.scripts.len(), 1);
+        assert!(message(&ed).contains("unsaved changes"), "{}", message(&ed));
+        chord(&mut ed, &mut world, &[CTRL, W]);
+        assert!(ed.scripts.is_empty());
+        assert_eq!(ed.active_script, None, "the scene shown again");
+        ed.update(&mut world);
+        assert!(ed.code_rect.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_click_in_the_code_places_the_caret_and_elsewhere_takes_the_keys_back() {
+        let dir = project("script-click");
+        std::fs::write(dir.join("notes.luau"), "local a = 1\nlocal b = 2\n").unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.update(&mut world);
+        ed.open_script(&world, Path::new("notes.luau"), None);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let r = ed.code_rect.unwrap();
+        let gutter = script::gutter_width(3, ed.code_advance);
+        // The second line, after `local `.
+        let at = [
+            r.pos[0] + gutter + crate::shell::CODE_PAD + 6.0 * ed.code_advance + 1.0,
+            r.pos[1] + 1.5 * CODE_LINE,
+        ];
+        mouse(&mut ed, at, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, at, Some(false));
+        ed.update(&mut world);
+        assert_eq!(ed.scripts[0].doc.primary().head, Pos::new(1, 6));
+        chars(&mut ed, "x");
+        ed.update(&mut world);
+        assert_eq!(ed.scripts[0].doc.line(1), "local xb = 2");
+        // A press in the scene tree gives the keys back: letters are the editor's again.
+        let tree = texts(&ed, "Cube")[0];
+        mouse(&mut ed, [tree.pos[0] + 2.0, tree.pos[1] + 2.0], Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, [tree.pos[0] + 2.0, tree.pos[1] + 2.0], Some(false));
+        ed.update(&mut world);
+        assert!(!ed.code_focus);
+        chars(&mut ed, "y");
+        ed.update(&mut world);
+        assert_eq!(ed.scripts[0].doc.line(1), "local xb = 2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scripts_unsaved_text_comes_back_with_the_session() {
+        let dir = project("script-session");
+        std::fs::write(dir.join("door.luau"), "return 1\n").unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.update(&mut world);
+        ed.open_script(&world, Path::new("door.luau"), None);
+        ed.update(&mut world);
+        chars(&mut ed, "-- ");
+        ed.update(&mut world);
+        ed.end_session(&mut world);
+        let (mut world, mut ed) = start(&dir);
+        ed.update(&mut world);
+        assert_eq!((ed.scripts.len(), ed.active_script), (1, Some(0)));
+        assert_eq!(ed.scripts[0].doc.text(), "-- return 1\n");
+        assert!(ed.scripts[0].doc.is_dirty());
+        assert_eq!(
+            ed.scripts[0].doc.primary().head,
+            Pos::new(0, 3),
+            "the caret too"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("door.luau")).unwrap(),
+            "return 1\n",
+            "the file as it was"
+        );
+        // Saved: its autosave goes.
+        let autosave = dir
+            .join(session::DIR)
+            .join(session::script_autosave_name(Path::new("door.luau")));
+        assert!(autosave.is_file());
+        ed.run(&mut world, ed.ids.save);
+        flush(&ed);
+        assert!(!autosave.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("door.luau")).unwrap(),
+            "-- return 1\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -225,6 +225,19 @@ pub(crate) struct Document {
     pub(crate) view: View,
 }
 
+/// A script the session had open in a tab (E8-1b).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScriptDoc {
+    /// Its file, relative to the project.
+    pub(crate) path: PathBuf,
+    /// Its unsaved text, relative to `.ofelia/`.
+    pub(crate) autosave: Option<PathBuf>,
+    /// Its primary caret: line, and byte in it.
+    pub(crate) caret: (usize, usize),
+    /// Its view's scroll: logical pixels across and down.
+    pub(crate) scroll: [f32; 2],
+}
+
 /// The editor's own state, the same for every scene.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct EditorState {
@@ -250,6 +263,8 @@ pub(crate) struct EditorState {
     pub(crate) game_window: Option<WindowPlacement>,
     /// The tab shown, among the documents (E5-5a).
     pub(crate) active: Option<usize>,
+    /// The script tab shown over it, among the scripts (E8-1b).
+    pub(crate) script: Option<usize>,
 }
 
 /// `.ofelia/session`: what the editor brings back at its next start.
@@ -257,6 +272,7 @@ pub(crate) struct EditorState {
 pub(crate) struct SessionFile {
     pub(crate) editor: EditorState,
     pub(crate) documents: Vec<Document>,
+    pub(crate) scripts: Vec<ScriptDoc>,
 }
 
 /// The session file's version. Keys and sections it does not know are skipped, so a
@@ -264,7 +280,8 @@ pub(crate) struct SessionFile {
 const VERSION: u32 = 1;
 
 impl SessionFile {
-    /// The file's text: a header, the editor's block, then a block per document.
+    /// The file's text: a header, the editor's block, then a block per document and one
+    /// per script.
     pub(crate) fn to_text(&self) -> String {
         let mut out = format!("[session version={VERSION}]\n\n[editor]\n");
         if let Some((on, [position, scale, angle, number])) = self.editor.snapping {
@@ -309,6 +326,9 @@ impl SessionFile {
         }
         if let Some(active) = self.editor.active {
             let _ = writeln!(out, "active = {active}");
+        }
+        if let Some(script) = self.editor.script {
+            let _ = writeln!(out, "script = {script}");
         }
         for (key, placement) in [
             ("window", self.editor.window),
@@ -367,6 +387,18 @@ impl SessionFile {
                 let _ = writeln!(out, "tool = {}", v.tool);
             }
         }
+        for s in &self.scripts {
+            out.push_str("\n[script]\npath = ");
+            quote_into(&mut out, &slashes(&s.path));
+            out.push('\n');
+            if let Some(path) = &s.autosave {
+                out.push_str("autosave = ");
+                quote_into(&mut out, &slashes(path));
+                out.push('\n');
+            }
+            let ((line, col), [x, y]) = (s.caret, s.scroll);
+            let _ = writeln!(out, "caret = ({line}, {col})\nscroll = ({x}, {y})");
+        }
         out
     }
 
@@ -379,6 +411,7 @@ impl SessionFile {
         enum Section {
             Editor,
             Document,
+            Script,
             /// A section of a later editor: skipped.
             Other,
         }
@@ -411,6 +444,15 @@ impl SessionFile {
                             view: View::default(),
                         });
                         Section::Document
+                    }
+                    "[script]" => {
+                        file.scripts.push(ScriptDoc {
+                            path: PathBuf::new(),
+                            autosave: None,
+                            caret: (0, 0),
+                            scroll: [0.0; 2],
+                        });
+                        Section::Script
                     }
                     _ => Section::Other,
                 };
@@ -457,12 +499,17 @@ impl SessionFile {
                         });
                     }
                     "fly" => file.editor.fly = Some(parse_number(value).map_err(at)?),
-                    "active" => {
-                        file.editor.active = Some(
+                    "active" | "script" => {
+                        let tab = Some(
                             value
                                 .parse()
                                 .map_err(|_| at(format!("`{value}` is not a tab's number")))?,
                         );
+                        if key == "active" {
+                            file.editor.active = tab;
+                        } else {
+                            file.editor.script = tab;
+                        }
                     }
                     "pick_transparent" => {
                         file.editor.pick_transparent = Some(match value {
@@ -496,6 +543,12 @@ impl SessionFile {
                         continue;
                     };
                     read_document_key(doc, key, value).map_err(at)?;
+                }
+                Section::Script => {
+                    let Some(s) = file.scripts.last_mut() else {
+                        continue;
+                    };
+                    read_script_key(s, key, value).map_err(at)?;
                 }
             }
         }
@@ -563,6 +616,30 @@ fn read_document_key(doc: &mut Document, key: &str, value: &str) -> Result<(), S
     Ok(())
 }
 
+/// One `key = value` of a `[script]` block; keys of a later editor are skipped.
+fn read_script_key(s: &mut ScriptDoc, key: &str, value: &str) -> Result<(), String> {
+    match key {
+        "path" => s.path = PathBuf::from(unquote(value)?),
+        "autosave" => s.autosave = Some(PathBuf::from(unquote(value)?)),
+        "caret" => {
+            let parts = items(value, '(', ')')?;
+            let [line, col] = parts[..] else {
+                return Err(format!("`{value}` is not (line, column)"));
+            };
+            s.caret = (parse_number(line)?, parse_number(col)?);
+        }
+        "scroll" => {
+            let parts = items(value, '(', ')')?;
+            let [x, y] = parts[..] else {
+                return Err(format!("`{value}` is not (x, y)"));
+            };
+            s.scroll = [parse_number(x)?, parse_number(y)?];
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Writes `key = [@id, …]` unless `ids` is empty.
 fn write_ids(out: &mut String, key: &str, ids: &[SceneId]) {
     if ids.is_empty() {
@@ -625,6 +702,16 @@ pub(crate) fn autosave_name(scene: Option<&Path>, id: AssetId) -> PathBuf {
         |s| s.to_string_lossy().into_owned(),
     );
     PathBuf::from(format!("autosave/{stem}-{id}.scene"))
+}
+
+/// Where a script's unsaved text goes, relative to `.ofelia/`: by its file's stem and a
+/// hash of its path, so two `door.luau` in different folders stay apart.
+pub(crate) fn script_autosave_name(script: &Path) -> PathBuf {
+    let stem = script
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let hash = engine_core::hash::state_hash64(slashes(script).as_bytes());
+    PathBuf::from(format!("autosave/{stem}-{hash:016x}.luau"))
 }
 
 /// The `n`-th older copy of `path`: `main-….scene` → `main-….1.scene`.
@@ -763,7 +850,12 @@ impl Drop for Writer {
 /// over it, so a crash leaves the old file or the new one, never half of one. With `keep`,
 /// the file it replaces becomes `.1` (and `.1` becomes `.2`, up to `keep`) when it is at
 /// least `apart` old; a younger one is replaced.
-fn write_whole(path: &Path, bytes: &[u8], keep: u32, apart: Duration) -> Result<(), String> {
+pub(crate) fn write_whole(
+    path: &Path,
+    bytes: &[u8],
+    keep: u32,
+    apart: Duration,
+) -> Result<(), String> {
     let at = |e: std::io::Error| format!("{}: {e}", path.display());
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(at)?;
@@ -905,6 +997,20 @@ mod tests {
                     view: View::default(),
                 },
             ],
+            scripts: vec![
+                ScriptDoc {
+                    path: PathBuf::from("scripts/door.luau"),
+                    autosave: Some(script_autosave_name(Path::new("scripts/door.luau"))),
+                    caret: (12, 4),
+                    scroll: [0.0, 152.5],
+                },
+                ScriptDoc {
+                    path: PathBuf::from("scripts/ui/menu.luau"),
+                    autosave: None,
+                    caret: (0, 0),
+                    scroll: [8.0, 0.0],
+                },
+            ],
             editor: EditorState {
                 snapping: Some((true, [0.1, 0.25, 45.0, 0.1])),
                 recent: vec![String::from("edit.undo"), String::from("scene.duplicate")],
@@ -929,6 +1035,7 @@ mod tests {
                     maximized: false,
                 }),
                 active: Some(1),
+                script: Some(0),
             },
         };
         let text = file.to_text();

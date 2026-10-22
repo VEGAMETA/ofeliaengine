@@ -10,6 +10,7 @@
 pub mod app;
 mod build;
 pub mod camera;
+mod code;
 mod draw;
 mod drop;
 pub mod expr;
@@ -25,6 +26,7 @@ pub mod paint;
 mod palette;
 mod prefabs;
 mod profile;
+mod script;
 mod session;
 pub mod shell;
 mod snap;

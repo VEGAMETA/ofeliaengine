@@ -67,6 +67,11 @@ fn children(nodes: &[Node], i: usize) -> impl Iterator<Item = usize> + '_ {
     })
 }
 
+/// Whether `n` is out of its parent's flow (floating or placed).
+fn out_of_flow(n: &Node) -> bool {
+    n.style.floating.is_some() || n.style.placed.is_some()
+}
+
 /// Size along `axis` that a child contributes to its parent's content size.
 fn contribution(n: &Node, axis: usize) -> f32 {
     match n.style.size[axis] {
@@ -86,7 +91,7 @@ fn fit_pass(nodes: &mut [Node], axis: usize) {
         let mut sum = 0.0f32;
         let mut max = 0.0f32;
         for c in children(nodes, i) {
-            if nodes[c].style.floating.is_some() {
+            if out_of_flow(&nodes[c]) {
                 continue;
             }
             let v = contribution(&nodes[c], axis);
@@ -120,7 +125,7 @@ fn grow_pass(nodes: &mut [Node], axis: usize) {
             let mut count = 0;
             for c in children(nodes, i) {
                 let cn = &nodes[c];
-                if cn.style.floating.is_some() {
+                if out_of_flow(cn) {
                     continue;
                 }
                 count += 1;
@@ -140,7 +145,7 @@ fn grow_pass(nodes: &mut [Node], axis: usize) {
             while c != NONE {
                 let cn = &mut nodes[c as usize];
                 match cn.style.size[axis] {
-                    Size::Grow(w) if weights > 0.0 => {
+                    Size::Grow(w) if weights > 0.0 && cn.style.placed.is_none() => {
                         cn.rect.size[axis] = clamp(cn, axis, free * w.max(0.0) / weights);
                     }
                     Size::Percent(p) => cn.rect.size[axis] = clamp(cn, axis, inner * p),
@@ -181,7 +186,7 @@ fn position_pass(nodes: &mut [Node], scroll: &dyn Fn(u64) -> f32) {
         let mut total = 0.0f32;
         let mut count = 0;
         for c in children(nodes, i) {
-            if nodes[c].style.floating.is_none() {
+            if !out_of_flow(&nodes[c]) {
                 total += nodes[c].rect.size[main];
                 count += 1;
             }
@@ -193,7 +198,7 @@ fn position_pass(nodes: &mut [Node], scroll: &dyn Fn(u64) -> f32) {
         let mut c = nodes[i].first_child;
         while c != NONE {
             let cn = &mut nodes[c as usize];
-            if let Some(offset) = cn.style.floating {
+            if let Some(offset) = cn.style.floating.or(cn.style.placed) {
                 cn.rect.pos = [origin[0] + offset[0], origin[1] + offset[1]];
             } else {
                 cn.rect.pos[main] = cursor;
@@ -223,7 +228,11 @@ pub(crate) fn layout(
     for n in nodes.iter_mut() {
         if let Some(t) = &n.text {
             let s = &text[t.range.clone()];
-            n.content = measure.measure(s, t.size, None);
+            n.content = if t.mono {
+                measure.measure_mono(s, t.size)
+            } else {
+                measure.measure(s, t.size, None)
+            };
         }
     }
     nodes[0].style.size = [Size::Fixed(root.size[0]), Size::Fixed(root.size[1])];

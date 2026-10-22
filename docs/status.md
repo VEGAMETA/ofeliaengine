@@ -21,9 +21,10 @@ Last updated: 2026-10-22.
   - asset ids: ids inside our own files, a `.meta` beside foreign ones, references by id
     and path, the local database only a cache;
   - any scene can be a prefab.
-  - **Where it stands (2026-10-22):** E1 to E5 are done (E2b but for the cook's path, E3
-    but for the tree's marks on what changed); next, material slots on `Model`, then E6
-    (at the end of this list). The entries below are in the order merged.
+  - **Where it stands (2026-10-22):** E1 to E6 are done (E2b but for the cook's path, E3
+    but for the tree's marks on what changed), and material slots on `Model`. E8, the
+    code editor, is under way (scripts in tabs); E7 waits for the owner's answers to ADR
+    0114. The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
@@ -385,9 +386,15 @@ Last updated: 2026-10-22.
   - **E6-5, the profiler's first panel** (#328, ADR 0107's as-built): the last 120 frames'
     CPU and GPU times as bars, the costliest CPU stages (`FrameReport`) and GPU passes
     (the frame graph's timestamps). **E6 is done.**
-  - **Next:** E7 waits for the owner's answers to ADR 0114's questions; meanwhile E8's
-    core, the multi-line text editor (it does not depend on the scripting API): editing,
-    selection, undo, scrolling, Luau's highlighting; then find and replace.
+  - **E8-1, scripts in tabs** (#PR, ADR 0107's as-built): `.luau` files open in tabs
+    after the scenes' (a double click in the dock, "File: Open Script…", an Output error
+    at a script's line), their code where the viewport is. The text is a line array
+    (measured: a key 0.5 µs, a new line 15 µs in a 100,000-line file), carets several at
+    once, VS Code's keys and mouse; Ctrl+S keeps the file's line endings; the session
+    brings the tabs back with their unsaved text. engine_ui gained placed nodes and
+    monospace text.
+  - **Next:** E7 waits for the owner's answers to ADR 0114's questions; meanwhile E8:
+    Luau's highlighting (E8-1c), then find and replace (E8-2).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
@@ -1535,6 +1542,14 @@ grown, divide and conquer); the old labels stay in parentheses.
       compensation, the plugins' state and windows, an effect baked in the editor.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
+
+- **The code editor's leftovers** (E8-1, 2026-10-22, ADR 0107's as-built):
+  - the scene is still drawn under a script's code (its GPU time spent while coding),
+    until the split view of code beside the scene skips its frame when no view shows it;
+  - a file changed outside with unsaved changes is told, not compared;
+  - closed scripts are not in "Reopen Closed";
+  - IME composition is not shown in place;
+  - wide (East Asian) characters take one column of the grid but two on screen.
 
 - **Frame pacing (the owner, 2026-10-21, for later):** a release build's player capped at
   the display's refresh rate by default (CLAUDE.md §7's limiter just below it under VRR),

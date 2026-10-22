@@ -406,6 +406,7 @@ impl Ui {
                     size: field.size,
                     color,
                     wrap: false,
+                    mono: false,
                 };
                 let node = self.id("text");
                 self.open(node, text_style, Some(span));

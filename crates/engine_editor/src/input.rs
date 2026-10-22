@@ -51,6 +51,16 @@ impl Clipboard {
     }
 }
 
+/// A key pressed with its modifiers, or a character typed: what a code view edits by,
+/// in the order they came ([`InputCollector::strokes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stroke {
+    /// A key, as the keymap sees it.
+    Key(Chord),
+    /// A character (after the keyboard layout), never a control character.
+    Char(char),
+}
+
 /// Mouse buttons the editor tells apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
@@ -120,6 +130,8 @@ pub struct InputCollector {
     /// The virtual keys pressed this frame: the letter on the key in Latin layouts (the
     /// US one in others), for keys that mean their letter (a keyboard transform's X, Y, Z).
     letters: Vec<u16>,
+    /// The keys and the characters typed this frame, in their order.
+    strokes: Vec<Stroke>,
     /// What Ctrl+V pastes from (and the editor copies to).
     pub clipboard: Clipboard,
 }
@@ -225,12 +237,14 @@ impl InputCollector {
             _ => {}
         }
         if let Some(key) = physical {
-            self.chords.push(Chord {
+            let chord = Chord {
                 ctrl: self.ctrl,
                 shift: self.shift,
                 alt: self.alt,
                 key,
-            });
+            };
+            self.chords.push(chord);
+            self.strokes.push(Stroke::Key(chord));
         }
     }
 
@@ -239,6 +253,7 @@ impl InputCollector {
     pub fn char(&mut self, c: char) {
         if !c.is_control() {
             self.ui.text.push(c);
+            self.strokes.push(Stroke::Char(c));
         }
     }
 
@@ -296,16 +311,18 @@ impl InputCollector {
         &self.ui.text
     }
 
+    /// The keys pressed and the characters typed this frame, in the order they came (a
+    /// character comes after its key).
+    pub fn strokes(&self) -> &[Stroke] {
+        &self.strokes
+    }
+
     /// Takes this frame's keys, typed text, button presses and wheel: something had them
     /// all (a keyboard transform), so the panels, the shortcuts and the camera do not.
     pub fn consume(&mut self) {
         self.pressed = [false; 3];
         self.wheel = 0.0;
-        self.ui.keys.clear();
-        self.ui.text.clear();
-        self.ui.paste.clear();
-        self.chords.clear();
-        self.letters.clear();
+        self.consume_keys();
     }
 
     /// Takes this frame's keys and text (a tool's), leaving the buttons and the wheel.
@@ -315,6 +332,15 @@ impl InputCollector {
         self.ui.paste.clear();
         self.chords.clear();
         self.letters.clear();
+        self.strokes.clear();
+    }
+
+    /// Takes this frame's keys and typed text from the panels (a script's code has
+    /// them), leaving the shortcuts their chords.
+    pub fn take_ui_keys(&mut self) {
+        self.ui.keys.clear();
+        self.ui.text.clear();
+        self.ui.paste.clear();
     }
 
     /// Takes `button`'s press this frame (a tool's click).
@@ -375,11 +401,7 @@ impl InputCollector {
         self.released = [false; 3];
         self.drag = [0.0; 2];
         self.wheel = 0.0;
-        self.ui.keys.clear();
-        self.ui.text.clear();
-        self.ui.paste.clear();
-        self.chords.clear();
-        self.letters.clear();
+        self.consume_keys();
     }
 }
 

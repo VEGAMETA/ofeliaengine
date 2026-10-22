@@ -131,6 +131,10 @@ pub struct Style {
     /// Taken out of the flow and placed at this offset from the parent's corner, drawn
     /// above everything else (popups, tooltips, menus).
     pub floating: Option<[f32; 2]>,
+    /// Taken out of the flow and placed at this offset from the parent's corner, but
+    /// drawn in order and clipped like the parent's other children (a code view's lines,
+    /// selections and carets on their grid).
+    pub placed: Option<[f32; 2]>,
     /// A picture over the node's rectangle, above its fill (a thumbnail).
     pub image: Option<UiImage>,
 }
@@ -162,6 +166,7 @@ impl Default for Style {
             clip: false,
             scroll: false,
             floating: None,
+            placed: None,
             image: None,
         }
     }
@@ -215,6 +220,8 @@ pub(crate) struct TextSpan {
     pub(crate) size: f32,
     pub(crate) color: Color,
     pub(crate) wrap: bool,
+    /// In the monospace face ([`Ui::mono_text_node`]).
+    pub(crate) mono: bool,
 }
 
 /// One element of a frame's tree.
@@ -245,6 +252,11 @@ pub(crate) struct Node {
 pub trait TextMeasure {
     /// Size of `text` at `size` pixels, wrapped at `max_width` if given.
     fn measure(&mut self, text: &str, size: f32, max_width: Option<f32>) -> [f32; 2];
+
+    /// [`Self::measure`] in the monospace face (code); the same face without one.
+    fn measure_mono(&mut self, text: &str, size: f32) -> [f32; 2] {
+        self.measure(text, size, None)
+    }
 }
 
 /// Every character is `0.5 × size` wide and lines are `1.25 × size` tall: for tests
@@ -396,6 +408,8 @@ pub enum DrawCmd {
         color: Color,
         /// Wrap to the rectangle's width.
         wrap: bool,
+        /// In the monospace face.
+        mono: bool,
     },
     /// Clip following commands to this rectangle (`None`: no clip).
     Clip(Option<Rect>),
@@ -757,6 +771,31 @@ impl Ui {
             size,
             color,
             wrap,
+            mono: false,
+        };
+        self.open(id, style, Some(span));
+        self.close();
+        id
+    }
+
+    /// A leaf node with text in the monospace face (code, one line, not wrapped).
+    pub fn mono_text_node(
+        &mut self,
+        key: &str,
+        style: Style,
+        text: &str,
+        size: f32,
+        color: Color,
+    ) -> u64 {
+        let id = self.id(key);
+        let start = self.text.len();
+        self.text.push_str(text);
+        let span = TextSpan {
+            range: start..self.text.len(),
+            size,
+            color,
+            wrap: false,
+            mono: true,
         };
         self.open(id, style, Some(span));
         self.close();
@@ -1202,6 +1241,7 @@ impl Ui {
                     size: t.size,
                     color: t.color,
                     wrap: t.wrap,
+                    mono: t.mono,
                 });
                 if let Some((_, scroll, caret_x, _)) = edited {
                     self.commands.push(DrawCmd::Rect {

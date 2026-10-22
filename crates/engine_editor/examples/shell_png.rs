@@ -396,6 +396,9 @@ fn main() {
     let model = ShellModel {
         scenes: &["main.scene", "level_01.scene*", "меню.scene"],
         active_scene: 1,
+        scripts: &[],
+        active_script: None,
+        code: None,
         tools: &tools,
         active_tool: 1,
         tree: &tree,

@@ -1416,3 +1416,97 @@ so not SQLite. The editor opens it at its start and follows the folder.
     shows the file in the dock).
 - **Left:** renaming folders; "Dependencies" (what an asset uses); references in
   prefabs, which come with E5.
+
+## As built (E8-1, 2026-10-22): scripts in tabs, the multi-line core
+
+- **The text** (`code::Document`): its lines in an array, each a string.
+  - §6 left a rope or a gap buffer to measurement. The array was measured on files of 10,000
+    and 100,000 lines (583 KB and 6 MB; release, ref-1):
+
+    | Lines | Read | A key | A new line | 2,000 edits undone | The text for saving |
+    |---|---|---|---|---|---|
+    | 10,000 | 0.34 ms | 0.57 µs | 2.1 µs | 1.3 ms | 0.09 ms |
+    | 100,000 | 4.6 ms | 0.48 µs | 15 µs | 10 ms | 1.1 ms |
+
+    A key costs under a microsecond, and a new line moves only the line array's
+    pointers. A rope would cut the 15 µs at a higher cost per key. It is reopened only for
+    files far beyond what scripts are.
+  - **Carets:** several at once, each with its selection; they merge when they meet.
+  - **Edits:** made from the last caret back, so the earlier ones' places hold; all the
+    carets' edits are one undo step.
+  - **Undo steps:** typing merges into one step a word at a time (a space or a line's end
+    closes it), and so does deleting. Moving a caret seals the step.
+  - **Columns on screen:** a tab reaches the next multiple of four, as in VS Code. The
+    lines are drawn with their tabs as spaces, so code indented with tabs (Roblox
+    Studio's) lines up with code indented with spaces.
+- **Script tabs** come after the scenes' in the tab row, each with its icon, its name (`*`
+  while unsaved) and a close mark.
+  - **A script shown:** its path and its caret's place (`Ln 11, Col 5`, the carets
+    counted) take the tool bar's place, and its code takes the viewport's. The scene stays
+    in the world.
+  - **A scene tab** clicked, Ctrl+Tab (through the scenes' tabs, then the scripts'), and
+    whatever shows an entity (the palette, an error's cause) bring the scene back in
+    front.
+- **Opening a script:**
+  - a double click on it in the dock;
+  - "File: Open Script…" (the palette's `#script:`);
+  - an Output error at a script's line (`path:line[:column]`), which opens it at that
+    line. The game's Rust files still open in VS Code.
+- **Drawing** (`shell::code_view`). engine_ui gained two things:
+  - placed nodes (`Style::placed`), which leave the flow like floating ones but are
+    painted in order and clipped by their parent;
+  - text in the monospace face (`Ui::mono_text_node`, JetBrains Mono first).
+
+  On that grid sit the current line's band, the selections, the lines in view only, the
+  carets and the gutter with the numbers, over code scrolled under it. The carets blink
+  every 530 ms while the code has the keys.
+- **Keys are VS Code's:**
+  - moving: arrows, Ctrl by words, Home (first character, then the line's start), End,
+    Page Up and Down, Ctrl+Home and Ctrl+End, Shift extending each;
+  - editing: Enter keeps the indentation, one level more after `then`, `do`, `else`,
+    `repeat`, `function (…)`, `{` and `(`. Backspace in indentation takes a whole level.
+    Tab and Shift+Tab indent (lines when the selection spans them), Ctrl+] and Ctrl+[
+    indent lines;
+  - lines and comments: Ctrl+/ comments lines with `-- ` or back, Alt+Up and Alt+Down
+    move lines, Ctrl+Shift+K deletes them, Ctrl+Enter opens a line below;
+  - deleting words: Ctrl+Backspace and Ctrl+Delete;
+  - the clipboard: Ctrl+C, Ctrl+X and Ctrl+V, and Shift+Delete and Shift+Insert. Without a
+    selection they copy or cut the whole line, which pastes back above the caret's line;
+    as many lines as carets paste a line at each;
+  - carets: Ctrl+D selects the word, then its next match; Ctrl+Alt+Up and Ctrl+Alt+Down
+    add a caret; Escape leaves one caret, then no selection;
+  - Ctrl+Z and Ctrl+Y (Ctrl+Shift+Z) undo and redo the script's own steps, not the
+    scene's; Ctrl+Up and Ctrl+Down scroll.
+- **Who gets the keys:**
+  - The editor keeps saving, the palette, Ctrl+P, the tabs (Ctrl+Tab, Ctrl+W, Ctrl+N,
+    Ctrl+O, Ctrl+Shift+T), Ctrl+J and the play keys (F5 to F8, Shift+F1). The scene's
+    shortcuts are off while the code has the keys, because their keys are the code's
+    (Ctrl+D, Delete, the tools' letters). A press anywhere else gives the keys back.
+  - The keys and the characters typed are applied in the order they came
+    (`InputCollector::strokes`), before the UI is built, so a key shows in its frame.
+- **The mouse:**
+  - a click places the caret; Shift+click extends the selection and Alt+click adds a
+    caret;
+  - a double click selects a word, a triple one its line;
+  - a drag selects, scrolling when it goes past the top or the bottom;
+  - the wheel scrolls three lines, and with Shift it scrolls across.
+- **Saving:** Ctrl+S writes the file whole (beside it, then renamed over it), with its
+  `\r\n` line ends and byte order mark kept. It works while the game plays.
+- **Closing:** a script with unsaved changes needs a second Ctrl+W (or ×), and the first
+  one tells.
+- **A file changed outside** (VS Code):
+  - it is read again when its tab has nothing unsaved (looked at once a second);
+  - with unsaved changes, the change is told once and Ctrl+S writes over it.
+- **The session** brings the script tabs back in their order, with their carets and
+  scroll and the one shown. Their unsaved text is autosaved at the scenes' rhythm, the
+  game playing or not (`.ofelia/autosave/<stem>-<hash>.luau`), and comes back.
+- **Left:**
+  - Luau's highlighting (E8-1c), find and replace (E8-2), Luau's analysis (E8-3),
+    "Open in VS Code" at the caret;
+  - comparing with a file changed outside instead of telling;
+  - closed scripts in "Reopen Closed";
+  - IME composition shown in place;
+  - wide characters (East Asian ones) take one column of the grid but two on screen.
+- **A cost left as it is:** the scene is still drawn under the code, so its GPU time is
+  spent while coding. Skipping its frame while no view shows it comes with the split
+  view of code beside the scene.
