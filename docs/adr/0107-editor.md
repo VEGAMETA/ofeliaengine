@@ -1510,3 +1510,30 @@ so not SQLite. The editor opens it at its start and follows the folder.
 - **A cost left as it is:** the scene is still drawn under the code, so its GPU time is
   spent while coding. Skipping its frame while no view shows it comes with the split
   view of code beside the scene.
+
+## As built (E8-1c, 2026-10-22): Luau's highlighting
+
+`docs/research/luau-highlighting.md` has the sources and the measurements.
+
+- **The scanner** (`highlight::line`) cuts a line into runs by Luau's own lexical rules
+  (its lexer, MIT) and colors them as luau-lsp's grammar does (MIT, ideas only):
+  - keywords: the 21 reserved words; `continue`, `export`, `type` and `const` where they
+    are keywords; attributes;
+  - strings: quoted, long and interpolated, the code in an interpolated string's braces
+    colored as code;
+  - comments and numbers;
+  - functions: their names where they are declared or called;
+  - builtins: `self` and the standard library;
+  - types: after `:`, `::`, `->` and `type`.
+
+  A field or a method is a name, whatever its word.
+- **A line's start state** (code, inside a long comment or string of a level, a quoted
+  string going on past its line's end) is kept per script. It is dropped from the first
+  line an edit touched (`Document::take_changed`) and made again up to the lines shown.
+  The lines in view are cut every frame: 5.6 µs for 60 lines. The states of 100,000
+  lines from nothing cost 9.6 ms, spent once.
+- **Drawing:** each run is a placed monospace text node in its token's color
+  (`Palette::syntax`, after VS Code's Dark+). Plain code between runs is drawn too, its
+  spaces left out.
+- **Left:** semantic colors from Luau's analysis (E8-3); an interpolated string's code
+  across lines resets at the line's end.

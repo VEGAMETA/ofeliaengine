@@ -94,6 +94,8 @@ pub(crate) struct Document {
     /// What the last copy or cut took as whole lines (carets without selections): pasted
     /// back, it goes in above the carets' lines, as VS Code does.
     lines_copied: Option<String>,
+    /// The first line changed since [`Self::take_changed`] last asked (highlighting's).
+    changed: Option<usize>,
 }
 
 /// What an indentation level is.
@@ -116,7 +118,14 @@ impl Document {
             version: 0,
             sealed: true,
             lines_copied: None,
+            changed: None,
         }
+    }
+
+    /// The first line changed since this was last asked: the lines from it on hold other
+    /// text (and maybe other places) than they did.
+    pub(crate) fn take_changed(&mut self) -> Option<usize> {
+        self.changed.take()
     }
 
     /// The text as it is now is not what its file holds (unsaved changes brought back from
@@ -191,6 +200,7 @@ impl Document {
         new[last].push_str(&tail);
         self.lines.splice(a.line..=b.line, new);
         self.version += 1;
+        self.changed = Some(self.changed.map_or(a.line, |c| c.min(a.line)));
         end
     }
 
@@ -1211,6 +1221,7 @@ mod tests {
             Pos::new(1, 1),
             "a shorter line: its end"
         );
+        assert_eq!(doc.take_changed(), None, "moving changes no line");
         doc.move_carets(Motion::Down, false);
         assert_eq!(
             doc.primary().head,
@@ -1263,6 +1274,8 @@ mod tests {
         assert_eq!(doc.carets().len(), 3);
         doc.type_text("gate");
         assert_eq!(doc.text(), "gate.open\ngate.close\ngate.lock");
+        assert_eq!(doc.take_changed(), Some(0), "the first line edited");
+        assert_eq!(doc.take_changed(), None);
         assert!(doc.undo());
         assert_eq!(doc.text(), "door.open\ndoor.close\ndoor.lock", "one step");
         // Carets added below type at the same column.

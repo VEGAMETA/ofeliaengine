@@ -817,7 +817,9 @@ Scripts open in tabs after the scenes' (ADR 0107 E8), their code where the viewp
 - **The session keeps your scripts:** the next start opens their tabs again, with their
   carets and their unsaved text.
 
-Highlighting, find and replace, and Luau's errors and completion as you type come next.
+Luau is highlighted as VS Code's luau-lsp extension colors it (keywords, strings,
+comments, numbers, function names, `self` and the standard library, types). Find and
+replace, and Luau's errors and completion as you type, come next.
 
 ## Autosave and the session
 
@@ -900,7 +902,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 |---|---|
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau in the game: the script component, its hooks, bindings and hot reload (its public API waits for the team's answers, ADR 0114) |
-| E8 | the code editor: highlighting, find and replace, Luau's errors and completion as you type (scripts in tabs are done) |
+| E8 | the code editor: find and replace, Luau's errors and completion as you type (scripts in tabs and highlighting are done) |
 
 The whole plan is ADR 0107 §7.
 

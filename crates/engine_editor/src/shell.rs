@@ -68,6 +68,8 @@ pub struct Palette {
     pub code: Color,
     /// The line of code the caret is on.
     pub code_line: Color,
+    /// Code's colors, by [`Token`].
+    pub syntax: [Color; 8],
 }
 
 impl Default for Palette {
@@ -88,6 +90,16 @@ impl Default for Palette {
             warning: srgb(230, 184, 84),
             code: srgb(27, 28, 33),
             code_line: srgb(37, 39, 47),
+            syntax: [
+                srgb(222, 224, 230),
+                srgb(197, 134, 192),
+                srgb(206, 145, 120),
+                srgb(106, 153, 85),
+                srgb(181, 206, 168),
+                srgb(220, 220, 170),
+                srgb(86, 156, 214),
+                srgb(78, 201, 176),
+            ],
         }
     }
 }
@@ -407,6 +419,40 @@ const CODE_TEXT_TOP: f32 = 1.0;
 /// Wider and taller than any view: the current line's band, the gutter.
 const CODE_FAR: f32 = 1.0e5;
 
+/// What a run of code is, for its color ([`Palette::syntax`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Token {
+    /// Plain code: names, operators.
+    Text = 0,
+    /// Luau's reserved words, its contextual ones where they are keywords, attributes.
+    Keyword = 1,
+    /// Strings, an interpolated one's text.
+    String = 2,
+    /// Comments.
+    Comment = 3,
+    /// Numbers.
+    Number = 4,
+    /// A function's name where it is declared or called.
+    Function = 5,
+    /// `self` and the standard library's names.
+    Builtin = 6,
+    /// A type's name after `:`, `::`, `->` or `type`.
+    Type = 7,
+}
+
+/// A run of code in view: its line and column, its text and what it is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CodeRun<'a> {
+    /// Its line in the script (from 0).
+    pub line: usize,
+    /// Its first column.
+    pub column: usize,
+    /// Its text (tabs as spaces).
+    pub text: &'a str,
+    /// What it is.
+    pub token: Token,
+}
+
 /// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
 /// the carets among them, by line and column; the shell puts them on the monospace grid.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -415,8 +461,8 @@ pub struct CodeView<'a> {
     pub path: &'a str,
     /// Where its caret is (`Ln 4, Col 12`).
     pub place: &'a str,
-    /// The lines in view, from line `first` of the script.
-    pub lines: &'a [&'a str],
+    /// The runs of the lines in view, highlighted.
+    pub runs: &'a [CodeRun<'a>],
     /// The first line in view (from 0).
     pub first: usize,
     /// Their numbers, as shown.
@@ -1018,8 +1064,8 @@ fn script_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shell
 }
 
 /// A script's code: the primary caret's line lit, the selections, the lines in view on
-/// their grid, the carets over them, and the gutter with the lines' numbers over what is
-/// scrolled under it.
+/// their grid in their runs' colors, the carets over them, and the gutter with the lines'
+/// numbers over what is scrolled under it.
 fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette) -> u64 {
     let area = Style {
         background: Some(p.code),
@@ -1050,13 +1096,14 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette) -> u64 {
             );
             ui.pop_id();
         }
-        for (k, line) in view.lines.iter().enumerate() {
+        for (k, run) in view.runs.iter().enumerate() {
             ui.push_id(k as u64);
             let style = Style {
-                placed: Some([x(0.0), y(view.first + k) + CODE_TEXT_TOP]),
+                placed: Some([x(run.column as f32), y(run.line) + CODE_TEXT_TOP]),
                 ..Style::default()
             };
-            ui.mono_text_node("line", style, line, CODE_TEXT, p.text);
+            let color = p.syntax[run.token as usize];
+            ui.mono_text_node("run", style, run.text, CODE_TEXT, color);
             ui.pop_id();
         }
         if view.blink {
