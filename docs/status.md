@@ -266,8 +266,9 @@ Last updated: 2026-10-20.
   - **Asked (2026-10-22):** meshes of several materials draw with their first. Two ways
     out: per-primitive parts, an entity each; or material slots on `Model`, one entity per
     mesh, as in Unity and Godot.
-  - **Next:** E4-4, thumbnails in the dock (offscreen renders of models and materials,
-    images as themselves, cached).
+  - **Next:** E4-4, the player's assets loaded in the background: glTF import, texture
+    decoding and mip levels off the frame's thread, uploads within a budget a frame
+    (today a large model stalls the frame where it first shows). Then E4-5, thumbnails.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
