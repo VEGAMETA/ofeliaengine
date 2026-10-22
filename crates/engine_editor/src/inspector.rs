@@ -113,6 +113,8 @@ pub struct Property {
     /// The parts (bit `i` for part `i`) where the other selected entities hold another
     /// value ([`Inspector::compare`]): shown "—".
     pub mixed: u8,
+    /// An asset field's value (the active entity's): its preview is shown (ADR 0112).
+    pub asset: Option<AssetRef>,
     /// Its name in [`Inspector::text`].
     name: (u32, u32),
     /// Its values' texts in [`Inspector::text`].
@@ -431,6 +433,8 @@ impl Inspector {
                     1
                 }
             };
+            // An asset field holds an `AssetRef` (the block's guarantee: a live value).
+            let asset = is_asset_ref(ty).then(|| ptr.cast::<AssetRef>().read_unaligned());
             self.properties.push(Property {
                 component,
                 offset,
@@ -440,6 +444,7 @@ impl Inspector {
                 whole,
                 changed: false,
                 mixed: 0,
+                asset,
                 name,
                 values,
                 count,

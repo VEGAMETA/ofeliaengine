@@ -76,7 +76,7 @@ use crate::shell::{
     build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
-use crate::thumbnails::{self, Thumbnails};
+use crate::thumbnails::{self, Subject, Thumbnails};
 use crate::transform::{self, KeyTransform};
 use crate::undo::{PlayChange, PlayMark, WorldSnapshot};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
@@ -1270,6 +1270,9 @@ struct CommandPalette {
     stack: Vec<Entity>,
     /// A list to pick from instead.
     choices: Option<Choices>,
+    /// The inspector field (section, field) an asset picked here goes to, instead of the
+    /// FileSystem dock.
+    for_field: Option<(usize, usize)>,
 }
 
 impl CommandPalette {
@@ -2336,6 +2339,44 @@ impl Editor {
                     Kind::Text if matches!(p.ty.kind, engine_reflect::TypeKind::String) => {
                         Widget::Edit(first)
                     }
+                    Kind::Text if engine_scene::text::is_asset_ref(p.ty) => {
+                        let entry = p.asset.and_then(|a| self.asset_db.get(a.file));
+                        let field = self.inspector.name(p);
+                        let preview = p.asset.filter(|a| !a.is_none()).and_then(|a| {
+                            let subject = field_subject(a, field, entry.map(|e| e.kind));
+                            // A file's as the database saw it; the engine's never change.
+                            let (path, kind, key) = match entry {
+                                Some(e) => (
+                                    e.path.as_str(),
+                                    e.kind,
+                                    thumbnails::Key {
+                                        bytes: e.size,
+                                        modified: e.modified,
+                                    },
+                                ),
+                                None if a.file == builtin::CUBE.file => (
+                                    "",
+                                    engine_scene::AssetKind::Model,
+                                    thumbnails::Key {
+                                        bytes: 0,
+                                        modified: 0,
+                                    },
+                                ),
+                                None => return None,
+                            };
+                            self.thumbnails.image(subject, path, kind, key)
+                        });
+                        let icon = match (p.asset, entry) {
+                            (Some(a), _) if a.is_none() => "",
+                            (_, Some(e)) => file_icon_of(e.kind),
+                            _ => icons::MESH,
+                        };
+                        Widget::Asset {
+                            preview,
+                            icon,
+                            name: first.rsplit('/').next().unwrap_or(first),
+                        }
+                    }
                     Kind::Text => Widget::Text(first),
                 };
                 Field {
@@ -2607,7 +2648,8 @@ impl Editor {
                         bytes: e.size,
                         modified: e.modified,
                     };
-                    self.thumbnails.image(e.id, &e.path, e.kind, key)
+                    self.thumbnails
+                        .image(Subject::File(e.id), &e.path, e.kind, key)
                 }
                 _ => None,
             };
@@ -3240,6 +3282,19 @@ impl Editor {
                 let key = (p.component, p.offset);
                 self.open_choice = (self.open_choice != Some(key)).then_some(key);
             }
+            FieldAction::Pick => {
+                // The palette's assets of the field's kind; Enter gives the field the one
+                // picked.
+                let query = match self.path_of(&p, component).as_str() {
+                    "Model.mesh" => "#model:",
+                    "Model.material" => "#material:",
+                    _ => "#",
+                };
+                self.open_palette(world, query);
+                if let Some(cp) = self.command_palette.as_mut() {
+                    cp.for_field = Some((event.section, event.field));
+                }
+            }
             FieldAction::Choose(i) => {
                 self.open_choice = None;
                 self.history.begin(&format!("Set {title}"), None);
@@ -3347,6 +3402,7 @@ impl Editor {
             .command_palette
             .get_or_insert_with(CommandPalette::default);
         cp.choices = None;
+        cp.for_field = None;
         cp.query.clear();
         cp.query.push_str(query);
         self.search_palette(world);
@@ -3477,8 +3533,12 @@ impl Editor {
                         self.show(world, found.entity);
                     }
                 } else if cp.finds_assets() {
-                    if let Some(found) = cp.assets.get(i) {
-                        self.reveal_asset(found.id);
+                    match (cp.assets.get(i), cp.for_field) {
+                        (Some(found), Some((section, field))) => {
+                            self.give_field_asset(world, section, field, found.id);
+                        }
+                        (Some(found), None) => self.reveal_asset(found.id),
+                        (None, _) => {}
                     }
                 } else if let Some(m) = cp.commands.get(i) {
                     self.run(world, m.id);
@@ -7037,18 +7097,38 @@ impl Editor {
         self.selection_changed(before);
     }
 
-    /// What a preview of asset `id` shows (ADR 0112): a model's meshes with their materials
-    /// where its file places them, a material on the built-in sphere; none for other kinds
-    /// or a model that cannot be read.
-    fn preview_parts(&self, id: AssetId) -> Option<Vec<(AssetRef, AssetRef, Affine3A)>> {
+    /// What a preview of `subject` shows (ADR 0112), none for other kinds or a model that
+    /// cannot be read:
+    /// - a model's meshes with their materials, where its file places them;
+    /// - one mesh with its own material (the default one for a built-in mesh);
+    /// - a material on the built-in sphere.
+    fn preview_parts(&self, subject: Subject) -> Option<Vec<(AssetRef, AssetRef, Affine3A)>> {
         use engine_scene::AssetKind as K;
+        let one = |mesh, material| Some(vec![(mesh, material, Affine3A::IDENTITY)]);
+        let id = match subject {
+            Subject::Material(material) => return one(builtin::SPHERE, material),
+            Subject::Mesh(mesh) if mesh.file == builtin::CUBE.file => {
+                return one(mesh, builtin::MATERIAL);
+            }
+            Subject::Mesh(mesh) => {
+                // The mesh's own material, from where its file uses it.
+                let entry = self.asset_db.get(mesh.file)?;
+                let outline =
+                    engine_assets::GltfOutline::read(&self.root.join(&entry.path)).ok()?;
+                let plan = ModelPlan::new(mesh.file, &entry.path, "preview", &outline).ok()?;
+                let material = plan
+                    .nodes
+                    .iter()
+                    .filter_map(|n| n.model)
+                    .find(|m| m.mesh == mesh)
+                    .map_or(builtin::MATERIAL, |m| m.material);
+                return one(mesh, material);
+            }
+            Subject::File(id) => id,
+        };
         let entry = self.asset_db.get(id)?;
         match entry.kind {
-            K::Material => Some(vec![(
-                builtin::SPHERE,
-                AssetRef::file(id),
-                Affine3A::IDENTITY,
-            )]),
+            K::Material => one(builtin::SPHERE, AssetRef::file(id)),
             K::Model => {
                 let outline =
                     engine_assets::GltfOutline::read(&self.root.join(&entry.path)).ok()?;
@@ -7304,6 +7384,30 @@ impl Editor {
             Ok(()) => self.say(format!("{} → {path}", drag.name)),
             Err(reason) => self.say(format!("{path}: {reason}")),
         }
+    }
+
+    /// Inspector field `field` of section `section` given asset `id` (picked in the
+    /// palette), as a file dropped on it would be.
+    fn give_field_asset(&mut self, world: &mut World, section: usize, field: usize, id: AssetId) {
+        let Some(entry) = self.asset_db.get(id) else {
+            return;
+        };
+        let mut drag = AssetDrag {
+            asset: id,
+            kind: entry.kind,
+            path: entry.path.clone(),
+            name: entry
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&entry.path)
+                .to_owned(),
+            plan: None,
+            placed: None,
+            selection: Vec::new(),
+            over: DropTarget::Field(section, field),
+        };
+        self.drop_on_field(world, section, field, &mut drag);
     }
 
     /// What a release would do now, by the pointer.
@@ -8411,9 +8515,9 @@ impl<G> EditorGame<G> {
             shared.assets = paths.clone();
         }
         // Thumbnails of models and materials (ADR 0112): drawn by the player, taken back.
-        for (id, _) in shared.thumbnails.take_to_draw() {
-            let parts = shared.preview_parts(id);
-            let key = thumbnails::preview_key(id);
+        for (subject, _) in shared.thumbnails.take_to_draw() {
+            let parts = shared.preview_parts(subject);
+            let key = thumbnails::preview_key(subject);
             match parts {
                 Some(parts) => player.request_preview(engine_app::PreviewRequest { key, parts }),
                 None => shared.thumbnails.drawn(key, Vec::new()),
@@ -8615,7 +8719,7 @@ impl<G> EditorGame<G> {
         shared
             .asset_db
             .find(path)
-            .is_some_and(|e| shared.thumbnails.made(e.id))
+            .is_some_and(|e| shared.thumbnails.made(Subject::File(e.id)))
     }
 
     /// The navigation mesh's edges the overlay shows now (View: Navigation): for tests.
@@ -9295,6 +9399,18 @@ fn placed_message(name: &str, plan: &ModelPlan) -> String {
         format!("Placed {name}")
     } else {
         format!("Placed {name}: {}", plan.mixed.join("; "))
+    }
+}
+
+/// What an inspector's asset field `field` holding `asset` shows a preview of: a model's
+/// field (`mesh`, `material`) its part, or the engine's; another field its file.
+fn field_subject(asset: AssetRef, field: &str, kind: Option<engine_scene::AssetKind>) -> Subject {
+    use engine_scene::AssetKind as K;
+    let part = asset.part != 0 || kind.is_none();
+    match field {
+        "mesh" if part => Subject::Mesh(asset),
+        "material" if part || kind == Some(K::Model) => Subject::Material(asset),
+        _ => Subject::File(asset.file),
     }
 }
 
@@ -10975,6 +11091,46 @@ mod tests {
         ed.update(&mut world);
         key(&mut ed, CTRL.0, CTRL.1, false);
         assert!(ed.tile > before, "{} > {before}", ed.tile);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_asset_field_is_picked_from_the_palette() {
+        let (dir, mut world, mut ed, boxed) = drop_project("asset-field");
+        let red = ed
+            .browser
+            .listing
+            .iter()
+            .find(|l| l.name == "red.material")
+            .and_then(|l| l.asset)
+            .unwrap();
+        ed.select_only(boxed);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        // The material field's box, right of its name: a click opens the palette on the
+        // project's materials.
+        let label = texts(&ed, "material")
+            .into_iter()
+            .max_by(|a, b| a.pos[0].total_cmp(&b.pos[0]))
+            .unwrap();
+        let at = [label.pos[0] + 150.0, label.pos[1] + label.size[1] / 2.0];
+        click(&mut ed, &mut world, at);
+        let cp = ed.command_palette.as_ref().expect("the palette open");
+        assert_eq!(cp.query, "#material:");
+        assert!(cp.for_field.is_some());
+        assert_eq!(cp.assets.len(), 1, "the one material file");
+        // Enter: the field takes it, as one step; the dock's pick is not moved.
+        let before = ed.browser.selected;
+        ed.palette_action(&mut world, PaletteAction::Run(0));
+        assert_eq!(
+            world.get::<Model>(boxed).unwrap().material,
+            AssetRef::file(red)
+        );
+        assert_eq!(ed.history.steps().count(), 1);
+        assert_eq!(ed.browser.selected, before);
+        // Opened the plain way, the palette's assets go to the dock again.
+        ed.open_palette(&mut world, "#red");
+        assert!(ed.command_palette.as_ref().unwrap().for_field.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

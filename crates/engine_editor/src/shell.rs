@@ -153,6 +153,17 @@ pub enum Widget<'a> {
         /// Every one, while open.
         open: Option<&'a [&'a str]>,
     },
+    /// An asset, as Godot's pickers show one (ADR 0107 E4): its preview, or its kind's
+    /// icon until there is one, and its name; a click picks another, a file dropped on it
+    /// takes its place.
+    Asset {
+        /// Its preview.
+        preview: Option<UiImage>,
+        /// Its kind's icon (none for no asset).
+        icon: &'a str,
+        /// Its name (the file and part), or `none`.
+        name: &'a str,
+    },
 }
 
 /// One property in the inspector.
@@ -241,6 +252,8 @@ pub enum FieldAction {
     Toggle,
     /// The choice was clicked: its list opens or closes.
     Open,
+    /// An asset field was clicked: another is picked.
+    Pick,
     /// Option `i` of the open list was picked.
     Choose(usize),
 }
@@ -445,6 +458,10 @@ const FILES_HEIGHT: f32 = 190.0;
 const INDENT: f32 = 14.0;
 /// How far a held file moves before it is dragged, in logical pixels.
 pub const DRAG_START: f32 = 4.0;
+/// The height of an asset field's row, and the side of its preview.
+const ASSET_ROW: f32 = 46.0;
+const ASSET_PREVIEW: f32 = 40.0;
+
 /// A tile's padding around its picture and name, the space between tiles, and the height
 /// of its name's line.
 const TILE_PAD: f32 = 4.0;
@@ -790,6 +807,42 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
             });
         });
     });
+}
+
+/// An asset field's box: its preview (its kind's icon until there is one) beside its name.
+/// Whether it was clicked.
+fn asset_box(ui: &mut Ui, preview: Option<UiImage>, icon: &str, name: &str, p: &Palette) -> bool {
+    let id = ui.row(
+        "asset",
+        Style {
+            size: [Size::Grow(1.0), Size::Fixed(ASSET_PREVIEW + 4.0)],
+            padding: [2.0, 2.0, 6.0, 2.0],
+            gap: 8.0,
+            radius: 3.0,
+            background: Some(p.header),
+            align_cross: Align::Center,
+            clip: true,
+            ..Style::default()
+        },
+        |ui| {
+            let picture = Style {
+                size: [Size::Fixed(ASSET_PREVIEW), Size::Fixed(ASSET_PREVIEW)],
+                radius: 2.0,
+                background: Some(p.dock),
+                align_main: Align::Center,
+                align_cross: Align::Center,
+                image: preview,
+                ..Style::default()
+            };
+            ui.row("preview", picture, |ui| {
+                if preview.is_none() && !icon.is_empty() {
+                    text(ui, "icon", icon, ICON * 1.4, p.text_dim);
+                }
+            });
+            text(ui, "name", name, TEXT, p.text);
+        },
+    );
+    ui.sense(id, false).clicked
 }
 
 /// A file's tile: its thumbnail (its kind's icon until there is one) over its name.
@@ -1654,10 +1707,15 @@ fn inspector_dock(
                     for (f, field) in section.fields.iter().enumerate() {
                         ui.push_id(f as u64);
                         let mut action = None;
+                        let height = if matches!(field.widget, Widget::Asset { .. }) {
+                            ASSET_ROW
+                        } else {
+                            26.0
+                        };
                         let row = ui.row(
                             "field",
                             Style {
-                                size: [Size::Grow(1.0), Size::Fixed(26.0)],
+                                size: [Size::Grow(1.0), Size::Fixed(height)],
                                 padding: [12.0, 0.0, 8.0, 0.0],
                                 gap: 8.0,
                                 align_cross: Align::Center,
@@ -1675,6 +1733,15 @@ fn inspector_dock(
                                     },
                                 );
                                 match field.widget {
+                                    Widget::Asset {
+                                        preview,
+                                        icon,
+                                        name,
+                                    } => {
+                                        if asset_box(ui, preview, icon, name, p) {
+                                            action = Some(FieldAction::Pick);
+                                        }
+                                    }
                                     Widget::Text(value) => {
                                         ui.row(
                                             "value",

@@ -166,4 +166,29 @@ Options 1, 2, 2 above, built in two steps.
     and a blue sphere), and a missing part is answered empty;
   - in the editor, a model's, an image's and a material's tiles all get their thumbnails,
     cached.
-- **Left:** the inspector's asset fields with their previews (E4-6c). Previews of scenes.
+- **Left:** previews of scenes.
+
+## As built (E4-6c, 2026-10-22): the inspector's asset fields
+
+ADR 0107's E4 asks for asset fields as in Godot (team decision, 2026-10-17).
+- **The field** (`Widget::Asset`) shows a 40 px preview (its kind's icon until there is
+  one) and the asset's name, in a taller row. The inspector keeps each asset field's value
+  (`Property::asset`).
+- **What the preview is of** (`thumbnails::Subject`):
+  - a model's `mesh` is that mesh alone, with the material its file gives it (the default
+    one for a built-in mesh);
+  - a model's `material` is that material on the built-in sphere (a glTF file's material,
+    a material file, or the built-in one);
+  - any other field shows its file's.
+
+  Thumbnails are keyed by subject, each cached under its own name in
+  `.ofelia/thumbnails/`.
+- **Picking:** a click opens the palette on the project's assets of the field's kind
+  (`#model:` for a mesh, `#material:` for a material, `#` for others). Enter gives the
+  field the one picked, through the same path as a file dropped on it (every selected
+  entity, one undo step, `Model`'s fields checked), not the dock. The palette opened the
+  usual way goes back to the dock.
+- **Checked:**
+  - picking a material file for a box's model through the palette is one step, and the
+    dock's pick does not move;
+  - on the GPU, the inspector shows the crate's mesh and its grid material on a sphere.

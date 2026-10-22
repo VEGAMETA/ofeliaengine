@@ -5,14 +5,15 @@
 //! - **An image's thumbnail** is the image fitted into a square of [`SIZE`] (never
 //!   enlarged), its proportions kept, centred on transparency, averaged in sRGB.
 //! - **A model's or a material's** is a preview the player draws (`Player::request_preview`)
-//!   when the cache has none for the file as it is.
-//! - **The cache** keeps a PNG per asset, named by its id, and beside it the key it was made
-//!   for (the file's size and modification time, the size, a version): a file written anew
-//!   is made again.
+//!   when the cache has none for the file as it is. So is a glTF file's mesh or material
+//!   (an inspector's field, [`Subject`]) and a built-in mesh.
+//! - **The cache** keeps a PNG per subject, named by its id (and part), and beside it the key
+//!   it was made for (the file's size and modification time, the size, a version): a file
+//!   written anew is made again.
 //! - **The atlas** has [`CELLS`] cells. The thumbnails on screen take them; the one seen
 //!   longest ago gives its cell up.
 
-use engine_scene::{AssetId, AssetKind};
+use engine_scene::{AssetId, AssetKind, AssetRef};
 use engine_ui::UiImage;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,26 @@ pub(crate) const CELLS: usize = (PER_ROW * PER_ROW) as usize;
 const UPLOADS_PER_FRAME: usize = 8;
 /// The cache's format; a new one makes every thumbnail again.
 const VERSION: u32 = 1;
+
+/// What a thumbnail shows: a file of the project (the dock's tiles), or a glTF file's or the
+/// engine's mesh or material (an inspector's asset field).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Subject {
+    File(AssetId),
+    Mesh(AssetRef),
+    Material(AssetRef),
+}
+
+impl Subject {
+    /// Its name in the cache.
+    fn cache_name(self) -> String {
+        match self {
+            Self::File(id) => format!("{id}"),
+            Self::Mesh(a) => format!("{}-mesh-{:016x}", a.file, a.part),
+            Self::Material(a) => format!("{}-material-{:016x}", a.file, a.part),
+        }
+    }
+}
 
 /// The file a thumbnail is made from, as the asset database saw it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,12 +82,12 @@ enum Thumb {
 
 /// What the thread did: for which asset and key, its pixels (none: not cached, and for an
 /// image, not one the editor reads), and whether it was an image.
-type Made = (AssetId, Key, Option<Vec<u8>>, bool);
+type Made = (Subject, Key, Option<Vec<u8>>, bool);
 
-/// A thumbnail to make: asset `id`'s file at `path` under the project, from the cache or
-/// (`image`) from the image itself; or pixels the player drew, to cache.
+/// A thumbnail to make: `subject`'s, its file at `path` under the project, from the cache
+/// or (`image`) from the image itself; or pixels the player drew, to cache.
 struct Job {
-    id: AssetId,
+    subject: Subject,
     path: PathBuf,
     key: Key,
     image: bool,
@@ -76,20 +97,20 @@ struct Job {
 /// The dock's thumbnails.
 pub(crate) struct Thumbnails {
     root: PathBuf,
-    thumbs: HashMap<AssetId, Thumb>,
+    thumbs: HashMap<Subject, Thumb>,
     jobs: Option<mpsc::Sender<Job>>,
     done: Option<mpsc::Receiver<Made>>,
     /// Each cell's thumbnail and the frame it was last on screen.
-    cells: [Option<(AssetId, u64)>; CELLS],
+    cells: [Option<(Subject, u64)>; CELLS],
     /// Cells whose pixels are still to be uploaded.
     uploads: Vec<usize>,
     /// The atlas's bindless index (none until the overlay made it).
     atlas: Option<u32>,
     frame: u64,
     /// Models and materials the cache had nothing for: to ask the player for.
-    to_draw: Vec<(AssetId, Key)>,
+    to_draw: Vec<(Subject, Key)>,
     /// Previews asked of the player, by their key.
-    drawing: HashMap<u64, (AssetId, Key)>,
+    drawing: HashMap<u64, (Subject, Key)>,
 }
 
 impl Thumbnails {
@@ -147,7 +168,7 @@ impl Thumbnails {
 
     /// The models and materials to ask the player for, each with the key its preview is
     /// asked by ([`preview_key`]).
-    pub(crate) fn take_to_draw(&mut self) -> Vec<(AssetId, Key)> {
+    pub(crate) fn take_to_draw(&mut self) -> Vec<(Subject, Key)> {
         let to_draw = core::mem::take(&mut self.to_draw);
         for &(id, key) in &to_draw {
             self.drawing.insert(preview_key(id), (id, key));
@@ -170,7 +191,7 @@ impl Thumbnails {
         }
         if let Some(jobs) = &self.jobs {
             let _ = jobs.send(Job {
-                id,
+                subject: id,
                 path: PathBuf::new(),
                 key,
                 image: false,
@@ -187,19 +208,20 @@ impl Thumbnails {
         );
     }
 
-    /// Asset `id`'s thumbnail, on screen this frame: its picture in the atlas once made,
-    /// none before (or for a kind that has none yet: E4-6b's rendered previews).
+    /// `id`'s thumbnail, on screen this frame: its picture in the atlas once made, none
+    /// before (or for a kind that has none). `kind` is its file's.
     pub(crate) fn image(
         &mut self,
-        id: AssetId,
+        id: Subject,
         path: &str,
         kind: AssetKind,
         key: Key,
     ) -> Option<UiImage> {
-        let image = match kind {
-            AssetKind::Texture => true,
-            AssetKind::Model | AssetKind::Material => false,
-            _ => return None,
+        let image = match (id, kind) {
+            (Subject::File(_), AssetKind::Texture) => true,
+            (Subject::File(_), AssetKind::Model | AssetKind::Material)
+            | (Subject::Mesh(_) | Subject::Material(_), _) => false,
+            (Subject::File(_), _) => return None,
         };
         let atlas = self.atlas?;
         let current = match self.thumbs.get(&id) {
@@ -250,7 +272,7 @@ impl Thumbnails {
     }
 
     /// Cell `c` given to `id`: its last thumbnail out of it, its pixels to upload.
-    fn take_cell(&mut self, c: usize, id: AssetId) {
+    fn take_cell(&mut self, c: usize, id: Subject) {
         if let Some((old, _)) = self.cells[c]
             && let Some(Thumb::Made { cell, .. }) = self.thumbs.get_mut(&old)
         {
@@ -264,7 +286,7 @@ impl Thumbnails {
 
     /// The thumbnail of `id` made on the thread (started the first time): from the cache,
     /// else from the image (`image`) or by the player.
-    fn make(&mut self, id: AssetId, path: &str, key: Key, image: bool) {
+    fn make(&mut self, id: Subject, path: &str, key: Key, image: bool) {
         if self.jobs.is_none() {
             let (jobs, incoming) = mpsc::channel::<Job>();
             let (done, results) = mpsc::channel();
@@ -274,11 +296,14 @@ impl Thumbnails {
                 .spawn(move || {
                     while let Ok(job) = incoming.recv() {
                         if let Some(pixels) = &job.save {
-                            save(&cache, job.id, job.key, pixels);
+                            save(&cache, job.subject, job.key, pixels);
                             continue;
                         }
                         let pixels = made(&cache, &job);
-                        if done.send((job.id, job.key, pixels, job.image)).is_err() {
+                        if done
+                            .send((job.subject, job.key, pixels, job.image))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -292,7 +317,7 @@ impl Thumbnails {
         }
         if let Some(jobs) = &self.jobs {
             let job = Job {
-                id,
+                subject: id,
                 path: self.root.join(path),
                 key,
                 image,
@@ -307,8 +332,8 @@ impl Thumbnails {
         }
     }
 
-    /// Whether asset `id` has its thumbnail made.
-    pub(crate) fn made(&self, id: AssetId) -> bool {
+    /// Whether `id` has its thumbnail made.
+    pub(crate) fn made(&self, id: Subject) -> bool {
         matches!(self.thumbs.get(&id), Some(Thumb::Made { .. }))
     }
 
@@ -352,8 +377,9 @@ fn uv_of(c: usize) -> [f32; 4] {
 /// image, made from it and cached. None when it has to be drawn (not an image) or the
 /// file is not an image the editor reads.
 fn made(cache: &Path, job: &Job) -> Option<Vec<u8>> {
-    let png = cache.join(format!("{}.png", job.id));
-    let key_file = cache.join(format!("{}.key", job.id));
+    let name = job.subject.cache_name();
+    let png = cache.join(format!("{name}.png"));
+    let key_file = cache.join(format!("{name}.key"));
     if std::fs::read_to_string(&key_file).is_ok_and(|k| k == job.key.text())
         && let Ok(bytes) = std::fs::read(&png)
         && let Ok(image) = engine_assets::decode_image(&bytes)
@@ -368,26 +394,33 @@ fn made(cache: &Path, job: &Job) -> Option<Vec<u8>> {
     let bytes = std::fs::read(&job.path).ok()?;
     let image = engine_assets::decode_image(&bytes).ok()?;
     let pixels = fit(&image.rgba, image.width, image.height, SIZE);
-    save(cache, job.id, job.key, &pixels);
+    save(cache, job.subject, job.key, &pixels);
     Some(pixels)
 }
 
 /// A thumbnail's pixels cached for the file as `key` says it is.
-fn save(cache: &Path, id: AssetId, key: Key, pixels: &[u8]) {
-    let png = cache.join(format!("{id}.png"));
+fn save(cache: &Path, id: Subject, key: Key, pixels: &[u8]) {
+    let name = id.cache_name();
+    let png = cache.join(format!("{name}.png"));
     if std::fs::create_dir_all(cache).is_ok()
         && let Some(encoded) =
             engine_render::png::encode_png(SIZE, SIZE, engine_render::png::PngFormat::Rgba, pixels)
         && std::fs::write(&png, encoded).is_ok()
     {
-        let _ = std::fs::write(cache.join(format!("{id}.key")), key.text());
+        let _ = std::fs::write(cache.join(format!("{name}.key")), key.text());
     }
 }
 
-/// The key a preview of asset `id` is asked of the player by.
-pub(crate) fn preview_key(id: AssetId) -> u64 {
-    let v = id.as_u128();
-    (v as u64) ^ ((v >> 64) as u64)
+/// The key a preview of `id` is asked of the player by.
+pub(crate) fn preview_key(id: Subject) -> u64 {
+    let (file, part, what) = match id {
+        Subject::File(f) => (f, 0, 0u64),
+        Subject::Mesh(a) => (a.file, a.part, 1),
+        Subject::Material(a) => (a.file, a.part, 2),
+    };
+    let v = file.as_u128();
+    let mixed = (v as u64) ^ ((v >> 64) as u64);
+    mixed ^ part.rotate_left(17) ^ what.wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
 /// `rgba` (`width` × `height`) fitted into a square of `side`, never enlarged, its
@@ -487,7 +520,7 @@ mod tests {
         std::fs::write(dir.join("rock.png"), png).unwrap();
         let cache = dir.join(".ofelia/thumbnails");
         let job = Job {
-            id: AssetId::new(),
+            subject: Subject::File(AssetId::new()),
             path: dir.join("rock.png"),
             key: Key {
                 bytes: 1,
@@ -498,7 +531,11 @@ mod tests {
         };
         let first = made(&cache, &job).unwrap();
         assert_eq!(first.len(), (SIZE * SIZE * 4) as usize);
-        assert!(cache.join(format!("{}.png", job.id)).is_file());
+        assert!(
+            cache
+                .join(format!("{}.png", job.subject.cache_name()))
+                .is_file()
+        );
         // The source gone: still made from the cache for the same key, not for another.
         std::fs::remove_file(dir.join("rock.png")).unwrap();
         assert_eq!(made(&cache, &job), Some(first));
