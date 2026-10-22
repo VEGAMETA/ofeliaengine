@@ -80,7 +80,9 @@ mod sound;
 mod text;
 mod videos;
 
-pub use assets::{Alpha, Assets, MaterialFile, MaterialSlots, Model, builtin};
+pub use assets::{
+    Alpha, Assets, ColliderState, MaterialFile, MaterialSlots, Model, ModelCollider, builtin,
+};
 pub use blockout::{
     BakedBrush, Blockout, Brush, BrushGroup, BrushOp, BrushPlane, BrushShape, grid_png,
 };

@@ -497,9 +497,15 @@ Last updated: 2026-10-22.
     against the scene's depth as the wireframes are: faint behind surfaces, steady on the
     ones they lie on; the X-ray overlay is gone. 19,200 edges: 10 / 82 µs on the GPUs,
     41 µs of the CPU's frame.
+  - **Colliders of a scene's models, step 1** (#PR, ADR 0117; ADR 0116 V2b): a scene file's
+    models had no colliders at all (only packs' did). `Assets::collider` now makes each
+    model's as the cook would, by the rules beside its glTF (level geometry by default),
+    on a cooking thread of its own when first asked; built-in meshes have their own
+    shapes. The editor draws them with the blockout's, colored by motion.
+    `engine_collision::Shape::edges` gives any shape's lines.
   - **Next, in this order:**
-    1. View modes on (ADR 0116 V2b): the models' colliders and the bodies in Play, from the
-       shapes' edges in the physics API, colored by how they move;
+    1. ADR 0117 step 2: `ScenePhysics::sync_models`, the models' bodies (static, and
+       dynamic ones moving their entities), so a level built from models collides in Play;
     2. E7 on: the engine's types in the editor and for luau-lsp (E7-2, under way on
        `feat/script-types`: the old solver types a hook's `self` from `component`'s
        declaration, the new one of Luau 0.736 does not), then views' fast path (E7-1c);

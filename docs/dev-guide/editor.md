@@ -479,10 +479,14 @@ group is baked, Tab, Ctrl+H and the side handles leave its brushes alone and say
 
 ### Colliders
 
-**View: Colliders** (the palette, or Alt+C as in Unreal) draws the edges of the brushes'
-pieces that collide as thin cyan lines in the world: what the game's physics gets from
-them ([blockout.md](blockout.md#colliders)). They are bright where they are in front and
-faint behind a surface, and never flicker on the surface they lie on (ADR 0116).
+**View: Colliders** (the palette, or Alt+C as in Unreal) draws what collides as thin lines
+in the world: the edges of the brushes' pieces ([blockout.md](blockout.md#colliders)) and
+every model's collider, made from its mesh by the rules beside its file as the cook makes
+it ([physics.md](physics.md#models-in-scene-files)). The color says how a body moves:
+cyan static, orange dynamic, violet kinematic, yellow a sensor. Lines are bright where they
+are in front, faint behind a surface, and never flicker on the surface they lie on
+(ADR 0116, ADR 0117). A model's collider is made in the background the first time it is
+shown, and again when its file is written anew.
 
 ### Navigation
 

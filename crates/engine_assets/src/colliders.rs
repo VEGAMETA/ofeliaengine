@@ -861,6 +861,8 @@ struct Builder<'a> {
     world: Vec<Mat4>,
     colliders: Vec<CookedCollider>,
     bodies: Vec<CookedBody>,
+    /// Each body's node and its collider in the node's object space.
+    nodes: Vec<BodyNode>,
     /// Shared colliders: (mesh, dynamic) → index.
     shared: HashMap<(usize, bool), Option<u32>>,
     cache: Option<&'a DerivedDataCache>,
@@ -871,6 +873,16 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    /// What was made.
+    fn finish(self) -> NodeColliders {
+        NodeColliders {
+            colliders: self.colliders,
+            bodies: self.bodies,
+            nodes: self.nodes,
+            stats: self.stats,
+        }
+    }
+
     /// Splits `meshes` into convex parts, all at once in parallel (each from the cache when
     /// it has them).
     fn decompose_meshes(&mut self, mut meshes: Vec<usize>) {
@@ -944,8 +956,13 @@ impl Builder<'_> {
         Some((self.colliders.len() - 1) as u32)
     }
 
-    /// A body; a transform with shear gets a collider of its own with the shear baked in.
-    fn body(&mut self, collider: u32, world: Mat4, body: CookedBody) {
+    /// A body made for node `node`; a transform with shear gets a collider of its own with
+    /// the shear baked in.
+    fn body(&mut self, node: usize, collider: u32, world: Mat4, body: CookedBody) {
+        self.nodes.push(BodyNode {
+            node: node as u32,
+            collider,
+        });
         let (collider, world) = if is_trs(world) {
             (collider, world)
         } else {
@@ -980,6 +997,42 @@ pub fn cook_colliders(
     cache: Option<&DerivedDataCache>,
     jobs: Option<&ThreadPool>,
 ) -> (Vec<CookedCollider>, Vec<CookedBody>, ColliderStats) {
+    let cooked = cook_node_colliders(scene, node_instances, rules, cache, jobs);
+    (cooked.colliders, cooked.bodies, cooked.stats)
+}
+
+/// A body's node: what [`cook_node_colliders`] made it for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyNode {
+    /// The node (`ImportedScene::nodes`).
+    pub node: u32,
+    /// The body's collider in the node's object space: the body's own, or the one a
+    /// transform's shear was baked from.
+    pub collider: u32,
+}
+
+/// What [`cook_node_colliders`] made.
+#[derive(Debug, Clone, Default)]
+pub struct NodeColliders {
+    /// The colliders, as [`cook_colliders`] makes them.
+    pub colliders: Vec<CookedCollider>,
+    /// The bodies, as [`cook_colliders`] makes them.
+    pub bodies: Vec<CookedBody>,
+    /// Each body's node, in the bodies' order.
+    pub nodes: Vec<BodyNode>,
+    /// What it took.
+    pub stats: ColliderStats,
+}
+
+/// [`cook_colliders`], with each body's node: where a scene's model of a mesh finds its
+/// collider (ADR 0117).
+pub fn cook_node_colliders(
+    scene: &ImportedScene,
+    node_instances: &[(u32, u32)],
+    rules: &ColliderRules,
+    cache: Option<&DerivedDataCache>,
+    jobs: Option<&ThreadPool>,
+) -> NodeColliders {
     engine_profiler::zone!("assets::cook_colliders");
     let (world, parent) = world_transforms(scene);
     let mut b = Builder {
@@ -988,6 +1041,7 @@ pub fn cook_colliders(
         world,
         colliders: Vec::new(),
         bodies: Vec::new(),
+        nodes: Vec::new(),
         shared: HashMap::new(),
         cache,
         jobs,
@@ -1003,7 +1057,7 @@ pub fn cook_colliders(
     let uses_khr = scene.nodes.iter().any(|n| n.physics.is_some());
     if uses_khr {
         khr_bodies(&mut b, &parent, &instances_of);
-        return (b.colliders, b.bodies, b.stats);
+        return b.finish();
     }
 
     // Authored collision meshes, by the node (or mesh) they name.
@@ -1081,6 +1135,7 @@ pub fn cook_colliders(
             if let Some(collider) = b.add(shapes, Origin::Authored, surface) {
                 let world = b.world[i];
                 b.body(
+                    i,
                     collider,
                     world,
                     CookedBody {
@@ -1142,6 +1197,7 @@ pub fn cook_colliders(
         if let Some(collider) = collider {
             let world = b.world[i];
             b.body(
+                i,
                 collider,
                 world,
                 CookedBody {
@@ -1164,6 +1220,7 @@ pub fn cook_colliders(
             && let Some(collider) = b.add(vec![shape], Origin::Authored, u16::MAX)
         {
             b.body(
+                c,
                 collider,
                 world,
                 CookedBody {
@@ -1173,7 +1230,7 @@ pub fn cook_colliders(
             );
         }
     }
-    (b.colliders, b.bodies, b.stats)
+    b.finish()
 }
 
 /// Bodies from `KHR_physics_rigid_bodies`.
@@ -1353,6 +1410,7 @@ fn khr_bodies(
             }
         }
         b.body(
+            root,
             collider,
             world,
             CookedBody {
@@ -1381,6 +1439,7 @@ fn khr_bodies(
         let m = material(mat);
         let world = b.world[i];
         b.body(
+            i,
             collider,
             world,
             CookedBody {
@@ -2457,6 +2516,16 @@ mod tests {
         };
         let reach = vertices.iter().map(|v| v.x).fold(f32::MIN, f32::max);
         assert!((reach - core::f32::consts::SQRT_2).abs() < 1e-4, "{reach}");
+        // Made for the child, whose collider in its own space is the shared one: what a
+        // model of the mesh takes (ADR 0117).
+        let by_node = cook_node_colliders(&scene, &[], &ColliderRules::default(), None, None);
+        assert_eq!(
+            by_node.nodes,
+            [BodyNode {
+                node: 1,
+                collider: 0
+            }]
+        );
     }
 
     #[test]

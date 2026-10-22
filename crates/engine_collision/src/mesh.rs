@@ -92,6 +92,52 @@ pub fn weld(
     (out, triangles)
 }
 
+/// The edges of a mesh of shared vertices (`triangles` index `vertices`) where its surface
+/// turns by more than [`crate::shape::CREASE`], and its open borders (an edge of one
+/// triangle), appended to `out` each once. An edge of more than two triangles counts as a
+/// turn. Triangles without area are left out.
+pub fn crease_edges(vertices: &[Vec3], triangles: &[[u32; 3]], out: &mut Vec<[Vec3; 2]>) {
+    let normal = |t: &[u32; 3]| {
+        let [a, b, c] = t.map(|i| vertices[i as usize]);
+        (b - a).cross(c - a).try_normalize()
+    };
+    let normals: Vec<Option<Vec3>> = triangles.iter().map(normal).collect();
+    // Each edge with its triangle, its ends in order: the same edge's entries sort
+    // together.
+    let mut edges: Vec<((u32, u32), u32)> = Vec::with_capacity(triangles.len() * 3);
+    for (k, t) in triangles.iter().enumerate() {
+        if normals[k].is_none() {
+            continue;
+        }
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            if a != b {
+                edges.push(((a.min(b), a.max(b)), k as u32));
+            }
+        }
+    }
+    edges.sort_unstable();
+    let limit = crate::shape::CREASE.cos();
+    let mut i = 0;
+    while i < edges.len() {
+        let (key, first) = edges[i];
+        let mut j = i + 1;
+        while j < edges.len() && edges[j].0 == key {
+            j += 1;
+        }
+        let turns = match j - i {
+            2 => {
+                let (n, m) = (normals[first as usize], normals[edges[i + 1].1 as usize]);
+                n.zip(m).is_none_or(|(n, m)| n.dot(m) < limit)
+            }
+            _ => true,
+        };
+        if turns {
+            out.push([vertices[key.0 as usize], vertices[key.1 as usize]]);
+        }
+        i = j;
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

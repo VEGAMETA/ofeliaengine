@@ -110,8 +110,8 @@ For lines on surfaces:
    colors on both GPUs.
 3. **V2a:** line lists in `engine_render::wire`; the blockout's colliders and the
    navigation mesh drawn with them, depth tested; the blockout's X-ray overlay gone; Alt+C.
-4. **V2b:** shapes' edges in `engine_physics`, the models' colliders and Play's bodies,
-   colored by how they move.
+4. **V2b:** the models' colliders, colored by how they move, and the bodies in Play:
+   [ADR 0117](0117-model-colliders.md), which found that a scene file's models had none.
 
 ## Consequences
 

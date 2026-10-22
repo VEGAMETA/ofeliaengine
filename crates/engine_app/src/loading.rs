@@ -10,10 +10,17 @@
 //! so compression never holds a load back; the result goes into the cache and comes back
 //! to the frame, which swaps it in.
 //!
+//! Models' colliders (ADR 0117) are cooked on a third thread, below the loading's priority:
+//! a prop's convex parts can take seconds, and the frame that waits for a scene's assets
+//! does not wait for them.
+//!
 //! Each thread is started with its first job: a player whose scenes use no glTF file never
 //! has them.
 
-use crate::assets::{GltfFile, TextureKey, gltf_mesh, gltf_primitives, open_gltf};
+use crate::assets::{
+    CookedColliders, GltfFile, TextureKey, cook_model_colliders, gltf_mesh, gltf_primitives,
+    open_gltf,
+};
 use engine_assets::{
     DerivedDataCache, EncodedTexture, TextureImage, TextureSource, build_mips, cached_texture,
     decode_image, import_texture, read_texture,
@@ -73,6 +80,14 @@ pub(crate) enum Job {
         cache: Arc<DerivedDataCache>,
         generation: u32,
     },
+    /// The colliders of every mesh of glTF file `file` (on the cooking thread), convex
+    /// parts from `cache` when it has them.
+    Colliders {
+        file: AssetId,
+        gltf: Arc<GltfFile>,
+        cache: Option<Arc<DerivedDataCache>>,
+        generation: u32,
+    },
 }
 
 /// Where a texture's image is read from: the glTF file's texture, and the file's folder
@@ -123,6 +138,11 @@ pub(crate) enum Done {
         generation: u32,
         result: Result<EncodedTexture, String>,
     },
+    Colliders {
+        file: AssetId,
+        generation: u32,
+        result: Result<CookedColliders, String>,
+    },
 }
 
 /// What a thread of the loader does.
@@ -134,6 +154,8 @@ enum Kind {
     /// and filters its levels while the other's blocks keep the workers busy), the thread
     /// helping; it runs below the loading's priority.
     Compress,
+    /// Cooks colliders: each job on a worker of its pool, below the loading's priority.
+    Cook,
 }
 
 /// The loader: its threads, the jobs going to them and the results coming back.
@@ -141,6 +163,7 @@ pub(crate) struct Loader {
     root: PathBuf,
     loading: Lane,
     compressing: Lane,
+    cooking: Lane,
 }
 
 /// A thread of the loader, its jobs and its results.
@@ -170,14 +193,16 @@ impl Loader {
             root,
             loading: Lane::new(Kind::Load),
             compressing: Lane::new(Kind::Compress),
+            cooking: Lane::new(Kind::Cook),
         }
     }
 
-    /// Gives `job` to the loader: compression to its compressing thread, the rest to its
-    /// loading thread.
+    /// Gives `job` to the loader: compression to its compressing thread, colliders to its
+    /// cooking thread, the rest to its loading thread.
     pub(crate) fn give(&mut self, job: Job) {
         let lane = match job {
             Job::Compress { .. } => &mut self.compressing,
+            Job::Colliders { .. } => &mut self.cooking,
             _ => &mut self.loading,
         };
         lane.in_flight += 1;
@@ -185,7 +210,8 @@ impl Loader {
         lane.send(&self.root);
     }
 
-    /// Whether loading jobs are given and not taken back (compression aside).
+    /// Whether loading jobs are given and not taken back (compression and colliders
+    /// aside).
     pub(crate) fn busy(&self) -> bool {
         self.loading.in_flight > 0
     }
@@ -199,6 +225,7 @@ impl Loader {
     pub(crate) fn take(&mut self, out: &mut Vec<Done>) {
         self.loading.take(out, &self.root);
         self.compressing.take(out, &self.root);
+        self.cooking.take(out, &self.root);
     }
 
     /// Waits a moment for loading results (the frame waiting for its assets): until one
@@ -250,8 +277,9 @@ impl Lane {
         if let Some(here) = &mut self.here {
             for job in self.backlog.drain(..) {
                 here.push_back(match job {
-                    // Not on the frame's thread: seconds a texture.
+                    // Not on the frame's thread: seconds a texture, or a prop's parts.
                     Job::Compress { .. } => failed(&job, "no thread to compress it on"),
+                    Job::Colliders { .. } => failed(&job, "no thread to cook them on"),
                     job => run_caught(job, root, None),
                 });
             }
@@ -284,12 +312,12 @@ impl Lane {
 }
 
 impl Drop for Loader {
-    /// Both threads told to stop. The loading one is waited for (its jobs are short); the
-    /// compressing one is not: it stops after the textures it is compressing, which can
-    /// take seconds, and an exit does not wait for them (a cache entry is written whole
-    /// or not at all, ADR 0041).
+    /// The threads told to stop. The loading one is waited for (its jobs are short); the
+    /// compressing and cooking ones are not: they stop after the textures they compress or
+    /// the files they cook, which can take seconds, and an exit does not wait for them (a
+    /// cache entry is written whole or not at all, ADR 0041).
     fn drop(&mut self) {
-        for lane in [&self.loading, &self.compressing] {
+        for lane in [&self.loading, &self.compressing, &self.cooking] {
             if let Some(running) = &lane.running {
                 running.stop.store(true, Ordering::Release);
                 if let Some(thread) = &running.thread {
@@ -315,6 +343,7 @@ fn start(root: PathBuf, kind: Kind) -> std::io::Result<Running> {
     let (name, priority) = match kind {
         Kind::Load => ("engine-load", Priority::BelowNormal),
         Kind::Compress => ("engine-compress", Priority::Lowest),
+        Kind::Cook => ("engine-cook", Priority::Lowest),
     };
     let workers = std::thread::available_parallelism()
         .map_or(2, |n| n.get() / 2)
@@ -351,7 +380,7 @@ fn start(root: PathBuf, kind: Kind) -> std::io::Result<Running> {
                 }
                 let (root, done) = (&root, &done);
                 match kind {
-                    Kind::Load => pool.scope(|s| {
+                    Kind::Load | Kind::Cook => pool.scope(|s| {
                         for job in batch.drain(..) {
                             s.spawn(move || {
                                 // The frame's side gone: nobody to tell.
@@ -421,6 +450,13 @@ fn failed(job: &Job, why: &str) -> Done {
             key, generation, ..
         } => Done::Compressed {
             key: *key,
+            generation: *generation,
+            result: Err(why),
+        },
+        Job::Colliders {
+            file, generation, ..
+        } => Done::Colliders {
+            file: *file,
             generation: *generation,
             result: Err(why),
         },
@@ -580,6 +616,19 @@ fn run(job: Job, root: &Path, pool: Option<&ThreadPool>) -> Done {
                 key,
                 generation,
                 result,
+            }
+        }
+        Job::Colliders {
+            file,
+            gltf,
+            cache,
+            generation,
+        } => {
+            engine_profiler::zone!("assets::load::colliders");
+            Done::Colliders {
+                file,
+                generation,
+                result: cook_model_colliders(&gltf, cache.as_deref()),
             }
         }
     }

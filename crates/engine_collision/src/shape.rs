@@ -2,6 +2,10 @@
 //! for the runtime's rebuilds, and what the editor will edit (a hull's points, faces and
 //! edges; a primitive's parameters). Nothing here depends on a physics backend.
 //!
+//! **Lines.** [`Shape::edges`] gives a shape's edges for drawing (the editor's colliders,
+//! ADR 0116): a box's, round shapes' rings, a hull's and a mesh's edges where the surface
+//! turns.
+//!
 //! **Scale.** [`Shape::transformed`] gives what a shape becomes under any affine map:
 //! uniform or not, mirrored, sheared. Exact where the result is still that kind of shape or
 //! a hull of exact points; round shapes that stop being round become hulls within a
@@ -9,7 +13,7 @@
 //! parts convex and their union the mapped prop.
 
 use crate::fit::Primitive;
-use core::f32::consts::{PI, TAU};
+use core::f32::consts::{FRAC_PI_2, PI, TAU};
 use engine_core::math::{Affine3A, Mat3, Quat, Vec3};
 
 /// A shape of a collider, in the collider's frame (its mesh's object space).
@@ -378,6 +382,145 @@ impl Shape {
             }
         }
     }
+
+    /// The shape's edges for drawing, in the collider's frame, appended to `out`:
+    /// - a box's twelve;
+    /// - a sphere's three great circles;
+    /// - a capsule's rims where its caps meet its sides, its four sides, and arcs over its
+    ///   caps; a cylinder's rims and four sides;
+    /// - a hull's and a mesh's edges where the surface turns (by more than [`CREASE`]) and
+    ///   a mesh's open borders, each once (a hull's faces are split into triangles, whose
+    ///   diagonals are no edges).
+    ///
+    /// A round shape's circle is [`ROUND`] segments.
+    pub fn edges(&self, out: &mut Vec<[Vec3; 2]>) {
+        match self {
+            Self::Box {
+                center,
+                rotation,
+                half_extents,
+            } => {
+                let corner = |i: usize| {
+                    let sign = |bit: usize| if i & bit == 0 { -1.0 } else { 1.0 };
+                    *center + *rotation * (Vec3::new(sign(1), sign(2), sign(4)) * *half_extents)
+                };
+                // Corners one bit apart, each pair once.
+                for i in 0..8 {
+                    for bit in [1, 2, 4] {
+                        if i & bit == 0 {
+                            out.push([corner(i), corner(i | bit)]);
+                        }
+                    }
+                }
+            }
+            Self::Sphere { center, radius } => {
+                for axis in [
+                    Quat::IDENTITY,
+                    Quat::from_rotation_x(FRAC_PI_2),
+                    Quat::from_rotation_z(FRAC_PI_2),
+                ] {
+                    arc(
+                        out,
+                        |a| *center + axis * (Vec3::new(a.cos(), 0.0, a.sin()) * *radius),
+                        TAU,
+                    );
+                }
+            }
+            Self::Capsule {
+                center,
+                rotation,
+                half_height,
+                radius,
+            } => {
+                let at = |p: Vec3| *center + *rotation * p;
+                round_sides(out, &at, *half_height, *radius);
+                // Over each cap, in the two upright planes.
+                for (top, y) in [(1.0, *half_height), (-1.0, -*half_height)] {
+                    for across in [Vec3::X, Vec3::Z] {
+                        arc(
+                            out,
+                            |a| {
+                                at(across * (a.cos() * *radius)
+                                    + Vec3::Y * (y + top * a.sin() * *radius))
+                            },
+                            PI,
+                        );
+                    }
+                }
+            }
+            Self::Cylinder {
+                center,
+                rotation,
+                half_height,
+                radius,
+            } => round_sides(
+                out,
+                &|p: Vec3| *center + *rotation * p,
+                *half_height,
+                *radius,
+            ),
+            Self::Hull { points } => {
+                if let Ok(hull) = crate::hull::Hull::new(points) {
+                    crate::mesh::crease_edges(&hull.points, &hull.triangles, out);
+                }
+            }
+            Self::Mesh {
+                vertices,
+                triangles,
+                ..
+            } => {
+                // Triangles that share corners share edges only once their copies are one.
+                let (welded, map) = crate::mesh::weld_vertices(vertices, WELD);
+                let triangles: Vec<[u32; 3]> = triangles
+                    .iter()
+                    .filter_map(|t| {
+                        let t = t.map(|i| map.get(i as usize).copied());
+                        Some([t[0]?, t[1]?, t[2]?])
+                    })
+                    .collect();
+                crate::mesh::crease_edges(&welded, &triangles, out);
+            }
+        }
+    }
+}
+
+/// A round shape's circle in [`Shape::edges`], in segments.
+pub const ROUND: usize = 32;
+
+/// How far a surface turns, at least, where [`Shape::edges`] draws an edge: 1°.
+pub const CREASE: f32 = 1.0 * PI / 180.0;
+
+/// The vertices of a mesh closer than this are one for [`Shape::edges`] (scene units).
+const WELD: f32 = 1e-5;
+
+/// The segments of `point(a)` for `a` from 0 to `span` radians, the circle's share of
+/// [`ROUND`] segments.
+fn arc(out: &mut Vec<[Vec3; 2]>, point: impl Fn(f32) -> Vec3, span: f32) {
+    let n = ((ROUND as f32 * span / TAU).round() as usize).max(1);
+    let mut last = point(0.0);
+    for k in 1..=n {
+        let next = point(span * k as f32 / n as f32);
+        out.push([last, next]);
+        last = next;
+    }
+}
+
+/// A capsule's or a cylinder's rims at `±half_height` around its Y and four sides between
+/// them, placed by `at`.
+fn round_sides(out: &mut Vec<[Vec3; 2]>, at: &dyn Fn(Vec3) -> Vec3, half_height: f32, radius: f32) {
+    for y in [half_height, -half_height] {
+        arc(
+            out,
+            |a| at(Vec3::new(a.cos() * radius, y, a.sin() * radius)),
+            TAU,
+        );
+    }
+    for side in [Vec3::X, Vec3::Z, -Vec3::X, -Vec3::Z] {
+        out.push([
+            at(side * radius + Vec3::Y * half_height),
+            at(side * radius - Vec3::Y * half_height),
+        ]);
+    }
 }
 
 /// The longest a unit vector gets under `linear` (bounded by its largest column's length
@@ -404,6 +547,13 @@ impl Collider {
                 })
                 .collect(),
             origin: self.origin,
+        }
+    }
+
+    /// Every shape's edges (see [`Shape::edges`]), appended to `out`.
+    pub fn edges(&self, out: &mut Vec<[Vec3; 2]>) {
+        for s in &self.shapes {
+            s.shape.edges(out);
         }
     }
 
@@ -603,5 +753,99 @@ mod tests {
             let out = part.transformed(map, 1e-3);
             assert!(close(out.volume(), part.volume() * det, 1e-4));
         }
+    }
+
+    #[test]
+    fn a_boxs_edges_are_its_twelve() {
+        let b = Shape::Box {
+            center: Vec3::new(1.0, 2.0, 3.0),
+            rotation: turned(),
+            half_extents: Vec3::new(0.5, 1.0, 1.5),
+        };
+        let mut out = Vec::new();
+        b.edges(&mut out);
+        assert_eq!(out.len(), 12);
+        let length: f32 = out.iter().map(|[a, b]| a.distance(*b)).sum();
+        assert!(close(length, 4.0 * (1.0 + 2.0 + 3.0), 1e-4), "{length}");
+    }
+
+    #[test]
+    fn round_shapes_edges_lie_on_their_surfaces() {
+        let mut out = Vec::new();
+        Shape::Sphere {
+            center: Vec3::ONE,
+            radius: 2.0,
+        }
+        .edges(&mut out);
+        assert_eq!(out.len(), 3 * ROUND);
+        assert!(
+            out.iter()
+                .flatten()
+                .all(|p| close(p.distance(Vec3::ONE), 2.0, 1e-4))
+        );
+        // A capsule's: its rims, sides and the arcs over its caps, each a radius from its
+        // segment.
+        out.clear();
+        Shape::Capsule {
+            center: Vec3::ZERO,
+            rotation: turned(),
+            half_height: 1.0,
+            radius: 0.5,
+        }
+        .edges(&mut out);
+        assert_eq!(out.len(), 2 * ROUND + 4 + 4 * (ROUND / 2));
+        let axis = turned() * Vec3::Y;
+        let from_segment = |p: Vec3| p.distance(axis * p.dot(axis).clamp(-1.0, 1.0));
+        assert!(
+            out.iter()
+                .flatten()
+                .all(|&p| close(from_segment(p), 0.5, 1e-4))
+        );
+        out.clear();
+        Shape::Cylinder {
+            center: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            half_height: 1.0,
+            radius: 0.5,
+        }
+        .edges(&mut out);
+        assert_eq!(out.len(), 2 * ROUND + 4);
+    }
+
+    #[test]
+    fn a_hulls_edges_leave_its_faces_diagonals_out() {
+        let mut out = Vec::new();
+        Shape::Hull {
+            points: crate::mesh::tests::cube().0,
+        }
+        .edges(&mut out);
+        assert_eq!(out.len(), 12, "{out:?}");
+    }
+
+    #[test]
+    fn a_meshs_edges_are_its_creases_and_borders() {
+        // A cube with vertices of its own for each triangle, as a renderer has them: its
+        // twelve edges, once each.
+        let (v, t) = crate::mesh::tests::cube();
+        let mut out = Vec::new();
+        Shape::Mesh {
+            vertices: t.iter().flatten().map(|&i| v[i as usize]).collect(),
+            triangles: (0..t.len() as u32)
+                .map(|k| [3 * k, 3 * k + 1, 3 * k + 2])
+                .collect(),
+            surfaces: Vec::new(),
+        }
+        .edges(&mut out);
+        assert_eq!(out.len(), 12, "{out:?}");
+        // A flat quad of two triangles: its four borders, not its diagonal.
+        out.clear();
+        Shape::Mesh {
+            vertices: vec![Vec3::ZERO, Vec3::X, Vec3::new(1.0, 0.0, 1.0), Vec3::Z],
+            triangles: vec![[0, 2, 1], [0, 3, 2]],
+            surfaces: Vec::new(),
+        }
+        .edges(&mut out);
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|[a, b]| close(a.distance(*b), 1.0, 1e-6)));
     }
 }

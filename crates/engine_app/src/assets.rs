@@ -34,12 +34,19 @@
 //!   image makes the glTF files that use it again.
 //! - **The file's id** is its `.meta`'s ([`AssetMeta`]); a file without one is found by
 //!   its path alone.
+//! - **A model's collider** ([`Assets::collider`], ADR 0117) is what the cook makes of its
+//!   mesh by its file's rules (`<file>.colliders.ron`): cooked in the background the first
+//!   time it is asked for, every mesh of the file at once, on a thread of its own (convex
+//!   parts can take seconds). A built-in mesh's is its own shape.
 
 use crate::loading::{Done, Job, Loader, Made};
+use engine_assets::colliders::{ColliderRules, Motion, cook_node_colliders};
 use engine_assets::{
     DerivedDataCache, EncodedTexture, ImportedScene, MaterialData, MeshData, TextureData,
     TextureImage, TextureSource, TextureUsage, TextureWrap,
 };
+use engine_collision::{Collider, ColliderShape, Origin, Shape};
+use engine_core::math::{Affine3A, Quat, Vec3};
 use engine_ecs::{Changed, Entity, GlobalTransform, QueryState, Transform, With, Without, World};
 use engine_reflect::Reflect;
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
@@ -337,6 +344,8 @@ pub(crate) struct GltfFile {
     pub(crate) scene: ImportedScene,
     pub(crate) dir: PathBuf,
     pub(crate) meta: AssetMeta,
+    /// The file itself: its colliders' rules are beside it.
+    pub(crate) path: PathBuf,
 }
 
 /// glTF file `id` at `path` under `root`, its id checked against its `.meta` when it has
@@ -366,7 +375,12 @@ pub(crate) fn open_gltf(root: &Path, path: &str, id: AssetId) -> Result<GltfFile
     let dir = full.parent().map(Path::to_path_buf).unwrap_or_default();
     let scene =
         engine_assets::import_gltf(&bytes, Some(&dir)).map_err(|e| format!("{path}: {e}"))?;
-    Ok(GltfFile { scene, dir, meta })
+    Ok(GltfFile {
+        scene,
+        dir,
+        meta,
+        path: full,
+    })
 }
 
 /// Which of a glTF's meshes part `part` is.
@@ -530,6 +544,171 @@ fn gltf_material(
     (desc, slots)
 }
 
+/// A model's collider (ADR 0117): its mesh's shapes as the cook makes them by its file's
+/// rules, and how a body of it moves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelCollider {
+    /// The shapes, in the mesh's space (the file's import scale applied).
+    pub collider: Collider,
+    /// What moves its body.
+    pub motion: Motion,
+    /// Reports overlaps but does not collide.
+    pub sensor: bool,
+    /// Friction.
+    pub friction: f32,
+    /// Restitution.
+    pub restitution: f32,
+    /// Mass in kg; none: from the shapes' volume.
+    pub mass: Option<f32>,
+    /// How much gravity acts on it.
+    pub gravity_factor: f32,
+    /// Its collision layer by name; none: by its motion.
+    pub layer: Option<String>,
+}
+
+impl ModelCollider {
+    /// A static collider of `shapes`, with the cook's defaults.
+    fn fixed(shapes: Vec<Shape>) -> Self {
+        Self {
+            collider: Collider {
+                shapes: shapes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(id, shape)| ColliderShape {
+                        id: id as u32,
+                        shape,
+                        surface: 0,
+                    })
+                    .collect(),
+                origin: Origin::Generated,
+            },
+            motion: Motion::Static,
+            sensor: false,
+            friction: 0.5,
+            restitution: 0.0,
+            mass: None,
+            gravity_factor: 1.0,
+            layer: None,
+        }
+    }
+}
+
+/// A mesh asset's collider as [`Assets::collider`] has it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColliderState {
+    /// Made.
+    Made(Arc<ModelCollider>),
+    /// Being made: asked again later, it may be.
+    Coming,
+    /// None: the mesh collides with nothing (its rules, a skinned mesh, a failure said in
+    /// the log, an asset that is not a mesh).
+    None,
+}
+
+/// A glTF file's colliders as the loader cooked them: each mesh's (by index), and the
+/// meshes' names its parts are found by.
+pub(crate) struct CookedColliders {
+    names: Vec<String>,
+    meshes: Vec<Option<Arc<ModelCollider>>>,
+}
+
+/// The colliders of every mesh of `file` (ADR 0117): the cook's, by the rules beside it,
+/// each mesh's from the first node that draws it, in the mesh's space; convex parts from
+/// `cache` when it has them.
+pub(crate) fn cook_model_colliders(
+    file: &GltfFile,
+    cache: Option<&DerivedDataCache>,
+) -> Result<CookedColliders, String> {
+    let rules = ColliderRules::for_scene(&file.path).map_err(|e| e.to_string())?;
+    let scene = &file.scene;
+    // No render instances: a model moves itself.
+    let cooked = cook_node_colliders(scene, &[], &rules, cache, None);
+    let scale = file.meta.model.applied_scale();
+    let mut meshes: Vec<Option<Arc<ModelCollider>>> = vec![None; scene.meshes.len()];
+    for (body, made_for) in cooked.bodies.iter().zip(&cooked.nodes) {
+        let Some(mesh) = scene
+            .nodes
+            .get(made_for.node as usize)
+            .and_then(|node| node.mesh)
+        else {
+            continue;
+        };
+        // In the node's object space: the mesh's.
+        let (Some(slot), Some(cooked)) = (
+            meshes.get_mut(mesh),
+            cooked.colliders.get(made_for.collider as usize),
+        ) else {
+            continue;
+        };
+        if slot.is_some() {
+            continue;
+        }
+        let collider = if scale == 1.0 {
+            cooked.collider.clone()
+        } else {
+            cooked
+                .collider
+                .transformed(Affine3A::from_scale(Vec3::splat(scale)), 1e-3 * scale)
+        };
+        *slot = Some(Arc::new(ModelCollider {
+            collider,
+            motion: body.motion,
+            sensor: body.sensor,
+            friction: body.friction,
+            restitution: body.restitution,
+            mass: body.mass,
+            gravity_factor: body.gravity_factor,
+            layer: body.layer.clone(),
+        }));
+    }
+    Ok(CookedColliders {
+        names: scene.meshes.iter().map(|m| m.name.clone()).collect(),
+        meshes,
+    })
+}
+
+/// A built-in mesh's collider: its own shape, static.
+fn builtin_collider(asset: AssetRef) -> Option<ModelCollider> {
+    let shape = match asset {
+        builtin::CUBE => Shape::Box {
+            center: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            half_extents: Vec3::splat(0.5),
+        },
+        builtin::SPHERE => Shape::Sphere {
+            center: Vec3::ZERO,
+            radius: 0.5,
+        },
+        builtin::CYLINDER => Shape::Cylinder {
+            center: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            half_height: 0.5,
+            radius: 0.5,
+        },
+        // Its two triangles, facing up.
+        builtin::PLANE => Shape::Mesh {
+            vertices: vec![
+                Vec3::new(-0.5, 0.0, -0.5),
+                Vec3::new(-0.5, 0.0, 0.5),
+                Vec3::new(0.5, 0.0, 0.5),
+                Vec3::new(0.5, 0.0, -0.5),
+            ],
+            triangles: vec![[0, 1, 2], [0, 2, 3]],
+            surfaces: Vec::new(),
+        },
+        _ => return None,
+    };
+    Some(ModelCollider::fixed(vec![shape]))
+}
+
+/// Which of meshes `names` part `part` is: the only one for none, else by name or index.
+fn mesh_index(names: &[String], part: u64) -> Option<usize> {
+    if part == 0 {
+        return (names.len() == 1).then_some(0);
+    }
+    find_part(part, names.iter().map(String::as_str))
+}
+
 /// The longest a frame waits for its assets ([`Assets::sync`]'s `wait`).
 const WAIT_AT_MOST: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -671,6 +850,15 @@ pub struct Assets {
     slot_changes: Option<SlotChanges>,
     unsplit: Option<Unsplit>,
     parts: Option<Parts>,
+    /// Models' colliders (ADR 0117): each glTF file's once cooked (or why not), the files
+    /// being cooked, the built-in meshes' as made, and how many times any was made or
+    /// forgotten.
+    colliders: HashMap<AssetId, Result<CookedColliders, String>>,
+    cooking: HashSet<AssetId>,
+    /// Of those, the files being read first: cooked once they are.
+    read_to_cook: HashSet<AssetId>,
+    builtin_colliders: HashMap<AssetRef, Option<Arc<ModelCollider>>>,
+    collider_epoch: u64,
 }
 
 impl Assets {
@@ -721,6 +909,11 @@ impl Assets {
             slot_changes: None,
             unsplit: None,
             parts: None,
+            colliders: HashMap::new(),
+            cooking: HashSet::new(),
+            read_to_cook: HashSet::new(),
+            builtin_colliders: HashMap::new(),
+            collider_epoch: 0,
         }
     }
 
@@ -816,6 +1009,11 @@ impl Assets {
         self.decoded.retain(|(k, _)| k.file != file);
         self.problems.retain(|asset, _| asset.file != file);
         self.gltf.remove(&file);
+        // Cooked again when next asked for.
+        self.read_to_cook.remove(&file);
+        if self.colliders.remove(&file).is_some() || self.cooking.remove(&file) {
+            self.collider_epoch += 1;
+        }
         let mut models = QueryState::<(Entity, &Model)>::new(world);
         let using: Vec<Entity> = models
             .iter_readonly(world)
@@ -915,6 +1113,78 @@ impl Assets {
     /// derived data cache, or compressed in the background and swapped in.
     pub fn textures_compressed(&self) -> usize {
         self.compressed_textures.len()
+    }
+
+    /// The collider of mesh `asset` (ADR 0117): a built-in mesh's own shape, or what the
+    /// cook makes of a glTF mesh by its file's rules (level geometry by default, as a
+    /// pack's). A glTF file's are cooked in the background the first time one is asked
+    /// for (the file read first if it is not in memory): [`ColliderState::Coming`] until
+    /// then. A file written anew is cooked again when next asked for.
+    pub fn collider(&mut self, asset: AssetRef) -> ColliderState {
+        let made = |c: Option<&Arc<ModelCollider>>| {
+            c.map_or(ColliderState::None, |c| ColliderState::Made(Arc::clone(c)))
+        };
+        if asset.is_none() {
+            return ColliderState::None;
+        }
+        if asset.file == builtin::LIBRARY {
+            let c = self
+                .builtin_colliders
+                .entry(asset)
+                .or_insert_with(|| builtin_collider(asset).map(Arc::new));
+            return made(c.as_ref());
+        }
+        match self.colliders.get(&asset.file) {
+            Some(Ok(cooked)) => {
+                return made(
+                    mesh_index(&cooked.names, asset.part)
+                        .and_then(|i| cooked.meshes.get(i)?.as_ref()),
+                );
+            }
+            Some(Err(_)) => return ColliderState::None,
+            None if self.cooking.contains(&asset.file) => return ColliderState::Coming,
+            None => {}
+        }
+        let Some(path) = file_path(&self.paths, asset).filter(|p| is_gltf(p)) else {
+            return ColliderState::None;
+        };
+        let path = path.to_owned();
+        match self.gltf(asset.file, &path) {
+            Ok(Some(file)) => {
+                self.cook(asset.file, file);
+                ColliderState::Coming
+            }
+            // Being read: cooked once it is.
+            Ok(None) => {
+                self.cooking.insert(asset.file);
+                self.read_to_cook.insert(asset.file);
+                ColliderState::Coming
+            }
+            Err(_) => ColliderState::None,
+        }
+    }
+
+    /// The colliders of glTF file `id`, read as `file`, cooked in the background.
+    fn cook(&mut self, id: AssetId, file: Arc<GltfFile>) {
+        let generation = self.generation(id);
+        self.cooking.insert(id);
+        self.loader.give(Job::Colliders {
+            file: id,
+            gltf: file,
+            cache: self.cache.clone(),
+            generation,
+        });
+    }
+
+    /// Raised each time a model's collider is made or forgotten ([`Self::collider`]): what
+    /// keeps colliders of its own (the editor's lines, a game's bodies) compares.
+    pub fn collider_epoch(&self) -> u64 {
+        self.collider_epoch
+    }
+
+    /// glTF files whose colliders are being cooked.
+    pub fn cooking(&self) -> usize {
+        self.cooking.len()
     }
 
     fn fail(&mut self, asset: AssetRef, why: String) {
@@ -1126,12 +1396,23 @@ impl Assets {
                     let state = match result {
                         Ok(read) => {
                             self.note_images(file, &read);
+                            // Its colliders were asked for while it was read.
+                            if self.read_to_cook.remove(&file) {
+                                self.cook(file, Arc::clone(&read));
+                            }
                             GltfState::Read {
                                 file: read,
                                 used: self.frame,
                             }
                         }
-                        Err(why) => GltfState::Failed(why),
+                        Err(why) => {
+                            if self.read_to_cook.remove(&file) {
+                                self.cooking.remove(&file);
+                                self.colliders.insert(file, Err(why.clone()));
+                                self.collider_epoch += 1;
+                            }
+                            GltfState::Failed(why)
+                        }
                     };
                     self.gltf.insert(file, state);
                 }
@@ -1189,6 +1470,22 @@ impl Assets {
                 } if generation == self.generation(key.file) => {
                     self.decoding.remove(&key);
                     self.decoded.push((key, result));
+                }
+                Done::Colliders {
+                    file,
+                    generation,
+                    result,
+                } if generation == self.generation(file) => {
+                    self.cooking.remove(&file);
+                    if let Err(why) = &result {
+                        let path = self.paths.get(AssetRef::file(file)).unwrap_or("");
+                        log::warn!(
+                            target: "engine_app::assets",
+                            "{path}: its colliders: {why}"
+                        );
+                    }
+                    self.colliders.insert(file, result);
+                    self.collider_epoch += 1;
                 }
                 Done::Compressed {
                     key,
