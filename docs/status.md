@@ -397,7 +397,7 @@ Last updated: 2026-10-22.
     `docs/research/luau-highlighting.md`): Luau's lexical rules, luau-lsp's colors; each
     line's start state kept and made again from the first line changed (60 lines cut in
     5.6 µs a frame).
-  - **E8-2, find, replace, go to a line** (#PR, ADR 0107's as-built): VS Code's find bar
+  - **E8-2, find, replace, go to a line** (#331, ADR 0107's as-built): VS Code's find bar
     in a script's tab (as you type, Enter and F3, Alt+C, Alt+W, Alt+Enter every match a
     caret, Ctrl+H replace and Ctrl+Alt+Enter all as one undo step), Ctrl+G's `:line`;
     the tab's keys a context of their own.
