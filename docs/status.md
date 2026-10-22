@@ -522,7 +522,7 @@ Last updated: 2026-10-22.
     profile aborts on a binding's error (Luau's C++ exceptions through mlua's callbacks
     under `panic = "abort"`): ADR 0118 proposed `unwind` (+5 % executable, +3.5 % in
     mlua-heavy code).
-  - **The shipping profile unwinds** (#PR, ADR 0118 accepted: team decision of
+  - **The shipping profile unwinds** (#355, ADR 0118 accepted: team decision of
     2026-10-22, option 1): a script's error stops its instance in what players get too.
     `check.ps1 -Profiles` runs a probe of three script errors built with `shipping`.
   - **Next, in this order:**
