@@ -108,8 +108,10 @@ For lines on surfaces:
    scene on both.
 2. **V1b:** `engine_render::unlit` and the editor's Unlit (Alt+3); a render test of its
    colors on both GPUs.
-3. **V2:** shapes' edges in `engine_physics`, the colliders overlay for every body, the
-   blockout's X-ray overlay gone.
+3. **V2a:** line lists in `engine_render::wire`; the blockout's colliders and the
+   navigation mesh drawn with them, depth tested; the blockout's X-ray overlay gone; Alt+C.
+4. **V2b:** shapes' edges in `engine_physics`, the models' colliders and Play's bodies,
+   colored by how they move.
 
 ## Consequences
 
@@ -190,3 +192,43 @@ For lines on surfaces:
 - **Tests:** the pass's colors on both GPUs under synchronization validation (base colors,
   one in front of another, a blended one over the background, emission added), and the
   editor's frame in Unlit: one flat color for the cube's every face.
+
+## As built (V2a, 2026-10-22): lines in the world
+
+- **`engine_render::wire::LineLists`:**
+  - segments given in the world, in batches (`LineBatch`: the segments, a color, the alpha
+    kept behind a surface), at most `MAX_SEGMENTS` (200,000) a frame;
+  - `lineVertex` (`wire.slang`) reads each batch's ends where they were pushed into the
+    frame's ring (`[Vec3; 2]` as they are: no copy between), through the camera without
+    jitter; `wireFragment` tests them against the scene's depth with the wireframes'
+    tolerance. One pass, `lines`, a draw per batch, on any device (a line list needs no
+    line mode);
+  - a type apart from the `Wireframer`: a frame's graph holds each one for the frame;
+  - `wire.slang`'s push constants now name the camera (`frame`) and the ends
+    (`positions`), so its two entries' SPIR-V changed; no perf scene builds them, and the
+    forward pipelines' SPIR-V stayed the same.
+- **The editor:**
+  - the blockout's colliders, cyan, and the navigation mesh, its boundaries green and its
+    other edges faint 2 cm above the surface, are lines in the world over any mode: bright
+    in front, faint behind a surface (0.2 and 0.25 of their alpha), steady on the surfaces
+    they lie on. The 2D overlay that showed them through walls is gone;
+  - each collider edge once (`Blockout::collider_edges`: a face's neighbour listed it
+    again);
+  - the overlay draws the editor's own lists, made when the brushes or a bake change:
+    nothing is copied each frame but into the ring;
+  - Alt+C turns the colliders on and off (Unreal's Collision show flag); in a code tab's
+    find bar it stays the match-case toggle.
+- **Measured** (ref-1, release, `view_modes` `measure_the_collider_lines --ignored`, 1,600
+  crates in 16 groups, 19,200 edges, framed at 1920 × 1080, medians of 100 frames):
+
+  | | RTX 4060 Ti | Radeon iGPU |
+  |---|---|---|
+  | the `lines` pass | 10 µs | 82 µs |
+  | composing the frame (CPU), colliders hidden | 121 µs | 136 µs |
+  | composing the frame (CPU), colliders shown | 162 µs | 177 µs |
+
+  A first version copied the segments twice each frame and composed in 254 and 269 µs.
+- **Tests:** a line list in the render test on both GPUs (whole on the surface it lies on,
+  a quarter of its alpha behind a nearer quad); the editor's frame with a crate on a floor
+  brush: the colliders' lines drawn, and at most one pixel of 1,500–1,700 changed in the
+  frames after; each edge once; Alt+C.

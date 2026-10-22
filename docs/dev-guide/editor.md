@@ -165,6 +165,7 @@ editor = ["dep:engine_editor"]
 | Add an entity (the menu under the pointer) | Ctrl+A |
 | Add a component to the selection | Ctrl+Shift+A |
 | View mode: Lit, Unlit, Wireframe, Lit + Wireframe | Alt+4, Alt+3, Alt+2, Alt+5 |
+| The blockout's colliders shown, or not | Alt+C |
 | Snap by default, or not (Y is an axis in a keyboard transform) | G (Blender's keys: Shift+Tab; Godot's: Y) |
 | Rename the active entity | F2 |
 | The command palette | Ctrl+Shift+P |
@@ -478,15 +479,17 @@ group is baked, Tab, Ctrl+H and the side handles leave its brushes alone and say
 
 ### Colliders
 
-**View: Colliders** (the palette) draws the edges of the brushes' pieces that collide,
-thin and cyan over the viewport: what the game's physics gets from them
-([blockout.md](blockout.md#colliders)).
+**View: Colliders** (the palette, or Alt+C as in Unreal) draws the edges of the brushes'
+pieces that collide as thin cyan lines in the world: what the game's physics gets from
+them ([blockout.md](blockout.md#colliders)). They are bright where they are in front and
+faint behind a surface, and never flicker on the surface they lie on (ADR 0116).
 
 ### Navigation
 
 **View: Navigation** (the palette) bakes the navigation mesh of the brushes that collide
-and draws it: its boundaries (walls, drops) bright green, the edges between its polygons
-faint, for a human-sized agent (1.8 m tall, 0.4 m wide-radius, 0.4 m steps, 45° slopes;
+and draws it in the world, just above the surface: its boundaries (walls, drops) bright
+green, the edges between its polygons faint, both fainter behind a surface, for a
+human-sized agent (1.8 m tall, 0.4 m wide-radius, 0.4 m steps, 45° slopes;
 [navigation.md](navigation.md)). It bakes in the background on workers of its own, a third
 of a second after the brushes last changed, so editing never waits for it; the status bar
 says how long it took ("Navigation: 357 tiles from 16,802 triangles in 158 ms").
@@ -541,7 +544,9 @@ a click opens its menu (ADR 0116). Unreal's keys switch it too:
   size: an edge on a surface never flickers against it, and an edge behind another
   surface is left out (Lit + Wireframe).
 - Unlit reads a custom material type as its glTF fallback.
-- The session keeps the mode. The colliders of every body come next.
+- The session keeps the mode.
+- Alt+C draws the blockout's colliders over any mode ([Colliders](#colliders)); the models'
+  colliders and the bodies in Play come next.
 
 ## Playing
 

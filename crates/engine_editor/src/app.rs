@@ -102,7 +102,7 @@ use engine_render::pick::{
     ListRequest, PickPass, PickRequest, PickView, Picker, SurfaceRequest, SurfaceResult,
 };
 use engine_render::unlit::{Unlit, UnlitView};
-use engine_render::wire::{WireStyle, WireView, Wireframer};
+use engine_render::wire::{LineBatch, LineLists, WireStyle, WireView, Wireframer};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, Disabled, PointLight, SpotLight, Sun, look_rotation};
 use engine_scene::{
@@ -522,6 +522,7 @@ pub fn editor<G: Game>(
     )?;
     let outliner = Outliner::new(setup.device, setup.bindless, output.format, output.white)?;
     let wireframer = Wireframer::new(setup.device, setup.bindless, output.format, output.white)?;
+    let line_lists = LineLists::new(setup.device, setup.bindless, output.format, output.white)?;
     let unlit = Unlit::new(setup.device, setup.bindless, output.format, output.white)?;
     // The thumbnails' atlas (ADR 0112): its pixels uploaded once the first frame records.
     let atlas = engine_render::texture::GpuTexture::new(
@@ -571,6 +572,7 @@ pub fn editor<G: Game>(
             picker,
             outliner,
             wireframer,
+            line_lists,
             unlit,
             atlas,
         },
@@ -902,6 +904,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Alt+3", ids.view_modes[1]),
         ("Alt+2", ids.view_modes[2]),
         ("Alt+5", ids.view_modes[3]),
+        // Unreal's Collision show flag.
+        ("Alt+C", ids.colliders),
         ("F2", ids.rename),
         ("Ctrl+Shift+P", ids.palette),
         // VS Code's: the project's scripts searched (the palette's `%`).
@@ -2035,7 +2039,7 @@ struct Editor {
     loose_files: Vec<String>,
     /// A loose file's click, for its double click.
     last_loose_click: Option<(String, Instant)>,
-    collider_edges: Vec<(Vec3, Vec3)>,
+    collider_edges: Vec<[Vec3; 2]>,
     collider_key: BlockoutKey,
     /// The navigation mesh shown over the viewport (View: Navigation, E2b-4b): its edges as
     /// last baked (their ends, and whether each is a boundary), what that bake was made
@@ -2043,6 +2047,8 @@ struct Editor {
     /// are now (a bake waits a moment after an edit).
     show_nav: bool,
     nav_edges: Vec<(Vec3, Vec3, bool)>,
+    /// Those edges as the overlay draws them ([`nav_lines`]).
+    nav_lines: [Vec<[Vec3; 2]>; 2],
     nav_key: BlockoutKey,
     nav_job: Option<std::sync::mpsc::Receiver<Result<NavBaked, String>>>,
     nav_changed: Option<(Instant, BlockoutKey)>,
@@ -2653,6 +2659,7 @@ impl Editor {
             collider_key: Vec::new(),
             show_nav: false,
             nav_edges: Vec::new(),
+            nav_lines: Default::default(),
             nav_key: Vec::new(),
             nav_job: None,
             nav_changed: None,
@@ -4468,6 +4475,15 @@ impl Editor {
         };
         for i in 0..chords {
             let chord = self.input.chords()[i];
+            // The find bar's own Alt keys while it is open: match case, whole words, every
+            // match a caret (Alt+C is the colliders' elsewhere).
+            if finding
+                && chord.alt
+                && !chord.ctrl
+                && matches!(chord.key, Key::KeyC | Key::KeyW | Key::Enter)
+            {
+                continue;
+            }
             // In the game's view, the keys without Ctrl or Alt are the game's, but F1 to
             // F12.
             if game_view && !chord.ctrl && !chord.alt && !is_function_key(chord.key) {
@@ -7687,6 +7703,7 @@ impl Editor {
         self.icon_hover = None;
         self.prefab_bases.clear();
         self.nav_edges.clear();
+        self.nav_lines = Default::default();
     }
 
     /// Tab record `doc` put in the world as the scene shown: its entities, file, autosave,
@@ -9718,6 +9735,7 @@ impl Editor {
                         baked.tiles, baked.triangles, baked.ms
                     ));
                     self.nav_edges = baked.edges;
+                    self.nav_lines = nav_lines(&self.nav_edges);
                 }
                 Ok(Err(e)) => {
                     self.nav_job = None;
@@ -14156,6 +14174,7 @@ impl<G> EditorGame<G> {
             shared.navigation_frame(player.blockout(), &runtime.world);
         } else {
             shared.nav_edges.clear();
+            shared.nav_lines = Default::default();
             shared.nav_key.clear();
         }
         // The colliders' overlay (ADR 0110 E2b-4): the edges again when a group changed.
@@ -15450,54 +15469,15 @@ struct NavBaked {
 /// How long the brushes stay as they are before their navigation is baked again.
 const NAV_WAIT: Duration = Duration::from_millis(300);
 
-/// The most navigation edges drawn.
-const NAV_EDGES: usize = 60_000;
-
-/// The navigation mesh over the viewport (ADR 0110 E2b-4b), under the panels: its
-/// boundaries (walls, drops) bright green, the edges between its polygons faint, a
-/// couple of centimetres above the surface.
-fn draw_navigation(editor: &Editor, rect: [u32; 4], canvas: &mut Canvas) {
-    if !editor.show_nav || editor.nav_edges.is_empty() {
-        return;
-    }
-    let scale = editor.scale.max(0.5);
-    let view = ViewProj::new(&editor.orbit, rect);
-    canvas.set_clip(Some(clip_of(rect)));
-    let order = Order::layer(-1);
+/// The navigation mesh's edges as the overlay draws them: its boundaries, then its other
+/// edges, a couple of centimetres above the surface they lie on.
+fn nav_lines(edges: &[(Vec3, Vec3, bool)]) -> [Vec<[Vec3; 2]>; 2] {
     let lift = Vec3::Y * 0.02;
-    for &(a, b, boundary) in editor.nav_edges.iter().take(NAV_EDGES) {
-        if let (Some(a), Some(b)) = (view.screen(a + lift), view.screen(b + lift)) {
-            let (width, color) = if boundary {
-                (1.5 * scale, Vec4::new(0.35, 1.0, 0.45, 0.9))
-            } else {
-                (scale, Vec4::new(0.35, 1.0, 0.45, 0.3))
-            };
-            canvas.draw(&Quad::line(a, b, width).color(color).order(order));
-        }
+    let mut lines: [Vec<[Vec3; 2]>; 2] = Default::default();
+    for &(a, b, boundary) in edges {
+        lines[usize::from(!boundary)].push([a + lift, b + lift]);
     }
-    canvas.set_clip(None);
-}
-
-/// The most collider edges drawn: a level's worth; beyond, the overlay would cost frames.
-const COLLIDER_EDGES: usize = 60_000;
-
-/// The blockout's colliders over the viewport (ADR 0110 E2b-4), under the panels: the
-/// edges of the brushes' pieces that collide, thin and cyan, as the physics gets them.
-fn draw_colliders(editor: &Editor, rect: [u32; 4], canvas: &mut Canvas) {
-    if !editor.show_colliders || editor.collider_edges.is_empty() {
-        return;
-    }
-    let scale = editor.scale.max(0.5);
-    let view = ViewProj::new(&editor.orbit, rect);
-    canvas.set_clip(Some(clip_of(rect)));
-    let order = Order::layer(-1);
-    let color = Vec4::new(0.35, 0.95, 1.0, 0.7);
-    for &(a, b) in editor.collider_edges.iter().take(COLLIDER_EDGES) {
-        if let (Some(a), Some(b)) = (view.screen(a), view.screen(b)) {
-            canvas.draw(&Quad::line(a, b, scale).color(color).order(order));
-        }
-    }
-    canvas.set_clip(None);
+    lines
 }
 
 /// A size over the viewport: `text` on a dark label centered on `at`.
@@ -15601,9 +15581,10 @@ pub struct EditorOverlay {
     picker: Picker,
     /// Outlines the selection in it.
     outliner: Outliner,
-    /// Its wireframes in the view modes that show edges (ADR 0116); none on a device
-    /// without the line mode.
-    wireframer: Option<Wireframer>,
+    /// The view modes' wireframes (ADR 0116), on a device with the line mode.
+    wireframer: Wireframer,
+    /// The colliders and the navigation mesh, as lines in the world (ADR 0116).
+    line_lists: LineLists,
     /// Its unlit view (ADR 0116).
     unlit: Unlit,
     /// The listing's thumbnails, in cells (ADR 0112).
@@ -15852,7 +15833,16 @@ impl Overlay for EditorOverlay {
                     );
                 }
                 // The view mode's edges (ADR 0116), below the outlines and the panels.
-                if let (Some(wires), Some(scene)) = (self.wireframer.as_mut(), view.scene)
+                let wire_view = |scene_depth| WireView {
+                    target: pass.target,
+                    rect,
+                    clip_from_world: view.camera.clip_from_world(aspect),
+                    near: view.camera.near,
+                    far: view.camera.far,
+                    scene_depth,
+                    render: view.frame.render,
+                };
+                if let Some(scene) = view.scene
                     && matches!(
                         editor.view_mode,
                         ViewMode::Wireframe | ViewMode::LitWireframe
@@ -15860,26 +15850,49 @@ impl Overlay for EditorOverlay {
                     && !editor.game_view()
                 {
                     let lines_only = editor.view_mode == ViewMode::Wireframe;
-                    wires.add_passes(
+                    self.wireframer.add_passes(
                         pass.fg,
                         pass.ring,
                         pass.bindless,
                         view.geometry,
                         scene,
-                        &WireView {
-                            target: pass.target,
-                            rect,
-                            clip_from_world: view.camera.clip_from_world(aspect),
-                            near: view.camera.near,
-                            far: view.camera.far,
-                            scene_depth: (!lines_only).then_some(view.frame.depth),
-                            render: view.frame.render,
-                        },
+                        &wire_view((!lines_only).then_some(view.frame.depth)),
                         if lines_only {
                             &WireStyle::LINES
                         } else {
                             &WireStyle::OVER
                         },
+                    );
+                }
+                // The blockout's colliders and the navigation mesh (ADR 0116 V2a): in the
+                // world, tested against the scene's depth, so a line on a surface never
+                // flickers against it and one behind a wall is faint.
+                if !editor.game_view() {
+                    // Empty when hidden.
+                    let [boundary, inner] = &editor.nav_lines;
+                    let batches = [
+                        LineBatch {
+                            lines: &editor.collider_edges,
+                            color: [0.35, 0.95, 1.0, 0.85],
+                            hidden: 0.2,
+                        },
+                        LineBatch {
+                            lines: boundary,
+                            color: [0.35, 1.0, 0.45, 0.9],
+                            hidden: 0.25,
+                        },
+                        LineBatch {
+                            lines: inner,
+                            color: [0.35, 1.0, 0.45, 0.3],
+                            hidden: 0.1,
+                        },
+                    ];
+                    self.line_lists.add_passes(
+                        pass.fg,
+                        pass.ring,
+                        pass.bindless,
+                        &wire_view(Some(view.frame.depth)),
+                        &batches,
                     );
                 }
                 // The outlines, below the panels (none in the game's view).
@@ -15952,8 +15965,6 @@ impl Overlay for EditorOverlay {
             }
             if let Some(rect) = editor.view_rect.filter(|_| !editor.game_view()) {
                 draw_overlays(editor, rect, &self.glyphs, &mut self.canvas);
-                draw_navigation(editor, rect, &mut self.canvas);
-                draw_colliders(editor, rect, &mut self.canvas);
                 draw_sides(editor, rect, &self.glyphs, &mut self.canvas);
                 draw_faces(editor, rect, &self.glyphs, &mut self.canvas);
                 if editor.draw.is_some() {
@@ -16027,11 +16038,12 @@ impl Overlay for EditorOverlay {
         self.outliner
             .set_output(setup.device, setup.bindless, output.format, output.white)
             .map_err(AppError::at("the editor's outlines"))?;
-        if let Some(wires) = &mut self.wireframer {
-            wires
-                .set_output(setup.device, setup.bindless, output.format, output.white)
-                .map_err(AppError::at("the editor's wireframes"))?;
-        }
+        self.wireframer
+            .set_output(setup.device, setup.bindless, output.format, output.white)
+            .map_err(AppError::at("the editor's wireframes"))?;
+        self.line_lists
+            .set_output(setup.device, setup.bindless, output.format, output.white)
+            .map_err(AppError::at("the editor's lines"))?;
         self.unlit
             .set_output(setup.device, setup.bindless, output.format, output.white)
             .map_err(AppError::at("the editor's unlit view"))?;
@@ -18933,6 +18945,11 @@ mod tests {
         );
         ed.run(&mut world, id);
         assert!(!ed.show_colliders);
+        // Alt+C, Unreal's key.
+        chord(&mut ed, &mut world, &[ALT, C]);
+        assert!(ed.show_colliders, "Alt+C shows them");
+        chord(&mut ed, &mut world, &[ALT, C]);
+        assert!(!ed.show_colliders, "and hides them");
     }
 
     const ALT: (u16, u16) = (0x12, 0x38);

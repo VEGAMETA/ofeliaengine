@@ -19,7 +19,7 @@ use engine_render::material::{MaterialDesc, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData};
 use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
-use engine_render::wire::{WireStyle, WireView, Wireframer};
+use engine_render::wire::{LineBatch, LineLists, WireStyle, WireView, Wireframer};
 use engine_rhi::ash::vk;
 use engine_rhi::{
     AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc, MemoryLocation,
@@ -80,10 +80,12 @@ fn wireframes_draw_the_edges_in_front_or_every_one_over_a_background() {
         ShadowSettings::default(),
     )
     .unwrap();
-    let Some(mut wires) = Wireframer::new(&device, &bindless, FORMAT, 1.0).unwrap() else {
+    let mut wires = Wireframer::new(&device, &bindless, FORMAT, 1.0).unwrap();
+    if !wires.draws_wireframes() {
         println!("skipping: the device has no line mode");
         return;
-    };
+    }
+    let mut lists = LineLists::new(&device, &bindless, FORMAT, 1.0).unwrap();
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mut textures = TexturePool::new(&device, 16 << 20, 1);
@@ -162,7 +164,10 @@ fn wireframes_draw_the_edges_in_front_or_every_one_over_a_background() {
     // the first.
     let mut shots = Vec::new();
     let mut frame_number = 0u64;
-    for over in [true, false] {
+    // A segment on A's surface, its right part behind B: what the colliders' overlay draws.
+    let segment = [[Vec3::new(-1.0, -0.2, -4.0), Vec3::new(0.5, -0.2, -4.0)]];
+    for shot in 0..3 {
+        let (over, list) = (shot != 1, shot == 2);
         for _ in 0..2 {
             frame_number += 1;
             // SAFETY: one-shot recording and submission, then wait.
@@ -245,30 +250,34 @@ fn wireframes_draw_the_edges_in_front_or_every_one_over_a_background() {
                         background: Some(BACKGROUND),
                     }
                 };
-                let drawn = wires.add_passes(
-                    &mut fg,
-                    &mut ring,
-                    &bindless,
-                    &geo,
-                    &frame,
-                    &WireView {
-                        target: color,
-                        rect: vk::Rect2D {
-                            offset: vk::Offset2D::default(),
-                            extent: vk::Extent2D {
-                                width: SIZE,
-                                height: SIZE,
-                            },
+                let view = WireView {
+                    target: color,
+                    rect: vk::Rect2D {
+                        offset: vk::Offset2D::default(),
+                        extent: vk::Extent2D {
+                            width: SIZE,
+                            height: SIZE,
                         },
-                        clip_from_world,
-                        near: NEAR,
-                        far: FAR,
-                        scene_depth: over.then_some(depth),
-                        render: (SIZE, SIZE),
                     },
-                    &style,
-                );
-                assert_eq!(drawn, 2, "both quads in view");
+                    clip_from_world,
+                    near: NEAR,
+                    far: FAR,
+                    scene_depth: over.then_some(depth),
+                    render: (SIZE, SIZE),
+                };
+                if list {
+                    let batch = LineBatch {
+                        lines: &segment,
+                        color: WHITE,
+                        hidden: 0.25,
+                    };
+                    let drawn = lists.add_passes(&mut fg, &mut ring, &bindless, &view, &[batch]);
+                    assert_eq!(drawn, 1, "one segment");
+                } else {
+                    let drawn = wires
+                        .add_passes(&mut fg, &mut ring, &bindless, &geo, &frame, &view, &style);
+                    assert_eq!(drawn, 2, "both quads in view");
+                }
                 let out = fg.import_buffer(
                     "readback",
                     ImportedBuffer {
@@ -348,7 +357,7 @@ fn wireframes_draw_the_edges_in_front_or_every_one_over_a_background() {
             .unwrap()
     };
     let line = |p: [f32; 3]| p.iter().all(|&v| v > 0.9);
-    let (over, only) = (&shots[0], &shots[1]);
+    let (over, only, listed) = (&shots[0], &shots[1], &shots[2]);
     // Over the frame: A's left edge, its diagonal (through its middle) and B's left edge.
     for (name, x, z) in [
         ("A's left", -1.1, -4.0),
@@ -377,6 +386,22 @@ fn wireframes_draw_the_edges_in_front_or_every_one_over_a_background() {
             "{p:?}"
         );
     }
+    // A line list: on A's surface whole (no fighting it), behind B at a quarter.
+    let row = (SIZE as f32 * 0.5 + 0.2 / 4.0 * pixels_per_unit) as u32;
+    let brightest_down = |shot: &[u16], x: u32| {
+        (row - 2..=row + 2)
+            .map(|r| at(shot, x, r))
+            .max_by(|p, q| p[0].total_cmp(&q[0]))
+            .unwrap()
+    };
+    let on_a = brightest_down(listed, column(-0.7, -4.0));
+    let behind_b = brightest_down(listed, column(0.25, -4.0));
+    println!("line list: on A {on_a:?}, behind B {behind_b:?}");
+    assert!(line(on_a), "{on_a:?}");
+    assert!(
+        behind_b.iter().all(|&v| (v - 0.25).abs() < 0.03),
+        "{behind_b:?}"
+    );
 
     // SAFETY: the device is idle.
     unsafe {
@@ -390,6 +415,7 @@ fn wireframes_draw_the_edges_in_front_or_every_one_over_a_background() {
         d.destroy_command_pool(pool, None);
     }
     drop(wires);
+    drop(lists);
     drop(scene);
     drop(renderer);
     drop(bindless);
