@@ -510,7 +510,8 @@ editor compiles textures in the background and Unity's caches its imports:
     uncompressed; from the cache, 42 ms of keys (FNV-1a over 45 MB of files at 1.1 GB/s)
     and 19 ms of entries read.
 - **Left:**
-  - the keys' hash is 70 % of a load from the cache: a faster content hash for keys
-    (ADR 0008's `StableHasher` stays as promised) is the next step;
+  - the keys' hash was 70 % of a load from the cache: XXH3-128 since ADR 0113 (keys
+    42 → 1 ms on one thread; FlightHelmet from the cache 31 → 27 ms added later, 34 →
+    31 ms in the first frame);
   - compressing on the GPU (ADR 0041's next) would make the 8 s of the first time
     vanish.

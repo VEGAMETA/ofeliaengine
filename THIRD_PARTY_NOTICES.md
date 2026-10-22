@@ -14,6 +14,7 @@ the dependency.
 | glam 0.33 | MIT OR Apache-2.0 | vectors, matrices, quaternions in `engine_core::math` (ADR 0012) |
 | mimalloc 0.1.52 + libmimalloc-sys 0.1.49 (© Octavian Oncescu) | MIT | the global allocator's Rust bindings in `engine_core::alloc` (ADR 0086) |
 | mimalloc 2.3.2 (© Microsoft Corporation, Daan Leijen; vendored inside libmimalloc-sys, built by cc) | MIT | the global allocator (ADR 0086) |
+| twox-hash 2.1.5 (© 2015 Jake Goulding; a Rust implementation of xxHash's XXH3 specification) | MIT | XXH3-128, the content hash of cache keys in `engine_core::hash` (ADR 0113) |
 | bytemuck 1.25 | Zlib OR Apache-2.0 OR MIT | plain-data proofs for ECS components that are snapshotted and hashed byte-wise (ADR 0017) |
 | linkme 0.3.37 | MIT OR Apache-2.0 | the list of reflected component and resource types the linker collects in `engine_ecs` (ADR 0104): saves find a type by name |
 | harfrust 0.13.3 (+ bitflags 2, once_cell 1, smallvec 1) | MIT (the others MIT OR Apache-2.0) | text shaping in `engine_text` (ADR 0025) |

@@ -45,7 +45,8 @@ The bootstrap triangle used SPIR-V compiled by hand.
     as the DDC;
   - a failed cache write costs only a recompile.
 - **`engine_core::hash::StableHasher`**: 128-bit FNV-1a, with a promise never to change,
-  because cache file names depend on it.
+  because cache file names depend on it. Keys over whole source files hash those with
+  `content_hash128` (XXH3-128, the same promise; ADR 0113) and feed the result to it.
 - The committed bootstrap SPIR-V is checked against the source by a test whenever the
   compiler version matches (2026.12 at first; 2026.18.3 since 2026-09-27, which honors
   `precise` in SPIR-V).

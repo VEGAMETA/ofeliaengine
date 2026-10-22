@@ -18,7 +18,7 @@ use crate::pack::{EntryKind, Pack, PackError, PackStats, PackWriter, PreparedEnt
 use block_compression::encode::compress_rgba16;
 use block_compression::half::f16;
 use block_compression::{BC6HSettings, CompressionVariant};
-use engine_core::hash::{StableHasher, hash128};
+use engine_core::hash::{StableHasher, content_hash128};
 use engine_core::jobs::ThreadPool;
 use engine_core::math::Vec3;
 use std::path::Path;
@@ -345,7 +345,8 @@ fn compress_level(level: &[Vec3], size: u32, jobs: Option<&ThreadPool>) -> Vec<u
 /// The cache key of a panorama file's bytes (`.hdr` or OpenEXR) cooked with `settings`.
 pub fn panorama_key(encoded: &[u8], settings: &PanoramaCookSettings) -> u128 {
     let mut h = StableHasher::new();
-    h.write_str("engine panorama 1");
+    // 2: the file's bytes by `content_hash128` (ADR 0113).
+    h.write_str("engine panorama 2");
     h.write_str(ENCODER);
     h.write_str("2 x 2 bilinear samples; box mips");
     h.write_u64(u64::from(settings.size));
@@ -358,7 +359,7 @@ pub fn panorama_key(encoded: &[u8], settings: &PanoramaCookSettings) -> u128 {
             }
         }
     }
-    h.write(&hash128(encoded).to_le_bytes());
+    h.write(&content_hash128(encoded).to_le_bytes());
     h.finish()
 }
 

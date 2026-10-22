@@ -146,6 +146,6 @@ of ADR 0040. RGBA8 → BC7/BC5:
   (ADR 0108's E4-8 as-built).
 - Measured on FlightHelmet (15 textures of 2048², 45 MB of PNG): from the cache, the
   textures cost 42 ms of keys on one thread (FNV-1a at 1.1 GB/s) and 19 ms of entries
-  read, against 897 ms decoded with their levels; GPU memory 272 → 68 MB. The keys' hash
-  is the next thing to make faster (a new content hash: `StableHasher` keeps ADR 0008's
-  promise).
+  read, against 897 ms decoded with their levels; GPU memory 272 → 68 MB.
+- The keys' hash of the file's bytes is `content_hash128` (XXH3-128) since ADR 0113
+  (`engine texture 2`): FlightHelmet's keys 42 → 1 ms on one thread.
