@@ -1258,6 +1258,31 @@ Two worlds on screen (co-op in one process) will need worlds of their own and co
   their overrides, so shown again they load the prefab as it is now: no merge needed; the
   scene in the world follows a file written anew as before (E5-4). **E5 is done.**
 
+## As built (E6-1, 2026-10-22): the Output
+
+`docs/research/ux/output.md` (Unity, Godot, Unreal, VS Code, Blender).
+
+- **The log is the engine's:** `engine_log::LogReader` takes the records logged since its
+  last read straight from the ring (ADR 0061), with no locks and nothing allocated in the
+  logger. A record still being written waits for the next read. Records the ring
+  overwrote first are counted as lost. The editor's Output starts from the oldest still
+  there, so the start's messages show.
+- **The rows** (`output::Output`): the last 10,000.
+  - The same message again within the last 64 rows folds into its row: a count on it, and
+    it moves last with its time (Unity's Collapse).
+  - A line marks each Play's start, and rows do not fold across it.
+  - The last 500 rows that match are shown, oldest first.
+- **The panel** opens above the bottom bar from its tab, or with "View: Output" (Ctrl+J,
+  VS Code's key), and takes the viewport's room while open.
+  - **The header:** a toggle per level with its count (errors, warnings, information,
+    debugging; debugging off by default), a text filter over the targets and messages,
+    Follow (the newest row kept in view) and Clear ("Output: Clear").
+  - **The rows:** errors and warnings carry a sign and a color of their own (`Palette::error`,
+    `Palette::warning`), not color alone.
+  - **The tab** says how many errors came.
+- **Left (E6's further steps):** causes taken from a row's text (asset paths, scene ids,
+  `file:line`), Tasks, History, and the profiler's first panel.
+
 ## As built (E4-1, 2026-10-22): the local cache's index
 
 §5 left the index's form to a measurement: our own text file, read in 3.2 ms and an

@@ -60,6 +60,10 @@ pub struct Palette {
     pub accent: Color,
     /// The edge around the viewport while the game plays.
     pub playing: Color,
+    /// Errors in the Output, with their mark (not by color alone).
+    pub error: Color,
+    /// Warnings in the Output.
+    pub warning: Color,
 }
 
 impl Default for Palette {
@@ -76,8 +80,41 @@ impl Default for Palette {
             text_dim: srgb(140, 144, 156),
             accent: srgb(96, 150, 240),
             playing: srgb(90, 200, 120),
+            error: srgb(236, 104, 96),
+            warning: srgb(230, 184, 84),
         }
     }
+}
+
+/// The Output panel (ADR 0107 E6): the log's rows shown, its filter and level toggles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutputView<'a> {
+    /// The rows shown, oldest first.
+    pub rows: &'a [OutputRow<'a>],
+    /// The text filter.
+    pub filter: &'a str,
+    /// Which levels show: errors, warnings, information, the rest.
+    pub levels: [bool; 4],
+    /// How many records of each level came.
+    pub counts: [usize; 4],
+    /// The newest row is kept in view.
+    pub follow: bool,
+}
+
+/// A row of the Output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutputRow<'a> {
+    /// The level's place (0 errors, 1 warnings, 2 information, 3 the rest); none for a
+    /// line marking an event (a Play).
+    pub level: Option<usize>,
+    /// When it last came.
+    pub time: &'a str,
+    /// Its target (empty for a marking line).
+    pub target: &'a str,
+    /// Its message, or the marking line's words.
+    pub message: &'a str,
+    /// How many times it came, folded into this row.
+    pub count: u32,
 }
 
 /// A row of the scene tree or of the folder tree.
@@ -343,6 +380,8 @@ pub struct ShellModel<'a> {
     pub columns: usize,
     /// Bottom panel tabs, and the open one (`None`: all closed).
     pub bottom_tabs: &'a [&'a str],
+    /// The Output panel above the bottom bar, while its tab is open.
+    pub output: Option<OutputView<'a>>,
     /// The open bottom panel.
     pub active_bottom: Option<usize>,
     /// The game is running.
@@ -432,6 +471,14 @@ pub struct ShellResponse {
     pub tree_under: Option<usize>,
     /// A bottom panel tab was clicked.
     pub bottom_tab: Option<usize>,
+    /// The Output's filter field was used (`Ui::edited_text` while it changes).
+    pub output_filter: Option<TextFieldResponse>,
+    /// An Output level toggle was clicked (0 errors … 3 the rest).
+    pub output_level: Option<usize>,
+    /// The Output's Follow was clicked.
+    pub output_follow: bool,
+    /// The Output's Clear was clicked.
+    pub output_clear: bool,
     /// Play (F5).
     pub play: bool,
     /// Pause (F7).
@@ -537,6 +584,9 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
                 inspector_dock(ui, model, p, &mut out, &mut popups);
             },
         );
+        if let Some(view) = &model.output {
+            output_panel(ui, view, p, &mut out);
+        }
         bottom_bar(ui, model, p, &mut out);
         if let Some(view) = &model.palette {
             palette(ui, view, p, &mut out, &mut popups);
@@ -1957,6 +2007,123 @@ fn inspector_dock(
             });
         },
     );
+}
+
+/// The Output panel (ADR 0107 E6): a header of level toggles with their counts, the
+/// filter, Follow and Clear; then the rows, the newest last, errors and warnings marked by
+/// a sign and a color, a folded row's count at its end.
+fn output_panel(ui: &mut Ui, view: &OutputView<'_>, p: &Palette, out: &mut ShellResponse) {
+    let panel = Style {
+        size: [Size::Grow(1.0), Size::Fixed(240.0)],
+        direction: Direction::Column,
+        background: Some(p.dock),
+        ..Style::default()
+    };
+    ui.container("output", panel, |ui| {
+        ui.row("output header", bar(p, 28.0), |ui| {
+            const NAMES: [&str; 4] = ["Errors", "Warnings", "Info", "Debug"];
+            for (i, name) in NAMES.iter().enumerate() {
+                ui.push_id(i as u64);
+                let on = view.levels[i];
+                let id = ui.container(
+                    "level",
+                    Style {
+                        padding: [8.0, 3.0, 8.0, 3.0],
+                        radius: 3.0,
+                        background: on.then_some(p.selection_dim),
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        let label = format!("{name} {}", view.counts[i]);
+                        text(
+                            ui,
+                            "label",
+                            &label,
+                            SMALL,
+                            if on { p.text } else { p.text_dim },
+                        );
+                    },
+                );
+                if ui.sense(id, false).clicked {
+                    out.output_level = Some(i);
+                }
+                ui.pop_id();
+            }
+            out.output_filter = filter(ui, view.filter, "Filter the log", p);
+            for (key, label, on) in [("follow", "Follow", view.follow), ("clear", "Clear", false)] {
+                let id = ui.container(
+                    key,
+                    Style {
+                        padding: [8.0, 3.0, 8.0, 3.0],
+                        radius: 3.0,
+                        background: on.then_some(p.selection_dim),
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        text(
+                            ui,
+                            "label",
+                            label,
+                            SMALL,
+                            if on { p.text } else { p.text_dim },
+                        );
+                    },
+                );
+                if ui.sense(id, false).clicked {
+                    if key == "follow" {
+                        out.output_follow = true;
+                    } else {
+                        out.output_clear = true;
+                    }
+                }
+            }
+        });
+        let mut last = None;
+        ui.scroll_column("output rows", |ui| {
+            for (i, row) in view.rows.iter().enumerate() {
+                ui.push_id(i as u64);
+                let line = Style {
+                    size: [Size::Grow(1.0), Size::Fixed(20.0)],
+                    padding: [8.0, 0.0, 8.0, 0.0],
+                    gap: 8.0,
+                    align_cross: Align::Center,
+                    background: row.level.is_none().then_some(p.header),
+                    ..Style::default()
+                };
+                let id = ui.container("row", line, |ui| {
+                    let (mark, color) = match row.level {
+                        Some(0) => (icons::ALERT, p.error),
+                        Some(1) => (icons::ALERT, p.warning),
+                        _ => ("", p.text),
+                    };
+                    text(ui, "time", row.time, SMALL, p.text_dim);
+                    text(ui, "mark", mark, SMALL, color);
+                    if !row.target.is_empty() {
+                        text(ui, "target", row.target, SMALL, p.text_dim);
+                    }
+                    let shown = if row.level.is_none() {
+                        p.text_dim
+                    } else {
+                        color
+                    };
+                    text(ui, "message", row.message, SMALL, shown);
+                    if row.count > 1 {
+                        ui.spacer("fill");
+                        text(ui, "count", &format!("×{}", row.count), SMALL, p.text_dim);
+                    }
+                });
+                last = Some(id);
+                ui.pop_id();
+            }
+        });
+        if view.follow
+            && let Some(id) = last
+        {
+            ui.reveal(id);
+        }
+    });
 }
 
 /// The thin bar of bottom panel tabs, with the status at its right end.

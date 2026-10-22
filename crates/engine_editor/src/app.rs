@@ -582,6 +582,9 @@ struct CommandIds {
     snap: CommandId,
     rename: CommandId,
     palette: CommandId,
+    /// The Output panel opened or closed (E6), and emptied.
+    output: CommandId,
+    clear_output: CommandId,
     find: CommandId,
     select_next: CommandId,
     select_previous: CommandId,
@@ -690,6 +693,8 @@ fn commands() -> (Commands, CommandIds) {
         snap: c.register("edit.snap", "Edit", "Snap by Default"),
         rename: c.register("scene.rename", "Scene", "Rename Selection"),
         palette: c.register("editor.palette", "Editor", "Command Palette"),
+        output: c.register("view.output", "View", "Output"),
+        clear_output: c.register("output.clear", "Output", "Clear"),
         find: c.register("scene.find", "Scene", "Go to Object"),
         select_next: c.register("scene.select_next", "Scene", "Select Next Row"),
         select_previous: c.register("scene.select_previous", "Scene", "Select Previous Row"),
@@ -828,6 +833,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+A", ids.add),
         ("F2", ids.rename),
         ("Ctrl+Shift+P", ids.palette),
+        // VS Code's key for its panel.
+        ("Ctrl+J", ids.output),
         ("Ctrl+P", ids.find),
         ("Ctrl+R", ids.restart),
         ("Space", ids.local_axes),
@@ -1449,6 +1456,11 @@ struct Editor {
     closed: Vec<Doc>,
     /// The other tabs' labels, made with the frame.
     tab_labels: Vec<String>,
+    /// The log as the Output panel shows it (E6), and the bottom panel open (0: Output).
+    output: crate::output::Output,
+    bottom: Option<usize>,
+    /// The Output tab's label (its errors counted), made with the frame.
+    output_label: String,
     /// The last click on a file in the dock, for double clicks (a scene opens).
     last_file_click: Option<(AssetId, Instant)>,
     /// The session in the project's `.ofelia/` (ADR 0107 §4): none until
@@ -2046,6 +2058,9 @@ impl Editor {
             next_doc_key: 2,
             closed: Vec::new(),
             tab_labels: Vec::new(),
+            output: crate::output::Output::new(),
+            bottom: None,
+            output_label: String::new(),
             last_file_click: None,
             session: None,
             game_crate: None,
@@ -3087,6 +3102,41 @@ impl Editor {
             rows: &palette_rows,
             selected: cp.selected.saturating_sub(cp.first),
         });
+        // The Output (E6): the log's new records taken, its tab naming the errors, its rows
+        // while it is open.
+        self.output.poll();
+        self.output_label.clear();
+        self.output_label.push_str("Output");
+        if self.output.counts[0] > 0 {
+            let _ = write!(
+                self.output_label,
+                " {} {}",
+                icons::ALERT,
+                self.output.counts[0]
+            );
+        }
+        let shown = if self.bottom == Some(0) {
+            self.output.shown()
+        } else {
+            Vec::new()
+        };
+        let output_rows: Vec<crate::shell::OutputRow<'_>> = shown
+            .iter()
+            .map(|r| crate::shell::OutputRow {
+                level: r.level,
+                time: &r.time,
+                target: &r.target,
+                message: &r.message,
+                count: r.count,
+            })
+            .collect();
+        let output_view = (self.bottom == Some(0)).then(|| crate::shell::OutputView {
+            rows: &output_rows,
+            filter: &self.output.filter,
+            levels: self.output.levels,
+            counts: self.output.counts,
+            follow: self.output.follow,
+        });
         let active_tab = self.active_tab();
         let scenes: Vec<&str> = self
             .tabs
@@ -3125,14 +3175,15 @@ impl Editor {
             tile: self.tile,
             columns,
             bottom_tabs: &[
-                "Output",
+                self.output_label.as_str(),
                 "Debugger",
                 "Audio",
                 "Animation",
                 "Shader",
                 "Profiler",
             ],
-            active_bottom: None,
+            active_bottom: self.bottom,
+            output: output_view,
             playing,
             paused: self.play.as_ref().is_some_and(|p| p.paused),
             status: &self.status,
@@ -3220,6 +3271,33 @@ impl Editor {
         }
         if response.open_prefab {
             self.run(world, self.ids.open_prefab);
+        }
+        // The bottom panel's tabs: Output opens and closes; the others come later.
+        if let Some(i) = response.bottom_tab {
+            if i == 0 {
+                self.run(world, self.ids.output);
+            } else {
+                self.say(String::from(
+                    "Only the Output is there yet (ADR 0107's phases)",
+                ));
+            }
+        }
+        if let Some(r) = response.output_filter {
+            if r.cancelled {
+                self.output.filter.clear();
+            } else if r.started || r.changed {
+                self.output.filter.clear();
+                self.output.filter.push_str(self.ui.edited_text());
+            }
+        }
+        if let Some(i) = response.output_level {
+            self.output.levels[i] = !self.output.levels[i];
+        }
+        if response.output_follow {
+            self.output.follow = !self.output.follow;
+        }
+        if response.output_clear {
+            self.run(world, self.ids.clear_output);
         }
         if response.play {
             self.run(world, self.ids.play);
@@ -7480,6 +7558,14 @@ impl Editor {
                 self.say(message);
             }
             self.reselect(world, &selected);
+        } else if id == ids.output {
+            self.bottom = if self.bottom == Some(0) {
+                None
+            } else {
+                Some(0)
+            };
+        } else if id == ids.clear_output {
+            self.output.clear();
         } else if id == ids.open_scene {
             self.open_palette(world, "#scene:");
             if let Some(cp) = self.command_palette.as_mut() {
@@ -10635,6 +10721,7 @@ impl<G> EditorGame<G> {
             shared.save_session(player.world_mut());
             let playing = shared.prepare_play(player.world_mut(), from_here);
             shared.play = Some(playing);
+            shared.output.mark("Play");
             if from_here {
                 shared.play_from_here(player.world_mut());
             }
@@ -12775,6 +12862,41 @@ mod tests {
         ed.run(&mut world, ed.ids.undo);
         assert_eq!(world.get::<Transform>(e).unwrap().translation, Vec3::ZERO);
         assert_eq!(world.get::<Mover>(e).unwrap().gait, Gait::Walk);
+    }
+
+    #[test]
+    fn ctrl_j_opens_the_output_and_its_tab_counts_the_errors() {
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            std::env::temp_dir(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.output = crate::output::Output::detached();
+        ed.update(&mut world);
+        assert_eq!(ed.output_label, "Output");
+        ed.output.push(
+            1,
+            engine_log::log::Level::Error,
+            "assets",
+            "props/lamp.scene: no such part",
+        );
+        ed.update(&mut world);
+        assert_eq!(ed.output_label, format!("Output {} 1", icons::ALERT));
+        // Ctrl+J: open, then closed again.
+        ed.run(&mut world, ed.ids.output);
+        assert_eq!(ed.bottom, Some(0));
+        ed.update(&mut world);
+        ed.run(&mut world, ed.ids.output);
+        assert_eq!(ed.bottom, None);
+        // "Output: Clear".
+        ed.run(&mut world, ed.ids.clear_output);
+        ed.update(&mut world);
+        assert_eq!(ed.output_label, "Output");
+        assert!(ed.output.shown().is_empty());
     }
 
     #[test]

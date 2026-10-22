@@ -13,6 +13,8 @@
 //!   [`LogConfig::filter`], changeable while running ([`set_filter`]).
 //! - **Crash reports:** [`write_recent`] copies the last lines out of the ring without
 //!   locks or allocation, and [`report`] holds the sections other subsystems add.
+//! - **Readers in the program** ([`LogReader`]: the editor's Output panel) take the records
+//!   logged since their last read, the same way.
 //!
 //! ```no_run
 //! let _log = engine_log::init(&engine_log::LogConfig::default()).expect("logger");
@@ -367,6 +369,143 @@ pub fn write_recent(out: &mut dyn fmt::Write, max_records: usize) -> fmt::Result
         }
         write_line(out, first, text)
     })
+}
+
+/// A record read back from the ring ([`LogReader::read`]), borrowed for the call.
+#[derive(Debug, Clone, Copy)]
+pub struct LogRecord<'a> {
+    /// When it was logged: nanoseconds since the logger was installed.
+    pub time: u64,
+    /// Its level.
+    pub level: Level,
+    /// Its target (the module path unless the call named one), as valid UTF-8.
+    pub target: &'a str,
+    /// Its message, as valid UTF-8 (a record cut at the length limit ends with `...`).
+    pub message: &'a str,
+}
+
+/// Reads the records logged since its last read, oldest first, as the editor's Output
+/// panel does: no locks, and nothing allocated (a record is assembled on the stack).
+/// Records the ring overwrote before they were read are counted, not seen.
+#[derive(Debug, Default)]
+pub struct LogReader {
+    /// The next sequence number to read.
+    cursor: u64,
+    /// A sequence number not written yet at the last reads, and how many saw it so: after
+    /// three, its writer is taken to have dropped it (as the writer thread does).
+    stalled: Option<(u64, u32)>,
+}
+
+impl LogReader {
+    /// A reader of what is logged from now on.
+    pub fn new() -> Self {
+        Self {
+            cursor: SHARED.get().map_or(0, |s| s.ring.head()),
+            stalled: None,
+        }
+    }
+
+    /// A reader of every record still in the ring, then of what comes.
+    pub fn from_oldest() -> Self {
+        Self {
+            cursor: SHARED
+                .get()
+                .map_or(0, |s| s.ring.head().saturating_sub(s.ring.capacity())),
+            stalled: None,
+        }
+    }
+
+    /// Calls `f` with each record logged since the last call, oldest first; how many were
+    /// lost meanwhile (overwritten before they were read, or dropped by their writers). A
+    /// record still being written waits for the next call. Nothing without a logger.
+    pub fn read(&mut self, mut f: impl FnMut(&LogRecord<'_>)) -> u64 {
+        let Some(shared) = SHARED.get() else {
+            return 0;
+        };
+        let ring = &shared.ring;
+        let head = ring.head();
+        let oldest = head.saturating_sub(ring.capacity());
+        let mut lost = 0;
+        if self.cursor < oldest {
+            lost += oldest - self.cursor;
+            self.cursor = oldest;
+        }
+        let mut text = [0u8; MAX_RECORD_BYTES];
+        'records: while self.cursor < head {
+            let seq = self.cursor;
+            let first = match ring.read(seq) {
+                Read::Part(p) if p.meta.part == 0 => p,
+                Read::Pending => {
+                    if self.wait(seq) {
+                        break;
+                    }
+                    lost += 1;
+                    self.cursor += 1;
+                    continue;
+                }
+                _ => {
+                    lost += 1;
+                    self.cursor += 1;
+                    continue;
+                }
+            };
+            let parts = u64::from(first.meta.parts.max(1));
+            let mut len = 0;
+            for k in 0..parts {
+                let part = if k == 0 {
+                    first
+                } else {
+                    match ring.read(seq + k) {
+                        Read::Part(p) if u64::from(p.meta.part) == k => p,
+                        Read::Pending if self.wait(seq + k) => break 'records,
+                        _ => break,
+                    }
+                };
+                let bytes = part.bytes();
+                text[len..len + bytes.len()].copy_from_slice(bytes);
+                len += bytes.len();
+            }
+            self.stalled = None;
+            let target_len = usize::from(first.meta.target_len).min(len);
+            let (target, message) = text[..len].split_at(target_len);
+            f(&LogRecord {
+                time: first.time,
+                level: first.meta.level,
+                target: valid_utf8(target),
+                message: valid_utf8(message),
+            });
+            self.cursor = seq + parts;
+        }
+        lost
+    }
+
+    /// Whether to wait for sequence number `seq`, still being written: yes for its first
+    /// three reads.
+    fn wait(&mut self, seq: u64) -> bool {
+        match &mut self.stalled {
+            Some((s, n)) if *s == seq => {
+                *n += 1;
+                if *n < 3 {
+                    return true;
+                }
+                self.stalled = None;
+                false
+            }
+            _ => {
+                self.stalled = Some((seq, 1));
+                true
+            }
+        }
+    }
+}
+
+/// The valid UTF-8 prefix of `bytes`: a record cut at its length limit may end inside a
+/// character.
+fn valid_utf8(bytes: &[u8]) -> &str {
+    match core::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => core::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or_default(),
+    }
 }
 
 /// Calls `emit` for every record between `start` and `end` whose first part is still

@@ -371,8 +371,13 @@ Last updated: 2026-10-22.
     further primitive on a child it makes (`Derived`: never saved, left out of undo,
     picks name the model), the renderer and the extraction untouched; a model dropped
     from the dock fills them from its glTF.
-  - **Next:** E6 (output, errors, history; ADR 0107 §7), then E7 (Luau, once the owner
-    has answered ADR 0114's questions).
+  - **E6-1, the Output** (#PR, ADR 0107's as-built; `docs/research/ux/output.md`):
+    `engine_log::LogReader` reads the ring since its last read without locks or
+    allocation; the panel (Ctrl+J, its tab) folds repeated messages with a count, marks
+    each Play, filters by level and text, follows the newest; its tab counts the errors.
+  - **Next:** E6-2, causes from a row's text (asset paths, scene ids, `file:line`); then
+    Tasks, History, the profiler's first panel; then E7 (Luau, once the owner has answered
+    ADR 0114's questions).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

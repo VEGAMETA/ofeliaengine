@@ -20,6 +20,7 @@ pub mod icons;
 mod import;
 pub mod input;
 pub mod inspector;
+mod output;
 pub mod paint;
 mod palette;
 mod prefabs;

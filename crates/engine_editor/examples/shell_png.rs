@@ -416,6 +416,7 @@ fn main() {
             "Profiler",
         ],
         active_bottom: None,
+        output: None,
         playing,
         paused: false,
         status: &status,

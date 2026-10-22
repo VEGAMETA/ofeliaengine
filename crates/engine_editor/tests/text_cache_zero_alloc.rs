@@ -186,6 +186,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         columns: 4,
         bottom_tabs: &["Output", "Debugger"],
         active_bottom: None,
+        output: None,
         playing: false,
         paused: false,
         status: "engine 0.0.0",
