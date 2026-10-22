@@ -503,19 +503,18 @@ Last updated: 2026-10-22.
     on a cooking thread of its own when first asked; built-in meshes have their own
     shapes. The editor draws them with the blockout's, colored by motion.
     `engine_collision::Shape::edges` gives any shape's lines.
-  - **Models' bodies, step 2** (#PR, ADR 0117): `Game::before_ticks(scene)` and
+  - **Models' bodies, step 2** (#352, ADR 0117): `Game::before_ticks(scene)` and
     `ScenePhysics::sync_scene(scene)` give the blockout's brushes and the models their
     bodies in one line (`Game::tick` had only the world, so the guide's `sync_blockout`
     call could not be written there). Static models follow their entities, props fall
     and roll moving theirs; it visits only what changed and allocates nothing while
     nothing does.
   - **Next, in this order:**
-    1. The colliders' overlay: change detection and lines kept on the GPU while they do
-       not change (10,000 models: 0.1 ms of the editor's frame and 0.26 ms of copies now);
-    2. E7 on: the engine's types in the editor and for luau-lsp (E7-2, under way on
+    1. E7 on: the engine's types in the editor and for luau-lsp (E7-2, under way on
        `feat/script-types`: the old solver types a hook's `self` from `component`'s
        declaration, the new one of Luau 0.736 does not), then views' fast path (E7-1c);
-    3. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
+       E7-3's player-owned physics builds on `ScenePhysics::sync_scene`;
+    2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
@@ -1665,6 +1664,12 @@ grown, divide and conquer); the old labels stay in parentheses.
       compensation, the plugins' state and windows, an effect baked in the editor.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
+
+- **The colliders' overlay in heavy scenes** (ADR 0117, 2026-10-22): with 10,000 models
+  shown it checks every model's place each frame (99 µs of the editor's frame) and copies
+  its 120,000 lines into the frame's ring (2.9 MB: 0.26 ms of the RTX's frame, over
+  PCIe). Change detection, as `ScenePhysics::sync_models` has, and the lines kept on the
+  GPU while they do not change would take both away. Only while the overlay is shown.
 
 - **The code editor's leftovers** (E8-1, 2026-10-22, ADR 0107's as-built):
   - the scene is still drawn under a script's code (its GPU time spent while coding),
