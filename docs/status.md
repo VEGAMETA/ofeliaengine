@@ -607,6 +607,14 @@ Last updated: 2026-10-22.
   - **Prefab following takes script components** (#372): an instance now gets a script's
     component its prefab added (E5-4 made only the program's types, through their
     `Default`); its texts at the script's defaults (`engine_ecs::DefaultValue`).
+  - **Fixed: a closed VM's queries corrupted a later VM's registry** (#375; from E7-5c):
+    - a query collected as its VM closed queued its views' references under the VM's
+      address;
+    - a VM made later at the same address let go of them, which were entries of its own
+      registry (hooks, views);
+    - the script measurement (six VMs in turn) aborted in 6 of 7 runs (exit 3, wherever an
+      entry was used next);
+    - closing hosts now leave nothing queued (`vm_made`, `vm_gone`): 6 of 6 runs pass.
   - **E9's research and ADR 0119** (#374, proposed):
     - research `docs/research/script-debugger.md` (Luau's debug interface, six debuggers,
       DAP, how to stop while the editor draws on the same thread);
