@@ -1786,15 +1786,26 @@ grown, divide and conquer); the old labels stay in parentheses.
     through the asset database);
   - undo does not keep what an instance could not place (`KeptBlocks`).
 
-- **The editor's frame allocates** (found 2026-10-22, E4-2). ADR 0107 §8 asks for 0
-  allocations per frame in steady state, panels included. The zero-allocation test covers
-  the shell's frame with fixed rows, not the editor's own:
-  - the editor's frame collects the tree's and the FileSystem dock's rows into `Vec`s
-    every frame it builds.
-
-  An idle editor builds no frame, so the cost is only while something changes. To do:
-  measure the editor's frame with the counting allocator, keep its rows in reused
-  buffers.
+- **Fixed (2026-10-23): the editor's frame allocated** (found 2026-10-22, E4-2; ADR 0107
+  §8 asks for 0 per frame in steady state, panels included).
+  - `engine_editor`'s `editor_frame_zero_alloc` measures the whole editor over the player:
+    - a tree of 25 named entities, one selected in the inspector;
+    - files in the dock;
+    - the pointer moving over the viewport and the panels, so every frame is built.
+  - It went from 23 allocations a frame (10 with the inspector's part alone) to 0. The
+    sources were:
+    - the shell's lists built anew each frame (tree, folders, files, tabs, menus, the
+      inspector's values, fields and sections);
+    - `roots()` and the tree's walk;
+    - three paths joined in `tick_assets`;
+    - a query made in `ensure_prefab_bases`;
+    - the outline's walk;
+    - the inspector's component list and field paths;
+    - a section's title put in lower case with no filter.
+  - The fix keeps the lists' room between frames (`recycle`: an in-place `collect` moves
+    a list's allocation to values of another lifetime). The test prints the stacks of the
+    first allocations when it fails.
+  - Not covered yet: a code tab, a multiple selection, Play.
 
 - **The Radeon's CPU check runs 70–85 % above its baseline** (2026-10-22, from #307 on):
   `perf_gate --cpu`'s cpu frame 374 → 640–693 µs, every stage alike (`simulate` and
