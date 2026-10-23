@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 
 /// Names the definitions give their own types; a component of one of these names is left
 /// out (it would shadow them).
-const RESERVED: [&str; 9] = [
+const RESERVED: [&str; 10] = [
     "Entity",
     "Quat",
     "ScriptSelf",
@@ -31,6 +31,7 @@ const RESERVED: [&str; 9] = [
     "ComponentType",
     "Query",
     "Script",
+    "Asset",
 ];
 
 /// The definitions' first part: what does not depend on the program's components.
@@ -52,6 +53,11 @@ type Value = nil | boolean | number | string | vector | Entity
 -- What `has`, `add` and `remove` take: `Transform` (each component of the program is a
 -- global of its name), a script's `component` table, or a component's name.
 export type ComponentType = { name: string }
+
+-- An asset of the project (a prefab scene, a model): what `prop.asset` holds. `tostring`
+-- gives its path once it is known.
+declare extern type Asset with
+end
 
 -- What `prop.number` and the other helpers take after the default.
 type PropOptions = {
@@ -145,6 +151,8 @@ declare prop: {
     boolean: (default: boolean, options: PropOptions?) -> boolean,
     vector: (default: vector, options: PropOptions?) -> vector,
     entity: (default: nil, options: PropOptions?) -> Entity?,
+    -- An asset reference of `kind` ("scene", "model"), set in the editor or a scene file.
+    asset: (kind: string?, options: PropOptions?) -> Asset?,
 }
 
 -- What `world.query` makes: `for e, a, b in q do` gives each entity that has the
@@ -166,6 +174,9 @@ declare world: {
     spawn: (components: { [string]: any }?) -> Entity,
     -- The entities that have these components, for `for e, a, b in q do`.
     query: (...ComponentType | string) -> Query,
+    -- A prefab scene (an asset, or its path) placed at once, moved by `translation`: its
+    -- root's entity.
+    instantiate: (prefab: Asset | string, translation: vector?) -> Entity,
 }
 
 -- Declares system `name`: hooks called once a tick (`on_tick(dt)`) or a frame
@@ -350,7 +361,7 @@ fn luau_type(
         "Vec3" | "Vec3A" | "Vec2" => return Some(String::from("vector")),
         "Quat" => return Some(String::from("Quat")),
         "Entity" => return Some(String::from("Entity?")),
-        "AssetRef" => return None,
+        "AssetRef" => return Some(String::from("Asset?")),
         _ => {}
     }
     match &ty.kind {

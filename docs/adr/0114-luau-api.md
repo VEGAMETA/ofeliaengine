@@ -1428,3 +1428,41 @@ there, and see the script's file in the inspector.
   - the editor's checker takes `random` and `audio` in strict mode.
 - **ADR 0114's coin** (example 2) still waits: its `sound` is a string prop, and props of
   text come with the layout that drops them.
+
+## As built (E7-5e3, 2026-10-23): prefabs placed by scripts, assets in scripts
+
+- **An asset is a value in scripts** (`typeof` `Asset`): a userdata of its own tag (68)
+  holding an `AssetRef`.
+  - Fields of type `AssetRef` (a `Model`'s, a script's `prop.asset(kind)`) are read and
+    written on the fast path: an asset or nil.
+  - Assets are kept, as views are, in a table of 64 places by what they name, so reading
+    one again makes nothing.
+  - `a == b` when they name the same asset; `tostring(a)` gives its path once the host
+    has found it, else its id.
+- **`prop.asset(kind)`** declares an asset reference, none at first. The editor's
+  inspector shows it as any asset field: dropped, picked and previewed.
+- **`world.instantiate(prefab, translation?)`** places a prefab scene at once and returns
+  its root's entity.
+  - `prefab` is an asset or the scene's path in the project.
+  - The scene loads as a scene file does (`engine_scene::load_with`, its own instances
+    read from the project's files), its script components and their values included. Its
+    roots move by `translation`, and a prefab of several roots gets an entity of its own
+    with the roots its children.
+  - **Instances made while the game runs are anonymous:** their `SceneId`s (and the
+    prefab bookkeeping) are taken away, as `world.spawn`'s entities have none, so two
+    instances of one prefab never share an id. Saves keep anonymous entities with their
+    references (ADR 0104).
+  - A script component in it starts at the next stage.
+- **An asset's path** comes from the editor's index of the project's assets, read only
+  (`AssetDatabase::open`, no scan), and else from the headers of the project's scene
+  files, read once; the host keeps what it found.
+- **Tests:**
+  - a prefab (a crate with a door script and a lid) placed by asset and by path: moved,
+    anonymous, its script's values and hierarchy kept;
+  - the asset's path, equality and type;
+  - the instance's script started at the next tick;
+  - the editor's checker takes `prop.asset` and `world.instantiate` in strict mode.
+- **Not in this step:**
+  - instancing from a release's packs: the player reads prefabs from the project's
+    folder;
+  - assets of other kinds than scenes for `instantiate`.

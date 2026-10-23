@@ -248,6 +248,26 @@ return Spin
   the components' hooks, `on_frame(dt, alpha)` once a frame; systems run in the order
   declared.
 
+`world.instantiate` places a prefab, any scene of your game, at once:
+
+```luau
+local Spawner = component("Spawner", { crate = prop.asset("scene") }) -- set in the inspector
+
+function Spawner.on_tick(self, dt: number)
+    if input.just_pressed("drop") and self.crate then
+        local made = world.instantiate(self.crate, self.Transform.translation)
+        made:find_child("Lid").Transform.translation += vector.create(0, 0.5, 0)
+    end
+end
+```
+
+- `prefab` is an asset (`prop.asset`, dropped on the field in the inspector) or the
+  scene's path (`"props/crate.scene"`).
+- Its roots move by the vector given; the root's entity comes back (a scene of several
+  roots gets one more entity holding them).
+- What scripts place is theirs alone: no scene id, so saving and loading keep each
+  instance apart.
+
 `world.spawn` makes an entity at once:
 
 ```luau
@@ -405,6 +425,5 @@ end
 
 ## Coming next
 
-- `world.instantiate` and asset props (`prop.asset`);
 - props of text;
 - script components in saves, with their timers.
