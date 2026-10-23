@@ -594,7 +594,7 @@ Last updated: 2026-10-22.
     own checks off. A material type is read inside `forward.slang`'s prelude, no shader
     changed; F12 goes into `forward.slang`. Completion 24 ms after a change, a definition
     15 ms.
-  - **E7-6a, props of text** (#PR, ADR 0114's as-built): a string prop is a `String` the
+  - **E7-6a, props of text** (#369, ADR 0114's as-built): a string prop is a `String` the
     component owns. Run-time types drop their texts (`DropGlue::Texts`), write defaults
     with them (`RuntimeType::write_default`, `DefaultValue` shared by saves, scenes, the
     inspector and undo), and move them on reload (`Relayout::take`). Read and written on
