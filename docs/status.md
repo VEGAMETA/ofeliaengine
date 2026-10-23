@@ -570,7 +570,7 @@ Last updated: 2026-10-22.
     four plain values) delivered after the hook that sent it, up to 16 passes a stage;
     `self:after(seconds, hook, …)` at the start of a tick. Nothing allocates (the
     zero-allocation test's relays).
-  - **E7-5e2, random numbers and sounds** (#PR, ADR 0114's as-built): `random.number`,
+  - **E7-5e2, random numbers and sounds** (#364, ADR 0114's as-built): `random.number`,
     `integer`, `vector_in_sphere` from the world's generator (SplitMix64 as a component of
     its own entity: rollback and saves carry it, the same seed everywhere), C functions;
     `audio.play`, `audio.play_at` make entities that play once and despawn.
