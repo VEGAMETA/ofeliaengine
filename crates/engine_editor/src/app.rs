@@ -19400,6 +19400,25 @@ return Dice
         );
         let found = luau.check("dice");
         assert!(found.is_empty(), "{found:?}");
+        // Prefabs placed by scripts (E7-5e3).
+        luau.set_source(
+            "spawner",
+            "--!strict
+local Spawner = component(\"Spawner\", { crate = prop.asset(\"scene\"), every = 2, left = 0 })
+function Spawner.on_tick(self, dt: number)
+    self.left -= dt
+    if self.left <= 0 and self.crate then
+        self.left = self.every
+        local made = world.instantiate(self.crate, self.Transform.translation)
+        print(tostring(self.crate), made.name)
+        world.instantiate(\"props/barrel.scene\")
+    end
+end
+return Spawner
+",
+        );
+        let found = luau.check("spawner");
+        assert!(found.is_empty(), "{found:?}");
         // A field of the wrong type: an error where it is.
         luau.set_source(
             "bad",

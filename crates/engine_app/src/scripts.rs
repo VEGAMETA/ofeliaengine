@@ -76,6 +76,8 @@ enum Kind {
     Boolean,
     Vector,
     Entity,
+    /// `prop.asset(kind)`: an asset reference (a prefab scene, a model), none at first.
+    Asset,
 }
 
 impl Kind {
@@ -86,6 +88,7 @@ impl Kind {
             Self::Boolean => <bool as Reflect>::TYPE_INFO,
             Self::Vector => <Vec3 as Reflect>::TYPE_INFO,
             Self::Entity => <Entity as Reflect>::TYPE_INFO,
+            Self::Asset => <engine_scene::AssetRef as Reflect>::TYPE_INFO,
         }
     }
 }
@@ -456,6 +459,10 @@ impl Scripts {
         vm.lua().set_app_data(names);
         vm.lua().set_app_data(Clock::default());
         vm.lua().set_app_data(Mailbox::default());
+        vm.lua().set_app_data(ProjectAssets {
+            root: root.to_path_buf(),
+            paths: HashMap::new(),
+        });
         vm.lua()
             .set_app_data(engine_scene::SceneRegistry::from_program());
         let mut scripts = Self {
@@ -1810,6 +1817,8 @@ fn write_default(out: &mut [u8], kind: Kind, value: &Value) {
             }
         }
         Kind::Entity => out[..8].copy_from_slice(&Entity::NULL.to_bits().to_le_bytes()),
+        // `AssetRef::NONE` is all zeros, as the defaults start.
+        Kind::Asset => {}
     }
 }
 
@@ -1957,6 +1966,7 @@ fn install(lua: &Lua) -> mlua::Result<()> {
         ("boolean", "boolean"),
         ("vector", "vector"),
         ("entity", "entity"),
+        ("asset", "asset"),
     ] {
         prop.set(
             name,
@@ -1980,6 +1990,7 @@ fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_c_function(script_views::world_query)?
     })?;
     world.set("spawn", lua.create_function(world_spawn)?)?;
+    world.set("instantiate", lua.create_function(world_instantiate)?)?;
     globals.set("world", world)?;
     globals.set("system", lua.create_function(declare_system)?)?;
     // The game's input (ADR 0114 §4), C functions: a name read through mlua allocates.
@@ -2212,6 +2223,157 @@ fn declare_system(lua: &Lua, (name, hooks): (mlua::LuaString, Table)) -> mlua::R
     Ok(())
 }
 
+/// The project's assets as scripts reach them (ADR 0114 E7-5e3): its folder, and the paths
+/// of the assets found so far by their ids.
+struct ProjectAssets {
+    root: PathBuf,
+    paths: HashMap<engine_scene::AssetId, String>,
+}
+
+impl ProjectAssets {
+    /// The path of asset file `id`, relative to the project: the editor's index of the
+    /// project's assets, read only; else the headers of its scene files, read once (the
+    /// prefabs scripts place are scenes).
+    fn path_of(&mut self, id: engine_scene::AssetId) -> Option<String> {
+        if let Some(path) = self.paths.get(&id) {
+            return Some(path.clone());
+        }
+        let db = engine_scene::AssetDatabase::open(&self.root);
+        for e in db.entries() {
+            self.paths.entry(e.id).or_insert_with(|| e.path.clone());
+        }
+        if !self.paths.contains_key(&id) {
+            let mut files = Vec::new();
+            collect_scenes(&self.root, &self.root, &mut files);
+            for path in files {
+                if let Ok(text) = std::fs::read_to_string(self.root.join(&path))
+                    && let Ok((_, Some(found))) = engine_scene::scene_header(&text)
+                {
+                    self.paths.entry(found).or_insert(path);
+                }
+            }
+        }
+        self.paths.get(&id).cloned()
+    }
+}
+
+/// The scene files under `dir` (inside the project `root`), by their paths from it, with
+/// `/`; the editor's own folders left out.
+fn collect_scenes(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let hidden = entry.file_name().to_string_lossy().starts_with('.');
+        if path.is_dir() {
+            if !hidden && entry.file_name() != "target" {
+                collect_scenes(root, &path, out);
+            }
+        } else if path.extension().is_some_and(|e| e == "scene")
+            && let Ok(relative) = path.strip_prefix(root)
+        {
+            out.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+/// `world.instantiate(prefab, translation?)` (ADR 0114 §3, ADR 0108): the prefab scene's
+/// entities placed in the world, at once, its roots moved by `translation`; the entity of
+/// its root (a prefab of several roots gets one of its own, the roots its children).
+/// `prefab` is an asset (`prop.asset("scene")`) or the scene's path in the project.
+/// Instances made while the game runs are anonymous, as `world.spawn`'s entities are: no
+/// `SceneId`, so two of one prefab never share one; saves keep them all the same.
+fn world_instantiate(lua: &Lua, (prefab, at): (Value, Option<Vector>)) -> mlua::Result<Value> {
+    let path = match &prefab {
+        Value::String(s) => s.to_str()?.to_owned(),
+        Value::UserData(_) => {
+            let mut found = None;
+            // SAFETY: the value is the one argument pushed, read where it lies.
+            unsafe {
+                lua.exec_raw::<()>(prefab.clone(), |state| {
+                    found = script_views::asset_at(state, -1);
+                })?;
+            }
+            let Some(asset) = found else {
+                return Err(mlua::Error::runtime(
+                    "world.instantiate takes a prefab: an asset (prop.asset) or a scene's path",
+                ));
+            };
+            let path = lua
+                .app_data_mut::<ProjectAssets>()
+                .and_then(|mut a| a.path_of(asset.file))
+                .ok_or_else(|| {
+                    mlua::Error::runtime(format!(
+                        "world.instantiate: no scene file of the project is {}",
+                        asset.file
+                    ))
+                })?;
+            script_views::name_asset(asset, &path);
+            path
+        }
+        _ => {
+            return Err(mlua::Error::runtime(
+                "world.instantiate takes a prefab: an asset (prop.asset) or a scene's path",
+            ));
+        }
+    };
+    let root = lua
+        .app_data_ref::<ProjectAssets>()
+        .map(|a| a.root.clone())
+        .ok_or_else(|| mlua::Error::runtime("world.instantiate: no project"))?;
+    let text = std::fs::read_to_string(root.join(&path))
+        .map_err(|e| mlua::Error::runtime(format!("world.instantiate: {path}: {e}")))?;
+    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
+    let w = unsafe { &mut *world_ptr(lua)? };
+    let report = {
+        let Some(registry) = lua.app_data_ref::<engine_scene::SceneRegistry>() else {
+            return Err(mlua::Error::runtime("world.instantiate: no scene registry"));
+        };
+        let files = engine_scene::PrefabFiles(&root);
+        let options = engine_scene::LoadOptions {
+            prefabs: Some(&files),
+        };
+        engine_scene::load_with(w, &registry, &text, &options)
+            .map_err(|e| mlua::Error::runtime(format!("world.instantiate: {path}:{e}")))?
+    };
+    // Anonymous: what scene files name their entities by goes.
+    for &e in &report.entities {
+        w.remove::<engine_scene::SceneId>(e);
+        w.remove::<engine_scene::PrefabInstance>(e);
+        w.remove::<engine_scene::KeptBlocks>(e);
+    }
+    let roots: Vec<Entity> = report
+        .entities
+        .iter()
+        .copied()
+        .filter(|&e| w.parent(e).is_none())
+        .collect();
+    let offset = at.map_or(Vec3::ZERO, |v| Vec3::new(v.x(), v.y(), v.z()));
+    let root = match roots.as_slice() {
+        [] => {
+            return Err(mlua::Error::runtime(format!(
+                "world.instantiate: {path} is empty"
+            )));
+        }
+        [one] => *one,
+        many => {
+            let parent = w.spawn((
+                engine_ecs::Transform::IDENTITY,
+                engine_ecs::GlobalTransform::IDENTITY,
+            ));
+            for &r in many {
+                let _ = w.set_parent(r, Some(parent));
+            }
+            parent
+        }
+    };
+    if let Some(t) = w.get_mut::<engine_ecs::Transform>(root) {
+        t.translation += offset;
+    }
+    Ok(script_views::entity_value(root))
+}
+
 /// `world.spawn({ Component = { field = value } })` (ADR 0114 §3): an entity with those
 /// components, each its default with the fields given written, at once (the next line
 /// reads them). A component of one field takes its value as it is (`Name = "Bullet"`). A
@@ -2317,6 +2479,7 @@ fn prop_of(component: &str, name: String, value: Value) -> mlua::Result<Prop> {
         Some("boolean") => Kind::Boolean,
         Some("vector") => Kind::Vector,
         Some("entity") => Kind::Entity,
+        Some("asset") => Kind::Asset,
         _ => {
             return Err(bad(
                 "a table is not a prop; use prop.number(…) and the others",
@@ -2718,6 +2881,11 @@ fn read(
             return Ok(script_views::entity_value(
                 at.cast::<Entity>().read_unaligned(),
             ));
+        }
+        if ty.name == "AssetRef" {
+            let a = at.cast::<engine_scene::AssetRef>().read_unaligned();
+            // SAFETY: room for the one value pushed, returned.
+            return lua.exec_raw::<Value>((), |state| script_views::push_new_asset(state, a));
         }
         match &ty.kind {
             TypeKind::Primitive(p) => Ok(match p {
@@ -4202,6 +4370,130 @@ return Dice
             Vec3::new(1.0, 2.0, 3.0)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prefabs_are_placed_by_asset_or_path_and_their_scripts_run() {
+        use engine_scene::{AssetId, AssetRef, SaveOptions, SceneId, SceneRegistry};
+        let dir = project(
+            "instantiate",
+            &[
+                ("door.luau", DOOR),
+                (
+                    "spawner.luau",
+                    r#"local Spawner = component("Spawner", {
+    prefab = prop.asset("scene"), made = prop.entity(), by_path = prop.entity(),
+    named = false, same = false, lid = prop.entity(),
+})
+function Spawner.on_tick(self, dt)
+    if self.made == nil then
+        self.made = world.instantiate(self.prefab, vector.create(5, 0, 0))
+        self.by_path = world.instantiate("props/crate.scene")
+        self.named = tostring(self.prefab) == "props/crate.scene"
+        self.same = self.prefab == self.prefab and typeof(self.prefab) == "Asset"
+        self.lid = self.made:find_child("Lid")
+    end
+end
+return Spawner
+"#,
+                ),
+            ],
+        );
+        // The prefab: a crate (a door script on it) and its lid, saved as a scene.
+        let id = AssetId::new();
+        {
+            let mut world = World::new();
+            let scripts = load(&dir, &mut world);
+            let crate_ = world.spawn((
+                SceneId::new(),
+                Name::new("Crate"),
+                Transform::from_xyz(1.0, 0.0, 0.0),
+            ));
+            assert!(scripts.add(&mut world, crate_, "Door"));
+            let door = scripts.component("Door").unwrap();
+            let TypeKind::Struct(fields) = &world.components().type_info(door).unwrap().kind else {
+                unreachable!()
+            };
+            let lift = fields.iter().find(|f| f.name == "lift").unwrap().offset;
+            let base = world.get_raw_mut(crate_, door).unwrap().as_ptr();
+            // SAFETY: Door's `lift`, an f32 at its offset.
+            unsafe { base.add(lift).cast::<f32>().write_unaligned(3.0) };
+            let lid = world.spawn((SceneId::new(), Name::new("Lid"), Transform::IDENTITY));
+            world.set_parent(lid, Some(crate_)).unwrap();
+            let mut text = String::new();
+            let options = SaveOptions {
+                id: Some(id),
+                assets: None,
+                prefabs: None,
+            };
+            engine_scene::save_with(
+                &mut world,
+                &SceneRegistry::from_program(),
+                &options,
+                &mut text,
+            )
+            .unwrap();
+            std::fs::create_dir_all(dir.join("props")).unwrap();
+            std::fs::write(dir.join("props/crate.scene"), text).unwrap();
+        }
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let spawner = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, spawner, "Spawner");
+        let sp = scripts.component("Spawner").unwrap();
+        let TypeKind::Struct(fields) = &world.components().type_info(sp).unwrap().kind else {
+            unreachable!()
+        };
+        let at = |name: &str| fields.iter().find(|f| f.name == name).unwrap().offset;
+        let (prefab, named, same) = (at("prefab"), at("named"), at("same"));
+        let base = world.get_raw_mut(spawner, sp).unwrap().as_ptr();
+        // SAFETY: Spawner's `prefab`, an asset reference at its offset.
+        unsafe {
+            base.add(prefab)
+                .cast::<AssetRef>()
+                .write_unaligned(AssetRef { file: id, part: 0 });
+        }
+        scripts.tick(&mut world, 0.1);
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let made = read_entity(&world, &scripts, spawner, "Spawner", "made");
+        let by_path = read_entity(&world, &scripts, spawner, "Spawner", "by_path");
+        for (e, x) in [(made, 6.0), (by_path, 1.0)] {
+            assert_eq!(world.get::<Name>(e).unwrap().as_str(), "Crate");
+            assert_eq!(world.get::<Transform>(e).unwrap().translation.x, x);
+            assert!(world.get::<SceneId>(e).is_none(), "anonymous");
+            assert_eq!(read_f32(&world, &scripts, e, "Door", "lift"), 3.0);
+        }
+        let lid = read_entity(&world, &scripts, spawner, "Spawner", "lid");
+        assert_eq!(world.parent(lid), Some(made));
+        assert!(world.get::<SceneId>(lid).is_none());
+        let base = world.get_raw(spawner, sp).unwrap().as_ptr();
+        // SAFETY: Spawner's `named` and `same`, bools at their offsets.
+        let (named, same) = unsafe { (base.add(named).read(), base.add(same).read()) };
+        assert_eq!((named, same), (1, 1), "the asset's path and equality");
+        // The doors' hooks start at the next stage: closed where they stand.
+        scripts.tick(&mut world, 0.1);
+        let closed = fields_of(&world, &scripts, "Door", "closed");
+        // SAFETY: Door's `closed`, a vector at its offset.
+        let at_made = unsafe {
+            world
+                .get_raw(made, scripts.component("Door").unwrap())
+                .unwrap()
+                .as_ptr()
+                .add(closed)
+                .cast::<Vec3>()
+                .read_unaligned()
+        };
+        assert_eq!(at_made, Vec3::new(6.0, 0.0, 0.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The offset of field `name` of script component `component`.
+    fn fields_of(world: &World, scripts: &Scripts, component: &str, name: &str) -> usize {
+        let id = scripts.component(component).unwrap();
+        let TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind else {
+            unreachable!()
+        };
+        fields.iter().find(|f| f.name == name).unwrap().offset
     }
 
     #[test]

@@ -39,7 +39,7 @@
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Changed, ComponentId, Entity, Parent, QueryState, Transform, World};
 use engine_reflect::{Primitive, TypeInfo, TypeKind};
-use engine_scene::Name;
+use engine_scene::{AssetRef, Name};
 use engine_script::mlua::{self, ffi};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -54,6 +54,12 @@ pub(crate) const TAG_VIEW: c_int = 65;
 /// functions (it pushes light userdata back with tag 0).
 pub(crate) const ENTITY_TAG: c_int = 0;
 
+/// An asset's tag (`prop.asset`, ADR 0114 E7-5e3).
+pub(crate) const TAG_ASSET: c_int = 68;
+
+/// Places in the table of assets kept ([`Tables::kept_assets`]): a power of two.
+const ASSET_CACHE: usize = 64;
+
 /// The most values a message (`e:send`) or a timer (`self:after`) carries.
 pub(crate) const MAIL_VALUES: c_int = 4;
 
@@ -67,6 +73,8 @@ const VIEWS: usize = 4;
 const LONGEST_ATOM: usize = 64;
 
 thread_local! {
+    /// The paths of the assets the host has named, for `tostring(asset)`.
+    static ASSET_PATHS: RefCell<HashMap<AssetRef, Box<str>>> = RefCell::new(HashMap::new());
     /// Names' atoms: the same numbers for every VM on this thread (a VM never leaves its
     /// thread: mlua's `Lua` is not `Send` here).
     static ATOMS: RefCell<HashMap<Box<str>, i16>> = RefCell::new(HashMap::new());
@@ -140,6 +148,8 @@ enum Fast {
     Vec2,
     /// An entity: a value ([`ENTITY_TAG`]), nil for none.
     Entity,
+    /// An asset: an [`AssetData`] userdata ([`TAG_ASSET`]), nil for none.
+    Asset,
     /// A struct inside: read as a view of it.
     Struct,
     /// Through the host's own functions.
@@ -152,6 +162,7 @@ fn fast_of(ty: &'static TypeInfo) -> Fast {
         "Vec3A" => return Fast::Vec3A,
         "Vec2" => return Fast::Vec2,
         "Entity" => return Fast::Entity,
+        "AssetRef" => return Fast::Asset,
         "Quat" => return Fast::Slow,
         _ => {}
     }
@@ -441,6 +452,9 @@ pub(crate) struct Tables {
     pub(crate) frame: bool,
     /// The entity holding the world's generator, as last found.
     random: Entity,
+    /// The assets given to scripts, the latest of each place, found by what they name
+    /// ([`push_asset`]).
+    kept_assets: Box<[(AssetRef, c_int)]>,
 }
 
 impl Default for Tables {
@@ -463,6 +477,7 @@ impl Default for Tables {
             search: Vec::new(),
             frame: false,
             random: Entity::NULL,
+            kept_assets: vec![(AssetRef::NONE, 0); ASSET_CACHE].into_boxed_slice(),
         }
     }
 }
@@ -599,7 +614,7 @@ pub(crate) unsafe fn install(state: *mut ffi::lua_State) {
     // SAFETY: as the caller says; each call is Luau's own API on that state.
     unsafe {
         (*ffi::lua_callbacks(state)).useratom = Some(useratom);
-        let methods: [Metatable; 3] = [
+        let methods: [Metatable; 4] = [
             (
                 TAG_SELF,
                 c"Self",
@@ -622,6 +637,11 @@ pub(crate) unsafe fn install(state: *mut ffi::lua_State) {
                 TAG_QUERY,
                 c"Query",
                 &[(c"__iter", query_iter), (c"__namecall", query_namecall)],
+            ),
+            (
+                TAG_ASSET,
+                c"Asset",
+                &[(c"__eq", asset_eq), (c"__tostring", asset_tostring)],
             ),
         ];
         for (tag, name, functions) in methods {
@@ -1036,7 +1056,12 @@ unsafe fn hand_over_slot(
 /// # Safety
 ///
 /// `at` points to a value of the slot's type in a live component.
-unsafe fn push_value(state: *mut ffi::lua_State, at: *const u8, fast: Fast) -> bool {
+unsafe fn push_value(
+    state: *mut ffi::lua_State,
+    tables: *mut Tables,
+    at: *const u8,
+    fast: Fast,
+) -> bool {
     // SAFETY: (each read) as the caller says.
     unsafe {
         match fast {
@@ -1060,6 +1085,7 @@ unsafe fn push_value(state: *mut ffi::lua_State, at: *const u8, fast: Fast) -> b
                 ffi::lua_pushvector(state, v[0], v[1], 0.0);
             }
             Fast::Entity => push_entity(state, at.cast::<Entity>().read_unaligned()),
+            Fast::Asset => push_asset(state, tables, at.cast::<AssetRef>().read_unaligned()),
             Fast::Struct | Fast::Slow => return false,
         }
     }
@@ -1111,6 +1137,17 @@ unsafe fn write_value(state: *mut ffi::lua_State, at: *mut u8, slot: &Slot) -> W
                     e
                 };
                 at.cast::<Entity>().write_unaligned(e);
+            }
+            Fast::Asset => {
+                let a = if ffi::lua_type(state, 3) == ffi::LUA_TNIL {
+                    AssetRef::NONE
+                } else {
+                    let Some(a) = asset_at(state, 3) else {
+                        return Wrote::Wrong("an asset");
+                    };
+                    a
+                };
+                at.cast::<AssetRef>().write_unaligned(a);
             }
             Fast::Struct | Fast::Slow => return Wrote::Slow,
             number => {
@@ -1211,7 +1248,12 @@ unsafe extern "C-unwind" fn self_index(state: *mut ffi::lua_State) -> c_int {
                     String::from("the entity is gone, or lost the component"),
                 );
             };
-            if push_value(state, base.as_ptr().add(slot.offset as usize), slot.fast) {
+            if push_value(
+                state,
+                tables,
+                base.as_ptr().add(slot.offset as usize),
+                slot.fast,
+            ) {
                 return 1;
             }
             return hand_over_slot(state, (*tables).slow.self_index, (*this).slots, &slot, 1);
@@ -1308,7 +1350,7 @@ unsafe extern "C-unwind" fn view_index(state: *mut ffi::lua_State) -> c_int {
             );
         };
         let offset = (*view).offset + slot.offset as usize;
-        if push_value(state, base.as_ptr().add(offset), slot.fast) {
+        if push_value(state, tables, base.as_ptr().add(offset), slot.fast) {
             return 1;
         }
         if slot.fast == Fast::Struct {
@@ -2070,6 +2112,110 @@ pub(crate) unsafe extern "C-unwind" fn input_vector(state: *mut ffi::lua_State) 
     unsafe {
         let [x, y] = read_input(state, "input.vector", [0.0; 2], |a, n| a.vector(n));
         ffi::lua_pushvector(state, x, y, 0.0);
+        1
+    }
+}
+
+/// An asset in a script: what it names.
+#[repr(C)]
+struct AssetData(AssetRef);
+
+/// The path of asset `a` from now on, for `tostring` (the host found it).
+pub(crate) fn name_asset(a: AssetRef, path: &str) {
+    ASSET_PATHS.with(|p| {
+        if let Ok(mut p) = p.try_borrow_mut() {
+            p.entry(a).or_insert_with(|| path.into());
+        }
+    });
+}
+
+/// Pushes asset `a` (nil for none) as a new userdata.
+///
+/// # Safety
+///
+/// `state` has room for a value.
+pub(crate) unsafe fn push_new_asset(state: *mut ffi::lua_State, a: AssetRef) {
+    // SAFETY: as the caller says; a block of the data's size, of an asset's tag, written
+    // whole.
+    unsafe {
+        if a.is_none() {
+            ffi::lua_pushnil(state);
+            return;
+        }
+        let p = ffi::lua_newuserdatataggedwithmetatable(state, size_of::<AssetData>(), TAG_ASSET)
+            .cast::<AssetData>();
+        p.write(AssetData(a));
+    }
+}
+
+/// Pushes asset `a` (nil for none): the one kept in its place if it names that, else a new
+/// one kept there, as views are kept ([`push_kept_view`]).
+///
+/// # Safety
+///
+/// `state` has room for a value; `tables` are the stage's.
+unsafe fn push_asset(state: *mut ffi::lua_State, tables: *mut Tables, a: AssetRef) {
+    // SAFETY: as the caller says; the place is inside the table (the hash's top bits).
+    unsafe {
+        if a.is_none() {
+            ffi::lua_pushnil(state);
+            return;
+        }
+        let id = a.file.as_u128();
+        let mixed = (id as u64) ^ ((id >> 64) as u64).rotate_left(21) ^ a.part.rotate_left(42);
+        let place = (mixed.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            >> (64 - ASSET_CACHE.trailing_zeros())) as usize;
+        let kept = &mut (*tables).kept_assets[place];
+        if kept.1 != 0 && kept.0 == a {
+            ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, kept.1);
+            return;
+        }
+        push_new_asset(state, a);
+        if kept.1 != 0 {
+            ffi::lua_unref(state, kept.1);
+        }
+        *kept = (a, ffi::lua_ref(state, -1));
+    }
+}
+
+/// The asset at stack index `idx`, if an asset is there.
+///
+/// # Safety
+///
+/// `idx` is a valid index of `state`.
+pub(crate) unsafe fn asset_at(state: *mut ffi::lua_State, idx: c_int) -> Option<AssetRef> {
+    // SAFETY: as the caller says; an asset's block holds what it names.
+    unsafe {
+        let p = ffi::lua_touserdatatagged(state, idx, TAG_ASSET).cast::<AssetData>();
+        (!p.is_null()).then(|| (*p).0)
+    }
+}
+
+/// `a == b` for two assets: whether they name the same one.
+unsafe extern "C-unwind" fn asset_eq(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM, called with both operands.
+    unsafe {
+        let same = asset_at(state, 1).is_some_and(|a| asset_at(state, 2) == Some(a));
+        ffi::lua_pushboolean(state, c_int::from(same));
+        1
+    }
+}
+
+/// `tostring(asset)`: its path when the host knows it, else its id.
+unsafe extern "C-unwind" fn asset_tostring(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM; the text is copied before the frame ends.
+    unsafe {
+        let text = match asset_at(state, 1) {
+            Some(a) => ASSET_PATHS
+                .with(|p| {
+                    p.try_borrow()
+                        .ok()
+                        .and_then(|p| p.get(&a).map(|s| s.to_string()))
+                })
+                .unwrap_or_else(|| format!("Asset({})", a.file)),
+            None => String::from("Asset(?)"),
+        };
+        ffi::lua_pushlstring_(state, text.as_ptr().cast(), text.len());
         1
     }
 }
