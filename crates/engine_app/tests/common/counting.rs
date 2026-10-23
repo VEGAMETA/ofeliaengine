@@ -1,11 +1,16 @@
 //! A global allocator that counts, and the steady-state measurement of the player's frames
 //! (CLAUDE.md §5), for the zero-allocation tests: each declares
 //! `#[global_allocator] static GLOBAL: counting::CountingAllocator` and runs alone in its
-//! file, so nothing else allocates concurrently.
+//! file, so nothing else allocates concurrently. A measurement that allocates prints the
+//! stacks of its first allocations, so a failure seen once (under a loaded machine) names
+//! what allocated.
 
 #![allow(dead_code, unreachable_pub)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::backtrace::Backtrace;
+use std::cell::Cell;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -15,6 +20,16 @@ static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 /// While set, the threads that allocate are noted (the first few).
 static NOTING: AtomicBool = AtomicBool::new(false);
 static THREADS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+/// The stacks of the first allocations while noting, with their threads.
+static TRACES: Mutex<Vec<(u32, Backtrace)>> = Mutex::new(Vec::new());
+/// How many stacks are kept, and how many were asked for.
+const TRACED: usize = 4;
+static TRACE_ASKED: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// Set while this thread captures a stack: what the capture allocates is not counted.
+    static CAPTURING: Cell<bool> = const { Cell::new(false) };
+}
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -53,6 +68,9 @@ pub fn allocations() -> usize {
 }
 
 fn count() {
+    if CAPTURING.try_with(Cell::get).unwrap_or(false) {
+        return;
+    }
     ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
     if NOTING.load(Ordering::Relaxed) {
         // SAFETY: a plain query.
@@ -63,6 +81,16 @@ fn count() {
                 Err(existing) if existing == id => break,
                 Err(_) => {}
             }
+        }
+        // The stack, resolved only if the measurement fails.
+        if TRACE_ASKED.fetch_add(1, Ordering::Relaxed) < TRACED
+            && CAPTURING.try_with(|c| c.set(true)).is_ok()
+        {
+            let trace = Backtrace::force_capture();
+            if let Ok(mut traces) = TRACES.lock() {
+                traces.push((id, trace));
+            }
+            CAPTURING.with(|c| c.set(false));
         }
     }
 }
@@ -124,6 +152,11 @@ pub fn assert_steady_state_once(
     }
     // SAFETY: a plain query.
     let frame_thread = unsafe { GetCurrentThreadId() };
+    if let Ok(mut traces) = TRACES.lock() {
+        traces.clear();
+        traces.reserve(TRACED);
+    }
+    TRACE_ASKED.store(0, Ordering::Relaxed);
     NOTING.store(true, Ordering::Relaxed);
     let before = ALLOCATIONS.load(Ordering::Relaxed);
     let measured = Instant::now();
@@ -144,6 +177,16 @@ pub fn assert_steady_state_once(
     println!(
         "{allocations} allocations in {rendered} frames (after {warm} warm-up frames); allocating threads {threads:?}, the frame thread {frame_thread}"
     );
+    if allocations > 0
+        && let Ok(traces) = TRACES.lock()
+    {
+        for (k, (thread, trace)) in traces.iter().enumerate() {
+            println!(
+                "allocation {} of the measurement, thread {thread}:\n{trace}",
+                k + 1
+            );
+        }
+    }
     assert!(rendered >= 230, "{rendered} frames rendered");
     assert_eq!(allocations, 0, "allocations per frame in steady state");
 }

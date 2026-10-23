@@ -987,8 +987,8 @@ water and impostors stay in §6):
       and pause, take a screenshot, read errors with their places.
 6. Recording on the job system (§3.5); the Radeon's forward and TAAU, a shadow redraw
    budget (§3.6).
-7. Housekeeping: the probes test's warm-up (§3.7), CLAUDE.md §2 (ADR), the forward
-   renderer split by feature (§3.9).
+7. Housekeeping: ~~the probes test's warm-up (§3.7)~~ (fixed 2026-10-23, §6), CLAUDE.md
+   §2 (ADR), the forward renderer split by feature (§3.9).
 
 Before it: ~~8d, localization~~ (done 2026-10-16; the owner kept Fluent).
 
@@ -1801,12 +1801,17 @@ grown, divide and conquer); the old labels stay in parentheses.
   refreshed for now; its flags are known noise while NVIDIA's CPU check is clean.
   Refresh it if the shift stays once the machine is quiet.
 
-- **`zero_alloc_probes` still fails under the gate's load now and then** (again on
-  2026-10-22, #314's gate): 6 allocations in 593 frames after 203 warm-up frames, the GI
-  volume converged; alone it passes (0 in 1,168 frames after 990). The test waits for the
-  volume's convergence since 2026-10-16, but the probe's capture (pending all along) can
-  still land inside the measurement when frames are slow. To do: find what the 6
-  allocations are (a capture completing?) and wait for that too, or make it allocation-free.
+- **Fixed (2026-10-23): `zero_alloc_probes` failed under the gate's load now and then**
+  (6 allocations after 160–235 warm-up frames, the GI volume converged; alone 0). Found
+  with stacks the zero-allocation tests now print for their first allocations:
+  - the render graph's cache drops the images no frame used for 128 frames (the probe's
+    capture targets, after its one capture);
+  - their bindless indices went to release lists that started empty, so the first
+    releases of a run grew them (0 → 4 → 8 → 16, in both lists: the 6);
+  - under load the warm-up ended before the drop.
+
+  The lists keep room for 256 indices now (`engine_rhi` `RELEASE_ROOM`). Six copies at
+  once: 2 of 18 runs allocated before, 0 of 24 after.
 
 - **Rendering:**
   - **the meshlet draws' order follows the GPU's scheduling** (atomic appends). A meshlet
