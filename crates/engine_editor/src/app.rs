@@ -8552,7 +8552,9 @@ impl Editor {
                         let pos = Pos::new(at.0 as usize, at.1 as usize);
                         let (a, b) = s.doc.word_range(pos);
                         let word = &s.doc.line(a.line)[a.col..b.col];
-                        let shown = if word.is_empty() {
+                        // Luau's is a type, after the word; Slang's server writes the
+                        // declaration, which names it.
+                        let shown = if word.is_empty() || s.language == Language::Slang {
                             text
                         } else {
                             format!("{word}: {text}")
@@ -8593,7 +8595,7 @@ impl Editor {
                 self.open_script(world, Path::new(&module), at);
             }
             Some(None) => self.say(String::from(
-                "No definition in the project: Luau's own, or not found",
+                "No definition to go to: the language's own, or not found",
             )),
             None => {}
         }
@@ -8608,7 +8610,7 @@ impl Editor {
         };
         if !s.language.answers() {
             self.say(String::from(
-                "Go to Definition works in Luau scripts for now",
+                "Go to Definition works in Luau and Slang tabs",
             ));
             return;
         }
@@ -22706,6 +22708,98 @@ return Keeper
         assert!(!texts(&ed, "1 error").is_empty(), "the code bar's count");
         // Its copy, checked inside forward.slang, is the editor's.
         assert!(dir.join(".ofelia/check/stripes.slang").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slang_tabs_complete_and_go_to_definitions_through_slangd() {
+        const F12: (u16, u16) = (0x7B, 0x58);
+        let library = match engine_shader::SlangLibrary::load() {
+            Ok(library) => library,
+            Err(e) => {
+                assert!(std::env::var("ENGINE_REQUIRE_SLANG").is_err(), "{e}");
+                println!("skipping (no Slang library): {e}");
+                return;
+            }
+        };
+        if !library.path().with_file_name("slangd.exe").is_file() {
+            assert!(std::env::var("ENGINE_REQUIRE_SLANG").is_err(), "no slangd");
+            println!("skipping (no slangd beside Slang's library)");
+            return;
+        }
+        let dir = project("slangd");
+        std::fs::create_dir_all(dir.join("shaders")).unwrap();
+        let stripes = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/golden/materials/stripes.slang"
+        ))
+        .unwrap();
+        std::fs::write(dir.join("shaders/stripes.slang"), &stripes).unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.update(&mut world);
+        ed.open_script(&world, Path::new("shaders/stripes.slang"), None);
+        ed.update(&mut world);
+        let find = |ed: &Editor, needle: &str| {
+            let doc = &ed.scripts[0].doc;
+            (0..doc.line_count())
+                .find_map(|l| doc.line(l).find(needle).map(|c| (l, c)))
+                .unwrap()
+        };
+        // ` s.` after `Surface s;`: a surface's fields, as the server knows `forward.slang`'s
+        // types inside a material type.
+        let (line, _) = find(&ed, "Surface s;");
+        let end = ed.scripts[0].doc.line(line).len();
+        ed.scripts[0].doc.place(Pos::new(line, end), false, false);
+        chars(&mut ed, " s.");
+        ed.update(&mut world);
+        wait_for(&mut ed, &mut world, |ed| {
+            ed.scripts[0]
+                .completing
+                .as_ref()
+                .is_some_and(|l| l.answered)
+        });
+        let labels = |ed: &Editor| -> Vec<String> {
+            let list = ed.scripts[0].completing.as_ref().unwrap();
+            list.shown
+                .iter()
+                .map(|&i| list.items[i].label.clone())
+                .collect()
+        };
+        let offered = labels(&ed);
+        assert!(
+            offered.iter().any(|l| l == "roughness") && offered.iter().any(|l| l == "base"),
+            "{offered:?}"
+        );
+        chars(&mut ed, "rou");
+        ed.update(&mut world);
+        assert_eq!(labels(&ed)[0], "roughness");
+        chord(&mut ed, &mut world, &[ENTER]);
+        assert_eq!(
+            ed.scripts[0].doc.line(line),
+            "        Surface s; s.roughness"
+        );
+        // F12 on `StripesParams`: its struct, in this module.
+        let (l, c) = find(&ed, "StripesParams load");
+        ed.scripts[0].doc.place(Pos::new(l, c + 3), false, false);
+        chord(&mut ed, &mut world, &[F12]);
+        wait_for(&mut ed, &mut world, |ed| {
+            ed.scripts[0].doc.primary().head.line == 2
+        });
+        assert_eq!(ed.scripts[0].doc.line(2), "struct StripesParams");
+        assert_eq!(ed.scripts.len(), 1);
+        // F12 on `MaterialContext`: `forward.slang` opens at its struct.
+        let (l, c) = find(&ed, "MaterialContext ctx");
+        ed.scripts[0].doc.place(Pos::new(l, c + 3), false, false);
+        chord(&mut ed, &mut world, &[F12]);
+        wait_for(&mut ed, &mut world, |ed| ed.scripts.len() == 2);
+        assert!(
+            ed.scripts[1].path.ends_with("forward.slang"),
+            "{:?}",
+            ed.scripts[1].path
+        );
+        assert_eq!(ed.active_script, Some(1));
+        let head = ed.scripts[1].doc.primary().head;
+        assert_eq!(ed.scripts[1].doc.line(head.line), "struct MaterialContext");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

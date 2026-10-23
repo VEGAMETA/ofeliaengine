@@ -1808,3 +1808,86 @@ side panel", after Godot, VS Code and JetBrains):
   They are no assets, so no `.meta`. The FileSystem dock lists them after the assets of
   their folder, read from the disk when it refreshes (hidden folders and `target` left
   out); a double click opens one. Nothing checks them.
+
+## As built (E10-2b, 2026-10-23): Slang's completion, hover, signatures and definitions
+
+Research: `docs/research/slang-in-the-editor.md` ("slangd, probed again").
+
+- **`slangd` as a child process** (`slangd.rs`), found beside Slang's library (the pinned
+  build's `bin`, or the Vulkan SDK's):
+  - LSP's JSON-RPC frames on its pipes, read by a thread of their own;
+  - asked from the Slang checker's thread, which waits for each answer (3 s at most);
+  - started with `-periodic-diagnostic-update off`: its own checks never run, so errors
+    stay the front end's (E10-2a), and it compiles only when asked;
+  - its `initialize` sent when the checker first checks a Slang module, answered while the
+    front end checks.
+- **A material type is read inside `forward.slang`'s prelude; no shader changed.** E10-2a
+  planned a module of the material API for `forward.slang` and the types to import. The
+  prelude gives the server the same types with `forward.slang` untouched, so no
+  pipeline's registers can move (ADR 0092).
+  - The type's document is `forward.slang`'s text up to `#ifdef MATERIAL_FILE` (1,980
+    lines), then the type's text.
+  - Places in the type move by the prelude's lines. A definition in the prelude is
+    `forward.slang`'s, at the same line.
+  - The document is written to `.ofelia/check/editing.<module>` once. The server reads
+    the text it was given, but its `gotoDefinition` returns places only in files that
+    exist.
+  - The engine's shader folder is the server's search path (`slang.additionalSearchPaths`)
+    for the prelude's includes. The project's folders are searched too (its
+    `searchInAllWorkspaceDirectories`, on by default).
+- **Any other module** is its own file's document.
+- **Changes go as the range that changed** (between the old and new texts' common start
+  and end): the server applies every change to its range. The whole text sent without
+  one went to the text's start, and completion then found nothing.
+- **Places:** LSP's UTF-16 units are made bytes and back. The server's URIs
+  (`file:///C%3A/…`) are decoded and compared by `path_key`.
+- **What the tabs show:**
+  - completion: LSP's kinds as the list's icons; methods and functions get their
+    parentheses;
+  - hover: the declaration and its documentation, as the server writes them
+    (`(field) float4 Surface.base`), not after the word as Luau's types are. The
+    server's "Defined in" is left out. A box of several lines stands above the word when
+    they fit;
+  - signatures: the active one, its argument from the label's offsets;
+  - F12 and Ctrl+click: the module and line. `forward.slang` opens in a tab there. The
+    core module's names (`frac`, `slang-synth://`) have none to go to, and the message
+    says it is the language's own.
+- **The engine's files are never material types:** `forward.slang` declares
+  `GltfMaterial : IMaterial`, so, opened from a definition, it would have been checked
+  inside itself.
+- **Measured** (the test build on ref-1, Slang 2026.18.3; `stripes.slang` as a material
+  type):
+
+  | what | time |
+  |---|---:|
+  | the first check, the server starting meanwhile | 192 ms |
+  | the first completion | 67 ms |
+  | a completion after a change | 24 ms |
+  | hover | 71 ms |
+  | a definition | 15 ms |
+  | the editor's first check of a material tab, after opening | 270–275 ms (264–268 before) |
+  | a misspelt field shown, after typing | 282–285 ms (281–282 before) |
+
+- **Tests:**
+  - the analyzer's, against the server:
+    - completion after `ctx.` and after a new `s.` line;
+    - the hover's declaration;
+    - `material_params` defined in `forward.slang` at its line, `StripesParams` in the
+      module;
+    - `lerp`'s signature;
+    - a module alone, with its fields and definitions;
+    - none for the core module's `frac`;
+    - `forward.slang` no material type;
+  - the editor's:
+    - ` s.` typed lists a surface's fields, `rou` narrows them to `roughness`, and Enter
+      writes it;
+    - F12 on `StripesParams` goes to its struct;
+    - F12 on `MaterialContext` opens `forward.slang` at its struct;
+  - the client's own: UTF-16 places, changes as ranges, hovers' text.
+
+  The server's tests are skipped without Slang or `slangd`, and fail then under
+  `ENGINE_REQUIRE_SLANG`.
+- **Not in this step:**
+  - semantic tokens (colors for names the lexical rules cannot tell apart);
+  - rename and references;
+  - completion items' details (the server's resolve).

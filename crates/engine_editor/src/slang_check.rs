@@ -9,9 +9,14 @@
 //! What is found in the module is placed in it. An error found elsewhere (in
 //! `forward.slang`, in a module it imports) goes on its first line, with where it is; a
 //! warning found elsewhere is that file's own, not shown.
+//!
+//! The engine's own files are never material types: `forward.slang` declares the glTF
+//! material and includes the others. Completion, hover, signatures and definitions are
+//! Slang's language server's (E10-2b, [`crate::slangd`]).
 
 use crate::checker::Analyzer;
-use engine_luau_analysis::{Diagnostic, Severity};
+use crate::slangd::Slangd;
+use engine_luau_analysis::{Completion, Diagnostic, Severity};
 use engine_shader::material_types::material_type_options;
 use engine_shader::{CompileOptions, Compiler, Finding, SlangLibrary, path_key};
 use std::collections::HashMap;
@@ -28,27 +33,44 @@ pub(crate) struct SlangAnalyzer {
     copies: PathBuf,
     /// The modules' texts, by name: their tabs', unsaved.
     sources: HashMap<String, String>,
+    /// The language server beside the library, for what is not a check.
+    server: Slangd,
 }
 
 impl SlangAnalyzer {
     /// The checks of the project in `root`; `None`, said once in the log, without Slang's
     /// library (the Vulkan SDK's, or `ENGINE_SLANG_LIBRARY`).
     pub(crate) fn new(root: &Path) -> Option<Self> {
-        let compiler = SlangLibrary::load().and_then(Compiler::new);
-        let compiler = match compiler {
-            Ok(compiler) => compiler,
+        let loaded = SlangLibrary::load().and_then(|library| {
+            let path = library.path().to_path_buf();
+            Compiler::new(library).map(|compiler| (compiler, path))
+        });
+        let (compiler, library) = match loaded {
+            Ok(loaded) => loaded,
             Err(e) => {
                 log::warn!(target: "engine_editor", "Slang modules are not checked: {e}");
                 return None;
             }
         };
+        let engine = PathBuf::from(engine_render::forward::ENGINE_SHADER_DIR);
+        let copies = root.join(crate::session::DIR).join("check");
         Some(Self {
             compiler,
             root: root.to_path_buf(),
-            engine: PathBuf::from(engine_render::forward::ENGINE_SHADER_DIR),
-            copies: root.join(crate::session::DIR).join("check"),
+            server: Slangd::new(&library, root, &engine, &copies),
+            engine,
+            copies,
             sources: HashMap::new(),
         })
+    }
+
+    /// The material type module `name` holding `text` declares; none in the engine's own
+    /// files.
+    fn material_of(&self, name: &str, text: &str) -> Option<String> {
+        if path_key(&self.root.join(name)).starts_with(path_key(&self.engine)) {
+            return None;
+        }
+        material_type(text)
     }
 }
 
@@ -62,11 +84,13 @@ impl Analyzer for SlangAnalyzer {
     }
 
     fn check(&mut self, name: &str) -> Vec<Diagnostic> {
+        // The language server starts while the front end checks.
+        self.server.warm();
         let Some(text) = self.sources.get(name) else {
             return Vec::new();
         };
         let path = self.root.join(name);
-        let (checked, found) = match material_type(text) {
+        let (checked, found) = match self.material_of(name, text) {
             Some(type_name) => {
                 let file = Path::new(name)
                     .file_name()
@@ -100,6 +124,32 @@ impl Analyzer for SlangAnalyzer {
             .into_iter()
             .filter_map(|f| place(f, &module, text))
             .collect()
+    }
+
+    fn complete(&mut self, name: &str, line: u32, byte: u32) -> Vec<Completion> {
+        let Some(text) = self.sources.get(name) else {
+            return Vec::new();
+        };
+        let material = self.material_of(name, text).is_some();
+        self.server.complete(name, text, material, (line, byte))
+    }
+
+    fn hover(&mut self, name: &str, line: u32, byte: u32) -> Option<String> {
+        let text = self.sources.get(name)?;
+        let material = self.material_of(name, text).is_some();
+        self.server.hover(name, text, material, (line, byte))
+    }
+
+    fn signature(&mut self, name: &str, line: u32, byte: u32) -> Option<(String, (usize, usize))> {
+        let text = self.sources.get(name)?;
+        let material = self.material_of(name, text).is_some();
+        self.server.signature(name, text, material, (line, byte))
+    }
+
+    fn definition(&mut self, name: &str, line: u32, byte: u32) -> Option<(String, u32, u32)> {
+        let text = self.sources.get(name)?;
+        let material = self.material_of(name, text).is_some();
+        self.server.definition(name, text, material, (line, byte))
     }
 }
 
@@ -213,6 +263,137 @@ mod tests {
             material_type("float3 noise(float3 p) { return p; }\n"),
             None
         );
+    }
+
+    /// The line and byte of `needle` in `text`, `after` bytes into it.
+    fn place_of(text: &str, needle: &str, after: usize) -> (u32, u32) {
+        let at = text.find(needle).unwrap() + after;
+        let line = text[..at].matches('\n').count();
+        let start = text[..at].rfind('\n').map_or(0, |n| n + 1);
+        (line as u32, (at - start) as u32)
+    }
+
+    #[test]
+    fn slangd_answers_inside_a_material_type_and_in_a_module_alone() {
+        if let Err(e) = SlangLibrary::load() {
+            assert!(std::env::var("ENGINE_REQUIRE_SLANG").is_err(), "{e}");
+            println!("skipping (no Slang library): {e}");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("slangd_answers_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let mut slang = SlangAnalyzer::new(&root).unwrap();
+        if !slang.server.found() {
+            assert!(std::env::var("ENGINE_REQUIRE_SLANG").is_err(), "no slangd");
+            println!("skipping (no slangd beside Slang's library)");
+            return;
+        }
+        // The golden shots' material type, read inside `forward.slang`'s prelude.
+        let stripes = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/golden/materials/stripes.slang"
+        ))
+        .unwrap();
+        let name = "materials/water.slang";
+        slang.set_source(name, &stripes);
+        let t = std::time::Instant::now();
+        assert_eq!(slang.check(name), []);
+        let checked = t.elapsed();
+        let t = std::time::Instant::now();
+        let items = slang.complete(
+            name,
+            place_of(&stripes, "ctx.world_position", 4).0,
+            place_of(&stripes, "ctx.world_position", 4).1,
+        );
+        let first = t.elapsed();
+        let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+        assert!(
+            labels.contains(&"world_position") && labels.contains(&"uv"),
+            "{labels:?}"
+        );
+        // What is at a place: the declaration, written by the server.
+        let (line, byte) = place_of(&stripes, "MaterialContext ctx", 3);
+        let t = std::time::Instant::now();
+        let hover = slang.hover(name, line, byte).unwrap();
+        let hovered = t.elapsed();
+        assert!(hover.starts_with("struct MaterialContext"), "{hover}");
+        // Defined in the prelude: `forward.slang`, at its own line.
+        let forward = std::fs::read_to_string(
+            Path::new(engine_render::forward::ENGINE_SHADER_DIR).join("forward.slang"),
+        )
+        .unwrap();
+        let (line, byte) = place_of(&stripes, "material_params<", 3);
+        let t = std::time::Instant::now();
+        let (module, at_line, at_byte) = slang.definition(name, line, byte).unwrap();
+        let defined = t.elapsed();
+        assert!(module.ends_with("shaders/forward.slang"), "{module}");
+        let expected = place_of(&forward, "T material_params<T>(MaterialContext", 2);
+        assert_eq!((at_line, at_byte), expected);
+        // Defined in the module itself.
+        let (line, byte) = place_of(&stripes, "StripesParams load", 3);
+        let found = slang.definition(name, line, byte).unwrap();
+        assert_eq!(
+            found,
+            (
+                name.to_owned(),
+                place_of(&stripes, "StripesParams\n", 0).0,
+                7
+            )
+        );
+        // A call's signature, its argument.
+        let (line, byte) = place_of(&stripes, "lerp(p.color_a, ", 16);
+        let (label, (a, b)) = slang.signature(name, line, byte).unwrap();
+        assert!(
+            label.contains("lerp") && a < b && b <= label.len(),
+            "{label} {a}..{b}"
+        );
+        // The text changed: what the new line's `s.` may be followed by.
+        let edited = stripes.replacen(
+            "        Surface s;\n",
+            "        Surface s;\n        s.\n",
+            1,
+        );
+        slang.set_source(name, &edited);
+        let (line, byte) = place_of(&edited, "        s.\n", 10);
+        let t = std::time::Instant::now();
+        let items = slang.complete(name, line, byte);
+        let again = t.elapsed();
+        let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+        assert!(
+            labels.contains(&"roughness") && labels.contains(&"base"),
+            "{labels:?}"
+        );
+        // A module alone, on disk: its own fields and definitions.
+        let noise = "struct Wave { float height; float speed; };\nfloat crest(Wave w)\n{\n    return w.height;\n}\n";
+        std::fs::write(root.join("lib/noise.slang"), noise).unwrap();
+        slang.set_source("lib/noise.slang", noise);
+        let items = slang.complete("lib/noise.slang", 3, 13);
+        let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["height", "speed"]);
+        let found = slang.definition("lib/noise.slang", 3, 13).unwrap();
+        assert_eq!(found, (String::from("lib/noise.slang"), 0, 20));
+        // The language's own (the core module's `frac`): none to go to.
+        let (line, byte) = place_of(&stripes, "frac(", 1);
+        assert_eq!(slang.definition(name, line, byte), None);
+        // `forward.slang` itself is no material type, though it declares one.
+        let engine = Path::new(engine_render::forward::ENGINE_SHADER_DIR).join("forward.slang");
+        let engine = engine.to_string_lossy().replace('\\', "/");
+        assert_eq!(slang.material_of(&engine, &forward), None);
+        assert_eq!(
+            slang.material_of(name, &stripes).as_deref(),
+            Some("StripesMaterial")
+        );
+        println!(
+            "check {:.0} ms (the server starting meanwhile); completion {:.0} ms the first time, {:.0} ms after a change; hover {:.0} ms; definition {:.0} ms",
+            checked.as_secs_f64() * 1e3,
+            first.as_secs_f64() * 1e3,
+            again.as_secs_f64() * 1e3,
+            hovered.as_secs_f64() * 1e3,
+            defined.as_secs_f64() * 1e3
+        );
+        drop(slang);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
