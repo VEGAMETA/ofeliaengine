@@ -601,6 +601,7 @@ impl Scripts {
                 .exec_raw::<()>((), |state| main = script_views::main_state(state))
         };
         scripts.main = main;
+        script_views::vm_made(main);
         let mut files = Vec::new();
         collect_scripts(folder, &mut files);
         files.sort();
@@ -1948,6 +1949,14 @@ impl Scripts {
             || module.to_owned(),
             |f| f.to_string_lossy().replace('\\', "/"),
         )
+    }
+}
+
+impl Drop for Scripts {
+    fn drop(&mut self) {
+        // Before the VM closes (the fields drop after this): its queries' references go
+        // with it, and its closing collects queries without leaving any.
+        script_views::vm_gone(self.main);
     }
 }
 
@@ -4444,6 +4453,12 @@ return Spawner
         );
         scripts.tick(&mut world, 0.25);
         assert!(script_views::dead_refs() < 20, "let go of");
+        // The host gone: its VM's queries (the module's own, collected as it closes) leave
+        // no references for a VM made later at the same address.
+        scripts.tick(&mut world, 0.25);
+        scripts.vm.lua().gc_collect().unwrap();
+        drop(scripts);
+        assert_eq!(script_views::dead_refs(), 0, "nothing left behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

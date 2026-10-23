@@ -2352,6 +2352,36 @@ thread_local! {
     /// go of at that VM's next stage: a destructor runs inside Luau's collector, where the
     /// registry is not written.
     static DEAD_REFS: RefCell<Vec<(usize, c_int)>> = const { RefCell::new(Vec::new()) };
+    /// The VMs (their main states' addresses) whose hosts live: a closing VM's queries
+    /// leave no references behind, as another VM made later at the same address would
+    /// let go of its own registry's entries with them.
+    static LIVE_VMS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// VM `main`'s host lives (it was made).
+pub(crate) fn vm_made(main: usize) {
+    LIVE_VMS.with(|v| {
+        if let Ok(mut v) = v.try_borrow_mut() {
+            v.push(main);
+        }
+    });
+}
+
+/// VM `main`'s host goes, before the VM closes: its queries' references waiting, and those
+/// its closing collects, are let go of with it.
+pub(crate) fn vm_gone(main: usize) {
+    LIVE_VMS.with(|v| {
+        if let Ok(mut v) = v.try_borrow_mut()
+            && let Some(at) = v.iter().position(|&m| m == main)
+        {
+            v.swap_remove(at);
+        }
+    });
+    DEAD_REFS.with(|d| {
+        if let Ok(mut d) = d.try_borrow_mut() {
+            d.retain(|&(vm, _)| vm != main);
+        }
+    });
 }
 
 /// How many references of queries gone wait to be let go of (tests).
@@ -2525,11 +2555,15 @@ unsafe extern "C" fn query_dtor(state: *mut ffi::lua_State, block: *mut c_void) 
         let query = Box::from_raw((*p).0);
         (*p).0 = core::ptr::null_mut();
         let vm = main_state(state);
-        DEAD_REFS.with(|d| {
-            if let Ok(mut d) = d.try_borrow_mut() {
-                d.extend(query.views.iter().map(|&r| (vm, r)));
-            }
-        });
+        // A closing VM's registry goes with it: nothing to let go of later.
+        let live = LIVE_VMS.with(|v| v.try_borrow().is_ok_and(|v| v.contains(&vm)));
+        if live {
+            DEAD_REFS.with(|d| {
+                if let Ok(mut d) = d.try_borrow_mut() {
+                    d.extend(query.views.iter().map(|&r| (vm, r)));
+                }
+            });
+        }
         drop(query);
     }
 }
