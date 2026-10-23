@@ -578,7 +578,7 @@ Last updated: 2026-10-22.
     value (`prop.asset(kind)`, `AssetRef` fields on the fast path); `world.instantiate(
     prefab, translation?)` places a prefab scene by asset or path, its instances
     anonymous (no `SceneId`), their scripts started at the next stage.
-  - **E7-5f1, script components in saves** (#PR, ADR 0114's as-built): saves took script
+  - **E7-5f1, script components in saves** (#366, ADR 0114's as-built): saves took script
     components but skipped them on load (`engine_save` looked up only the program's
     types): types made at run time load now. `after` timers ride on their entities into a
     save (a `ScriptTimers` component put on just for it), and `on_load(self)` runs at the
