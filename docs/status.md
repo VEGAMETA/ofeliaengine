@@ -21,11 +21,13 @@ Last updated: 2026-10-22.
   - asset ids: ids inside our own files, a `.meta` beside foreign ones, references by id
     and path, the local database only a cache;
   - any scene can be a prefab.
-  - **Where it stands (2026-10-22):** E1 to E6 are done (E2b but for the cook's path, E3
+  - **Where it stands (2026-10-23):** E1 to E6 are done (E2b but for the cook's path, E3
     but for the tree's marks on what changed), and material slots on `Model`. E8, the
-    code editor, is done but for rename and references across the project. E7 waits for
-    the owner's answers to ADR 0114, and E10-1 for the answer on the material file. The
-    entries below are in the order merged.
+    code editor, is done but for rename and references across the project. E7 is under
+    way: the script host, scenes, the editor's attach and reload, the types, the fast
+    path, physics queries and triggers, entities as values; the rest of v1 (E7-5) is
+    next. E10-1 waits for the answer on the material file. The entries below are in the
+    order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
@@ -535,9 +537,23 @@ Last updated: 2026-10-22.
     (`ScenePhysics::sync_triggers`, part of `sync_scene`); scripts hear the last step's
     contacts as `on_touch(self, other, point, normal)` and `on_untouch(self, other)`,
     once per step. The editor draws triggers with the colliders, in yellow.
-  - **Next, in this order:**
-    1. E7-5, the rest of scripting v1: `send`, `after`, `audio`, `random`,
-       `world.instantiate`, saves of script components;
+  - **E7-1d, entities as values** (#358, ADR 0114's as-built): an entity is a light
+    userdata of its handle (equal by value, a table key, `typeof` `Entity`, never
+    allocated); views through entities are kept in a table of 256 places; `world.find`'s
+    index follows the names that changed; the host allocates nothing in a stage. The door
+    example on 1,000 entities with ten watchers: 1,237,831 allocations in 600 ticks → 0
+    (`tests/zero_alloc_scripts.rs`); an empty hook 0.165 → 0.138 µs, 1,000 doors 0.63 →
+    0.6 ms.
+  - **Next, in this order** (E7-5, the rest of scripting v1, in steps; the API is ADR
+    0114's):
+    1. E7-5a: entity methods (`has`, `add`, `remove`, `despawn` at the stage's end,
+       `children`, `find_child`, `parent`) through `__namecall`, components as values
+       (`Transform`, a script's component table), `Transform`'s methods;
+    2. E7-5b: `world.spawn`, `world.query` (`with`, `without`) and `system(name, hooks)`;
+    3. E7-5c: `input` (the tick's view and the frame's);
+    4. E7-5d: `send`, `after`, `audio`, `random`, `world.instantiate`;
+    5. E7-5e: saves of script components (`on_load`) and §8's networking rules; each
+       step adds its examples to the zero-allocation test;
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 

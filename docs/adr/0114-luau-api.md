@@ -1136,3 +1136,62 @@ there, and see the script's file in the inspector.
   batch on both GPUs.
 - **Not in this step:** contacts in the joined client's re-simulated ticks (networked
   prediction, §8); a trigger's own collision layer.
+
+## As built (E7-1d, 2026-10-23): entities as values, nothing allocated
+
+- **Entities are values** (§3): light userdata of tag 0 holding the handle's bits plus one
+  (`script_views::entity_value`), no longer userdata blocks:
+  - never allocated; `==`, `rawequal` and table keys go by the handle, so two finds of one
+    entity are one key; `typeof` says `Entity` (`lua_setlightuserdataname`), `type` says
+    `userdata`;
+  - tag 0, because mlua pushes light userdata back with tag 0: an entity that passes
+    through the host's own functions (a contact's `other`, a ray's hit, an entity prop)
+    stays itself;
+  - their metatable is the VM's one for every light userdata (`__index`: `name`, `alive`,
+    components; `__tostring`); no other light userdata reaches scripts;
+  - entity props and fields are read and written on the fast path.
+- **Views through entities are kept:** `e.Transform`, and a struct inside a view, is
+  looked up in a table of 256 places by its entity, type, component and offset. The view
+  there is given again; otherwise a new one takes the place. Views never change, so one
+  given twice is the same (`rawequal(e.Transform, e.Transform)`).
+- **`world.find`'s index** follows the names that came or changed (`Changed<Name>`, at a
+  stage's first find) instead of being made again every stage, which made a string per
+  named entity. It is keyed by the name's hash and checked against the found entity's own
+  name; a first one renamed or gone, or two names of one hash, make it again.
+- **The host allocates nothing in a stage:**
+  - the hooks' module name is shared (`Rc<str>`; it was a `String` copied at every call);
+  - the instances' order and the components hearing contacts are scratch lists;
+  - the clock is set in place (mlua's `set_app_data` boxes its value anew).
+- **The slow path is handed the field's place:** a field the fast path found but does not
+  read or write (rotations, enums, strings) goes to the host's function with its place
+  among the struct's fields after the arguments, so the key's text is not read through
+  mlua. `LuaString::to_str` clones the string's reference, and the first clone of one
+  allocates its shared count (16 bytes, mlua 0.12.1).
+- **`physics.raycast`** returns four values, nils on a miss, instead of a list.
+- **Measured** (ref-1, release; `scripts::tests::measure_hooks_and_views`, medians of 51
+  ticks, three runs each, main and this branch one after the other):
+
+  | What | Main | Now |
+  |---|---|---|
+  | an empty `on_tick`, per instance | 0.164–0.166 µs | **0.138–0.139 µs** |
+  | a prop's read and write | 72–75 ns the pair | 72–74 ns |
+  | a component field's read and write | 71–75 ns the pair | 76.5–77 ns |
+  | 1,000 doors (example 1), one tick | 0.63 ms | **0.58–0.61 ms** |
+
+  A field's pair is 3–5 ns slower. With entity fields back on the slow path it is the
+  same, so the new code on its path is not the cause; most likely the code's layout.
+  A `Slot` grown by its place (56 bytes) made it 87 ns, so the place is found when
+  handing over instead.
+- **Allocations** (§13; `engine_app/tests/zero_alloc_scripts.rs`: the door example on
+  1,000 entities and ten watchers using `world.find`, entities as table keys, an entity
+  prop, `self.entity`, `self.locals`, `time`, a ray and a trigger's contacts; 600 ticks and
+  frames after 240): **1,237,831 → 0**. The other three examples need E7-5's parts
+  (`has`, `despawn`, `audio`, `world.query`, systems, `input`, `Transform`'s methods)
+  and join the test with them.
+- **What still allocates, by design:** a `quat` made or read (a userdata), `tostring`, a
+  `physics.overlap_sphere` loop (its iterator), an enum field written by name (its text
+  read through mlua).
+- **Tests:** entities as values and keys (`==`, `rawequal`, a set of entities, `typeof`,
+  `type`); the kept views over 300 entities (more than the table's places); the name index
+  through a second of a name, the first despawned, a rename and a newcomer; the errors
+  naming `Entity`.

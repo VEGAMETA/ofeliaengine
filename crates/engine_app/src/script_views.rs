@@ -6,31 +6,44 @@
 //!   struct's fields are matched by their names' atoms ([`Slot`]), so finding a field
 //!   compares small integers. A name made before the callback was set has none and is
 //!   matched by its bytes.
-//! - **Tags.** `self` ([`TAG_SELF`]), views ([`TAG_VIEW`]) and entities ([`TAG_ENTITY`])
-//!   are userdata of tags of their own, made with their tag's metatable, whose metamethods
-//!   are the C functions here: they read the userdata, the key's atom and the world
-//!   directly. Numbers, booleans and vectors are read and written there, entities' names
-//!   and components, `world.find`; the rest (rotations, entity fields, strings, enums,
-//!   errors' wording) goes to the host's own functions ([`Slow`]), called from here.
+//! - **Tags.** `self` ([`TAG_SELF`]) and views ([`TAG_VIEW`]) are userdata of tags of
+//!   their own, made with their tag's metatable, whose metamethods are the C functions
+//!   here: they read the userdata, the key's atom and the world directly. Numbers,
+//!   booleans, vectors and entities are read and written there, entities' names and
+//!   components, `world.find`; the rest (rotations, strings, enums, errors' wording) goes
+//!   to the host's own functions ([`Slow`]), called from here with the field's place when
+//!   it was found, so they read no key's text (a string read through mlua allocates).
+//! - **Entities are values** (ADR 0114 §3): light userdata of tag [`ENTITY_TAG`] holding
+//!   the handle's bits plus one ([`entity_value`]), never allocated, equal when their
+//!   handles are, usable as table keys, `typeof` `Entity`. Their metatable is the VM's
+//!   one for every light userdata (no other light userdata reaches scripts).
 //! - **No allocation per access:** a view of `self`'s entity's component is made once and
-//!   kept on `self` ([`ThisData::views`]), as are `self.locals` and `self.entity`; vectors
-//!   and numbers are values.
+//!   kept on `self` ([`ThisData::views`]), as is `self.locals`; a view through an entity
+//!   (`e.Transform`) or of a struct inside a view is kept in a table of the latest
+//!   ([`VIEW_CACHE`] places) and given again; `world.find`'s index follows the names that
+//!   changed ([`NameIndex`]); entities, vectors and numbers are values.
 //! - **Errors** are raised with `lua_error` once nothing with a destructor is alive in the
 //!   frame, as mlua's own callbacks raise theirs.
 
-use engine_ecs::{ComponentId, Entity, World};
+use engine_ecs::{Changed, ComponentId, Entity, QueryState, World};
 use engine_reflect::{Primitive, TypeInfo, TypeKind};
-use engine_script::mlua::ffi;
+use engine_scene::Name;
+use engine_script::mlua::{self, ffi};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int};
+use std::ffi::{c_char, c_int, c_void};
+use std::hash::BuildHasherDefault;
 
 /// `self`'s tag (mlua's own userdata take 0 and 1).
 pub(crate) const TAG_SELF: c_int = 64;
 /// A view's tag.
 pub(crate) const TAG_VIEW: c_int = 65;
-/// An entity's tag.
-pub(crate) const TAG_ENTITY: c_int = 66;
+/// Entities' light userdata tag: 0, the one mlua keeps when a value passes through its own
+/// functions (it pushes light userdata back with tag 0).
+pub(crate) const ENTITY_TAG: c_int = 0;
+
+/// Places in the table of views kept ([`Tables::kept`]): a power of two.
+const VIEW_CACHE: usize = 256;
 
 /// Views of its entity's components a `self` keeps.
 const VIEWS: usize = 4;
@@ -110,6 +123,8 @@ enum Fast {
     Vec3,
     Vec3A,
     Vec2,
+    /// An entity: a value ([`ENTITY_TAG`]), nil for none.
+    Entity,
     /// A struct inside: read as a view of it.
     Struct,
     /// Through the host's own functions.
@@ -121,7 +136,8 @@ fn fast_of(ty: &'static TypeInfo) -> Fast {
         "Vec3" => return Fast::Vec3,
         "Vec3A" => return Fast::Vec3A,
         "Vec2" => return Fast::Vec2,
-        "Quat" | "Entity" => return Fast::Slow,
+        "Entity" => return Fast::Entity,
+        "Quat" => return Fast::Slow,
         _ => {}
     }
     match &ty.kind {
@@ -174,6 +190,133 @@ pub(crate) struct Slow {
     pub(crate) view_newindex: c_int,
 }
 
+/// A view kept ([`Tables::kept`]): what it shows (its entity's bits, its type's address,
+/// its component, its offset) and its registry reference (0: none).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Kept {
+    entity: u64,
+    info: usize,
+    id: u32,
+    offset: u32,
+    view: c_int,
+}
+
+/// A key that is a hash already, passed through.
+#[derive(Default)]
+struct Hashed(u64);
+
+impl std::hash::Hasher for Hashed {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(b);
+        }
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        self.0 = v;
+    }
+}
+
+/// FNV-1a over a name's bytes: [`NameIndex`]'s key.
+fn name_hash(name: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in name {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// `world.find`'s index (ADR 0114 §3): for each name's hash, the first entity in the
+/// entities' order with a name of that hash. Brought up to date at a stage's first find
+/// from the names that came or changed since (so nothing is made while none does), and
+/// checked against the entity's own name at each find: a first one renamed or gone, or two
+/// names of one hash, make it again from the world.
+#[derive(Default)]
+struct NameIndex {
+    /// The stage it was brought up to date in, the world it follows and that world's
+    /// restores (a restore makes it again).
+    stage: u64,
+    world: (u64, u64),
+    all: Option<QueryState<(Entity, &'static Name)>>,
+    changed: Option<QueryState<(Entity, &'static Name), Changed<Name>>>,
+    first: HashMap<u64, Entity, BuildHasherDefault<Hashed>>,
+}
+
+impl NameIndex {
+    /// Notes `e`, named so, if it comes before the first of its name's hash.
+    fn note(first: &mut HashMap<u64, Entity, BuildHasherDefault<Hashed>>, e: Entity, name: &str) {
+        first
+            .entry(name_hash(name.as_bytes()))
+            .and_modify(|had| {
+                if e.index() < had.index() {
+                    *had = e;
+                }
+            })
+            .or_insert(e);
+    }
+
+    /// Up to date with `world` for stage `stage`.
+    fn update(&mut self, world: &mut World, stage: u64) {
+        if self.stage == stage {
+            return;
+        }
+        self.stage = stage;
+        let at = (world.id(), world.resync_epoch());
+        if self.world != at || self.changed.is_none() {
+            if self.world.0 != at.0 {
+                self.all = None;
+                self.changed = None;
+            }
+            self.world = at;
+            self.changed.get_or_insert_with(|| QueryState::new(world));
+            self.rebuild(world);
+        }
+        let Some(changed) = self.changed.as_mut() else {
+            return;
+        };
+        for (e, n) in changed.iter_readonly(world) {
+            Self::note(&mut self.first, e, n.as_str());
+        }
+    }
+
+    /// Made again from every named entity.
+    fn rebuild(&mut self, world: &mut World) {
+        self.first.clear();
+        let all = self.all.get_or_insert_with(|| QueryState::new(world));
+        for (e, n) in all.iter_readonly(world) {
+            Self::note(&mut self.first, e, n.as_str());
+        }
+    }
+
+    /// The first entity named `name`, if any.
+    fn find(&mut self, world: &mut World, name: &str) -> Option<Entity> {
+        let named =
+            |world: &World, e: Entity| world.get::<Name>(e).is_some_and(|n| n.as_str() == name);
+        let h = name_hash(name.as_bytes());
+        // Every name that came is in the index: none of this hash means none of this name.
+        let first = *self.first.get(&h)?;
+        if named(world, first) {
+            return Some(first);
+        }
+        // The first went or was renamed: made again, then a scan for two names of a hash.
+        self.rebuild(world);
+        let first = *self.first.get(&h)?;
+        if named(world, first) {
+            return Some(first);
+        }
+        let all = self.all.as_mut()?;
+        all.iter_readonly(world)
+            .filter(|(_, n)| n.as_str() == name)
+            .map(|(e, _)| e)
+            .min_by_key(|e| e.index())
+    }
+}
+
 /// What the fast path reads besides the world: each struct's slots (by its description's
 /// address, kept for the host's life), the components by their names' atoms, and the
 /// slow paths.
@@ -186,11 +329,14 @@ pub(crate) struct Tables {
     locals: c_int,
     name: c_int,
     alive: c_int,
-    /// The stage open (counted from 1), and the entities by name as `world.find` made them
-    /// in the stage of that number (ADR 0114 §3: once a stage): of several of one name,
-    /// the first in the entities' order.
+    /// The stage open (counted from 1), and the entities by name as `world.find` sees them
+    /// in it (ADR 0114 §3: once a stage): of several of one name, the first in the
+    /// entities' order.
     stage: u64,
-    names: (u64, HashMap<Box<str>, Entity>),
+    names: NameIndex,
+    /// The views made through entities and of structs inside views, the latest of each
+    /// place, found by what they show ([`push_kept_view`]).
+    kept: Box<[Kept]>,
 }
 
 impl Default for Tables {
@@ -204,7 +350,8 @@ impl Default for Tables {
             name: c_int::from(atom_of("name")),
             alive: c_int::from(atom_of("alive")),
             stage: 0,
-            names: (0, HashMap::new()),
+            names: NameIndex::default(),
+            kept: vec![Kept::default(); VIEW_CACHE].into_boxed_slice(),
         }
     }
 }
@@ -259,23 +406,8 @@ impl Tables {
 
     /// The entity named `name` in `world`, as this stage's index has it.
     fn find(&mut self, world: &mut World, name: &str) -> Option<Entity> {
-        if self.names.0 != self.stage {
-            self.names.0 = self.stage;
-            let by_name = &mut self.names.1;
-            by_name.clear();
-            let mut q = engine_ecs::QueryState::<(Entity, &engine_scene::Name)>::new(world);
-            for (e, n) in q.iter_readonly(world) {
-                by_name
-                    .entry(n.as_str().into())
-                    .and_modify(|first: &mut Entity| {
-                        if e.index() < first.index() {
-                            *first = e;
-                        }
-                    })
-                    .or_insert(e);
-            }
-        }
-        self.names.1.get(name).copied()
+        self.names.update(world, self.stage);
+        self.names.find(world, name)
     }
 
     fn named(&self, atom: c_int) -> Option<Named> {
@@ -296,15 +428,9 @@ pub(crate) struct ThisData {
     slots: *const [Slot],
     /// Each view's component's name's atom and its registry reference (0: none).
     views: [(c_int, c_int); VIEWS],
-    /// `self.locals`'s and `self.entity`'s registry references, once made (0: not yet).
+    /// `self.locals`'s registry reference, once made (0: not yet).
     locals: c_int,
-    entity_ref: c_int,
 }
-
-/// An entity in a script.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct EntityData(Entity);
 
 /// A component's view, or a struct's inside one: its entity and component, where the
 /// struct lies, and its slots.
@@ -350,7 +476,7 @@ pub(crate) unsafe fn install(state: *mut ffi::lua_State) {
     // SAFETY: as the caller says; each call is Luau's own API on that state.
     unsafe {
         (*ffi::lua_callbacks(state)).useratom = Some(useratom);
-        let methods: [Metatable; 3] = [
+        let methods: [Metatable; 2] = [
             (
                 TAG_SELF,
                 c"Self",
@@ -360,15 +486,6 @@ pub(crate) unsafe fn install(state: *mut ffi::lua_State) {
                 TAG_VIEW,
                 c"View",
                 &[(c"__index", view_index), (c"__newindex", view_newindex)],
-            ),
-            (
-                TAG_ENTITY,
-                c"Entity",
-                &[
-                    (c"__index", entity_index),
-                    (c"__eq", entity_eq),
-                    (c"__tostring", entity_tostring),
-                ],
             ),
         ];
         for (tag, name, functions) in methods {
@@ -382,6 +499,19 @@ pub(crate) unsafe fn install(state: *mut ffi::lua_State) {
             ffi::lua_setreadonly(state, -1, 1);
             ffi::lua_setuserdatametatable(state, tag);
         }
+        // Entities: the metatable of every light userdata, set through one of them.
+        let entity: [(&std::ffi::CStr, ffi::lua_CFunction); 2] =
+            [(c"__index", entity_index), (c"__tostring", entity_tostring)];
+        ffi::lua_pushlightuserdatatagged(state, core::ptr::null_mut(), ENTITY_TAG);
+        ffi::lua_createtable(state, 0, 2);
+        for (key, f) in entity {
+            ffi::lua_pushcfunctiond(state, f, key.as_ptr());
+            ffi::lua_rawsetfield(state, -2, key.as_ptr());
+        }
+        ffi::lua_setreadonly(state, -1, 1);
+        ffi::lua_setmetatable(state, -2);
+        ffi::lua_pop(state, 1);
+        ffi::lua_setlightuserdataname(state, ENTITY_TAG, c"Entity".as_ptr());
     }
 }
 
@@ -404,7 +534,6 @@ pub(crate) unsafe fn push_this(
         slots: tables.slots(info),
         views: [(0, 0); VIEWS],
         locals: 0,
-        entity_ref: 0,
     };
     // SAFETY: a block of the data's size, of `self`'s tag, written whole.
     unsafe {
@@ -414,21 +543,48 @@ pub(crate) unsafe fn push_this(
     }
 }
 
+/// The light userdata of entity `e`: its bits plus one, so that none is the null pointer
+/// (mlua's `Value::NULL`); the null entity wraps to it and is never pushed.
+fn entity_pointer(e: Entity) -> *mut c_void {
+    e.to_bits().wrapping_add(1) as usize as *mut c_void
+}
+
+/// The entity of light userdata `p` ([`entity_pointer`]), if one.
+fn pointer_entity(p: *mut c_void) -> Option<Entity> {
+    let bits = p as usize as u64;
+    (bits != 0).then(|| Entity::from_bits(bits - 1))
+}
+
+/// Entity `e` as a script's value, for the host's own functions: nil for the null entity.
+pub(crate) fn entity_value(e: Entity) -> mlua::Value {
+    if e == Entity::NULL {
+        mlua::Value::Nil
+    } else {
+        mlua::Value::LightUserData(mlua::LightUserData(entity_pointer(e)))
+    }
+}
+
+/// The entity `value` is, if one.
+pub(crate) fn value_entity(value: &mlua::Value) -> Option<Entity> {
+    match value {
+        mlua::Value::LightUserData(p) => pointer_entity(p.0),
+        _ => None,
+    }
+}
+
 /// Pushes entity `e` (nil for the null entity).
 ///
 /// # Safety
 ///
 /// `state` has room for a value.
 pub(crate) unsafe fn push_entity(state: *mut ffi::lua_State, e: Entity) {
-    // SAFETY: as the caller says; a block of the data's size, of an entity's tag.
+    // SAFETY: as the caller says.
     unsafe {
         if e == Entity::NULL {
             ffi::lua_pushnil(state);
-            return;
+        } else {
+            ffi::lua_pushlightuserdatatagged(state, entity_pointer(e), ENTITY_TAG);
         }
-        let p = ffi::lua_newuserdatataggedwithmetatable(state, size_of::<EntityData>(), TAG_ENTITY)
-            .cast::<EntityData>();
-        p.write(EntityData(e));
     }
 }
 
@@ -438,11 +594,8 @@ pub(crate) unsafe fn push_entity(state: *mut ffi::lua_State, e: Entity) {
 ///
 /// `idx` is a valid index of `state`.
 pub(crate) unsafe fn entity_at(state: *mut ffi::lua_State, idx: c_int) -> Option<Entity> {
-    // SAFETY: as the caller says; an entity's block holds its data.
-    unsafe {
-        let p = ffi::lua_touserdatatagged(state, idx, TAG_ENTITY).cast::<EntityData>();
-        (!p.is_null()).then(|| (*p).0)
-    }
+    // SAFETY: as the caller says.
+    pointer_entity(unsafe { ffi::lua_tolightuserdatatagged(state, idx, ENTITY_TAG) })
 }
 
 /// `world.find(name)`: the entity of that `Name` (the first made, of several), or nil.
@@ -479,6 +632,45 @@ unsafe fn push_view_data(state: *mut ffi::lua_State, data: ViewData) {
         let p = ffi::lua_newuserdatataggedwithmetatable(state, size_of::<ViewData>(), TAG_VIEW)
             .cast::<ViewData>();
         p.write(data);
+    }
+}
+
+/// Pushes a view of what `data` shows: the one kept in its place in the table if it shows
+/// that, else a new one kept there (the one before let go; a script holding it keeps it).
+/// Views never change, so one shown twice is the same.
+///
+/// # Safety
+///
+/// `state` has room for a value; `tables` are the stage's, used within this call only.
+unsafe fn push_kept_view(state: *mut ffi::lua_State, tables: *mut Tables, data: ViewData) {
+    let key = Kept {
+        entity: data.entity.to_bits(),
+        info: core::ptr::from_ref(data.info) as usize,
+        id: data.id.index(),
+        offset: data.offset as u32,
+        view: 0,
+    };
+    let mixed = key.entity
+        ^ (key.info as u64).rotate_left(29)
+        ^ (u64::from(key.id) << 40)
+        ^ u64::from(key.offset).rotate_left(13);
+    let place =
+        (mixed.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - VIEW_CACHE.trailing_zeros())) as usize;
+    // SAFETY: as the caller says; the place is inside the table (the hash's top bits).
+    unsafe {
+        let kept = &mut (*tables).kept[place];
+        if kept.view != 0 && (Kept { view: 0, ..*kept }) == key {
+            ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, kept.view);
+            return;
+        }
+        push_view_data(state, data);
+        if kept.view != 0 {
+            ffi::lua_unref(state, kept.view);
+        }
+        *kept = Kept {
+            view: ffi::lua_ref(state, -1),
+            ..key
+        };
     }
 }
 
@@ -566,8 +758,7 @@ pub(crate) unsafe fn forget_views(state: *mut ffi::lua_State, this: *mut ThisDat
     }
 }
 
-/// Lets go of what `this` kept: its views, its locals and its entity (its instance is
-/// gone).
+/// Lets go of what `this` kept: its views and its locals (its instance is gone).
 ///
 /// # Safety
 ///
@@ -576,11 +767,9 @@ pub(crate) unsafe fn release(state: *mut ffi::lua_State, this: *mut ThisData) {
     // SAFETY: as the caller says; the references were taken with `lua_ref`.
     unsafe {
         forget_views(state, this);
-        for r in [&mut (*this).locals, &mut (*this).entity_ref] {
-            if *r != 0 {
-                ffi::lua_unref(state, *r);
-                *r = 0;
-            }
+        if (*this).locals != 0 {
+            ffi::lua_unref(state, (*this).locals);
+            (*this).locals = 0;
         }
     }
 }
@@ -674,6 +863,34 @@ unsafe fn hand_over(state: *mut ffi::lua_State, r: c_int, returns: c_int) -> c_i
     }
 }
 
+/// Hands the call to the host's function at registry reference `r`, as [`hand_over`],
+/// with the place of slot `slot` among `slots` (its struct's fields) after the arguments:
+/// the host's function finds the field by it, not by the key's name (a string read
+/// through mlua allocates).
+///
+/// # Safety
+///
+/// As [`hand_over`]; `slots` valid.
+unsafe fn hand_over_slot(
+    state: *mut ffi::lua_State,
+    r: c_int,
+    slots: *const [Slot],
+    slot: &Slot,
+    returns: c_int,
+) -> c_int {
+    // SAFETY: as the caller says.
+    unsafe {
+        let place = (*slots)
+            .iter()
+            .position(|s| s.offset == slot.offset && s.atom == slot.atom && s.name == slot.name);
+        match place {
+            Some(i) => ffi::lua_pushinteger(state, i as ffi::lua_Integer),
+            None => ffi::lua_pushnil(state),
+        }
+        hand_over(state, r, returns)
+    }
+}
+
 /// Pushes the value of a slot of kind `fast` at `at`: false for a kind the slow path reads.
 ///
 /// # Safety
@@ -702,6 +919,7 @@ unsafe fn push_value(state: *mut ffi::lua_State, at: *const u8, fast: Fast) -> b
                 let v = at.cast::<[f32; 2]>().read_unaligned();
                 ffi::lua_pushvector(state, v[0], v[1], 0.0);
             }
+            Fast::Entity => push_entity(state, at.cast::<Entity>().read_unaligned()),
             Fast::Struct | Fast::Slow => return false,
         }
     }
@@ -742,6 +960,17 @@ unsafe fn write_value(state: *mut ffi::lua_State, at: *mut u8, slot: &Slot) -> W
                     Fast::Vec2 => at.cast::<[f32; 2]>().write_unaligned([v[0], v[1]]),
                     _ => at.cast::<[f32; 3]>().write_unaligned(v),
                 }
+            }
+            Fast::Entity => {
+                let e = if ffi::lua_type(state, 3) == ffi::LUA_TNIL {
+                    Entity::NULL
+                } else {
+                    let Some(e) = entity_at(state, 3) else {
+                        return Wrote::Wrong("an entity");
+                    };
+                    e
+                };
+                at.cast::<Entity>().write_unaligned(e);
             }
             Fast::Struct | Fast::Slow => return Wrote::Slow,
             number => {
@@ -790,6 +1019,9 @@ unsafe fn write_value(state: *mut ffi::lua_State, at: *mut u8, slot: &Slot) -> W
 unsafe fn given(state: *mut ffi::lua_State) -> String {
     // SAFETY: as the caller says; type names are Luau's static strings.
     unsafe {
+        if entity_at(state, 3).is_some() {
+            return String::from("Entity");
+        }
         let name = ffi::lua_typename(state, ffi::lua_type(state, 3));
         if name.is_null() {
             return String::from("a value");
@@ -817,14 +1049,9 @@ unsafe extern "C-unwind" fn self_index(state: *mut ffi::lua_State) -> c_int {
         if key.is_null() {
             return hand_over(state, (*tables).slow.self_index, 1);
         }
-        // Its entity, made the first time and kept.
+        // Its entity: a value.
         if is_named(key, atom, (*tables).entity, b"entity") {
-            if (*this).entity_ref != 0 {
-                ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, (*this).entity_ref);
-            } else {
-                push_entity(state, (*this).entity);
-                (*this).entity_ref = ffi::lua_ref(state, -1);
-            }
+            push_entity(state, (*this).entity);
             return 1;
         }
         // Kept between hooks, made the first time.
@@ -847,7 +1074,7 @@ unsafe extern "C-unwind" fn self_index(state: *mut ffi::lua_State) -> c_int {
             if push_value(state, base.as_ptr().add(slot.offset as usize), slot.fast) {
                 return 1;
             }
-            return hand_over(state, (*tables).slow.self_index, 1);
+            return hand_over_slot(state, (*tables).slow.self_index, (*this).slots, &slot, 1);
         }
         // A component of its entity: the view kept, or one made and kept.
         if let Some(&(_, r)) = (*this).views.iter().find(|(a, r)| *r != 0 && *a == atom) {
@@ -857,8 +1084,9 @@ unsafe extern "C-unwind" fn self_index(state: *mut ffi::lua_State) -> c_int {
         if let Some(named) = (*tables).named(atom)
             && (*world).get_raw((*this).entity, named.id).is_some()
         {
-            push_view_data(
+            push_kept_view(
                 state,
+                tables,
                 ViewData {
                     entity: (*this).entity,
                     id: named.id,
@@ -901,7 +1129,9 @@ unsafe extern "C-unwind" fn self_newindex(state: *mut ffi::lua_State) -> c_int {
         };
         match write_value(state, base.as_ptr().add(slot.offset as usize), &slot) {
             Wrote::Done => 0,
-            Wrote::Slow => hand_over(state, (*tables).slow.self_newindex, 0),
+            Wrote::Slow => {
+                hand_over_slot(state, (*tables).slow.self_newindex, (*this).slots, &slot, 0)
+            }
             Wrote::Wrong(what) => {
                 let message = format!(
                     "{}.{} takes {what}, not {}",
@@ -943,8 +1173,9 @@ unsafe extern "C-unwind" fn view_index(state: *mut ffi::lua_State) -> c_int {
         }
         if slot.fast == Fast::Struct {
             let slots = (*tables).slots(slot.ty);
-            push_view_data(
+            push_kept_view(
                 state,
+                tables,
                 ViewData {
                     entity: (*view).entity,
                     id: (*view).id,
@@ -955,7 +1186,7 @@ unsafe extern "C-unwind" fn view_index(state: *mut ffi::lua_State) -> c_int {
             );
             return 1;
         }
-        hand_over(state, (*tables).slow.view_index, 1)
+        hand_over_slot(state, (*tables).slow.view_index, (*view).slots, &slot, 1)
     }
 }
 
@@ -984,7 +1215,9 @@ unsafe extern "C-unwind" fn view_newindex(state: *mut ffi::lua_State) -> c_int {
         let at = base.as_ptr().add((*view).offset + slot.offset as usize);
         match write_value(state, at, &slot) {
             Wrote::Done => 0,
-            Wrote::Slow => hand_over(state, (*tables).slow.view_newindex, 0),
+            Wrote::Slow => {
+                hand_over_slot(state, (*tables).slow.view_newindex, (*view).slots, &slot, 0)
+            }
             Wrote::Wrong(what) => {
                 let message = format!(
                     "{}.{} takes {what}, not {}",
@@ -1042,8 +1275,9 @@ unsafe extern "C-unwind" fn entity_index(state: *mut ffi::lua_State) -> c_int {
         if let Some(named) = named
             && (*world).get_raw(e, named.id).is_some()
         {
-            push_view_data(
+            push_kept_view(
                 state,
+                tables,
                 ViewData {
                     entity: e,
                     id: named.id,
@@ -1065,16 +1299,6 @@ unsafe extern "C-unwind" fn entity_index(state: *mut ffi::lua_State) -> c_int {
         };
         drop(text);
         raise(state, message)
-    }
-}
-
-/// `a == b` for two entities.
-unsafe extern "C-unwind" fn entity_eq(state: *mut ffi::lua_State) -> c_int {
-    // SAFETY: a C function of the VM, called with both operands.
-    unsafe {
-        let same = entity_at(state, 1).is_some_and(|a| entity_at(state, 2) == Some(a));
-        ffi::lua_pushboolean(state, c_int::from(same));
-        1
     }
 }
 
