@@ -537,7 +537,7 @@ Last updated: 2026-10-22.
     (`ScenePhysics::sync_triggers`, part of `sync_scene`); scripts hear the last step's
     contacts as `on_touch(self, other, point, normal)` and `on_untouch(self, other)`,
     once per step. The editor draws triggers with the colliders, in yellow.
-  - **E7-1d, entities as values** (#PR, ADR 0114's as-built): an entity is a light
+  - **E7-1d, entities as values** (#358, ADR 0114's as-built): an entity is a light
     userdata of its handle (equal by value, a table key, `typeof` `Entity`, never
     allocated); views through entities are kept in a table of 256 places; `world.find`'s
     index follows the names that changed; the host allocates nothing in a stage. The door
