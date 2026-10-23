@@ -530,7 +530,7 @@ Last updated: 2026-10-22.
     world (`Game::physics`) or the player's own (`PlayerSettings::physics`), which runs
     the pack and the scene's models and brushes for a game that has none. Bodies carry
     their entity in their user data (`entity_user_data`), so hits name entities.
-  - **E7-3b, triggers and contacts** (#PR, ADR 0114's as-built): a `Trigger` component
+  - **E7-3b, triggers and contacts** (#357, ADR 0114's as-built): a `Trigger` component
     (box, sphere, capsule) is a kinematic sensor body kept where its entity is
     (`ScenePhysics::sync_triggers`, part of `sync_scene`); scripts hear the last step's
     contacts as `on_touch(self, other, point, normal)` and `on_untouch(self, other)`,
