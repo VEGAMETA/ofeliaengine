@@ -427,6 +427,8 @@ pub(crate) struct Tables {
     pub(crate) despawns: Vec<Entity>,
     /// `find_child`'s queue (scratch).
     search: Vec<Entity>,
+    /// Whether this stage is a frame's: `input` gives the frame's view, else the tick's.
+    pub(crate) frame: bool,
 }
 
 impl Default for Tables {
@@ -447,6 +449,7 @@ impl Default for Tables {
             own: HashMap::new(),
             despawns: Vec::new(),
             search: Vec::new(),
+            frame: false,
         }
     }
 }
@@ -1806,6 +1809,126 @@ unsafe extern "C-unwind" fn view_namecall(state: *mut ffi::lua_State) -> c_int {
         let message = format!("{} has no method `{text}`", (*view).info.name);
         drop(text);
         raise(state, message)
+    }
+}
+
+/// The action named by the string at stack index 1, or why there is none (`what` names
+/// the function in the error).
+///
+/// # Safety
+///
+/// A C function's state; the string lives while it is on the stack.
+unsafe fn action_arg<'a>(
+    state: *mut ffi::lua_State,
+    what: &'static str,
+) -> Result<&'a str, String> {
+    // SAFETY: as the caller says.
+    unsafe {
+        if ffi::lua_type(state, 1) != ffi::LUA_TSTRING {
+            return Err(format!("{what} takes an action's name"));
+        }
+        let mut len = 0usize;
+        let s = ffi::lua_tolstring(state, 1, &mut len);
+        core::str::from_utf8(core::slice::from_raw_parts(s.cast::<u8>(), len))
+            .map_err(|_| format!("{what}: an action's name is text"))
+    }
+}
+
+/// What `read` makes of the stage's view of the game's input (ADR 0114 §4: the tick's in
+/// tick hooks, the frame's in frame hooks), for the action named at index 1; `none` without
+/// an input. Raises for a name that is not one.
+///
+/// # Safety
+///
+/// A C function's state.
+unsafe fn read_input<R>(
+    state: *mut ffi::lua_State,
+    what: &'static str,
+    none: R,
+    read: impl FnOnce(engine_input::Actions<'_>, &str) -> R,
+) -> R {
+    // SAFETY: as the caller says; the world and tables are the stage's.
+    unsafe {
+        let (world, tables) = match opened() {
+            Ok(open) => open,
+            Err(why) => raise(state, why.to_owned()),
+        };
+        let name = match action_arg(state, what) {
+            Ok(name) => name,
+            Err(why) => raise(state, why),
+        };
+        let Some(input) = (*world).resource::<engine_input::Input>() else {
+            return none;
+        };
+        let actions = if (*tables).frame {
+            input.frame()
+        } else {
+            input.tick()
+        };
+        read(actions, name)
+    }
+}
+
+/// `input.pressed(action)`: whether it is held (a button, or an axis away from rest).
+pub(crate) unsafe extern "C-unwind" fn input_pressed(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM.
+    unsafe {
+        let v = read_input(state, "input.pressed", false, |a, n| a.pressed(n));
+        ffi::lua_pushboolean(state, c_int::from(v));
+        1
+    }
+}
+
+/// `input.just_pressed(action)`: whether it went down in this view (a tap shorter than a
+/// tick counts in the tick's).
+pub(crate) unsafe extern "C-unwind" fn input_just_pressed(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM.
+    unsafe {
+        let v = read_input(state, "input.just_pressed", false, |a, n| a.just_pressed(n));
+        ffi::lua_pushboolean(state, c_int::from(v));
+        1
+    }
+}
+
+/// `input.just_released(action)`: whether it went up in this view.
+pub(crate) unsafe extern "C-unwind" fn input_just_released(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM.
+    unsafe {
+        let v = read_input(state, "input.just_released", false, |a, n| {
+            a.just_released(n)
+        });
+        ffi::lua_pushboolean(state, c_int::from(v));
+        1
+    }
+}
+
+/// `input.strength(action)`: how far it is held, 0 to 1.
+pub(crate) unsafe extern "C-unwind" fn input_strength(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM.
+    unsafe {
+        let v = read_input(state, "input.strength", 0.0, |a, n| a.strength(n));
+        ffi::lua_pushnumber(state, f64::from(v));
+        1
+    }
+}
+
+/// `input.axis(action)`: a 1D axis' value, −1 to 1.
+pub(crate) unsafe extern "C-unwind" fn input_axis(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM.
+    unsafe {
+        let v = read_input(state, "input.axis", 0.0, |a, n| a.axis(n));
+        ffi::lua_pushnumber(state, f64::from(v));
+        1
+    }
+}
+
+/// `input.vector(action)`: a 2D axis' value as a vector (x, y, 0), its length at most 1.
+pub(crate) unsafe extern "C-unwind" fn input_vector(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM.
+    unsafe {
+        let [x, y] = read_input(state, "input.vector", [0.0; 2], |a, n| a.vector(n));
+        ffi::lua_pushvector(state, x, y, 0.0);
+        1
     }
 }
 

@@ -262,6 +262,8 @@ local maths = require("@shared/maths") -- an alias of a .luaurc
 | Library | What |
 |---|---|
 | `world.find(name)` | the entity with that `Name` (the first made, of several), or `nil` |
+| `input.pressed(a)`, `input.just_pressed(a)`, `input.just_released(a)` | your game's action `a` (its input map): held, gone down, gone up |
+| `input.strength(a)`, `input.axis(a)`, `input.vector(a)` | how far it is held (0 to 1), a 1D axis (−1 to 1), a 2D axis as a vector (x, y, 0) |
 | `time.now()`, `time.tick()`, `time.dt()` | the game's time in seconds, the tick's number, its length |
 | `quat.identity()`, `quat.axis_angle(axis, angle)`, `quat.euler(x, y, z)` | rotations, in radians; `q * v` rotates a vector, `a * b` composes |
 | `physics.raycast(origin, direction, max_distance, filter?)` | the first body along the ray: its entity (`nil` for a body without one), the point, the normal and the distance; `nil`s on a miss |
@@ -342,7 +344,9 @@ The editor knows the engine's API and your components: it underlines a wrong fie
 value of the wrong type as you write, completes `self.Transform.` and shows types on
 hover. In a hook, `self` is your component's props with the entity's components
 (`self.lift`, `self.Transform.translation`), typed from `component`'s declaration: write
-`function Door.on_tick(self, dt: number)` and nothing more.
+`function Door.on_tick(self, dt: number)` and nothing more. To name that type yourself,
+`type Self = Script<typeof(Door.props)>` gives it (`function Door.on_tick(self: Self, dt:
+number)`).
 
 The editor writes the same types to `types/ofelia.d.luau` in your game's folder whenever
 they change (a script declared, a component added). A game made with `ofeliaengine new`
@@ -354,8 +358,27 @@ at it, so VS Code checks and completes your scripts the same way. The file is in
   `timer["repeat"]`.
 - Lists, maps and asset references are not readable from scripts yet, and have no types.
 
+`input` reads the tick's view in a tick's hooks (`on_tick`, `on_start`, contacts, systems'
+`on_tick`), where a tap shorter than a tick still counts, and the frame's in `on_frame`.
+Move what the game's state depends on in ticks; turn a camera in frames:
+
+```luau
+function Walker.on_tick(self, dt: number)
+    local move = input.vector("move")
+    local speed = if input.pressed("run") then self.speed * 2 else self.speed
+    local t = self.Transform
+    t.translation += (t:right() * move.x + t:forward() * move.y) * (speed * dt)
+end
+
+function Walker.on_frame(self, dt: number)
+    local camera = self:find_child("Camera")
+    if camera then
+        camera.Transform:rotate(vector.create(1, 0, 0), -input.vector("look").y * 0.002)
+    end
+end
+```
+
 ## Coming next
 
-- `input`;
 - `send`, `after` timers, `audio`, `random`, `world.instantiate`;
 - script components in saves.
