@@ -607,9 +607,22 @@ Last updated: 2026-10-22.
   - **Prefab following takes script components** (#372): an instance now gets a script's
     component its prefab added (E5-4 made only the program's types, through their
     `Default`); its texts at the script's defaults (`engine_ecs::DefaultValue`).
+  - **E9's research and ADR 0119** (#PR, proposed):
+    - research `docs/research/script-debugger.md` (Luau's debug interface, six debuggers,
+      DAP, how to stop while the editor draws on the same thread);
+    - UX `docs/research/ux/script-debugger.md`, replacing the note of 2026-10-17;
+    - ADR 0107 §6's fallback (frames drawn from inside a breakpoint) cannot be built: the
+      frame cannot be entered again. ADR 0119 proposes the stage on a fiber, or a stage
+      that can stop halfway; four questions to the team.
   - **Next, in this order:**
-    1. E9, the script debugger (ADR 0107 §7: the core, DAP for VS Code, the panel and the
-       gutter), its UX note first. E10-1 waits for the answer on the material file.
+    1. E9-1a, which does not wait for ADR 0119's answers:
+       - the gutter;
+       - breakpoints kept in the session and set in the VM;
+       - logpoints and pause points, with conditions and hit counts;
+       - measured: nothing without breakpoints;
+    2. E9-1b: stops, stepping, the panel, pause on errors (after ADR 0119's answers);
+       then E9-2 (DAP, VS Code) and E9-3 (the player). E10-1 waits for the answer on the
+       material file.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
