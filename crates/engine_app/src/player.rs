@@ -4083,12 +4083,20 @@ impl Player {
     /// Takes a save of the world now and hands it to the writer thread.
     fn take_save(&mut self, game: &mut impl Game, slot: &str) {
         engine_profiler::zone!("app::take_save");
+        // Scripts' timers ride on their entities into the save (ADR 0114 §8).
+        if let Some(scripts) = self.scripts.as_mut() {
+            scripts.before_save(&mut self.runtime.world);
+        }
         let world = &self.runtime.world;
         let options = engine_save::CaptureOptions {
             level: Some(&self.saves.level_ids),
             ..engine_save::CaptureOptions::default()
         };
         let mut image = engine_save::capture(world, &options);
+        if let Some(scripts) = self.scripts.as_mut() {
+            scripts.after_save(&mut self.runtime.world);
+        }
+        let world = &self.runtime.world;
         image.set_state(
             "clock",
             &crate::saves::ClockState {
@@ -4157,6 +4165,10 @@ impl Player {
         cameras.for_each(world, |camera| camera.cut());
         // Every sound starts again where the save had it (ADR 0105).
         self.sound.after_load(world);
+        // Scripts' timers set again, their `on_load` at the next tick (ADR 0114 §8).
+        if let Some(scripts) = self.scripts.as_mut() {
+            scripts.after_load(world);
+        }
         game.after_load(world, &save, &report);
         Ok(report)
     }

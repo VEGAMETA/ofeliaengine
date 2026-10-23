@@ -578,10 +578,16 @@ Last updated: 2026-10-22.
     value (`prop.asset(kind)`, `AssetRef` fields on the fast path); `world.instantiate(
     prefab, translation?)` places a prefab scene by asset or path, its instances
     anonymous (no `SceneId`), their scripts started at the next stage.
+  - **E7-5f1, script components in saves** (#PR, ADR 0114's as-built): saves took script
+    components but skipped them on load (`engine_save` looked up only the program's
+    types): types made at run time load now. `after` timers ride on their entities into a
+    save (a `ScriptTimers` component put on just for it), and `on_load(self)` runs at the
+    next tick after a load.
   - **Next, in this order** (E7-5, the rest of scripting v1, in steps; the API is ADR
     0114's):
-    1. E7-5f: saves of script components (`on_load`), their timers, and §8's networking
-       rules; each step adds its examples to the zero-allocation test;
+    1. E7-5f2: §8's networking rules (`net.is_server`, `is_client`, `resimulating`; a
+       joined client runs its predicted entities' tick hooks, again on re-simulation,
+       sounds then dropped); each step adds its examples to the zero-allocation test;
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 

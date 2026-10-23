@@ -43,6 +43,11 @@ settings.saves.autosave = Some(Autosave { every: Duration::from_secs(300), slots
   - their strings, lists, optional values and maps;
   - the hierarchy, in the children's order;
   - references between entities.
+- **Scripts' state** (`docs/dev-guide/scripting.md`):
+  - every script component's props;
+  - the `self:after` timers waiting, with their values;
+  - not `self.locals` or a module's own tables: keep in props what a load must bring
+    back. `on_load(self)` runs once the save's values are in.
 - **The engine's own state:**
   - transforms, the camera, lights, renderers, probes;
   - the clock;
