@@ -280,6 +280,20 @@ local bullet = world.spawn({
 bullet.Transform.translation += vector.create(0, 0.1, 0) -- there already
 ```
 
+## Multiplayer
+
+A script's state is its props: they are saved, rolled back and, once your network schema
+names them, replicated. Keep `self.locals` for caches.
+
+- `net.is_server()`: this side decides the world (playing alone, or hosting);
+  `net.is_client()`: it plays on someone else's host.
+- On a client, only your own predicted entities' tick hooks run. They run again when the
+  host corrects a prediction, and `net.resimulating()` says so. While they do, sounds,
+  messages and timers are left out: they started the first time.
+- Systems, timers and contacts run on the host.
+- Use `time` and `random` for anything the game's state depends on: they are the same on
+  every machine, and kept by saves and rollback. `os.clock` and `math.random` are not.
+
 ## Scripts that use each other
 
 `require` gives you another script by its path from yours, as luau-lsp finds it:
@@ -427,4 +441,5 @@ end
 ## Coming next
 
 - props of text;
-- what a networked client runs: its own predicted entities' hooks, and `net`.
+- script components in your network schema;
+- prefabs from a release's packs.

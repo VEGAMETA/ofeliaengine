@@ -2720,7 +2720,14 @@ impl Player {
                     self.runtime.frame_driven(
                         &(),
                         &mut self.scene,
-                        |world, (), dt| game_cell.borrow_mut().tick(world, dt),
+                        |world, (), dt| {
+                            // Scripts predict the client's own entities (ADR 0114 §8).
+                            if simulating && let Some(scripts) = scripts_cell.borrow_mut().as_mut()
+                            {
+                                scripts.tick_predicted(world, dt);
+                            }
+                            game_cell.borrow_mut().tick(world, dt);
+                        },
                         |world, step| client.client_frame(world, Instant::now(), step),
                         present,
                     )

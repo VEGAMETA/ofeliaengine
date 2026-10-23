@@ -23,11 +23,11 @@ Last updated: 2026-10-22.
   - any scene can be a prefab.
   - **Where it stands (2026-10-23):** E1 to E6 are done (E2b but for the cook's path, E3
     but for the tree's marks on what changed), and material slots on `Model`. E8, the
-    code editor, is done but for rename and references across the project. E7 is under
-    way: the script host, scenes, the editor's attach and reload, the types, the fast
-    path, physics queries and triggers, entities as values; the rest of v1 (E7-5) is
-    next. E10-1 waits for the answer on the material file. The entries below are in the
-    order merged.
+    code editor, is done but for rename and references across the project. E7, scripting
+    v1 (ADR 0114), is done but for props of text, prefabs from packs and script
+    components in the network schema; nothing the engine gives scripts allocates in
+    steady state (ADR 0114's examples in the zero-allocation test). E10-1 waits for the
+    answer on the material file. The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
@@ -583,13 +583,15 @@ Last updated: 2026-10-22.
     types): types made at run time load now. `after` timers ride on their entities into a
     save (a `ScriptTimers` component put on just for it), and `on_load(self)` runs at the
     next tick after a load.
-  - **Next, in this order** (E7-5, the rest of scripting v1, in steps; the API is ADR
-    0114's):
-    1. E7-5f2: §8's networking rules (`net.is_server`, `is_client`, `resimulating`; a
-       joined client runs its predicted entities' tick hooks, again on re-simulation,
-       sounds then dropped); each step adds its examples to the zero-allocation test;
-    2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
-       type readable alone first). E10-1 waits for the answer on the material file.
+  - **E7-5f2, the networking rules** (#PR, ADR 0114's as-built): `net.is_server`,
+    `is_client`, `resimulating`; a joined client runs its predicted entities' tick hooks
+    (`Scripts::tick_predicted`), again on re-simulation (`engine_net::Resimulating`),
+    sounds, messages and timers then left out. Scripting v1 is done with it.
+  - **Next, in this order:**
+    1. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
+       type readable alone first). E10-1 waits for the answer on the material file;
+    2. scripting's remainders: props of text (a layout that drops them), prefabs from
+       packs, script components in `NetSchema` by name.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

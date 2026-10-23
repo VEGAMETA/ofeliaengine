@@ -19391,9 +19391,11 @@ local Dice = component(\"Dice\", { roll = 0 })
 function Dice.on_tick(self, dt: number)
     self.roll = random.integer(1, 6) + random.number()
     local spark = self.Transform.translation + random.vector_in_sphere()
-    local shot: Entity = audio.play_at(\"sfx/shot.wav\", spark, \"effects\")
+    local shot = audio.play_at(\"sfx/shot.wav\", spark, \"effects\")
     audio.play(\"ui/click.ogg\")
-    shot:despawn()
+    if shot and net.is_server() and not net.is_client() and not net.resimulating() then
+        shot:despawn()
+    end
 end
 return Dice
 ",

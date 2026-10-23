@@ -1492,3 +1492,30 @@ there, and see the script's file in the inspector.
   - the timer due four ticks after the load, as it was at the save, with its string and
     its entity remapped;
   - the editor's checker takes `on_load` in strict mode.
+
+## As built (E7-5f2, 2026-10-23): the networking rules
+
+- **`net.is_server()`** says whether this side decides the world (alone, or hosting),
+  **`net.is_client()`** whether it plays on a host (`NetState::Joined`/`Joining`), and
+  **`net.resimulating()`** whether this tick runs again. All three are C functions.
+- **Re-simulation is the world's to tell:** `engine_net::Resimulating`, a resource the
+  client sets around the ticks it runs again after a correction (ADR 0074).
+- **A joined client's ticks** (§8, rule 5) run `Scripts::tick_predicted`: the tick hooks
+  of the instances on its predicted entities (`engine_net::Predicted`) only, in every
+  predicted tick and again in every re-simulated one. The rest of the world comes from
+  the host's snapshots, and no systems, timers or contacts run there: the host's are the
+  world's. The player calls it in the joined client's tick, before the game's.
+- **What a tick run again would start twice** is left out (rule 4): `audio.play` and
+  `audio.play_at` return nil, and `send` and `after` do nothing. The first prediction
+  already started them.
+- **Tests:**
+  - a client's tick runs its own entity only, the host's every entity;
+  - re-run, the hook runs but plays no sound and sends no message again;
+  - `net.*` alone (a server, not a client);
+  - the editor's checker takes `net` in strict mode.
+- **Not in this step:** script components replicated (the game's `NetSchema` taking them
+  by name, §8 rule 5's later step); predicted spawning.
+- **Scripting v1** (§12's E7) is complete with this step, but for:
+  - props of text;
+  - prefabs from a release's packs;
+  - script components in the network schema.

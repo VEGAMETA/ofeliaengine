@@ -1631,6 +1631,10 @@ unsafe fn entity_method(
         // host's functions keep them, told how many values follow (nils are values).
         let sent = is_named(method, atom, m.send, b"send");
         let timed = own != 0 && is_named(method, atom, m.after, b"after");
+        // A tick run again on a client sent and set them the first time (ADR 0114 §8).
+        if (sent || timed) && engine_net::Resimulating::now(&*world) {
+            return 0;
+        }
         if sent || timed {
             let first = if sent { 3 } else { 4 };
             let what = if sent { "send" } else { "after" };
@@ -1992,6 +1996,60 @@ pub(crate) unsafe extern "C-unwind" fn random_in_sphere(state: *mut ffi::lua_Sta
     unsafe {
         let v = draw(state, crate::random::Random::in_sphere);
         ffi::lua_pushvector(state, v.x, v.y, v.z);
+        1
+    }
+}
+
+/// The session this world plays in (ADR 0114 §4, §8): (whether it decides the world: alone
+/// or hosting; whether it plays on a host; whether ticks are running again).
+///
+/// # Safety
+///
+/// A C function's state.
+unsafe fn session(state: *mut ffi::lua_State) -> (bool, bool, bool) {
+    // SAFETY: as the caller says; the world is the stage's.
+    unsafe {
+        let (world, _) = match opened() {
+            Ok(open) => open,
+            Err(why) => raise(state, why.to_owned()),
+        };
+        let world = &*world;
+        let joined = world.resource::<crate::Network>().is_some_and(|n| {
+            matches!(
+                n.state(),
+                crate::NetState::Joined | crate::NetState::Joining
+            )
+        });
+        (!joined, joined, engine_net::Resimulating::now(world))
+    }
+}
+
+/// `net.is_server()`: whether this side decides the world (alone, or hosting).
+pub(crate) unsafe extern "C-unwind" fn net_is_server(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM.
+    unsafe {
+        let (server, _, _) = session(state);
+        ffi::lua_pushboolean(state, c_int::from(server));
+        1
+    }
+}
+
+/// `net.is_client()`: whether this side plays on a host.
+pub(crate) unsafe extern "C-unwind" fn net_is_client(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM.
+    unsafe {
+        let (_, client, _) = session(state);
+        ffi::lua_pushboolean(state, c_int::from(client));
+        1
+    }
+}
+
+/// `net.resimulating()`: whether this tick runs again (a client correcting its prediction).
+pub(crate) unsafe extern "C-unwind" fn net_resimulating(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM.
+    unsafe {
+        let (_, _, again) = session(state);
+        ffi::lua_pushboolean(state, c_int::from(again));
         1
     }
 }

@@ -96,6 +96,29 @@ pub struct NetId {
     pub generation: u16,
 }
 
+/// On a client, while the ticks since a correction run again (ADR 0074): `true` around
+/// them. What a re-simulated tick starts that was started the first time (a sound, a
+/// script's message or timer) is left out (ADR 0114 §8). A world without it is not
+/// re-simulating.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Resimulating(pub bool);
+
+impl Resimulating {
+    /// Whether `world` is running ticks again now.
+    pub fn now(world: &engine_ecs::World) -> bool {
+        world.resource::<Self>().is_some_and(|r| r.0)
+    }
+
+    /// Marks `world` re-simulating (or not).
+    fn set(world: &mut engine_ecs::World, on: bool) {
+        match world.resource_mut::<Self>() {
+            Some(r) => r.0 = on,
+            None if on => world.insert_resource(Self(true)),
+            None => {}
+        }
+    }
+}
+
 /// On a client: this entity is predicted (the client owns it). Its replicated components
 /// are the client's prediction; the server's state corrects them by rollback.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
