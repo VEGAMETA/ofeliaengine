@@ -589,7 +589,7 @@ Last updated: 2026-10-22.
     `is_client`, `resimulating`; a joined client runs its predicted entities' tick hooks
     (`Scripts::tick_predicted`), again on re-simulation (`engine_net::Resimulating`),
     sounds, messages and timers then left out. Scripting v1 is done with it.
-  - **E10-2b, Slang's completion, hover, signatures and definitions** (#PR, ADR 0107's
+  - **E10-2b, Slang's completion, hover, signatures and definitions** (#368, ADR 0107's
     as-built; research note's "slangd, probed again"): `slangd` as a child process, its
     own checks off. A material type is read inside `forward.slang`'s prelude, no shader
     changed; F12 goes into `forward.slang`. Completion 24 ms after a change, a definition
