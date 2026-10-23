@@ -166,6 +166,13 @@ pub struct PlayerSettings {
     /// (`NetConfig::new::<Input>(schema)`); the world's [`crate::Network`] resource hosts,
     /// joins and leaves. `None`: singleplayer only.
     pub network: Option<crate::NetConfig>,
+    /// The player's own physics world (ADR 0114 E7-3), for a game that owns none
+    /// ([`crate::Game::physics`] gives none): made with these settings, the pack's bodies in
+    /// it, the scene's models and brushes kept in step before the ticks, stepped after each
+    /// tick, its bodies' entities interpolated each frame. Scripts query it
+    /// (`physics.raycast`); sound travels through it when the game gives no acoustics.
+    /// `None` (the default): none.
+    pub physics: Option<engine_physics::PhysicsSettings>,
 }
 
 /// How many frames a second the player draws at most (ADR 0023's addendum of 2026-10-22).
@@ -257,6 +264,7 @@ impl Default for PlayerSettings {
             saves: crate::SaveSettings::default(),
             audio: crate::AudioSettings::default(),
             network: None,
+            physics: None,
         }
     }
 }

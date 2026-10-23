@@ -1066,3 +1066,40 @@ there, and see the script's file in the inspector.
 - **Not in this step:** an entity from `world.find` and a view through another entity
   are still made at each access (a garbage-collected block each); the zero-allocation
   test.
+
+## As built (E7-3a, 2026-10-23): physics for scripts, queries
+
+- **Which world scripts query:** the game's, through a new hook, `Game::physics(&self) ->
+  Option<&ScenePhysics>`; else the player's own. The player makes its own when
+  `PlayerSettings::physics` gives settings:
+  - it loads the pack's bodies into it;
+  - it keeps the scene's models and brushes in step before the ticks (`sync_scene`);
+  - it steps the world after each tick's `Game::tick` and interpolates in the presentation;
+  - sound travels through it when the game gives no acoustics.
+
+  `Player::physics` and `physics_mut` reach it. The editor's Play forwards `Game::physics`.
+- **Bodies name their entities:** `engine_physics::ecs::entity_user_data(e)` (the
+  entity's bits plus one, so 0 names none) in a body's user data, read back by
+  `user_data_entity`. `ScenePhysics` gives it to models' bodies, brush groups' and a
+  pack's moving bodies; `ScenePhysics::entity_of(body)` reads it. A game's own bodies
+  carry it the same way. The backends gained `user_data(body)` and
+  `set_user_data(body, data)`.
+- **The library** (`physics`), through mlua: a query costs microseconds, so the fast path
+  is not needed here.
+  - `raycast(origin, direction, max_distance, filter?)` returns the hit's entity (nil for
+    a body without one), point, normal and distance, or nothing on a miss;
+  - `overlap_sphere(center, radius, filter?)` is an iterator over the entities whose bodies
+    overlap the sphere, each once;
+  - `filter({ "Moving", … })` names collision layers. It is made once at a module's top,
+    and resolved against the world's `PhysicsSettings::layer_names` the first time it is
+    used there.
+
+  Without a physics world, a query is an error that says where one comes from. The types
+  file declares them (`PhysicsFilter`).
+- **Tests:** scripts' queries against a world of named bodies (an entity, point, normal and
+  distance, an overlap, a filter by layer name, a miss, no world); in the player on both
+  GPUs, its own world drops a prop onto a floor for a game without physics, and a script's
+  ray sees the prop; a body's user data read and written in Jolt; the types file checks a
+  script that queries.
+- **Next (E7-3b):** `Trigger`, a sensor shape on an entity, and `on_touch` / `on_untouch`
+  from the last step's contacts.

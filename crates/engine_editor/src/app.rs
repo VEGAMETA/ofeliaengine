@@ -14611,6 +14611,10 @@ impl<G: Game> Game for EditorGame<G> {
         self.game.as_ref().and_then(Game::acoustics)
     }
 
+    fn physics(&self) -> Option<&engine_app::ScenePhysics> {
+        self.game.as_ref().and_then(Game::physics)
+    }
+
     fn present(&mut self, world: &mut World, alpha: f32) {
         if self.running() {
             self.guarded("present", |game| game.present(world, alpha));
@@ -19152,6 +19156,22 @@ return Door
         assert!(found.is_empty(), "{found:?}");
         luau.set_source("front_door", &script_template("FrontDoor"));
         let found = luau.check("front_door");
+        assert!(found.is_empty(), "{found:?}");
+        // The physics library (ADR 0114 E7-3).
+        luau.set_source(
+            "eye",
+            "--!strict
+local moving = physics.filter({ \"Moving\" })
+             local Eye = component(\"Eye\", { seen = 0 })
+             function Eye.on_tick(self, dt: number)
+                 local e, _point, _normal, distance = physics.raycast(vector.zero, vector.create(0, -1, 0), 10, moving)
+                 if e and distance then self.seen = distance end
+                 for other in physics.overlap_sphere(vector.zero, 2) do print(other.name) end
+             end
+return Eye
+",
+        );
+        let found = luau.check("eye");
         assert!(found.is_empty(), "{found:?}");
         // A field of the wrong type: an error where it is.
         luau.set_source(

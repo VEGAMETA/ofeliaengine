@@ -148,6 +148,12 @@ fn sphere_against_sphere_matches_the_analytic_contact() {
     let normal = Vec3::new(x, 1.0, 0.0) / 2.5;
     println!("{hit:?}");
     assert_eq!((hit.body, hit.user_data), (target, 7));
+    // The body keeps it, and takes another (ADR 0114 E7-3: scripts name entities so).
+    assert_eq!(w.user_data(target), 7);
+    w.set_user_data(target, 9);
+    assert_eq!(w.user_data(target), 9);
+    w.destroy_body(target);
+    assert_eq!(w.user_data(target), 0, "a body that is gone has none");
     assert!(
         close(hit.fraction, (x + 10.0) / 20.0, 1e-4),
         "{}",

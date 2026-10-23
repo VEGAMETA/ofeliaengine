@@ -525,8 +525,13 @@ Last updated: 2026-10-22.
   - **The shipping profile unwinds** (#355, ADR 0118 accepted: team decision of
     2026-10-22, option 1): a script's error stops its instance in what players get too.
     `check.ps1 -Profiles` runs a probe of three script errors built with `shipping`.
+  - **E7-3a, physics queries for scripts** (#356, ADR 0114's as-built):
+    `physics.raycast`, `physics.overlap_sphere` and `physics.filter` on the game's physics
+    world (`Game::physics`) or the player's own (`PlayerSettings::physics`), which runs
+    the pack and the scene's models and brushes for a game that has none. Bodies carry
+    their entity in their user data (`entity_user_data`), so hits name entities.
   - **Next, in this order:**
-    1. E7 on: E7-3's player-owned physics for scripts builds on `ScenePhysics::sync_scene`;
+    1. E7-3b: `Trigger` and `on_touch` / `on_untouch` from the last step's contacts;
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 

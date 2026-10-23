@@ -32,6 +32,10 @@
 //!   saved velocities (`Game::before_save` and `Game::after_load`, one line each).
 //! - **A scene file's models** (ADR 0117): [`ScenePhysics::sync_models`] gives each model
 //!   the body its collider asks for ([`crate::Assets::collider`]) and keeps it in step.
+//! - **Bodies name their entities** (ADR 0114 E7-3): a model's body, a brush group's and a
+//!   pack's moving body carry their entity in their user data
+//!   ([`engine_physics::ecs::entity_user_data`]), so query hits and contacts give it back
+//!   ([`ScenePhysics::entity_of`]); scripts' `physics.raycast` reads it so.
 
 use crate::AppError;
 use crate::assets::{Assets, ColliderState, Model, ModelCollider};
@@ -39,7 +43,9 @@ use engine_assets::colliders::{CookedBody, CookedCollider, Motion};
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
 use engine_ecs::{Changed, Entity, GlobalTransform, Or, QueryState, Transform, Without, World};
-use engine_physics::ecs::{KinematicTarget, PhysicsPose, PhysicsSync, RigidBody};
+use engine_physics::ecs::{
+    KinematicTarget, PhysicsPose, PhysicsSync, RigidBody, entity_user_data, user_data_entity,
+};
 use engine_physics::{
     BodyDesc, BodyId, CompoundChild, GravityMode, MotionType, PhysicsBackend, PhysicsError,
     PhysicsSettings, ShapeDesc, ShapeId,
@@ -176,6 +182,18 @@ impl ScenePhysics {
     /// ([`crate::Game::acoustics`]).
     pub fn backend(&self) -> &JoltBackend {
         &self.physics
+    }
+
+    /// The world's settings: the collision layers by name.
+    pub fn settings(&self) -> &PhysicsSettings {
+        &self.settings
+    }
+
+    /// The entity body `body` belongs to, as its user data names it (a model's, a brush
+    /// group's, a pack's moving body's, or a body the game gave
+    /// [`engine_physics::ecs::entity_user_data`]).
+    pub fn entity_of(&self, body: BodyId) -> Option<Entity> {
+        user_data_entity(self.physics.user_data(body))
     }
 
     /// The bodies made from the scene, in the pack's order.
@@ -340,6 +358,7 @@ impl ScenePhysics {
                 Transform::from_translation(placed.position).with_rotation(placed.rotation),
                 GlobalTransform(pose),
             ));
+            self.physics.set_user_data(id, entity_user_data(entity));
             // Known to saves by its first instance's id (pack version 9).
             if let Some(id) = body
                 .instances
@@ -454,7 +473,10 @@ impl ScenePhysics {
             shapes.push(compound);
             let body = self
                 .physics
-                .create_body(&BodyDesc::fixed(compound, Vec3::ZERO))
+                .create_body(&BodyDesc {
+                    user_data: entity_user_data(group),
+                    ..BodyDesc::fixed(compound, Vec3::ZERO)
+                })
                 .map_err(AppError::at("a brush group's body"))?;
             self.blockout.insert(
                 group,
@@ -714,6 +736,7 @@ impl ScenePhysics {
         desc.restitution = collider.restitution;
         desc.mass = collider.mass;
         desc.sensor = collider.sensor;
+        desc.user_data = entity_user_data(e);
         if collider.gravity_factor != 1.0 {
             desc.gravity = GravityMode::Scaled(collider.gravity_factor);
         }

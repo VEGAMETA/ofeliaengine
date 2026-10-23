@@ -83,6 +83,13 @@ pub trait Game {
         let _ = world;
     }
 
+    /// The physics world the game's scripts query (`physics.raycast`) and hear contacts from
+    /// (ADR 0114 E7-3): `Some(&self.physics)`. `None` (the default): the player's own, when
+    /// `PlayerSettings::physics` asks for one.
+    fn physics(&self) -> Option<&crate::ScenePhysics> {
+        None
+    }
+
     /// The physics world sound travels through (ADR 0105): walls between a placed sound
     /// and the listener muffle it, and the room around the listener gives the reverb
     /// (`AudioSettings::acoustics`). With a [`ScenePhysics`](crate::ScenePhysics):

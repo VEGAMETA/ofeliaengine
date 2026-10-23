@@ -689,6 +689,11 @@ unsafe extern "C" {
         bi: *mut JPH_BodyInterface,
         body: JPH_BodyID,
     ) -> u64;
+    pub(crate) fn JPH_BodyInterface_SetUserData(
+        bi: *mut JPH_BodyInterface,
+        body: JPH_BodyID,
+        user_data: u64,
+    );
     pub(crate) fn JPH_BodyInterface_GetObjectLayer(
         bi: *mut JPH_BodyInterface,
         body: JPH_BodyID,

@@ -114,10 +114,33 @@ From Rust, `player.add_script(door, "Door")` gives one with its defaults.
 | `world.find(name)` | the entity with that `Name` (the first made, of several), or `nil` |
 | `time.now()`, `time.tick()`, `time.dt()` | the game's time in seconds, the tick's number, its length |
 | `quat.identity()`, `quat.axis_angle(axis, angle)`, `quat.euler(x, y, z)` | rotations, in radians; `q * v` rotates a vector, `a * b` composes |
+| `physics.raycast(origin, direction, max_distance, filter?)` | the first body along the ray: its entity (`nil` for a body without one), the point, the normal and the distance; nothing on a miss |
+| `physics.overlap_sphere(center, radius, filter?)` | the entities whose bodies overlap the sphere, for a `for` loop |
+| `physics.filter({ "Moving" })` | the collision layers a query sees, by name (`PhysicsSettings::layer_names`); make it once, at the module's top |
 | `print(...)`, `warn(...)` | the engine's log, with the script's file and line |
 
 Luau's own libraries (`math`, `string`, `table`, `vector`, `buffer`) are there too, in
 Luau's sandbox.
+
+`physics` queries the game's physics world (`Game::physics`), or the player's own: set
+`PlayerSettings::physics` and the player runs one for a game that has none. It holds the
+pack's bodies and the scene's models and brushes, and steps them after every tick
+([physics.md](physics.md#the-players-own-physics-world)).
+
+```luau
+local Eye = component("Eye", { range = 20 })
+local moving = physics.filter({ "Moving" })
+
+function Eye.on_tick(self, dt: number)
+    local t = self.Transform
+    local e, point, normal, distance = physics.raycast(t.translation, vector.create(0, 0, -1), self.range, moving)
+    if e then
+        print("sees", e.name, "at", distance)
+    end
+end
+
+return Eye
+```
 
 ## Changing a script while it runs
 

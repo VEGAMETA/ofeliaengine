@@ -24,7 +24,23 @@
 
 use crate::{BodyId, CharacterId, PhysicsBackend};
 use engine_core::math::{Quat, Vec3};
-use engine_ecs::{Parent, QueryState, Transform, With, Without, World, pod_component};
+use engine_ecs::{Entity, Parent, QueryState, Transform, With, Without, World, pod_component};
+
+/// A body's user data ([`crate::BodyDesc::user_data`]) naming entity `e`: what query hits
+/// and [`user_data_entity`] give back (ADR 0114 E7-3: scripts' raycasts and contacts name
+/// entities so). 0 names none, so the null entity is 0 too.
+pub const fn entity_user_data(e: Entity) -> u64 {
+    e.to_bits().wrapping_add(1)
+}
+
+/// The entity a body's user data names ([`entity_user_data`]), if any.
+pub const fn user_data_entity(data: u64) -> Option<Entity> {
+    if data == 0 {
+        None
+    } else {
+        Some(Entity::from_bits(data - 1))
+    }
+}
 
 /// The entity is driven by this rigid body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
