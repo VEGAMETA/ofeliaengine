@@ -1891,3 +1891,34 @@ Research: `docs/research/slang-in-the-editor.md` ("slangd, probed again").
   - semantic tokens (colors for names the lexical rules cannot tell apart);
   - rename and references;
   - completion items' details (the server's resolve).
+
+## As built (2026-10-23): the editor's frame makes no allocation
+
+§8's budget of 0 allocations per frame, panels included, is measured now
+(`engine_editor/tests/editor_frame_zero_alloc.rs`).
+
+- **The measured frames:** the whole editor over the player (offscreen), 240 frames after
+  240 more of warm-up.
+  - The scene: a tree of 25 named entities, one selected in the inspector, files in the
+    dock.
+  - The pointer moves over the viewport and the panels, so every frame is built.
+- **Before:** 23 allocations a frame:
+  - the shell's lists built anew (tree, folders, files, scene tabs, the view modes' menu,
+    the inspector's values, fields and sections);
+  - `roots()`;
+  - the tree's walk;
+  - three paths joined in `tick_assets`;
+  - a query made in `ensure_prefab_bases`;
+  - the outline's walk;
+  - the inspector's component list and field paths;
+  - a section title put in lower case with no filter.
+- **Now 0.** The lists' room is kept between frames (`FrameLists`, `RowScratch`):
+  - their values borrow the editor and the world, so the lists cannot stay;
+  - `recycle` empties one and gives its allocation to values of another lifetime (an
+    in-place `collect` of values of one size).
+- **When it fails,** the test prints the stacks of the measurement's first allocations,
+  each by its frames in the engine's crates with their lines.
+- **Not covered yet:**
+  - a code tab;
+  - a multiple selection (the inspector's comparison);
+  - Play.

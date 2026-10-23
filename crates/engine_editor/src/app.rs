@@ -580,6 +580,46 @@ pub fn editor<G: Game>(
     ))
 }
 
+/// The rooms of the lists a frame builds for the shell. Their rows and labels borrow the
+/// editor and the world, so the lists cannot stay between frames, but their room does
+/// ([`recycle`]): a steady frame makes nothing (ADR 0107 §8).
+#[derive(Default)]
+struct FrameLists {
+    tree: Vec<TreeItem<'static>>,
+    view_modes: Vec<MenuItem<'static>>,
+    folders: Vec<TreeItem<'static>>,
+    files: Vec<FileItem<'static>>,
+    scenes: Vec<&'static str>,
+    /// The inspector's shown values, each property's range of them, its fields and
+    /// sections (an asset's too).
+    values: Vec<&'static str>,
+    spans: Vec<(usize, usize)>,
+    fields: Vec<Field<'static>>,
+    asset_fields: Vec<Field<'static>>,
+    sections: Vec<Section<'static>>,
+}
+
+/// What the tree's rows are collected with, kept between frames.
+#[derive(Default)]
+struct RowScratch {
+    roots: Vec<Entity>,
+    stack: Vec<(Entity, u16)>,
+    kids: Vec<Entity>,
+    /// The prefab instances' roots ([`Editor::ensure_prefab_bases`]).
+    instances: Vec<Entity>,
+}
+
+/// `v` emptied, as a list of values of another lifetime, its room kept: a `collect` in
+/// place keeps the allocation of a list whose values are of the same size.
+fn recycle<T, U>(mut v: Vec<T>) -> Vec<U> {
+    debug_assert!(
+        size_of::<T>() == size_of::<U>() && align_of::<T>() == align_of::<U>(),
+        "a list's room holds values of its size"
+    );
+    v.clear();
+    v.into_iter().map(|_| unreachable!("emptied")).collect()
+}
+
 /// A row of the scene tree.
 #[derive(Debug, Clone, Copy)]
 struct Row {
@@ -2170,6 +2210,13 @@ struct Editor {
     /// The last command's message for the status bar, and when it came.
     message: Option<(String, Instant)>,
     rows: Vec<Row>,
+    /// The tree's rows' scratch, and the rooms of the frame's lists.
+    row_scratch: RowScratch,
+    lists: FrameLists,
+    /// The prefab instances, as [`Self::ensure_prefab_bases`] finds them each frame.
+    instance_query: Option<QueryState<(Entity, &'static PrefabInstance)>>,
+    /// The outline's walk down the selection ([`Self::outline`]), kept between frames.
+    outline_stack: Vec<Entity>,
     scene_ids: Option<QueryState<(Entity, &'static SceneId)>>,
     /// The entities the engine made for others (a model's further materials, ADR 0115):
     /// picks on them name their scene entity.
@@ -2755,6 +2802,10 @@ impl Editor {
             status: String::new(),
             message: None,
             rows: Vec::new(),
+            row_scratch: RowScratch::default(),
+            lists: FrameLists::default(),
+            instance_query: None,
+            outline_stack: Vec::new(),
             scene_ids: None,
             derived: None,
             frames: 0,
@@ -2875,7 +2926,8 @@ impl Editor {
         // The roots by their order ([`RootOrder`]); those without one (a scene of format
         // 2, roots made by code) get one after the rest in spawn order, what the tree
         // showed, kept by the next save.
-        let mut roots = self.roots(world, None);
+        let mut roots = std::mem::take(&mut self.row_scratch.roots);
+        self.roots_into(world, None, &mut roots);
         if roots
             .last()
             .is_some_and(|&e| world.get::<RootOrder>(e).is_none())
@@ -2892,7 +2944,7 @@ impl Editor {
                     world.insert(e, RootOrder(next));
                 }
             }
-            roots = self.roots(world, None);
+            self.roots_into(world, None, &mut roots);
         }
         let world = &*world;
         self.rows.clear();
@@ -2929,7 +2981,10 @@ impl Editor {
             }
             roots.retain(|e| keep.contains(e));
         }
-        let mut stack: Vec<(Entity, u16)> = roots.iter().rev().map(|&e| (e, 0)).collect();
+        let mut stack = std::mem::take(&mut self.row_scratch.stack);
+        let mut kids = std::mem::take(&mut self.row_scratch.kids);
+        stack.clear();
+        stack.extend(roots.iter().rev().map(|&e| (e, 0)));
         while let Some((e, depth)) = stack.pop() {
             let filtered = !filter.is_empty();
             let mut children = world
@@ -2944,10 +2999,14 @@ impl Editor {
                 children: has_children,
             });
             if has_children && (filtered || !self.collapsed.contains(&e)) {
-                let kids: Vec<Entity> = children.collect();
-                stack.extend(kids.into_iter().rev().map(|c| (c, depth + 1)));
+                kids.clear();
+                kids.extend(children);
+                stack.extend(kids.iter().rev().map(|&c| (c, depth + 1)));
             }
         }
+        self.row_scratch.roots = roots;
+        self.row_scratch.stack = stack;
+        self.row_scratch.kids = kids;
     }
 
     /// The editor's camera entity, made on first use.
@@ -3159,8 +3218,9 @@ impl Editor {
         let coding = self.code_frame();
         self.script_files.refresh(world);
         let properties = self.inspector.properties();
-        let mut values: Vec<&str> = Vec::with_capacity(properties.len() * 3);
-        let mut spans: Vec<(usize, usize)> = Vec::with_capacity(properties.len());
+        let mut values: Vec<&str> = recycle(std::mem::take(&mut self.lists.values));
+        let mut spans = std::mem::take(&mut self.lists.spans);
+        spans.clear();
         for p in properties {
             let start = values.len();
             values.extend(
@@ -3187,7 +3247,9 @@ impl Editor {
         self.shown_sections.clear();
         for (k, section) in self.inspector.sections().iter().enumerate() {
             let start = self.shown.len();
-            let title_matches = section.title.to_lowercase().contains(&filter);
+            // Only a filter is matched against (a title in lower case is made).
+            let title_matches =
+                !filter.is_empty() && section.title.to_lowercase().contains(&filter);
             for i in section.properties.clone() {
                 let name = self.inspector.name(&properties[i]);
                 if filter.is_empty() || title_matches || name.to_lowercase().contains(&filter) {
@@ -3202,102 +3264,100 @@ impl Editor {
         let typing = self.typing;
         // A transform's scale shows its lock (the owner, 2026-10-22).
         let (transform, scale_lock) = (world.component_id::<Transform>(), self.scale_lock);
-        let fields: Vec<Field<'_>> = self
-            .shown
-            .iter()
-            .map(|&i| {
-                let p = &properties[i];
-                let (a, b) = spans[i];
-                let shown = &values[a..b];
-                let first = shown.first().copied().unwrap_or("");
-                let lock = (transform == Some(p.component) && self.inspector.name(p) == "scale")
-                    .then_some(scale_lock);
-                let widget = match p.kind {
-                    Kind::Numbers { .. } | Kind::Rotation => Widget::Numbers {
-                        values: shown,
-                        labels: if shown.len() > 1 {
-                            Inspector::labels(p)
-                        } else {
-                            &[]
-                        },
-                        typing: typing
-                            .filter(|&(c, o, _)| c == p.component && o == p.offset)
-                            .map(|(_, _, part)| part),
-                        lock,
+        let mut fields: Vec<Field<'_>> = recycle(std::mem::take(&mut self.lists.fields));
+        fields.extend(self.shown.iter().map(|&i| {
+            let p = &properties[i];
+            let (a, b) = spans[i];
+            let shown = &values[a..b];
+            let first = shown.first().copied().unwrap_or("");
+            let lock = (transform == Some(p.component) && self.inspector.name(p) == "scale")
+                .then_some(scale_lock);
+            let widget = match p.kind {
+                Kind::Numbers { .. } | Kind::Rotation => Widget::Numbers {
+                    values: shown,
+                    labels: if shown.len() > 1 {
+                        Inspector::labels(p)
+                    } else {
+                        &[]
                     },
-                    Kind::Bool => Widget::Check((p.mixed == 0).then_some(first == "true")),
-                    Kind::Choice => Widget::Choice {
-                        current: first,
-                        open: (open == Some((p.component, p.offset))).then_some(options.as_slice()),
-                    },
-                    Kind::Text if matches!(p.ty.kind, engine_reflect::TypeKind::String) => {
-                        Widget::Edit(first)
-                    }
-                    Kind::Text if engine_scene::text::is_asset_ref(p.ty) => {
-                        let entry = p.asset.and_then(|a| self.asset_db.get(a.file));
-                        let field = self.inspector.name(p);
-                        let preview = p.asset.filter(|a| !a.is_none()).and_then(|a| {
-                            let subject = field_subject(a, field, entry.map(|e| e.kind));
-                            // A file's as the database saw it; the engine's never change.
-                            let (path, kind, key) = match entry {
-                                Some(e) => (
-                                    e.path.as_str(),
-                                    e.kind,
-                                    thumbnails::Key {
-                                        bytes: e.size,
-                                        modified: e.modified,
-                                    },
-                                ),
-                                None if a.file == builtin::CUBE.file => (
-                                    "",
-                                    engine_scene::AssetKind::Model,
-                                    thumbnails::Key {
-                                        bytes: 0,
-                                        modified: 0,
-                                    },
-                                ),
-                                None => return None,
-                            };
-                            self.thumbnails.image(subject, path, kind, key)
-                        });
-                        let icon = match (p.asset, entry) {
-                            (Some(a), _) if a.is_none() => "",
-                            (_, Some(e)) => file_icon_of(e.kind),
-                            _ => icons::MESH,
-                        };
-                        Widget::Asset {
-                            preview,
-                            icon,
-                            name: first.rsplit('/').next().unwrap_or(first),
-                        }
-                    }
-                    Kind::Text => Widget::Text(first),
-                };
-                Field {
-                    name: self.inspector.name(p),
-                    widget,
-                    changed: p.changed,
+                    typing: typing
+                        .filter(|&(c, o, _)| c == p.component && o == p.offset)
+                        .map(|(_, _, part)| part),
+                    lock,
+                },
+                Kind::Bool => Widget::Check((p.mixed == 0).then_some(first == "true")),
+                Kind::Choice => Widget::Choice {
+                    current: first,
+                    open: (open == Some((p.component, p.offset))).then_some(options.as_slice()),
+                },
+                Kind::Text if matches!(p.ty.kind, engine_reflect::TypeKind::String) => {
+                    Widget::Edit(first)
                 }
-            })
-            .collect();
+                Kind::Text if engine_scene::text::is_asset_ref(p.ty) => {
+                    let entry = p.asset.and_then(|a| self.asset_db.get(a.file));
+                    let field = self.inspector.name(p);
+                    let preview = p.asset.filter(|a| !a.is_none()).and_then(|a| {
+                        let subject = field_subject(a, field, entry.map(|e| e.kind));
+                        // A file's as the database saw it; the engine's never change.
+                        let (path, kind, key) = match entry {
+                            Some(e) => (
+                                e.path.as_str(),
+                                e.kind,
+                                thumbnails::Key {
+                                    bytes: e.size,
+                                    modified: e.modified,
+                                },
+                            ),
+                            None if a.file == builtin::CUBE.file => (
+                                "",
+                                engine_scene::AssetKind::Model,
+                                thumbnails::Key {
+                                    bytes: 0,
+                                    modified: 0,
+                                },
+                            ),
+                            None => return None,
+                        };
+                        self.thumbnails.image(subject, path, kind, key)
+                    });
+                    let icon = match (p.asset, entry) {
+                        (Some(a), _) if a.is_none() => "",
+                        (_, Some(e)) => file_icon_of(e.kind),
+                        _ => icons::MESH,
+                    };
+                    Widget::Asset {
+                        preview,
+                        icon,
+                        name: first.rsplit('/').next().unwrap_or(first),
+                    }
+                }
+                Kind::Text => Widget::Text(first),
+            };
+            Field {
+                name: self.inspector.name(p),
+                widget,
+                changed: p.changed,
+            }
+        }));
         let section_list = self.inspector.sections();
         // A file picked in the dock: its path and kind, then its import settings (E4-9).
-        let asset_fields: Vec<Field<'_>>;
+        let mut asset_fields: Vec<Field<'_>> =
+            recycle(std::mem::take(&mut self.lists.asset_fields));
+        let mut sections: Vec<Section<'_>> = recycle(std::mem::take(&mut self.lists.sections));
         let scale_value: [&str; 1];
-        let sections: Vec<Section<'_>> = if let Some(asset) = &self.inspected {
+        if let Some(asset) = &self.inspected {
             scale_value = [asset.scale_text.as_str()];
-            let mut list = vec![
-                Field {
-                    name: "path",
-                    widget: Widget::Text(&asset.path),
-                    changed: false,
-                },
-                Field {
-                    name: "kind",
-                    widget: Widget::Text(asset.kind.name()),
-                    changed: false,
-                },
-            ];
+            let list = &mut asset_fields;
+            list.push(Field {
+                name: "path",
+                widget: Widget::Text(&asset.path),
+                changed: false,
+            });
+            list.push(Field {
+                name: "kind",
+                widget: Widget::Text(asset.kind.name()),
+                changed: false,
+            });
             for &s in crate::import::settings(asset.kind) {
                 let widget = match s {
                     crate::import::Setting::Scale => Widget::Numbers {
@@ -3318,13 +3378,12 @@ impl Editor {
                     changed: asset.changed(s),
                 });
             }
-            asset_fields = list;
-            let mut sections = vec![Section {
+            sections.push(Section {
                 title: "Asset",
                 fields: &asset_fields[..2],
                 script: "",
                 removable: false,
-            }];
+            });
             if asset_fields.len() > 2 {
                 sections.push(Section {
                     title: "Import",
@@ -3333,22 +3392,18 @@ impl Editor {
                     removable: false,
                 });
             }
-            sections
         } else {
-            self.shown_sections
-                .iter()
-                .filter_map(|&(a, b, k)| {
-                    let s = section_list.get(k)?;
-                    Some(Section {
-                        title: s.title,
-                        fields: &fields[a..b],
-                        script: self.script_files.of(s.component).unwrap_or(""),
-                        // What places the entity stays (Unity's rule).
-                        removable: s.title != "Transform",
-                    })
+            sections.extend(self.shown_sections.iter().filter_map(|&(a, b, k)| {
+                let s = section_list.get(k)?;
+                Some(Section {
+                    title: s.title,
+                    fields: &fields[a..b],
+                    script: self.script_files.of(s.component).unwrap_or(""),
+                    // What places the entity stays (Unity's rule).
+                    removable: s.title != "Transform",
                 })
-                .collect()
-        };
+            }));
+        }
 
         // The tree. A large selection is looked up through a set (one row at a time
         // would be rows times selected).
@@ -3365,30 +3420,27 @@ impl Editor {
                 self.selection.contains(&e)
             }
         };
-        let items: Vec<TreeItem<'_>> = self
-            .rows
-            .iter()
-            .map(|row| {
-                let (icon, kind) = kind_of(world, row.entity);
-                let kind = match &self.play {
-                    Some(p) if p.keep.contains(&row.entity) => "Kept",
-                    _ => kind,
-                };
-                TreeItem {
-                    depth: row.depth,
-                    icon,
-                    name: world.get::<Name>(row.entity).map_or(kind, Name::as_str),
-                    kind,
-                    expanded: row.children.then(|| !self.collapsed.contains(&row.entity)),
-                    selected: in_selection(row.entity),
-                    active: Some(row.entity) == self.active(),
-                    renaming: Some(row.entity) == self.renaming,
-                    disabled: world.get::<Disabled>(row.entity).is_some(),
-                    off: is_off(world, row.entity),
-                    script: self.script_files.first_of(world, row.entity).is_some(),
-                }
-            })
-            .collect();
+        let mut items: Vec<TreeItem<'_>> = recycle(std::mem::take(&mut self.lists.tree));
+        items.extend(self.rows.iter().map(|row| {
+            let (icon, kind) = kind_of(world, row.entity);
+            let kind = match &self.play {
+                Some(p) if p.keep.contains(&row.entity) => "Kept",
+                _ => kind,
+            };
+            TreeItem {
+                depth: row.depth,
+                icon,
+                name: world.get::<Name>(row.entity).map_or(kind, Name::as_str),
+                kind,
+                expanded: row.children.then(|| !self.collapsed.contains(&row.entity)),
+                selected: in_selection(row.entity),
+                active: Some(row.entity) == self.active(),
+                renaming: Some(row.entity) == self.renaming,
+                disabled: world.get::<Disabled>(row.entity).is_some(),
+                off: is_off(world, row.entity),
+                script: self.script_files.first_of(world, row.entity).is_some(),
+            }
+        }));
         self.selection_label.clear();
         if let Some(asset) = &self.inspected {
             self.selection_label
@@ -3446,17 +3498,16 @@ impl Editor {
             leaf(8),
         ];
         // The view modes' menu: the current one checked.
-        let view_mode_items: Vec<MenuItem<'_>> = ViewMode::ALL
-            .iter()
-            .map(|&m| MenuItem {
-                icon: if m == self.view_mode {
-                    icons::CHECK
-                } else {
-                    ""
-                },
-                label: m.label(),
-            })
-            .collect();
+        let mut view_mode_items: Vec<MenuItem<'_>> =
+            recycle(std::mem::take(&mut self.lists.view_modes));
+        view_mode_items.extend(ViewMode::ALL.iter().map(|&m| MenuItem {
+            icon: if m == self.view_mode {
+                icons::CHECK
+            } else {
+                ""
+            },
+            label: m.label(),
+        }));
         // The steps' menus: the current value marked.
         let current = [
             self.snapping.position,
@@ -3619,32 +3670,28 @@ impl Editor {
             _ => (None, None),
         };
         // The asset browser's rows.
-        let folder_items: Vec<TreeItem<'_>> = self
-            .browser
-            .folders
-            .iter()
-            .map(|(path, depth)| TreeItem {
-                depth: *depth,
-                icon: if *path == self.browser.folder {
-                    icons::FOLDER_OPEN
-                } else {
-                    icons::FOLDER
-                },
-                name: if path.is_empty() {
-                    "res://"
-                } else {
-                    path.rsplit('/').next().unwrap_or(path)
-                },
-                kind: "",
-                expanded: None,
-                selected: *path == self.browser.folder,
-                active: false,
-                renaming: false,
-                disabled: false,
-                off: false,
-                script: false,
-            })
-            .collect();
+        let mut folder_items: Vec<TreeItem<'_>> = recycle(std::mem::take(&mut self.lists.folders));
+        folder_items.extend(self.browser.folders.iter().map(|(path, depth)| TreeItem {
+            depth: *depth,
+            icon: if *path == self.browser.folder {
+                icons::FOLDER_OPEN
+            } else {
+                icons::FOLDER
+            },
+            name: if path.is_empty() {
+                "res://"
+            } else {
+                path.rsplit('/').next().unwrap_or(path)
+            },
+            kind: "",
+            expanded: None,
+            selected: *path == self.browser.folder,
+            active: false,
+            renaming: false,
+            disabled: false,
+            off: false,
+            script: false,
+        }));
         // The tiles, the thumbnails of those on screen (by last frame's scroll area).
         let columns = self
             .listing
@@ -3655,7 +3702,7 @@ impl Editor {
             let last = ((scroll + r.size[1]) / row).ceil() as usize;
             first * columns..(last + 1) * columns
         });
-        let mut file_items: Vec<FileItem<'_>> = Vec::with_capacity(self.browser.listing.len());
+        let mut file_items: Vec<FileItem<'_>> = recycle(std::mem::take(&mut self.lists.files));
         for (i, l) in self.browser.listing.iter().enumerate() {
             let thumbnail = match l.asset.and_then(|id| self.asset_db.get(id)) {
                 Some(e) if shown.contains(&i) => {
@@ -3837,15 +3884,16 @@ impl Editor {
             })
             .collect();
         let active_tab = self.active_tab();
-        let scenes: Vec<&str> = self
-            .tabs
-            .iter()
-            .zip(&self.tab_labels)
-            .map(|(tab, label)| match tab {
-                None => self.scene_label.as_str(),
-                Some(_) => label.as_str(),
-            })
-            .collect();
+        let mut scenes: Vec<&str> = recycle(std::mem::take(&mut self.lists.scenes));
+        scenes.extend(
+            self.tabs
+                .iter()
+                .zip(&self.tab_labels)
+                .map(|(tab, label)| match tab {
+                    None => self.scene_label.as_str(),
+                    Some(_) => label.as_str(),
+                }),
+        );
         let tools = self.tools.each_ref().map(String::as_str);
         // A keyboard transform's hint below and right of the pointer, in the window.
         let hint_at = {
@@ -4114,6 +4162,18 @@ impl Editor {
         self.ui.begin_frame(self.input.ui_input(scale), logical);
         let response = build(&mut self.ui, &model, &self.palette);
         self.ui.end_frame(&mut self.text);
+        // The lists' rooms, for the next frame (the sections first: they borrow the
+        // fields).
+        self.lists.sections = recycle(sections);
+        self.lists.fields = recycle(fields);
+        self.lists.asset_fields = recycle(asset_fields);
+        self.lists.values = recycle(values);
+        self.lists.spans = spans;
+        self.lists.tree = recycle(items);
+        self.lists.view_modes = recycle(view_mode_items);
+        self.lists.folders = recycle(folder_items);
+        self.lists.files = recycle(file_items);
+        self.lists.scenes = recycle(scenes);
         self.listing = self
             .ui
             .rect_of(response.listing)
@@ -6170,6 +6230,8 @@ impl Editor {
     /// when it is not among them.
     fn outline(&mut self, world: &World, slot_of: impl Fn(Entity) -> Option<u32>) {
         self.outline_items.clear();
+        let mut stack = std::mem::take(&mut self.outline_stack);
+        stack.clear();
         let active = self.active();
         // While a box is dragged, what it takes in the hovered one's line; with Ctrl the
         // selected ones it would take out lose their own.
@@ -6177,7 +6239,6 @@ impl Editor {
             Some(b) => (&b.taken, self.input.ctrl()),
             None => (&[], false),
         };
-        let mut stack = Vec::new();
         for &e in &self.selection {
             if removing && boxed.contains(&e) {
                 continue;
@@ -6215,6 +6276,7 @@ impl Editor {
                 class: OutlineClass::Hovered,
             });
         }
+        self.outline_stack = stack;
     }
 
     /// The gizmo's part of the frame (ADR 0107 E2): a drag in progress goes on, is taken
@@ -6949,20 +7011,23 @@ impl Editor {
     /// The scene's roots (entities with a scene id under none), as the tree shows them:
     /// by their order, those without one last in spawn order; `except` left out.
     fn roots(&mut self, world: &mut World, except: Option<Entity>) -> Vec<Entity> {
+        let mut roots = Vec::new();
+        self.roots_into(world, except, &mut roots);
+        roots
+    }
+
+    /// [`Self::roots`] into `out`, its room kept.
+    fn roots_into(&mut self, world: &mut World, except: Option<Entity>, out: &mut Vec<Entity>) {
         let q = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
         let world = &*world;
-        let mut roots: Vec<Entity> = q
-            .iter_readonly(world)
-            .map(|(e, _)| e)
-            .filter(|&e| {
-                Some(e) != except
-                    && world
-                        .parent(e)
-                        .is_none_or(|p| world.get::<SceneId>(p).is_none())
-            })
-            .collect();
-        roots.sort_unstable_by_key(|&e| root_key(world, e));
-        roots
+        out.clear();
+        out.extend(q.iter_readonly(world).map(|(e, _)| e).filter(|&e| {
+            Some(e) != except
+                && world
+                    .parent(e)
+                    .is_none_or(|p| world.get::<SceneId>(p).is_none())
+        }));
+        out.sort_unstable_by_key(|&e| root_key(world, e));
     }
 
     /// An order for a new root after every other.
@@ -10795,13 +10860,19 @@ impl Editor {
     /// paths to the player and the inspector.
     fn tick_assets(&mut self, world: &mut World) {
         if let Some(watch) = &self.asset_watch {
-            let skip = [
-                self.root.join(".ofelia"),
-                self.root.join("target"),
-                self.root.join(".git"),
-            ];
+            // The editor's own folder, the build's and git's are not the project's assets.
+            let skipped = |path: &Path| {
+                path.strip_prefix(&self.root)
+                    .ok()
+                    .and_then(|p| p.components().next())
+                    .is_some_and(|c| {
+                        [".ofelia", "target", ".git"]
+                            .iter()
+                            .any(|s| c.as_os_str() == std::ffi::OsStr::new(s))
+                    })
+            };
             while let Some(event) = watch.try_next() {
-                if !skip.iter().any(|s| event.path.starts_with(s)) {
+                if !skipped(&event.path) {
                     self.assets_changed = Some(Instant::now());
                 }
             }
@@ -11918,15 +11989,20 @@ impl Editor {
     /// Every outermost instance's prefab placed alone (built for those new since): what a
     /// prefab written anew is followed from.
     fn ensure_prefab_bases(&mut self, world: &mut World) {
-        let mut q = QueryState::<(Entity, &PrefabInstance)>::new(world);
-        let roots: Vec<Entity> = q
-            .iter_readonly(world)
-            .map(|(e, _)| e)
-            .filter(|&e| world.get::<PrefabPart>(e).is_none())
-            .collect();
-        for root in roots {
+        let q = self
+            .instance_query
+            .get_or_insert_with(|| QueryState::new(world));
+        let mut roots = std::mem::take(&mut self.row_scratch.instances);
+        roots.clear();
+        roots.extend(
+            q.iter_readonly(world)
+                .map(|(e, _)| e)
+                .filter(|&e| world.get::<PrefabPart>(e).is_none()),
+        );
+        for &root in &roots {
             self.ensure_prefab_base(world, root);
         }
+        self.row_scratch.instances = roots;
     }
 
     /// The open scene's instances follow the prefab files `changed` (written anew; E5-4):

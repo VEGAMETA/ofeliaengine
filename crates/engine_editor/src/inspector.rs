@@ -145,6 +145,10 @@ pub struct Inspector {
     spare: Vec<Property>,
     spare_sections: Vec<Section>,
     other_text: String,
+    /// The entity's components and a field's path, as [`Inspector::build`] goes through
+    /// them, kept between frames.
+    components: Vec<(&'static TypeInfo, ComponentId)>,
+    path: String,
 }
 
 impl Inspector {
@@ -176,18 +180,21 @@ impl Inspector {
         let Some(ids) = world.component_ids_of(entity) else {
             return;
         };
-        let mut components: Vec<(&'static TypeInfo, ComponentId)> = ids
-            .iter()
-            .filter_map(|&id| Some((world.components().type_info(id)?, id)))
-            .filter(|(info, _)| !info.attrs.hidden && !info.attrs.skip)
-            .collect();
+        let mut components = std::mem::take(&mut self.components);
+        components.clear();
+        components.extend(
+            ids.iter()
+                .filter_map(|&id| Some((world.components().type_info(id)?, id)))
+                .filter(|(info, _)| !info.attrs.hidden && !info.attrs.skip),
+        );
         components.sort_by_key(|(info, _)| info.name);
-        for (info, id) in components {
+        let mut path = std::mem::take(&mut self.path);
+        for &(info, id) in &components {
             let Some(ptr) = world.get_raw(entity, id) else {
                 continue;
             };
             let first = self.properties.len();
-            let mut path = String::new();
+            path.clear();
             // SAFETY: the entity's live value of the component `info` describes.
             unsafe {
                 self.walk(
@@ -242,6 +249,8 @@ impl Inspector {
                 properties: first..self.properties.len(),
             });
         }
+        self.components = components;
+        self.path = path;
     }
 
     /// Shows a selection: keeps the sections whose component every entity of `others`
