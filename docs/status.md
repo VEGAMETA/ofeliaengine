@@ -607,7 +607,7 @@ Last updated: 2026-10-22.
   - **Prefab following takes script components** (#372): an instance now gets a script's
     component its prefab added (E5-4 made only the program's types, through their
     `Default`); its texts at the script's defaults (`engine_ecs::DefaultValue`).
-  - **Fixed: a closed VM's queries corrupted a later VM's registry** (#PR; from E7-5c):
+  - **Fixed: a closed VM's queries corrupted a later VM's registry** (#375; from E7-5c):
     - a query collected as its VM closed queued its views' references under the VM's
       address;
     - a VM made later at the same address let go of them, which were entries of its own
