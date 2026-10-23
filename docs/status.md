@@ -562,7 +562,7 @@ Last updated: 2026-10-22.
     `system(name, { on_tick, on_frame })` after the instances; `world.spawn({ … })` at
     once. 10,000 spinners as a system 1.2 ms a tick (target 2), as hooks 2.7 ms; the
     spin example allocates nothing.
-  - **E7-5d, input** (#PR, ADR 0114's as-built): `input.pressed`, `just_pressed`,
+  - **E7-5d, input** (#362, ADR 0114's as-built): `input.pressed`, `just_pressed`,
     `just_released`, `strength`, `axis`, `vector` by action name, the tick's view in tick
     hooks and the frame's in frame hooks; C functions, so nothing allocates (ADR 0114's
     walker in the zero-allocation test).
