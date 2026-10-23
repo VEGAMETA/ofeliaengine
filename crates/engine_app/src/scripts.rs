@@ -1395,6 +1395,42 @@ impl Scripts {
         OPEN_WORLD.set(core::ptr::null_mut());
         OPEN_PHYSICS.set(core::ptr::null());
         script_views::close();
+        self.log_breakpoints();
+    }
+
+    /// The logpoints' messages since the last stage, to the log at their lines, as `print`
+    /// writes (ADR 0119): nothing to do, and nothing made, without them.
+    fn log_breakpoints(&self) {
+        for l in self.vm.take_logged() {
+            log::info!(target: "script", "{}:{}: {}", self.file(&l.module), l.line, l.text);
+        }
+    }
+
+    /// Script module `module`'s breakpoints from now on (the editor's; ADR 0119): placed in
+    /// the VM at once, or when it loads, and kept through its reloads. Their messages go to
+    /// the log at the end of each stage.
+    pub fn set_breakpoints(&mut self, module: &str, breakpoints: Vec<engine_script::Breakpoint>) {
+        self.vm.set_breakpoints(module, breakpoints);
+    }
+
+    /// How module `module`'s breakpoints are doing, in the order they were set.
+    pub fn breakpoint_states(&self, module: &str) -> Vec<engine_script::BreakState> {
+        self.vm.breakpoint_states(module)
+    }
+
+    /// Whether a pause point was reached since the last call: the game pauses after its
+    /// tick.
+    pub fn take_debug_pause(&mut self) -> bool {
+        self.vm.take_pause()
+    }
+
+    /// The module of script file `file` (relative to the project, as the editor names it),
+    /// if it is loaded.
+    pub fn module_of(&self, file: &Path) -> Option<&str> {
+        self.files
+            .iter()
+            .find(|(_, f)| f.as_path() == file)
+            .map(|(m, _)| m.as_str())
     }
 
     /// The instances made to match the world: those that came get a `self` and are started
@@ -5071,6 +5107,68 @@ return Bell
         assert!(
             why.to_string().contains("net_quantum is a positive number"),
             "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn logpoints_and_pause_points_in_a_components_hook() {
+        let dir = project("logpoints", &[("door.luau", DOOR)]);
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        assert_eq!(
+            scripts.module_of(Path::new("scripts/door.luau")),
+            Some("door")
+        );
+        let door = world.spawn((Transform::IDENTITY,));
+        world.spawn((Name::new("Player"), Transform::from_xyz(1.0, 0.0, 0.0)));
+        scripts.add(&mut world, door, "Door");
+        // Line 24: `self.opened = near`, where `near` and `step` are known.
+        scripts.set_breakpoints(
+            "door",
+            vec![
+                engine_script::Breakpoint {
+                    line: 24,
+                    action: engine_script::BreakAction::Log(String::from(
+                        "near {near} lift {self.lift}",
+                    )),
+                    condition: None,
+                    hits: engine_script::Hits::Every,
+                    enabled: true,
+                },
+                engine_script::Breakpoint {
+                    line: 24,
+                    action: engine_script::BreakAction::Pause,
+                    condition: Some(String::from("near and self.lift > 2")),
+                    hits: engine_script::Hits::Every,
+                    enabled: true,
+                },
+            ],
+        );
+        scripts.tick(&mut world, 0.1);
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let states = scripts.breakpoint_states("door");
+        assert_eq!(states[0].placed, Some(24));
+        assert_eq!(states[0].last.as_deref(), Some("near true lift 2.5"));
+        assert!(
+            scripts.take_debug_pause(),
+            "the pause point's condition held"
+        );
+        assert!(!scripts.take_debug_pause());
+        // Kept through a reload of the script.
+        let file = dir.join("scripts/door.luau");
+        std::fs::write(&file, DOOR.replace("lift = 2.5", "lift = 3")).unwrap();
+        scripts
+            .reload_file(&mut world, &dir, &dir.join("scripts"), &file)
+            .unwrap();
+        scripts.tick(&mut world, 0.1);
+        let states = scripts.breakpoint_states("door");
+        assert_eq!(states[0].hits, 2);
+        assert!(
+            states[0]
+                .last
+                .as_deref()
+                .is_some_and(|l| l.starts_with("near true"))
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

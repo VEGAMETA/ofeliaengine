@@ -622,8 +622,14 @@ Last updated: 2026-10-22.
     - ADR 0107 §6's fallback (frames drawn from inside a breakpoint) cannot be built: the
       frame cannot be entered again. ADR 0119 proposes the stage on a fiber, or a stage
       that can stop halfway; four questions to the team.
+  - **E9-1a-1, the debugger's core** (#376, ADR 0119's as-built):
+    - breakpoints placed through each module's chunk and kept through reloads;
+    - logpoints and pause points, with conditions and hit rules, evaluated in the frame
+      (its locals, upvalues and globals);
+    - the host logs the messages at their lines;
+    - debug level 2.
   - **Next, in this order:**
-    1. E9-1a, which does not wait for ADR 0119's answers:
+    1. E9-1a-2, which does not wait for ADR 0119's answers:
        - the gutter;
        - breakpoints kept in the session and set in the VM;
        - logpoints and pause points, with conditions and hit counts;
