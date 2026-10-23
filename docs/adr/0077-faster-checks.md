@@ -228,3 +228,72 @@ hack crate now has an empty build script and `syn` with `full` in its
 features by name and version (`cargo tree --format "{p}|{f}"`): `syn` 3 (bytemuck's
 derive, engine_reflect_derive) has features of its own, and by name alone the check
 reported 32 false pairs for it.
+
+## Addendum (2026-10-23): single packages' builds made copies of their own
+
+- **What was seen:**
+  - `C:\cargo-target\ofeliaengine` grew from 37 GB (2026-10-18, after `tools/clean.ps1`)
+    to 178 GB in five days.
+  - In the last day alone, `debug\deps` held 20 copies of the editor's test binary.
+  - A build of a few packages (`cargo test -p`, the checks' `-Affected`) built its own
+    copy of most of the workspace beside the full check's, instead of reusing it.
+- **How it was found:**
+  - Cargo's unit graph (`--unit-graph`) lists each unit with its features and profile.
+    It is unstable, so `RUSTC_BOOTSTRAP=1` enabled it, for this diagnosis only and never
+    in the checks.
+  - Each package's own build was compared with the workspace's build of the same kind:
+    48 packages, `cargo test --no-run` and `cargo build`.
+- **Two causes:**
+  1. **Features: seven dependencies drifted unseen.**
+     - `tools/feature-drift.ps1` compared features one by one, so a copy resolved with no
+       features at all left it nothing to compare.
+     - Built for the target:
+       - `bitflags`: `serde`, from ron;
+       - `crossbeam-utils` and `either`: `std`, from rayon;
+       - `num-traits`: `std`, from mlua and the minidump crates;
+       - `smallvec`: `const_new`, from ICU4X's fixed_decimal;
+       - `thiserror`: `std`, from gpu-allocator and fluent-syntax.
+     - Built for the host: `cc`, `parallel` from luau0-src, in every build that has
+       engine_script. Without it, every C and C++ build script (mimalloc's under
+       engine_core, Jolt's, Box2D's) was built again, and every crate above them.
+  2. **The debug info of what build scripts and proc macros use.**
+     - Cargo's default for them is "no debug info when possible". A crate that the build's
+       own code also uses keeps its debug info, so that one build serves both.
+     - Which crates those are depends on the packages a build selects. unicode-ident is
+       under proc-macro2 and syn, and also under ron (engine_assets).
+     - So every build without engine_assets built it without debug info. With it went
+       every proc macro, the hack crate's build script among them, and every crate above.
+- **Fixes:**
+  - The hack crate has the seven with the workspace's features: six under
+    `[dependencies]`, and `cc` with `parallel` under `[build-dependencies]`.
+  - `[profile.dev.build-override] debug = false` (the test profile inherits it):
+    - what build scripts and proc macros use has no debug info, in every build;
+    - a crate that both sides use is built twice, once for each, in every build alike.
+  - `tools/feature-drift.ps1` compares copies whole (`<dependency>@<version>
+    [<features>]`):
+    - with and without dev-dependencies (`cargo build -p`, `cargo run -p`);
+    - it found the seven, in 22 s.
+  - `tools/clean.ps1` also cleans `examples\` and `build\`, and `-Days` takes a fraction
+    of a day: after a build of everything, `-Days 0.05` removes what that build did not
+    write.
+- **Numbers** (ref-1): units of a package's own build that the workspace's build of the
+  same kind lacks, over the 48 packages' `cargo test --no-run` and `cargo build`:
+
+  | | builds with a copy of their own | units |
+  |---|---:|---:|
+  | before | 88 of 96 | 2,303 |
+  | the hack crate's seven | 80 of 96 | 1,897 |
+  | and `build-override` | 0 of 96 | 0 |
+
+  - `cargo check --all-targets` (clippy's) and `cargo build --release`: 0 after.
+  - Builds right after the workspace's `cargo build --all-targets`:
+
+    | build | before | after |
+    |---|---|---|
+    | `-p engine_editor` | 20 units, 38.4 s | 0, 0.5 s |
+    | `-p engine_crash` | 32 units, 18.7 s | 0, 0.3 s |
+    | `-p engine_anim` | 10 units, 7.9 s | 0, 0.3 s |
+    | `-p engine_rhi` | 11 units, 4.4 s | 0, 0.3 s |
+
+  - The "before" builds compiled only what copies of earlier that day lacked.
+  - The changes rebuilt every engine crate once: 429 units, 242 s.

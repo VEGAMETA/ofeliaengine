@@ -35,7 +35,11 @@ cargo install cargo-nextest --locked
 - **New crates depend on `engine_workspace_hack`** (directly, or through `engine_core`).
   It gives the shared dependencies one set of features in every build, so `cargo test -p`
   a crate reuses what the full check built instead of rebuilding it. When `-Deny` reports
-  feature drift after a dependency change, add the dependency it names there.
+  feature drift after a dependency change, add the dependency it names there: under
+  `[build-dependencies]` when it is built for the host (below a build script or a proc
+  macro), with the features the workspace builds it with.
+- **Free disk space with `tools/clean.ps1 -Days 1`** after merging: Cargo never removes
+  the outputs of older builds.
 
 ## Golden images
 

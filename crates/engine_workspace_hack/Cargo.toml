@@ -1,6 +1,6 @@
 [package]
 name = "engine_workspace_hack"
-description = "Feature unification (ADR 0077): every build resolves the shared dependencies that differed (bytemuck, windows-sys, serde, parking_lot) with the same features, so a build of some packages reuses the whole workspace's instead of overwriting it."
+description = "Feature unification (ADR 0077): every build resolves the shared dependencies that differed (bytemuck, windows-sys, serde, parking_lot, smallvec, cc, ...) with the same features, so a build of some packages reuses the whole workspace's instead of making copies of its own."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,6 +22,13 @@ workspace = true
 # (run by `tools/check.ps1 -Deny`, the check for dependency changes): add them here.
 
 [dependencies]
+# Found 2026-10-23, when tools/feature-drift.ps1 learned to see copies resolved with no
+# features at all: `std` (their default) from rayon (crossbeam-utils, either), mlua and the
+# crash reporter's minidump crates (num-traits), gpu-allocator and fluent-syntax
+# (thiserror); `serde` from ron (bitflags); `const_new` from ICU4X's fixed_decimal
+# (smallvec, ADR 0102). Builds without those crates (engine_crash, engine_anim,
+# engine_core's tests and most single packages) resolved them bare.
+bitflags = { version = "2", features = ["serde"] }
 bytemuck = { version = "1.25", features = [
     "aarch64_simd",
     "derive",
@@ -30,13 +37,18 @@ bytemuck = { version = "1.25", features = [
     "wasm_simd",
 ] }
 
+crossbeam-utils = "0.8"
+either = "1"
 lock_api = { version = "0.4", features = ["arc_lock", "atomic_usize"] }
 # `std` (its default) from fluent-syntax (ADR 0102), in every build that has engine_loc.
 memchr = "2"
+num-traits = "0.2"
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 # `alloc` for ron (material files, ADR 0092).
 serde = { version = "1", features = ["alloc", "derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+smallvec = { version = "1", features = ["const_generics", "const_new"] }
+thiserror = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -83,7 +95,11 @@ windows-sys = { version = "0.61", features = [
 # not in the others, which rebuilt every proc macro and their users in turn; `extra-traits`
 # from strum_macros (through rav1d, ADR 0100) in every build that has engine_video. Syn 3
 # gets `extra-traits`, `fold` and `visit` from ICU4X's derives (synstructure, yoke-derive,
-# zerofrom-derive, zerovec-derive; ADR 0102) in every build that has engine_loc.
+# zerofrom-derive, zerovec-derive; ADR 0102) in every build that has engine_loc. `cc` gets
+# `parallel` from luau0-src (mlua, ADR 0032) in every build that has engine_script, and not
+# in the others (2026-10-23): those built every C and C++ build script again (mimalloc's
+# under engine_core, Jolt's, Box2D's), and every crate above them.
 [build-dependencies]
+cc = { version = "1", features = ["parallel"] }
 syn = { version = "2", features = ["extra-traits", "full"] }
 syn3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "visit"] }
