@@ -551,7 +551,7 @@ Last updated: 2026-10-22.
     program's, a script's `component` table, or a name); `Transform`'s `rotate`,
     `look_at`, `forward`, `right`, `up`. None of them allocates (the zero-allocation
     test's walkers).
-  - **E7-5b, `require` between scripts** (#PR, ADR 0114's as-built): Luau's require by
+  - **E7-5b, `require` between scripts** (#360, ADR 0114's as-built): Luau's require by
     string over the project's modules (mlua's require with the host's own navigation:
     `./`, `../`, `@self`, `.luaurc` aliases); what a script requires runs before it,
     whatever the files' names (its `require` paths scanned before loading); a reloaded
