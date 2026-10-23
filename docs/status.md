@@ -574,7 +574,7 @@ Last updated: 2026-10-22.
     `integer`, `vector_in_sphere` from the world's generator (SplitMix64 as a component of
     its own entity: rollback and saves carry it, the same seed everywhere), C functions;
     `audio.play`, `audio.play_at` make entities that play once and despawn.
-  - **E7-5e3, prefabs and assets in scripts** (#PR, ADR 0114's as-built): an asset is a
+  - **E7-5e3, prefabs and assets in scripts** (#365, ADR 0114's as-built): an asset is a
     value (`prop.asset(kind)`, `AssetRef` fields on the fast path); `world.instantiate(
     prefab, translation?)` places a prefab scene by asset or path, its instances
     anonymous (no `SceneId`), their scripts started at the next stage.
