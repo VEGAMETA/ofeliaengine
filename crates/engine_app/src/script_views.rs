@@ -60,6 +60,9 @@ pub(crate) const TAG_ASSET: c_int = 68;
 /// Places in the table of assets kept ([`Tables::kept_assets`]): a power of two.
 const ASSET_CACHE: usize = 64;
 
+/// Places in the table of texts kept ([`Tables::kept_texts`]): a power of two.
+const TEXT_CACHE: usize = 64;
+
 /// The most values a message (`e:send`) or a timer (`self:after`) carries.
 pub(crate) const MAIL_VALUES: c_int = 4;
 
@@ -150,6 +153,8 @@ enum Fast {
     Entity,
     /// An asset: an [`AssetData`] userdata ([`TAG_ASSET`]), nil for none.
     Asset,
+    /// A text (a `String`): a Lua string, kept ([`push_text`]), written in place.
+    Text,
     /// A struct inside: read as a view of it.
     Struct,
     /// Through the host's own functions.
@@ -181,6 +186,7 @@ fn fast_of(ty: &'static TypeInfo) -> Fast {
             Primitive::F64 => Fast::F64,
         },
         TypeKind::Struct(_) => Fast::Struct,
+        TypeKind::String => Fast::Text,
         _ => Fast::Slow,
     }
 }
@@ -455,6 +461,9 @@ pub(crate) struct Tables {
     /// The assets given to scripts, the latest of each place, found by what they name
     /// ([`push_asset`]).
     kept_assets: Box<[(AssetRef, c_int)]>,
+    /// The texts given to scripts, the latest of each place by their hash, as registry
+    /// references (none: 0): a text read again is the string kept ([`push_text`]).
+    kept_texts: Box<[c_int]>,
 }
 
 impl Default for Tables {
@@ -478,6 +487,7 @@ impl Default for Tables {
             frame: false,
             random: Entity::NULL,
             kept_assets: vec![(AssetRef::NONE, 0); ASSET_CACHE].into_boxed_slice(),
+            kept_texts: vec![0; TEXT_CACHE].into_boxed_slice(),
         }
     }
 }
@@ -1086,10 +1096,39 @@ unsafe fn push_value(
             }
             Fast::Entity => push_entity(state, at.cast::<Entity>().read_unaligned()),
             Fast::Asset => push_asset(state, tables, at.cast::<AssetRef>().read_unaligned()),
+            Fast::Text => push_text(state, tables, engine_reflect::read_str(at)),
             Fast::Struct | Fast::Slow => return false,
         }
     }
     true
+}
+
+/// Pushes `text` as a Lua string: the one kept in its place when it holds the same text,
+/// so a text read again makes nothing; else a new one, kept there.
+///
+/// # Safety
+///
+/// A state with room for two values; `tables` the host's.
+unsafe fn push_text(state: *mut ffi::lua_State, tables: *mut Tables, text: &str) {
+    // SAFETY: as the caller says; the place is inside the table (the hash's top bits), and
+    // a kept reference is a string's.
+    unsafe {
+        let place = (name_hash(text.as_bytes()).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            >> (64 - TEXT_CACHE.trailing_zeros())) as usize;
+        let kept = &mut (*tables).kept_texts[place];
+        if *kept != 0 {
+            ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, *kept);
+            let mut len = 0usize;
+            let p = ffi::lua_tolstring(state, -1, &mut len);
+            if !p.is_null() && core::slice::from_raw_parts(p.cast::<u8>(), len) == text.as_bytes() {
+                return;
+            }
+            ffi::lua_settop(state, -2);
+            ffi::lua_unref(state, *kept);
+        }
+        ffi::lua_pushlstring(state, text.as_ptr().cast(), text.len());
+        *kept = ffi::lua_ref(state, -1);
+    }
 }
 
 /// What a write of the value at stack index 3 into a slot came to.
@@ -1105,7 +1144,8 @@ enum Wrote {
 ///
 /// # Safety
 ///
-/// `at` points to a value of the slot's type in a live component, plain data.
+/// `at` points to a value of the slot's type in a live component: plain data, or a
+/// `String` for a text.
 unsafe fn write_value(state: *mut ffi::lua_State, at: *mut u8, slot: &Slot) -> Wrote {
     // SAFETY: (each access) as the caller says.
     unsafe {
@@ -1148,6 +1188,19 @@ unsafe fn write_value(state: *mut ffi::lua_State, at: *mut u8, slot: &Slot) -> W
                     a
                 };
                 at.cast::<AssetRef>().write_unaligned(a);
+            }
+            Fast::Text => {
+                if ffi::lua_type(state, 3) != ffi::LUA_TSTRING {
+                    return Wrote::Wrong("a string");
+                }
+                let mut len = 0usize;
+                let p = ffi::lua_tolstring(state, 3, &mut len);
+                let Ok(text) = core::str::from_utf8(core::slice::from_raw_parts(p.cast(), len))
+                else {
+                    return Wrote::Wrong("text (UTF-8)");
+                };
+                // Its room reused: nothing made once it is large enough.
+                engine_reflect::write_str(at, text);
             }
             Fast::Struct | Fast::Slow => return Wrote::Slow,
             number => {

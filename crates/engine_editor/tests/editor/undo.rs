@@ -713,7 +713,7 @@ fn records_follow_a_components_new_layout_by_name() {
     let mut defaults = vec![0u8; 16];
     defaults[4..8].copy_from_slice(&2.0f32.to_le_bytes());
     defaults[8..16].copy_from_slice(&Entity::NULL.to_bits().to_le_bytes());
-    let r = Relayout::between(old, &OLD, new, &NEW, defaults.into());
+    let r = Relayout::between(old, &OLD, new, &NEW, defaults.into(), &[]);
     let now = r.apply(&value(3.0, friend));
     // SAFETY: a value of the new layout.
     unsafe { w.insert_raw(door, new, now.as_ptr()) };

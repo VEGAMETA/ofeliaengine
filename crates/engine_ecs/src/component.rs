@@ -121,12 +121,43 @@ pub struct ComponentDesc {
     pub name: Box<str>,
     /// Size and alignment of one value (alignment at most [`MAX_COMPONENT_ALIGN`]).
     pub layout: Layout,
-    /// Drops a value in place; `None` for types without drop glue.
-    pub drop: Option<unsafe fn(*mut u8)>,
+    /// How a value drops in place; `None` for types without drop glue.
+    pub drop: Option<DropGlue>,
     /// Whether values are plain data (see [`Pod`]).
     pub pod: bool,
     /// Field description (script components build one at run time).
     pub type_info: Option<&'static engine_reflect::TypeInfo>,
+}
+
+/// How a component's values drop in place.
+#[derive(Debug, Clone, Copy)]
+pub enum DropGlue {
+    /// A Rust type's drop glue.
+    Fn(unsafe fn(*mut u8)),
+    /// A type made at run time (a script's component, ADR 0114): the `String`s of its text
+    /// fields, the rest plain data.
+    Texts(&'static [crate::reflected::TextField]),
+}
+
+impl DropGlue {
+    /// Drops the value at `ptr` in place.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` points to an initialized, aligned value of the component, not used after.
+    pub(crate) unsafe fn drop_value(self, ptr: *mut u8) {
+        // SAFETY: as the caller says; a text field holds a `String` of the value.
+        unsafe {
+            match self {
+                Self::Fn(drop) => drop(ptr),
+                Self::Texts(texts) => {
+                    for t in texts {
+                        core::ptr::drop_in_place(ptr.add(t.offset).cast::<String>());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Errors from registering components.
@@ -157,7 +188,7 @@ pub(crate) struct ComponentInfo {
     /// Stable hash of the name: the canonical sort key.
     pub(crate) key: u64,
     pub(crate) layout: Layout,
-    pub(crate) drop: Option<unsafe fn(*mut u8)>,
+    pub(crate) drop: Option<DropGlue>,
     pub(crate) pod: bool,
     pub(crate) type_info: Option<&'static engine_reflect::TypeInfo>,
     /// Registered through `World::register_dynamic`: no Rust type behind it.
@@ -234,7 +265,7 @@ impl Components {
         let desc = ComponentDesc {
             name: core::any::type_name::<T>().into(),
             layout: Layout::new::<T>(),
-            drop: core::mem::needs_drop::<T>().then_some(drop_as::<T> as unsafe fn(*mut u8)),
+            drop: core::mem::needs_drop::<T>().then_some(DropGlue::Fn(drop_as::<T>)),
             pod: T::POD.is_pod(),
             type_info: T::TYPE_INFO,
         };

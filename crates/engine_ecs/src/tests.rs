@@ -1339,6 +1339,7 @@ fn a_type_made_at_run_time_registers_by_name_in_any_world() {
         component: "test::RuntimeTestThing".into(),
         layout: core::alloc::Layout::new::<f32>(),
         defaults: 2.5f32.to_le_bytes().into(),
+        texts: &[],
         source: "".into(),
     };
     // SAFETY: an f32, plain data, its default one.
@@ -1450,7 +1451,7 @@ fn a_relayout_moves_fields_by_name_and_a_dynamic_description_is_replaced() {
     let mut defaults = vec![0u8; 24];
     defaults[8..12].copy_from_slice(&2.5f32.to_le_bytes());
     defaults[16..24].copy_from_slice(&Entity::NULL.to_bits().to_le_bytes());
-    let r = crate::Relayout::between(old, &OLD, new, &NEW, defaults.into());
+    let r = crate::Relayout::between(old, &OLD, new, &NEW, defaults.into(), &[]);
     assert_eq!(r.entities, [16]);
     assert_eq!(r.moves.len(), 2, "lift and target: open changed its type");
     let target = Entity::from_bits(0x0000_0007_0000_0003);

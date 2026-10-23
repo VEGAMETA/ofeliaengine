@@ -127,7 +127,7 @@ impl Drop for ChunkPool {
 pub(crate) struct Column {
     pub(crate) id: ComponentId,
     pub(crate) size: u32,
-    pub(crate) drop: Option<unsafe fn(*mut u8)>,
+    pub(crate) drop: Option<crate::component::DropGlue>,
     pub(crate) pod: bool,
 }
 
@@ -501,7 +501,7 @@ impl Archetype {
                 for chunk in 0..self.chunks.len() {
                     for row in 0..self.chunk_len(chunk) {
                         // SAFETY: rows below the chunk's length are initialized.
-                        unsafe { drop(self.value_ptr(chunk, column, row)) };
+                        unsafe { drop.drop_value(self.value_ptr(chunk, column, row)) };
                     }
                 }
             }

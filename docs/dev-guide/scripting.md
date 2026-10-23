@@ -68,14 +68,17 @@ From Rust, `player.add_script(door, "Door")` gives one with its defaults.
   components' names do. A file may declare several; what it returns is its module.
 - **Props** are the component's data. Each instance has its own, and they live in the
   world, as a Rust component's fields do:
-  - a number (`lift = 2.5`), a boolean (`open = false`) or a vector (`closed =
-    vector.zero`): their default and type;
+  - a number (`lift = 2.5`), a boolean (`open = false`), a vector (`closed =
+    vector.zero`) or a string (`sound = "pickups/coin.ogg"`): their default and type;
   - `prop.number(default, { min, max, step, tooltip, hidden })`, `prop.integer(…)`,
-    `prop.boolean(…)`, `prop.vector(…)`: the same, with limits and help. A write beyond
-    `min` or `max` is clamped, as the inspector does;
+    `prop.boolean(…)`, `prop.vector(…)`, `prop.string(…)`: the same, with limits and
+    help. A write beyond `min` or `max` is clamped, as the inspector does;
   - `prop.entity()`: another entity, `nil` at first.
 
-  Strings come in a later step.
+  A string prop is the component's own text: saved, kept by scenes and undo, edited in
+  the inspector. Reading the same text again makes nothing, and writing one reuses its
+  room. A world holding string props cannot be snapshotted whole, as one holding sounds
+  cannot.
 - **Props are laid out by name** (a Luau table's keys have no order), and the inspector
   shows them that way. A prop away from its default is marked, and its reset puts the
   default back.
@@ -440,6 +443,5 @@ end
 
 ## Coming next
 
-- props of text;
 - script components in your network schema;
 - prefabs from a release's packs.
