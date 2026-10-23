@@ -4,7 +4,7 @@ Where the engine stands and how work on it is run. A new session (coordinator or
 reads this after `CLAUDE.md` and `docs/agent-rules.md`. Keep it current: whoever merges a
 PR that changes the picture updates this file in the same PR.
 
-Last updated: 2026-10-22.
+Last updated: 2026-10-23.
 
 ## 0. Now (2026-10-22)
 
@@ -28,8 +28,9 @@ Last updated: 2026-10-22.
     comes with the one-button build); nothing the engine gives scripts allocates in
     steady state (ADR 0114's examples in the zero-allocation test). E10-2, Slang in the
     code editor, is done: errors from the front end, completion, hover, signatures and
-    definitions from `slangd`. E10-1 waits for the answer on the material file. The
-    entries below are in the order merged.
+    definitions from `slangd`. E9, the script debugger (ADR 0119, accepted), is under way:
+    its core's logpoints and pause points are in. E10-1 waits for the answer on the
+    material file. The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
@@ -628,15 +629,22 @@ Last updated: 2026-10-22.
       (its locals, upvalues and globals);
     - the host logs the messages at their lines;
     - debug level 2.
+  - **ADR 0119 accepted** (#PR; team decision, 2026-10-23, every recommendation):
+    - a stop suspends the script stage on a fiber of its own;
+    - the editor edits the world at a stop; where the stage holds its borrows (a stop
+      inside a metamethod or a C library's callback), the world is read-only;
+    - the VS Code extension is kept in the repository and installed from a `.vsix`; on the
+      Marketplace and Open VSX at the first public release;
+    - pause on errors is on by default in the editor, once per line per Play.
   - **Next, in this order:**
-    1. E9-1a-2, which does not wait for ADR 0119's answers:
+    1. E9-1a-2:
        - the gutter;
        - breakpoints kept in the session and set in the VM;
        - logpoints and pause points, with conditions and hit counts;
        - measured: nothing without breakpoints;
-    2. E9-1b: stops, stepping, the panel, pause on errors (after ADR 0119's answers);
-       then E9-2 (DAP, VS Code) and E9-3 (the player). E10-1 waits for the answer on the
-       material file.
+    2. E9-1b: stops on the stage's fiber, stepping, the panel, pause on errors; then E9-2
+       (DAP, VS Code) and E9-3 (the player). E10-1 waits for the answer on the material
+       file.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
@@ -787,12 +795,14 @@ Last updated: 2026-10-22.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner:** ADR 0114's seven questions on the Luau API (asked
-  2026-10-22; E7 waits for them). Settled 2026-10-22 (team decisions): Luau (E7) comes in
-  the queue's order (E5-5, material slots, E6, then E7), its public API drafted meanwhile
-  for the owner to sign off; meshes of
-  several materials get material slots on `Model` (queued after E5); ADR 0108's prefab
-  root rule stays; the Radeon's CPU check baseline is not refreshed for now (§6).
+- **Questions open with the owner:** E10's four on materials (one material file, variants
+  with a base, numbers on graph nodes, where generated Slang lives; E10-1 waits for the
+  first). Settled 2026-10-23 (team decision): ADR 0119's four, every recommendation.
+  Settled 2026-10-22 (team decisions): ADR 0114's seven, every recommendation; Luau (E7)
+  comes in the queue's order (E5-5, material slots, E6, then E7), its public API drafted
+  meanwhile for the owner to sign off; meshes of several materials get material slots on
+  `Model` (queued after E5); ADR 0108's prefab root rule stays; the Radeon's CPU check
+  baseline is not refreshed for now (§6).
   Earlier: 2026-10-16, the virtual shadow pages stay off by default on discrete GPUs; the
   monitor was lent for exclusive full screen (§6).
 - **Agents** (team decision, 2026-10-20): at most 2 at a time, when there is a need, for

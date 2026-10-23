@@ -205,6 +205,12 @@ Where the game's Rust code runs, as put to the owner:
     the game thread waits inside the breakpoint while the editor draws its frames from
     within it. In that case the world is read-only in the editor, because the paused Rust
     call may hold borrows of it.
+  - **Amended by ADR 0119** (accepted 2026-10-23):
+    - frames drawn from inside a breakpoint cannot be built, as the frame cannot be
+      entered again;
+    - a stop suspends the script stage on a fiber of its own instead;
+    - the world is read-only where the stage holds its borrows (a stop inside a
+      metamethod or a C library's callback), editable at every other stop.
 - **Cost:** nothing without breakpoints. A function with one runs interpreted until it is
   reloaded (Luau's native code has no breakpoints).
 
