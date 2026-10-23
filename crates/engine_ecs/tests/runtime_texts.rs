@@ -2,6 +2,8 @@
 //! value owns its strings, dropped with it, and moved by a relayout. The live bytes of the
 //! process come back to where they were: nothing leaks, nothing is freed twice.
 
+#![allow(clippy::unwrap_used)]
+
 use engine_ecs::{Entity, Relayout, RuntimeType, TextField, World};
 use engine_reflect::{Attrs, Field, Reflect, TypeInfo, TypeKind};
 use std::alloc::{GlobalAlloc, Layout, System};

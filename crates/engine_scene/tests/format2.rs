@@ -287,6 +287,7 @@ fn a_component_is_added_by_name_at_its_default_with_what_it_requires() {
             component: "script::SceneTestGauge".into(),
             layout: core::alloc::Layout::new::<f32>(),
             defaults: 0.5f32.to_le_bytes().into(),
+            texts: &[],
             source: "scripts/gauge.luau".into(),
         });
     }
