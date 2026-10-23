@@ -149,3 +149,50 @@
    - b) off: the error goes to the Output and the game goes on (Unity's and Roblox's).
 
    Recommended: a.
+
+## As built (E9-1a-1, 2026-10-23): the core's breakpoints, logpoints and pause points
+
+- **`engine_script::debug`:**
+  - `ScriptVm::set_breakpoints(module, …)` keeps a module's breakpoints and places them
+    through its chunk (`lua_breakpoint`, the chunk kept in `Module`). A comment's line moves
+    to the next line with code, which `breakpoint_states` reports.
+  - A module loaded again gets its breakpoints before its new chunk runs.
+  - An off breakpoint is kept, not placed.
+- **`debugbreak`** (Luau's callback, set at the VM's creation, called only at a patched
+  instruction) finds the breakpoints of the frame's module and line. Its body runs under
+  `catch_unwind`. For each breakpoint it:
+  - tests the condition;
+  - counts the hit, then applies the hit rule (`Hits`: every, the n-th, from the n-th,
+    every n-th);
+  - acts: a logpoint keeps its message, a pause point asks for a pause.
+- **Evaluation** compiles a condition or a text once per breakpoint and per frame's names,
+  into `function(<locals and upvalues>) return … end`:
+  - mlua compiles the bytecode only; it is loaded and called with raw calls on the thread
+    that reached the breakpoint, so a coroutine's breakpoint (and E9-1b's hook threads) work
+    alike;
+  - its environment is the frame's function's, so the module's globals are there;
+  - a later local shadows an earlier one and an upvalue, and Luau's internal locals are
+    left out;
+  - breakpoints reached while it runs are passed over;
+  - an error (a condition that does not compile, a text that fails) is kept on the
+    breakpoint, and the script goes on.
+- **`ScriptSettings::debug_level`**, 2 by default: the names conditions and logpoints read.
+  It costs bytes of names, not instructions; the measurement is below.
+- **The host** (`Scripts`):
+  - `set_breakpoints`, `breakpoint_states`, `take_debug_pause` and `module_of(file)` serve
+    the editor;
+  - at the end of each stage, logpoints' messages go to the log at their lines as `print`
+    writes them (`scripts/door.luau:24: …`), so the Output links them;
+  - with no message, nothing is made.
+- **Tests:**
+  - a logpoint reads a parameter, a local (nil before its assignment), an upvalue and a
+    global;
+  - a comment's line moves;
+  - conditions with every-n-th hits, pause points, and errors kept;
+  - breakpoints set before the module loads, kept through a reload, off ones not placed;
+  - in the host, a logpoint in a component's `on_tick` reads `near` and `self.lift`, a
+    pause point's condition holds, and both are kept through the script's reload;
+  - the zero-allocation test: 0 in 600 ticks (no breakpoints).
+- **Next (E9-1a-2):** the editor's gutter, keys and options; breakpoints kept in the
+  session and given to each Play's host; a logpoint's latest message at its line; a pause
+  point pausing Play.

@@ -15,6 +15,9 @@
 //!   keeps running and the error is returned with its line.
 //! - **Errors** name the module and line ([`ScriptError`]), for the editor's "jump to the
 //!   line".
+//! - **The debugger** ([`debug`], ADR 0119): breakpoints set on a module's lines, kept
+//!   through its reloads; logpoints and pause points, with conditions and hit rules.
+//!   Nothing is paid without them.
 //!
 //! ```
 //! use engine_script::{ScriptSettings, ScriptVm};
@@ -46,6 +49,9 @@
 //! ```
 
 pub use mlua;
+
+pub mod debug;
+pub use debug::{BreakAction, BreakState, Breakpoint, Hits, Logged};
 
 use mlua::chunk::Compiler;
 use mlua::{FromLuaMulti, Function, IntoLuaMulti, Lua, Table, Value};
@@ -117,6 +123,10 @@ pub struct ScriptSettings {
     pub call_budget: Duration,
     /// Compile loaded chunks to native code (Luau codegen).
     pub native: bool,
+    /// Luau's debug level: 2 keeps locals' and upvalues' names, which the debugger's
+    /// conditions and logpoints read (bytes of names, no cost per instruction); 1 keeps
+    /// lines and functions' names, enough for errors' traces.
+    pub debug_level: u8,
 }
 
 impl Default for ScriptSettings {
@@ -125,6 +135,7 @@ impl Default for ScriptSettings {
             memory_limit: 256 << 20,
             call_budget: Duration::from_millis(50),
             native: true,
+            debug_level: 2,
         }
     }
 }
@@ -199,6 +210,8 @@ const TIMEOUT_MARKER: &str = "script exceeded its time budget";
 struct Module {
     exports: Table,
     state: Table,
+    /// The chunk that made it: breakpoints are set through it.
+    chunk: Function,
 }
 
 /// A sandboxed Luau VM with modules.
@@ -224,16 +237,20 @@ impl ScriptVm {
         lua.set_compiler(
             Compiler::new()
                 .set_optimization_level(2)
-                .set_debug_level(1)
+                .set_debug_level(settings.debug_level)
                 .set_type_info_level(1),
         );
+        lua.set_app_data(debug::Debugger::default());
         lua.enable_jit(settings.native);
         lua.set_memory_limit(settings.memory_limit)
             .map_err(|_| ScriptError::OutOfMemory)?;
         // SAFETY: the VM's state; the interrupt is a C function of this crate.
         unsafe {
             lua.exec_raw::<()>((), |state| {
-                (*mlua::ffi::lua_callbacks(state)).interrupt = Some(interrupt);
+                let callbacks = mlua::ffi::lua_callbacks(state);
+                (*callbacks).interrupt = Some(interrupt);
+                // Called only at a patched instruction: nothing without breakpoints.
+                (*callbacks).debugbreak = Some(debug::debugbreak);
             })
         }
         .map_err(|e| ScriptError::Runtime {
@@ -278,6 +295,8 @@ impl ScriptVm {
             .set_name(format!("={name}"))
             .set_environment(env);
         let function = chunk.into_function().map_err(|e| compile_error(name, &e))?;
+        // Its breakpoints before it runs: its top level and the closures it makes have them.
+        self.place_breakpoints(name, &function);
         self.arm();
         let result = function.call::<Value>(state.clone());
         self.disarm();
@@ -296,6 +315,7 @@ impl ScriptVm {
             Module {
                 exports: exports.clone(),
                 state,
+                chunk: function,
             },
         );
         if let Some(old) = old
@@ -359,6 +379,61 @@ impl ScriptVm {
         r.map_err(|e| self.map(module, e))
     }
 
+    /// Module `module`'s breakpoints from now on (ADR 0119), replacing its others; placed
+    /// at once when it is loaded, else when it loads. Kept through its reloads.
+    pub fn set_breakpoints(&mut self, module: &str, breakpoints: Vec<Breakpoint>) {
+        let old = self
+            .lua
+            .app_data_mut::<debug::Debugger>()
+            .map(|mut d| d.set(module, breakpoints))
+            .unwrap_or_default();
+        if let Some(chunk) = self.modules.get(module).map(|m| m.chunk.clone()) {
+            for line in old {
+                breakpoint(&self.lua, &chunk, line, false);
+            }
+            self.place_breakpoints(module, &chunk);
+        }
+    }
+
+    /// How module `module`'s breakpoints are doing, in the order they were set: where they
+    /// were placed, their hits, a logpoint's latest message, an error.
+    pub fn breakpoint_states(&self, module: &str) -> Vec<BreakState> {
+        self.lua
+            .app_data_ref::<debug::Debugger>()
+            .map(|d| d.states(module))
+            .unwrap_or_default()
+    }
+
+    /// The logpoints' messages since the last call.
+    pub fn take_logged(&self) -> Vec<Logged> {
+        self.lua
+            .app_data_mut::<debug::Debugger>()
+            .map(|mut d| d.take_logged())
+            .unwrap_or_default()
+    }
+
+    /// Whether a pause point was reached since the last call.
+    pub fn take_pause(&self) -> bool {
+        self.lua
+            .app_data_mut::<debug::Debugger>()
+            .is_some_and(|mut d| d.take_pause())
+    }
+
+    /// Places module `module`'s enabled breakpoints in `chunk`.
+    fn place_breakpoints(&self, module: &str, chunk: &Function) {
+        let wanted = self
+            .lua
+            .app_data_ref::<debug::Debugger>()
+            .map(|d| d.wanted(module))
+            .unwrap_or_default();
+        for (slot, line) in wanted {
+            let placed = breakpoint(&self.lua, chunk, line, true);
+            if let Some(mut d) = self.lua.app_data_mut::<debug::Debugger>() {
+                d.placed(module, slot, placed);
+            }
+        }
+    }
+
     /// Bytes the VM's heap uses.
     pub fn used_memory(&self) -> usize {
         self.lua.used_memory()
@@ -400,6 +475,24 @@ impl ScriptVm {
     fn map(&self, module: &str, e: mlua::Error) -> ScriptError {
         runtime_error(module, &e)
     }
+}
+
+/// Sets (or clears) a breakpoint on `line` of `chunk` and the functions in it: the line
+/// Luau placed it on (the next one with code), none when no line from there has code.
+fn breakpoint(lua: &Lua, chunk: &Function, line: u32, enabled: bool) -> Option<u32> {
+    let line = c_int::try_from(line).ok()?;
+    // SAFETY: the chunk is the one argument pushed; `lua_breakpoint` reads its function and
+    // patches instructions in place, and the placed line is pushed back as the result.
+    let placed = unsafe {
+        lua.exec_raw::<c_int>(chunk.clone(), |state| {
+            let placed = mlua::ffi::lua_breakpoint(state, -1, line, c_int::from(enabled));
+            // What stays on the stack is the result.
+            mlua::ffi::lua_settop(state, 0);
+            mlua::ffi::lua_pushinteger(state, placed as _);
+        })
+    }
+    .ok()?;
+    u32::try_from(placed).ok().filter(|&l| l > 0)
 }
 
 /// `name:12: message` → (12, message).
