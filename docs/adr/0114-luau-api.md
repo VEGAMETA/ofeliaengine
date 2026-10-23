@@ -1399,3 +1399,32 @@ there, and see the script's file in the inspector.
   - the editor's checker takes `send` and `after` in strict mode.
 - **Not in this step:** timers and messages in saves (E7-5f); `random`, `audio`,
   `world.instantiate` (E7-5e2, E7-5e3).
+
+## As built (E7-5e2, 2026-10-23): random numbers and sounds
+
+- **`random.number()`, `random.integer(a, b)`, `random.vector_in_sphere()`** draw from the
+  world's generator, `engine_app::random::Random`: SplitMix64, one `u64` of state.
+  - It is a component of plain data on an entity of its own, not a resource: snapshots
+    copy components, so prediction's rollback draws again what the first run drew, and a
+    save keeps it (E7-5f).
+  - The first draw finds it, or makes it with the default seed: the same numbers on
+    every machine. The host remembers where it is.
+  - `integer` takes whole numbers, the first no greater, both ends included (Lemire's
+    multiplication). `vector_in_sphere` draws in the cube until a point falls inside.
+  - C functions: a draw allocates nothing. `math.random` stays, outside the simulation.
+- **`audio.play(sound, bus?)`** makes an entity with an `AudioSource` (on `ui` unless
+  named) and **`audio.play_at(sound, position, bus?)`** one with an `AudioSource3D` (on
+  `effects`) at that place, its `GlobalTransform` set at once. Both play once and despawn
+  at their end (`PlayMode::Despawn`), and return the entity.
+- **Found:** a world holding sounds cannot be snapshotted (`AudioSource` holds strings:
+  `SnapshotError::NotPlainData`), so a predicted world keeps its sounds out, as it keeps
+  out other text. The test takes its rollback before the sounds.
+- **Tests:**
+  - two worlds with the same seed draw the same numbers;
+  - a snapshot taken before a tick gives that tick's draws again;
+  - a die stays on its faces, about a sixth of the time each;
+  - the sounds' entities, buses, modes and place;
+  - the zero-allocation test's dice draw every tick: 0 allocations;
+  - the editor's checker takes `random` and `audio` in strict mode.
+- **ADR 0114's coin** (example 2) still waits: its `sound` is a string prop, and props of
+  text come with the layout that drops them.

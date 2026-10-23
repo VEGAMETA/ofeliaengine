@@ -19383,6 +19383,23 @@ return Bell
         );
         let found = luau.check("bell");
         assert!(found.is_empty(), "{found:?}");
+        // The world's random numbers and sounds (E7-5e2).
+        luau.set_source(
+            "dice",
+            "--!strict
+local Dice = component(\"Dice\", { roll = 0 })
+function Dice.on_tick(self, dt: number)
+    self.roll = random.integer(1, 6) + random.number()
+    local spark = self.Transform.translation + random.vector_in_sphere()
+    local shot: Entity = audio.play_at(\"sfx/shot.wav\", spark, \"effects\")
+    audio.play(\"ui/click.ogg\")
+    shot:despawn()
+end
+return Dice
+",
+        );
+        let found = luau.check("dice");
+        assert!(found.is_empty(), "{found:?}");
         // A field of the wrong type: an error where it is.
         luau.set_source(
             "bad",

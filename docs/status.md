@@ -570,12 +570,14 @@ Last updated: 2026-10-22.
     four plain values) delivered after the hook that sent it, up to 16 passes a stage;
     `self:after(seconds, hook, …)` at the start of a tick. Nothing allocates (the
     zero-allocation test's relays).
+  - **E7-5e2, random numbers and sounds** (#364, ADR 0114's as-built): `random.number`,
+    `integer`, `vector_in_sphere` from the world's generator (SplitMix64 as a component of
+    its own entity: rollback and saves carry it, the same seed everywhere), C functions;
+    `audio.play`, `audio.play_at` make entities that play once and despawn.
   - **Next, in this order** (E7-5, the rest of scripting v1, in steps; the API is ADR
     0114's):
-    1. E7-5e2: `random` (the world's generator, seeded, saved) and `audio.play`,
-       `audio.play_at`;
-    2. E7-5e3: `world.instantiate` and asset references in scripts (`prop.asset`);
-    3. E7-5f: saves of script components (`on_load`), their timers, and §8's networking
+    1. E7-5e3: `world.instantiate` and asset references in scripts (`prop.asset`);
+    2. E7-5f: saves of script components (`on_load`), their timers, and §8's networking
        rules; each step adds its examples to the zero-allocation test;
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
