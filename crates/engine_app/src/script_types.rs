@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 
 /// Names the definitions give their own types; a component of one of these names is left
 /// out (it would shadow them).
-const RESERVED: [&str; 7] = [
+const RESERVED: [&str; 8] = [
     "Entity",
     "Quat",
     "ScriptSelf",
@@ -29,6 +29,7 @@ const RESERVED: [&str; 7] = [
     "PropOptions",
     "PhysicsFilter",
     "ComponentType",
+    "Query",
 ];
 
 /// The definitions' first part: what does not depend on the program's components.
@@ -131,10 +132,33 @@ declare prop: {
     entity: (default: nil, options: PropOptions?) -> Entity?,
 }
 
+-- What `world.query` makes: `for e, a, b in q do` gives each entity that has the
+-- components, and views of them (moved to each entity in turn: keep the entity, not the
+-- view). Made once, at a module's top.
+declare extern type Query with
+    -- Only the entities that have `component` too.
+    function with(self, component: ComponentType | string): Query
+    -- Only the entities without `component`.
+    function without(self, component: ComponentType | string): Query
+    __iter: (self: Query) -> ((Query, Entity?) -> (Entity, ...any), Query, nil)
+end
+
 declare world: {
     -- The entity with that `Name` (the first made, of several), or nil.
     find: (name: string) -> Entity?,
+    -- An entity with these components (`{ Transform = { translation = p }, Name = "Bullet" }`),
+    -- at once.
+    spawn: (components: { [string]: any }?) -> Entity,
+    -- The entities that have these components, for `for e, a, b in q do`.
+    query: (...ComponentType | string) -> Query,
 }
+
+-- Declares system `name`: hooks called once a tick (`on_tick(dt)`) or a frame
+-- (`on_frame(dt, alpha)`), after the components' instances, in the order declared.
+declare function system(name: string, hooks: {
+    on_tick: ((dt: number) -> ())?,
+    on_frame: ((dt: number, alpha: number) -> ())?,
+}): ()
 
 -- The collision layers a query sees, by name: made once, at a module's top.
 declare extern type PhysicsFilter with

@@ -147,6 +147,19 @@ struct Instance {
 #[derive(Default)]
 struct Loading {
     declared: Vec<(String, Table, Vec<Prop>)>,
+    /// `system(name, hooks)`, in the order declared.
+    systems: Vec<(String, Table)>,
+}
+
+/// A system (ADR 0114 §1): hooks called once a tick (`on_tick(dt)`) or a frame
+/// (`on_frame(dt, alpha)`), after the components' instances, in the order declared.
+struct System {
+    name: String,
+    module: Rc<str>,
+    tick: Option<Function>,
+    frame: Option<Function>,
+    /// An error stopped it: it is called no more, until its script runs again.
+    stopped: bool,
 }
 
 thread_local! {
@@ -197,6 +210,12 @@ pub struct Scripts {
     listening: Vec<usize>,
     /// The entities a stage's despawns take, with their children (scratch).
     gone: Vec<Entity>,
+    /// The systems, in the order declared (ADR 0114 §1).
+    systems: Vec<System>,
+    /// The registry references of queries collected, let go of at a stage's start
+    /// (scratch), and the VM's main state, which names their VM.
+    dead: Vec<std::ffi::c_int>,
+    main: usize,
     clock: Clock,
     /// Errors already in the log.
     reported: HashSet<String>,
@@ -297,6 +316,9 @@ impl Scripts {
             order: Vec::new(),
             listening: Vec::new(),
             gone: Vec::new(),
+            systems: Vec::new(),
+            dead: Vec::new(),
+            main: 0,
             clock: Clock::default(),
             reported: HashSet::new(),
             sources: HashMap::new(),
@@ -306,6 +328,15 @@ impl Scripts {
             heard: (0, 0),
             versions: HashMap::new(),
         };
+        let mut main = 0;
+        // SAFETY: the VM's state; only its main state's address is read.
+        let _ = unsafe {
+            scripts
+                .vm
+                .lua()
+                .exec_raw::<()>((), |state| main = script_views::main_state(state))
+        };
+        scripts.main = main;
         let mut files = Vec::new();
         collect_scripts(folder, &mut files);
         files.sort();
@@ -459,23 +490,58 @@ impl Scripts {
         let lua = self.vm.lua();
         lua.set_app_data(Loading::default());
         let loaded = self.vm.load_module(module, source);
-        let declared = self
+        let Loading { declared, systems } = self
             .vm
             .lua()
             .remove_app_data::<Loading>()
-            .map(|l| l.declared)
             .unwrap_or_default();
         if let Err(e) = loaded {
             log::error!(target: "script", "{}", self.place(&e));
             return;
         }
         self.ran(module, source);
+        self.take_systems(module, systems);
         for (name, table, props) in declared {
             if let Err(why) = self.register(world, module, &name, &table, props) {
                 let file = self.file(module);
                 log::error!(target: "script", "{file}: component `{name}`: {why}");
             }
         }
+    }
+
+    /// The systems module `module` declared (`system(name, hooks)`) as it ran: one of a
+    /// name it declared before takes the new hooks where it was (started again), a new one
+    /// goes last, and one it no longer declares goes.
+    fn take_systems(&mut self, module: &str, declared: Vec<(String, Table)>) {
+        let hook = |t: &Table, name: &str| match t.get::<Value>(name) {
+            Ok(Value::Function(f)) => Some(f),
+            _ => None,
+        };
+        let mut kept = Vec::with_capacity(declared.len());
+        for (name, hooks) in declared {
+            let (tick, frame) = (hook(&hooks, "on_tick"), hook(&hooks, "on_frame"));
+            match self
+                .systems
+                .iter_mut()
+                .find(|s| *s.module == *module && s.name == name)
+            {
+                Some(s) => {
+                    s.tick = tick;
+                    s.frame = frame;
+                    s.stopped = false;
+                }
+                None => self.systems.push(System {
+                    name: name.clone(),
+                    module: module.into(),
+                    tick,
+                    frame,
+                    stopped: false,
+                }),
+            }
+            kept.push(name);
+        }
+        self.systems
+            .retain(|s| *s.module != *module || kept.contains(&s.name));
     }
 
     /// Module `module` ran its text `source`: what it returned is what `require` gives
@@ -575,14 +641,14 @@ impl Scripts {
         self.note_needs(&module, source);
         self.vm.lua().set_app_data(Loading::default());
         let loaded = self.vm.load_module(&module, source);
-        let declared = self
+        let Loading { declared, systems } = self
             .vm
             .lua()
             .remove_app_data::<Loading>()
-            .map(|l| l.declared)
             .unwrap_or_default();
         loaded.map_err(|e| self.place(&e))?;
         self.ran(&module, source);
+        self.take_systems(&module, systems);
         let before = self.components.len();
         let mut again = Vec::new();
         for (name, table, props) in declared {
@@ -836,7 +902,9 @@ impl Scripts {
         physics: Option<&crate::ScenePhysics>,
     ) {
         engine_profiler::zone!("scripts::frame");
-        if !self.components.iter().any(|c| c.hooks.frame.is_some()) {
+        if !self.components.iter().any(|c| c.hooks.frame.is_some())
+            && !self.systems.iter().any(|s| s.frame.is_some())
+        {
             return;
         }
         self.open(world, physics);
@@ -918,7 +986,8 @@ impl Scripts {
         self.order = keys;
     }
 
-    /// Every instance's hook of `stage`, in the instances' order.
+    /// Every instance's hook of `stage`, in the instances' order, then the systems', in
+    /// the order declared.
     fn call_all(&mut self, stage: Stage, dt: f32, alpha: f32) {
         let mut order = core::mem::take(&mut self.order);
         order.clear();
@@ -927,10 +996,50 @@ impl Scripts {
             self.call(key, stage, dt, alpha);
         }
         self.order = order;
+        for k in 0..self.systems.len() {
+            let s = &self.systems[k];
+            let hook = match stage {
+                Stage::Tick => &s.tick,
+                Stage::Frame => &s.frame,
+            };
+            let (Some(hook), false) = (hook.clone(), s.stopped) else {
+                continue;
+            };
+            let module = s.module.clone();
+            let result = match stage {
+                Stage::Tick => self.vm.call_function::<_, ()>(&module, &hook, dt),
+                Stage::Frame => self.vm.call_function::<_, ()>(&module, &hook, (dt, alpha)),
+            };
+            if let Err(err) = result {
+                let name = match stage {
+                    Stage::Tick => "on_tick",
+                    Stage::Frame => "on_frame",
+                };
+                self.systems[k].stopped = true;
+                let line = format!("{} ({}.{name})", self.place(&err), self.systems[k].name);
+                if self.reported.insert(line.clone()) {
+                    log::error!(target: "script", "{line}, the system stopped");
+                }
+            }
+        }
     }
 
     /// The world (and `physics`, if any) open to the scripts until [`Self::close`].
     fn open(&mut self, world: &mut World, physics: Option<&crate::ScenePhysics>) {
+        script_views::take_dead_refs(self.main, &mut self.dead);
+        if !self.dead.is_empty() {
+            let dead = core::mem::take(&mut self.dead);
+            // SAFETY: the references the queries took with `lua_ref`, each let go once.
+            let _ = unsafe {
+                self.vm.lua().exec_raw::<()>((), |state| {
+                    for &r in &dead {
+                        mlua::ffi::lua_unref(state, r);
+                    }
+                })
+            };
+            self.dead = dead;
+            self.dead.clear();
+        }
         OPEN_WORLD.set(world);
         OPEN_PHYSICS.set(physics.map_or(core::ptr::null(), core::ptr::from_ref));
         script_views::open(&mut self.tables);
@@ -1487,6 +1596,7 @@ fn install(lua: &Lua) -> mlua::Result<()> {
         view_newindex: registry_ref(lua, lua.create_function(view_newindex_slow)?)?,
         add: registry_ref(lua, lua.create_function(entity_add)?)?,
         children: c_function_ref(lua, script_views::children_next, c"children")?,
+        query_next: c_function_ref(lua, script_views::query_next, c"query")?,
     };
     lua.set_app_data(slow);
     let globals = lua.globals();
@@ -1531,7 +1641,13 @@ fn install(lua: &Lua) -> mlua::Result<()> {
     world.set("find", unsafe {
         lua.create_c_function(script_views::world_find)?
     })?;
+    // SAFETY: as `find`.
+    world.set("query", unsafe {
+        lua.create_c_function(script_views::world_query)?
+    })?;
+    world.set("spawn", lua.create_function(world_spawn)?)?;
     globals.set("world", world)?;
+    globals.set("system", lua.create_function(declare_system)?)?;
     let physics = lua.create_table()?;
     physics.set("raycast", lua.create_function(raycast)?)?;
     physics.set("overlap_sphere", lua.create_function(overlap_sphere)?)?;
@@ -1672,6 +1788,90 @@ fn declare_component(
     };
     loading.declared.push((name, table.clone(), list));
     Ok(table)
+}
+
+/// `system(name, hooks)`: a system of module that runs it (ADR 0114 §1), its hooks
+/// (`on_tick`, `on_frame`) on `hooks`.
+fn declare_system(lua: &Lua, (name, hooks): (mlua::LuaString, Table)) -> mlua::Result<()> {
+    let name = name.to_str()?.to_owned();
+    let Some(mut loading) = lua.app_data_mut::<Loading>() else {
+        return Err(mlua::Error::runtime(
+            "system() declares at a script's top, while it loads",
+        ));
+    };
+    if loading.systems.iter().any(|(n, _)| *n == name) {
+        return Err(mlua::Error::runtime(format!(
+            "system `{name}` is declared twice"
+        )));
+    }
+    loading.systems.push((name, hooks));
+    Ok(())
+}
+
+/// `world.spawn({ Component = { field = value } })` (ADR 0114 §3): an entity with those
+/// components, each its default with the fields given written, at once (the next line
+/// reads them). A component of one field takes its value as it is (`Name = "Bullet"`). A
+/// script component's hooks start at the next stage.
+fn world_spawn(lua: &Lua, components: Option<Table>) -> mlua::Result<Value> {
+    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
+    let w = unsafe { &mut *world_ptr(lua)? };
+    let e = w.spawn(());
+    let Some(components) = components else {
+        return Ok(script_views::entity_value(e));
+    };
+    let made = (|| {
+        for pair in components.pairs::<mlua::LuaString, Value>() {
+            let (name, value) = pair?;
+            let name = name.to_str()?;
+            let Some((id, info)) = named(lua, &name) else {
+                return Err(mlua::Error::runtime(format!(
+                    "world.spawn: no component is called `{name}`"
+                )));
+            };
+            if matches!(info.name, "Parent" | "Children") {
+                return Err(mlua::Error::runtime(
+                    "`Parent` and `Children` keep the hierarchy: they are not spawned with",
+                ));
+            }
+            if w.get_raw(e, id).is_none() {
+                let made = lua
+                    .app_data_ref::<engine_scene::SceneRegistry>()
+                    .is_some_and(|r| r.insert_default(w, e, info.name));
+                if !made {
+                    return Err(mlua::Error::runtime(format!(
+                        "`{name}` cannot be made from a script"
+                    )));
+                }
+            }
+            match value {
+                Value::Table(fields) => {
+                    for pair in fields.pairs::<mlua::LuaString, Value>() {
+                        let (key, value) = pair?;
+                        let f = struct_field(info, &key.to_str()?)?;
+                        set_field(w, e, id, info, 0, f, value)?;
+                    }
+                }
+                Value::Boolean(true) => {}
+                value => {
+                    let TypeKind::Struct([f]) = &info.kind else {
+                        return Err(mlua::Error::runtime(format!(
+                            "world.spawn: `{name}` takes a table of its fields"
+                        )));
+                    };
+                    set_field(w, e, id, info, 0, f, value)?;
+                }
+            }
+        }
+        Ok(())
+    })();
+    match made {
+        Ok(()) => Ok(script_views::entity_value(e)),
+        Err(err) => {
+            // Nothing half made stays.
+            w.despawn(e);
+            Err(err)
+        }
+    }
 }
 
 /// A prop from its declaration: a plain default, or a `prop.*` helper's table.
@@ -2462,6 +2662,31 @@ return Fields
 ",
                 ),
                 ("door.luau", DOOR),
+                (
+                    "spin_system.luau",
+                    "local SpinSystem = component(\"SpinSystem\", { speed = 1.5 })
+local spinning = world.query(SpinSystem, Transform)
+local UP = vector.create(0, 1, 0)
+system(\"SpinSystem\", {
+    on_tick = function(dt)
+        for _, spin, t in spinning do
+            t:rotate(UP, spin.speed * dt)
+        end
+    end,
+})
+return SpinSystem
+",
+                ),
+                (
+                    "spin_hook.luau",
+                    "local SpinHook = component(\"SpinHook\", { speed = 1.5 })
+local UP = vector.create(0, 1, 0)
+function SpinHook.on_tick(self, dt)
+    self.Transform:rotate(UP, self.speed * dt)
+end
+return SpinHook
+",
+                ),
             ],
         );
         let median = |mut v: Vec<f64>| {
@@ -2491,6 +2716,8 @@ return Fields
         let props = run("Props", 100);
         let fields = run("Fields", 100);
         let doors = run("Door", 1000);
+        let system = run("SpinSystem", 10_000);
+        let hooks = run("SpinHook", 10_000);
         println!("| what | per | median |");
         println!("|---|---|---:|");
         println!("| an empty on_tick | instance | {:.3} µs |", empty / 1000.0);
@@ -2505,6 +2732,14 @@ return Fields
         println!(
             "| 1,000 doors (the door example) | tick | {:.3} ms |",
             doors / 1e3
+        );
+        println!(
+            "| 10,000 spinners as a system (the spin example) | tick | {:.3} ms |",
+            system / 1e3
+        );
+        println!(
+            "| 10,000 spinners, a hook each | tick | {:.3} ms |",
+            hooks / 1e3
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3143,6 +3378,137 @@ return Npc
         scripts.tick(&mut world, 0.1);
         assert_eq!(read_f32(&world, &scripts, e, "Coin", "version"), 2.0);
         assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn systems_loop_over_queries_and_spawned_entities_are_there_at_once() {
+        let dir = project(
+            "systems",
+            &[
+                (
+                    "spin.luau",
+                    r#"local Spin = component("Spin", { speed = 1, turns = 0 })
+local spinning = world.query(Spin, Transform)
+local plain = world.query("Transform"):with(Spin):without(Trigger)
+local UP = vector.create(0, 1, 0)
+system("Spin", {
+    on_tick = function(dt)
+        for e, spin, t in spinning do
+            t:rotate(UP, spin.speed * dt)
+            spin.turns += 1
+        end
+    end,
+    on_frame = function(dt, alpha)
+        local n = 0
+        for e in plain do
+            n += 1
+        end
+        world.find("Counter").Transform.translation = vector.create(n, alpha, 0)
+    end,
+})
+system("Broken", {
+    on_tick = function(dt)
+        error("no luck")
+    end,
+})
+return Spin
+"#,
+                ),
+                (
+                    "spawner.luau",
+                    r#"local Spawner = component("Spawner", { made = prop.entity(), at = vector.zero, named = false })
+function Spawner.on_tick(self, dt)
+    if self.made == nil then
+        local e = world.spawn({
+            Name = "Bullet",
+            Transform = { translation = vector.create(1, 2, 3) },
+            Spin = { speed = 2 },
+        })
+        self.made = e
+        self.at = e.Transform.translation
+        self.named = e.name == "Bullet" and e:has("Spin")
+    end
+    -- Queries made and dropped: collected, their views let go of.
+    for i = 1, 20 do
+        for e in world.query(Transform) do
+            break
+        end
+    end
+end
+return Spawner
+"#,
+                ),
+            ],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let counter = world.spawn((Name::new("Counter"), Transform::IDENTITY));
+        let spinners: Vec<Entity> = (0..3)
+            .map(|_| {
+                let e = world.spawn((Transform::IDENTITY,));
+                scripts.add(&mut world, e, "Spin");
+                e
+            })
+            .collect();
+        // One with a trigger: spun, but not in the filtered query.
+        world.insert(spinners[2], crate::Trigger::default());
+        let spawner = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, spawner, "Spawner");
+        for _ in 0..4 {
+            scripts.tick(&mut world, 0.25);
+        }
+        scripts.frame(&mut world, 0.016, 0.5);
+        // Four ticks a quarter of a turn each (speed 1 rad/s × 0.25 s): 1 rad about y.
+        for &e in &spinners {
+            assert_eq!(read_f32(&world, &scripts, e, "Spin", "turns"), 4.0);
+            let (axis, angle) = world.get::<Transform>(e).unwrap().rotation.to_axis_angle();
+            assert!(
+                (angle - 1.0).abs() < 1e-4 && axis.y > 0.99,
+                "{axis} {angle}"
+            );
+        }
+        // The spawned bullet: its components at once, spun by the system from its first
+        // tick (the loop began after it was made).
+        let bullet = read_entity(&world, &scripts, spawner, "Spawner", "made");
+        assert!(world.contains(bullet));
+        assert_eq!(
+            world.get::<Transform>(bullet).unwrap().translation,
+            Vec3::new(1.0, 2.0, 3.0)
+        );
+        assert!(world.get::<engine_ecs::GlobalTransform>(bullet).is_some());
+        assert_eq!(world.get::<Name>(bullet).unwrap().as_str(), "Bullet");
+        assert_eq!(read_f32(&world, &scripts, bullet, "Spin", "speed"), 2.0);
+        assert_eq!(read_f32(&world, &scripts, bullet, "Spin", "turns"), 4.0);
+        let id = scripts.component("Spawner").unwrap();
+        let TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind else {
+            unreachable!()
+        };
+        let named = fields.iter().find(|f| f.name == "named").unwrap().offset;
+        let base = world.get_raw(spawner, id).unwrap().as_ptr();
+        // SAFETY: Spawner's `named`, a bool at its offset.
+        let named = unsafe { base.add(named).read() };
+        assert_eq!(named, 1);
+        // The frame's system: two spinners without a trigger, and the bullet.
+        assert_eq!(
+            world.get::<Transform>(counter).unwrap().translation,
+            Vec3::new(3.0, 0.5, 0.0)
+        );
+        let reported: Vec<&str> = scripts.reported.iter().map(String::as_str).collect();
+        assert_eq!(
+            reported,
+            ["scripts/spin.luau:22: no luck (Broken.on_tick)"],
+            "the broken system stopped once"
+        );
+        // The queries made in the ticks are collected; their views go at the next stage.
+        scripts.vm.lua().gc_collect().unwrap();
+        assert!(
+            script_views::dead_refs() >= 80,
+            "{}",
+            script_views::dead_refs()
+        );
+        scripts.tick(&mut world, 0.25);
+        assert!(script_views::dead_refs() < 20, "let go of");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -4,9 +4,10 @@
 //! `self.entity`, `self.locals`, the time, a physics ray, contacts with a trigger), and
 //! walkers using entities' and `Transform`'s methods (`rotate`, `forward`, `look_at`,
 //! `find_child`, `children`, `has`, `parent`, a function of their own through `self:`),
-//! through 600 ticks and frames after a warm-up: the heap allocations made in the
-//! scripts' stages are counted (the physics steps between them are not). One test per
-//! file, so nothing else allocates concurrently.
+//! and the spinning example (§5) as a system over a query of 1,000 entities, through 600
+//! ticks and frames after a warm-up: the heap allocations made in the scripts' stages
+//! are counted (the physics steps between them are not). One test per file, so nothing
+//! else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -129,6 +130,27 @@ end
 return Walker
 "#;
 
+/// ADR 0114 §5's third example, as written there: a system over a query.
+const SPIN: &str = r#"--!strict
+-- scripts/spin.luau: everything with Spin turns about its up axis.
+local Spin = component("Spin", {
+    speed = prop.number(math.rad(90), { hint = "degrees", tooltip = "Turn a second" }),
+})
+
+local spinning = world.query(Spin, Transform) -- made once, iterated every tick
+local UP = vector.create(0, 1, 0)
+
+system("Spin", {
+    on_tick = function(dt: number)
+        for _, spin, t in spinning do
+            t:rotate(UP, spin.speed * dt)
+        end
+    end,
+})
+
+return Spin
+"#;
+
 /// Watchers, each with a trigger, a ball falling through it and a floor named after it.
 const WATCHERS: usize = 10;
 
@@ -144,6 +166,7 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
     std::fs::write(dir.join("scripts/door.luau"), DOOR).unwrap();
     std::fs::write(dir.join("scripts/watcher.luau"), WATCHER).unwrap();
     std::fs::write(dir.join("scripts/walker.luau"), WALKER).unwrap();
+    std::fs::write(dir.join("scripts/spin.luau"), SPIN).unwrap();
     let mut world = World::new();
     let mut scripts = Scripts::load(&mut world, &dir, &dir.join("scripts")).unwrap();
     let mut physics = ScenePhysics::new(&PhysicsSettings {
@@ -212,6 +235,14 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
         })
         .collect();
 
+    let spinners: Vec<Entity> = (0..1000)
+        .map(|i| {
+            let e = world.spawn((Transform::from_xyz(i as f32, 10.0, 0.0),));
+            assert!(scripts.add(&mut world, e, "Spin"));
+            e
+        })
+        .collect();
+
     let dt = 1.0 / 64.0;
     let mut tick = |world: &mut World, scripts: &mut Scripts, n: usize, counted: &mut usize| {
         // The player paces along the row; every 80 ticks the balls are dropped again.
@@ -262,6 +293,14 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
         // SAFETY: a number prop (f32) at its offset in the watcher's component.
         unsafe { base.add(at).cast::<f32>().read_unaligned() }
     };
+    // The spinners turned 90° a second for 840 ticks.
+    let turned = world.get::<Transform>(spinners[0]).unwrap().rotation;
+    let expected =
+        Quat::from_rotation_y((840.0 * dt * 90f32.to_radians()) % core::f32::consts::TAU);
+    assert!(
+        turned.dot(expected).abs() > 0.999,
+        "{turned:?} against {expected:?}"
+    );
     let id = scripts.component("Walker").unwrap();
     let engine_reflect::TypeKind::Struct(walker_fields) =
         &world.components().type_info(id).unwrap().kind

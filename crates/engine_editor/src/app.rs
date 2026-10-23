@@ -19302,6 +19302,34 @@ return Turret
         );
         let found = luau.check("turret");
         assert!(found.is_empty(), "{found:?}");
+        // A system over a query, and spawning (E7-5c): ADR 0114's spin example.
+        luau.set_source(
+            "spin",
+            "--!strict
+local Spin = component(\"Spin\", {
+    speed = prop.number(math.rad(90), { tooltip = \"Turn a second\" }),
+})
+local spinning = world.query(Spin, Transform)
+local still = world.query(Transform):with(Spin):without(Trigger)
+local UP = vector.create(0, 1, 0)
+system(\"Spin\", {
+    on_tick = function(dt: number)
+        for _, spin, t in spinning do
+            t:rotate(UP, spin.speed * dt)
+        end
+        for e in still do
+            if e.name == \"Top\" then
+                local made = world.spawn({ Name = \"Spark\", Transform = { translation = vector.one } })
+                made:despawn()
+            end
+        end
+    end,
+})
+return Spin
+",
+        );
+        let found = luau.check("spin");
+        assert!(found.is_empty(), "{found:?}");
         // A field of the wrong type: an error where it is.
         luau.set_source(
             "bad",

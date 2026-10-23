@@ -556,12 +556,17 @@ Last updated: 2026-10-22.
     `./`, `../`, `@self`, `.luaurc` aliases); what a script requires runs before it,
     whatever the files' names (its `require` paths scanned before loading); a reloaded
     script's dependents run again after it, and the editor names them.
+  - **E7-5c, queries, systems, spawning** (#PR, ADR 0114's as-built): `world.query(A,
+    B)` with `with`/`without`, looped as `for e, a, b in q do` (a snapshot at the loop's
+    start, the query's own views moved to each entity: nothing made per step);
+    `system(name, { on_tick, on_frame })` after the instances; `world.spawn({ … })` at
+    once. 10,000 spinners as a system 1.2 ms a tick (target 2), as hooks 2.7 ms; the
+    spin example allocates nothing.
   - **Next, in this order** (E7-5, the rest of scripting v1, in steps; the API is ADR
     0114's):
-    1. E7-5c: `world.spawn`, `world.query` (`with`, `without`) and `system(name, hooks)`;
-    2. E7-5d: `input` (the tick's view and the frame's);
-    3. E7-5e: `send`, `after`, `audio`, `random`, `world.instantiate`;
-    4. E7-5f: saves of script components (`on_load`) and §8's networking rules; each
+    1. E7-5d: `input` (the tick's view and the frame's);
+    2. E7-5e: `send`, `after`, `audio`, `random`, `world.instantiate`;
+    3. E7-5f: saves of script components (`on_load`) and §8's networking rules; each
        step adds its examples to the zero-allocation test;
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.

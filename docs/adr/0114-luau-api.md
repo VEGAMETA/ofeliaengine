@@ -1296,3 +1296,46 @@ there, and see the script's file in the inspector.
     module has run, and errors before;
   - comments in `.luaurc` files: the order's scan reads their aliases as JSON, though
     Luau's own reader takes comments.
+
+## As built (E7-5c, 2026-10-23): queries, systems, spawning
+
+- **`world.query(A, B, …)`** makes a query, a userdata of its own tag (67) holding its
+  components by name. The names are found at its first loop, since a script's own
+  component is registered once its module ran. `q:with(C)` and `q:without(D)` filter and
+  return the query.
+- **`for e, a, b in q do`** is Luau's generalized iteration (`__iter`):
+  - the loop's start takes a snapshot of the entities whose archetypes match;
+  - each step goes from the entity before (the query remembers where it is, so a step
+    costs nothing to find) and passes over an entity that went or lost a column since;
+  - `a`, `b` are the query's own views, one a column, moved to each entity in turn:
+    nothing is made per step, and a view kept past its step shows the entity of the
+    step after. The guide says to keep the entity instead.
+- **A query collected** frees its box in its userdata's destructor
+  (`lua_setuserdatadtor`). Its views' registry references wait in a list, by VM, until
+  the host's next stage lets go of them: a destructor runs inside Luau's collector,
+  where the registry is not written.
+- **`system(name, { on_tick, on_frame })`** declares a system at a script's top. Its hooks
+  run after the components' instances, in the order declared (§7). An error stops the
+  system, reported once ("(Spin.on_tick)"); running its script again starts it again,
+  and one the script no longer declares goes.
+- **`world.spawn({ Component = { field = value } })`** makes an entity, at once:
+  - each component's default comes from `SceneRegistry::insert_default` (a `Transform`
+    brings its `GlobalTransform`), then the fields given are written;
+  - a component of one field takes its value as it is (`Name = "Bullet"`);
+  - a script component's hooks start at the next stage;
+  - an error despawns what was half made.
+- **Measured** (ref-1, release, `scripts::tests::measure_hooks_and_views`, medians of 51
+  ticks, two runs): 10,000 spinners as a system (example 3) take **1.20–1.21 ms** a tick
+  (target 2 ms); the same as a hook each takes 2.64–2.68 ms. The zero-allocation test
+  runs example 3 as written over 1,000 entities: 0 allocations in 600 ticks.
+- **Tests:**
+  - a system turning what a query gives, and a filtered query in a frame's system;
+  - a spawned entity with its components at once, which a loop that began after it
+    visits;
+  - a broken system stopped and reported once;
+  - queries made and dropped in a hook: collected, their views let go of at the next
+    stage;
+  - the editor's checker takes the spin example and `spawn` in strict mode.
+- **Not in this step:** a query over an entity's children; the scene tree's order for
+  queries (they visit archetypes in their order, the same on every machine for the same
+  world).

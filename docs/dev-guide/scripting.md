@@ -190,6 +190,52 @@ end
 return Turret
 ```
 
+## Many objects at once: queries and systems
+
+A hook runs once per object. For many alike objects, a system runs once a tick and loops
+over a query:
+
+```luau
+-- scripts/spin.luau: everything with Spin turns about its up axis.
+local Spin = component("Spin", { speed = math.rad(90) })
+
+local spinning = world.query(Spin, Transform) -- made once, at the top
+local UP = vector.create(0, 1, 0)
+
+system("Spin", {
+    on_tick = function(dt: number)
+        for e, spin, t in spinning do
+            t:rotate(UP, spin.speed * dt)
+        end
+    end,
+})
+
+return Spin
+```
+
+- `world.query(A, B, …)` gives each entity that has all of them, with a view of each:
+  `for e, a, b in q do`. `q:with(C)` keeps only those that also have `C`,
+  `q:without(D)` those without `D`.
+- A loop visits what matched when it began; an entity that goes or loses a component
+  during it is passed over.
+- The views a loop gives are the query's own, moved to each entity in turn: keep the
+  entity (`e`), not the view, past the step.
+- Make a query once, at the script's top: making one inside a hook allocates.
+- `system(name, { on_tick = f, on_frame = g })`: `on_tick(dt)` runs once a tick, after
+  the components' hooks, `on_frame(dt, alpha)` once a frame; systems run in the order
+  declared.
+
+`world.spawn` makes an entity at once:
+
+```luau
+local bullet = world.spawn({
+    Name = "Bullet", -- a component of one field takes its value
+    Transform = { translation = muzzle },
+    Bullet = { speed = 40 }, -- a script's component: its hooks start next tick
+})
+bullet.Transform.translation += vector.create(0, 0.1, 0) -- there already
+```
+
 ## Scripts that use each other
 
 `require` gives you another script by its path from yours, as luau-lsp finds it:
@@ -273,6 +319,7 @@ Save a script (Ctrl+S in the editor, or in another editor) and it runs again at 
 
 Measured on ref-1 (Ryzen 7 7700, release):
 - an empty `on_tick` costs 0.14 µs per instance;
+- 10,000 spinners take 1.2 ms a tick as a system, 2.7 ms as a hook each;
 - reading and writing a prop or a component's field costs about 37 ns each (a number, a
   boolean, a vector, an entity);
 - 1,000 doors like the one above take 0.6 ms a tick.
@@ -309,7 +356,6 @@ at it, so VS Code checks and completes your scripts the same way. The file is in
 
 ## Coming next
 
-- `world.spawn`, `world.query` and systems over queries;
 - `input`;
 - `send`, `after` timers, `audio`, `random`, `world.instantiate`;
 - script components in saves.

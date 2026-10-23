@@ -23,6 +23,11 @@
 //!   `Door.open(self)`); `Transform`'s (`rotate`, `look_at`, `forward`, `right`, `up`) on
 //!   its views. A component is named by its table (`Transform`, a script's `component`
 //!   table: its `name`) or by its name.
+//! - **Queries** (E7-5c) are userdata of [`TAG_QUERY`]: `for e, a, b in q do` takes a
+//!   snapshot of what matches when the loop begins ([`query_iter`]); each step goes from
+//!   the entity before ([`query_next`]) and moves the query's views, one a column, to the
+//!   entity, so a loop makes nothing. A query collected lets go of its views at the next
+//!   stage ([`take_dead_refs`]).
 //! - **No allocation per access:** a view of `self`'s entity's component is made once and
 //!   kept on `self` ([`ThisData::views`]), as is `self.locals`; a view through an entity
 //!   (`e.Transform`) or of a struct inside a view is kept in a table of the latest
@@ -198,6 +203,7 @@ pub(crate) struct Slow {
     pub(crate) view_newindex: c_int,
     pub(crate) add: c_int,
     pub(crate) children: c_int,
+    pub(crate) query_next: c_int,
 }
 
 /// The atoms of an entity's `parent` and methods, and of `Transform`'s methods.
@@ -215,6 +221,8 @@ struct Methods {
     forward: c_int,
     right: c_int,
     up: c_int,
+    with: c_int,
+    without: c_int,
 }
 
 impl Methods {
@@ -233,6 +241,8 @@ impl Methods {
             forward: a("forward"),
             right: a("right"),
             up: a("up"),
+            with: a("with"),
+            without: a("without"),
         }
     }
 
@@ -573,7 +583,7 @@ pub(crate) unsafe fn install(state: *mut ffi::lua_State) {
     // SAFETY: as the caller says; each call is Luau's own API on that state.
     unsafe {
         (*ffi::lua_callbacks(state)).useratom = Some(useratom);
-        let methods: [Metatable; 2] = [
+        let methods: [Metatable; 3] = [
             (
                 TAG_SELF,
                 c"Self",
@@ -592,6 +602,11 @@ pub(crate) unsafe fn install(state: *mut ffi::lua_State) {
                     (c"__namecall", view_namecall),
                 ],
             ),
+            (
+                TAG_QUERY,
+                c"Query",
+                &[(c"__iter", query_iter), (c"__namecall", query_namecall)],
+            ),
         ];
         for (tag, name, functions) in methods {
             ffi::lua_createtable(state, 0, 4);
@@ -604,6 +619,7 @@ pub(crate) unsafe fn install(state: *mut ffi::lua_State) {
             ffi::lua_setreadonly(state, -1, 1);
             ffi::lua_setuserdatametatable(state, tag);
         }
+        ffi::lua_setuserdatadtor(state, TAG_QUERY, Some(query_dtor));
         // Entities: the metatable of every light userdata, set through one of them.
         let entity: [(&std::ffi::CStr, ffi::lua_CFunction); 3] = [
             (c"__index", entity_index),
@@ -1803,6 +1819,385 @@ unsafe extern "C-unwind" fn entity_tostring(state: *mut ffi::lua_State) -> c_int
         };
         ffi::lua_pushlstring_(state, text.as_ptr().cast(), text.len());
         1
+    }
+}
+
+/// A query's tag.
+pub(crate) const TAG_QUERY: c_int = 67;
+
+thread_local! {
+    /// Registry references of queries gone (their views), with their VM's main state, let
+    /// go of at that VM's next stage: a destructor runs inside Luau's collector, where the
+    /// registry is not written.
+    static DEAD_REFS: RefCell<Vec<(usize, c_int)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// How many references of queries gone wait to be let go of (tests).
+#[cfg(test)]
+pub(crate) fn dead_refs() -> usize {
+    DEAD_REFS.with(|d| d.borrow().len())
+}
+
+/// The references of the queries of VM `main` (its main state's address) gone since the
+/// last call, into `out`.
+pub(crate) fn take_dead_refs(main: usize, out: &mut Vec<c_int>) {
+    DEAD_REFS.with(|d| {
+        if let Ok(mut d) = d.try_borrow_mut() {
+            d.retain(|&(vm, r)| {
+                if vm == main {
+                    out.push(r);
+                }
+                vm != main
+            });
+        }
+    });
+}
+
+/// The address of `state`'s VM's main state, which names the VM.
+///
+/// # Safety
+///
+/// `state` is a live state.
+pub(crate) unsafe fn main_state(state: *mut ffi::lua_State) -> usize {
+    // SAFETY: as the caller says.
+    unsafe { ffi::lua_mainthread(state) as usize }
+}
+
+/// `world.query(A, B, …)` (ADR 0114 §3): the components a loop gives (`for e, a, b in q
+/// do`), its filters (`q:with(C)`, `q:without(D)`), and, once a loop began, what matched
+/// then and where the loop is.
+pub(crate) struct Query {
+    /// The columns and filters by name, until the first loop finds them: a script's own
+    /// component is registered once its module ran.
+    names: Vec<Box<str>>,
+    with: Vec<Box<str>>,
+    without: Vec<Box<str>>,
+    found: bool,
+    columns: Vec<Named>,
+    with_ids: Vec<ComponentId>,
+    without_ids: Vec<ComponentId>,
+    /// The entities that matched when the loop began, and the one given last.
+    matched: Vec<Entity>,
+    at: usize,
+    /// One view a column, moved to each entity in turn (registry references).
+    views: Vec<c_int>,
+}
+
+/// A query's userdata: its query, boxed (the destructor drops it).
+#[repr(C)]
+struct QueryData(*mut Query);
+
+/// The query at stack index `idx`, if one is there.
+///
+/// # Safety
+///
+/// `idx` is a valid index of `state`.
+unsafe fn query_at(state: *mut ffi::lua_State, idx: c_int) -> *mut Query {
+    // SAFETY: as the caller says; a query's block holds its box.
+    unsafe {
+        let p = ffi::lua_touserdatatagged(state, idx, TAG_QUERY).cast::<QueryData>();
+        if p.is_null() {
+            core::ptr::null_mut()
+        } else {
+            (*p).0
+        }
+    }
+}
+
+/// The name of the component the value at stack index `idx` names (its table's `name`,
+/// or the name), copied; none for another value.
+///
+/// # Safety
+///
+/// `idx` is a valid index of `state`.
+unsafe fn component_name(state: *mut ffi::lua_State, idx: c_int) -> Option<Box<str>> {
+    // SAFETY: as the caller says; the string is copied before it is popped.
+    unsafe {
+        let table = ffi::lua_type(state, idx) == ffi::LUA_TTABLE;
+        if table {
+            ffi::lua_rawgetfield(state, idx, c"name".as_ptr());
+        }
+        let at = if table { -1 } else { idx };
+        let name = (ffi::lua_type(state, at) == ffi::LUA_TSTRING).then(|| {
+            let mut len = 0usize;
+            let s = ffi::lua_tolstring(state, at, &mut len);
+            String::from_utf8_lossy(core::slice::from_raw_parts(s.cast::<u8>(), len))
+                .into_owned()
+                .into_boxed_str()
+        });
+        if table {
+            ffi::lua_pop(state, 1);
+        }
+        name
+    }
+}
+
+/// The names of the components the arguments from index `from` name, or the place of the
+/// first that names none.
+///
+/// # Safety
+///
+/// A C function's state.
+unsafe fn component_names(state: *mut ffi::lua_State, from: c_int) -> Result<Vec<Box<str>>, c_int> {
+    // SAFETY: as the caller says.
+    unsafe {
+        let n = ffi::lua_gettop(state);
+        let mut names = Vec::with_capacity(n.max(0) as usize);
+        for i in from..=n {
+            match component_name(state, i) {
+                Some(name) => names.push(name),
+                None => return Err(i),
+            }
+        }
+        Ok(names)
+    }
+}
+
+/// `world.query(A, B, …)`: a query of those components, made once (at a module's top) and
+/// looped over every tick.
+pub(crate) unsafe extern "C-unwind" fn world_query(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM; the names are owned before the query is made.
+    unsafe {
+        let names = match component_names(state, 1) {
+            Ok(names) if !names.is_empty() => names,
+            Ok(_) => raise(
+                state,
+                String::from("world.query takes the components to give"),
+            ),
+            Err(i) => raise(
+                state,
+                format!(
+                    "world.query's argument {i} is not a component (`Transform`, a script's) or its name"
+                ),
+            ),
+        };
+        let query = Box::new(Query {
+            names,
+            with: Vec::new(),
+            without: Vec::new(),
+            found: false,
+            columns: Vec::new(),
+            with_ids: Vec::new(),
+            without_ids: Vec::new(),
+            matched: Vec::new(),
+            at: 0,
+            views: Vec::new(),
+        });
+        let p = ffi::lua_newuserdatataggedwithmetatable(state, size_of::<QueryData>(), TAG_QUERY)
+            .cast::<QueryData>();
+        p.write(QueryData(Box::into_raw(query)));
+        1
+    }
+}
+
+/// A query's userdata collected: its box dropped, its views' references let go of at the
+/// next stage.
+unsafe extern "C" fn query_dtor(state: *mut ffi::lua_State, block: *mut c_void) {
+    // SAFETY: Luau calls it once with the block of a query's userdata, which holds the box
+    // `world_query` made.
+    unsafe {
+        let p = block.cast::<QueryData>();
+        if (*p).0.is_null() {
+            return;
+        }
+        let query = Box::from_raw((*p).0);
+        (*p).0 = core::ptr::null_mut();
+        let vm = main_state(state);
+        DEAD_REFS.with(|d| {
+            if let Ok(mut d) = d.try_borrow_mut() {
+                d.extend(query.views.iter().map(|&r| (vm, r)));
+            }
+        });
+        drop(query);
+    }
+}
+
+/// `q:with(C)`, `q:without(D)`: the query, filtered.
+unsafe extern "C-unwind" fn query_namecall(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM, called with the query and the components.
+    unsafe {
+        let q = query_at(state, 1);
+        let (_, tables) = match opened() {
+            Ok(open) => open,
+            Err(_) => (core::ptr::null_mut(), OPEN_TABLES.get()),
+        };
+        if q.is_null() {
+            raise(state, String::from("not a query"));
+        }
+        let mut atom: c_int = -1;
+        let method = ffi::lua_namecallatom(state, &mut atom);
+        if method.is_null() {
+            raise(state, String::from("call a query's methods with a colon"));
+        }
+        let m = if tables.is_null() {
+            Methods::new()
+        } else {
+            (*tables).methods
+        };
+        let with = is_named(method, atom, m.with, b"with");
+        if !with && !is_named(method, atom, m.without, b"without") {
+            let text = std::ffi::CStr::from_ptr(method)
+                .to_string_lossy()
+                .into_owned();
+            let message = format!("a query has no method `{text}` (it has `with` and `without`)");
+            drop(text);
+            raise(state, message);
+        }
+        let names = match component_names(state, 2) {
+            Ok(names) => names,
+            Err(i) => raise(
+                state,
+                format!(
+                    "argument {} is not a component (`Transform`, a script's) or its name",
+                    i - 1
+                ),
+            ),
+        };
+        if with {
+            (*q).with.extend(names);
+        } else {
+            (*q).without.extend(names);
+        }
+        (*q).found = false;
+        ffi::lua_settop(state, 1);
+        1
+    }
+}
+
+/// `for e, a, b in q do`: what matches now is what the loop visits; the step after it is
+/// [`query_next`].
+unsafe extern "C-unwind" fn query_iter(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM, called with the query; the world and tables are the
+    // stage's.
+    unsafe {
+        let q = query_at(state, 1);
+        let (world, tables) = match opened() {
+            Ok(open) => open,
+            Err(why) => raise(state, why.to_owned()),
+        };
+        if q.is_null() {
+            raise(state, String::from("not a query"));
+        }
+        let query = &mut *q;
+        if !query.found {
+            let find = |name: &str| (*tables).named(c_int::from(atom_of(name)));
+            let mut missing = None;
+            query.columns.clear();
+            for name in &query.names {
+                match find(name) {
+                    Some(named) => query.columns.push(named),
+                    None => missing = missing.or(Some(name.clone())),
+                }
+            }
+            query.with_ids.clear();
+            for name in &query.with {
+                match find(name) {
+                    Some(named) => query.with_ids.push(named.id),
+                    None => missing = missing.or(Some(name.clone())),
+                }
+            }
+            query.without_ids.clear();
+            for name in &query.without {
+                // A component no script has made yet: no entity has it.
+                if let Some(named) = find(name) {
+                    query.without_ids.push(named.id);
+                }
+            }
+            if let Some(name) = missing {
+                let message = format!("world.query: no component is called `{name}`");
+                drop(name);
+                raise(state, message);
+            }
+            query.found = true;
+            // Its views, one a column, made the first time.
+            for &r in &query.views {
+                ffi::lua_unref(state, r);
+            }
+            query.views.clear();
+            for c in 0..query.columns.len() {
+                let named = query.columns[c];
+                push_view_data(
+                    state,
+                    ViewData {
+                        entity: Entity::NULL,
+                        id: named.id,
+                        info: named.info,
+                        offset: 0,
+                        slots: named.slots,
+                    },
+                );
+                let r = ffi::lua_ref(state, -1);
+                ffi::lua_pop(state, 1);
+                query.views.push(r);
+            }
+        }
+        query.matched.clear();
+        for arch in (*world).archetypes() {
+            let has = arch.components();
+            if query.columns.iter().all(|c| has.contains(&c.id))
+                && query.with_ids.iter().all(|id| has.contains(id))
+                && !query.without_ids.iter().any(|id| has.contains(id))
+            {
+                for chunk in 0..arch.chunk_count() {
+                    query.matched.extend_from_slice(arch.chunk_entities(chunk));
+                }
+            }
+        }
+        query.at = 0;
+        ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, (*tables).slow.query_next);
+        ffi::lua_pushvalue(state, 1);
+        ffi::lua_pushnil(state);
+        3
+    }
+}
+
+/// A query loop's step: the entity after `prev` that still has the columns, and its views
+/// moved to it; nil after the last.
+pub(crate) unsafe extern "C-unwind" fn query_next(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM, called with the query and the entity before; the
+    // views' blocks are views'.
+    unsafe {
+        let q = query_at(state, 1);
+        let (world, _) = match opened() {
+            Ok(open) => open,
+            Err(why) => raise(state, why.to_owned()),
+        };
+        if q.is_null() {
+            raise(state, String::from("not a query"));
+        }
+        let query = &mut *q;
+        let mut i = match entity_at(state, 2) {
+            None => 0,
+            Some(prev) if query.matched.get(query.at) == Some(&prev) => query.at + 1,
+            Some(prev) => query
+                .matched
+                .iter()
+                .position(|&e| e == prev)
+                .map_or(query.matched.len(), |p| p + 1),
+        };
+        // What went or lost a column since the loop began is passed over.
+        while let Some(&e) = query.matched.get(i)
+            && !query
+                .columns
+                .iter()
+                .all(|c| (*world).get_raw(e, c.id).is_some())
+        {
+            i += 1;
+        }
+        let Some(&e) = query.matched.get(i) else {
+            ffi::lua_pushnil(state);
+            return 1;
+        };
+        query.at = i;
+        push_entity(state, e);
+        for &r in &query.views {
+            ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, r);
+            let view = ffi::lua_touserdatatagged(state, -1, TAG_VIEW).cast::<ViewData>();
+            if !view.is_null() {
+                (*view).entity = e;
+            }
+        }
+        1 + query.views.len() as c_int
     }
 }
 
