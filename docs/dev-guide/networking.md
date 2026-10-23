@@ -218,6 +218,11 @@ fn schema() -> NetSchema {                       // the same on host and clients
 - `net_skip` (or `skip`): stays local.
 - Engine types you cannot annotate: `replicate_with::<Transform>(FieldHints::new()
   .quantum("translation", 0.001).skip("scale"))`.
+- **A script's component** by its name: `.replicate_script("Door")`. It is found when the
+  session starts, as scripts load after your schema is built. One that is not declared
+  then is left out on both sides, said in the log. Its props' `net_quantum` and `net_skip`
+  options work as the attributes above; its string props stay local. See
+  `docs/dev-guide/scripting.md`.
 - **Events are for things that happen once** (a door opened, a hit for effects), never for
   state: state is replicated, and a late joiner gets it.
 - **Player actions are input**, not events: put them in the input type with a `SubTick`

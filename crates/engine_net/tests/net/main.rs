@@ -6,3 +6,4 @@ mod common;
 
 mod coop;
 mod replication;
+mod scripts;

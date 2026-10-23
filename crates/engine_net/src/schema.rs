@@ -67,7 +67,8 @@ impl Codec {
 #[derive(Debug)]
 pub(crate) struct NetComponent {
     pub(crate) name: &'static str,
-    pub(crate) type_id: TypeId,
+    /// A Rust type's; none for a script's.
+    pub(crate) type_id: Option<TypeId>,
     pub(crate) size: usize,
     pub(crate) codecs: Vec<Codec>,
     /// One per word.
@@ -80,7 +81,75 @@ pub(crate) struct NetComponent {
     /// Whether quantizing loses precision (quantized floats, quaternions): the server
     /// then rounds its own values (see `Server::send`).
     pub(crate) lossy: bool,
-    pub(crate) register: fn(&mut World) -> ComponentId,
+    pub(crate) register: Register,
+}
+
+/// How a replicated component is found in a world.
+#[derive(Debug)]
+pub(crate) enum Register {
+    /// A Rust type's.
+    Typed(fn(&mut World) -> ComponentId),
+    /// A script's component, by name (ADR 0114 §8): found among the types made at run time
+    /// when a session starts ([`NetSchema::register`]), as scripts load after a game builds
+    /// its schema.
+    Script {
+        hints: FieldHints,
+        runtime: Option<engine_ecs::RuntimeType>,
+    },
+}
+
+impl NetComponent {
+    /// Its codecs, and what they make of its words.
+    fn shape(&mut self, codecs: Vec<Codec>) {
+        let mut kinds = Vec::new();
+        let mut linear = Vec::new();
+        for c in &codecs {
+            let n = c.words();
+            linear.extend(core::iter::repeat_n(
+                matches!(c, Codec::F32Quantized { .. }),
+                n,
+            ));
+            match *c {
+                Codec::F32Quantized { .. } | Codec::Int { .. } => kinds.push(WordKind::Int),
+                Codec::F32 { .. } => kinds.push(WordKind::Raw),
+                Codec::Bool { .. } => kinds.push(WordKind::Bit),
+                Codec::Wide { .. } => kinds.extend([WordKind::Raw, WordKind::Raw]),
+                Codec::Quat { .. } => kinds.extend([WordKind::Int; 4]),
+            }
+        }
+        self.lossy = codecs
+            .iter()
+            .any(|c| matches!(c, Codec::F32Quantized { .. } | Codec::Quat { .. }));
+        self.any_linear = linear.iter().any(|&l| l);
+        self.words = kinds.len();
+        self.linear = linear;
+        self.kinds = kinds;
+        self.codecs = codecs;
+    }
+
+    /// Writes the value a client starts a replicated component from, before its words: a
+    /// Rust type's zeros (plain data), a script's default (its texts, and the props not
+    /// replicated). What `bytes` held is not dropped.
+    pub(crate) fn write_initial(&self, bytes: &mut [u8]) {
+        match &self.register {
+            Register::Script {
+                runtime: Some(t), ..
+            } => {
+                // SAFETY: `bytes` is room for one value (the component's size); its old
+                // bytes are a value moved into a world already, written over.
+                unsafe { t.write_default(bytes.as_mut_ptr()) };
+            }
+            _ => bytes.fill(0),
+        }
+    }
+}
+
+/// The codecs of a value described by `info`.
+fn codecs_of(info: &'static TypeInfo, hints: &FieldHints) -> Vec<Codec> {
+    let mut codecs = Vec::new();
+    let mut path = String::new();
+    collect(info, 0, hints, &mut path, &mut codecs, false);
+    codecs
 }
 
 /// A one-shot event type (server to clients or clients to server), plain data.
@@ -220,58 +289,132 @@ impl NetSchema {
             !self
                 .components
                 .iter()
-                .any(|c| c.type_id == TypeId::of::<T>()),
+                .any(|c| c.type_id == Some(TypeId::of::<T>())),
             "{} is replicated twice",
             core::any::type_name::<T>()
         );
-        let mut codecs = Vec::new();
-        let mut path = String::new();
-        collect(
-            <T as Reflect>::TYPE_INFO,
-            0,
-            &hints,
-            &mut path,
-            &mut codecs,
-            false,
-        );
+        let codecs = codecs_of(<T as Reflect>::TYPE_INFO, &hints);
         assert!(
             !codecs.is_empty(),
             "{} has no replicable fields",
             core::any::type_name::<T>()
         );
-        let mut kinds = Vec::new();
-        let mut linear = Vec::new();
-        for c in &codecs {
-            let n = c.words();
-            linear.extend(core::iter::repeat_n(
-                matches!(c, Codec::F32Quantized { .. }),
-                n,
-            ));
-            match *c {
-                Codec::F32Quantized { .. } | Codec::Int { .. } => kinds.push(WordKind::Int),
-                Codec::F32 { .. } => kinds.push(WordKind::Raw),
-                Codec::Bool { .. } => kinds.push(WordKind::Bit),
-                Codec::Wide { .. } => kinds.extend([WordKind::Raw, WordKind::Raw]),
-                Codec::Quat { .. } => kinds.extend([WordKind::Int; 4]),
-            }
-        }
-        let lossy = codecs
-            .iter()
-            .any(|c| matches!(c, Codec::F32Quantized { .. } | Codec::Quat { .. }));
-        let any_linear = linear.iter().any(|&l| l);
-        self.components.push(NetComponent {
-            linear,
-            any_linear,
-            lossy,
+        let mut c = NetComponent {
             name: <T as Reflect>::TYPE_INFO.name,
-            type_id: TypeId::of::<T>(),
+            type_id: Some(TypeId::of::<T>()),
             size: core::mem::size_of::<T>(),
-            words: kinds.len(),
-            codecs,
-            kinds,
-            register: |w| w.register::<T>(),
+            codecs: Vec::new(),
+            kinds: Vec::new(),
+            linear: Vec::new(),
+            any_linear: false,
+            words: 0,
+            lossy: false,
+            register: Register::Typed(|w| w.register::<T>()),
+        };
+        c.shape(codecs);
+        self.components.push(c);
+        self
+    }
+
+    /// Replicates script component `name` (ADR 0114 §8) with the precision its props'
+    /// attributes give (`net_quantum`, `net_skip`). It is found among the types made at
+    /// run time when a session starts, as scripts load after the game builds its schema:
+    /// one not declared then, or with no replicable prop, goes from the schema, said in
+    /// the log (both sides drop the same with the same scripts). Its text props are not
+    /// replicated (they have no fixed layout), nor `net_skip` ones: a client's value keeps
+    /// their defaults.
+    ///
+    /// # Panics
+    ///
+    /// If `name` is replicated twice, or more than [`MAX_COMPONENTS`] are registered.
+    #[must_use]
+    pub fn replicate_script(self, name: &str) -> Self {
+        self.replicate_script_with(name, FieldHints::default())
+    }
+
+    /// Replicates script component `name` with overrides ([`Self::replicate_script`]).
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::replicate_script`].
+    #[must_use]
+    pub fn replicate_script_with(mut self, name: &str, hints: FieldHints) -> Self {
+        assert!(
+            self.components.len() < MAX_COMPONENTS,
+            "at most {MAX_COMPONENTS} replicated components"
+        );
+        assert!(
+            !self.components.iter().any(|c| c.name == name),
+            "{name} is replicated twice"
+        );
+        self.components.push(NetComponent {
+            name: Box::leak(name.to_owned().into_boxed_str()),
+            type_id: None,
+            size: 0,
+            codecs: Vec::new(),
+            kinds: Vec::new(),
+            linear: Vec::new(),
+            any_linear: false,
+            words: 0,
+            lossy: false,
+            register: Register::Script {
+                hints,
+                runtime: None,
+            },
         });
         self
+    }
+
+    /// Finds the script components among the types made at run time (the latest of each
+    /// name) and registers every component in `world`: their ids, in the schema's order.
+    /// A script's component not declared, of another layout in `world`, or with no
+    /// replicable prop goes from the schema, said in the log.
+    pub(crate) fn register(&mut self, world: &mut World) -> Vec<ComponentId> {
+        let mut ids = Vec::with_capacity(self.components.len());
+        self.components.retain_mut(|c| {
+            // A script's type and codecs, set on it once its borrow ends.
+            let mut found = None;
+            let id = match &c.register {
+                Register::Typed(register) => Some(register(world)),
+                Register::Script { hints, runtime } => {
+                    let declared = runtime.clone().or_else(|| {
+                        engine_ecs::runtime_types()
+                            .into_iter()
+                            .rev()
+                            .find(|t| t.info.name == c.name)
+                    });
+                    let id = declared.and_then(|t| {
+                        let codecs = codecs_of(t.info, hints);
+                        let id = if codecs.is_empty() { None } else { t.id(world) };
+                        if id.is_some() {
+                            found = Some((t, codecs));
+                        }
+                        id
+                    });
+                    if id.is_none() {
+                        log::error!(
+                            target: "engine_net",
+                            "script component `{}` is not declared, has no prop to replicate, \
+                             or another component holds its name: not replicated",
+                            c.name
+                        );
+                    }
+                    id
+                }
+            };
+            if let Some((t, codecs)) = found {
+                c.size = t.layout.size();
+                if let Register::Script { runtime, .. } = &mut c.register {
+                    *runtime = Some(t);
+                }
+                c.shape(codecs);
+            }
+            if let Some(id) = id {
+                ids.push(id);
+            }
+            id.is_some()
+        });
+        ids
     }
 
     /// Adds a one-shot event type (plain data). Events are for things that happen once
@@ -372,7 +515,7 @@ impl NetSchema {
     }
 
     pub(crate) fn component_index(&self, t: TypeId) -> Option<usize> {
-        self.components.iter().position(|c| c.type_id == t)
+        self.components.iter().position(|c| c.type_id == Some(t))
     }
 
     pub(crate) fn event_index(&self, t: TypeId) -> Option<usize> {

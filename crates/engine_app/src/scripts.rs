@@ -2848,6 +2848,15 @@ fn prop_of(component: &str, name: String, value: Value) -> mlua::Result<Prop> {
         attrs.step = opts.get("step")?;
         attrs.hidden = opts.get::<Option<bool>>("hidden")?.unwrap_or(false);
         attrs.skip = opts.get::<Option<bool>>("skip")?.unwrap_or(false);
+        // How the network sends it, once the game's schema names its component.
+        attrs.net_skip = opts.get::<Option<bool>>("net_skip")?.unwrap_or(false);
+        attrs.net_quantum = opts.get("net_quantum")?;
+        if attrs
+            .net_quantum
+            .is_some_and(|q| q <= 0.0 || !q.is_finite())
+        {
+            return Err(bad("net_quantum is a positive number"));
+        }
         if let Some(tip) = opts.get::<Option<String>>("tooltip")? {
             attrs.tooltip = Some(leak(&tip));
         }
@@ -5008,6 +5017,46 @@ return Bell
         // Dropped with their entity.
         assert!(world.despawn(bell));
         assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn props_say_how_the_network_sends_them() {
+        let dir = project(
+            "net-props",
+            &[(
+                "gate.luau",
+                r#"return component("Gate", {
+    lift = prop.number(0, { net_quantum = 0.01 }),
+    spin = prop.number(0, { net_skip = true }),
+    open = false,
+})
+"#,
+            )],
+        );
+        let mut world = World::new();
+        let scripts = load(&dir, &mut world);
+        let id = scripts.component("Gate").unwrap();
+        let TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind else {
+            unreachable!()
+        };
+        let attrs = |name: &str| fields.iter().find(|f| f.name == name).unwrap().attrs;
+        assert_eq!(attrs("lift").net_quantum, Some(0.01));
+        assert!(!attrs("lift").net_skip);
+        assert!(attrs("spin").net_skip);
+        assert_eq!(attrs("open").net_quantum, None);
+        let lua = Lua::new();
+        let declared = lua.create_table().unwrap();
+        let opts = lua.create_table().unwrap();
+        opts.set("net_quantum", 0).unwrap();
+        declared.set("__prop", "number").unwrap();
+        declared.set("default", 1).unwrap();
+        declared.set("opts", opts).unwrap();
+        let why = prop_of("Gate", String::from("lift"), Value::Table(declared)).unwrap_err();
+        assert!(
+            why.to_string().contains("net_quantum is a positive number"),
+            "{why}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
