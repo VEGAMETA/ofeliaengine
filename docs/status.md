@@ -556,7 +556,7 @@ Last updated: 2026-10-22.
     `./`, `../`, `@self`, `.luaurc` aliases); what a script requires runs before it,
     whatever the files' names (its `require` paths scanned before loading); a reloaded
     script's dependents run again after it, and the editor names them.
-  - **E7-5c, queries, systems, spawning** (#PR, ADR 0114's as-built): `world.query(A,
+  - **E7-5c, queries, systems, spawning** (#361, ADR 0114's as-built): `world.query(A,
     B)` with `with`/`without`, looped as `for e, a, b in q do` (a snapshot at the loop's
     start, the query's own views moved to each entity: nothing made per step);
     `system(name, { on_tick, on_frame })` after the instances; `world.spawn({ … })` at
