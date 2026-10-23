@@ -230,12 +230,24 @@ declare random: {
     vector_in_sphere: () -> vector,
 }
 
--- Sounds that play once and go: their entities.
+-- Sounds that play once and go: their entities (nil while a client's tick runs again: it
+-- played the first time).
 declare audio: {
     -- As it is, no place (the UI, a stinger), on `bus` (`ui` by default).
-    play: (sound: string, bus: string?) -> Entity,
+    play: (sound: string, bus: string?) -> Entity?,
     -- At `position` in the world, on `bus` (`effects` by default).
-    play_at: (sound: string, position: vector, bus: string?) -> Entity,
+    play_at: (sound: string, position: vector, bus: string?) -> Entity?,
+}
+
+-- The session the game plays in.
+declare net: {
+    -- Whether this side decides the world: alone, or hosting.
+    is_server: () -> boolean,
+    -- Whether this side plays on a host (its own entities predicted).
+    is_client: () -> boolean,
+    -- Whether this tick runs again (a client correcting its prediction): what it starts
+    -- (sounds, messages, timers) started the first time.
+    resimulating: () -> boolean,
 }
 
 declare time: {

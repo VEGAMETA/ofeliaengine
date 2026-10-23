@@ -1278,7 +1278,8 @@ impl<I: InputData, T: Transport> Client<I, T> {
                 }
             }
         }
-        // Re-run the ticks since, with the inputs they had.
+        // Re-run the ticks since, with the inputs they had; the world says so meanwhile.
+        crate::Resimulating::set(world, true);
         for t in start + 1..self.tick {
             let p = &self.pred[(t % PRED_RING) as usize];
             if !p.valid || p.tick != t {
@@ -1291,6 +1292,7 @@ impl<I: InputData, T: Transport> Client<I, T> {
             self.info.resimulated += 1;
             self.stats.resimulated_ticks += 1;
         }
+        crate::Resimulating::set(world, false);
         if start < last
             && let Some(before) = before
         {

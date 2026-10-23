@@ -459,6 +459,8 @@ pub struct Scripts {
     receivers: Vec<(u32, u32)>,
     /// A save was applied: the next tick's stage calls every instance's `on_load`.
     loaded: bool,
+    /// A joined client's tick (ADR 0114 §8): only its predicted entities' instances run.
+    predicted_only: bool,
     /// The registry references of queries collected, let go of at a stage's start
     /// (scratch), and the VM's main state, which names their VM.
     dead: Vec<std::ffi::c_int>,
@@ -573,6 +575,7 @@ impl Scripts {
             due: Vec::new(),
             receivers: Vec::new(),
             loaded: false,
+            predicted_only: false,
             dead: Vec::new(),
             main: 0,
             clock: Clock::default(),
@@ -1161,6 +1164,26 @@ impl Scripts {
         self.close();
     }
 
+    /// A joined client's tick (ADR 0114 §8, ADR 0074): the tick hooks of the instances of
+    /// its predicted entities ([`engine_net::Predicted`]) only, in every predicted tick and
+    /// again in every re-simulated one; the rest of the world comes from the host's
+    /// snapshots. No systems, timers or contacts run here: the host's are the world's.
+    pub fn tick_predicted(&mut self, world: &mut World, dt: f32) {
+        engine_profiler::zone!("scripts::tick_predicted");
+        self.clock.ticks += 1;
+        self.clock.dt = dt;
+        if let Some(mut clock) = self.vm.lua().app_data_mut::<Clock>() {
+            *clock = self.clock;
+        }
+        self.open(world, None, false);
+        self.follow(world);
+        self.predicted_only = true;
+        self.call_all(Stage::Tick, dt, 0.0);
+        self.predicted_only = false;
+        self.despawn_asked(world);
+        self.close();
+    }
+
     /// A frame's stage, before its presentation: every instance's `on_frame`.
     pub fn frame(&mut self, world: &mut World, dt: f32, alpha: f32) {
         self.frame_with(world, dt, alpha, None);
@@ -1267,10 +1290,28 @@ impl Scripts {
         order.clear();
         order.extend(self.instances.keys().copied());
         for &key in &order {
+            // A client runs its predicted entities only.
+            if self.predicted_only {
+                let e = self.instances.get(&key).map(|(e, _)| *e);
+                let world = open_world();
+                let predicted = match e {
+                    Some(e) if !world.is_null() => {
+                        // SAFETY: the stage's world (`open_world`), read for this check only.
+                        unsafe { &*world }.get::<engine_net::Predicted>(e).is_some()
+                    }
+                    _ => false,
+                };
+                if !predicted {
+                    continue;
+                }
+            }
             self.call(key, stage, dt, alpha);
             self.deliver();
         }
         self.order = order;
+        if self.predicted_only {
+            return;
+        }
         for k in 0..self.systems.len() {
             let s = &self.systems[k];
             let hook = match stage {
@@ -2256,6 +2297,18 @@ fn install(lua: &Lua) -> mlua::Result<()> {
     audio.set("play", lua.create_function(audio_play)?)?;
     audio.set("play_at", lua.create_function(audio_play_at)?)?;
     globals.set("audio", audio)?;
+    // The session (ADR 0114 §4, §8).
+    let net = lua.create_table()?;
+    let asks: [(&str, mlua::ffi::lua_CFunction); 3] = [
+        ("is_server", script_views::net_is_server),
+        ("is_client", script_views::net_is_client),
+        ("resimulating", script_views::net_resimulating),
+    ];
+    for (name, f) in asks {
+        // SAFETY: C functions of the fast path's, which take no arguments.
+        net.set(name, unsafe { lua.create_c_function(f)? })?;
+    }
+    globals.set("net", net)?;
     let physics = lua.create_table()?;
     physics.set("raycast", lua.create_function(raycast)?)?;
     physics.set("overlap_sphere", lua.create_function(overlap_sphere)?)?;
@@ -2406,6 +2459,10 @@ fn audio_play(
 ) -> mlua::Result<Value> {
     // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
     let w = unsafe { &mut *world_ptr(lua)? };
+    // A tick run again on a client played it the first time (ADR 0114 §8).
+    if engine_net::Resimulating::now(w) {
+        return Ok(Value::Nil);
+    }
     let bus = bus.as_ref().map(mlua::LuaString::to_str).transpose()?;
     let source = crate::AudioSource::new(&sound.to_str()?)
         .on_bus(bus.as_deref().unwrap_or("ui"))
@@ -2422,6 +2479,9 @@ fn audio_play_at(
 ) -> mlua::Result<Value> {
     // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
     let w = unsafe { &mut *world_ptr(lua)? };
+    if engine_net::Resimulating::now(w) {
+        return Ok(Value::Nil);
+    }
     let bus = bus.as_ref().map(mlua::LuaString::to_str).transpose()?;
     let mut source = crate::AudioSource3D::new(&sound.to_str()?).despawned_at_end();
     if let Some(bus) = bus.as_deref() {
@@ -4821,6 +4881,72 @@ return Keeper
         let word = unsafe { base.add(word_at).read() };
         assert_eq!(word, 1, "the timer's values came back, its entity remapped");
         assert_eq!(read_f32(&world, &scripts, keeper, "Keeper", "count"), 7.0);
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clients_ticks_run_its_predicted_entities_and_reruns_start_nothing_again() {
+        let dir = project(
+            "net",
+            &[(
+                "pawn.luau",
+                r#"local Pawn = component("Pawn", { ticks = 0, sounds = 0, pings = 0, server = false, client = true, again = false })
+function Pawn.on_tick(self, dt)
+    self.ticks += 1
+    if audio.play("ui/step.ogg") then
+        self.sounds += 1
+    end
+    self:send("ping")
+    self.server = net.is_server()
+    self.client = net.is_client()
+    self.again = net.resimulating()
+end
+function Pawn.ping(self)
+    self.pings += 1
+end
+return Pawn
+"#,
+            )],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let mine = world.spawn((Transform::IDENTITY, engine_net::Predicted));
+        let theirs = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, mine, "Pawn");
+        scripts.add(&mut world, theirs, "Pawn");
+        let flag = |world: &World, scripts: &Scripts, e: Entity, name: &str| {
+            let at = fields_of(world, scripts, "Pawn", name);
+            let base = world
+                .get_raw(e, scripts.component("Pawn").unwrap())
+                .unwrap()
+                .as_ptr();
+            // SAFETY: a bool prop of Pawn at its offset.
+            unsafe { base.add(at).read() == 1 }
+        };
+        // A client's tick: its own entity only.
+        scripts.tick_predicted(&mut world, 0.1);
+        assert_eq!(read_f32(&world, &scripts, mine, "Pawn", "ticks"), 1.0);
+        assert_eq!(read_f32(&world, &scripts, theirs, "Pawn", "ticks"), 0.0);
+        assert_eq!(read_f32(&world, &scripts, mine, "Pawn", "sounds"), 1.0);
+        assert_eq!(read_f32(&world, &scripts, mine, "Pawn", "pings"), 1.0);
+        // Alone: this side decides the world.
+        assert!(flag(&world, &scripts, mine, "server") && !flag(&world, &scripts, mine, "client"));
+        assert!(!flag(&world, &scripts, mine, "again"));
+        // Run again after a correction: no sound, no message a second time.
+        world.insert_resource(engine_net::Resimulating(true));
+        scripts.tick_predicted(&mut world, 0.1);
+        assert_eq!(read_f32(&world, &scripts, mine, "Pawn", "ticks"), 2.0);
+        assert_eq!(read_f32(&world, &scripts, mine, "Pawn", "sounds"), 1.0);
+        assert_eq!(read_f32(&world, &scripts, mine, "Pawn", "pings"), 1.0);
+        assert!(flag(&world, &scripts, mine, "again"));
+        let mut sounds = engine_ecs::QueryState::<&crate::AudioSource>::new(&mut world);
+        assert_eq!(sounds.iter_readonly(&world).count(), 1);
+        // The host's tick: every entity.
+        world.insert_resource(engine_net::Resimulating(false));
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(read_f32(&world, &scripts, mine, "Pawn", "ticks"), 3.0);
+        assert_eq!(read_f32(&world, &scripts, theirs, "Pawn", "ticks"), 1.0);
         assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
         let _ = std::fs::remove_dir_all(&dir);
     }
