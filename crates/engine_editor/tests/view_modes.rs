@@ -440,6 +440,16 @@ fn models_colliders_are_drawn_by_how_they_move() {
         Transform::from_xyz(-2.0, 0.5, 0.0),
         Model::new(AssetRef::part(id, &mesh), AssetRef::part(id, &material)),
     ));
+    // A trigger, drawn as a sensor (ADR 0114 E7-3).
+    world.spawn((
+        SceneId::new(),
+        Name::new("Gate"),
+        Transform::from_xyz(0.0, 1.0, 2.0),
+        engine_app::Trigger {
+            shape: engine_app::TriggerShape::Sphere,
+            size: Vec3::splat(1.5),
+        },
+    ));
     let parts = [
         (AssetRef::file(id), String::from("crate.glb")),
         (AssetRef::part(id, &mesh), format!("crate.glb#{mesh}")),
@@ -496,8 +506,9 @@ fn models_colliders_are_drawn_by_how_they_move() {
     }
     frame(&mut player, &mut game, &mut overlay);
     let _ = capture(&mut player, &mut game, &mut overlay, "model-colliders");
-    // The floor's twelve; the block's box, static; the crate's box fitted to it, a prop.
-    assert_eq!(game.collider_lines(), [12, 12, 12, 0, 0]);
+    // The floor's twelve; the block's box, static; the crate's box fitted to it, a prop;
+    // the trigger's sphere, three circles of 32, a sensor.
+    assert_eq!(game.collider_lines(), [12, 12, 12, 0, 96]);
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

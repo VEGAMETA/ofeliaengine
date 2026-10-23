@@ -2055,6 +2055,10 @@ struct Editor {
     model_key: (u64, ModelKey),
     model_now: ModelKey,
     model_query: Option<ModelQuery>,
+    /// The triggers drawn with them (ADR 0114 E7-3), as sensors: each one and its place.
+    trigger_key: TriggerKey,
+    trigger_now: TriggerKey,
+    trigger_query: Option<TriggerQuery>,
     /// The navigation mesh shown over the viewport (View: Navigation, E2b-4b): its edges as
     /// last baked (their ends, and whether each is a boundary), what that bake was made
     /// from, a bake running in the background, and since when the brushes have been as they
@@ -2678,6 +2682,9 @@ impl Editor {
             model_key: (u64::MAX, Vec::new()),
             model_now: Vec::new(),
             model_query: None,
+            trigger_key: Vec::new(),
+            trigger_now: Vec::new(),
+            trigger_query: None,
             show_nav: false,
             nav_edges: Vec::new(),
             nav_lines: Default::default(),
@@ -9798,10 +9805,23 @@ impl Editor {
                 .iter_readonly(world)
                 .map(|(e, m, g)| (e, m.mesh, g.0.to_cols_array())),
         );
-        if self.model_key.0 == epoch && self.model_key.1 == self.model_now {
+        let triggers = self
+            .trigger_query
+            .get_or_insert_with(|| QueryState::new(world));
+        self.trigger_now.clear();
+        self.trigger_now.extend(
+            triggers
+                .iter_readonly(world)
+                .map(|(e, t, g)| (e, *t, g.0.to_cols_array())),
+        );
+        if self.model_key.0 == epoch
+            && self.model_key.1 == self.model_now
+            && self.trigger_key == self.trigger_now
+        {
             return;
         }
         core::mem::swap(&mut self.model_key.1, &mut self.model_now);
+        core::mem::swap(&mut self.trigger_key, &mut self.trigger_now);
         self.model_key.0 = epoch;
         for lines in &mut self.model_lines {
             lines.clear();
@@ -9829,6 +9849,21 @@ impl Editor {
                 local
                     .iter()
                     .map(|[a, b]| [place.transform_point3(*a), place.transform_point3(*b)]),
+            );
+        }
+        // Triggers, as their bodies are: the shape made for the entity's scale, placed and
+        // turned with it.
+        let mut lines = Vec::new();
+        for &(_, trigger, place) in &self.trigger_key {
+            let (scale, rotation, translation) =
+                Affine3A::from_cols_array(&place).to_scale_rotation_translation();
+            let at = Affine3A::from_rotation_translation(rotation, translation);
+            lines.clear();
+            trigger.collision_shape(scale).edges(&mut lines);
+            self.model_lines[3].extend(
+                lines
+                    .iter()
+                    .map(|[a, b]| [at.transform_point3(*a), at.transform_point3(*b)]),
             );
         }
     }
@@ -14281,9 +14316,10 @@ impl<G> EditorGame<G> {
         // collider came.
         if shared.show_colliders {
             shared.model_colliders_frame(player);
-        } else if !shared.model_key.1.is_empty() {
+        } else if !shared.model_key.1.is_empty() || !shared.trigger_key.is_empty() {
             shared.model_lines = Default::default();
             shared.model_key = (u64::MAX, Vec::new());
+            shared.trigger_key.clear();
             shared.mesh_lines.clear();
         }
         // The newest pick's entity, and what to outline (ADR 0109), through the
@@ -15057,6 +15093,16 @@ type BlockoutKey = Vec<(Entity, u64, [f32; 12])>;
 
 /// The models whose colliders the overlay draws (ADR 0117): each one's mesh and place.
 type ModelKey = Vec<(Entity, AssetRef, [f32; 12])>;
+/// The triggers the overlay draws: each one and its place.
+type TriggerKey = Vec<(Entity, engine_app::Trigger, [f32; 12])>;
+type TriggerQuery = QueryState<
+    (
+        Entity,
+        &'static engine_app::Trigger,
+        &'static GlobalTransform,
+    ),
+    engine_ecs::Without<engine_runtime::Inactive>,
+>;
 type ModelQuery = QueryState<
     (Entity, &'static Model, &'static GlobalTransform),
     engine_ecs::Without<engine_runtime::Inactive>,
@@ -19112,6 +19158,21 @@ mod tests {
         assert_eq!(ed.history.steps().count(), 2, "nothing more");
     }
 
+    /// The guide's coin (`docs/dev-guide/scripting.md`, Hooks).
+    const COIN: &str = r#"--!strict
+-- A coin: on an entity with a `Trigger`, picked up by the player.
+local Coin = component("Coin", { value = 1 })
+
+function Coin.on_touch(self, other: Entity?, point: vector, normal: vector)
+    if other and other.name == "Player" then
+        print("picked up", self.value)
+        self.Transform.translation = vector.create(0, -100, 0) -- out of the way
+    end
+end
+
+return Coin
+"#;
+
     /// The guide's first script (`docs/dev-guide/scripting.md`).
     const DOOR: &str = r#"--!strict
 local Door = component("Door", {
@@ -19172,6 +19233,10 @@ return Eye
 ",
         );
         let found = luau.check("eye");
+        assert!(found.is_empty(), "{found:?}");
+        // The guide's coin: contacts (E7-3b).
+        luau.set_source("coin", COIN);
+        let found = luau.check("coin");
         assert!(found.is_empty(), "{found:?}");
         // A field of the wrong type: an error where it is.
         luau.set_source(

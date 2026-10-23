@@ -530,8 +530,14 @@ Last updated: 2026-10-22.
     world (`Game::physics`) or the player's own (`PlayerSettings::physics`), which runs
     the pack and the scene's models and brushes for a game that has none. Bodies carry
     their entity in their user data (`entity_user_data`), so hits name entities.
+  - **E7-3b, triggers and contacts** (#357, ADR 0114's as-built): a `Trigger` component
+    (box, sphere, capsule) is a kinematic sensor body kept where its entity is
+    (`ScenePhysics::sync_triggers`, part of `sync_scene`); scripts hear the last step's
+    contacts as `on_touch(self, other, point, normal)` and `on_untouch(self, other)`,
+    once per step. The editor draws triggers with the colliders, in yellow.
   - **Next, in this order:**
-    1. E7-3b: `Trigger` and `on_touch` / `on_untouch` from the last step's contacts;
+    1. E7-5, the rest of scripting v1: `send`, `after`, `audio`, `random`,
+       `world.instantiate`, saves of script components;
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.
 

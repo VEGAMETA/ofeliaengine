@@ -26,6 +26,9 @@
 //!   - `on_start` once, before an instance's first tick;
 //!   - `on_tick(self, dt)` in every fixed tick, before the game's own;
 //!   - `on_frame(self, dt, alpha)` in every frame, before its presentation;
+//!   - `on_touch(self, other, point, normal)` and `on_untouch(self, other)` at the start of
+//!     a tick, for the last physics step's contacts of the entity's bodies and
+//!     [`crate::Trigger`]s (`other` nil for a body without an entity; ADR 0114 E7-3);
 //!   - `on_stop` once the component went from a living entity: its props are gone with
 //!     it, `self.entity` and `self.locals` stay.
 //!
@@ -113,11 +116,18 @@ struct Hooks {
     tick: Option<Function>,
     frame: Option<Function>,
     stop: Option<Function>,
+    touch: Option<Function>,
+    untouch: Option<Function>,
 }
 
 impl Hooks {
     fn any(&self) -> bool {
-        self.start.is_some() || self.tick.is_some() || self.frame.is_some() || self.stop.is_some()
+        self.start.is_some()
+            || self.tick.is_some()
+            || self.frame.is_some()
+            || self.stop.is_some()
+            || self.touch.is_some()
+            || self.untouch.is_some()
     }
 }
 
@@ -184,6 +194,9 @@ pub struct Scripts {
     /// Each component's registry name's version: the next layout of its props is
     /// `script::Door#2`, and so on.
     versions: HashMap<String, u32>,
+    /// The physics world whose contacts were heard last (its address), and its step then:
+    /// a step's contacts are heard once.
+    heard: (usize, u64),
 }
 
 /// What reloading a script did ([`Scripts::reload_file`]).
@@ -255,6 +268,7 @@ impl Scripts {
             clock: Clock::default(),
             reported: HashSet::new(),
             sources: HashMap::new(),
+            heard: (0, 0),
             versions: HashMap::new(),
         };
         let mut files = Vec::new();
@@ -640,6 +654,9 @@ impl Scripts {
         self.vm.lua().set_app_data(self.clock);
         self.open(world, physics);
         self.follow(world);
+        if let Some(physics) = physics {
+            self.touches(physics);
+        }
         let ids: Vec<(u32, u32)> = self.instances.keys().copied().collect();
         for key in ids {
             self.call(key, Stage::Tick, dt, 0.0);
@@ -813,6 +830,105 @@ impl Scripts {
         }
     }
 
+    /// The last physics step's contacts heard by the instances of the entities in them
+    /// (ADR 0114 E7-3), once each step: `on_touch(self, other, point, normal)` when a body
+    /// began touching one of the entity's bodies or its trigger, `on_untouch(self, other)`
+    /// when it stopped; the normal points from the instance's entity toward the other.
+    fn touches(&mut self, physics: &crate::ScenePhysics) {
+        let at = (core::ptr::from_ref(physics) as usize, physics.steps());
+        if at == self.heard {
+            return;
+        }
+        self.heard = at;
+        let listened: Vec<usize> = (0..self.components.len())
+            .filter(|&k| {
+                let h = &self.components[k].hooks;
+                h.touch.is_some() || h.untouch.is_some()
+            })
+            .collect();
+        if listened.is_empty() {
+            return;
+        }
+        let events = engine_physics::PhysicsBackend::contact_events(physics.backend());
+        for event in events {
+            let a = physics.entity_of(event.a);
+            let b = physics.entity_of(event.b);
+            let begin = event.kind == engine_physics::ContactKind::Begin;
+            for (me, other, normal) in [(a, b, event.normal), (b, a, -event.normal)] {
+                let Some(me) = me else {
+                    continue;
+                };
+                for &k in &listened {
+                    self.touch(me, k, other, begin, event.point, normal);
+                }
+            }
+        }
+    }
+
+    /// Instance (`me`, component `k`) hears a contact with `other` (`begin`: it began).
+    fn touch(
+        &mut self,
+        me: Entity,
+        k: usize,
+        other: Option<Entity>,
+        begin: bool,
+        point: Vec3,
+        normal: Vec3,
+    ) {
+        let key = (me.index(), k as u32);
+        let Some((e, inst)) = self.instances.get_mut(&key) else {
+            return;
+        };
+        if *e != me || inst.stopped {
+            return;
+        }
+        let this = inst.this.clone();
+        let started = core::mem::replace(&mut inst.started, true);
+        let c = &self.components[k];
+        let module = c.module.clone();
+        // Its `on_start` first, the first time.
+        if !started
+            && let Some(start) = c.hooks.start.clone()
+            && let Err(err) = self
+                .vm
+                .call_function::<_, ()>(&module, &start, this.clone())
+        {
+            self.stop(key, "on_start", me, &err);
+            return;
+        }
+        let c = &self.components[k];
+        let (hook, name) = if begin {
+            (c.hooks.touch.clone(), "on_touch")
+        } else {
+            (c.hooks.untouch.clone(), "on_untouch")
+        };
+        let Some(hook) = hook else {
+            return;
+        };
+        let lua = self.vm.lua();
+        let other = match other {
+            Some(o) => match entity_value(lua, o) {
+                Ok(v) => v,
+                Err(_) => return,
+            },
+            None => Value::Nil,
+        };
+        let vector = |v: Vec3| Value::Vector(Vector::new(v.x, v.y, v.z));
+        let result = if begin {
+            self.vm.call_function::<_, ()>(
+                &module,
+                &hook,
+                (this, other, vector(point), vector(normal)),
+            )
+        } else {
+            self.vm
+                .call_function::<_, ()>(&module, &hook, (this, other))
+        };
+        if let Err(err) = result {
+            self.stop(key, name, me, &err);
+        }
+    }
+
     /// Instance `key` stopped by `err` in hook `hook`.
     fn stop(&mut self, key: (u32, u32), hook: &str, e: Entity, err: &ScriptError) {
         if let Some((_, inst)) = self.instances.get_mut(&key) {
@@ -947,6 +1063,8 @@ fn hooks_of(table: &Table) -> Hooks {
         tick: hook("on_tick"),
         frame: hook("on_frame"),
         stop: hook("on_stop"),
+        touch: hook("on_touch"),
+        untouch: hook("on_untouch"),
     }
 }
 
@@ -2341,6 +2459,89 @@ return Eye
             "{:?}",
             scripts.reported
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_trigger_hears_a_ball_fall_through_it_once_in_and_once_out() {
+        use engine_physics::ecs::entity_user_data;
+        use engine_physics::{BodyDesc, PhysicsBackend, PhysicsSettings, ShapeDesc};
+        let dir = project(
+            "triggers",
+            &[(
+                "gate.luau",
+                r#"local Gate = component("Gate", { touched = 0, left = 0, who = prop.entity(), near = false })
+function Gate.on_touch(self, other, point, normal)
+    self.touched += 1
+    self.who = other
+    self.near = vector.magnitude(point) < 2
+end
+function Gate.on_untouch(self, other)
+    if other == self.who then
+        self.left += 1
+    end
+end
+return Gate
+"#,
+            )],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let mut physics = crate::ScenePhysics::new(&PhysicsSettings {
+            threads: 0,
+            ..PhysicsSettings::default()
+        })
+        .unwrap();
+        // A 2 m box trigger at the origin, and a ball dropped through it from 3 m.
+        let gate = world.spawn((
+            Name::new("Gate"),
+            Transform::IDENTITY,
+            engine_ecs::GlobalTransform::IDENTITY,
+            crate::Trigger::default().with_size(Vec3::splat(2.0)),
+        ));
+        scripts.add(&mut world, gate, "Gate");
+        let ball = world.spawn((Name::new("Ball"), Transform::from_xyz(0.0, 3.0, 0.0)));
+        let w = physics.physics();
+        let round = w.create_shape(&ShapeDesc::Sphere { radius: 0.25 }).unwrap();
+        w.create_body(&BodyDesc {
+            user_data: entity_user_data(ball),
+            ..BodyDesc::dynamic(round, Vec3::new(0.0, 3.0, 0.0))
+        })
+        .unwrap();
+        let dt = 1.0 / 64.0;
+        for _ in 0..128 {
+            physics.sync_triggers(&mut world).unwrap();
+            scripts.tick_with(&mut world, dt, Some(&physics));
+            physics.step(&mut world, dt).unwrap();
+        }
+        assert!(physics.trigger_body(gate).is_some());
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let id = scripts.component("Gate").unwrap();
+        let info = world.components().type_info(id).unwrap();
+        let TypeKind::Struct(fields) = &info.kind else {
+            unreachable!()
+        };
+        let at = |name: &str| fields.iter().find(|f| f.name == name).unwrap().offset;
+        let base = world.get_raw(gate, id).unwrap().as_ptr();
+        // SAFETY: Gate's props at their offsets: f32s, an entity and a boolean.
+        unsafe {
+            assert_eq!(
+                base.add(at("touched")).cast::<f32>().read_unaligned(),
+                1.0,
+                "in once"
+            );
+            assert_eq!(
+                base.add(at("left")).cast::<f32>().read_unaligned(),
+                1.0,
+                "out once"
+            );
+            assert_eq!(base.add(at("who")).cast::<Entity>().read_unaligned(), ball);
+            assert_eq!(base.add(at("near")).read(), 1, "where it touched");
+        }
+        // The trigger taken away: its body goes.
+        world.remove::<crate::Trigger>(gate);
+        physics.sync_triggers(&mut world).unwrap();
+        assert!(physics.trigger_body(gate).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

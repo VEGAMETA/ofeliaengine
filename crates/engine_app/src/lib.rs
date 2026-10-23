@@ -110,7 +110,7 @@ pub use net::{
     SubTick, To,
 };
 pub use overlay::{Overlay, OverlayOutput, OverlayPass, OverlayView};
-pub use physics::{SceneBodies, ScenePhysics};
+pub use physics::{SceneBodies, ScenePhysics, Trigger, TriggerShape};
 pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Setup, UiLayer};
 /// Previews the player draws (ADR 0112): an asset's parts alone, read back.
 pub use previews::{PREVIEW_SIZE, Preview, PreviewRequest};

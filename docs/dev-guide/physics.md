@@ -466,6 +466,15 @@ carry their entity in their user data: a query's hit gives it back
 (`engine_physics::ecs::user_data_entity(hit.user_data)`, or `physics.entity_of(body)`).
 Give a body of your own `user_data: entity_user_data(e)` and scripts see it as `e`.
 
+### Triggers
+
+`Trigger { shape, size }` on an entity makes it a sensor: a box, a sphere (its size's x
+the diameter) or a capsule standing on y, around the entity's origin, placed, turned and
+scaled with it. It pushes nothing. Bodies that come in and leave are the step's contact
+events (`ContactEvent { sensor: true, .. }`), and scripts hear them as `on_touch` and
+`on_untouch` (scripting.md). `sync_scene` gives every trigger its body and keeps it where
+its entity is; `physics.trigger_body(entity)` names it.
+
 ### Loading them
 
 ```rust

@@ -87,12 +87,31 @@ From Rust, `player.add_script(door, "Door")` gives one with its defaults.
 | `on_start(self)` | once, before the instance's first tick |
 | `on_tick(self, dt)` | every fixed tick (64 a second by default), before your game's `tick` |
 | `on_frame(self, dt, alpha)` | every rendered frame, before your game's `present`; `alpha` is how far the frame lies between the last two ticks |
+| `on_touch(self, other, point, normal)` | a body began touching the entity's body or its `Trigger`: `other` is its entity (`nil` for a body without one), the normal points toward it; at the start of the next tick |
+| `on_untouch(self, other)` | it stopped touching |
 | `on_stop(self)` | once the component went from a living entity |
 
 - **Hooks run only while the world simulates:** in a game, and in the editor's Play.
 - **They run in the entities' order** (the order they were made in), the same on every
   machine.
 - **Define only the hooks you need:** each one costs a call per instance.
+- **Contacts need a physics world** (the game's, or the player's own: see the libraries
+  below). A `Trigger` component makes an entity a sensor: a box, a sphere or a capsule
+  around it, that pushes nothing and hears what comes in.
+
+```luau
+-- A coin: on an entity with a `Trigger`, picked up by the player.
+local Coin = component("Coin", { value = 1 })
+
+function Coin.on_touch(self, other: Entity?, point: vector, normal: vector)
+    if other and other.name == "Player" then
+        print("picked up", self.value)
+        self.Transform.translation = vector.create(0, -100, 0) -- out of the way
+    end
+end
+
+return Coin
+```
 
 ## `self`
 

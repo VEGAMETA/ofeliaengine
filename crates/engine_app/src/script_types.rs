@@ -64,6 +64,8 @@ type ScriptComponent<P> = {
     on_tick: ((self: P & ScriptSelf, dt: number) -> ())?,
     on_frame: ((self: P & ScriptSelf, dt: number, alpha: number) -> ())?,
     on_stop: ((self: P & ScriptSelf) -> ())?,
+    on_touch: ((self: P & ScriptSelf, other: Entity?, point: vector, normal: vector) -> ())?,
+    on_untouch: ((self: P & ScriptSelf, other: Entity?) -> ())?,
     [string]: any,
 }
 
