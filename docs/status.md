@@ -583,7 +583,7 @@ Last updated: 2026-10-22.
     types): types made at run time load now. `after` timers ride on their entities into a
     save (a `ScriptTimers` component put on just for it), and `on_load(self)` runs at the
     next tick after a load.
-  - **E7-5f2, the networking rules** (#PR, ADR 0114's as-built): `net.is_server`,
+  - **E7-5f2, the networking rules** (#367, ADR 0114's as-built): `net.is_server`,
     `is_client`, `resimulating`; a joined client runs its predicted entities' tick hooks
     (`Scripts::tick_predicted`), again on re-simulation (`engine_net::Resimulating`),
     sounds, messages and timers then left out. Scripting v1 is done with it.
