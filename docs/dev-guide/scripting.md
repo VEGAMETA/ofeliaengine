@@ -190,6 +190,27 @@ end
 return Turret
 ```
 
+## Scripts that use each other
+
+`require` gives you another script by its path from yours, as luau-lsp finds it:
+
+```luau
+-- scripts/coin.luau
+local Wallet = require("./wallet") -- scripts/wallet.luau
+local maths = require("@shared/maths") -- an alias of a .luaurc
+```
+
+- What you get is what that script returned: its component's table (for
+  `e:has(Wallet)`), or a table of functions.
+- `../` goes up a folder (`require("../shared/maths")` from `scripts/npc/guard.luau`), and
+  `scripts/npc/init.luau` is what `require("./npc")` finds.
+- Aliases come from a `.luaurc` in your game's folder (or in `scripts/` and below), as
+  luau-lsp reads them: `{ "aliases": { "shared": "./scripts/shared" } }`.
+- A script runs after the scripts it requires, whatever their files are called. Two that
+  require each other cannot both run first: the log says so.
+- When you save a script, the ones that require it run again after it, so none keeps the
+  old one.
+
 ## The libraries
 
 | Library | What |
@@ -288,7 +309,6 @@ at it, so VS Code checks and completes your scripts the same way. The file is in
 
 ## Coming next
 
-- `require("./wallet")` between your scripts;
 - `world.spawn`, `world.query` and systems over queries;
 - `input`;
 - `send`, `after` timers, `audio`, `random`, `world.instantiate`;

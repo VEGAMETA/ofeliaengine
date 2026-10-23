@@ -8953,6 +8953,13 @@ impl Editor {
             let gone = r.gone.join(", ");
             let _ = write!(message, "; no longer declared: {gone} (their data stays)");
         }
+        if !r.dependents.is_empty() {
+            let _ = write!(
+                message,
+                "; ran again, as they require it: {}",
+                r.dependents.join(", ")
+            );
+        }
         self.say(message);
     }
 
@@ -23085,6 +23092,19 @@ return Turret
         assert_eq!(
             said(&ed),
             "Reloaded scripts/lamp.luau in 1.5 ms, 3 instances going on; new: Glow"
+        );
+        // Those that require it ran again after it (ADR 0114 E7-5b).
+        let with = engine_app::scripts::Reloaded {
+            file: String::from("scripts/wallet.luau"),
+            kept: vec![String::from("Wallet")],
+            dependents: vec![String::from("scripts/coin.luau")],
+            took: Duration::from_micros(800),
+            ..Default::default()
+        };
+        ed.script_reloaded(Path::new("scripts/wallet.luau"), Ok(with));
+        assert_eq!(
+            said(&ed),
+            "Reloaded scripts/wallet.luau in 0.8 ms; ran again, as they require it: scripts/coin.luau"
         );
         // The same text: nothing said.
         ed.message = None;
