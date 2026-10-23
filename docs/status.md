@@ -599,7 +599,7 @@ Last updated: 2026-10-22.
     with them (`RuntimeType::write_default`, `DefaultValue` shared by saves, scenes, the
     inspector and undo), and move them on reload (`Relayout::take`). Read and written on
     the fast path with nothing made in steady state; ADR 0114's coin checks clean.
-  - **E7-6b, script components in the network schema** (#PR, ADR 0114's as-built):
+  - **E7-6b, script components in the network schema** (#370, ADR 0114's as-built):
     `NetSchema::replicate_script(name)`, found when a session starts; props' `net_quantum`
     and `net_skip`; a client's value starts from the script's defaults; the server reads
     columns that own texts. Prefabs from packs move to the one-button build (nothing
