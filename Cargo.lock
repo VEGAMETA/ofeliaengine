@@ -606,6 +606,7 @@ dependencies = [
  "engine_platform",
  "engine_profiler",
  "engine_reflect",
+ "log",
 ]
 
 [[package]]

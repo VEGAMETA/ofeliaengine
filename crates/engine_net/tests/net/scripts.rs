@@ -3,6 +3,8 @@
 //! precision, a client's value starting from the script's defaults (its texts and the
 //! props not replicated).
 
+#![allow(clippy::unwrap_used, missing_docs)]
+
 use crate::common::*;
 use engine_ecs::{ComponentId, Entity, RuntimeType, TextField, World};
 use engine_net::{NetSchema, Replicated, ServerSettings};
