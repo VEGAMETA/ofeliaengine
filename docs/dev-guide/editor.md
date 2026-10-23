@@ -943,7 +943,12 @@ ones `luau-analyze` and VS Code's luau-lsp use:
     typing, counted in the code bar.
   - An error in a file the module includes shows on its first line, with that file and
     line.
-- **Completion, hover and F12** work in Luau scripts for now; Slang's come later.
+- **Completion, hover, signatures and F12** come from Slang's language server, `slangd`,
+  which ships with Slang beside its library:
+  - in a material type they know `forward.slang`'s types: `ctx.` lists a
+    `MaterialContext`'s fields, and F12 on `MaterialContext` opens `forward.slang` there;
+  - resting the mouse on a name shows its declaration and its documentation;
+  - without `slangd`, Slang's tabs only check, and the Output says so once.
 - **Ctrl+Shift+F** finds text in the Slang modules too.
 
 ## Autosave and the session
@@ -1026,9 +1031,9 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | Phase | What |
 |---|---|
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
-| E7 | Luau: the engine's types in the editor and for luau-lsp, faster views, physics for scripts, the rest of v1 (ADR 0114) |
+| E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E10 | materials: completion, hover and definitions in Slang modules; then the material file, the graph, previews (the team's questions are open) |
+| E10 | materials: the material file, the graph, previews (the team's questions are open); Slang in the code editor is done |
 
 The whole plan is ADR 0107 §7.
 

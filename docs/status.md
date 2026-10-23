@@ -26,8 +26,10 @@ Last updated: 2026-10-22.
     code editor, is done but for rename and references across the project. E7, scripting
     v1 (ADR 0114), is done but for props of text, prefabs from packs and script
     components in the network schema; nothing the engine gives scripts allocates in
-    steady state (ADR 0114's examples in the zero-allocation test). E10-1 waits for the
-    answer on the material file. The entries below are in the order merged.
+    steady state (ADR 0114's examples in the zero-allocation test). E10-2, Slang in the
+    code editor, is done: errors from the front end, completion, hover, signatures and
+    definitions from `slangd`. E10-1 waits for the answer on the material file. The
+    entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
@@ -587,11 +589,17 @@ Last updated: 2026-10-22.
     `is_client`, `resimulating`; a joined client runs its predicted entities' tick hooks
     (`Scripts::tick_predicted`), again on re-simulation (`engine_net::Resimulating`),
     sounds, messages and timers then left out. Scripting v1 is done with it.
+  - **E10-2b, Slang's completion, hover, signatures and definitions** (#PR, ADR 0107's
+    as-built; research note's "slangd, probed again"): `slangd` as a child process, its
+    own checks off. A material type is read inside `forward.slang`'s prelude, no shader
+    changed; F12 goes into `forward.slang`. Completion 24 ms after a change, a definition
+    15 ms.
   - **Next, in this order:**
-    1. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
-       type readable alone first). E10-1 waits for the answer on the material file;
-    2. scripting's remainders: props of text (a layout that drops them), prefabs from
-       packs, script components in `NetSchema` by name.
+    1. scripting's remainders: props of text (a layout that drops them), prefabs from
+       packs, script components in `NetSchema` by name. E10-1 waits for the answer on
+       the material file;
+    2. E9, the script debugger (ADR 0107 §7: the core, DAP for VS Code, the panel and the
+       gutter), its UX note first.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

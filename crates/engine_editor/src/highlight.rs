@@ -56,9 +56,9 @@ impl Language {
     }
 
     /// Whether its checker answers more than a check: completion, hover, definitions and
-    /// signatures. Slang's only checks, until its language server (E10-2b).
+    /// signatures (Slang's through its language server, E10-2b).
     pub(crate) fn answers(self) -> bool {
-        self == Self::Luau
+        matches!(self, Self::Luau | Self::Slang)
     }
 
     /// The runs of `line`, which starts in `state`, by this language's rules

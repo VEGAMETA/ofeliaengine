@@ -1454,8 +1454,10 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
             });
         }
         if let Some((line, column, what)) = view.hover {
-            let above = if line > view.first {
-                -26.0
+            // Above the word when its lines fit there, below it otherwise.
+            let lines = what.lines().count().max(1);
+            let above = if line >= view.first + lines {
+                -(7.0 + lines as f32 * CODE_LINE)
             } else {
                 CODE_LINE + 4.0
             };

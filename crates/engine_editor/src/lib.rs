@@ -36,6 +36,7 @@ mod session;
 pub mod shell;
 mod slang_check;
 mod slang_highlight;
+mod slangd;
 mod snap;
 mod text_highlight;
 mod thumbnails;

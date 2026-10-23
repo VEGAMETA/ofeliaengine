@@ -7,8 +7,9 @@ The question: how the editor's code tabs get Slang as they have Luau (E8). That 
 highlighting, errors as you type, completion, hover, a definition and a call's signature,
 and what a save does.
 
-No code was carried over: the scanner (`engine_editor/src/slang_highlight.rs`) and the
-checker (`slang_check.rs`) are written from the rules below.
+No code was carried over. The scanner (`engine_editor/src/slang_highlight.rs`), the
+checker (`slang_check.rs`) and the language server's client (`slangd.rs`) are written
+from the rules below and LSP's specification.
 
 ## Sources
 
@@ -133,3 +134,41 @@ The golden `stripes.slang`, opened in a tab of a test project (`engine_editor`'s
 - **a misspelt field showed at its place 281–282 ms after typing:** 150 ms of rest and
   about 130 ms of check.
 - A 3-line module checked alone took 1.0 ms.
+
+## slangd, probed again (E10-2b, 2026-10-23)
+
+Slang 2026.18.3's `slangd`, probed from a script, and its source read at the
+`v2026.18.3` tag: `source/slang/slang-language-server.cpp` and
+`slang-workspace-version.cpp`.
+
+- **A material type inside `forward.slang`'s prelude** (its text up to
+  `#ifdef MATERIAL_FILE`, then the golden `stripes.slang`) reads as the engine compiles it:
+  - completion after `ctx.` lists a `MaterialContext`'s 7 fields in 22–37 ms;
+  - a hover names `struct MaterialContext`;
+  - signature help lists `lerp`'s 3 overloads, its parameters as UTF-16 offsets in the
+    label;
+  - at a statement's start, 1,777 names: the locals, the prelude's and the core module's.
+
+  "No setting gives it a prelude" (above) holds; the prelude is in the document instead.
+- **Definitions only in files that exist.** `gotoDefinition` keeps a place only when
+  `File::exists` its path, or for the core and GLSL modules (`slang-synth://core/
+  core.builtin`). A document the server was only given returned `[]`. Written to disk, it
+  answers in 2–70 ms:
+  - `MaterialContext`, `material_params`, `MODEL_LIT` and `surface_terms` at the
+    prelude's lines;
+  - `StripesParams` at the type's own line.
+- **A change without a range goes to the text's start.** `Workspace::changeDoc` takes the
+  range as given, and a missing one is the start. After the whole text was sent so,
+  every completion and signature came back empty. Sent as the range that changed, `s.`
+  on a new line lists a `Surface`'s 17 fields in 31 ms.
+- **`-periodic-diagnostic-update off` publishes nothing.** `publishDiagnostics` returns
+  within a second of a change, and with the option the server's loop no longer calls it.
+  A client that takes its errors elsewhere starts the server so, and it compiles only
+  when asked.
+- **Search paths:**
+  - `slang.additionalSearchPaths` is asked in `workspace/configuration` and taken as an
+    array of folders;
+  - `searchInAllWorkspaceDirectories` is on by default: every folder under the root with
+    `.slang` or `.hlsl` files is searched, hidden ones skipped, and every open document's
+    folder.
+- **URIs** come back with the drive's colon escaped (`file:///C%3A/…`).
