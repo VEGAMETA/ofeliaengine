@@ -140,7 +140,9 @@ impl ReadRefs for IdRefs<'_> {
 }
 
 /// Gives entity `e` the component `info` describes, from its `text` lines (its other
-/// fields their type's default). False when the type cannot be made (no `Default`).
+/// fields their type's default): a program type's, or a script's (made at run time, its
+/// texts its own). False when the type cannot be made (no `Default`, or a script's no
+/// longer declared).
 fn insert_from_lines(
     world: &mut World,
     e: Entity,
@@ -148,32 +150,43 @@ fn insert_from_lines(
     text: &str,
     index: &HashMap<SceneId, Entity>,
 ) -> bool {
-    let Some(reflected) = engine_ecs::find_reflected(info.name) else {
-        return false;
-    };
-    let engine_ecs::ReflectedKind::Component { id, default } = reflected.kind else {
-        return false;
-    };
-    let Some(write) = default() else {
-        return false;
-    };
     let Ok(layout) = std::alloc::Layout::from_size_align(info.size.max(1), info.align) else {
         return false;
     };
     if !world.contains(e) {
         return false;
     }
-    let component = id(world);
+    let (component, made) = match engine_ecs::find_reflected(info.name) {
+        Some(reflected) => {
+            let engine_ecs::ReflectedKind::Component { id, default } = reflected.kind else {
+                return false;
+            };
+            let Some(write) = default() else {
+                return false;
+            };
+            (id(world), engine_ecs::DefaultValue::Written(write))
+        }
+        None => {
+            let declared = engine_ecs::runtime_types()
+                .into_iter()
+                .rev()
+                .find(|t| t.info.name == info.name && t.layout.size() == info.size);
+            let Some((t, id)) = declared.and_then(|t| t.id(world).map(|id| (t, id))) else {
+                return false;
+            };
+            (id, engine_ecs::DefaultValue::Runtime(t))
+        }
+    };
     let mut refs = IdRefs { index };
-    // SAFETY: a non-zero size. The room is made a valid value by its default writer, read
-    // into (staying valid), then moved into the world by `insert_raw` (the entity is
-    // alive, so it is consumed), and freed without dropping what moved out.
+    // SAFETY: a non-zero size. The room is made a valid value by its default, read into
+    // (staying valid), then moved into the world by `insert_raw` (the entity is alive, so
+    // it is consumed), and freed without dropping what moved out.
     unsafe {
         let ptr = std::alloc::alloc(layout);
         if ptr.is_null() {
             return false;
         }
-        write(ptr);
+        made.write(ptr);
         let _ = engine_scene::read_lines(info, ptr, text, &mut refs);
         world.insert_raw(e, component, ptr);
         std::alloc::dealloc(ptr, layout);

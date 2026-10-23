@@ -18063,6 +18063,110 @@ mod tests {
     }
 
     #[test]
+    fn instances_take_a_script_component_their_prefab_added() {
+        static FIELDS: [engine_reflect::Field; 2] = [
+            engine_reflect::Field {
+                name: "rate",
+                offset: 0,
+                ty: <f32 as engine_reflect::Reflect>::TYPE_INFO,
+                attrs: engine_reflect::Attrs::NONE,
+            },
+            engine_reflect::Field {
+                name: "sound",
+                offset: 8,
+                ty: <String as engine_reflect::Reflect>::TYPE_INFO,
+                attrs: engine_reflect::Attrs::NONE,
+            },
+        ];
+        static FLICKER: engine_reflect::TypeInfo = engine_reflect::TypeInfo {
+            name: "EditorTestFlicker",
+            size: 32,
+            align: 8,
+            kind: TypeKind::Struct(&FIELDS),
+            attrs: engine_reflect::Attrs::NONE,
+        };
+        static TEXTS: [engine_ecs::TextField; 1] = [engine_ecs::TextField {
+            offset: 8,
+            default: "lamp/hum.ogg",
+        }];
+        // What the player's script host makes of a flicker script: its texts empty in the
+        // bytes, its rate 1.
+        let mut defaults = vec![0u8; 32];
+        defaults[0..4].copy_from_slice(&1.0f32.to_le_bytes());
+        // SAFETY: room for a `String` at the text's offset; an empty one owns nothing.
+        unsafe {
+            defaults
+                .as_mut_ptr()
+                .add(8)
+                .cast::<String>()
+                .write_unaligned(String::new());
+        }
+        // SAFETY: an f32 and a `String`, the text the type's.
+        unsafe {
+            engine_ecs::add_runtime_type(engine_ecs::RuntimeType {
+                info: &FLICKER,
+                component: "script::EditorTestFlicker".into(),
+                layout: core::alloc::Layout::from_size_align(32, 8).unwrap(),
+                defaults: defaults.into_boxed_slice(),
+                texts: &TEXTS,
+                source: "scripts/flicker.luau".into(),
+            });
+        }
+        let (dir, mut world, mut ed, _) = drop_project("prefab-script");
+        let lamp = AssetId::new();
+        let ids = [SceneId::new(), SceneId::new(), SceneId::new()];
+        let file = dir.join("props/lamp.scene");
+        std::fs::write(&file, lamp_scene(lamp, ids, 1.0, "Bulb", false)).unwrap();
+        ed.asset_db.scan();
+        ed.refresh_browser();
+        let drag = AssetDrag {
+            asset: lamp,
+            kind: engine_scene::AssetKind::Scene,
+            path: String::from("props/lamp.scene"),
+            name: String::from("lamp.scene"),
+            plan: None,
+            refused: None,
+            placed: None,
+            selection: Vec::new(),
+            over: DropTarget::Tree,
+        };
+        ed.drop_asset(&mut world, drag);
+        let mut q = QueryState::<(Entity, &PrefabInstance)>::new(&mut world);
+        let root = q.iter_readonly(&world).map(|(e, _)| e).next().unwrap();
+        ed.update(&mut world);
+        // The prefab written anew, its bulb flickering three times a second.
+        let text = lamp_scene(lamp, ids, 1.0, "Bulb", false).replace(
+            "Name = \"Bulb\"\n",
+            "Name = \"Bulb\"\nEditorTestFlicker.rate = 3\n",
+        );
+        std::fs::write(&file, text).unwrap();
+        ed.asset_db.scan();
+        ed.follow_prefabs(&mut world, &[lamp]);
+        let bulb_id = SceneId::derive(*world.get::<SceneId>(root).unwrap(), ids[1]);
+        let bulb = world
+            .children(root)
+            .find(|&c| world.get::<SceneId>(c) == Some(&bulb_id))
+            .unwrap();
+        let id = world
+            .components()
+            .id_by_name("script::EditorTestFlicker")
+            .unwrap();
+        let value = world
+            .get_raw(bulb, id)
+            .expect("the script's component followed");
+        // SAFETY: the flicker's `rate`, an f32 at 0, and `sound`, a `String` at 8.
+        let (rate, sound) = unsafe {
+            (
+                value.as_ptr().cast::<f32>().read(),
+                engine_reflect::read_str(value.as_ptr().add(8)).to_owned(),
+            )
+        };
+        assert_eq!(rate, 3.0);
+        assert_eq!(sound, "lamp/hum.ogg", "its text at the script's default");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn apply_overrides_writes_an_instance_into_its_prefab() {
         let (dir, mut world, mut ed, _) = drop_project("apply");
         let lamp = AssetId::new();
