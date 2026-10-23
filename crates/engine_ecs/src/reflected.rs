@@ -6,7 +6,7 @@
 //! registered by hand). A save finds a type by its stable name before the world has seen
 //! it; the editor's "add component" and scripting can list them all.
 
-use crate::component::{ComponentDesc, ComponentId};
+use crate::component::{ComponentDesc, ComponentId, DropGlue};
 use crate::world::World;
 use core::alloc::Layout;
 use core::marker::PhantomData;
@@ -66,6 +66,16 @@ pub fn find_reflected(name: &str) -> Option<&'static ReflectedType> {
     REFLECTED.iter().find(|t| t.info.name == name)
 }
 
+/// A `String` field of a type made at run time (a script's text prop): where it is in a
+/// value, and its default text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextField {
+    /// Its offset.
+    pub offset: usize,
+    /// Its default text.
+    pub default: &'static str,
+}
+
 /// A component type made while the program runs (a script's, ADR 0114): what a world needs
 /// to register it, and its default value. Scenes and the editor find these beside the
 /// program's [`reflected_types`].
@@ -77,8 +87,12 @@ pub struct RuntimeType {
     pub component: Box<str>,
     /// Size and alignment of one value.
     pub layout: Layout,
-    /// Its default value, laid out.
+    /// Its default value, laid out, its texts empty: a value of its own, which any copy of
+    /// its bytes is too. [`Self::write_default`] writes one with its texts.
     pub defaults: Box<[u8]>,
+    /// Its `String` fields: a value owns their texts, dropped with it, so a type with any
+    /// is no plain data.
+    pub texts: &'static [TextField],
     /// Where it was declared, for the editor (`scripts/door.luau`); empty when nowhere.
     pub source: Box<str>,
 }
@@ -93,12 +107,77 @@ impl RuntimeType {
         let desc = ComponentDesc {
             name: self.component.clone(),
             layout: self.layout,
-            drop: None,
-            pod: true,
+            drop: (!self.texts.is_empty()).then_some(DropGlue::Texts(self.texts)),
+            pod: self.texts.is_empty(),
             type_info: Some(self.info),
         };
-        // SAFETY: `add_runtime_type`'s caller promised plain data of `layout`.
+        // SAFETY: `add_runtime_type`'s caller promised plain data of `layout` but for the
+        // texts, `String`s the glue drops.
         unsafe { world.register_dynamic(desc) }.ok()
+    }
+
+    /// Writes its default value at `dst`: its bytes, then its texts, which the value owns.
+    ///
+    /// # Safety
+    ///
+    /// `dst` is room for one value of its layout (any alignment); what it held is not
+    /// dropped.
+    pub unsafe fn write_default(&self, dst: *mut u8) {
+        // SAFETY: as the caller says; the bytes are a value of the layout with its texts
+        // empty, each replaced (unaligned, as the room may be) without being dropped.
+        unsafe {
+            let len = self.defaults.len().min(self.layout.size());
+            core::ptr::copy_nonoverlapping(self.defaults.as_ptr(), dst, len);
+            for t in self.texts {
+                dst.add(t.offset)
+                    .cast::<String>()
+                    .write_unaligned(String::from(t.default));
+            }
+        }
+    }
+}
+
+/// How a reflected component's default value is written: a program type's by its
+/// `Default`, a type made at run time's from its bytes and texts.
+#[derive(Debug, Clone)]
+pub enum DefaultValue {
+    /// A type of the program.
+    Written(WriteDefault),
+    /// A type made at run time (a script's component, ADR 0114).
+    Runtime(RuntimeType),
+}
+
+impl DefaultValue {
+    /// The default of the component type named `name`: the program's type of that name,
+    /// or else the latest made at run time (of `layout`, when given). `None` for a type
+    /// without `Default`, or none of that name.
+    pub fn of(name: &str, layout: Option<Layout>) -> Option<Self> {
+        if let Some(t) = find_reflected(name) {
+            let ReflectedKind::Component { default, .. } = &t.kind else {
+                return None;
+            };
+            return default().map(Self::Written);
+        }
+        runtime_types()
+            .into_iter()
+            .rev()
+            .find(|t| t.info.name == name && layout.is_none_or(|l| l == t.layout))
+            .map(Self::Runtime)
+    }
+
+    /// Writes it at `dst`.
+    ///
+    /// # Safety
+    ///
+    /// `dst` is room for one value of the type, aligned; what it held is not dropped.
+    pub unsafe fn write(&self, dst: *mut u8) {
+        // SAFETY: as the caller says.
+        unsafe {
+            match self {
+                Self::Written(write) => write(dst),
+                Self::Runtime(t) => t.write_default(dst),
+            }
+        }
     }
 }
 
@@ -111,8 +190,10 @@ pub struct Relayout {
     pub old: ComponentId,
     /// The component of the new layout.
     pub new: ComponentId,
-    /// The new layout's default value.
+    /// The new layout's default value (its texts empty).
     pub defaults: Box<[u8]>,
+    /// The new layout's texts.
+    pub texts: &'static [TextField],
     /// The fields that keep their values.
     pub moves: Vec<FieldMove>,
     /// Where the new layout holds entities (byte offsets), for values that keep entity
@@ -132,18 +213,22 @@ pub struct FieldMove {
     pub len: usize,
     /// It holds an entity.
     pub entity: bool,
+    /// It holds a text (a `String`): moved, not copied.
+    pub text: bool,
 }
 
 impl Relayout {
     /// From component `old`, described by `before`, to `new`, described by `after` with
-    /// default value `defaults`. Fields match by name, and keep their value when their types
-    /// have one name and size (type descriptions are not unique, so not by address).
+    /// default value `defaults` (its texts empty) and texts `texts`. Fields match by name,
+    /// and keep their value when their types have one name and size (type descriptions
+    /// are not unique, so not by address).
     pub fn between(
         old: ComponentId,
         before: &TypeInfo,
         new: ComponentId,
         after: &TypeInfo,
         defaults: Box<[u8]>,
+        texts: &'static [TextField],
     ) -> Self {
         let fields = |t: &TypeInfo| match t.kind {
             engine_reflect::TypeKind::Struct(fields) => fields,
@@ -160,6 +245,7 @@ impl Relayout {
                     to: f.offset,
                     len: f.ty.size,
                     entity: is_entity(f.ty),
+                    text: matches!(f.ty.kind, engine_reflect::TypeKind::String),
                 })
             })
             .collect();
@@ -172,15 +258,17 @@ impl Relayout {
             old,
             new,
             defaults,
+            texts,
             moves,
             entities,
         }
     }
 
-    /// A value of the old layout (`value`, its bytes) in the new.
+    /// A value of the old layout kept as bytes (`value`, plain data: no texts) in the new,
+    /// the new layout's texts empty.
     pub fn apply(&self, value: &[u8]) -> Vec<u8> {
         let mut out = self.defaults.to_vec();
-        for m in &self.moves {
+        for m in self.moves.iter().filter(|m| !m.text) {
             if let (Some(from), Some(to)) = (
                 value.get(m.from..m.from + m.len),
                 out.get_mut(m.to..m.to + m.len),
@@ -189,6 +277,37 @@ impl Relayout {
             }
         }
         out
+    }
+
+    /// Writes at `new` the value of the new layout made from the live value at `old`: the
+    /// fields that keep their values take them, texts moved (left empty in the old value,
+    /// so dropping it drops only those that did not move), and the new layout's other
+    /// texts take their defaults.
+    ///
+    /// # Safety
+    ///
+    /// `old` points to a live, writable value of the old layout, aligned; `new` is room for
+    /// one value of the new layout (any alignment), what it held not dropped.
+    pub unsafe fn take(&self, old: *mut u8, new: *mut u8) {
+        // SAFETY: as the caller says; the default's bytes are a value of the new layout,
+        // a moved text's `String` is owned by `new` once copied and replaced in `old`
+        // without a drop, and a text that did not move is written without a drop.
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.defaults.as_ptr(), new, self.defaults.len());
+            for m in &self.moves {
+                core::ptr::copy_nonoverlapping(old.add(m.from), new.add(m.to), m.len);
+                if m.text {
+                    old.add(m.from).cast::<String>().write(String::new());
+                }
+            }
+            for t in self.texts {
+                if !self.moves.iter().any(|m| m.text && m.to == t.offset) {
+                    new.add(t.offset)
+                        .cast::<String>()
+                        .write_unaligned(String::from(t.default));
+                }
+            }
+        }
     }
 }
 
@@ -202,8 +321,9 @@ static RUNTIME_VERSION: AtomicU64 = AtomicU64::new(0);
 ///
 /// # Safety
 ///
-/// Its values are plain data of `layout`: no drop glue, `Send` and `Sync`, any bytes of
-/// `defaults` a valid value.
+/// Its values are plain data of `layout` but for `texts`, each a `String` at its offset:
+/// no other drop glue, `Send` and `Sync`, any bytes of `defaults` a valid value (its
+/// texts empty).
 pub unsafe fn add_runtime_type(t: RuntimeType) {
     let mut list = RUNTIME
         .write()

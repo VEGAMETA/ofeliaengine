@@ -5,8 +5,8 @@
 //! walkers using entities' and `Transform`'s methods (`rotate`, `forward`, `look_at`,
 //! `find_child`, `children`, `has`, `parent`, a function of their own through `self:`),
 //! the spinning example (§5) as a system over a query of 1,000 entities, relays sending
-//! each other messages and setting timers, and dice drawing the world's random numbers
-//! every tick, through 600
+//! each other messages and setting timers, dice drawing the world's random numbers, and
+//! chimes reading their text props and writing one, every tick, through 600
 //! ticks and frames after a warm-up: the heap allocations made in the scripts' stages
 //! are counted (the physics steps between them are not). One test per file, so nothing
 //! else allocates concurrently.
@@ -212,6 +212,23 @@ end
 return Dice
 "#;
 
+/// Text props read and written every tick: the same text again makes nothing (the string
+/// kept, the `String`'s room reused).
+const CHIME: &str = r#"--!strict
+local Chime = component("Chime", {
+    sound = "ui/chime.ogg",
+    said = prop.string(""),
+    rings = 0,
+})
+function Chime.on_tick(self, dt)
+    if self.sound ~= "" then
+        self.rings += 1
+    end
+    self.said = self.sound
+end
+return Chime
+"#;
+
 /// Watchers, each with a trigger, a ball falling through it and a floor named after it.
 const WATCHERS: usize = 10;
 
@@ -232,6 +249,7 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
     std::fs::write(dir.join("scripts/spin.luau"), SPIN).unwrap();
     std::fs::write(dir.join("scripts/relay.luau"), RELAY).unwrap();
     std::fs::write(dir.join("scripts/dice.luau"), DICE).unwrap();
+    std::fs::write(dir.join("scripts/chime.luau"), CHIME).unwrap();
     let mut world = World::new();
     let mut scripts = Scripts::load(&mut world, &dir, &dir.join("scripts")).unwrap();
     let mut physics = ScenePhysics::new(&PhysicsSettings {
@@ -347,6 +365,13 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
     }
     let dice = world.spawn((Transform::IDENTITY,));
     assert!(scripts.add(&mut world, dice, "Dice"));
+    let chimes: Vec<Entity> = (0..10)
+        .map(|_| {
+            let chime = world.spawn((Transform::IDENTITY,));
+            assert!(scripts.add(&mut world, chime, "Chime"));
+            chime
+        })
+        .collect();
     let started = std::time::Instant::now();
 
     let spinners: Vec<Entity> = (0..1000)
@@ -503,6 +528,26 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
         assert!(read(w, "hits") > 0.0, "no ray hit its floor");
         assert!(read(w, "touches") > 0.0, "no ball touched its trigger");
         assert!(read(w, "leaves") > 0.0, "no ball left its trigger");
+    }
+    // The chimes rang every tick, and said what they sound.
+    let id = scripts.component("Chime").unwrap();
+    let engine_reflect::TypeKind::Struct(chime_fields) =
+        &world.components().type_info(id).unwrap().kind
+    else {
+        unreachable!()
+    };
+    let at = |name: &str| chime_fields.iter().find(|f| f.name == name).unwrap().offset;
+    for &c in &chimes {
+        let base = world.get_raw(c, id).unwrap().as_ptr();
+        // SAFETY: Chime's `rings`, an f32, and `said`, a `String`, at their offsets.
+        let (rings, said) = unsafe {
+            (
+                base.add(at("rings")).cast::<f32>().read_unaligned(),
+                engine_reflect::read_str(base.add(at("said"))),
+            )
+        };
+        assert_eq!(rings, 840.0, "a chime stopped");
+        assert_eq!(said, "ui/chime.ogg");
     }
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(counted, 0, "allocations in 600 ticks of scripts");

@@ -19436,6 +19436,52 @@ return Keeper
         );
         let found = luau.check("keeper");
         assert!(found.is_empty(), "{found:?}");
+        // ADR 0114's second example, its sound a string prop (E7-6a). Its touch takes
+        // `Entity?`, as E7-3 made it (nil for a body without an entity). Loaded by a host
+        // first, as the player loads the project's scripts: `Wallet` is then an entity's.
+        const ADR_WALLET: &str = "--!strict
+-- scripts/wallet.luau: what the player carries.
+return component(\"Wallet\", {
+    coins = prop.integer(0, { min = 0 }),
+})
+";
+        const ADR_COIN: &str = "--!strict
+-- scripts/coin.luau: touched by something with a Wallet, it pays, rings and goes.
+local Wallet = require(\"./wallet\")
+
+local Coin = component(\"Coin\", {
+    value = prop.integer(1, { min = 1 }),
+    sound = \"pickups/coin.ogg\",
+    said = prop.string(\"\", { tooltip = \"What it said last\" }),
+})
+type Self = Script<typeof(Coin.props)>
+
+function Coin.on_touch(self: Self, other: Entity?)
+    if not other or not other:has(Wallet) then
+        return
+    end
+    other.Wallet.coins += self.value
+    audio.play_at(self.sound, self.Transform.translation)
+    self.said = self.sound
+    self:despawn()
+end
+
+return Coin
+";
+        std::fs::write(dir.join("scripts/wallet.luau"), ADR_WALLET).unwrap();
+        std::fs::write(dir.join("scripts/coin.luau"), ADR_COIN).unwrap();
+        let mut world = World::new();
+        let host =
+            engine_app::scripts::Scripts::load(&mut world, &dir, &dir.join("scripts")).unwrap();
+        assert_eq!(
+            host.component("Coin").is_some(),
+            host.component("Wallet").is_some()
+        );
+        luau.set_definitions(&engine_app::script_types::definitions());
+        luau.set_source("scripts/wallet.luau", ADR_WALLET);
+        luau.set_source("scripts/coin.luau", ADR_COIN);
+        let found = luau.check("scripts/coin.luau");
+        assert!(found.is_empty(), "{found:?}");
         // A field of the wrong type: an error where it is.
         luau.set_source(
             "bad",
@@ -23141,6 +23187,7 @@ return Keeper
                 component: "script::EditorTestLever".into(),
                 layout: core::alloc::Layout::new::<f32>(),
                 defaults: 0.25f32.to_le_bytes().into(),
+                texts: &[],
                 source: "scripts/lever.luau".into(),
             });
         }
@@ -23199,6 +23246,109 @@ return Keeper
     }
 
     #[test]
+    fn a_scripts_text_prop_is_edited_undone_and_marked_in_the_inspector() {
+        static FIELDS: [engine_reflect::Field; 2] = [
+            engine_reflect::Field {
+                name: "rings",
+                offset: 0,
+                ty: <f32 as engine_reflect::Reflect>::TYPE_INFO,
+                attrs: engine_reflect::Attrs::NONE,
+            },
+            engine_reflect::Field {
+                name: "sound",
+                offset: 8,
+                ty: <String as engine_reflect::Reflect>::TYPE_INFO,
+                attrs: engine_reflect::Attrs::NONE,
+            },
+        ];
+        static BELL: engine_reflect::TypeInfo = engine_reflect::TypeInfo {
+            name: "EditorTestBell",
+            size: 32,
+            align: 8,
+            kind: TypeKind::Struct(&FIELDS),
+            attrs: engine_reflect::Attrs::NONE,
+        };
+        static TEXTS: [engine_ecs::TextField; 1] = [engine_ecs::TextField {
+            offset: 8,
+            default: "ui/bell.ogg",
+        }];
+        let dir = folder("text-prop");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/bell.luau"),
+            "local EditorTestBell = component(\"EditorTestBell\", { rings = 0, sound = \"ui/bell.ogg\" })\n\
+             return EditorTestBell\n",
+        )
+        .unwrap();
+        // What the player's script host makes of that file: its texts empty in the bytes.
+        let mut defaults = vec![0u8; 32];
+        // SAFETY: room for a `String` at the text's offset; an empty one owns nothing.
+        unsafe {
+            defaults
+                .as_mut_ptr()
+                .add(8)
+                .cast::<String>()
+                .write_unaligned(String::new());
+        }
+        // SAFETY: an f32 and a `String`, the text the type's.
+        unsafe {
+            engine_ecs::add_runtime_type(engine_ecs::RuntimeType {
+                info: &BELL,
+                component: "script::EditorTestBell".into(),
+                layout: core::alloc::Layout::from_size_align(32, 8).unwrap(),
+                defaults: defaults.into_boxed_slice(),
+                texts: &TEXTS,
+                source: "scripts/bell.luau".into(),
+            });
+        }
+        let (mut world, mut ed, door) = door_project(&dir);
+        let attach = middle(texts(&ed, icons::SCRIPT_MARK)[0]);
+        click(&mut ed, &mut world, attach);
+        pick_item(&mut ed, &mut world, "EditorTestBell");
+        let id = world
+            .components()
+            .id_by_name("script::EditorTestBell")
+            .unwrap();
+        assert!(!world.components().is_pod(id));
+        let sound = |world: &World| {
+            let base = world.get_raw(door, id).unwrap();
+            // SAFETY: the bell's `sound`, a `String` at 8.
+            unsafe { engine_reflect::read_str(base.as_ptr().add(8)) }.to_owned()
+        };
+        assert_eq!(sound(&world), "ui/bell.ogg", "its default text");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "ui/bell.ogg").is_empty(), "shown in its field");
+        assert_eq!(
+            shown_field(&ed, "EditorTestBell", "sound").map(|f| f.2),
+            Some(false)
+        );
+        ed.set(&mut world, door, "EditorTestBell.sound", "\"ui/gong.ogg\"")
+            .unwrap();
+        ed.update(&mut world);
+        assert_eq!(sound(&world), "ui/gong.ogg");
+        assert_eq!(
+            shown_field(&ed, "EditorTestBell", "sound").map(|f| f.2),
+            Some(true),
+            "away from its default"
+        );
+        // Undone and done again: kept as the scene's lines, as it owns text.
+        ed.history.undo(&mut world);
+        assert_eq!(sound(&world), "ui/bell.ogg");
+        ed.history.redo(&mut world);
+        assert_eq!(sound(&world), "ui/gong.ogg");
+        // Taking the component off and undoing it brings its text back.
+        ed.history.begin("Remove EditorTestBell", None);
+        ed.history.touch(&mut world, door);
+        world.remove_raw(door, id);
+        ed.history.commit(&mut world);
+        assert!(world.get_raw(door, id).is_none());
+        ed.history.undo(&mut world);
+        assert_eq!(sound(&world), "ui/gong.ogg");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn new_script_writes_a_file_named_after_the_entity_and_attaches_it_once_loaded() {
         static FRONT_DOOR: engine_reflect::TypeInfo = engine_reflect::TypeInfo {
             name: "FrontDoor",
@@ -23235,6 +23385,7 @@ return Keeper
                 component: "script::FrontDoor".into(),
                 layout: core::alloc::Layout::new::<()>(),
                 defaults: Box::new([]),
+                texts: &[],
                 source: "scripts/front_door.luau".into(),
             });
         }

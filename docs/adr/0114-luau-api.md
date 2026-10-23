@@ -1519,3 +1519,53 @@ there, and see the script's file in the inspector.
   - props of text;
   - prefabs from a release's packs;
   - script components in the network schema.
+
+## As built (E7-6a, 2026-10-23): props of text
+
+- **A string is a prop:** a plain default (`sound = "pickups/coin.ogg"`), or
+  `prop.string(default?, { tooltip, hidden, skip })` for its attributes. Its field is a
+  `String` the component owns (`<String as Reflect>`), as §1 said. A declaration's other
+  values for it (`prop.string(3)`) are refused with its prop's name.
+- **The layout that drops them** (`engine_ecs`):
+  - `ComponentDesc::drop` is a `DropGlue`: a Rust type's function, or
+    `DropGlue::Texts(&[TextField])` for a type made at run time, which drops the `String`
+    at each text field.
+  - `RuntimeType::texts` lists them, with their default texts. Its `defaults` bytes hold
+    empty strings there: any copy of them is a valid value that owns nothing.
+    `RuntimeType::write_default` writes a value with its own texts.
+  - A component with texts is no plain data (`pod: false`). Saves and scenes write it as
+    text. A whole-world snapshot refuses it, as it refuses sounds (E7-5e2).
+- **One default for every reflected component** (`engine_ecs::DefaultValue`): a program
+  type's `Default` or a run-time type's bytes and texts.
+  - `engine_save` resolves a script component through it (its `MakeDefault` went).
+  - The inspector's defaults (reset and the changed marks) use it.
+  - The editor's undo keeps a component that is no plain data as its scene lines, a
+    script's too now.
+  - `engine_scene` writes a script component's default with its texts.
+- **Hot reload moves texts, not copies:** `Relayout::take` writes the new layout's value
+  from the live old one. A text kept moves (left empty in the old value, so removing it
+  drops only what did not move), and the new layout's other texts take their defaults.
+  `Relayout::apply` (bytes the editor's undo kept: plain data) leaves texts empty.
+- **The fast path reads and writes them** (`Fast::Text`):
+  - a read gives the Lua string kept in its place of a 64-place table, found by the
+    text's hash, when it is the same text: a text read again makes nothing;
+  - a write takes strings only and reuses the `String`'s room (`clear`, `push_str`);
+  - every reflected `String` field takes this path now, a Rust component's too.
+- **ADR 0114's coin (example 2) runs:**
+  - `scripts/wallet.luau` and `scripts/coin.luau` check clean in strict mode, loaded by a
+    host first, as the player loads them, so `Wallet` is an entity's component;
+  - its touch takes `other: Entity?`, as E7-3 made it (nil for a body without an
+    entity), with `if not other or not other:has(Wallet) then return end`.
+- **Tests:**
+  - `engine_ecs`: a run-time type's texts through inserts, a write, a despawn, a removal,
+    a replacement and a relayout. The process's live heap bytes come back to where they
+    were: nothing leaks, nothing is freed twice;
+  - the host: defaults, hooks reading and writing them, a scene and a save round trip, a
+    reload that takes one text away and adds another (the kept one moved), the refusal;
+  - the zero-allocation test's chimes read two texts and write one every tick: 0
+    allocations in 600 ticks;
+  - the editor: a text prop edited in the inspector, marked away from its default, undone
+    and done again, taken off with its component and put back by undo;
+  - the editor's checker takes the coin and `prop.string`.
+- **Not in this step:** text in messages' values (`e:send`) was already plain values of
+  Luau's (strings included); lists and maps as props.

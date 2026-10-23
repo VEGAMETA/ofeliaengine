@@ -45,49 +45,23 @@ impl Defaults {
             let reg = world.components();
             let info = reg.type_info(id)?;
             let layout = reg.layout(id)?;
-            // The program's types write theirs; a script's, made at run time, has its bytes.
-            let made = match engine_ecs::find_reflected(info.name) {
-                Some(t) => {
-                    let engine_ecs::ReflectedKind::Component { default, .. } = &t.kind else {
-                        return None;
-                    };
-                    Made::Written(default()?)
-                }
-                None => Made::Copied(
-                    engine_ecs::runtime_types()
-                        .into_iter()
-                        .find(|t| t.info.name == info.name && t.layout == layout)?
-                        .defaults,
-                ),
-            };
+            // The program's types write theirs; a script's, made at run time, has its bytes
+            // and texts.
+            let made = engine_ecs::DefaultValue::of(info.name, Some(layout))?;
             let layout =
                 std::alloc::Layout::from_size_align(layout.size().max(1), layout.align()).ok()?;
-            // SAFETY: a non-zero size. The value is written by the type's default writer, or
-            // copied from a script's default bytes (plain data of its layout), and kept for
-            // the session: never freed, so never dropped.
+            // SAFETY: a non-zero size. The value is written by its type's default, and kept
+            // for the session: never freed, so never dropped.
             unsafe {
                 let ptr = std::alloc::alloc(layout);
                 if ptr.is_null() {
                     return None;
                 }
-                match made {
-                    Made::Written(write) => write(ptr),
-                    Made::Copied(bytes) => core::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        ptr,
-                        bytes.len().min(layout.size()),
-                    ),
-                }
+                made.write(ptr);
                 NonNull::new(ptr)
             }
         })
     }
-}
-
-/// How a default value is made: by the type's writer, or from a script's bytes.
-enum Made {
-    Written(engine_ecs::reflected::WriteDefault),
-    Copied(Box<[u8]>),
 }
 
 /// How a property is shown and edited.

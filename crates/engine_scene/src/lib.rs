@@ -515,14 +515,10 @@ impl SceneRegistry {
                 true
             }
             Access::Dynamic(t) => match (t.id(world), Scratch::new(entry.info)) {
-                // SAFETY: the scratch is room for one value of the type, its default bytes
-                // a valid one (plain data), which `insert_raw` copies into the world.
+                // SAFETY: the scratch is room for one value of the type, made a valid one by
+                // its default (its texts its own), which `insert_raw` moves into the world.
                 (Some(id), Some(scratch)) => unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        t.defaults.as_ptr(),
-                        scratch.ptr,
-                        t.defaults.len().min(entry.info.size),
-                    );
+                    t.write_default(scratch.ptr);
                     world.insert_raw(entity, id, scratch.ptr)
                 },
                 _ => false,
@@ -2081,14 +2077,11 @@ fn spawn(
                     }
                     if let (Some(id), Some(scratch)) = (id, &scratches[entry_index]) {
                         // SAFETY: the scratch is room for one value of the type; its default
-                        // bytes make it valid (plain data), reading keeps it valid, and
-                        // `insert_raw` copies it into the world.
+                        // makes it valid (its texts its own), reading keeps it valid, and
+                        // `insert_raw` moves it into the world: what the scratch held before
+                        // is the world's, written over, not dropped.
                         unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                t.defaults.as_ptr(),
-                                scratch.ptr,
-                                t.defaults.len().min(entry.info.size),
-                            );
+                            t.write_default(scratch.ptr);
                             fill(scratch.ptr);
                             world.insert_raw(e, id, scratch.ptr);
                         }

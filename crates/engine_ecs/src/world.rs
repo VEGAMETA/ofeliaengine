@@ -225,7 +225,8 @@ impl World {
     /// # Safety
     ///
     /// Values stored under this id must match `desc.layout`, be safe to send and share
-    /// between threads, be dropped correctly by `desc.drop`, and, when `desc.pod` is
+    /// between threads, be dropped correctly by `desc.drop` (a text field's `String` by
+    /// [`DropGlue::Texts`](crate::DropGlue::Texts)), and, when `desc.pod` is
     /// set, be plain data: no padding, no pointers, every bit pattern valid.
     pub unsafe fn register_dynamic(
         &mut self,
@@ -364,7 +365,9 @@ impl World {
         for column in 0..arch.columns.len() {
             if let Some(drop) = arch.columns[column].drop {
                 // SAFETY: the row is initialized.
-                unsafe { drop(arch.value_ptr(loc.chunk as usize, column, loc.row as usize)) };
+                unsafe {
+                    drop.drop_value(arch.value_ptr(loc.chunk as usize, column, loc.row as usize))
+                };
             }
         }
         if let Some(moved) =
@@ -601,7 +604,7 @@ impl World {
             // SAFETY: an initialized old value is replaced by the caller's value.
             unsafe {
                 if let Some(drop) = arch.columns[column].drop {
-                    drop(ptr);
+                    drop.drop_value(ptr);
                 }
                 core::ptr::copy_nonoverlapping(value, ptr, size);
             }
@@ -651,7 +654,9 @@ impl World {
         let arch = &self.archetypes[loc.archetype as usize];
         if let Some(drop) = arch.columns[column].drop {
             // SAFETY: initialized; `move_row` forgets the slot.
-            unsafe { drop(arch.value_ptr(loc.chunk as usize, column, loc.row as usize)) };
+            unsafe {
+                drop.drop_value(arch.value_ptr(loc.chunk as usize, column, loc.row as usize))
+            };
         }
         let target = self.remove_target(loc.archetype, id);
         self.log_removals(loc.archetype, Some(target), entity);

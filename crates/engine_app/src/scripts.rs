@@ -78,6 +78,8 @@ enum Kind {
     Entity,
     /// `prop.asset(kind)`: an asset reference (a prefab scene, a model), none at first.
     Asset,
+    /// A string (`prop.string`, or a plain one): a `String` the component owns.
+    Text,
 }
 
 impl Kind {
@@ -89,6 +91,7 @@ impl Kind {
             Self::Vector => <Vec3 as Reflect>::TYPE_INFO,
             Self::Entity => <Entity as Reflect>::TYPE_INFO,
             Self::Asset => <engine_scene::AssetRef as Reflect>::TYPE_INFO,
+            Self::Text => <String as Reflect>::TYPE_INFO,
         }
     }
 }
@@ -113,8 +116,10 @@ struct Declared {
     hooks: Hooks,
     info: &'static TypeInfo,
     id: ComponentId,
-    /// Its props' defaults, laid out.
+    /// Its props' defaults, laid out, its texts empty.
     defaults: Vec<u8>,
+    /// Its text props: where they are and their defaults.
+    texts: &'static [engine_ecs::TextField],
     /// Its table, where its module put its functions: a message or a timer names one.
     table: Table,
 }
@@ -967,7 +972,7 @@ impl Scripts {
     ) -> Result<Option<Relayout>, String> {
         let name = self.components[k].name.clone();
         let source = self.file(&self.components[k].module);
-        let (info, defaults, layout) = describe(&name, &mut props)?;
+        let (info, defaults, texts, layout) = describe(&name, &mut props)?;
         let (old, old_info) = (self.components[k].id, self.components[k].info);
         let in_place =
             world.components().layout(old) == Some(layout) && same_places(old_info, info);
@@ -990,6 +995,7 @@ impl Scripts {
             component: registry,
             layout,
             defaults: defaults.clone().into_boxed_slice(),
+            texts,
             source: source.into(),
         };
         let relayout = if in_place {
@@ -999,12 +1005,12 @@ impl Scripts {
             let new = runtime
                 .id(world)
                 .ok_or_else(|| String::from("the world holds another component of its name"))?;
-            let r = Relayout::between(old, old_info, new, info, runtime.defaults.clone());
+            let r = Relayout::between(old, old_info, new, info, runtime.defaults.clone(), texts);
             move_values(world, &r);
             Some(r)
         };
         let id = relayout.as_ref().map_or(old, |r| r.new);
-        // SAFETY: the values are plain data of `layout`, as `register`'s.
+        // SAFETY: the values are plain data of `layout` but for the texts, as `register`'s.
         unsafe { engine_ecs::add_runtime_type(runtime) };
         if let Some(mut names) = self.vm.lua().app_data_mut::<Names>() {
             names.by_name.insert(name.clone(), (id, info));
@@ -1021,6 +1027,7 @@ impl Scripts {
         c.info = info;
         c.id = id;
         c.defaults = defaults;
+        c.texts = texts;
         c.table = table.clone();
         // Its instances' timers follow it to its new layout.
         if id != old
@@ -1072,20 +1079,22 @@ impl Scripts {
         {
             return Err(String::from("another component has this name"));
         }
-        let (info, defaults, layout) = describe(name, &mut props)?;
+        let (info, defaults, texts, layout) = describe(name, &mut props)?;
         // Beside the program's types, so scenes and the editor find it by name.
         let runtime = engine_ecs::RuntimeType {
             info,
             component: format!("script::{name}").into(),
             layout,
             defaults: defaults.clone().into_boxed_slice(),
+            texts,
             source: self.file(module).into(),
         };
         let id = runtime
             .id(world)
             .ok_or_else(|| String::from("the world holds another component of its name"))?;
-        // SAFETY: the values are plain data of `layout` (numbers, booleans, vectors and
-        // entities by value), with no drop glue, `Send` and `Sync`; the defaults are one.
+        // SAFETY: the values are plain data of `layout` (numbers, booleans, vectors,
+        // entities and assets by value) but for the texts, `String`s at `texts`; `Send`
+        // and `Sync`; the defaults are one, their texts empty.
         unsafe { engine_ecs::add_runtime_type(runtime) };
         let hooks = hooks_of(table);
         if let Some(mut names) = self.vm.lua().app_data_mut::<Names>() {
@@ -1101,6 +1110,7 @@ impl Scripts {
             info,
             id,
             defaults,
+            texts,
             table: table.clone(),
         });
         Ok(())
@@ -1130,8 +1140,24 @@ impl Scripts {
         let Some(c) = self.by_name.get(name).map(|&k| &self.components[k]) else {
             return false;
         };
-        // SAFETY: the defaults are a value of the component's layout, plain data, copied.
-        unsafe { world.insert_raw(entity, c.id, c.defaults.as_ptr()) }
+        if c.texts.is_empty() {
+            // SAFETY: the defaults are a value of the component's layout, plain data, copied.
+            return unsafe { world.insert_raw(entity, c.id, c.defaults.as_ptr()) };
+        }
+        let mut value = c.defaults.clone();
+        // SAFETY: a value of the component's layout, its texts empty, each replaced by its
+        // default (unaligned, as the room is bytes) and moved into the world by
+        // `insert_raw`: the copy left is bytes only.
+        unsafe {
+            for t in c.texts {
+                value
+                    .as_mut_ptr()
+                    .add(t.offset)
+                    .cast::<String>()
+                    .write_unaligned(String::from(t.default));
+            }
+            world.insert_raw(entity, c.id, value.as_ptr())
+        }
     }
 
     /// A fixed tick's stage (before the game's own): instances that came are started, then
@@ -1945,11 +1971,20 @@ fn module_of(folder: &Path, file: &Path) -> Result<String, String> {
 }
 
 /// Component `name`'s description from its props, laid out by name (a table's keys have
-/// no order): its type, its default value and its layout.
+/// no order): its type, its default value (its texts empty), its texts and its layout.
+#[allow(clippy::type_complexity)]
 fn describe(
     name: &str,
     props: &mut [Prop],
-) -> Result<(&'static TypeInfo, Vec<u8>, std::alloc::Layout), String> {
+) -> Result<
+    (
+        &'static TypeInfo,
+        Vec<u8>,
+        &'static [engine_ecs::TextField],
+        std::alloc::Layout,
+    ),
+    String,
+> {
     props.sort_by(|a, b| a.name.cmp(&b.name));
     let mut offset = 0usize;
     let mut align = 1usize;
@@ -1981,8 +2016,20 @@ fn describe(
     for p in props.iter() {
         write_default(&mut defaults[p.offset..], p.kind, &p.default);
     }
+    let texts: Vec<engine_ecs::TextField> = props
+        .iter()
+        .filter(|p| p.kind == Kind::Text)
+        .map(|p| engine_ecs::TextField {
+            offset: p.offset,
+            default: match &p.default {
+                Value::String(s) => leak(&s.to_string_lossy()),
+                _ => "",
+            },
+        })
+        .collect();
+    let texts: &'static [engine_ecs::TextField] = Box::leak(texts.into_boxed_slice());
     let layout = std::alloc::Layout::from_size_align(size, align).map_err(|e| e.to_string())?;
-    Ok((info, defaults, layout))
+    Ok((info, defaults, texts, layout))
 }
 
 /// Whether two descriptions of a component keep its props in the same places: the same
@@ -2022,7 +2069,8 @@ fn hooks_of(table: &Table) -> Hooks {
     }
 }
 
-/// Every entity's value of `r.old` moved into `r.new` ([`Relayout::apply`]).
+/// Every entity's value of `r.old` moved into `r.new` ([`Relayout::take`]): its texts
+/// move with it, and the old value drops what did not.
 fn move_values(world: &mut World, r: &Relayout) {
     let entities: Vec<Entity> = world
         .archetypes()
@@ -2030,17 +2078,18 @@ fn move_values(world: &mut World, r: &Relayout) {
         .filter(|a| a.components().contains(&r.old))
         .flat_map(|a| (0..a.chunk_count()).flat_map(move |c| a.chunk_entities(c).iter().copied()))
         .collect();
-    let size = world.components().layout(r.old).map_or(0, |l| l.size());
+    let mut moved = vec![0u8; r.defaults.len()];
     for e in entities {
-        let Some(ptr) = world.get_raw(e, r.old) else {
+        let Some(ptr) = world.get_raw_mut(e, r.old) else {
             continue;
         };
-        // SAFETY: the entity's live value of the old layout: `size` bytes of plain data,
-        // copied out before the world changes.
-        let value = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), size) }.to_vec();
-        let moved = r.apply(&value);
-        // SAFETY: a value of the new layout, plain data, which `insert_raw` copies.
-        unsafe { world.insert_raw(e, r.new, moved.as_ptr()) };
+        // SAFETY: the entity's live value of the old layout, and room for one of the new,
+        // which `insert_raw` moves into the world (the room's bytes are written over next,
+        // never dropped); removing the old value drops what it kept.
+        unsafe {
+            r.take(ptr.as_ptr(), moved.as_mut_ptr());
+            world.insert_raw(e, r.new, moved.as_ptr());
+        }
         world.remove_raw(e, r.old);
     }
 }
@@ -2091,6 +2140,17 @@ fn write_default(out: &mut [u8], kind: Kind, value: &Value) {
         Kind::Entity => out[..8].copy_from_slice(&Entity::NULL.to_bits().to_le_bytes()),
         // `AssetRef::NONE` is all zeros, as the defaults start.
         Kind::Asset => {}
+        // An empty `String`, which owns nothing (any copy of it is one too): the default
+        // text is written into each value ([`engine_ecs::RuntimeType::write_default`]).
+        Kind::Text => {
+            let room = &mut out[..core::mem::size_of::<String>()];
+            // SAFETY: room for a `String`, written unaligned, as bytes are.
+            unsafe {
+                room.as_mut_ptr()
+                    .cast::<String>()
+                    .write_unaligned(String::new());
+            }
+        }
     }
 }
 
@@ -2239,6 +2299,7 @@ fn install(lua: &Lua) -> mlua::Result<()> {
         ("vector", "vector"),
         ("entity", "entity"),
         ("asset", "asset"),
+        ("string", "string"),
     ] {
         prop.set(
             name,
@@ -2744,6 +2805,7 @@ fn prop_of(component: &str, name: String, value: Value) -> mlua::Result<Prop> {
         Value::Number(_) | Value::Integer(_) => Some(Kind::Number),
         Value::Boolean(_) => Some(Kind::Boolean),
         Value::Vector(_) => Some(Kind::Vector),
+        Value::String(_) => Some(Kind::Text),
         _ => None,
     };
     if let Some(kind) = plain(&value) {
@@ -2756,12 +2818,9 @@ fn prop_of(component: &str, name: String, value: Value) -> mlua::Result<Prop> {
         });
     }
     let Value::Table(t) = &value else {
-        return Err(bad(match value {
-            Value::String(_) => {
-                "strings in props come in a later step; use a number, a boolean, a vector or prop.entity()"
-            }
-            _ => "a prop is a number, a boolean, a vector or a prop.* value",
-        }));
+        return Err(bad(
+            "a prop is a number, a boolean, a vector, a string or a prop.* value",
+        ));
     };
     let helper: Option<String> = t.get("__prop")?;
     let kind = match helper.as_deref() {
@@ -2771,6 +2830,7 @@ fn prop_of(component: &str, name: String, value: Value) -> mlua::Result<Prop> {
         Some("vector") => Kind::Vector,
         Some("entity") => Kind::Entity,
         Some("asset") => Kind::Asset,
+        Some("string") => Kind::Text,
         _ => {
             return Err(bad(
                 "a table is not a prop; use prop.number(…) and the others",
@@ -2778,6 +2838,9 @@ fn prop_of(component: &str, name: String, value: Value) -> mlua::Result<Prop> {
         }
     };
     let default: Value = t.get("default")?;
+    if kind == Kind::Text && !matches!(default, Value::String(_) | Value::Nil) {
+        return Err(bad("prop.string's default is a string"));
+    }
     let mut attrs = Attrs::NONE;
     if let Some(opts) = t.get::<Option<Table>>("opts")? {
         attrs.min = opts.get("min")?;
@@ -4785,6 +4848,167 @@ return Spawner
             unreachable!()
         };
         fields.iter().find(|f| f.name == name).unwrap().offset
+    }
+
+    /// Script component `component`'s text prop `name` on `e`.
+    fn read_text(
+        world: &World,
+        scripts: &Scripts,
+        e: Entity,
+        component: &str,
+        name: &str,
+    ) -> String {
+        let at = fields_of(world, scripts, component, name);
+        let base = world
+            .get_raw(e, scripts.component(component).unwrap())
+            .unwrap();
+        // SAFETY: the component's live value, a `String` at the prop's offset.
+        unsafe { engine_reflect::read_str(base.as_ptr().add(at)) }.to_owned()
+    }
+
+    #[test]
+    fn text_props_are_the_components_own_through_scenes_saves_and_reloads() {
+        const BELL: &str = r#"--!strict
+local Bell = component("Bell", {
+    sound = "ui/bell.ogg",
+    label = prop.string("a bell", { tooltip = "What it says" }),
+    rings = 0,
+})
+function Bell.on_tick(self, dt)
+    if self.sound == "ui/bell.ogg" then
+        self.rings += 1
+    end
+    if self.rings == 2 then
+        self.sound = "ui/gong.ogg"
+    end
+    self.label = "rung"
+end
+return Bell
+"#;
+        let dir = project("texts", &[("bell.luau", BELL)]);
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let id = scripts.component("Bell").unwrap();
+        assert!(!world.components().is_pod(id), "it owns its texts");
+        let bell = world.spawn((
+            engine_scene::SceneId::new(),
+            Name::new("Bell"),
+            Transform::IDENTITY,
+        ));
+        assert!(scripts.add(&mut world, bell, "Bell"));
+        assert_eq!(
+            read_text(&world, &scripts, bell, "Bell", "sound"),
+            "ui/bell.ogg"
+        );
+        assert_eq!(read_text(&world, &scripts, bell, "Bell", "label"), "a bell");
+        // Read and written by its hooks.
+        for _ in 0..3 {
+            scripts.tick(&mut world, 0.1);
+        }
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        assert_eq!(
+            read_text(&world, &scripts, bell, "Bell", "sound"),
+            "ui/gong.ogg"
+        );
+        assert_eq!(read_text(&world, &scripts, bell, "Bell", "label"), "rung");
+        assert_eq!(read_f32(&world, &scripts, bell, "Bell", "rings"), 2.0);
+        // A scene keeps them as text, and gives them back.
+        let mut text = String::new();
+        let options = engine_scene::SaveOptions {
+            id: Some(engine_scene::AssetId::new()),
+            assets: None,
+            prefabs: None,
+        };
+        engine_scene::save_with(
+            &mut world,
+            &engine_scene::SceneRegistry::from_program(),
+            &options,
+            &mut text,
+        )
+        .unwrap();
+        assert!(text.contains("Bell.sound = \"ui/gong.ogg\""), "{text}");
+        let mut loaded = World::new();
+        let loaded_scripts = load(&dir, &mut loaded);
+        engine_scene::load(
+            &mut loaded,
+            &engine_scene::SceneRegistry::from_program(),
+            &text,
+        )
+        .unwrap();
+        let mut q = engine_ecs::QueryState::<(Entity, &Name)>::new(&mut loaded);
+        let again = q
+            .iter_readonly(&loaded)
+            .find(|(_, n)| n.as_str() == "Bell")
+            .unwrap()
+            .0;
+        assert_eq!(
+            read_text(&loaded, &loaded_scripts, again, "Bell", "sound"),
+            "ui/gong.ogg"
+        );
+        assert_eq!(
+            read_text(&loaded, &loaded_scripts, again, "Bell", "label"),
+            "rung"
+        );
+        drop(loaded);
+        // A save too.
+        let image = engine_save::capture(&world, &engine_save::CaptureOptions::default());
+        let bytes =
+            engine_save::encode(&image, engine_save::Encoding::Text, &Default::default()).unwrap();
+        let save = engine_save::decode(&bytes).unwrap();
+        let mut saved = World::new();
+        let saved_scripts = load(&dir, &mut saved);
+        let report = engine_save::apply(&mut saved, &save).unwrap();
+        assert!(
+            !report.notes.iter().any(|n| n.contains("Bell")),
+            "{:?}",
+            report.notes
+        );
+        let mut q = engine_ecs::QueryState::<(Entity, &Name)>::new(&mut saved);
+        let again = q
+            .iter_readonly(&saved)
+            .find(|(_, n)| n.as_str() == "Bell")
+            .unwrap()
+            .0;
+        assert_eq!(
+            read_text(&saved, &saved_scripts, again, "Bell", "sound"),
+            "ui/gong.ogg"
+        );
+        drop(saved);
+        // Reloaded with a prop taken away and one added: the texts kept move, the new one
+        // has its default.
+        let file = dir.join("scripts/bell.luau");
+        let changed = BELL
+            .replace(
+                "    label = prop.string(\"a bell\", { tooltip = \"What it says\" }),\n",
+                "    note = \"hello\",\n",
+            )
+            .replace("    self.label = \"rung\"\n", "");
+        std::fs::write(&file, changed).unwrap();
+        scripts
+            .reload_file(&mut world, &dir, &dir.join("scripts"), &file)
+            .unwrap();
+        assert_ne!(scripts.component("Bell").unwrap(), id, "a new layout");
+        assert_eq!(
+            read_text(&world, &scripts, bell, "Bell", "sound"),
+            "ui/gong.ogg"
+        );
+        assert_eq!(read_text(&world, &scripts, bell, "Bell", "note"), "hello");
+        assert_eq!(read_f32(&world, &scripts, bell, "Bell", "rings"), 2.0);
+        // A text prop takes strings only.
+        let lua = Lua::new();
+        let declared = lua.create_table().unwrap();
+        declared.set("__prop", "string").unwrap();
+        declared.set("default", 3).unwrap();
+        let why = prop_of("Bad", String::from("sound"), Value::Table(declared)).unwrap_err();
+        assert!(
+            why.to_string()
+                .contains("prop.string's default is a string"),
+            "{why}"
+        );
+        // Dropped with their entity.
+        assert!(world.despawn(bell));
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

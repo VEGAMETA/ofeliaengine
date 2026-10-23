@@ -151,6 +151,8 @@ declare prop: {
     integer: (default: number, options: PropOptions?) -> number,
     boolean: (default: boolean, options: PropOptions?) -> boolean,
     vector: (default: vector, options: PropOptions?) -> vector,
+    -- Text the component keeps (a sound's path, a line of dialogue's key).
+    string: (default: string?, options: PropOptions?) -> string,
     entity: (default: nil, options: PropOptions?) -> Entity?,
     -- An asset reference of `kind` ("scene", "model"), set in the editor or a scene file.
     asset: (kind: string?, options: PropOptions?) -> Asset?,

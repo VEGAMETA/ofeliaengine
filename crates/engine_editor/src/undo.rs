@@ -31,7 +31,6 @@
 //! assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 5.0);
 //! ```
 
-use engine_ecs::reflected::WriteDefault;
 use engine_ecs::{Children, ComponentId, Entity, Parent, QueryState, World};
 use engine_reflect::{TypeInfo, TypeKind};
 use engine_scene::SceneId;
@@ -68,10 +67,10 @@ impl ComponentRecord {
 }
 
 /// How a component that is not plain data is kept: as the scene lines it saves with.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct LinesCodec {
     info: &'static TypeInfo,
-    default: WriteDefault,
+    default: std::sync::Arc<engine_ecs::DefaultValue>,
     /// Whether the type holds entity references (for finding referrers).
     entities: bool,
 }
@@ -87,31 +86,31 @@ impl Codecs {
     /// and for components scenes do not save: runtime state (`hidden`, `skip`), types
     /// without reflection or without `Default`.
     fn lines(&mut self, world: &World, id: ComponentId) -> Option<LinesCodec> {
-        *self.lines.entry(id).or_insert_with(|| {
-            let reg = world.components();
-            if reg.is_pod(id) {
-                return None;
-            }
-            let info = reg.type_info(id)?;
-            let layout = reg.layout(id)?;
-            if info.attrs.hidden
-                || info.attrs.skip
-                || layout.size() != info.size
-                || layout.align() != info.align
-            {
-                return None;
-            }
-            let engine_ecs::ReflectedKind::Component { default, .. } =
-                &engine_ecs::find_reflected(info.name)?.kind
-            else {
-                return None;
-            };
-            Some(LinesCodec {
-                info,
-                default: default()?,
-                entities: holds_entities(info),
+        self.lines
+            .entry(id)
+            .or_insert_with(|| {
+                let reg = world.components();
+                if reg.is_pod(id) {
+                    return None;
+                }
+                let info = reg.type_info(id)?;
+                let layout = reg.layout(id)?;
+                if info.attrs.hidden
+                    || info.attrs.skip
+                    || layout.size() != info.size
+                    || layout.align() != info.align
+                {
+                    return None;
+                }
+                // A program type's `Default`, or a script's bytes and texts.
+                let default = engine_ecs::DefaultValue::of(info.name, Some(layout))?;
+                Some(LinesCodec {
+                    info,
+                    default: std::sync::Arc::new(default),
+                    entities: holds_entities(info),
+                })
             })
-        })
+            .clone()
     }
 
     /// Whether undo records the component: plain data, or saved by scenes.
@@ -1458,7 +1457,7 @@ fn restore_lines(
     // line fails), and `insert_raw` moves it into the world, leaving the buffer's memory
     // to be freed without dropping the value.
     unsafe {
-        (codec.default)(value.ptr_mut());
+        codec.default.write(value.ptr_mut());
         if let Err(e) = engine_scene::read_lines(codec.info, value.ptr_mut(), text, &mut refs) {
             log::warn!(target: "engine_editor::undo", "`{}`: {e}", codec.info.name);
         }

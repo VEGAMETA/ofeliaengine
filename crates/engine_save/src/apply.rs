@@ -5,7 +5,8 @@
 use crate::SaveError;
 use crate::body::{LoadedKey, LoadedSave};
 use crate::capture::IdBuild;
-use engine_ecs::reflected::{InsertDefault, WriteDefault};
+use engine_ecs::DefaultValue;
+use engine_ecs::reflected::InsertDefault;
 use engine_ecs::{
     Children, ComponentId, Entity, Parent, QueryState, ReflectedKind, World, find_reflected,
 };
@@ -93,40 +94,12 @@ impl Drop for Scratch {
     }
 }
 
-/// How a resolved component's default value is made.
-enum MakeDefault {
-    /// A type of the program: its `Default`.
-    Typed(WriteDefault),
-    /// A type made at run time (a script's component, ADR 0114 E7-5f): its default value,
-    /// laid out.
-    Bytes(Box<[u8]>),
-}
-
-impl MakeDefault {
-    /// Writes the default value into `ptr`.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` is room for one value of the type, aligned.
-    unsafe fn write(&self, ptr: *mut u8) {
-        // SAFETY: as the caller says; a laid out default is one value's bytes, plain data.
-        unsafe {
-            match self {
-                Self::Typed(write) => write(ptr),
-                Self::Bytes(bytes) => {
-                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len())
-                }
-            }
-        }
-    }
-}
-
 /// A saved type resolved against the program, once per save.
 enum Resolved {
     Component {
         info: &'static TypeInfo,
         id: ComponentId,
-        default: MakeDefault,
+        default: DefaultValue,
         scratch: Scratch,
     },
     Resource {
@@ -151,7 +124,7 @@ fn resolve(world: &mut World, name: &str, notes: &mut Vec<String>) -> Resolved {
             return Resolved::Component {
                 info: t.info,
                 id,
-                default: MakeDefault::Bytes(t.defaults),
+                default: DefaultValue::Runtime(t),
                 scratch,
             };
         }
@@ -170,7 +143,7 @@ fn resolve(world: &mut World, name: &str, notes: &mut Vec<String>) -> Resolved {
                 Some(scratch) => Resolved::Component {
                     info: reflected.info,
                     id: id(world),
-                    default: MakeDefault::Typed(default),
+                    default: DefaultValue::Written(default),
                     scratch,
                 },
                 None => Resolved::Skipped,

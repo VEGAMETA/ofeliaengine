@@ -37,7 +37,8 @@ pub use bundle::{Bundle, MAX_BUNDLE};
 pub use bytemuck;
 pub use commands::{Commands, PendingEntity, Target};
 pub use component::{
-    Component, ComponentDesc, ComponentId, Components, MAX_COMPONENT_ALIGN, Pod, RegisterError,
+    Component, ComponentDesc, ComponentId, Components, DropGlue, MAX_COMPONENT_ALIGN, Pod,
+    RegisterError,
 };
 /// Reflection (`engine_reflect`), re-exported for [`reflect_component!`].
 pub use engine_reflect as reflect;
@@ -47,8 +48,8 @@ pub use hierarchy::{ChildIter, Children, HierarchyError, Parent};
 pub use linkme;
 pub use query::{Changed, Fetch, Filter, Or, QueryIter, QueryState, ReadOnlyFetch, With, Without};
 pub use reflected::{
-    FieldMove, ReflectedKind, ReflectedType, Relayout, RuntimeType, add_runtime_type,
-    find_reflected, reflected_types, runtime_types, runtime_types_version,
+    DefaultValue, FieldMove, ReflectedKind, ReflectedType, Relayout, RuntimeType, TextField,
+    add_runtime_type, find_reflected, reflected_types, runtime_types, runtime_types_version,
 };
 pub use schedule::{
     Access, FnSystem, Res, ResMut, Schedule, System, SystemContext, SystemQuery, system,
