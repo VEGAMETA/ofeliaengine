@@ -46,6 +46,9 @@ declare extern type Quat with
     __mul: ((self: Quat, other: Quat) -> Quat) & ((self: Quat, other: vector) -> vector)
 end
 
+-- What a message (`send`) or a timer (`after`) carries.
+type Value = nil | boolean | number | string | vector | Entity
+
 -- What `has`, `add` and `remove` take: `Transform` (each component of the program is a
 -- global of its name), a script's `component` table, or a component's name.
 export type ComponentType = { name: string }
@@ -81,6 +84,9 @@ const ENTITY_MEMBERS: &str = r#"    -- Its `Name`, if it has one.
     function children(self): ((Entity, Entity?) -> Entity?, Entity, nil)
     -- The nearest of its descendants named `name` (its children first), or nil.
     function find_child(self, name: string): Entity?
+    -- Calls `hook` with these values (at most four) on each of its scripts that has it,
+    -- after the hook that sends returns.
+    function send(self, hook: string, ...: Value): ()
 "#;
 
 /// An entity's methods on `self` (`self:despawn()`).
@@ -90,6 +96,10 @@ const SELF_METHODS: &str = r#"    has: (self: any, component: ComponentType | st
     despawn: (self: any) -> (),
     children: (self: any) -> ((Entity, Entity?) -> Entity?, Entity, nil),
     find_child: (self: any, name: string) -> Entity?,
+    send: (self: any, hook: string, ...Value) -> (),
+    -- Calls `hook` on this script with these values (at most four) once `seconds` of game
+    -- time passed.
+    after: (self: any, seconds: number, hook: string, ...Value) -> (),
 "#;
 
 /// `Transform`'s methods on its views.

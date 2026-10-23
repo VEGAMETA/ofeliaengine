@@ -1361,3 +1361,41 @@ there, and see the script's file in the inspector.
   - the editor's checker takes it in strict mode, its `type Self =
     Script<typeof(Walker.props)>` too: the definitions export `Script<P>` (`P &
     ScriptSelf`) and `ComponentType` for annotations, as §5's examples write them.
+
+## As built (E7-5e1, 2026-10-23): messages and timers
+
+- **`e:send(hook, …)`** (and `self:send`) calls `hook` on every script of `e` whose
+  component's table has a function of that name, with the values given: at most four,
+  each nil, a boolean, a number, a string, a vector or an entity. The fast path checks
+  the count and the kinds, so its errors name the line.
+- **Delivery** (§7): a message waits in the VM's mailbox and is delivered after the hook
+  that sent it returns, in the order sent.
+  - Messages sent while delivering go in the same pass, up to 16 passes; the rest wait for
+    the next stage, and the log says so once.
+  - A message to a despawned entity is dropped. One that no script of its entity has a
+    function for is said once ("a message `x` reached Crate, and none of its scripts has
+    it").
+  - A script not started yet starts first.
+- **`self:after(seconds, hook, …)`** calls `hook` on this instance once that much game time
+  has passed: in ticks (`ceil(seconds / dt)`, one at least), at the start of a tick's
+  stage, before the contacts and the hooks. Timers of one tick go in the order set. A
+  timer whose instance went is dropped; one of a component moved to a new layout by a
+  reload follows it.
+- **A component with only its own functions** (handlers, no `on_*` hook) has instances too,
+  so messages and timers reach it.
+- **Nothing allocates in steady state:**
+  - the values are moved into a message and passed to the hook by reference, never cloned;
+  - the mailbox's lists keep their room;
+  - the host looks in the mailbox only when a send set its flag.
+  The zero-allocation test's relays send their partners three values and set a timer
+  every tick: 0 allocations in 600 ticks.
+- **Tests:**
+  - a message heard after its hook, not before;
+  - an echo sent while delivering, in the same pass;
+  - a timer due at the right tick, with its value;
+  - a loop of messages stopped at 16 passes a stage;
+  - a message no script hears;
+  - a table sent, and five values: errors at their lines;
+  - the editor's checker takes `send` and `after` in strict mode.
+- **Not in this step:** timers and messages in saves (E7-5f); `random`, `audio`,
+  `world.instantiate` (E7-5e2, E7-5e3).

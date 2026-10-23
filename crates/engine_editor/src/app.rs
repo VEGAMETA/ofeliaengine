@@ -19362,6 +19362,27 @@ return Walker
         );
         let found = luau.check("walker_input");
         assert!(found.is_empty(), "{found:?}");
+        // Messages and timers (E7-5e).
+        luau.set_source(
+            "bell",
+            "--!strict
+local Bell = component(\"Bell\", { rung = 0 })
+function Bell.on_tick(self, dt: number)
+    local other = world.find(\"Other\")
+    if other then
+        other:send(\"ring\", \"dong\", self.entity, 7)
+    end
+    self:send(\"echo\")
+    self:after(0.5, \"ring\", \"late\")
+end
+function Bell.ring(self, word: string)
+    print(word)
+end
+return Bell
+",
+        );
+        let found = luau.check("bell");
+        assert!(found.is_empty(), "{found:?}");
         // A field of the wrong type: an error where it is.
         luau.set_source(
             "bad",
