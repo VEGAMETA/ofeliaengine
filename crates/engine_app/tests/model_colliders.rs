@@ -3,7 +3,9 @@
 //! is asked for: level geometry by default, a box fitted to it for a prop, none when the
 //! rules turn it off, and cooked again each time the file is read again. Their bodies, from
 //! a game whose physics follows the scene: a prop falls onto a floor, a static model's body
-//! follows it when it moves and goes with it.
+//! follows it when it moves and goes with it. The player's own physics world
+//! (`PlayerSettings::physics`) does the same for a game without one, and its scripts query
+//! it (ADR 0114 E7-3).
 
 #![allow(clippy::unwrap_used, clippy::print_stdout, clippy::panic)]
 
@@ -300,5 +302,111 @@ fn models_bodies_follow_the_scene() {
     frames(&mut player, &mut game, 2);
     assert!(game.physics.model_body(floor).is_none());
     assert_eq!(down(&game), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A game with no physics of its own: the player's runs the scene.
+struct Bare;
+
+impl Game for Bare {
+    fn tick(&mut self, _world: &mut World, _dt: f32) {}
+}
+
+#[test]
+fn the_players_own_physics_runs_the_scene_and_its_scripts_query_it() {
+    let dir = std::env::temp_dir().join(format!("ofelia-own-physics-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    let baked = engine_app::bake::glb("Crate", &[cube()], &engine_app::grid_png());
+    let (mesh, material) = baked.parts[0].clone();
+    std::fs::write(dir.join("crate.glb"), &baked.bytes).unwrap();
+    std::fs::write(dir.join("crate.colliders.ron"), "(bodies: Dynamic)").unwrap();
+    // A script that looks down from above the crate: what it sees, and how far.
+    std::fs::write(
+        dir.join("scripts/eye.luau"),
+        r#"local Eye = component("Eye", { below = 0 })
+function Eye.on_tick(self, dt)
+    local e, point, normal, distance = physics.raycast(vector.create(0, 10, 0), vector.create(0, -1, 0), 100)
+    self.below = if e ~= nil and e.name == "Crate" then distance else -1
+end
+return Eye
+"#,
+    )
+    .unwrap();
+    let id = AssetMeta::ensure(&dir.join("crate.glb")).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("own physics test"),
+        window: Window::Offscreen {
+            width: 160,
+            height: 90,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        physics: Some(PhysicsSettings {
+            threads: 0,
+            ..PhysicsSettings::default()
+        }),
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    assert!(player.physics().is_some(), "the player's own world");
+    let mut paths = AssetPaths::new();
+    paths.insert(AssetRef::file(id), "crate.glb");
+    player.assets_mut().add_paths(&paths);
+    player.set_frame_time(Some(1.0 / 60.0));
+    let world = player.world_mut();
+    world.spawn((
+        SceneId::new(),
+        Transform::from_xyz(0.0, -0.5, 0.0).with_scale(Vec3::new(10.0, 1.0, 10.0)),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    let crate_ = world.spawn((
+        SceneId::new(),
+        Name::new("Crate"),
+        Transform::from_xyz(0.0, 3.0, 0.0),
+        Model::new(AssetRef::part(id, &mesh), AssetRef::part(id, &material)),
+    ));
+    let eye = world.spawn((SceneId::new(), Transform::IDENTITY));
+    assert!(
+        player
+            .scripts()
+            .is_some_and(|s| s.component("Eye").is_some())
+    );
+    let scripts = player.scripts().unwrap();
+    let eye_component = scripts.component("Eye").unwrap();
+    assert!(
+        player.add_script(eye, "Eye"),
+        "the script's component on the eye"
+    );
+    let mut game = Bare;
+    for _ in 0..240 {
+        player.frame(&mut game).unwrap();
+    }
+    let y = player
+        .world_mut()
+        .get::<Transform>(crate_)
+        .unwrap()
+        .translation
+        .y;
+    println!("the crate rests at {y}");
+    assert!((y - 0.5).abs() < 0.05, "fallen onto the floor: {y}");
+    // The script saw the crate below it: its top 9 m down from the eye at 10.
+    let world = player.world_mut();
+    let base = world.get_raw(eye, eye_component).unwrap().as_ptr();
+    // SAFETY: Eye's one prop, an f32 at offset 0.
+    let below = unsafe { base.cast::<f32>().read_unaligned() };
+    println!("the eye sees the crate {below} m below");
+    assert!((below - 9.0).abs() < 0.1, "{below}");
     let _ = std::fs::remove_dir_all(&dir);
 }

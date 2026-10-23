@@ -578,6 +578,10 @@ pub struct Player {
     steps: u32,
     /// The game's last error in [`Game::before_ticks`], said once.
     scene_error: Option<String>,
+    /// The player's own physics world (`PlayerSettings::physics`, ADR 0114 E7-3), and its
+    /// last error, said once.
+    own_physics: Option<crate::ScenePhysics>,
+    physics_error: Option<String>,
 }
 
 /// The view in a window of its own (ADR 0107 E3-4: the editor's Play): the scene drawn
@@ -1202,6 +1206,8 @@ impl Player {
             previews: crate::previews::Previews::new(settings.frames_in_flight),
             steps: 0,
             scene_error: None,
+            own_physics: None,
+            physics_error: None,
             assets: assets(settings),
             blockout: crate::Blockout::new(),
             scripts: None,
@@ -1241,9 +1247,30 @@ impl Player {
         if let Some(scene) = &settings.scene {
             player.load_scene(scene)?;
         }
+        // The player's own physics world, when the game asks for one (ADR 0114 E7-3): the
+        // pack's bodies now, the scene's models and brushes before every frame's ticks.
+        if let Some(physics) = &settings.physics {
+            let mut own = crate::ScenePhysics::new(physics)?;
+            if let Some(pack) = &settings.pack {
+                let jobs = Arc::clone(&player.jobs);
+                let instances = player.scene_info.instances.clone();
+                own.load_pack(pack, &jobs, &mut player.runtime.world, &instances)?;
+            }
+            player.own_physics = Some(own);
+        }
         // Saved now as well as at exit: a crash does not cost the next start its cache.
         player.save_pipeline_cache();
         Ok(player)
+    }
+
+    /// The player's own physics world (`PlayerSettings::physics`), if it has one.
+    pub fn physics(&self) -> Option<&crate::ScenePhysics> {
+        self.own_physics.as_ref()
+    }
+
+    /// The player's own physics world, to add bodies of the game's own or query it.
+    pub fn physics_mut(&mut self) -> Option<&mut crate::ScenePhysics> {
+        self.own_physics.as_mut()
     }
 
     /// Loads a scene file (ADR 0108; a path relative to `PlayerSettings::project`) into the
@@ -2609,6 +2636,17 @@ impl Player {
                     }
                 }
             }
+            // The player's own physics follows the scene too (ADR 0114 E7-3).
+            if let Some(own) = &mut self.own_physics {
+                let mut scene = crate::SceneParts {
+                    world: &mut self.runtime.world,
+                    assets: &mut self.assets,
+                    blockout: &self.blockout,
+                };
+                if let Err(e) = own.sync_scene(&mut scene) {
+                    say_once(&mut self.physics_error, &e.to_string());
+                }
+            }
         }
         // Ticks, presentation, interpolation (ADR 0064).
         // The network session's requests (host, join, leave) at the frame's start (ADR 0106).
@@ -2623,6 +2661,10 @@ impl Player {
             // Scripts run in both stages, before the game's own hooks (ADR 0114 §7), only
             // while the world simulates.
             let scripts_cell = RefCell::new(self.scripts.as_mut());
+            // The player's own physics world, stepped after each tick's game hook and
+            // interpolated in the presentation; scripts query the game's, else this one.
+            let own_physics = RefCell::new(self.own_physics.as_mut());
+            let physics_error = &mut self.physics_error;
             let frame_dt = elapsed as f32;
             let timing = &mut self.timing;
             let mut net = self.net.as_deref_mut();
@@ -2640,8 +2682,13 @@ impl Player {
                 if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                     input.sample_frame(Instant::now());
                 }
+                if let Some(own) = own_physics.borrow_mut().as_mut() {
+                    own.interpolate(world, alpha);
+                }
                 if simulating && let Some(scripts) = scripts_cell.borrow_mut().as_mut() {
-                    scripts.frame(world, frame_dt, alpha);
+                    let game = game_cell.borrow();
+                    let own = own_physics.borrow();
+                    scripts.frame_with(world, frame_dt, alpha, game.physics().or(own.as_deref()));
                 }
                 game_cell.borrow_mut().present(world, alpha);
                 // Models (ADR 0108): their meshes and materials reach the GPU this frame,
@@ -2702,9 +2749,16 @@ impl Player {
                         }
                         timing.advance(world, dt);
                         if let Some(scripts) = scripts_cell.borrow_mut().as_mut() {
-                            scripts.tick(world, dt);
+                            let game = game_cell.borrow();
+                            let own = own_physics.borrow();
+                            scripts.tick_with(world, dt, game.physics().or(own.as_deref()));
                         }
                         game_cell.borrow_mut().tick(world, dt);
+                        if let Some(own) = own_physics.borrow_mut().as_mut()
+                            && let Err(e) = own.step(world, dt)
+                        {
+                            say_once(physics_error, &e.to_string());
+                        }
                         // Hosting: the pawns given, the events, the snapshots out.
                         if let Some(host) = net.as_mut() {
                             host.host_tick_end(world, Instant::now());
@@ -2765,7 +2819,10 @@ impl Player {
         self.sound.update(
             &mut self.runtime.world,
             main.as_ref().map(|m| &m.camera),
-            game.acoustics(),
+            game.acoustics().or(self
+                .own_physics
+                .as_ref()
+                .map(|p| p.backend() as &dyn engine_physics::PhysicsBackend)),
             elapsed,
             self.simulating,
         );
@@ -4235,4 +4292,13 @@ fn assets(settings: &PlayerSettings) -> crate::Assets {
         }
     }
     assets
+}
+
+/// `said` in the log as a warning about the player's physics, unless it was the last one
+/// (`last` keeps it).
+fn say_once(last: &mut Option<String>, said: &str) {
+    if last.as_deref() != Some(said) {
+        log::warn!(target: "engine_app::player", "the player's physics: {said}");
+        *last = Some(said.to_owned());
+    }
 }

@@ -701,6 +701,16 @@ pub trait PhysicsBackend {
     fn set_body_gravity(&mut self, body: BodyId, gravity: GravityMode);
     /// Whether the body is awake.
     fn is_active(&self, body: BodyId) -> bool;
+    /// The body's user data ([`BodyDesc::user_data`]); 0 for a body that is gone, or a
+    /// backend that keeps none.
+    fn user_data(&self, body: BodyId) -> u64 {
+        let _ = body;
+        0
+    }
+    /// Sets the body's user data (a backend that keeps none ignores it).
+    fn set_user_data(&mut self, body: BodyId, data: u64) {
+        let _ = (body, data);
+    }
 
     /// Reads many transforms at once (for the renderer / ECS sync). `out` has one entry
     /// per body; missing bodies leave their entry unchanged.

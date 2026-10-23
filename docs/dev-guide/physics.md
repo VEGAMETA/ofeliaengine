@@ -448,6 +448,24 @@ is made the same way: by the rules beside its file (`yard.colliders.ron` next to
 - A built-in mesh's collider is its own shape: the cube a box, the sphere a sphere.
 - The editor draws them (View: Colliders, Alt+C), colored by motion.
 
+### The player's own physics world
+
+A game that runs no physics of its own (one made of scripts, say) can let the player run
+one: `PlayerSettings { physics: Some(PhysicsSettings::default()), .. }`. The player then:
+- loads the pack's bodies into it, and keeps the scene's models and brushes in step before
+  every frame's ticks (`sync_scene`);
+- steps it after each `Game::tick`, and moves its bodies' entities smoothly between steps;
+- lets scripts query it (`physics.raycast`), and sound travel through it.
+
+`player.physics_mut()` reaches it, to add bodies of the game's own. A game that owns a
+`ScenePhysics` gives it to its scripts instead: `fn physics(&self) -> Option<&ScenePhysics>
+{ Some(&self.physics) }` in its `Game`.
+
+**Bodies name their entities.** A model's body, a brush group's and a pack's moving body
+carry their entity in their user data: a query's hit gives it back
+(`engine_physics::ecs::user_data_entity(hit.user_data)`, or `physics.entity_of(body)`).
+Give a body of your own `user_data: entity_user_data(e)` and scripts see it as `e`.
+
 ### Loading them
 
 ```rust

@@ -1249,6 +1249,23 @@ impl PhysicsBackend for JoltBackend {
             && unsafe { JPH_BodyInterface_IsActive(self.body_interface, raw) }
     }
 
+    fn user_data(&self, body: BodyId) -> u64 {
+        let raw = body.0 as JPH_BodyID;
+        if !self.bodies.contains_key(&raw) {
+            return 0;
+        }
+        // SAFETY: checked live body; read outside a step on the owning thread.
+        unsafe { JPH_BodyInterface_GetUserData(self.body_interface, raw) }
+    }
+
+    fn set_user_data(&mut self, body: BodyId, data: u64) {
+        let raw = body.0 as JPH_BodyID;
+        if self.bodies.contains_key(&raw) {
+            // SAFETY: checked live body; written outside a step on the owning thread.
+            unsafe { JPH_BodyInterface_SetUserData(self.body_interface, raw, data) };
+        }
+    }
+
     fn create_constraint(&mut self, desc: &ConstraintDesc) -> Result<ConstraintId, PhysicsError> {
         let (a, b) = match *desc {
             ConstraintDesc::Fixed { a, b }

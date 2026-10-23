@@ -35,6 +35,10 @@
 //!   hooks and never saved.
 //! - **The libraries of this step:**
 //!   - `world.find(name)`;
+//!   - `physics.raycast(origin, direction, max_distance, filter?)`,
+//!     `physics.overlap_sphere(center, radius, filter?)` and `physics.filter(layers)`, on
+//!     the game's physics world ([`crate::Game::physics`]) or the player's own
+//!     (`PlayerSettings::physics`; ADR 0114 E7-3);
 //!   - `time.now()`, `time.tick()`, `time.dt()`;
 //!   - `quat.identity()`, `quat.axis_angle(axis, angle)`, `quat.euler(x, y, z)`;
 //!   - `prop.number(default, { min, max, step, tooltip })`, `prop.integer`, `prop.entity`;
@@ -135,6 +139,8 @@ thread_local! {
     /// The world, open to the scripts for the length of a stage (null outside): a
     /// thread-local, not the VM's app data, as every field's access reads it.
     static OPEN_WORLD: core::cell::Cell<*mut World> = const { core::cell::Cell::new(core::ptr::null_mut()) };
+    /// The physics world scripts query in this stage (null: none).
+    static OPEN_PHYSICS: core::cell::Cell<*const crate::ScenePhysics> = const { core::cell::Cell::new(core::ptr::null()) };
 }
 
 /// The components scripts may name, by their stable names: the program's reflected ones
@@ -623,11 +629,16 @@ impl Scripts {
     /// A fixed tick's stage (before the game's own): instances that came are started, then
     /// every instance's `on_tick`, in their entities' order.
     pub fn tick(&mut self, world: &mut World, dt: f32) {
+        self.tick_with(world, dt, None);
+    }
+
+    /// [`Self::tick`], scripts querying `physics` (`physics.raycast`; ADR 0114 E7-3).
+    pub fn tick_with(&mut self, world: &mut World, dt: f32, physics: Option<&crate::ScenePhysics>) {
         engine_profiler::zone!("scripts::tick");
         self.clock.ticks += 1;
         self.clock.dt = dt;
         self.vm.lua().set_app_data(self.clock);
-        self.open(world);
+        self.open(world, physics);
         self.follow(world);
         let ids: Vec<(u32, u32)> = self.instances.keys().copied().collect();
         for key in ids {
@@ -638,11 +649,22 @@ impl Scripts {
 
     /// A frame's stage, before its presentation: every instance's `on_frame`.
     pub fn frame(&mut self, world: &mut World, dt: f32, alpha: f32) {
+        self.frame_with(world, dt, alpha, None);
+    }
+
+    /// [`Self::frame`], scripts querying `physics`.
+    pub fn frame_with(
+        &mut self,
+        world: &mut World,
+        dt: f32,
+        alpha: f32,
+        physics: Option<&crate::ScenePhysics>,
+    ) {
         engine_profiler::zone!("scripts::frame");
         if !self.components.iter().any(|c| c.hooks.frame.is_some()) {
             return;
         }
-        self.open(world);
+        self.open(world, physics);
         self.follow(world);
         let ids: Vec<(u32, u32)> = self.instances.keys().copied().collect();
         for key in ids {
@@ -651,16 +673,16 @@ impl Scripts {
         self.close();
     }
 
-    /// The world open to the scripts until [`Self::close`].
-    fn open(&mut self, world: &mut World) {
-        let lua = self.vm.lua();
-        let _ = lua;
+    /// The world (and `physics`, if any) open to the scripts until [`Self::close`].
+    fn open(&mut self, world: &mut World, physics: Option<&crate::ScenePhysics>) {
         OPEN_WORLD.set(world);
+        OPEN_PHYSICS.set(physics.map_or(core::ptr::null(), core::ptr::from_ref));
         script_views::open(&mut self.tables);
     }
 
     fn close(&self) {
         OPEN_WORLD.set(core::ptr::null_mut());
+        OPEN_PHYSICS.set(core::ptr::null());
         script_views::close();
     }
 
@@ -1051,6 +1073,22 @@ fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_c_function(script_views::world_find)?
     })?;
     globals.set("world", world)?;
+    let physics = lua.create_table()?;
+    physics.set("raycast", lua.create_function(raycast)?)?;
+    physics.set("overlap_sphere", lua.create_function(overlap_sphere)?)?;
+    physics.set(
+        "filter",
+        lua.create_function(|_, layers: Table| {
+            let names = layers
+                .sequence_values::<String>()
+                .collect::<mlua::Result<Vec<_>>>()?;
+            Ok(PhysicsFilter {
+                names,
+                resolved: core::cell::Cell::new(None),
+            })
+        })?,
+    )?;
+    globals.set("physics", physics)?;
     let time = lua.create_table()?;
     time.set(
         "now",
@@ -1240,6 +1278,138 @@ fn prop_of(component: &str, name: String, value: Value) -> mlua::Result<Prop> {
         default,
         attrs,
         offset: 0,
+    })
+}
+
+/// The physics world scripts query in this stage, or why there is none.
+fn open_physics() -> mlua::Result<*const crate::ScenePhysics> {
+    let p = OPEN_PHYSICS.get();
+    if p.is_null() {
+        return Err(mlua::Error::runtime(
+            "no physics world: the game gives none (`Game::physics`), and \
+             `PlayerSettings::physics` asks for none",
+        ));
+    }
+    Ok(p)
+}
+
+/// `physics.filter(layers)`: the collision layers a query sees, by name, made once at a
+/// module's top and resolved against a physics world's layer names the first time it is
+/// used there.
+struct PhysicsFilter {
+    names: Vec<String>,
+    /// The world it was resolved for (its address), and the layers' bits.
+    resolved: core::cell::Cell<Option<(usize, u64)>>,
+}
+
+impl UserData for PhysicsFilter {}
+
+/// What query `filter` (a [`PhysicsFilter`], or none: every layer) sees in `physics`.
+fn query_filter(
+    physics: &crate::ScenePhysics,
+    filter: Option<&AnyUserData>,
+) -> mlua::Result<engine_physics::QueryFilter> {
+    let mut out = engine_physics::QueryFilter::default();
+    let Some(filter) = filter else {
+        return Ok(out);
+    };
+    let filter = filter.borrow::<PhysicsFilter>()?;
+    let world = core::ptr::from_ref(physics) as usize;
+    let bits = match filter.resolved.get() {
+        Some((at, bits)) if at == world => bits,
+        _ => {
+            let mut bits = 0u64;
+            for name in &filter.names {
+                let layer = physics.settings().layer(name).ok_or_else(|| {
+                    mlua::Error::runtime(format!(
+                        "no collision layer `{name}` (PhysicsSettings::layer_names)"
+                    ))
+                })?;
+                bits |= 1 << layer.0;
+            }
+            filter.resolved.set(Some((world, bits)));
+            bits
+        }
+    };
+    out.layers = bits;
+    Ok(out)
+}
+
+/// Entity `e` as a script's value.
+fn entity_value(lua: &Lua, e: Entity) -> mlua::Result<Value> {
+    // SAFETY: room for the one value pushed, returned.
+    unsafe { lua.exec_raw::<Value>((), |state| script_views::push_entity(state, e)) }
+}
+
+/// `physics.raycast(origin, direction, max_distance, filter?)`: the first body along the
+/// ray, as its entity (nil for a body without one), the hit's point and normal, and its
+/// distance; nothing when it hits nothing.
+fn raycast(
+    lua: &Lua,
+    (origin, direction, max, filter): (Vector, Vector, f32, Option<AnyUserData>),
+) -> mlua::Result<mlua::MultiValue> {
+    // SAFETY: the stage's physics world (`open_physics`), read within this callback only.
+    let physics = unsafe { &*open_physics()? };
+    let Some(direction) = Vec3::new(direction.x(), direction.y(), direction.z()).try_normalize()
+    else {
+        return Err(mlua::Error::runtime(
+            "physics.raycast: a direction of length 0",
+        ));
+    };
+    // No length (or not a number): nothing to hit.
+    if max.is_nan() || max <= 0.0 {
+        return Ok(mlua::MultiValue::new());
+    }
+    let ray = engine_physics::Ray {
+        origin: Vec3::new(origin.x(), origin.y(), origin.z()),
+        direction: direction * max,
+    };
+    let filter = query_filter(physics, filter.as_ref())?;
+    let Some(hit) = engine_physics::PhysicsBackend::raycast(physics.backend(), &ray, filter) else {
+        return Ok(mlua::MultiValue::new());
+    };
+    let entity = match engine_physics::ecs::user_data_entity(hit.user_data) {
+        Some(e) => entity_value(lua, e)?,
+        None => Value::Nil,
+    };
+    let vector = |v: Vec3| Value::Vector(Vector::new(v.x, v.y, v.z));
+    Ok(mlua::MultiValue::from_vec(vec![
+        entity,
+        vector(hit.point),
+        vector(hit.normal),
+        Value::Number(f64::from(hit.fraction * max)),
+    ]))
+}
+
+/// `physics.overlap_sphere(center, radius, filter?)`: the entities whose bodies overlap the
+/// sphere, for a `for` loop (each once, in the bodies' order).
+fn overlap_sphere(
+    lua: &Lua,
+    (center, radius, filter): (Vector, f32, Option<AnyUserData>),
+) -> mlua::Result<Function> {
+    // SAFETY: the stage's physics world (`open_physics`), read within this callback only.
+    let physics = unsafe { &*open_physics()? };
+    let filter = query_filter(physics, filter.as_ref())?;
+    let mut bodies = Vec::new();
+    engine_physics::PhysicsBackend::overlap_sphere(
+        physics.backend(),
+        Vec3::new(center.x(), center.y(), center.z()),
+        radius.max(0.0),
+        filter,
+        &mut bodies,
+    );
+    let mut entities: Vec<Entity> = Vec::with_capacity(bodies.len());
+    for body in bodies {
+        if let Some(e) = physics.entity_of(body)
+            && !entities.contains(&e)
+        {
+            entities.push(e);
+        }
+    }
+    let next = core::cell::RefCell::new(entities.into_iter());
+    lua.create_function(move |lua, ()| match next.borrow_mut().next() {
+        Some(e) => entity_value(lua, e),
+        None => Ok(Value::Nil),
     })
 }
 
@@ -2070,6 +2240,107 @@ return Ghost
         ] {
             assert!(reported.contains(&line), "{line} in {reported:?}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scripts_query_the_physics_world_and_its_bodies_name_their_entities() {
+        use engine_physics::ecs::entity_user_data;
+        use engine_physics::{BodyDesc, PhysicsBackend, PhysicsSettings, ShapeDesc};
+        let dir = project(
+            "physics",
+            &[(
+                "eye.luau",
+                r#"local Eye = component("Eye", { floor = false, distance = 0, near = 0, moving = 0, missed = false })
+local moving = physics.filter({ "Moving" })
+function Eye.on_tick(self, dt)
+    local e, point, normal, distance = physics.raycast(vector.create(0, 10, 0), vector.create(0, -1, 0), 100)
+    self.floor = e ~= nil and e.name == "Floor" and normal.y > 0.99 and point.y > 0.99
+    self.distance = distance
+    local n = 0
+    for other in physics.overlap_sphere(vector.create(0, 1, 0), 3) do
+        n += 1
+    end
+    self.near = n
+    local m = physics.raycast(vector.create(3, 10, 0), vector.create(0, -1, 0), 100, moving)
+    self.moving = if m ~= nil and m.name == "Ball" then 1 else 0
+    self.missed = physics.raycast(vector.create(50, 10, 0), vector.create(0, -1, 0), 100) == nil
+end
+return Eye
+"#,
+            )],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let mut physics = crate::ScenePhysics::new(&PhysicsSettings {
+            threads: 0,
+            ..PhysicsSettings::default()
+        })
+        .unwrap();
+        // A floor 1 m thick, its top at 1 (static: layer 0), and a ball above it at x = 3
+        // on the moving layer, each naming its entity.
+        let floor = world.spawn((Name::new("Floor"), Transform::IDENTITY));
+        let ball = world.spawn((Name::new("Ball"), Transform::from_xyz(3.0, 3.0, 0.0)));
+        let w = physics.physics();
+        let slab = w
+            .create_shape(&ShapeDesc::Box {
+                half_extents: Vec3::new(5.0, 0.5, 5.0),
+            })
+            .unwrap();
+        w.create_body(&BodyDesc {
+            user_data: entity_user_data(floor),
+            ..BodyDesc::fixed(slab, Vec3::new(0.0, 0.5, 0.0))
+        })
+        .unwrap();
+        let round = w.create_shape(&ShapeDesc::Sphere { radius: 0.5 }).unwrap();
+        w.create_body(&BodyDesc {
+            user_data: entity_user_data(ball),
+            gravity: engine_physics::GravityMode::Scaled(0.0),
+            ..BodyDesc::dynamic(round, Vec3::new(3.0, 3.0, 0.0))
+        })
+        .unwrap();
+        let eye = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, eye, "Eye");
+        scripts.tick_with(&mut world, 0.1, Some(&physics));
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let id = scripts.component("Eye").unwrap();
+        let info = world.components().type_info(id).unwrap();
+        let TypeKind::Struct(fields) = &info.kind else {
+            unreachable!()
+        };
+        let at = |name: &str| fields.iter().find(|f| f.name == name).unwrap().offset;
+        let base = world.get_raw(eye, id).unwrap().as_ptr();
+        // SAFETY: Eye's props at their offsets: booleans and f32s.
+        unsafe {
+            assert_eq!(
+                base.add(at("floor")).read(),
+                1,
+                "the floor's entity, point and normal"
+            );
+            let distance = base.add(at("distance")).cast::<f32>().read_unaligned();
+            assert!((distance - 9.0).abs() < 1e-3, "{distance}");
+            assert_eq!(
+                base.add(at("near")).cast::<f32>().read_unaligned(),
+                1.0,
+                "the floor"
+            );
+            assert_eq!(
+                base.add(at("moving")).cast::<f32>().read_unaligned(),
+                1.0,
+                "the ball"
+            );
+            assert_eq!(base.add(at("missed")).read(), 1, "nothing out there");
+        }
+        // Without a physics world: the error says where one comes from.
+        scripts.tick(&mut world, 0.1);
+        assert!(
+            scripts
+                .reported
+                .iter()
+                .any(|r| r.contains("no physics world")),
+            "{:?}",
+            scripts.reported
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

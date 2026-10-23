@@ -333,8 +333,10 @@ your ticks; joined, the client runs them (its predictions); offline, nothing cha
 3. The frame waits for its slot and its swapchain image.
 4. `Game::before_ticks` runs while the world simulates, with the scene's parts outside
    the world (its assets, its brushes): the game's physics follows them there
-   ([physics.md](physics.md#models-in-scene-files)).
-5. The due ticks run: `Game::tick`, then transforms propagate to the GPU scene.
+   ([physics.md](physics.md#models-in-scene-files)), as the player's own does
+   (`PlayerSettings::physics`).
+5. The due ticks run: scripts' `on_tick`, `Game::tick`, the player's own physics step,
+   then transforms propagate to the GPU scene.
 6. `Game::present` runs (the camera, from the latest input).
 7. `Game::animate` runs (skinning matrices); the player places the skinned meshes and
    mirrors the probes and the GI volume. Then sound follows the sources and the listener,

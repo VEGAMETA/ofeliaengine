@@ -21,12 +21,13 @@ use std::fmt::Write as _;
 
 /// Names the definitions give their own types; a component of one of these names is left
 /// out (it would shadow them).
-const RESERVED: [&str; 5] = [
+const RESERVED: [&str; 6] = [
     "Entity",
     "Quat",
     "ScriptSelf",
     "ScriptComponent",
     "PropOptions",
+    "PhysicsFilter",
 ];
 
 /// The definitions' first part: what does not depend on the program's components.
@@ -81,6 +82,21 @@ declare prop: {
 declare world: {
     -- The entity with that `Name` (the first made, of several), or nil.
     find: (name: string) -> Entity?,
+}
+
+-- The collision layers a query sees, by name: made once, at a module's top.
+declare extern type PhysicsFilter with
+end
+
+declare physics: {
+    -- The first body along the ray, at most `max_distance` away: its entity (nil for a body
+    -- without one), the hit's point and normal, and its distance. Nothing when it hits
+    -- nothing.
+    raycast: (origin: vector, direction: vector, max_distance: number, filter: PhysicsFilter?) -> (Entity?, vector?, vector?, number?),
+    -- The entities whose bodies overlap the sphere, for a `for` loop.
+    overlap_sphere: (center: vector, radius: number, filter: PhysicsFilter?) -> () -> Entity?,
+    -- The layers named so (`PhysicsSettings::layer_names`).
+    filter: (layers: { string }) -> PhysicsFilter,
 }
 
 declare time: {
