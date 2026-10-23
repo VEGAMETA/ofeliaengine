@@ -853,14 +853,20 @@ decisions). In short:
 - **After a merge.**
   - Remove the worktree (look for links first: never junction the main checkout's
     folders, give scenes via `ENGINE_TEST_ASSETS`) and its target dir.
-  - `tools/clean.ps1` frees stale build outputs. A few days of work leave most of the
-    garbage within its default window of 3 days, so run it with `-Days 1`. It does not
-    go into the nested tracy and loom build directories: give each one alone
-    (`-Targets C:\cargo-target\ofeliaengine	racy`; several in one `-File` argument do
-    not parse). On 2026-10-18 that took `C:/cargo-target/ofeliaengine` from 168 to
-    37 GB: incremental caches 94 GB, superseded crate copies, the tracy directory 22 GB.
-    What it keeps (each crate's newest build, anything written in the last day) rebuilds
-    nothing.
+  - `tools/clean.ps1` frees stale build outputs, after every merge. A few days of work
+    leave most of the garbage within its default window of 3 days, so run it with
+    `-Days 1`.
+    - It does not go into the nested tracy and loom build directories: give each one
+      alone (`-Targets C:\cargo-target\ofeliaengine\tracy`; several in one `-File`
+      argument do not parse).
+    - What it keeps (each crate's newest build, anything written in the last day)
+      rebuilds nothing the last day's builds used.
+    - After a build of everything (a change to the hack crate or to a profile, a new
+      toolchain), `-Days 0.05` removes what that build did not write.
+    - On 2026-10-18 it took `C:/cargo-target/ofeliaengine` from 168 to 37 GB:
+      incremental caches 94 GB, superseded crate copies, the tracy directory 22 GB.
+    - Five days without it took `C:\cargo-target` to 188.5 GB, and `-Days 1` freed
+      131.6 GB (2026-10-23).
 - **Backups.** Everything is pushed: agents push after every commit. When the usage limit
   stops agents, the coordinator snapshots their uncommitted work to `backup/wip*`
   branches, then resumes them by message.
@@ -1102,7 +1108,11 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    40-58 s → 11-15 s): 632 → 141 s with nothing changed; the perf step (ADR 0062 addendum:
    runs a round at a time, a scene with a slower pass measured again, 100 frames per run,
    baselines from median runs, a 12 s wait for a quiet CPU instead of 2 × 2 min) 749 →
-   237 s: the gate `-Gpu -Perf` 901 → 400 s. Left: sccache for agents' worktrees (when
+   237 s: the gate `-Gpu -Perf` 901 → 400 s. On 2026-10-23 (#378) a package's own build
+   was found making copies of most of the workspace's builds in 88 of 96 cases (seven
+   dependencies' features that the drift check missed, and Cargo's "debug info when
+   possible" for what build scripts use). The hack crate and the dev profile fix them:
+   0 of 96. Left: sccache for agents' worktrees (when
    agents run again), and a study of the Radeon's variance:
    - the shadow pass (and bloom) read 20–27 % slower in a few scenes for minutes at a time,
      in every round, with the CPU quiet, then normal again (2026-10-10). Work on the CPU

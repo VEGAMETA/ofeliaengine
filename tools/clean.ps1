@@ -5,16 +5,21 @@
 #
 #   powershell -File tools\clean.ps1                 # target\ and the agents' targets, 3 days
 #   powershell -File tools\clean.ps1 -Days 7 -DryRun # show what would go
+#   powershell -File tools\clean.ps1 -Days 0.05      # after a build of everything: what it
+#                                                   # did not write in 72 minutes goes
 #   powershell -File tools\clean.ps1 -Targets D:\t1,D:\t2
 #
 # In every profile directory (debug, release, profiling, ...):
 # - incremental\<crate>-<hash>: removed when nothing in it was written for -Days days;
-# - deps\: of the files of one crate (same name, different hashes) the newest hash stays,
-#   older hashes not written for -Days days are removed.
+# - deps\ and examples\: of the files of one crate (same name, different hashes) the newest
+#   hash stays, older hashes not written for -Days days are removed;
+# - build\<package>-<hash>: of one package's compiled build scripts, and of what their runs
+#   made (out\, output), the newest stays, older ones not written for -Days days are
+#   removed.
 # Directories of worktrees that no longer exist (..\ofeliaengine-wt\<name>-target whose
 # <name> worktree is gone) are removed whole.
 param(
-    [int]$Days = 3,
+    [double]$Days = 3,
     [string[]]$Targets = @(),
     [switch]$DryRun
 )
@@ -42,6 +47,48 @@ function Newest-Write($item) {
     if ($newest) { $newest.LastWriteTime } else { $item.LastWriteTime }
 }
 
+# `libfoo-0123abcd.rlib`, `foo-0123abcd.exe`, `foo-0123abcd.dll.lib`, ...: grouped by crate
+# name, then by hash; of each crate's, the newest hash stays.
+function Clean-Hashed([string]$dir) {
+    if (-not (Test-Path $dir)) { return }
+    $pattern = '^(.+)-([0-9a-f]{16})(\.[A-Za-z0-9.]+)?$'
+    $files = Get-ChildItem -LiteralPath $dir -File -Force |
+        Where-Object { $_.Name -match $pattern } |
+        ForEach-Object {
+            $null = $_.Name -match $pattern
+            [pscustomobject]@{ File = $_; Crate = $Matches[1]; Hash = $Matches[2] }
+        }
+    foreach ($crate in $files | Group-Object Crate) {
+        $hashes = $crate.Group | Group-Object Hash | ForEach-Object {
+            [pscustomobject]@{
+                Files = $_.Group.File
+                Newest = ($_.Group.File | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
+            }
+        } | Sort-Object Newest -Descending
+        foreach ($old in $hashes | Select-Object -Skip 1) {
+            if ($old.Newest -lt $cutoff) { $old.Files | ForEach-Object { Remove-Entry $_ } }
+        }
+    }
+}
+
+# `build\<package>-<hash>`: a compiled build script, or what one run of it made (`output`,
+# `out\`): grouped by package and kind; of each group, the newest stays.
+function Clean-BuildScripts([string]$dir) {
+    if (-not (Test-Path $dir)) { return }
+    $entries = Get-ChildItem -LiteralPath $dir -Directory -Force |
+        Where-Object { $_.Name -match '^(.+)-([0-9a-f]{16})$' } |
+        ForEach-Object {
+            $null = $_.Name -match '^(.+)-([0-9a-f]{16})$'
+            $kind = if (Test-Path -LiteralPath (Join-Path $_.FullName 'output')) { 'run' } else { 'script' }
+            [pscustomobject]@{ Dir = $_; Group = "$($Matches[1]) $kind"; Newest = Newest-Write $_ }
+        }
+    foreach ($group in $entries | Group-Object Group) {
+        foreach ($old in $group.Group | Sort-Object Newest -Descending | Select-Object -Skip 1) {
+            if ($old.Newest -lt $cutoff) { Remove-Entry $old.Dir }
+        }
+    }
+}
+
 function Clean-Profile([string]$dir) {
     $incremental = Join-Path $dir 'incremental'
     if (Test-Path $incremental) {
@@ -49,28 +96,9 @@ function Clean-Profile([string]$dir) {
             if ((Newest-Write $entry) -lt $cutoff) { Remove-Entry $entry }
         }
     }
-    $deps = Join-Path $dir 'deps'
-    if (Test-Path $deps) {
-        # `libfoo-0123abcd.rlib`, `foo-0123abcd.exe`, `foo-0123abcd.d`, ...: group by crate
-        # name, then by hash.
-        $files = Get-ChildItem -LiteralPath $deps -File -Force |
-            Where-Object { $_.BaseName -match '^(.+)-([0-9a-f]{16})$' } |
-            ForEach-Object {
-                $null = $_.BaseName -match '^(.+)-([0-9a-f]{16})$'
-                [pscustomobject]@{ File = $_; Crate = $Matches[1]; Hash = $Matches[2] }
-            }
-        foreach ($crate in $files | Group-Object Crate) {
-            $hashes = $crate.Group | Group-Object Hash | ForEach-Object {
-                [pscustomobject]@{
-                    Files = $_.Group.File
-                    Newest = ($_.Group.File | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
-                }
-            } | Sort-Object Newest -Descending
-            foreach ($old in $hashes | Select-Object -Skip 1) {
-                if ($old.Newest -lt $cutoff) { $old.Files | ForEach-Object { Remove-Entry $_ } }
-            }
-        }
-    }
+    Clean-Hashed (Join-Path $dir 'deps')
+    Clean-Hashed (Join-Path $dir 'examples')
+    Clean-BuildScripts (Join-Path $dir 'build')
 }
 
 function Clean-Target([string]$target) {

@@ -90,6 +90,15 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
+# Build scripts, proc macros and their dependencies: no debug info, always (ADR 0077's
+# addendum of 2026-10-23). Cargo's default, "no debug info when possible", keeps it for a
+# crate the build's own code also uses, so that one build serves both: which crates those
+# are depends on the packages a build selects. unicode-ident, under proc-macro2 and also
+# under ron (engine_assets), gave every build without engine_assets a copy of its own of
+# every proc macro and of every crate above them.
+[profile.dev.build-override]
+debug = false
+
 # What `cargo test` and cargo-nextest build: line tables only (file and line in panics and
 # backtraces, no variables in a debugger). A third of the debug info to write: rebuilding
 # every test after a change in engine_core went 84 -> 56 s on ref-1 (ADR 0077). Debug a test
