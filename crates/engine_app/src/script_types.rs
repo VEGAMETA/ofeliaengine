@@ -21,13 +21,14 @@ use std::fmt::Write as _;
 
 /// Names the definitions give their own types; a component of one of these names is left
 /// out (it would shadow them).
-const RESERVED: [&str; 6] = [
+const RESERVED: [&str; 7] = [
     "Entity",
     "Quat",
     "ScriptSelf",
     "ScriptComponent",
     "PropOptions",
     "PhysicsFilter",
+    "ComponentType",
 ];
 
 /// The definitions' first part: what does not depend on the program's components.
@@ -43,6 +44,10 @@ declare extern type Quat with
     __mul: ((self: Quat, other: Quat) -> Quat) & ((self: Quat, other: vector) -> vector)
 end
 
+-- What `has`, `add` and `remove` take: `Transform` (each component of the program is a
+-- global of its name), a script's `component` table, or a component's name.
+type ComponentType = { name: string }
+
 -- What `prop.number` and the other helpers take after the default.
 type PropOptions = {
     min: number?,
@@ -52,6 +57,51 @@ type PropOptions = {
     hidden: boolean?,
     skip: boolean?,
 }
+"#;
+
+/// An entity's fields and methods (ADR 0114 §3).
+const ENTITY_MEMBERS: &str = r#"    -- Its `Name`, if it has one.
+    name: string?
+    -- Whether it still exists.
+    alive: boolean
+    -- Its parent, if it has one.
+    parent: Entity?
+    -- Whether it has `component`.
+    function has(self, component: ComponentType | string): boolean
+    -- Gives it `component` (the default, then `values` written into it) unless it has one,
+    -- at once.
+    function add(self, component: ComponentType | string, values: { [string]: any }?): ()
+    -- Takes `component` away, at once.
+    function remove(self, component: ComponentType | string): ()
+    -- Despawns it, with its children, at the end of the stage.
+    function despawn(self): ()
+    -- Its children in order, for a `for` loop.
+    function children(self): ((Entity, Entity?) -> Entity?, Entity, nil)
+    -- The nearest of its descendants named `name` (its children first), or nil.
+    function find_child(self, name: string): Entity?
+"#;
+
+/// An entity's methods on `self` (`self:despawn()`).
+const SELF_METHODS: &str = r#"    has: (self: any, component: ComponentType | string) -> boolean,
+    add: (self: any, component: ComponentType | string, values: { [string]: any }?) -> (),
+    remove: (self: any, component: ComponentType | string) -> (),
+    despawn: (self: any) -> (),
+    children: (self: any) -> ((Entity, Entity?) -> Entity?, Entity, nil),
+    find_child: (self: any, name: string) -> Entity?,
+"#;
+
+/// `Transform`'s methods on its views.
+const TRANSFORM_METHODS: &str = r#"    -- Turns it by `angle` radians about `axis`, in its parent's space.
+    function rotate(self, axis: vector, angle: number): ()
+    -- Turns it so that its forward (-z) points at `point`, in its parent's space, `up` (y by
+    -- default) up.
+    function look_at(self, point: vector, up: vector?): ()
+    -- Where it faces: its -z, in its parent's space.
+    function forward(self): vector
+    -- Its x, in its parent's space.
+    function right(self): vector
+    -- Its y, in its parent's space.
+    function up(self): vector
 "#;
 
 /// The definitions' last part: the libraries.
@@ -92,7 +142,7 @@ end
 
 declare physics: {
     -- The first body along the ray, at most `max_distance` away: its entity (nil for a body
-    -- without one), the hit's point and normal, and its distance. Nothing when it hits
+    -- without one), the hit's point and normal, and its distance. Nils when it hits
     -- nothing.
     raycast: (origin: vector, direction: vector, max_distance: number, filter: PhysicsFilter?) -> (Entity?, vector?, vector?, number?),
     -- The entities whose bodies overlap the sphere, for a `for` loop.
@@ -127,12 +177,15 @@ declare function warn(...: any): ()
 /// ([`engine_ecs::runtime_types`]), sorted by name.
 pub fn definitions() -> String {
     let mut components: BTreeMap<&'static str, &'static TypeInfo> = BTreeMap::new();
+    // The program's components are globals too (`Transform`), scripts' are not.
+    let mut program: Vec<&'static str> = Vec::new();
     for t in engine_ecs::reflected_types() {
         if matches!(t.kind, engine_ecs::ReflectedKind::Component { .. })
             && !t.info.attrs.hidden
             && !t.info.attrs.skip
         {
             components.entry(t.info.name).or_insert(t.info);
+            program.push(t.info.name);
         }
     }
     for t in engine_ecs::runtime_types() {
@@ -149,15 +202,12 @@ pub fn definitions() -> String {
     for info in components.values() {
         declare_struct(info, &mut declared, &mut out);
     }
-    // An entity, and `self`: their components by name.
+    // An entity, and `self`: their components by name, an entity's methods.
     out.push_str(
         "\n-- An entity: its components by name. Reading one it lacks is an error.\n\
-         declare extern type Entity with\n    \
-         -- Its `Name`, if it has one.\n    \
-         name: string?\n    \
-         -- Whether it still exists.\n    \
-         alive: boolean\n",
+         declare extern type Entity with\n",
     );
+    out.push_str(ENTITY_MEMBERS);
     for name in components.keys() {
         let _ = writeln!(out, "    {name}: {name}");
     }
@@ -165,11 +215,20 @@ pub fn definitions() -> String {
         "end\n\n-- `self` in a hook, beside its component's props.\ntype ScriptSelf = {\n",
     );
     out.push_str("    entity: Entity,\n    locals: { [string]: any },\n");
+    out.push_str(SELF_METHODS);
     for name in components.keys() {
         let _ = writeln!(out, "    {name}: {name},");
     }
     out.push_str("}\n");
     out.push_str(LIBRARIES);
+    out.push_str("\n-- The program's components, as `has`, `add` and `remove` take them.\n");
+    program.sort_unstable();
+    program.dedup();
+    for name in program {
+        if components.contains_key(name) {
+            let _ = writeln!(out, "declare {name}: ComponentType");
+        }
+    }
     out
 }
 
@@ -194,6 +253,9 @@ fn declare_struct(info: &'static TypeInfo, declared: &mut Vec<&'static str>, out
             let _ = writeln!(lines, "    -- {}", tip.replace('\n', " "));
         }
         let _ = writeln!(lines, "    {}: {ty}", f.name);
+    }
+    if info.name == "Transform" {
+        lines.push_str(TRANSFORM_METHODS);
     }
     let _ = write!(
         out,

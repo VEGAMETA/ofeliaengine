@@ -19238,6 +19238,63 @@ return Eye
         luau.set_source("coin", COIN);
         let found = luau.check("coin");
         assert!(found.is_empty(), "{found:?}");
+        // Entities' and `Transform`'s methods, components as values (E7-5a).
+        luau.set_source(
+            "walker",
+            "--!strict
+local UP = vector.create(0, 1, 0)
+local Walker = component(\"Walker\", { speed = 1.5, steps = 0 })
+function Walker.on_tick(self, dt: number)
+    local t = self.Transform
+    t:rotate(UP, self.speed * dt)
+    t:look_at(t.translation + t:forward() + t:right() + t:up())
+    local camera = self:find_child(\"Camera\")
+    if camera and camera:has(Transform) and camera.parent == self.entity then
+        camera.Transform:rotate(vector.create(1, 0, 0), 0.1)
+    end
+    for child in self.entity:children() do
+        if child:has(\"Walker\") then
+            child:despawn()
+        end
+    end
+    if not self:has(Trigger) then
+        self:add(Trigger, { size = vector.one })
+    end
+    self.entity:remove(Trigger)
+    self.steps += 1
+end
+return Walker
+",
+        );
+        let found = luau.check("walker");
+        assert!(found.is_empty(), "{found:?}");
+        // The guide's turret.
+        luau.set_source(
+            "turret",
+            "-- A turret: turns toward the player, its barrel a child named \"Barrel\".
+local Turret = component(\"Turret\", { reach = 20 })
+
+function Turret.on_tick(self, dt: number)
+    local player = world.find(\"Player\")
+    if not player then
+        return
+    end
+    local t = self.Transform
+    local to = player.Transform.translation - t.translation
+    if vector.magnitude(to) < self.reach then
+        t:look_at(player.Transform.translation)
+        local barrel = self:find_child(\"Barrel\")
+        if barrel and not barrel:has(Trigger) then
+            barrel:add(Trigger, { size = vector.create(0.2, 0.2, 2) })
+        end
+    end
+end
+
+return Turret
+",
+        );
+        let found = luau.check("turret");
+        assert!(found.is_empty(), "{found:?}");
         // A field of the wrong type: an error where it is.
         luau.set_source(
             "bad",

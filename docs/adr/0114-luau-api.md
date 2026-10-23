@@ -1195,3 +1195,68 @@ there, and see the script's file in the inspector.
   `type`); the kept views over 300 entities (more than the table's places); the name index
   through a second of a name, the first despawned, a rename and a newcomer; the errors
   naming `Entity`.
+
+## As built (E7-5a, 2026-10-23): entities' methods, components as values
+
+- **Methods are `__namecall`s** on the fast path's metatables (entities' light userdata,
+  `self`, views), found by the method's atom:
+  - an entity's: `has(C)`, `add(C, values?)`, `remove(C)`, `despawn()`, `children()`,
+    `find_child(name)`, and the field `parent`;
+  - `self` has its entity's methods, then the functions on its component's table:
+    `self:open()` calls `Door.open(self)` (the entity's names come first);
+  - `Transform`'s on its views: `rotate(axis, angle)` (in the parent's space, as Godot's
+    `rotate`), `look_at(point, up?)` (its forward, −z, toward a point in the parent's
+    space; unchanged when there is nowhere to look), `forward()`, `right()`, `up()`.
+- **Components as values:** each of the program's components is a global table of its
+  name (`Transform`, `Trigger`), which the sandbox seals; a script's `component` table is
+  one by its `name`; a name works too (`e:has("Wallet")`, for another script's component
+  until `require` comes). `typeof` says `table`: Luau honours `__type` for userdata only.
+- **What each does:**
+  - `has`: whether the entity has it (false for one that is gone);
+  - `add`: the default (`SceneRegistry::insert_default`, by scene files' names) unless it
+    has one, then `values` written field by field, at once; a script component's
+    instance starts at the next stage;
+  - `remove`: at once;
+  - `add` and `remove` refuse `Parent` and `Children`, which keep the hierarchy;
+  - `despawn`: at the end of the stage (§7), with its children. Their instances'
+    `on_stop` runs first, the props still there, then `despawn_recursive`; despawns asked
+    in those `on_stop`s go too, up to 16 passes;
+  - `children`: a loop that keeps nothing. Each step goes from the child before
+    (`Parent::next_sibling`, new), so it allocates nothing; a child that leaves ends it;
+  - `find_child`: the nearest descendant of the name, breadth first (a child before a
+    grandchild), its queue a scratch list.
+- **Errors** name what went wrong: a method without its colon (`e.has`), a method that is
+  none (`self:fly()`: neither an entity's nor a function of the component), a component
+  that is none (`has: no component is called X`), `Transform has no method spin`.
+- **`alive` stays a field** (as built in E7-1c), not §3's method.
+- **Types:**
+  - `Entity` has `parent` and the methods, `self` (`ScriptSelf`) the methods, `Transform`
+    its methods;
+  - `type ComponentType = { name: string }`, and a `declare` for each of the program's
+    components;
+  - luau-lsp does not see a component's own functions on `self`: `self:open()` is flagged
+    in strict mode, and `Door.open(self)` keeps the types. An indexer on `self` would
+    lose the check of props' names.
+- **Measured:** nothing allocated. The zero-allocation test's walkers use `rotate`,
+  `forward`, `right`, `up`, `look_at`, `find_child`, `children`, `has`, `parent` and a
+  function of their own every tick: 0 in 600 ticks. The views' measures are unchanged
+  within their spread (main and this branch one after the other, three runs each):
+
+  | What | Main | This branch |
+  |---|---|---|
+  | a prop's pair | 72–75 ns | 76–78 ns |
+  | a field's pair | 86–91 ns | 82–84 ns |
+  | 1,000 doors | 0.59–0.61 ms | 0.59–0.60 ms |
+
+  A field's pair measured 76.5–77 ns on main's code an hour earlier: the layout of a build
+  moves these by about ten nanoseconds.
+- **Tests:**
+  - every method and `parent`, `add` with values read on the next line, `remove`, an own
+    function through `self:`;
+  - `Transform`'s methods turned and read back;
+  - a despawn at the stage's end with its child, its `on_stop` seeing its props and the
+    tick's write;
+  - the four errors;
+  - the editor's checker takes a strict script using them all.
+- **Not in this step:** `require` (next: the project's modules by path, `.luaurc` aliases,
+  dependents reloaded after them); `send`.

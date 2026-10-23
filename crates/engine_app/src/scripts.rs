@@ -193,6 +193,8 @@ pub struct Scripts {
     order: Vec<(u32, u32)>,
     /// The components that hear contacts (scratch).
     listening: Vec<usize>,
+    /// The entities a stage's despawns take, with their children (scratch).
+    gone: Vec<Entity>,
     clock: Clock,
     /// Errors already in the log.
     reported: HashSet<String>,
@@ -262,8 +264,11 @@ impl Scripts {
                 tables.name(t.info.name, id, t.info);
             }
         }
+        tables.transform = names.by_name.get("Transform").map(|&(id, _)| id);
         vm.lua().set_app_data(names);
         vm.lua().set_app_data(Clock::default());
+        vm.lua()
+            .set_app_data(engine_scene::SceneRegistry::from_program());
         let mut scripts = Self {
             vm,
             tables,
@@ -274,6 +279,7 @@ impl Scripts {
             seen: HashSet::new(),
             order: Vec::new(),
             listening: Vec::new(),
+            gone: Vec::new(),
             clock: Clock::default(),
             reported: HashSet::new(),
             sources: HashMap::new(),
@@ -469,6 +475,9 @@ impl Scripts {
         for (k, c) in self.components[..before].iter_mut().enumerate() {
             if *c.module == *module && !again.contains(&k) {
                 c.hooks = Hooks::default();
+                if let Some(gone) = self.tables.forget_own(c.id) {
+                    unref(self.vm.lua(), gone);
+                }
                 out.gone.push(c.name.clone());
             }
         }
@@ -544,6 +553,12 @@ impl Scripts {
             names.by_name.insert(name.clone(), (id, info));
         }
         self.tables.name(&name, id, info);
+        if id != old
+            && let Some(gone) = self.tables.forget_own(old)
+        {
+            unref(self.vm.lua(), gone);
+        }
+        self.own(id, table);
         let c = &mut self.components[k];
         c.hooks = hooks_of(table);
         c.info = info;
@@ -609,6 +624,7 @@ impl Scripts {
             names.by_name.insert(name.to_owned(), (id, info));
         }
         self.tables.name(name, id, info);
+        self.own(id, table);
         self.by_name.insert(name.to_owned(), self.components.len());
         self.components.push(Declared {
             name: name.to_owned(),
@@ -670,6 +686,7 @@ impl Scripts {
             self.touches(physics);
         }
         self.call_all(Stage::Tick, dt, 0.0);
+        self.despawn_asked(world);
         self.close();
     }
 
@@ -693,7 +710,80 @@ impl Scripts {
         self.open(world, physics);
         self.follow(world);
         self.call_all(Stage::Frame, dt, alpha);
+        self.despawn_asked(world);
         self.close();
+    }
+
+    /// Script component `id`'s table, `table`: where `self:open()` finds `Door.open`. The
+    /// registry `e:add` makes defaults with is made again, as it may be new.
+    fn own(&mut self, id: ComponentId, table: &Table) {
+        let lua = self.vm.lua();
+        if let Ok(own) = registry_ref(lua, table.clone())
+            && let Some(old) = self.tables.set_own(id, own)
+        {
+            unref(lua, old);
+        }
+        if let Some(mut registry) = lua.app_data_mut::<engine_scene::SceneRegistry>() {
+            *registry = engine_scene::SceneRegistry::from_program();
+        }
+    }
+
+    /// The entities scripts despawned in this stage, with their children (ADR 0114 §7):
+    /// their instances' `on_stop` first, their props still there, then the entities go.
+    /// Despawns asked by those `on_stop`s go too, up to 16 passes; the rest wait for the
+    /// next stage.
+    fn despawn_asked(&mut self, world: &mut World) {
+        for _ in 0..16 {
+            if self.tables.despawns.is_empty() {
+                return;
+            }
+            let mut gone = core::mem::take(&mut self.gone);
+            gone.clear();
+            gone.append(&mut self.tables.despawns);
+            let asked = gone.len();
+            let mut at = 0;
+            while at < gone.len() {
+                let e = gone[at];
+                at += 1;
+                gone.extend(world.children(e));
+            }
+            for &e in &gone {
+                self.stop_instances_of(e);
+            }
+            for &e in &gone[..asked] {
+                world.despawn_recursive(e);
+            }
+            self.gone = gone;
+        }
+    }
+
+    /// `on_stop` of every instance on `e` still running, which runs no more.
+    fn stop_instances_of(&mut self, e: Entity) {
+        let mut keys = core::mem::take(&mut self.order);
+        keys.clear();
+        keys.extend(
+            self.instances
+                .range((e.index(), 0)..=(e.index(), u32::MAX))
+                .map(|(&key, _)| key),
+        );
+        for &key in &keys {
+            let Some((at, inst)) = self.instances.get_mut(&key) else {
+                continue;
+            };
+            if *at != e || inst.stopped {
+                continue;
+            }
+            inst.stopped = true;
+            let this = inst.this.clone();
+            let c = &self.components[key.1 as usize];
+            let (module, stop) = (c.module.clone(), c.hooks.stop.clone());
+            if let Some(stop) = stop
+                && let Err(err) = self.vm.call_function::<_, ()>(&module, &stop, this)
+            {
+                self.report(key.1 as usize, "on_stop", e, &err);
+            }
+        }
+        self.order = keys;
     }
 
     /// Every instance's hook of `stage`, in the instances' order.
@@ -1150,16 +1240,106 @@ fn write_default(out: &mut [u8], kind: Kind, value: &Value) {
     }
 }
 
-/// Function `f` in the registry, by a reference the fast path pushes it by.
-fn registry_ref(lua: &Lua, f: Function) -> mlua::Result<std::ffi::c_int> {
+/// `value` (a function, a table) in the registry, by a reference the fast path pushes it
+/// by.
+fn registry_ref(lua: &Lua, value: impl mlua::IntoLuaMulti) -> mlua::Result<std::ffi::c_int> {
     let mut made = 0;
-    // SAFETY: the function is the one argument pushed; the reference keeps it.
+    // SAFETY: the value is the one argument pushed; the reference keeps it.
     unsafe {
-        lua.exec_raw::<()>(f, |state| {
+        lua.exec_raw::<()>(value, |state| {
             made = mlua::ffi::lua_ref(state, -1);
         })?;
     }
     Ok(made)
+}
+
+/// C function `f`, named `name` in tracebacks, in the registry: made once, pushed by its
+/// reference.
+fn c_function_ref(
+    lua: &Lua,
+    f: mlua::ffi::lua_CFunction,
+    name: &'static std::ffi::CStr,
+) -> mlua::Result<std::ffi::c_int> {
+    let mut made = 0;
+    // SAFETY: the function is pushed and kept by the reference.
+    unsafe {
+        lua.exec_raw::<()>((), |state| {
+            mlua::ffi::lua_pushcfunctiond(state, f, name.as_ptr());
+            made = mlua::ffi::lua_ref(state, -1);
+        })?;
+    }
+    Ok(made)
+}
+
+/// Lets go of registry reference `r`.
+fn unref(lua: &Lua, r: std::ffi::c_int) {
+    // SAFETY: a reference the host took with `lua_ref`.
+    let _ = unsafe {
+        lua.exec_raw::<()>((), |state| {
+            mlua::ffi::lua_unref(state, r);
+        })
+    };
+}
+
+/// `e:add(Component, values?)` (ADR 0114 §3): the component's default given to the entity
+/// if it has none, then `values` written into it, field by field. At once: the next line
+/// reads it. A script component's instance starts at the next stage.
+fn entity_add(
+    lua: &Lua,
+    (target, component, values): (Value, Value, Option<Table>),
+) -> mlua::Result<()> {
+    let Some(e) = script_views::value_entity(&target) else {
+        return Err(mlua::Error::runtime("add: not an entity"));
+    };
+    let takes =
+        || mlua::Error::runtime("add takes a component (`Transform`, a script's) or its name");
+    let name = match &component {
+        Value::Table(t) => t.raw_get::<mlua::LuaString>("name").map_err(|_| takes())?,
+        Value::String(s) => s.clone(),
+        _ => return Err(takes()),
+    };
+    let name = name.to_str()?;
+    let Some((id, info)) = named(lua, &name) else {
+        return Err(mlua::Error::runtime(format!(
+            "add: no component is called `{name}`"
+        )));
+    };
+    if matches!(info.name, "Parent" | "Children") {
+        return Err(mlua::Error::runtime(
+            "`Parent` and `Children` keep the hierarchy: they are not added",
+        ));
+    }
+    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
+    let w = unsafe { &mut *world_ptr(lua)? };
+    if !w.contains(e) {
+        return Err(mlua::Error::runtime("add: the entity is gone"));
+    }
+    if w.get_raw(e, id).is_none() {
+        // Scene files' names, which the registry goes by.
+        let made = lua
+            .app_data_ref::<engine_scene::SceneRegistry>()
+            .is_some_and(|r| r.insert_default(w, e, info.name));
+        if !made {
+            return Err(mlua::Error::runtime(format!(
+                "`{name}` cannot be added from a script"
+            )));
+        }
+    }
+    if let Some(values) = values {
+        for pair in values.pairs::<mlua::LuaString, Value>() {
+            let (key, value) = pair?;
+            let f = struct_field(info, &key.to_str()?)?;
+            set_field(w, e, id, info, 0, f, value)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` can be a global naming a component: a capital, then letters, digits and
+/// `_`.
+fn global_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// The host's libraries, before the sandbox seals the globals.
@@ -1173,9 +1353,26 @@ fn install(lua: &Lua) -> mlua::Result<()> {
         self_newindex: registry_ref(lua, lua.create_function(self_newindex_slow)?)?,
         view_index: registry_ref(lua, lua.create_function(view_index_slow)?)?,
         view_newindex: registry_ref(lua, lua.create_function(view_newindex_slow)?)?,
+        add: registry_ref(lua, lua.create_function(entity_add)?)?,
+        children: c_function_ref(lua, script_views::children_next, c"children")?,
     };
     lua.set_app_data(slow);
     let globals = lua.globals();
+    // Components as values (ADR 0114 §3): `Transform` and every other component of the
+    // program is a table of its name, as `has`, `add` and `remove` take them; a script's
+    // `component` table is one too. The sandbox makes them read-only.
+    for t in engine_ecs::reflected_types() {
+        let name = t.info.name;
+        if matches!(t.kind, engine_ecs::ReflectedKind::Component { .. })
+            && !t.info.attrs.hidden
+            && !t.info.attrs.skip
+            && global_name(name)
+        {
+            let c = lua.create_table()?;
+            c.set("name", name)?;
+            globals.set(name, c)?;
+        }
+    }
     globals.set("component", lua.create_function(declare_component)?)?;
     let prop = lua.create_table()?;
     for (name, kind) in [
@@ -2502,6 +2699,220 @@ return BadMate
         for line in [
             "scripts/bad.luau:3: BadMate.mate takes an entity, not number (BadMate.on_tick)",
             "scripts/bad.luau:7: BadSpeed.speed takes a number, not Entity (BadSpeed.on_tick)",
+        ] {
+            assert!(reported.contains(&line), "{line} in {reported:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn entities_have_methods_and_components_are_values() {
+        let dir = project(
+            "methods",
+            &[
+                (
+                    "methods.luau",
+                    r#"local Methods = component("Methods", {
+    has = false, kind = false, kids = 0, first = prop.entity(), nearest = prop.entity(),
+    family = false, added = false, own = 0, removed = false,
+})
+function Methods.bump(self, by)
+    self.own += by
+    return self.own
+end
+function Methods.on_tick(self, dt)
+    local e = self.entity
+    self.has = e:has(Transform) and self:has(Transform) and e:has(Methods)
+        and e:has("Methods") and not e:has("Trigger") == (self.own == 0)
+    self.kind = type(Transform) == "table" and Transform.name == "Transform"
+        and Methods.name == "Methods"
+    local n = 0
+    for child in e:children() do
+        n += 1
+        if n == 1 then
+            self.first = child
+        end
+    end
+    self.kids = n
+    self.nearest = e:find_child("Deep")
+    local second = e:find_child("Second")
+    self.family = second ~= nil and second.parent == e and e.parent == nil
+        and e:find_child("Nobody") == nil
+    if not e:has(Trigger) then
+        e:add(Trigger, { size = vector.create(2, 3, 4) })
+        self.added = e.Trigger.size.y == 3 and e.Trigger.shape == "Box"
+    end
+    self.removed = self:bump(2) == self.own
+    if self.own >= 4 then
+        e:remove(Trigger)
+    end
+end
+return Methods
+"#,
+                ),
+                (
+                    "turn.luau",
+                    r#"local Turn = component("Turn", { forward = vector.zero, right = vector.zero, up = vector.zero, looked = vector.zero })
+function Turn.on_tick(self, dt)
+    local t = self.Transform
+    t:rotate(vector.create(0, 2, 0), math.pi / 2)
+    self.forward = t:forward()
+    self.right = t:right()
+    self.up = t:up()
+    local eye = world.find("Eye").Transform
+    eye:look_at(vector.create(10, 1, 0))
+    self.looked = eye:forward()
+end
+return Turn
+"#,
+                ),
+                (
+                    "doomed.luau",
+                    r#"local Doomed = component("Doomed", { ticks = 0 })
+function Doomed.on_tick(self, dt)
+    self.ticks += 1
+    if self.ticks == 2 then
+        self:despawn()
+        self.Transform.translation = vector.create(5, 0, 0)
+    end
+end
+function Doomed.on_stop(self)
+    world.find("Witness").Transform.translation = vector.create(self.ticks, self.Transform.translation.x, 0)
+end
+return Doomed
+"#,
+                ),
+                (
+                    "wrong.luau",
+                    r#"local NoColon = component("NoColon", {})
+function NoColon.on_tick(self, dt)
+    local _ = self.entity.has
+end
+local Unknown = component("Unknown", {})
+function Unknown.on_tick(self, dt)
+    self:fly()
+end
+local NoSuch = component("NoSuch", {})
+function NoSuch.on_tick(self, dt)
+    local _ = self.entity:has(Nothing)
+end
+local Spin = component("Spin", {})
+function Spin.on_tick(self, dt)
+    self.Transform:spin()
+end
+return NoColon
+"#,
+                ),
+            ],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        // A parent with two children, the second with a grandchild named "Deep", and a
+        // child named "Deep" further down the first.
+        let parent = world.spawn((Name::new("Parent"), Transform::IDENTITY));
+        let first = world.spawn((Name::new("First"), Transform::IDENTITY));
+        let second = world.spawn((Name::new("Second"), Transform::IDENTITY));
+        let deeper = world.spawn((Name::new("Under"), Transform::IDENTITY));
+        let deepest = world.spawn((Name::new("Deep"), Transform::IDENTITY));
+        let near = world.spawn((Name::new("Deep"), Transform::IDENTITY));
+        world.set_parent(first, Some(parent)).unwrap();
+        world.set_parent(second, Some(parent)).unwrap();
+        world.set_parent(deeper, Some(first)).unwrap();
+        world.set_parent(deepest, Some(deeper)).unwrap();
+        world.set_parent(near, Some(second)).unwrap();
+        scripts.add(&mut world, parent, "Methods");
+        let turn = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, turn, "Turn");
+        world.spawn((Name::new("Eye"), Transform::from_xyz(0.0, 1.0, 0.0)));
+        let witness = world.spawn((Name::new("Witness"), Transform::IDENTITY));
+        let doomed = world.spawn((Transform::IDENTITY,));
+        let doomed_child = world.spawn((Transform::IDENTITY,));
+        world.set_parent(doomed_child, Some(doomed)).unwrap();
+        scripts.add(&mut world, doomed, "Doomed");
+        let wrong = world.spawn((Transform::IDENTITY,));
+        for name in ["NoColon", "Unknown", "NoSuch", "Spin"] {
+            scripts.add(&mut world, wrong, name);
+        }
+
+        scripts.tick(&mut world, 0.1);
+        let flag = |world: &World, scripts: &Scripts, e: Entity, name: &str| {
+            let id = scripts.component("Methods").unwrap();
+            let TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind else {
+                unreachable!()
+            };
+            let at = fields.iter().find(|f| f.name == name).unwrap().offset;
+            // SAFETY: a bool prop of Methods at its offset.
+            unsafe { world.get_raw(e, id).unwrap().as_ptr().add(at).read() == 1 }
+        };
+        for name in ["has", "kind", "family", "added", "removed"] {
+            assert!(
+                flag(&world, &scripts, parent, name),
+                "{name}: {:?}",
+                scripts.reported
+            );
+        }
+        assert_eq!(read_f32(&world, &scripts, parent, "Methods", "kids"), 2.0);
+        assert_eq!(
+            read_entity(&world, &scripts, parent, "Methods", "first"),
+            first
+        );
+        assert_eq!(
+            read_entity(&world, &scripts, parent, "Methods", "nearest"),
+            near,
+            "the nearest of two of a name"
+        );
+        assert_eq!(read_f32(&world, &scripts, parent, "Methods", "own"), 2.0);
+        let size = world.get::<crate::Trigger>(parent).unwrap().size;
+        assert_eq!(size, Vec3::new(2.0, 3.0, 4.0), "added with its values");
+        // Turned a quarter about y: forward (-z) to -x, right (x) to -z.
+        let t = world.get::<Transform>(turn).unwrap().rotation;
+        assert!((t * Vec3::NEG_Z - Vec3::NEG_X).length() < 1e-5, "{t:?}");
+        let vec = |name: &str| {
+            let id = scripts.component("Turn").unwrap();
+            let TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind else {
+                unreachable!()
+            };
+            let at = fields.iter().find(|f| f.name == name).unwrap().offset;
+            // SAFETY: a vector prop of Turn at its offset.
+            unsafe {
+                world
+                    .get_raw(turn, id)
+                    .unwrap()
+                    .as_ptr()
+                    .add(at)
+                    .cast::<Vec3>()
+                    .read_unaligned()
+            }
+        };
+        assert!((vec("forward") - Vec3::NEG_X).length() < 1e-5);
+        assert!((vec("right") - Vec3::NEG_Z).length() < 1e-5);
+        assert!((vec("up") - Vec3::Y).length() < 1e-5);
+        assert!(
+            (vec("looked") - Vec3::X).length() < 1e-5,
+            "looks at the point"
+        );
+        assert!(world.contains(doomed));
+
+        // The second tick: the doomed entity despawns at the stage's end, with its child,
+        // after its `on_stop` saw its props and what the tick wrote.
+        scripts.tick(&mut world, 0.1);
+        assert!(!world.contains(doomed) && !world.contains(doomed_child));
+        assert_eq!(
+            world.get::<Transform>(witness).unwrap().translation,
+            Vec3::new(2.0, 5.0, 0.0)
+        );
+        assert_eq!(read_f32(&world, &scripts, parent, "Methods", "own"), 4.0);
+        assert!(
+            world.get::<crate::Trigger>(parent).is_none(),
+            "removed at once"
+        );
+
+        let reported: Vec<&str> = scripts.reported.iter().map(String::as_str).collect();
+        for line in [
+            "scripts/wrong.luau:3: `has` is a method: call it with a colon (`e:has(…)`) (NoColon.on_tick)",
+            "scripts/wrong.luau:7: no method `fly`: neither an entity's nor a function of the component (Unknown.on_tick)",
+            "scripts/wrong.luau:11: has takes a component (`Transform`, a script's) or its name (NoSuch.on_tick)",
+            "scripts/wrong.luau:15: Transform has no method `spin` (Spin.on_tick)",
         ] {
             assert!(reported.contains(&line), "{line} in {reported:?}");
         }
