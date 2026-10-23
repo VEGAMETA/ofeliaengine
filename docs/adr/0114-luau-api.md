@@ -1466,3 +1466,29 @@ there, and see the script's file in the inspector.
   - instancing from a release's packs: the player reads prefabs from the project's
     folder;
   - assets of other kinds than scenes for `instantiate`.
+
+## As built (E7-5f1, 2026-10-23): script components and their timers in saves
+
+- **Found:** saves took script components (they have their `TypeInfo`) but skipped them on
+  load ("`Door` is not in the program"): `engine_save::apply` looked up only the
+  program's reflected types. It now falls back to the types made at run time
+  (`engine_ecs::runtime_types`, the latest layout of the name), their default value laid
+  out (`MakeDefault::Bytes`), then the save's fields by name over it. Entity props
+  remap with the save's other references.
+- **`after` timers ride on their entities** (§8): `Scripts::before_save` writes each
+  entity's pending timers into a `ScriptTimers` component (hidden: out of the inspector
+  and scene files, kept by saves), its values as `SavedValue`s (nil, booleans, numbers,
+  strings, vectors, entities) and its delay as the ticks left. `after_save` takes the
+  components away again: they hold text, and a snapshot (prediction's rollback) takes
+  plain data only. `after_load` sets the timers again from them, then takes them away;
+  what waited from the world before the load (messages, timers) goes.
+- **`on_load(self)`** is called on every instance at the next tick after a save was
+  applied, in the instances' order, after its `on_start` when it had not started.
+- **The player** calls the three around `capture` and `apply` (`take_save`, `load_save`).
+- **Tests:**
+  - a script component's values, its entity prop and a pending timer through a save
+    captured, written as text, read and applied to a world and host made anew;
+  - `on_load` once at the next tick;
+  - the timer due four ticks after the load, as it was at the save, with its string and
+    its entity remapped;
+  - the editor's checker takes `on_load` in strict mode.

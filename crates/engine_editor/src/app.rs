@@ -19419,6 +19419,19 @@ return Spawner
         );
         let found = luau.check("spawner");
         assert!(found.is_empty(), "{found:?}");
+        // A save applied (E7-5f1).
+        luau.set_source(
+            "keeper",
+            "--!strict
+local Keeper = component(\"Keeper\", { loads = 0 })
+function Keeper.on_load(self)
+    self.loads += 1
+end
+return Keeper
+",
+        );
+        let found = luau.check("keeper");
+        assert!(found.is_empty(), "{found:?}");
         // A field of the wrong type: an error where it is.
         luau.set_source(
             "bad",

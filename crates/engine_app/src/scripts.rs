@@ -127,6 +127,7 @@ struct Hooks {
     stop: Option<Function>,
     touch: Option<Function>,
     untouch: Option<Function>,
+    load: Option<Function>,
     /// Whether its table has any function: a message's or a timer's hook makes instances.
     handlers: bool,
 }
@@ -134,6 +135,7 @@ struct Hooks {
 impl Hooks {
     fn any(&self) -> bool {
         self.handlers
+            || self.load.is_some()
             || self.start.is_some()
             || self.tick.is_some()
             || self.frame.is_some()
@@ -292,6 +294,94 @@ fn self_after(
     Ok(())
 }
 
+/// The `after` timers of an entity's scripts, as a save keeps them (ADR 0114 §8): put on
+/// the entity just before a save is taken ([`Scripts::before_save`]) and taken away after
+/// it, as a snapshot takes plain data only; read back after a save is applied
+/// ([`Scripts::after_load`]). Its entity references are remapped with the save's.
+#[derive(Debug, Clone, Default, PartialEq, Reflect)]
+#[reflect(hidden)]
+pub struct ScriptTimers {
+    /// Each timer, in the order set.
+    pub timers: Vec<SavedTimer>,
+}
+engine_ecs::reflect_component!(ScriptTimers);
+
+/// A timer as a save keeps it.
+#[derive(Debug, Clone, Default, PartialEq, Reflect)]
+pub struct SavedTimer {
+    /// The script component it calls, by name.
+    pub component: String,
+    /// Its hook.
+    pub hook: String,
+    /// The ticks left until it is due.
+    pub ticks: u64,
+    /// The values it carries.
+    pub values: Vec<SavedValue>,
+}
+
+/// A message's or a timer's value as a save keeps it.
+#[derive(Debug, Clone, Default, PartialEq, Reflect)]
+pub struct SavedValue {
+    /// What it is: nil 0, a boolean 1, a number 2, a string 3, a vector 4, an entity 5.
+    pub kind: u8,
+    /// A boolean (0 or 1) or a number.
+    pub number: f64,
+    /// A string.
+    pub text: String,
+    /// A vector.
+    pub vector: Vec3,
+    /// An entity.
+    pub entity: Entity,
+}
+
+impl SavedValue {
+    fn of(v: &Value) -> Self {
+        let mut out = Self::default();
+        match v {
+            Value::Boolean(b) => {
+                out.kind = 1;
+                out.number = f64::from(u8::from(*b));
+            }
+            Value::Number(n) => {
+                out.kind = 2;
+                out.number = *n;
+            }
+            Value::Integer(i) => {
+                out.kind = 2;
+                out.number = *i as f64;
+            }
+            Value::String(s) => {
+                out.kind = 3;
+                out.text = s.to_string_lossy();
+            }
+            Value::Vector(v) => {
+                out.kind = 4;
+                out.vector = Vec3::new(v.x(), v.y(), v.z());
+            }
+            v => {
+                if let Some(e) = script_views::value_entity(v) {
+                    out.kind = 5;
+                    out.entity = e;
+                }
+            }
+        }
+        out
+    }
+
+    fn value(&self, lua: &Lua) -> Value {
+        match self.kind {
+            1 => Value::Boolean(self.number != 0.0),
+            2 => Value::Number(self.number),
+            3 => lua
+                .create_string(&self.text)
+                .map_or(Value::Nil, Value::String),
+            4 => Value::Vector(Vector::new(self.vector.x, self.vector.y, self.vector.z)),
+            5 => script_views::entity_value(self.entity),
+            _ => Value::Nil,
+        }
+    }
+}
+
 /// What a module's run declared, gathered while it loads.
 #[derive(Default)]
 struct Loading {
@@ -367,6 +457,8 @@ pub struct Scripts {
     letters: Vec<Message>,
     due: Vec<Timer>,
     receivers: Vec<(u32, u32)>,
+    /// A save was applied: the next tick's stage calls every instance's `on_load`.
+    loaded: bool,
     /// The registry references of queries collected, let go of at a stage's start
     /// (scratch), and the VM's main state, which names their VM.
     dead: Vec<std::ffi::c_int>,
@@ -480,6 +572,7 @@ impl Scripts {
             letters: Vec::new(),
             due: Vec::new(),
             receivers: Vec::new(),
+            loaded: false,
             dead: Vec::new(),
             main: 0,
             clock: Clock::default(),
@@ -1055,6 +1148,9 @@ impl Scripts {
         }
         self.open(world, physics, false);
         self.follow(world);
+        if core::mem::take(&mut self.loaded) {
+            self.call_loaded();
+        }
         self.deliver_later();
         self.timers_due();
         if let Some(physics) = physics {
@@ -1455,6 +1551,140 @@ impl Scripts {
         }
     }
 
+    /// Before a save is taken (ADR 0114 §8): each entity's `after` timers written into a
+    /// [`ScriptTimers`] on it, so the save keeps them with the entity. [`Self::after_save`]
+    /// takes them away again once the save is taken.
+    pub fn before_save(&mut self, world: &mut World) {
+        let now = self.clock.ticks;
+        let mut by_entity: BTreeMap<Entity, Vec<SavedTimer>> = BTreeMap::new();
+        if let Some(mail) = self.vm.lua().app_data_ref::<Mailbox>() {
+            for t in &mail.timers {
+                let Some(c) = self.components.iter().find(|c| c.id == t.id) else {
+                    continue;
+                };
+                by_entity.entry(t.entity).or_default().push(SavedTimer {
+                    component: c.name.clone(),
+                    hook: t.call.hook.to_string_lossy(),
+                    ticks: t.due.saturating_sub(now),
+                    values: t.call.values[..t.call.count]
+                        .iter()
+                        .map(SavedValue::of)
+                        .collect(),
+                });
+            }
+        }
+        for (e, timers) in by_entity {
+            if world.contains(e) {
+                world.insert(e, ScriptTimers { timers });
+            }
+        }
+    }
+
+    /// After a save was taken: the [`ScriptTimers`] [`Self::before_save`] put on entities
+    /// taken away (a snapshot takes plain data only).
+    pub fn after_save(&mut self, world: &mut World) {
+        let mut q = engine_ecs::QueryState::<(Entity, &ScriptTimers)>::new(world);
+        let held: Vec<Entity> = q.iter_readonly(world).map(|(e, _)| e).collect();
+        for e in held {
+            world.remove::<ScriptTimers>(e);
+        }
+    }
+
+    /// After a save was applied (ADR 0114 §8): what waited from the world before goes, the
+    /// save's timers are set again from the [`ScriptTimers`] on its entities (then taken
+    /// away), and the next tick's stage calls every instance's `on_load`.
+    pub fn after_load(&mut self, world: &mut World) {
+        let now = self.clock.ticks;
+        let mut q = engine_ecs::QueryState::<(Entity, &ScriptTimers)>::new(world);
+        let saved: Vec<(Entity, ScriptTimers)> = q
+            .iter_readonly(world)
+            .map(|(e, t)| (e, t.clone()))
+            .collect();
+        let lua = self.vm.lua();
+        if let Some(mut mail) = lua.app_data_mut::<Mailbox>() {
+            mail.messages.clear();
+            mail.later.clear();
+            mail.timers.clear();
+            for (e, timers) in &saved {
+                for t in &timers.timers {
+                    let Some(c) = self.components.iter().find(|c| c.name == t.component) else {
+                        continue;
+                    };
+                    let Ok(hook) = lua.create_string(&t.hook) else {
+                        continue;
+                    };
+                    let mut values = [Value::Nil, Value::Nil, Value::Nil, Value::Nil];
+                    let count = t.values.len().min(values.len());
+                    for (slot, v) in values.iter_mut().zip(&t.values) {
+                        *slot = v.value(lua);
+                    }
+                    mail.seq += 1;
+                    let (due, seq) = (now + t.ticks.max(1), mail.seq);
+                    let at = mail
+                        .timers
+                        .partition_point(|x| (x.due, x.seq) <= (due, seq));
+                    mail.timers.insert(
+                        at,
+                        Timer {
+                            due,
+                            seq,
+                            entity: *e,
+                            id: c.id,
+                            call: Call {
+                                hook,
+                                count,
+                                values,
+                            },
+                        },
+                    );
+                }
+            }
+        }
+        MAIL.set(false);
+        for (e, _) in saved {
+            world.remove::<ScriptTimers>(e);
+        }
+        self.loaded = true;
+    }
+
+    /// Every instance's `on_load` (its `on_start` first if it has not started), in the
+    /// instances' order, after a save was applied.
+    fn call_loaded(&mut self) {
+        let mut order = core::mem::take(&mut self.order);
+        order.clear();
+        order.extend(self.instances.keys().copied());
+        for &key in &order {
+            let k = key.1 as usize;
+            let Some((e, inst)) = self.instances.get_mut(&key) else {
+                continue;
+            };
+            if inst.stopped {
+                continue;
+            }
+            let (e, this) = (*e, inst.this.clone());
+            let started = core::mem::replace(&mut inst.started, true);
+            let c = &self.components[k];
+            let module = c.module.clone();
+            let (start, load) = (c.hooks.start.clone(), c.hooks.load.clone());
+            if !started
+                && let Some(start) = start
+                && let Err(err) = self
+                    .vm
+                    .call_function::<_, ()>(&module, &start, this.clone())
+            {
+                self.stop(key, "on_start", e, &err);
+                continue;
+            }
+            if let Some(load) = load
+                && let Err(err) = self.vm.call_function::<_, ()>(&module, &load, this)
+            {
+                self.stop(key, "on_load", e, &err);
+            }
+            self.deliver();
+        }
+        self.order = order;
+    }
+
     /// The messages scripts sent, delivered (ADR 0114 §7): each, in the order sent, to every
     /// script of its entity whose component has a function of its hook's name. Those sent
     /// while delivering go in the same pass, up to 16 passes; the rest wait for the next
@@ -1746,6 +1976,7 @@ fn hooks_of(table: &Table) -> Hooks {
         stop: hook("on_stop"),
         touch: hook("on_touch"),
         untouch: hook("on_untouch"),
+        load: hook("on_load"),
         handlers,
     }
 }
@@ -4494,6 +4725,104 @@ return Spawner
             unreachable!()
         };
         fields.iter().find(|f| f.name == name).unwrap().offset
+    }
+
+    #[test]
+    fn script_components_and_their_timers_come_back_with_a_save() {
+        let dir = project(
+            "saves",
+            &[(
+                "keeper.luau",
+                r#"local Keeper = component("Keeper", { count = 0, friend = prop.entity(), loads = 0, rang = 0, word = false })
+function Keeper.on_tick(self, dt)
+    self.count += 1
+    if self.count == 2 then
+        self:after(0.5, "ring", "dong", self.friend)
+    end
+end
+function Keeper.ring(self, word, who)
+    self.rang += 1
+    self.word = word == "dong" and who == self.friend and who.name == "Friend"
+end
+function Keeper.on_load(self)
+    self.loads += 1
+end
+return Keeper
+"#,
+            )],
+        );
+        let keeper_of = |world: &World, scripts: &Scripts| {
+            let id = scripts.component("Keeper").unwrap();
+            world
+                .archetypes()
+                .iter()
+                .filter(|a| a.components().contains(&id))
+                .find_map(|a| {
+                    (0..a.chunk_count()).find_map(|c| a.chunk_entities(c).first().copied())
+                })
+                .unwrap()
+        };
+        // Three ticks: the timer set at the second, due five ticks later (0.5 s at 0.1 s).
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let friend = world.spawn((Name::new("Friend"), Transform::IDENTITY));
+        let keeper = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, keeper, "Keeper");
+        let id = scripts.component("Keeper").unwrap();
+        let TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind else {
+            unreachable!()
+        };
+        let at = |name: &str| fields.iter().find(|f| f.name == name).unwrap().offset;
+        let (friend_at, word_at) = (at("friend"), at("word"));
+        let base = world.get_raw_mut(keeper, id).unwrap().as_ptr();
+        // SAFETY: Keeper's `friend`, an entity at its offset.
+        unsafe { base.add(friend_at).cast::<Entity>().write_unaligned(friend) };
+        for _ in 0..3 {
+            scripts.tick(&mut world, 0.1);
+        }
+        // The save: the timer rides on its entity, then leaves it.
+        scripts.before_save(&mut world);
+        assert!(world.get::<ScriptTimers>(keeper).is_some());
+        let image = engine_save::capture(&world, &engine_save::CaptureOptions::default());
+        scripts.after_save(&mut world);
+        assert!(
+            world.get::<ScriptTimers>(keeper).is_none(),
+            "plain data again"
+        );
+        let bytes =
+            engine_save::encode(&image, engine_save::Encoding::Text, &Default::default()).unwrap();
+        let save = engine_save::decode(&bytes).unwrap();
+
+        // A world and a host made anew, the save applied.
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let report = engine_save::apply(&mut world, &save).unwrap();
+        assert!(
+            !report.notes.iter().any(|n| n.contains("Keeper")),
+            "{:?}",
+            report.notes
+        );
+        scripts.after_load(&mut world);
+        let keeper = keeper_of(&world, &scripts);
+        assert!(world.get::<ScriptTimers>(keeper).is_none());
+        assert_eq!(read_f32(&world, &scripts, keeper, "Keeper", "count"), 3.0);
+        let friend = read_entity(&world, &scripts, keeper, "Keeper", "friend");
+        assert_eq!(world.get::<Name>(friend).unwrap().as_str(), "Friend");
+        // Its `on_load` once, at the next tick; the timer four ticks after the load.
+        for _ in 0..3 {
+            scripts.tick(&mut world, 0.1);
+        }
+        assert_eq!(read_f32(&world, &scripts, keeper, "Keeper", "loads"), 1.0);
+        assert_eq!(read_f32(&world, &scripts, keeper, "Keeper", "rang"), 0.0);
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(read_f32(&world, &scripts, keeper, "Keeper", "rang"), 1.0);
+        let base = world.get_raw(keeper, id).unwrap().as_ptr();
+        // SAFETY: Keeper's `word`, a bool at its offset.
+        let word = unsafe { base.add(word_at).read() };
+        assert_eq!(word, 1, "the timer's values came back, its entity remapped");
+        assert_eq!(read_f32(&world, &scripts, keeper, "Keeper", "count"), 7.0);
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

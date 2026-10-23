@@ -93,12 +93,40 @@ impl Drop for Scratch {
     }
 }
 
+/// How a resolved component's default value is made.
+enum MakeDefault {
+    /// A type of the program: its `Default`.
+    Typed(WriteDefault),
+    /// A type made at run time (a script's component, ADR 0114 E7-5f): its default value,
+    /// laid out.
+    Bytes(Box<[u8]>),
+}
+
+impl MakeDefault {
+    /// Writes the default value into `ptr`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is room for one value of the type, aligned.
+    unsafe fn write(&self, ptr: *mut u8) {
+        // SAFETY: as the caller says; a laid out default is one value's bytes, plain data.
+        unsafe {
+            match self {
+                Self::Typed(write) => write(ptr),
+                Self::Bytes(bytes) => {
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len())
+                }
+            }
+        }
+    }
+}
+
 /// A saved type resolved against the program, once per save.
 enum Resolved {
     Component {
         info: &'static TypeInfo,
         id: ComponentId,
-        default: WriteDefault,
+        default: MakeDefault,
         scratch: Scratch,
     },
     Resource {
@@ -112,6 +140,21 @@ enum Resolved {
 
 fn resolve(world: &mut World, name: &str, notes: &mut Vec<String>) -> Resolved {
     let Some(reflected) = find_reflected(name) else {
+        // A type made at run time (a script's component): its latest layout.
+        if let Some(t) = engine_ecs::runtime_types()
+            .into_iter()
+            .rev()
+            .find(|t| t.info.name == name)
+            && let Some(id) = t.id(world)
+            && let Some(scratch) = Scratch::new(t.info)
+        {
+            return Resolved::Component {
+                info: t.info,
+                id,
+                default: MakeDefault::Bytes(t.defaults),
+                scratch,
+            };
+        }
         notes.push(format!(
             "`{name}` is not in the program; its values skipped"
         ));
@@ -127,7 +170,7 @@ fn resolve(world: &mut World, name: &str, notes: &mut Vec<String>) -> Resolved {
                 Some(scratch) => Resolved::Component {
                     info: reflected.info,
                     id: id(world),
-                    default,
+                    default: MakeDefault::Typed(default),
                     scratch,
                 },
                 None => Resolved::Skipped,
@@ -255,7 +298,7 @@ pub fn apply_with(
             // valid, decoding keeps it valid, and `insert_raw` moves it into the world (the
             // entity is alive: just matched or made), leaving the scratch free again.
             unsafe {
-                default(scratch.ptr);
+                default.write(scratch.ptr);
                 let decoded = save.decode(value, info, scratch.ptr, &entity, &label, &mut notes);
                 world.insert_raw(e, *id, scratch.ptr);
                 decoded?;

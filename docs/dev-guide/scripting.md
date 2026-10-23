@@ -89,6 +89,7 @@ From Rust, `player.add_script(door, "Door")` gives one with its defaults.
 | `on_frame(self, dt, alpha)` | every rendered frame, before your game's `present`; `alpha` is how far the frame lies between the last two ticks |
 | `on_touch(self, other, point, normal)` | a body began touching the entity's body or its `Trigger`: `other` is its entity (`nil` for a body without one), the normal points toward it; at the start of the next tick |
 | `on_untouch(self, other)` | it stopped touching |
+| `on_load(self)` | a save was applied: your props hold the saved values (at the next tick, after `on_start` for an instance the load made) |
 | `on_stop(self)` | once the component went from a living entity |
 
 - **Hooks run only while the world simulates:** in a game, and in the editor's Play.
@@ -426,4 +427,4 @@ end
 ## Coming next
 
 - props of text;
-- script components in saves, with their timers.
+- what a networked client runs: its own predicted entities' hooks, and `net`.
