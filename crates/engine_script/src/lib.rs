@@ -309,6 +309,11 @@ impl ScriptVm {
         Ok(())
     }
 
+    /// What module `name` returned, if it is loaded.
+    pub fn exports(&self, name: &str) -> Option<&Table> {
+        self.modules.get(name).map(|m| &m.exports)
+    }
+
     /// Whether a module is loaded.
     pub fn has_module(&self, name: &str) -> bool {
         self.modules.contains_key(name)

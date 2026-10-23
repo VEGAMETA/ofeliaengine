@@ -1260,3 +1260,39 @@ there, and see the script's file in the inspector.
   - the editor's checker takes a strict script using them all.
 - **Not in this step:** `require` (next: the project's modules by path, `.luaurc` aliases,
   dependents reloaded after them); `send`.
+
+## As built (E7-5b, 2026-10-23): `require` between scripts
+
+- **`require(path)` is Luau's require by string** over the project's modules. It is
+  mlua's `create_require_function` with the host's own `Require`
+  (`engine_app::script_require`): a tree of the modules under `scripts/`, named by their
+  paths (`npc/guard`). Luau's own navigation resolves `./`, `../`, `@self` and the aliases
+  of the `.luaurc` files above the requiring script, read from the project's folder.
+- **It replaces the VM's default,** mlua's file system requirer. That one never ran for
+  these scripts: their chunks are named `=module`, and it takes `@` names only.
+- **What it returns** is what the module returned (a component's table, a table of
+  functions), cached per module by mlua's `require`.
+- **Load order:** what a module requires runs before it.
+  - The host reads every script and finds the paths of its `require` calls written as
+    strings (comments and other strings skipped).
+  - It resolves them as the navigation does and loads in that order, the rest in path
+    order.
+  - Scripts that require each other are reported: one runs before what it requires, whose
+    `require` fails naming it ("has not run yet").
+- **Reloads** (§10): a script run again drops its cached result. The scripts that require
+  it, and those that require them, run again after it in their order, from the text that
+  last ran. The editor names them ("ran again, as they require it: …").
+- **An `init.luau`** is its folder's module (`require("./npc")`), as Luau has it: its `./`
+  is beside the folder, and `@self` is the folder.
+- **Tests:**
+  - a script before its requirement in path order;
+  - `../`, an `init` with `@self`, an alias from the project's `.luaurc`;
+  - two scripts requiring each other;
+  - a reload whose dependent runs again and sees the new result;
+  - the path scanner, the navigation and the order on their own;
+  - the editor's message.
+- **Not in this step:**
+  - a path made at run time, which the scan cannot see: its `require` works only once its
+    module has run, and errors before;
+  - comments in `.luaurc` files: the order's scan reads their aliases as JSON, though
+    Luau's own reader takes comments.

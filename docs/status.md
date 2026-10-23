@@ -551,14 +551,17 @@ Last updated: 2026-10-22.
     program's, a script's `component` table, or a name); `Transform`'s `rotate`,
     `look_at`, `forward`, `right`, `up`. None of them allocates (the zero-allocation
     test's walkers).
+  - **E7-5b, `require` between scripts** (#360, ADR 0114's as-built): Luau's require by
+    string over the project's modules (mlua's require with the host's own navigation:
+    `./`, `../`, `@self`, `.luaurc` aliases); what a script requires runs before it,
+    whatever the files' names (its `require` paths scanned before loading); a reloaded
+    script's dependents run again after it, and the editor names them.
   - **Next, in this order** (E7-5, the rest of scripting v1, in steps; the API is ADR
     0114's):
-    1. E7-5b: `require` by string over the project's modules (`.luaurc` aliases,
-       dependents reloaded after them);
-    2. E7-5c: `world.spawn`, `world.query` (`with`, `without`) and `system(name, hooks)`;
-    3. E7-5d: `input` (the tick's view and the frame's);
-    4. E7-5e: `send`, `after`, `audio`, `random`, `world.instantiate`;
-    5. E7-5f: saves of script components (`on_load`) and §8's networking rules; each
+    1. E7-5c: `world.spawn`, `world.query` (`with`, `without`) and `system(name, hooks)`;
+    2. E7-5d: `input` (the tick's view and the frame's);
+    3. E7-5e: `send`, `after`, `audio`, `random`, `world.instantiate`;
+    4. E7-5f: saves of script components (`on_load`) and §8's networking rules; each
        step adds its examples to the zero-allocation test;
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.

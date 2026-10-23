@@ -74,6 +74,7 @@ mod previews;
 mod process;
 mod report;
 mod saves;
+mod script_require;
 pub mod script_types;
 mod script_views;
 pub mod scripts;

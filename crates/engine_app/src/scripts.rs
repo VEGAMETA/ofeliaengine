@@ -53,6 +53,7 @@
 //!   with their state. Props that kept their places take the new hooks in place; props that
 //!   changed move each entity's values by name to a component of the new layout.
 
+use crate::script_require;
 use crate::script_views::{self, Tables};
 use engine_core::math::{Quat, Vec2, Vec3, Vec3A};
 use engine_ecs::{ComponentId, Entity, Relayout, World};
@@ -61,7 +62,8 @@ use engine_script::mlua::{
     self, AnyUserData, Function, Lua, MetaMethod, Table, UserData, UserDataMethods, Value, Vector,
 };
 use engine_script::{ScriptError, ScriptSettings, ScriptVm};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -200,6 +202,13 @@ pub struct Scripts {
     reported: HashSet<String>,
     /// Each module's text as it last ran, hashed: a reload of the same text does nothing.
     sources: HashMap<String, u64>,
+    /// Each module's text as it last ran, which runs again when a module it requires is
+    /// reloaded.
+    texts: HashMap<String, Rc<str>>,
+    /// The project's modules as `require` finds them (ADR 0114 E7-5b), and what each
+    /// requires by string, by module.
+    modules: Rc<RefCell<script_require::Modules>>,
+    needs: BTreeMap<String, Vec<String>>,
     /// Each component's registry name's version: the next layout of its props is
     /// `script::Door#2`, and so on.
     versions: HashMap<String, u32>,
@@ -225,6 +234,8 @@ pub struct Reloaded {
     pub gone: Vec<String>,
     /// The instances that go on, their state kept.
     pub instances: usize,
+    /// The scripts that require it, run again after it (their files).
+    pub dependents: Vec<String>,
     /// How long it took.
     pub took: Duration,
 }
@@ -250,7 +261,13 @@ impl Scripts {
     /// When the VM cannot be made.
     pub fn load(world: &mut World, root: &Path, folder: &Path) -> Result<Self, ScriptError> {
         engine_profiler::zone!("scripts::load");
-        let vm = ScriptVm::new_with(ScriptSettings::default(), install)?;
+        // `require` between the project's scripts, over the modules found below.
+        let modules = Rc::new(RefCell::new(script_require::Modules::default()));
+        let vm = ScriptVm::new_with(ScriptSettings::default(), |lua| {
+            install(lua)?;
+            let require = script_require::require_function(lua, modules.clone())?;
+            lua.globals().set("require", require)
+        })?;
         let mut tables = Box::new(Tables::default());
         tables.slow = vm
             .lua()
@@ -283,6 +300,9 @@ impl Scripts {
             clock: Clock::default(),
             reported: HashSet::new(),
             sources: HashMap::new(),
+            texts: HashMap::new(),
+            modules,
+            needs: BTreeMap::new(),
             heard: (0, 0),
             versions: HashMap::new(),
         };
@@ -303,6 +323,7 @@ impl Scripts {
             }
         }
         scripts.vm.lua().set_app_data(shown_files);
+        let mut texts = Vec::new();
         for file in files {
             let Ok(relative) = file.strip_prefix(folder) else {
                 continue;
@@ -313,16 +334,79 @@ impl Scripts {
                 .replace('\\', "/");
             let shown = file.strip_prefix(root).unwrap_or(&file).to_path_buf();
             scripts.files.insert(module.clone(), shown.clone());
-            let source = match std::fs::read_to_string(&file) {
-                Ok(s) => s,
-                Err(e) => {
-                    log::error!(target: "script", "{}: {e}", shown.display());
-                    continue;
-                }
-            };
-            scripts.load_module(world, &module, &source);
+            match std::fs::read_to_string(&file) {
+                Ok(s) => texts.push((module, s)),
+                Err(e) => log::error!(target: "script", "{}: {e}", shown.display()),
+            }
+        }
+        let folder_path: Vec<String> = folder
+            .strip_prefix(root)
+            .unwrap_or(folder)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        *scripts.modules.borrow_mut() = script_require::Modules::new(
+            root.to_path_buf(),
+            folder_path,
+            texts.iter().map(|(m, _)| m.clone()),
+        );
+        // What each requires runs before it (ADR 0114 E7-5b).
+        for (module, source) in &texts {
+            scripts.note_needs(module, source);
+        }
+        let (order, cycles) = script_require::order(&scripts.needs);
+        for cycle in cycles {
+            let files: Vec<String> = cycle.iter().map(|m| scripts.file(m)).collect();
+            log::error!(
+                target: "script",
+                "{}: these scripts require each other, so one runs before what it requires",
+                files.join(" → ")
+            );
+        }
+        let mut texts: HashMap<String, String> = texts.into_iter().collect();
+        for module in order {
+            if let Some(source) = texts.remove(&module) {
+                scripts.load_module(world, &module, &source);
+            }
         }
         Ok(scripts)
+    }
+
+    /// What module `module` (its text `source`) requires by string, as modules.
+    fn note_needs(&mut self, module: &str, source: &str) {
+        let modules = self.modules.borrow();
+        let needs = script_require::requires(source)
+            .iter()
+            .filter_map(|path| modules.resolve(module, path))
+            .collect();
+        drop(modules);
+        self.needs.insert(module.to_owned(), needs);
+    }
+
+    /// The modules that require `module`, and those that require them, in the order they
+    /// run again after it.
+    fn dependents_of(&self, module: &str) -> Vec<String> {
+        let mut found: BTreeSet<String> = BTreeSet::new();
+        let mut next = vec![module.to_owned()];
+        while let Some(m) = next.pop() {
+            for (d, needs) in &self.needs {
+                if needs.contains(&m) && d != module && found.insert(d.clone()) {
+                    next.push(d.clone());
+                }
+            }
+        }
+        let among: BTreeMap<String, Vec<String>> = found
+            .iter()
+            .map(|d| {
+                let needs = self.needs[d]
+                    .iter()
+                    .filter(|n| found.contains(*n))
+                    .cloned()
+                    .collect();
+                (d.clone(), needs)
+            })
+            .collect();
+        script_require::order(&among).0
     }
 
     /// A script made after the start (the editor's New Script): file `file` under `folder`
@@ -354,6 +438,8 @@ impl Scripts {
         if let Some(mut files) = self.vm.lua().app_data_mut::<Files>() {
             files.0.insert(module.clone(), shown);
         }
+        self.modules.borrow_mut().add(&module);
+        self.note_needs(&module, &source);
         let before = self.components.len();
         self.load_module(world, &module, &source);
         if !self.vm.has_module(&module) {
@@ -383,15 +469,27 @@ impl Scripts {
             log::error!(target: "script", "{}", self.place(&e));
             return;
         }
-        self.sources.insert(
-            module.to_owned(),
-            engine_core::hash::state_hash64(source.as_bytes()),
-        );
+        self.ran(module, source);
         for (name, table, props) in declared {
             if let Err(why) = self.register(world, module, &name, &table, props) {
                 let file = self.file(module);
                 log::error!(target: "script", "{file}: component `{name}`: {why}");
             }
+        }
+    }
+
+    /// Module `module` ran its text `source`: what it returned is what `require` gives
+    /// from now on, the text kept for its next run.
+    fn ran(&mut self, module: &str, source: &str) {
+        self.sources.insert(
+            module.to_owned(),
+            engine_core::hash::state_hash64(source.as_bytes()),
+        );
+        self.texts.insert(module.to_owned(), source.into());
+        if let Some(exports) = self.vm.exports(module)
+            && let Err(e) = script_require::ran(self.vm.lua(), module, exports.clone())
+        {
+            log::error!(target: "script", "{}: {e}", self.file(module));
         }
     }
 
@@ -433,16 +531,50 @@ impl Scripts {
         let shown = self.file(&module);
         let source = std::fs::read_to_string(file).map_err(|e| format!("{shown}: {e}"))?;
         let hash = engine_core::hash::state_hash64(source.as_bytes());
+        if self.sources.get(&module) == Some(&hash) {
+            return Ok(Reloaded {
+                file: shown,
+                took: started.elapsed(),
+                ..Reloaded::default()
+            });
+        }
+        let mut out = self.run_again(world, &module, &source)?;
+        // Those that require it run again after it, in their order (ADR 0114 §10), so
+        // none keeps what the old version returned.
+        for d in self.dependents_of(&module) {
+            let Some(text) = self.texts.get(&d).cloned() else {
+                continue;
+            };
+            match self.run_again(world, &d, &text) {
+                Ok(again) => {
+                    out.instances += again.instances;
+                    out.relaid.extend(again.relaid);
+                    out.dependents.push(again.file);
+                }
+                Err(why) => log::error!(target: "script", "{why}"),
+            }
+        }
+        out.took = started.elapsed();
+        Ok(out)
+    }
+
+    /// Module `module` run again with text `source`, as [`Self::reload_file`] describes.
+    fn run_again(
+        &mut self,
+        world: &mut World,
+        module: &str,
+        source: &str,
+    ) -> Result<Reloaded, String> {
+        let started = Instant::now();
+        let module = module.to_owned();
+        let shown = self.file(&module);
         let mut out = Reloaded {
             file: shown.clone(),
             ..Reloaded::default()
         };
-        if self.sources.get(&module) == Some(&hash) {
-            out.took = started.elapsed();
-            return Ok(out);
-        }
+        self.note_needs(&module, source);
         self.vm.lua().set_app_data(Loading::default());
-        let loaded = self.vm.load_module(&module, &source);
+        let loaded = self.vm.load_module(&module, source);
         let declared = self
             .vm
             .lua()
@@ -450,7 +582,7 @@ impl Scripts {
             .map(|l| l.declared)
             .unwrap_or_default();
         loaded.map_err(|e| self.place(&e))?;
-        self.sources.insert(module.clone(), hash);
+        self.ran(&module, source);
         let before = self.components.len();
         let mut again = Vec::new();
         for (name, table, props) in declared {
@@ -2916,6 +3048,101 @@ return NoColon
         ] {
             assert!(reported.contains(&line), "{line} in {reported:?}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scripts_require_each_other_by_path_and_dependents_run_again_after_a_reload() {
+        let dir = project(
+            "require",
+            &[
+                // Before the wallet in path order: it runs after it all the same.
+                (
+                    "coin.luau",
+                    r#"local Wallet = require("./wallet")
+local math2 = require("@shared/math")
+local Coin = component("Coin", { version = 0, paid = false, doubled = 0 })
+function Coin.on_tick(self, dt)
+    self.version = Wallet.version
+    self.paid = self:has(Wallet) and Wallet.name == "Wallet"
+    self.doubled = math2.double(21)
+end
+return Coin
+"#,
+                ),
+                (
+                    "wallet.luau",
+                    r#"local Wallet = component("Wallet", { coins = 0 })
+Wallet.version = 1
+return Wallet
+"#,
+                ),
+                (
+                    "shared/math.luau",
+                    "return { double = function(x) return x * 2 end }\n",
+                ),
+                (
+                    "npc/init.luau",
+                    r#"local guard = require("@self/guard")
+local Npc = component("Npc", { guarded = false })
+function Npc.on_tick(self, dt)
+    self.guarded = guard.on_duty
+end
+return Npc
+"#,
+                ),
+                (
+                    "npc/guard.luau",
+                    "local math2 = require(\"../shared/math\")\nreturn { on_duty = math2.double(1) == 2 }\n",
+                ),
+                ("a.luau", "local B = require(\"./b\")\nreturn { b = B }\n"),
+                ("b.luau", "local A = require(\"./a\")\nreturn { a = A }\n"),
+            ],
+        );
+        std::fs::write(
+            dir.join(".luaurc"),
+            r#"{ "aliases": { "shared": "./scripts/shared" } }"#,
+        )
+        .unwrap();
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let e = world.spawn((Transform::IDENTITY,));
+        for name in ["Coin", "Wallet", "Npc"] {
+            assert!(scripts.add(&mut world, e, name), "{name} loaded");
+        }
+        // The two that require each other: neither runs.
+        assert!(!scripts.vm.has_module("a") || !scripts.vm.has_module("b"));
+        scripts.tick(&mut world, 0.1);
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        assert_eq!(read_f32(&world, &scripts, e, "Coin", "version"), 1.0);
+        assert_eq!(read_f32(&world, &scripts, e, "Coin", "doubled"), 42.0);
+        let flag = |world: &World, scripts: &Scripts, component: &str, name: &str| {
+            let id = scripts.component(component).unwrap();
+            let TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind else {
+                unreachable!()
+            };
+            let at = fields.iter().find(|f| f.name == name).unwrap().offset;
+            // SAFETY: a bool prop at its offset.
+            unsafe { world.get_raw(e, id).unwrap().as_ptr().add(at).read() == 1 }
+        };
+        assert!(flag(&world, &scripts, "Coin", "paid"));
+        assert!(flag(&world, &scripts, "Npc", "guarded"));
+
+        // The wallet changed: the coin, which requires it, runs again after it and sees
+        // what the new one returned.
+        let wallet = dir.join("scripts/wallet.luau");
+        std::fs::write(
+            &wallet,
+            "local Wallet = component(\"Wallet\", { coins = 0 })\nWallet.version = 2\nreturn Wallet\n",
+        )
+        .unwrap();
+        let reloaded = scripts
+            .reload_file(&mut world, &dir, &dir.join("scripts"), &wallet)
+            .unwrap();
+        assert_eq!(reloaded.dependents, ["scripts/coin.luau"]);
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(read_f32(&world, &scripts, e, "Coin", "version"), 2.0);
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
