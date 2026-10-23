@@ -1108,7 +1108,7 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    40-58 s → 11-15 s): 632 → 141 s with nothing changed; the perf step (ADR 0062 addendum:
    runs a round at a time, a scene with a slower pass measured again, 100 frames per run,
    baselines from median runs, a 12 s wait for a quiet CPU instead of 2 × 2 min) 749 →
-   237 s: the gate `-Gpu -Perf` 901 → 400 s. On 2026-10-23 (#PR) a package's own build
+   237 s: the gate `-Gpu -Perf` 901 → 400 s. On 2026-10-23 (#378) a package's own build
    was found making copies of most of the workspace's builds in 88 of 96 cases (seven
    dependencies' features that the drift check missed, and Cargo's "debug info when
    possible" for what build scripts use). The hack crate and the dev profile fix them:
