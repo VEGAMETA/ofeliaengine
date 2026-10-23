@@ -1,9 +1,11 @@
 //! ADR 0114 §11 and §13: what the engine gives scripts allocates nothing in steady state.
-//! The door example (§5) on 1,000 entities, and watchers using the rest of what scripts
-//! have so far (`world.find`, entities as values and as table keys, an entity's name, an
-//! entity prop, `self.entity`, `self.locals`, the time, a physics ray, contacts with a
-//! trigger), through 600 ticks and frames after a warm-up: the heap allocations made in
-//! the scripts' stages are counted (the physics steps between them are not). One test per
+//! The door example (§5) on 1,000 entities, watchers using the rest of what scripts have
+//! (`world.find`, entities as values and as table keys, an entity's name, an entity prop,
+//! `self.entity`, `self.locals`, the time, a physics ray, contacts with a trigger), and
+//! walkers using entities' and `Transform`'s methods (`rotate`, `forward`, `look_at`,
+//! `find_child`, `children`, `has`, `parent`, a function of their own through `self:`),
+//! through 600 ticks and frames after a warm-up: the heap allocations made in the
+//! scripts' stages are counted (the physics steps between them are not). One test per
 //! file, so nothing else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
@@ -100,8 +102,38 @@ end
 return Watcher
 "#;
 
+/// Methods: entities' and `Transform`'s (ADR 0114 §3, E7-5a).
+const WALKER: &str = r#"local UP = vector.create(0, 1, 0)
+local Walker = component("Walker", { speed = 1.5, steps = 0 })
+
+function Walker.step(self, by)
+    self.steps += by
+end
+
+function Walker.on_tick(self, dt)
+    local t = self.Transform
+    t:rotate(UP, self.speed * dt)
+    local ahead = t:forward() + t:right() * 0.5 + t:up() * 0.1
+    t.translation += ahead * dt
+    local camera = self:find_child("Camera")
+    if camera and camera:has(Transform) and camera.parent == self.entity then
+        camera.Transform:look_at(vector.create(0, 0, -10))
+    end
+    for child in self.entity:children() do
+        if child:has(Transform) then
+            self:step(1)
+        end
+    end
+end
+
+return Walker
+"#;
+
 /// Watchers, each with a trigger, a ball falling through it and a floor named after it.
 const WATCHERS: usize = 10;
+
+/// Walkers, each with a camera and an arm.
+const WALKERS: usize = 10;
 
 #[test]
 fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
@@ -111,6 +143,7 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
     std::fs::create_dir_all(dir.join("scripts")).unwrap();
     std::fs::write(dir.join("scripts/door.luau"), DOOR).unwrap();
     std::fs::write(dir.join("scripts/watcher.luau"), WATCHER).unwrap();
+    std::fs::write(dir.join("scripts/walker.luau"), WALKER).unwrap();
     let mut world = World::new();
     let mut scripts = Scripts::load(&mut world, &dir, &dir.join("scripts")).unwrap();
     let mut physics = ScenePhysics::new(&PhysicsSettings {
@@ -167,6 +200,18 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
         balls.push((body, at + Vec3::new(0.0, 3.0, 0.0)));
     }
 
+    let walkers: Vec<Entity> = (0..WALKERS)
+        .map(|i| {
+            let walker = world.spawn((Transform::from_xyz(i as f32 * 3.0, 0.0, -30.0),));
+            for name in ["Arm", "Camera"] {
+                let child = world.spawn((Name::new(name), Transform::IDENTITY));
+                world.set_parent(child, Some(walker)).unwrap();
+            }
+            assert!(scripts.add(&mut world, walker, "Walker"));
+            walker
+        })
+        .collect();
+
     let dt = 1.0 / 64.0;
     let mut tick = |world: &mut World, scripts: &mut Scripts, n: usize, counted: &mut usize| {
         // The player paces along the row; every 80 ticks the balls are dropped again.
@@ -217,6 +262,23 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
         // SAFETY: a number prop (f32) at its offset in the watcher's component.
         unsafe { base.add(at).cast::<f32>().read_unaligned() }
     };
+    let id = scripts.component("Walker").unwrap();
+    let engine_reflect::TypeKind::Struct(walker_fields) =
+        &world.components().type_info(id).unwrap().kind
+    else {
+        unreachable!()
+    };
+    let steps = walker_fields
+        .iter()
+        .find(|f| f.name == "steps")
+        .unwrap()
+        .offset;
+    for &w in &walkers {
+        let base = world.get_raw(w, id).unwrap().as_ptr();
+        // SAFETY: Walker's `steps`, an f32 at its offset.
+        let steps = unsafe { base.add(steps).cast::<f32>().read_unaligned() };
+        assert_eq!(steps, 840.0 * 2.0, "a walker stopped");
+    }
     for &w in &watchers {
         assert_eq!(read(w, "looks"), 840.0, "a watcher stopped");
         assert!(read(w, "hits") > 0.0, "no ray hit its floor");

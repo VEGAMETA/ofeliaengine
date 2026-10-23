@@ -37,6 +37,12 @@ impl Parent {
     pub fn previous_sibling(&self) -> Entity {
         self.prev
     }
+
+    /// The sibling after this entity among the parent's children, or `Entity::NULL` for
+    /// the last: a step of a loop over them that keeps no iterator (scripts' `children()`).
+    pub fn next_sibling(&self) -> Entity {
+        self.next
+    }
 }
 
 /// The entity's children: the ends of the list and how many there are.

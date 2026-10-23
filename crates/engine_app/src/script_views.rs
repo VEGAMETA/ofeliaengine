@@ -17,6 +17,12 @@
 //!   the handle's bits plus one ([`entity_value`]), never allocated, equal when their
 //!   handles are, usable as table keys, `typeof` `Entity`. Their metatable is the VM's
 //!   one for every light userdata (no other light userdata reaches scripts).
+//! - **Methods** (ADR 0114 §3, E7-5a) are `__namecall`s, found by the method's atom: an
+//!   entity's (`has`, `add`, `remove`, `despawn`, `children`, `find_child`) on entities and
+//!   `self`, then the functions on `self`'s component's table (`self:open()` is
+//!   `Door.open(self)`); `Transform`'s (`rotate`, `look_at`, `forward`, `right`, `up`) on
+//!   its views. A component is named by its table (`Transform`, a script's `component`
+//!   table: its `name`) or by its name.
 //! - **No allocation per access:** a view of `self`'s entity's component is made once and
 //!   kept on `self` ([`ThisData::views`]), as is `self.locals`; a view through an entity
 //!   (`e.Transform`) or of a struct inside a view is kept in a table of the latest
@@ -25,7 +31,8 @@
 //! - **Errors** are raised with `lua_error` once nothing with a destructor is alive in the
 //!   frame, as mlua's own callbacks raise theirs.
 
-use engine_ecs::{Changed, ComponentId, Entity, QueryState, World};
+use engine_core::math::{Quat, Vec3};
+use engine_ecs::{Changed, ComponentId, Entity, Parent, QueryState, Transform, World};
 use engine_reflect::{Primitive, TypeInfo, TypeKind};
 use engine_scene::Name;
 use engine_script::mlua::{self, ffi};
@@ -181,13 +188,73 @@ struct Named {
 }
 
 /// The host's own functions the C functions hand the rest to, as registry references:
-/// `self`'s `__index` and `__newindex`, a view's.
+/// `self`'s `__index` and `__newindex`, a view's, an entity's `add`; and `children()`'s
+/// step ([`children_next`]), made once.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Slow {
     pub(crate) self_index: c_int,
     pub(crate) self_newindex: c_int,
     pub(crate) view_index: c_int,
     pub(crate) view_newindex: c_int,
+    pub(crate) add: c_int,
+    pub(crate) children: c_int,
+}
+
+/// The atoms of an entity's `parent` and methods, and of `Transform`'s methods.
+#[derive(Debug, Clone, Copy)]
+struct Methods {
+    parent: c_int,
+    has: c_int,
+    add: c_int,
+    remove: c_int,
+    despawn: c_int,
+    children: c_int,
+    find_child: c_int,
+    rotate: c_int,
+    look_at: c_int,
+    forward: c_int,
+    right: c_int,
+    up: c_int,
+}
+
+impl Methods {
+    fn new() -> Self {
+        let a = |name| c_int::from(atom_of(name));
+        Self {
+            parent: a("parent"),
+            has: a("has"),
+            add: a("add"),
+            remove: a("remove"),
+            despawn: a("despawn"),
+            children: a("children"),
+            find_child: a("find_child"),
+            rotate: a("rotate"),
+            look_at: a("look_at"),
+            forward: a("forward"),
+            right: a("right"),
+            up: a("up"),
+        }
+    }
+
+    /// Whether `key` (its atom `atom`) names one of an entity's methods.
+    ///
+    /// # Safety
+    ///
+    /// `key` is a live string.
+    unsafe fn entity_method(&self, key: *const c_char, atom: c_int) -> bool {
+        let names: [(c_int, &[u8]); 6] = [
+            (self.has, b"has"),
+            (self.add, b"add"),
+            (self.remove, b"remove"),
+            (self.despawn, b"despawn"),
+            (self.children, b"children"),
+            (self.find_child, b"find_child"),
+        ];
+        // SAFETY: as the caller says.
+        names
+            .iter()
+            .any(|&(named, name)| unsafe { is_named(key, atom, named, name) })
+    }
 }
 
 /// A view kept ([`Tables::kept`]): what it shows (its entity's bits, its type's address,
@@ -337,6 +404,19 @@ pub(crate) struct Tables {
     /// The views made through entities and of structs inside views, the latest of each
     /// place, found by what they show ([`push_kept_view`]).
     kept: Box<[Kept]>,
+    /// The atoms of entities' `parent` and methods, and `Transform`'s.
+    methods: Methods,
+    /// `Transform`'s id, whose views have its methods.
+    pub(crate) transform: Option<ComponentId>,
+    /// Each script component's table (what its module declared, its own functions on it)
+    /// by the component's index, as a registry reference: `self:open()` calls
+    /// `Door.open(self)`.
+    own: HashMap<u32, c_int>,
+    /// The entities scripts despawned in this stage: the host despawns them, with their
+    /// children, at its end (ADR 0114 §7).
+    pub(crate) despawns: Vec<Entity>,
+    /// `find_child`'s queue (scratch).
+    search: Vec<Entity>,
 }
 
 impl Default for Tables {
@@ -352,6 +432,11 @@ impl Default for Tables {
             stage: 0,
             names: NameIndex::default(),
             kept: vec![Kept::default(); VIEW_CACHE].into_boxed_slice(),
+            methods: Methods::new(),
+            transform: None,
+            own: HashMap::new(),
+            despawns: Vec::new(),
+            search: Vec::new(),
         }
     }
 }
@@ -402,6 +487,18 @@ impl Tables {
             self.named.resize(atom + 1, None);
         }
         self.named[atom] = Some(Named { id, info, slots });
+    }
+
+    /// Script component `id`'s table is the one at registry reference `table` from now on;
+    /// the one before, if any, for the caller to let go.
+    pub(crate) fn set_own(&mut self, id: ComponentId, table: c_int) -> Option<c_int> {
+        self.own.insert(id.index(), table)
+    }
+
+    /// Component `id`'s table goes (its component no longer has one): its reference, for
+    /// the caller to let go.
+    pub(crate) fn forget_own(&mut self, id: ComponentId) -> Option<c_int> {
+        self.own.remove(&id.index())
     }
 
     /// The entity named `name` in `world`, as this stage's index has it.
@@ -480,12 +577,20 @@ pub(crate) unsafe fn install(state: *mut ffi::lua_State) {
             (
                 TAG_SELF,
                 c"Self",
-                &[(c"__index", self_index), (c"__newindex", self_newindex)],
+                &[
+                    (c"__index", self_index),
+                    (c"__newindex", self_newindex),
+                    (c"__namecall", self_namecall),
+                ],
             ),
             (
                 TAG_VIEW,
                 c"View",
-                &[(c"__index", view_index), (c"__newindex", view_newindex)],
+                &[
+                    (c"__index", view_index),
+                    (c"__newindex", view_newindex),
+                    (c"__namecall", view_namecall),
+                ],
             ),
         ];
         for (tag, name, functions) in methods {
@@ -500,10 +605,13 @@ pub(crate) unsafe fn install(state: *mut ffi::lua_State) {
             ffi::lua_setuserdatametatable(state, tag);
         }
         // Entities: the metatable of every light userdata, set through one of them.
-        let entity: [(&std::ffi::CStr, ffi::lua_CFunction); 2] =
-            [(c"__index", entity_index), (c"__tostring", entity_tostring)];
+        let entity: [(&std::ffi::CStr, ffi::lua_CFunction); 3] = [
+            (c"__index", entity_index),
+            (c"__namecall", entity_namecall),
+            (c"__tostring", entity_tostring),
+        ];
         ffi::lua_pushlightuserdatatagged(state, core::ptr::null_mut(), ENTITY_TAG);
-        ffi::lua_createtable(state, 0, 2);
+        ffi::lua_createtable(state, 0, 3);
         for (key, f) in entity {
             ffi::lua_pushcfunctiond(state, f, key.as_ptr());
             ffi::lua_rawsetfield(state, -2, key.as_ptr());
@@ -1264,6 +1372,16 @@ unsafe extern "C-unwind" fn entity_index(state: *mut ffi::lua_State) -> c_int {
             }
             return 1;
         }
+        if is_named(key, atom, (*tables).methods.parent, b"parent") {
+            push_entity(state, (*world).parent(e).unwrap_or(Entity::NULL));
+            return 1;
+        }
+        if (*tables).methods.entity_method(key, atom) {
+            let text = std::ffi::CStr::from_ptr(key).to_string_lossy().into_owned();
+            let message = format!("`{text}` is a method: call it with a colon (`e:{text}(…)`)");
+            drop(text);
+            raise(state, message);
+        }
         let named = (*tables).named(atom).or_else(|| {
             // A name made before the atoms were: by its bytes.
             let bytes = std::ffi::CStr::from_ptr(key).to_bytes();
@@ -1297,6 +1415,379 @@ unsafe extern "C-unwind" fn entity_index(state: *mut ffi::lua_State) -> c_int {
         } else {
             format!("an entity has no `{text}`")
         };
+        drop(text);
+        raise(state, message)
+    }
+}
+
+/// The component the value at stack index `idx` names: a component's table (`Transform`,
+/// a script's `component` table: its `name`) or its name; with the name's text (null when
+/// there is none) for an error.
+///
+/// # Safety
+///
+/// `idx` is a valid index of `state`; `tables` are the stage's.
+unsafe fn component_at(
+    state: *mut ffi::lua_State,
+    tables: *mut Tables,
+    idx: c_int,
+) -> (Option<Named>, *const c_char) {
+    // SAFETY: as the caller says; a table's `name` lives while the table does.
+    unsafe {
+        let mut atom: c_int = -1;
+        let key = if ffi::lua_type(state, idx) == ffi::LUA_TTABLE {
+            ffi::lua_rawgetfield(state, idx, c"name".as_ptr());
+            let key = ffi::lua_tostringatom(state, -1, &mut atom);
+            ffi::lua_pop(state, 1);
+            key
+        } else {
+            ffi::lua_tostringatom(state, idx, &mut atom)
+        };
+        if key.is_null() {
+            return (None, key);
+        }
+        let named = (*tables).named(atom).or_else(|| {
+            let bytes = std::ffi::CStr::from_ptr(key).to_bytes();
+            core::str::from_utf8(bytes)
+                .ok()
+                .map(atom_of)
+                .and_then(|a| (*tables).named(c_int::from(a)))
+        });
+        (named, key)
+    }
+}
+
+/// Why the value [`component_at`] read for `method` names no component.
+///
+/// # Safety
+///
+/// `key` is a live string or null.
+unsafe fn no_component(method: &str, key: *const c_char) -> String {
+    if key.is_null() {
+        return format!("{method} takes a component (`Transform`, a script's) or its name");
+    }
+    // SAFETY: as the caller says.
+    let text = unsafe { std::ffi::CStr::from_ptr(key) }.to_string_lossy();
+    format!("{method}: no component is called `{text}`")
+}
+
+/// The nearest of `e`'s descendants named `name`: its children first, then theirs.
+/// `search` is the queue.
+fn find_child(world: &World, search: &mut Vec<Entity>, e: Entity, name: &[u8]) -> Option<Entity> {
+    search.clear();
+    search.push(e);
+    let mut at = 0;
+    while at < search.len() {
+        let parent = search[at];
+        at += 1;
+        for child in world.children(parent) {
+            if world
+                .get::<Name>(child)
+                .is_some_and(|n| n.as_str().as_bytes() == name)
+            {
+                return Some(child);
+            }
+            search.push(child);
+        }
+    }
+    None
+}
+
+/// `e:method(…)` and `self:method(…)` for entity `e`, the method the call names: an
+/// entity's own; else, with `own` the table of `self`'s component (0: none), a function
+/// on it, called with `self` and the arguments. What the method returns.
+///
+/// # Safety
+///
+/// A C function's state, the receiver at index 1 and the arguments after it; the world and
+/// tables are the stage's.
+unsafe fn entity_method(
+    state: *mut ffi::lua_State,
+    world: *mut World,
+    tables: *mut Tables,
+    e: Entity,
+    own: c_int,
+) -> c_int {
+    // SAFETY: as the caller says; each call is Luau's own API on that state, strings read
+    // while they are on the stack.
+    unsafe {
+        let mut atom: c_int = -1;
+        let method = ffi::lua_namecallatom(state, &mut atom);
+        if method.is_null() {
+            raise(state, String::from("call an entity's methods with a colon"));
+        }
+        let m = (*tables).methods;
+        if is_named(method, atom, m.has, b"has") {
+            let (named, key) = component_at(state, tables, 2);
+            let Some(named) = named else {
+                let message = no_component("has", key);
+                raise(state, message);
+            };
+            ffi::lua_pushboolean(state, c_int::from((*world).get_raw(e, named.id).is_some()));
+            return 1;
+        }
+        if is_named(method, atom, m.remove, b"remove") {
+            let (named, key) = component_at(state, tables, 2);
+            let Some(named) = named else {
+                let message = no_component("remove", key);
+                raise(state, message);
+            };
+            if matches!(named.info.name, "Parent" | "Children") {
+                raise(
+                    state,
+                    String::from(
+                        "`Parent` and `Children` keep the hierarchy: they are not removed",
+                    ),
+                );
+            }
+            (*world).remove_raw(e, named.id);
+            return 0;
+        }
+        if is_named(method, atom, m.add, b"add") {
+            // The host's function makes the component's default and writes the values.
+            push_entity(state, e);
+            ffi::lua_replace(state, 1);
+            return hand_over(state, (*tables).slow.add, 0);
+        }
+        if is_named(method, atom, m.despawn, b"despawn") {
+            (*tables).despawns.push(e);
+            return 0;
+        }
+        if is_named(method, atom, m.children, b"children") {
+            ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, (*tables).slow.children);
+            push_entity(state, e);
+            ffi::lua_pushnil(state);
+            return 3;
+        }
+        if is_named(method, atom, m.find_child, b"find_child") {
+            if ffi::lua_type(state, 2) != ffi::LUA_TSTRING {
+                raise(state, String::from("find_child takes a name"));
+            }
+            let mut len = 0usize;
+            let name = ffi::lua_tolstring(state, 2, &mut len);
+            let name = core::slice::from_raw_parts(name.cast::<u8>(), len);
+            let found = find_child(&*world, &mut (*tables).search, e, name);
+            push_entity(state, found.unwrap_or(Entity::NULL));
+            return 1;
+        }
+        // `self`'s component's own functions: `self:open()` is `Door.open(self)`.
+        if own != 0 {
+            ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, own);
+            ffi::lua_rawgetfield(state, -1, method);
+            if ffi::lua_type(state, -1) == ffi::LUA_TFUNCTION {
+                ffi::lua_remove(state, -2);
+                ffi::lua_insert(state, 1);
+                let args = ffi::lua_gettop(state) - 1;
+                ffi::lua_call(state, args, ffi::LUA_MULTRET);
+                return ffi::lua_gettop(state);
+            }
+            ffi::lua_pop(state, 2);
+        }
+        let text = std::ffi::CStr::from_ptr(method)
+            .to_string_lossy()
+            .into_owned();
+        let message = if own != 0 {
+            format!("no method `{text}`: neither an entity's nor a function of the component")
+        } else {
+            format!("an entity has no method `{text}`")
+        };
+        drop(text);
+        raise(state, message)
+    }
+}
+
+/// `entity:method(…)`.
+unsafe extern "C-unwind" fn entity_namecall(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM, called with the entity and the arguments; the world
+    // and tables are the stage's.
+    unsafe {
+        let Some(e) = entity_at(state, 1) else {
+            raise(state, String::from("not an entity"));
+        };
+        let (world, tables) = match opened() {
+            Ok(open) => open,
+            Err(why) => raise(state, why.to_owned()),
+        };
+        entity_method(state, world, tables, e, 0)
+    }
+}
+
+/// `self:method(…)`: its entity's methods, then its component's own functions.
+unsafe extern "C-unwind" fn self_namecall(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: as `entity_namecall`, for `self`.
+    unsafe {
+        let this = ffi::lua_touserdatatagged(state, 1, TAG_SELF).cast::<ThisData>();
+        let (world, tables) = match opened() {
+            Ok(open) => open,
+            Err(why) => raise(state, why.to_owned()),
+        };
+        if this.is_null() {
+            raise(state, String::from("not a script's `self`"));
+        }
+        let own = (*tables).own.get(&(*this).id.index()).copied().unwrap_or(0);
+        entity_method(state, world, tables, (*this).entity, own)
+    }
+}
+
+/// `for child in e:children() do`: the child after `prev` (the first after nil), nil after
+/// the last or once `prev` left the parent. A step keeps nothing: the parent and the child
+/// before are the loop's own values.
+pub(crate) unsafe extern "C-unwind" fn children_next(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM, called with the parent and the child before.
+    unsafe {
+        let (world, _) = match opened() {
+            Ok(open) => open,
+            Err(why) => raise(state, why.to_owned()),
+        };
+        let next = entity_at(state, 1).and_then(|parent| match entity_at(state, 2) {
+            None => (*world).children(parent).next(),
+            Some(prev) => (*world)
+                .get::<Parent>(prev)
+                .filter(|p| p.get() == parent)
+                .map(|p| p.next_sibling())
+                .filter(|&n| n != Entity::NULL),
+        });
+        push_entity(state, next.unwrap_or(Entity::NULL));
+        1
+    }
+}
+
+/// The vector at stack index `idx`, if one.
+///
+/// # Safety
+///
+/// `idx` is a valid index of `state`.
+unsafe fn vector_at(state: *mut ffi::lua_State, idx: c_int) -> Option<Vec3> {
+    // SAFETY: as the caller says; a vector's three floats.
+    unsafe {
+        let v = ffi::lua_tovector(state, idx);
+        (!v.is_null()).then(|| Vec3::from_array(v.cast::<[f32; 3]>().read_unaligned()))
+    }
+}
+
+/// `Transform`'s method `method` (atom `atom`) on `e`'s, if it is one: what it returns.
+///
+/// # Safety
+///
+/// As [`entity_method`], the view at index 1; `id` is `Transform`'s.
+unsafe fn transform_method(
+    state: *mut ffi::lua_State,
+    world: *mut World,
+    m: Methods,
+    e: Entity,
+    id: ComponentId,
+    method: *const c_char,
+    atom: c_int,
+) -> Option<c_int> {
+    // SAFETY: as the caller says; the component's bytes are a `Transform`.
+    unsafe {
+        let gone = "the entity is gone, or lost the component";
+        if is_named(method, atom, m.rotate, b"rotate") {
+            let mut is_number: c_int = 0;
+            let angle = ffi::lua_tonumberx(state, 3, &mut is_number);
+            let (Some(axis), true) = (vector_at(state, 2), is_number != 0) else {
+                raise(
+                    state,
+                    String::from("rotate takes an axis (a vector) and an angle (radians)"),
+                );
+            };
+            let Some(axis) = axis.try_normalize() else {
+                raise(state, String::from("rotate: an axis of length 0"));
+            };
+            let Some(base) = (*world).get_raw_mut(e, id) else {
+                raise(state, String::from(gone));
+            };
+            let t = base.as_ptr().cast::<Transform>();
+            let mut value = t.read_unaligned();
+            value.rotation =
+                (Quat::from_axis_angle(axis, angle as f32) * value.rotation).normalize();
+            t.write_unaligned(value);
+            return Some(0);
+        }
+        if is_named(method, atom, m.look_at, b"look_at") {
+            let Some(point) = vector_at(state, 2) else {
+                raise(
+                    state,
+                    String::from("look_at takes a point (a vector), then an up (optional)"),
+                );
+            };
+            let up = vector_at(state, 3).unwrap_or(Vec3::Y);
+            let Some(base) = (*world).get_raw_mut(e, id) else {
+                raise(state, String::from(gone));
+            };
+            let t = base.as_ptr().cast::<Transform>();
+            let mut value = t.read_unaligned();
+            let to = point - value.translation;
+            // Nowhere to look (the point is where it stands, or straight along `up`): as it was.
+            if to.length_squared() > 1e-12
+                && to
+                    .normalize()
+                    .cross(up.normalize_or_zero())
+                    .length_squared()
+                    > 1e-8
+            {
+                value.rotation = engine_runtime::look_rotation(value.translation, point, up);
+                t.write_unaligned(value);
+            }
+            return Some(0);
+        }
+        let axis = if is_named(method, atom, m.forward, b"forward") {
+            Vec3::NEG_Z
+        } else if is_named(method, atom, m.right, b"right") {
+            Vec3::X
+        } else if is_named(method, atom, m.up, b"up") {
+            Vec3::Y
+        } else {
+            return None;
+        };
+        let Some(base) = (*world).get_raw(e, id) else {
+            raise(state, String::from(gone));
+        };
+        let v = base.as_ptr().cast::<Transform>().read_unaligned().rotation * axis;
+        ffi::lua_pushvector(state, v.x, v.y, v.z);
+        Some(1)
+    }
+}
+
+/// `view:method(…)`: `Transform`'s methods on its views.
+unsafe extern "C-unwind" fn view_namecall(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: as `entity_namecall`, for a view.
+    unsafe {
+        let view = ffi::lua_touserdatatagged(state, 1, TAG_VIEW).cast::<ViewData>();
+        let (world, tables) = match opened() {
+            Ok(open) => open,
+            Err(why) => raise(state, why.to_owned()),
+        };
+        if view.is_null() {
+            raise(state, String::from("not a component's view"));
+        }
+        let mut atom: c_int = -1;
+        let method = ffi::lua_namecallatom(state, &mut atom);
+        if method.is_null() {
+            raise(
+                state,
+                String::from("call a component's methods with a colon"),
+            );
+        }
+        if let Some(id) = (*tables).transform
+            && (*view).id == id
+            && (*view).offset == 0
+            && let Some(n) = transform_method(
+                state,
+                world,
+                (*tables).methods,
+                (*view).entity,
+                id,
+                method,
+                atom,
+            )
+        {
+            return n;
+        }
+        let text = std::ffi::CStr::from_ptr(method)
+            .to_string_lossy()
+            .into_owned();
+        let message = format!("{} has no method `{text}`", (*view).info.name);
         drop(text);
         raise(state, message)
     }

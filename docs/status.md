@@ -544,15 +544,21 @@ Last updated: 2026-10-22.
     example on 1,000 entities with ten watchers: 1,237,831 allocations in 600 ticks → 0
     (`tests/zero_alloc_scripts.rs`); an empty hook 0.165 → 0.138 µs, 1,000 doors 0.63 →
     0.6 ms.
+  - **E7-5a, entities' methods** (#359, ADR 0114's as-built): `has`, `add`, `remove`,
+    `despawn` (at the stage's end, with its children, after their `on_stop`), `children`
+    (a loop that keeps nothing), `find_child` (the nearest), `parent`, on entities and
+    `self`; `self:open()` calls `Door.open(self)`; components as values (globals of the
+    program's, a script's `component` table, or a name); `Transform`'s `rotate`,
+    `look_at`, `forward`, `right`, `up`. None of them allocates (the zero-allocation
+    test's walkers).
   - **Next, in this order** (E7-5, the rest of scripting v1, in steps; the API is ADR
     0114's):
-    1. E7-5a: entity methods (`has`, `add`, `remove`, `despawn` at the stage's end,
-       `children`, `find_child`, `parent`) through `__namecall`, components as values
-       (`Transform`, a script's component table), `Transform`'s methods;
-    2. E7-5b: `world.spawn`, `world.query` (`with`, `without`) and `system(name, hooks)`;
-    3. E7-5c: `input` (the tick's view and the frame's);
-    4. E7-5d: `send`, `after`, `audio`, `random`, `world.instantiate`;
-    5. E7-5e: saves of script components (`on_load`) and §8's networking rules; each
+    1. E7-5b: `require` by string over the project's modules (`.luaurc` aliases,
+       dependents reloaded after them);
+    2. E7-5c: `world.spawn`, `world.query` (`with`, `without`) and `system(name, hooks)`;
+    3. E7-5d: `input` (the tick's view and the frame's);
+    4. E7-5e: `send`, `after`, `audio`, `random`, `world.instantiate`;
+    5. E7-5f: saves of script components (`on_load`) and §8's networking rules; each
        step adds its examples to the zero-allocation test;
     2. E10-2b, completion, hover and definitions in Slang through `slangd` (a material
        type readable alone first). E10-1 waits for the answer on the material file.

@@ -129,6 +129,67 @@ return Coin
 - In `on_stop` the component is gone, so its props are too. `self.entity` and
   `self.locals` are still there.
 
+## Entities and their components
+
+An entity is a value: two that name the same entity are equal, and an entity is a table
+key like a number. What it has:
+- `e.name`: its `Name`, or `nil`;
+- `e.alive`: whether it still exists;
+- `e.parent`: its parent, or `nil`;
+- `e.Transform`, `e.Wallet`: its components by name, live. Reading one it lacks is an
+  error: check with `e:has(Transform)`.
+
+Its methods (`self` has them too: `self:despawn()`):
+
+| Method | What |
+|---|---|
+| `e:has(C)` | whether it has component `C` |
+| `e:add(C, values?)` | gives it `C` (the default, then `values` such as `{ size = vector.one }`) unless it has one. At once: the next line reads it. A script component's hooks start at the next stage |
+| `e:remove(C)` | takes `C` away, at once |
+| `e:despawn()` | despawns it with its children at the end of the stage; their `on_stop` runs first |
+| `for child in e:children() do` | its children, in order |
+| `e:find_child(name)` | the nearest of its descendants named so (its children first), or `nil` |
+
+`C` names a component:
+- `Transform` and the game's other components are globals of their names;
+- a script's component is the table `component` returned (`Door` in its own file), or its
+  name (`e:has("Wallet")`).
+
+`self:open()` calls your component's own function, `Door.open(self)`. The entity's methods
+come first, so do not give your functions their names. The editor's types know your
+functions only as `Door.open(self)`.
+
+A `Transform` has methods too:
+
+| Method | What |
+|---|---|
+| `t:rotate(axis, angle)` | turns it by `angle` radians about `axis`, in its parent's space |
+| `t:look_at(point, up?)` | turns it so its forward points at `point` (in its parent's space), `up` (y by default) up |
+| `t:forward()`, `t:right()`, `t:up()` | its −z, x and y, in its parent's space |
+
+```luau
+-- A turret: turns toward the player, its barrel a child named "Barrel".
+local Turret = component("Turret", { reach = 20 })
+
+function Turret.on_tick(self, dt: number)
+    local player = world.find("Player")
+    if not player then
+        return
+    end
+    local t = self.Transform
+    local to = player.Transform.translation - t.translation
+    if vector.magnitude(to) < self.reach then
+        t:look_at(player.Transform.translation)
+        local barrel = self:find_child("Barrel")
+        if barrel and not barrel:has(Trigger) then
+            barrel:add(Trigger, { size = vector.create(0.2, 0.2, 2) })
+        end
+    end
+end
+
+return Turret
+```
+
 ## The libraries
 
 | Library | What |
@@ -227,9 +288,7 @@ at it, so VS Code checks and completes your scripts the same way. The file is in
 
 ## Coming next
 
-- entity methods (`has`, `add`, `remove`, `despawn`, `children`, `find_child`, `parent`),
-  components as values (`e:has(Wallet)`), `Transform`'s methods (`rotate`, `look_at`,
-  `forward`, `right`, `up`);
+- `require("./wallet")` between your scripts;
 - `world.spawn`, `world.query` and systems over queries;
 - `input`;
 - `send`, `after` timers, `audio`, `random`, `world.instantiate`;
