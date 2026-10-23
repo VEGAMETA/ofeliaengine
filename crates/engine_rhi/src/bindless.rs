@@ -109,13 +109,19 @@ struct Indices {
     retired: Vec<(u64, u32)>,
 }
 
+/// Indices released and freed that their lists hold without growing: a burst of releases
+/// (a render graph's cache dropping the images it no longer uses) makes nothing, the first
+/// one in a run included (CLAUDE.md §5).
+const RELEASE_ROOM: u32 = 256;
+
 impl Indices {
     fn new(capacity: u32) -> Self {
+        let room = capacity.min(RELEASE_ROOM) as usize;
         Self {
             capacity,
             next: 0,
-            free: Vec::new(),
-            retired: Vec::new(),
+            free: Vec::with_capacity(room),
+            retired: Vec::with_capacity(room),
         }
     }
 
@@ -672,5 +678,24 @@ mod tests {
         assert!(indices.alloc().is_none());
         indices.collect(12);
         assert_eq!(indices.alloc(), Some(b));
+    }
+
+    #[test]
+    fn a_burst_of_releases_fits_the_room_made_up_front() {
+        let mut indices = Indices::new(1 << 16);
+        let taken: Vec<u32> = (0..RELEASE_ROOM)
+            .map(|_| indices.alloc().unwrap())
+            .collect();
+        let room = (indices.retired.capacity(), indices.free.capacity());
+        for &i in &taken {
+            indices.retire(i, 1);
+        }
+        indices.collect(1);
+        assert_eq!(indices.free.len(), RELEASE_ROOM as usize);
+        assert_eq!(
+            (indices.retired.capacity(), indices.free.capacity()),
+            room,
+            "nothing grew"
+        );
     }
 }
