@@ -1103,3 +1103,36 @@ there, and see the script's file in the inspector.
   script that queries.
 - **Next (E7-3b):** `Trigger`, a sensor shape on an entity, and `on_touch` / `on_untouch`
   from the last step's contacts.
+
+## As built (E7-3b, 2026-10-23): triggers and contacts
+
+- **`Trigger`** (`engine_app`, a reflected component): `shape` (a box, a sphere, a capsule
+  standing on y) and `size` (metres). It stands around its entity's origin, placed, turned
+  and scaled with it, and pushes nothing. Scenes save it, the inspector edits it, Add
+  Component lists it.
+- **`ScenePhysics::sync_triggers`** (part of `sync_scene`), as `sync_models` works:
+  - a kinematic sensor body per active entity with a trigger, on the `Moving` layer, its
+    user data the entity;
+  - its shape made for the entity's scale;
+  - moved (`set_transform`) when the entity moves, made again when the trigger or the
+    scale changes, gone with the component, the entity, or when it is turned off;
+  - it visits only what changed (change ticks, the removal log of `Trigger`, a rescan on
+    the activity and resync epochs).
+- **Contacts:** at the start of a tick's script stage the host hears the last physics
+  step's contact events, once per step (`ScenePhysics::steps`). For each side that names an
+  entity, every script instance there with `on_touch` or `on_untouch` is called:
+  - `on_touch(self, other, point, normal)`, the normal pointing from the instance's entity
+    toward the other;
+  - `on_untouch(self, other)`;
+  - `other` is nil for a body without an entity;
+  - an instance not yet started is started first.
+
+  The types file declares both hooks.
+- **The editor** draws triggers with the colliders (View: Colliders, Alt+C), in the
+  sensors' yellow, as their bodies are.
+- **Tests:** a ball dropped through a 2 m trigger is heard once coming in, with its
+  entity and a point near the trigger, and once going out; the trigger's body goes with
+  the component. The editor draws a spherical trigger (three circles) in the sensors'
+  batch on both GPUs.
+- **Not in this step:** contacts in the joined client's re-simulated ticks (networked
+  prediction, §8); a trigger's own collision layer.

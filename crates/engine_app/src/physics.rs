@@ -32,6 +32,11 @@
 //!   saved velocities (`Game::before_save` and `Game::after_load`, one line each).
 //! - **A scene file's models** (ADR 0117): [`ScenePhysics::sync_models`] gives each model
 //!   the body its collider asks for ([`crate::Assets::collider`]) and keeps it in step.
+//! - **Triggers** ([`Trigger`], ADR 0114 E7-3): a sensor body per entity with one, placed,
+//!   turned and scaled with it ([`ScenePhysics::sync_triggers`]); the bodies that come into
+//!   it and leave it are the step's contact events, which scripts hear as `on_touch` and
+//!   `on_untouch`. [`ScenePhysics::steps`] counts steps, so a step's events are heard
+//!   once.
 //! - **Bodies name their entities** (ADR 0114 E7-3): a model's body, a brush group's and a
 //!   pack's moving body carry their entity in their user data
 //!   ([`engine_physics::ecs::entity_user_data`]), so query hits and contacts give it back
@@ -80,6 +85,109 @@ pub struct SceneBodies {
     pub load_ms: f64,
 }
 
+/// What a [`Trigger`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+#[repr(u8)]
+pub enum TriggerShape {
+    /// A box, its size the box's.
+    #[default]
+    Box,
+    /// A sphere, its size's x the diameter.
+    Sphere,
+    /// A capsule standing on y: its size's x the diameter, its y the whole height.
+    Capsule,
+}
+
+/// A sensor on its entity (ADR 0114 E7-3): a body that comes into its shape is said to the
+/// entity's scripts (`on_touch(self, other, point, normal)`), and one that leaves it
+/// (`on_untouch(self, other)`). It stands around its entity's origin, placed, turned and
+/// scaled with it, and pushes nothing. A physics world gives it a body
+/// ([`ScenePhysics::sync_triggers`]); the editor draws it with the colliders.
+#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
+pub struct Trigger {
+    /// What it is.
+    pub shape: TriggerShape,
+    /// Its size along x, y and z, metres.
+    #[reflect(min = 0.0)]
+    pub size: Vec3,
+}
+engine_ecs::reflect_component!(Trigger);
+
+impl Default for Trigger {
+    /// A 1 m box.
+    fn default() -> Self {
+        Self {
+            shape: TriggerShape::Box,
+            size: Vec3::ONE,
+        }
+    }
+}
+
+impl Trigger {
+    /// The smallest size a side takes (a zero would be no shape).
+    const SMALLEST: f32 = 0.01;
+
+    /// A box of `size`.
+    pub const fn with_size(self, size: Vec3) -> Self {
+        Self { size, ..self }
+    }
+
+    /// Its shape in its entity's space, `scale` its entity's scale (each axis' size).
+    pub fn collision_shape(&self, scale: Vec3) -> engine_collision::Shape {
+        let size = (self.size * scale.abs()).max(Vec3::splat(Self::SMALLEST));
+        match self.shape {
+            TriggerShape::Box => engine_collision::Shape::Box {
+                center: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                half_extents: size * 0.5,
+            },
+            TriggerShape::Sphere => engine_collision::Shape::Sphere {
+                center: Vec3::ZERO,
+                radius: size.x * 0.5,
+            },
+            TriggerShape::Capsule => {
+                let radius = size.x * 0.5;
+                engine_collision::Shape::Capsule {
+                    center: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
+                    half_height: (size.y * 0.5 - radius).max(0.0),
+                    radius,
+                }
+            }
+        }
+    }
+}
+
+/// A trigger's body: the trigger and scale its shape was made for, where it stands, its
+/// body and shape.
+#[derive(Debug)]
+struct TriggerBody {
+    trigger: Trigger,
+    scale: Vec3,
+    placed: [f32; 12],
+    body: BodyId,
+    shape: ShapeId,
+}
+
+type TriggerRows = QueryState<
+    (Entity, &'static Trigger, &'static GlobalTransform),
+    (
+        Or<(Changed<Trigger>, Changed<GlobalTransform>)>,
+        Without<Inactive>,
+    ),
+>;
+type AllTriggers =
+    QueryState<(Entity, &'static Trigger, &'static GlobalTransform), Without<Inactive>>;
+
+/// What [`ScenePhysics::sync_triggers`] follows of the world, as [`ModelSync`] does.
+struct TriggerSync {
+    changed: TriggerRows,
+    all: AllTriggers,
+    epochs: (u64, u64),
+    seen: Vec<(Entity, Trigger, Affine3A)>,
+    gone: Vec<Entity>,
+}
+
 /// A scene's physics world (see the module's documentation).
 pub struct ScenePhysics {
     physics: JoltBackend,
@@ -105,6 +213,11 @@ pub struct ScenePhysics {
     model_shapes: HashMap<AssetRef, (Arc<ModelCollider>, ShapeId)>,
     model_placed: HashMap<(AssetRef, [i32; 9]), (ShapeId, bool)>,
     model_sync: Option<ModelSync>,
+    /// The triggers' bodies (ADR 0114 E7-3), by entity, and what their sync follows.
+    triggers: HashMap<Entity, TriggerBody>,
+    trigger_sync: Option<TriggerSync>,
+    /// Steps taken: a step's contact events are heard once.
+    steps: u64,
 }
 
 /// A model's body: the mesh, collider and place it was made for, and whether it moves its
@@ -170,6 +283,9 @@ impl ScenePhysics {
             model_shapes: HashMap::new(),
             model_placed: HashMap::new(),
             model_sync: None,
+            triggers: HashMap::new(),
+            trigger_sync: None,
+            steps: 0,
         })
     }
 
@@ -796,7 +912,147 @@ impl ScenePhysics {
     pub fn sync_scene(&mut self, scene: &mut crate::SceneParts<'_>) -> Result<usize, AppError> {
         let groups = self.sync_blockout(scene.world, scene.blockout)?;
         let models = self.sync_models(scene.world, scene.assets)?;
-        Ok(groups + models)
+        let triggers = self.sync_triggers(scene.world)?;
+        Ok(groups + models + triggers)
+    }
+
+    /// The bodies of the world's triggers ([`Trigger`], ADR 0114 E7-3): a sensor per active
+    /// entity with one, where the entity is, its shape made for the entity's scale; moved
+    /// when the entity moves, made again when its trigger or scale changes, gone with it.
+    /// Visits only the triggers that changed (and every one once entities were turned off
+    /// or on, or the world restored). Part of [`Self::sync_scene`]. Returns how many it
+    /// made.
+    pub fn sync_triggers(&mut self, world: &mut World) -> Result<usize, AppError> {
+        engine_profiler::zone!("app::physics::sync_triggers");
+        let mut sync = match self.trigger_sync.take() {
+            Some(sync) => sync,
+            None => {
+                world.track_removals::<Trigger>();
+                TriggerSync {
+                    changed: QueryState::new(world),
+                    all: QueryState::new(world),
+                    epochs: (u64::MAX, u64::MAX),
+                    seen: Vec::new(),
+                    gone: Vec::new(),
+                }
+            }
+        };
+        let made = self.sync_triggers_with(&mut sync, world);
+        self.trigger_sync = Some(sync);
+        made
+    }
+
+    fn sync_triggers_with(
+        &mut self,
+        sync: &mut TriggerSync,
+        world: &mut World,
+    ) -> Result<usize, AppError> {
+        sync.gone.clear();
+        world.drain_removed::<Trigger>(|e| sync.gone.push(e));
+        for i in 0..sync.gone.len() {
+            let e = sync.gone[i];
+            if world.get::<Trigger>(e).is_none()
+                && let Some(old) = self.triggers.remove(&e)
+            {
+                self.drop_trigger_body(old);
+            }
+        }
+        let epochs = (
+            world.resource::<ActivityEpoch>().map_or(0, |a| a.0),
+            world.resync_epoch(),
+        );
+        sync.seen.clear();
+        if epochs != sync.epochs {
+            sync.epochs = epochs;
+            sync.seen
+                .extend(sync.all.iter_readonly(world).map(|(e, t, g)| (e, *t, g.0)));
+            let active: HashSet<Entity> = sync.seen.iter().map(|&(e, _, _)| e).collect();
+            let off: Vec<Entity> = self
+                .triggers
+                .keys()
+                .copied()
+                .filter(|e| !active.contains(e))
+                .collect();
+            for e in off {
+                if let Some(old) = self.triggers.remove(&e) {
+                    self.drop_trigger_body(old);
+                }
+            }
+        } else {
+            sync.seen.extend(
+                sync.changed
+                    .iter_readonly(world)
+                    .map(|(e, t, g)| (e, *t, g.0)),
+            );
+        }
+        let mut made = 0;
+        for i in 0..sync.seen.len() {
+            let (e, trigger, place) = sync.seen[i];
+            let (scale, rotation, position) = place.to_scale_rotation_translation();
+            let key = place.to_cols_array();
+            if let Some(b) = self.triggers.get_mut(&e) {
+                if b.trigger == trigger && b.scale == scale {
+                    if b.placed != key {
+                        self.physics.set_transform(b.body, position, rotation);
+                        b.placed = key;
+                    }
+                    continue;
+                }
+                if let Some(old) = self.triggers.remove(&e) {
+                    self.drop_trigger_body(old);
+                }
+            }
+            let collider = engine_collision::Collider {
+                shapes: vec![engine_collision::ColliderShape {
+                    id: 0,
+                    shape: trigger.collision_shape(scale),
+                    surface: 0,
+                }],
+                origin: engine_collision::Origin::Generated,
+            };
+            let shape = engine_physics::colliders::build(&mut self.physics, &collider)
+                .map_err(AppError::at("a trigger's shape"))?;
+            let mut desc = BodyDesc::fixed(shape, position);
+            desc.motion = MotionType::Kinematic;
+            desc.rotation = rotation;
+            desc.sensor = true;
+            desc.gravity = GravityMode::Scaled(0.0);
+            desc.user_data = entity_user_data(e);
+            if let Some(layer) = self.settings.layer("Moving") {
+                desc.layer = layer;
+            }
+            let body = self
+                .physics
+                .create_body(&desc)
+                .map_err(AppError::at("a trigger's body"))?;
+            self.triggers.insert(
+                e,
+                TriggerBody {
+                    trigger,
+                    scale,
+                    placed: key,
+                    body,
+                    shape,
+                },
+            );
+            made += 1;
+        }
+        Ok(made)
+    }
+
+    fn drop_trigger_body(&mut self, old: TriggerBody) {
+        self.physics.destroy_body(old.body);
+        self.physics.destroy_shape(old.shape);
+    }
+
+    /// The body of trigger `entity`, if it has one ([`Self::sync_triggers`]).
+    pub fn trigger_body(&self, entity: Entity) -> Option<BodyId> {
+        self.triggers.get(&entity).map(|b| b.body)
+    }
+
+    /// Steps taken so far: the contact events of the backend are the last step's.
+    pub fn steps(&self) -> u64 {
+        self.steps
     }
 
     /// The body of model `entity`, if it has one ([`Self::sync_models`]).
@@ -815,6 +1071,7 @@ impl ScenePhysics {
     /// Call it from `Game::tick` after the game's own logic.
     pub fn step(&mut self, world: &mut World, dt: f32) -> Result<(), PhysicsError> {
         engine_profiler::zone!("app::physics::step");
+        self.steps += 1;
         let Some(sync) = self.sync.as_mut() else {
             return self.physics.step(dt, 1);
         };
