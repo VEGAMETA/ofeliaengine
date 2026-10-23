@@ -190,6 +190,29 @@ end
 return Turret
 ```
 
+## Messages and timers
+
+```luau
+-- Tell the door's scripts: every one with an `open` function runs it.
+world.find("Door"):send("open", "key", self.entity)
+
+-- Run this script's `explode` in two seconds of game time.
+self:after(2, "explode", 3)
+
+function Crate.explode(self, power)
+    -- …
+end
+```
+
+- `e:send(hook, …)` calls `hook` on each script of `e` that has a function of that name,
+  after the hook that sends returns. `self:send` sends to your own entity.
+- `self:after(seconds, hook, …)` calls `hook` on this script later, at the start of a tick.
+- Both carry at most four values: nil, booleans, numbers, strings, vectors, entities. A
+  table stays where it is: send what it holds, or keep it in `self.locals`.
+- A message to an entity that is gone is dropped. One that no script of the entity
+  hears is said once in the log, as is a loop of messages that never ends (it stops at
+  16 rounds a stage, the rest go on next tick).
+
 ## Many objects at once: queries and systems
 
 A hook runs once per object. For many alike objects, a system runs once a tick and loops
@@ -380,5 +403,5 @@ end
 
 ## Coming next
 
-- `send`, `after` timers, `audio`, `random`, `world.instantiate`;
-- script components in saves.
+- `random`, `audio.play`, `world.instantiate`;
+- script components in saves, with their timers.

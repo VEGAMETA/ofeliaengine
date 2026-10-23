@@ -54,6 +54,9 @@ pub(crate) const TAG_VIEW: c_int = 65;
 /// functions (it pushes light userdata back with tag 0).
 pub(crate) const ENTITY_TAG: c_int = 0;
 
+/// The most values a message (`e:send`) or a timer (`self:after`) carries.
+pub(crate) const MAIL_VALUES: c_int = 4;
+
 /// Places in the table of views kept ([`Tables::kept`]): a power of two.
 const VIEW_CACHE: usize = 256;
 
@@ -204,6 +207,8 @@ pub(crate) struct Slow {
     pub(crate) add: c_int,
     pub(crate) children: c_int,
     pub(crate) query_next: c_int,
+    pub(crate) send: c_int,
+    pub(crate) after: c_int,
 }
 
 /// The atoms of an entity's `parent` and methods, and of `Transform`'s methods.
@@ -223,6 +228,8 @@ struct Methods {
     up: c_int,
     with: c_int,
     without: c_int,
+    send: c_int,
+    after: c_int,
 }
 
 impl Methods {
@@ -243,6 +250,8 @@ impl Methods {
             up: a("up"),
             with: a("with"),
             without: a("without"),
+            send: a("send"),
+            after: a("after"),
         }
     }
 
@@ -252,13 +261,14 @@ impl Methods {
     ///
     /// `key` is a live string.
     unsafe fn entity_method(&self, key: *const c_char, atom: c_int) -> bool {
-        let names: [(c_int, &[u8]); 6] = [
+        let names: [(c_int, &[u8]); 7] = [
             (self.has, b"has"),
             (self.add, b"add"),
             (self.remove, b"remove"),
             (self.despawn, b"despawn"),
             (self.children, b"children"),
             (self.find_child, b"find_child"),
+            (self.send, b"send"),
         ];
         // SAFETY: as the caller says.
         names
@@ -1571,6 +1581,52 @@ unsafe fn entity_method(
         if is_named(method, atom, m.despawn, b"despawn") {
             (*tables).despawns.push(e);
             return 0;
+        }
+        // A message (`e:send(hook, …)`) and a timer (`self:after(seconds, hook, …)`): the
+        // host's functions keep them, told how many values follow (nils are values).
+        let sent = is_named(method, atom, m.send, b"send");
+        let timed = own != 0 && is_named(method, atom, m.after, b"after");
+        if sent || timed {
+            let first = if sent { 3 } else { 4 };
+            let what = if sent { "send" } else { "after" };
+            let count = (ffi::lua_gettop(state) - first + 1).max(0);
+            if count > MAIL_VALUES {
+                let message = format!("{what} carries at most {MAIL_VALUES} values, not {count}");
+                raise(state, message);
+            }
+            for i in first..first + count {
+                let t = ffi::lua_type(state, i);
+                let plain = matches!(
+                    t,
+                    ffi::LUA_TNIL
+                        | ffi::LUA_TBOOLEAN
+                        | ffi::LUA_TNUMBER
+                        | ffi::LUA_TSTRING
+                        | ffi::LUA_TVECTOR
+                ) || entity_at(state, i).is_some();
+                if !plain {
+                    let name = std::ffi::CStr::from_ptr(ffi::lua_typename(state, t))
+                        .to_string_lossy()
+                        .into_owned();
+                    let message = format!(
+                        "{what} carries plain values (nil, booleans, numbers, strings, vectors, entities), not a {name}"
+                    );
+                    drop(name);
+                    raise(state, message);
+                }
+            }
+            if sent {
+                push_entity(state, e);
+                ffi::lua_replace(state, 1);
+            }
+            ffi::lua_pushinteger(state, ffi::lua_Integer::from(count));
+            ffi::lua_insert(state, first);
+            let r = if sent {
+                (*tables).slow.send
+            } else {
+                (*tables).slow.after
+            };
+            return hand_over(state, r, 0);
         }
         if is_named(method, atom, m.children, b"children") {
             ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, (*tables).slow.children);

@@ -4,7 +4,8 @@
 //! `self.entity`, `self.locals`, the time, a physics ray, contacts with a trigger), and
 //! walkers using entities' and `Transform`'s methods (`rotate`, `forward`, `look_at`,
 //! `find_child`, `children`, `has`, `parent`, a function of their own through `self:`),
-//! and the spinning example (§5) as a system over a query of 1,000 entities, through 600
+//! the spinning example (§5) as a system over a query of 1,000 entities, and relays
+//! sending each other messages and setting timers every tick, through 600
 //! ticks and frames after a warm-up: the heap allocations made in the scripts' stages
 //! are counted (the physics steps between them are not). One test per file, so nothing
 //! else allocates concurrently.
@@ -179,6 +180,26 @@ system("Spin", {
 return Spin
 "#;
 
+/// Messages and timers (ADR 0114 §3, E7-5e): a relay sends its partner a message of three
+/// values and sets itself a timer every tick.
+const RELAY: &str = r#"local Relay = component("Relay", { got = 0, fired = 0, partner = prop.entity() })
+function Relay.on_tick(self, dt)
+    if self.partner ~= nil then
+        self.partner:send("hello", "hi", self.entity, 1.5)
+    end
+    self:after(0.05, "tock", 2)
+end
+function Relay.hello(self, word, from, n)
+    if word == "hi" and from ~= nil and n == 1.5 then
+        self.got += 1
+    end
+end
+function Relay.tock(self, n)
+    self.fired += n
+end
+return Relay
+"#;
+
 /// Watchers, each with a trigger, a ball falling through it and a floor named after it.
 const WATCHERS: usize = 10;
 
@@ -197,6 +218,7 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
     std::fs::write(dir.join("scripts/stroller.luau"), STROLLER).unwrap();
     std::fs::write(dir.join("scripts/walker.luau"), WALKER).unwrap();
     std::fs::write(dir.join("scripts/spin.luau"), SPIN).unwrap();
+    std::fs::write(dir.join("scripts/relay.luau"), RELAY).unwrap();
     let mut world = World::new();
     let mut scripts = Scripts::load(&mut world, &dir, &dir.join("scripts")).unwrap();
     let mut physics = ScenePhysics::new(&PhysicsSettings {
@@ -287,6 +309,29 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
             walker
         })
         .collect();
+    // Ten pairs of relays, each the other's partner.
+    let relay = scripts.component("Relay").unwrap();
+    let engine_reflect::TypeKind::Struct(relay_fields) =
+        &world.components().type_info(relay).unwrap().kind
+    else {
+        unreachable!()
+    };
+    let offset = |name: &str| relay_fields.iter().find(|f| f.name == name).unwrap().offset;
+    let (partner, got, fired) = (offset("partner"), offset("got"), offset("fired"));
+    let relays: Vec<Entity> = (0..20)
+        .map(|_| {
+            let e = world.spawn((Transform::IDENTITY,));
+            assert!(scripts.add(&mut world, e, "Relay"));
+            e
+        })
+        .collect();
+    for pair in relays.chunks(2) {
+        for (me, other) in [(pair[0], pair[1]), (pair[1], pair[0])] {
+            let base = world.get_raw_mut(me, relay).unwrap().as_ptr();
+            // SAFETY: Relay's `partner`, an entity at its offset.
+            unsafe { base.add(partner).cast::<Entity>().write_unaligned(other) };
+        }
+    }
     let started = std::time::Instant::now();
 
     let spinners: Vec<Entity> = (0..1000)
@@ -373,6 +418,20 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
         // SAFETY: a number prop (f32) at its offset in the watcher's component.
         unsafe { base.add(at).cast::<f32>().read_unaligned() }
     };
+    // Each relay heard its partner every tick, and its timers fired (all but the last few
+    // set, still pending).
+    for &r in &relays {
+        let base = world.get_raw(r, relay).unwrap().as_ptr();
+        // SAFETY: Relay's `got` and `fired`, f32s at their offsets.
+        let (got, fired) = unsafe {
+            (
+                base.add(got).cast::<f32>().read_unaligned(),
+                base.add(fired).cast::<f32>().read_unaligned(),
+            )
+        };
+        assert_eq!(got, 840.0, "a relay missed messages");
+        assert!(fired >= 2.0 * 830.0, "{fired}");
+    }
     // The spinners turned 90° a second for 840 ticks.
     let turned = world.get::<Transform>(spinners[0]).unwrap().rotation;
     let expected =

@@ -112,6 +112,8 @@ struct Declared {
     id: ComponentId,
     /// Its props' defaults, laid out.
     defaults: Vec<u8>,
+    /// Its table, where its module put its functions: a message or a timer names one.
+    table: Table,
 }
 
 #[derive(Default)]
@@ -122,11 +124,14 @@ struct Hooks {
     stop: Option<Function>,
     touch: Option<Function>,
     untouch: Option<Function>,
+    /// Whether its table has any function: a message's or a timer's hook makes instances.
+    handlers: bool,
 }
 
 impl Hooks {
     fn any(&self) -> bool {
-        self.start.is_some()
+        self.handlers
+            || self.start.is_some()
             || self.tick.is_some()
             || self.frame.is_some()
             || self.stop.is_some()
@@ -141,6 +146,147 @@ struct Instance {
     started: bool,
     /// An error stopped it: its hooks are called no more.
     stopped: bool,
+}
+
+/// A message's or a timer's call: the function of its hook's name, its values (at most
+/// [`script_views::MAIL_VALUES`]; ADR 0114 §3: nil, booleans, numbers, strings, vectors
+/// and entities).
+struct Call {
+    hook: mlua::LuaString,
+    count: usize,
+    values: [Value; 4],
+}
+
+/// `e:send(hook, …)`: a call of `hook` on every script of `target` whose component has a
+/// function of that name.
+struct Message {
+    target: Entity,
+    call: Call,
+}
+
+/// `self:after(seconds, hook, …)`: a call of `hook` on instance (`entity`, component `id`)
+/// at tick `due` (`seq`: the order set, for timers of one tick).
+struct Timer {
+    due: u64,
+    seq: u64,
+    entity: Entity,
+    id: ComponentId,
+    call: Call,
+}
+
+/// What scripts sent and set, waiting (the VM's app data, which the host's functions
+/// push to): messages in the order sent, timers by when they are due.
+#[derive(Default)]
+struct Mailbox {
+    messages: Vec<Message>,
+    /// Those past a stage's 16 passes, for the next stage.
+    later: Vec<Message>,
+    timers: Vec<Timer>,
+    seq: u64,
+}
+
+/// The values a message or a timer carries, checked: plain values only.
+fn mail_values(what: &str, values: &[Value]) -> mlua::Result<()> {
+    for v in values {
+        let plain = matches!(
+            v,
+            Value::Nil
+                | Value::Boolean(_)
+                | Value::Number(_)
+                | Value::Integer(_)
+                | Value::String(_)
+                | Value::Vector(_)
+        ) || script_views::value_entity(v).is_some();
+        if !plain {
+            return Err(mlua::Error::runtime(format!(
+                "{what} carries plain values (nil, booleans, numbers, strings, vectors, entities), not a {}",
+                v.type_name()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `e:send(hook, …)` (ADR 0114 §3): the message kept, delivered after the hook that sent
+/// it returns.
+#[allow(clippy::type_complexity)]
+fn entity_send(
+    lua: &Lua,
+    (target, hook, count, a, b, c, d): (Value, mlua::LuaString, usize, Value, Value, Value, Value),
+) -> mlua::Result<()> {
+    let Some(target) = script_views::value_entity(&target) else {
+        return Err(mlua::Error::runtime("send: not an entity"));
+    };
+    let values = [a, b, c, d];
+    let count = count.min(values.len());
+    mail_values("send", &values[..count])?;
+    let Some(mut mail) = lua.app_data_mut::<Mailbox>() else {
+        return Err(mlua::Error::runtime("send: no mailbox"));
+    };
+    mail.messages.push(Message {
+        target,
+        call: Call {
+            hook,
+            count,
+            values,
+        },
+    });
+    MAIL.set(true);
+    Ok(())
+}
+
+/// `self:after(seconds, hook, …)` (ADR 0114 §3): `hook` called on this instance once that
+/// many seconds of game time passed, at the start of a tick (the next one at least).
+#[allow(clippy::type_complexity)]
+fn self_after(
+    lua: &Lua,
+    (ud, seconds, hook, count, a, b, c, d): (
+        AnyUserData,
+        f64,
+        mlua::LuaString,
+        usize,
+        Value,
+        Value,
+        Value,
+        Value,
+    ),
+) -> mlua::Result<()> {
+    // SAFETY: the fast path hands over `self`s of its tag only.
+    let this = unsafe { *script_views::this_at(ud.to_pointer()) };
+    let values = [a, b, c, d];
+    let count = count.min(values.len());
+    mail_values("after", &values[..count])?;
+    let clock = lua
+        .app_data_ref::<Clock>()
+        .map_or_else(Clock::default, |c| *c);
+    let ticks = if clock.dt > 0.0 && seconds.is_finite() {
+        (seconds.max(0.0) / f64::from(clock.dt)).ceil().max(1.0) as u64
+    } else {
+        1
+    };
+    let Some(mut mail) = lua.app_data_mut::<Mailbox>() else {
+        return Err(mlua::Error::runtime("after: no mailbox"));
+    };
+    mail.seq += 1;
+    let (due, seq) = (clock.ticks + ticks, mail.seq);
+    let at = mail
+        .timers
+        .partition_point(|t| (t.due, t.seq) <= (due, seq));
+    mail.timers.insert(
+        at,
+        Timer {
+            due,
+            seq,
+            entity: this.entity,
+            id: this.id,
+            call: Call {
+                hook,
+                count,
+                values,
+            },
+        },
+    );
+    Ok(())
 }
 
 /// What a module's run declared, gathered while it loads.
@@ -163,6 +309,8 @@ struct System {
 }
 
 thread_local! {
+    /// Whether a message waits: the host looks in the mailbox only then.
+    static MAIL: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
     /// The world, open to the scripts for the length of a stage (null outside): a
     /// thread-local, not the VM's app data, as every field's access reads it.
     static OPEN_WORLD: core::cell::Cell<*mut World> = const { core::cell::Cell::new(core::ptr::null_mut()) };
@@ -212,6 +360,10 @@ pub struct Scripts {
     gone: Vec<Entity>,
     /// The systems, in the order declared (ADR 0114 §1).
     systems: Vec<System>,
+    /// Messages being delivered, the timers due, the receivers of one (scratch).
+    letters: Vec<Message>,
+    due: Vec<Timer>,
+    receivers: Vec<(u32, u32)>,
     /// The registry references of queries collected, let go of at a stage's start
     /// (scratch), and the VM's main state, which names their VM.
     dead: Vec<std::ffi::c_int>,
@@ -303,6 +455,7 @@ impl Scripts {
         tables.transform = names.by_name.get("Transform").map(|&(id, _)| id);
         vm.lua().set_app_data(names);
         vm.lua().set_app_data(Clock::default());
+        vm.lua().set_app_data(Mailbox::default());
         vm.lua()
             .set_app_data(engine_scene::SceneRegistry::from_program());
         let mut scripts = Self {
@@ -317,6 +470,9 @@ impl Scripts {
             listening: Vec::new(),
             gone: Vec::new(),
             systems: Vec::new(),
+            letters: Vec::new(),
+            due: Vec::new(),
+            receivers: Vec::new(),
             dead: Vec::new(),
             main: 0,
             clock: Clock::default(),
@@ -762,6 +918,17 @@ impl Scripts {
         c.info = info;
         c.id = id;
         c.defaults = defaults;
+        c.table = table.clone();
+        // Its instances' timers follow it to its new layout.
+        if id != old
+            && let Some(mut mail) = self.vm.lua().app_data_mut::<Mailbox>()
+        {
+            for t in &mut mail.timers {
+                if t.id == old {
+                    t.id = id;
+                }
+            }
+        }
         // Its instances' `self`: the new place and description, their locals kept; every
         // `self`'s kept views go, as they may name the old component.
         let tables = &mut *self.tables;
@@ -831,6 +998,7 @@ impl Scripts {
             info,
             id,
             defaults,
+            table: table.clone(),
         });
         Ok(())
     }
@@ -880,6 +1048,8 @@ impl Scripts {
         }
         self.open(world, physics, false);
         self.follow(world);
+        self.deliver_later();
+        self.timers_due();
         if let Some(physics) = physics {
             self.touches(physics);
         }
@@ -909,6 +1079,7 @@ impl Scripts {
         }
         self.open(world, physics, true);
         self.follow(world);
+        self.deliver_later();
         self.call_all(Stage::Frame, dt, alpha);
         self.despawn_asked(world);
         self.close();
@@ -994,6 +1165,7 @@ impl Scripts {
         order.extend(self.instances.keys().copied());
         for &key in &order {
             self.call(key, stage, dt, alpha);
+            self.deliver();
         }
         self.order = order;
         for k in 0..self.systems.len() {
@@ -1010,6 +1182,7 @@ impl Scripts {
                 Stage::Tick => self.vm.call_function::<_, ()>(&module, &hook, dt),
                 Stage::Frame => self.vm.call_function::<_, ()>(&module, &hook, (dt, alpha)),
             };
+            self.deliver();
             if let Err(err) = result {
                 let name = match stage {
                     Stage::Tick => "on_tick",
@@ -1211,6 +1384,7 @@ impl Scripts {
                 };
                 for &k in &listened {
                     self.touch(me, k, other, begin, event.point, normal);
+                    self.deliver();
                 }
             }
         }
@@ -1271,6 +1445,156 @@ impl Scripts {
         };
         if let Err(err) = result {
             self.stop(key, name, me, &err);
+        }
+    }
+
+    /// The messages scripts sent, delivered (ADR 0114 §7): each, in the order sent, to every
+    /// script of its entity whose component has a function of its hook's name. Those sent
+    /// while delivering go in the same pass, up to 16 passes; the rest wait for the next
+    /// stage, and the log says so once.
+    fn deliver(&mut self) {
+        if !MAIL.get() {
+            return;
+        }
+        for _ in 0..16 {
+            let mut batch = core::mem::take(&mut self.letters);
+            if let Some(mut mail) = self.vm.lua().app_data_mut::<Mailbox>() {
+                core::mem::swap(&mut batch, &mut mail.messages);
+            }
+            MAIL.set(false);
+            if batch.is_empty() {
+                self.letters = batch;
+                return;
+            }
+            for m in batch.drain(..) {
+                self.receive(m.target, None, &m.call);
+            }
+            self.letters = batch;
+        }
+        if MAIL.get() {
+            if let Some(mut mail) = self.vm.lua().app_data_mut::<Mailbox>() {
+                let Mailbox {
+                    messages, later, ..
+                } = &mut *mail;
+                later.append(messages);
+            }
+            MAIL.set(false);
+            let line = String::from(
+                "scripts: messages still sent after 16 passes (do scripts send to each other in a loop?); the rest wait for the next stage",
+            );
+            if self.reported.insert(line.clone()) {
+                log::warn!(target: "script", "{line}");
+            }
+        }
+    }
+
+    /// The messages left by the last stage's passes, delivered first in this one.
+    fn deliver_later(&mut self) {
+        if let Some(mut mail) = self.vm.lua().app_data_mut::<Mailbox>()
+            && !mail.later.is_empty()
+        {
+            let Mailbox {
+                messages, later, ..
+            } = &mut *mail;
+            core::mem::swap(messages, later);
+            messages.append(later);
+            MAIL.set(true);
+        }
+        self.deliver();
+    }
+
+    /// The timers due at this tick, called in the order due and set, each one's messages
+    /// delivered when it returns.
+    fn timers_due(&mut self) {
+        let now = self.clock.ticks;
+        let mut due = core::mem::take(&mut self.due);
+        if let Some(mut mail) = self.vm.lua().app_data_mut::<Mailbox>() {
+            let n = mail.timers.partition_point(|t| t.due <= now);
+            due.extend(mail.timers.drain(..n));
+        }
+        for t in due.drain(..) {
+            if let Some(k) = self.components.iter().position(|c| c.id == t.id) {
+                self.receive(t.entity, Some(k), &t.call);
+                self.deliver();
+            }
+        }
+        self.due = due;
+    }
+
+    /// `call` on the scripts of `target` (only component `only`'s, for a timer) whose
+    /// component has its hook: started first if new. A message no script of a living
+    /// entity hears is said once.
+    fn receive(&mut self, target: Entity, only: Option<usize>, call: &Call) {
+        let world = open_world();
+        // SAFETY: the stage's world (`open_world`), read only here.
+        if world.is_null() || !unsafe { &*world }.contains(target) {
+            return;
+        }
+        let mut keys = core::mem::take(&mut self.receivers);
+        keys.clear();
+        keys.extend(
+            self.instances
+                .range((target.index(), 0)..=(target.index(), u32::MAX))
+                .map(|(&key, _)| key)
+                .filter(|key| only.is_none_or(|k| key.1 as usize == k)),
+        );
+        let mut heard = false;
+        for &key in &keys {
+            let k = key.1 as usize;
+            let Some((e, inst)) = self.instances.get_mut(&key) else {
+                continue;
+            };
+            if *e != target || inst.stopped {
+                continue;
+            }
+            let Ok(Value::Function(hook)) = self.components[k].table.raw_get::<Value>(&call.hook)
+            else {
+                continue;
+            };
+            heard = true;
+            let this = inst.this.clone();
+            let started = core::mem::replace(&mut inst.started, true);
+            let c = &self.components[k];
+            let module = c.module.clone();
+            if !started
+                && let Some(start) = c.hooks.start.clone()
+                && let Err(err) = self
+                    .vm
+                    .call_function::<_, ()>(&module, &start, this.clone())
+            {
+                self.stop(key, "on_start", target, &err);
+                continue;
+            }
+            let [a, b, c, d] = &call.values;
+            let result = match call.count {
+                0 => self.vm.call_function::<_, ()>(&module, &hook, this),
+                1 => self.vm.call_function::<_, ()>(&module, &hook, (this, a)),
+                2 => self.vm.call_function::<_, ()>(&module, &hook, (this, a, b)),
+                3 => self
+                    .vm
+                    .call_function::<_, ()>(&module, &hook, (this, a, b, c)),
+                _ => self
+                    .vm
+                    .call_function::<_, ()>(&module, &hook, (this, a, b, c, d)),
+            };
+            if let Err(err) = result {
+                let name = call.hook.to_string_lossy();
+                self.stop(key, &name, target, &err);
+            }
+        }
+        self.receivers = keys;
+        if !heard && only.is_none() {
+            // SAFETY: as above.
+            let who = unsafe { &*world }
+                .get::<engine_scene::Name>(target)
+                .map_or_else(|| format!("{target:?}"), |n| n.as_str().to_owned());
+            let line = format!(
+                "scripts: a message `{}` reached {who}, and none of its scripts has it",
+                call.hook.to_string_lossy()
+            );
+            if self.reported.insert(line.clone()) {
+                log::warn!(target: "script", "{line}");
+            }
         }
     }
 
@@ -1403,6 +1727,11 @@ fn same_places(a: &TypeInfo, b: &TypeInfo) -> bool {
 /// The hooks on a component's table.
 fn hooks_of(table: &Table) -> Hooks {
     let hook = |key: &str| table.get::<Option<Function>>(key).ok().flatten();
+    // A function of its own (a message's, a timer's hook) makes instances too.
+    let handlers = table
+        .pairs::<Value, Value>()
+        .flatten()
+        .any(|(_, v)| matches!(v, Value::Function(_)));
     Hooks {
         start: hook("on_start"),
         tick: hook("on_tick"),
@@ -1410,6 +1739,7 @@ fn hooks_of(table: &Table) -> Hooks {
         stop: hook("on_stop"),
         touch: hook("on_touch"),
         untouch: hook("on_untouch"),
+        handlers,
     }
 }
 
@@ -1597,6 +1927,8 @@ fn install(lua: &Lua) -> mlua::Result<()> {
         view_index: registry_ref(lua, lua.create_function(view_index_slow)?)?,
         view_newindex: registry_ref(lua, lua.create_function(view_newindex_slow)?)?,
         add: registry_ref(lua, lua.create_function(entity_add)?)?,
+        send: registry_ref(lua, lua.create_function(entity_send)?)?,
+        after: registry_ref(lua, lua.create_function(self_after)?)?,
         children: c_function_ref(lua, script_views::children_next, c"children")?,
         query_next: c_function_ref(lua, script_views::query_next, c"query")?,
     };
@@ -3611,6 +3943,129 @@ return Pad
         assert!(!flag(&world, &scripts, "framed"));
         assert!(world.resource::<Input>().unwrap().tick().pressed("jump"));
         assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn messages_are_delivered_after_their_hook_and_timers_when_due() {
+        let dir = project(
+            "messages",
+            &[
+                (
+                    "bell.luau",
+                    r#"local Bell = component("Bell", { rung = 0, ok = false, echoed = 0, late = 0, timed = 0, at = 0 })
+function Bell.ring(self, word, who, n)
+    self.rung += 1
+    self.ok = word == "dong" and who == world.find("Ringer") and n == 7
+    if self.rung == 1 then
+        self:send("echo")
+        self:after(0.25, "late", 3)
+    end
+end
+function Bell.echo(self)
+    self.echoed += 1
+end
+function Bell.late(self, n)
+    self.late = n
+    self.timed += 1
+    self.at = time.tick()
+end
+return Bell
+"#,
+                ),
+                (
+                    "ringer.luau",
+                    r#"local Ringer = component("Ringer", { sent = 0, heard = 0 })
+function Ringer.on_tick(self, dt)
+    if self.sent < 3 then
+        world.find("Bell"):send("ring", "dong", self.entity, 7)
+        self.sent += 1
+        -- Delivered after this hook: not heard yet.
+        self.heard = world.find("Bell").Bell.rung
+    end
+    if self.sent == 1 then
+        self.entity:send("nobody_has_this")
+    end
+end
+return Ringer
+"#,
+                ),
+                (
+                    "pinger.luau",
+                    r#"local Pinger = component("Pinger", { pings = 0 })
+function Pinger.on_tick(self, dt)
+    if self.pings == 0 then
+        self:send("ping")
+    end
+end
+function Pinger.ping(self)
+    self.pings += 1
+    self:send("ping")
+end
+return Pinger
+"#,
+                ),
+                (
+                    "bad.luau",
+                    r#"local Table = component("Table", {})
+function Table.on_tick(self, dt)
+    self:send("x", {})
+end
+local Many = component("Many", {})
+function Many.on_tick(self, dt)
+    self:send("x", 1, 2, 3, 4, 5)
+end
+return Table
+"#,
+                ),
+            ],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let ringer = world.spawn((Name::new("Ringer"), Transform::IDENTITY));
+        scripts.add(&mut world, ringer, "Ringer");
+        let bell = world.spawn((Name::new("Bell"), Transform::IDENTITY));
+        scripts.add(&mut world, bell, "Bell");
+        let pinger = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, pinger, "Pinger");
+        let bad = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, bad, "Table");
+        scripts.add(&mut world, bad, "Many");
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(read_f32(&world, &scripts, ringer, "Ringer", "heard"), 0.0);
+        assert_eq!(read_f32(&world, &scripts, bell, "Bell", "rung"), 1.0);
+        assert_eq!(read_f32(&world, &scripts, bell, "Bell", "echoed"), 1.0);
+        // A loop of messages: 16 passes, the rest the next stage.
+        assert_eq!(read_f32(&world, &scripts, pinger, "Pinger", "pings"), 16.0);
+        for _ in 0..4 {
+            scripts.tick(&mut world, 0.1);
+        }
+        assert_eq!(read_f32(&world, &scripts, pinger, "Pinger", "pings"), 80.0);
+        assert_eq!(read_f32(&world, &scripts, bell, "Bell", "rung"), 3.0);
+        assert_eq!(read_f32(&world, &scripts, bell, "Bell", "echoed"), 1.0);
+        // Set at tick 1, a quarter second at 0.1 s a tick: due at the start of tick 4.
+        assert_eq!(read_f32(&world, &scripts, bell, "Bell", "late"), 3.0);
+        assert_eq!(read_f32(&world, &scripts, bell, "Bell", "timed"), 1.0);
+        assert_eq!(read_f32(&world, &scripts, bell, "Bell", "at"), 4.0);
+        let id = scripts.component("Bell").unwrap();
+        let TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind else {
+            unreachable!()
+        };
+        let ok = fields.iter().find(|f| f.name == "ok").unwrap().offset;
+        let base = world.get_raw(bell, id).unwrap().as_ptr();
+        // SAFETY: Bell's `ok`, a bool at its offset.
+        let ok = unsafe { base.add(ok).read() };
+        assert_eq!(ok, 1, "the values arrived as sent");
+        let reported: Vec<&str> = scripts.reported.iter().map(String::as_str).collect();
+        for line in [
+            "scripts: a message `nobody_has_this` reached Ringer, and none of its scripts has it",
+            "scripts: messages still sent after 16 passes (do scripts send to each other in a loop?); the rest wait for the next stage",
+            "scripts/bad.luau:3: send carries plain values (nil, booleans, numbers, strings, vectors, entities), not a table (Table.on_tick)",
+            "scripts/bad.luau:7: send carries at most 4 values, not 5 (Many.on_tick)",
+        ] {
+            assert!(reported.contains(&line), "{line} in {reported:?}");
+        }
+        assert_eq!(reported.len(), 4, "{reported:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
