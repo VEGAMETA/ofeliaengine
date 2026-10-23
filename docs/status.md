@@ -629,7 +629,7 @@ Last updated: 2026-10-23.
       (its locals, upvalues and globals);
     - the host logs the messages at their lines;
     - debug level 2.
-  - **ADR 0119 accepted** (#PR; team decision, 2026-10-23, every recommendation):
+  - **ADR 0119 accepted** (#377; team decision, 2026-10-23, every recommendation):
     - a stop suspends the script stage on a fiber of its own;
     - the editor edits the world at a stop; where the stage holds its borrows (a stop
       inside a metamethod or a C library's callback), the world is read-only;
