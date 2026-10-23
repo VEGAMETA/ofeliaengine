@@ -19330,6 +19330,38 @@ return Spin
         );
         let found = luau.check("spin");
         assert!(found.is_empty(), "{found:?}");
+        // The game's input (E7-5d): ADR 0114's walker.
+        luau.set_source(
+            "walker_input",
+            "--!strict
+-- scripts/walker.luau: walks with \"move\" (faster with \"run\"); its camera looks with \"look\".
+local Walker = component(\"Walker\", {
+    speed = 4.0, -- metres a second
+    sensitivity = 0.002, -- radians per count of mouse motion
+})
+type Self = Script<typeof(Walker.props)>
+local RIGHT = vector.create(1, 0, 0)
+
+function Walker.on_tick(self: Self, dt: number)
+    local move = input.vector(\"move\") -- the tick's view: a tap shorter than a tick still counts
+    local speed = if input.pressed(\"run\") then self.speed * 2 else self.speed
+    local t = self.Transform
+    t.translation += (t:right() * move.x + t:forward() * move.y) * (speed * dt)
+end
+
+function Walker.on_frame(self: Self, dt: number)
+    local look = input.vector(\"look\") -- the frame's view: the camera follows the hand at once
+    local camera = self:find_child(\"Camera\")
+    if camera then
+        camera.Transform:rotate(RIGHT, -look.y * self.sensitivity)
+    end
+end
+
+return Walker
+",
+        );
+        let found = luau.check("walker_input");
+        assert!(found.is_empty(), "{found:?}");
         // A field of the wrong type: an error where it is.
         luau.set_source(
             "bad",

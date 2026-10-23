@@ -878,7 +878,7 @@ impl Scripts {
         if let Some(mut clock) = self.vm.lua().app_data_mut::<Clock>() {
             *clock = self.clock;
         }
-        self.open(world, physics);
+        self.open(world, physics, false);
         self.follow(world);
         if let Some(physics) = physics {
             self.touches(physics);
@@ -907,7 +907,7 @@ impl Scripts {
         {
             return;
         }
-        self.open(world, physics);
+        self.open(world, physics, true);
         self.follow(world);
         self.call_all(Stage::Frame, dt, alpha);
         self.despawn_asked(world);
@@ -1024,8 +1024,9 @@ impl Scripts {
         }
     }
 
-    /// The world (and `physics`, if any) open to the scripts until [`Self::close`].
-    fn open(&mut self, world: &mut World, physics: Option<&crate::ScenePhysics>) {
+    /// The world (and `physics`, if any) open to the scripts until [`Self::close`];
+    /// `frame`: a frame's stage, whose `input` is the frame's view.
+    fn open(&mut self, world: &mut World, physics: Option<&crate::ScenePhysics>, frame: bool) {
         script_views::take_dead_refs(self.main, &mut self.dead);
         if !self.dead.is_empty() {
             let dead = core::mem::take(&mut self.dead);
@@ -1042,6 +1043,7 @@ impl Scripts {
         }
         OPEN_WORLD.set(world);
         OPEN_PHYSICS.set(physics.map_or(core::ptr::null(), core::ptr::from_ref));
+        self.tables.frame = frame;
         script_views::open(&mut self.tables);
     }
 
@@ -1648,6 +1650,21 @@ fn install(lua: &Lua) -> mlua::Result<()> {
     world.set("spawn", lua.create_function(world_spawn)?)?;
     globals.set("world", world)?;
     globals.set("system", lua.create_function(declare_system)?)?;
+    // The game's input (ADR 0114 §4), C functions: a name read through mlua allocates.
+    let input = lua.create_table()?;
+    let reads: [(&str, mlua::ffi::lua_CFunction); 6] = [
+        ("pressed", script_views::input_pressed),
+        ("just_pressed", script_views::input_just_pressed),
+        ("just_released", script_views::input_just_released),
+        ("strength", script_views::input_strength),
+        ("axis", script_views::input_axis),
+        ("vector", script_views::input_vector),
+    ];
+    for (name, f) in reads {
+        // SAFETY: C functions of the fast path's, which check their arguments.
+        input.set(name, unsafe { lua.create_c_function(f)? })?;
+    }
+    globals.set("input", input)?;
     let physics = lua.create_table()?;
     physics.set("raycast", lua.create_function(raycast)?)?;
     physics.set("overlap_sphere", lua.create_function(overlap_sphere)?)?;
@@ -3509,6 +3526,91 @@ return Spawner
         );
         scripts.tick(&mut world, 0.25);
         assert!(script_views::dead_refs() < 20, "let go of");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scripts_read_the_ticks_view_of_input_in_ticks_and_the_frames_in_frames() {
+        use engine_input::{Binding, EventKind, Input, InputEvent, InputMap, Key};
+        let dir = project(
+            "input",
+            &[(
+                "pad.luau",
+                r#"local Pad = component("Pad", { jumped = 0, held = false, x = 0, y = 0, framed = false, unknown = true })
+function Pad.on_tick(self, dt)
+    if input.just_pressed("jump") then
+        self.jumped += 1
+    end
+    self.held = input.pressed("jump")
+    local move = input.vector("move")
+    self.x = move.x
+    self.y = move.y
+    self.unknown = input.pressed("nothing") or input.axis("nothing") ~= 0
+end
+function Pad.on_frame(self, dt, alpha)
+    self.framed = input.pressed("jump")
+end
+return Pad
+"#,
+            )],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let mut map = InputMap::new();
+        let jump = map.add_button("jump").unwrap();
+        map.bind(jump, Binding::button(Key::Space)).unwrap();
+        let walk = map.add_axis2d("move").unwrap();
+        map.bind(walk, Binding::wasd()).unwrap();
+        world.insert_resource(Input::new(map));
+        let pad = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, pad, "Pad");
+        let t0 = std::time::Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        let key = |world: &mut World, ms: u64, key: Key, pressed: bool| {
+            world.resource_mut::<Input>().unwrap().handle(&InputEvent {
+                time: at(ms),
+                kind: EventKind::Key { key, pressed },
+            });
+        };
+        let flag = |world: &World, scripts: &Scripts, name: &str| {
+            let id = scripts.component("Pad").unwrap();
+            let TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind else {
+                unreachable!()
+            };
+            let at = fields.iter().find(|f| f.name == name).unwrap().offset;
+            let base = world.get_raw(pad, id).unwrap().as_ptr();
+            // SAFETY: a bool prop of Pad at its offset.
+            unsafe { base.add(at).read() == 1 }
+        };
+        // Space and D down: the tick sees the press once, and the move to the right.
+        key(&mut world, 1, Key::Space, true);
+        key(&mut world, 1, Key::KeyD, true);
+        world.resource_mut::<Input>().unwrap().sample_tick(at(2));
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(read_f32(&world, &scripts, pad, "Pad", "jumped"), 1.0);
+        assert!(flag(&world, &scripts, "held"));
+        assert_eq!(read_f32(&world, &scripts, pad, "Pad", "x"), 1.0);
+        assert_eq!(read_f32(&world, &scripts, pad, "Pad", "y"), 0.0);
+        assert!(
+            !flag(&world, &scripts, "unknown"),
+            "an unknown action is released"
+        );
+        // Still held at the next tick: pressed, not just pressed.
+        world.resource_mut::<Input>().unwrap().sample_tick(at(20));
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(read_f32(&world, &scripts, pad, "Pad", "jumped"), 1.0);
+        // The frames' own view: held in a frame, then let go (a frame that saw it go still
+        // latches the press; the one after does not). The tick's view is not sampled again.
+        world.resource_mut::<Input>().unwrap().sample_frame(at(22));
+        scripts.frame(&mut world, 0.016, 0.5);
+        assert!(flag(&world, &scripts, "framed"));
+        key(&mut world, 25, Key::Space, false);
+        world.resource_mut::<Input>().unwrap().sample_frame(at(30));
+        world.resource_mut::<Input>().unwrap().sample_frame(at(40));
+        scripts.frame(&mut world, 0.016, 0.5);
+        assert!(!flag(&world, &scripts, "framed"));
+        assert!(world.resource::<Input>().unwrap().tick().pressed("jump"));
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

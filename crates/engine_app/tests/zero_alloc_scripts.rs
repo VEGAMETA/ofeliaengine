@@ -104,14 +104,14 @@ return Watcher
 "#;
 
 /// Methods: entities' and `Transform`'s (ADR 0114 §3, E7-5a).
-const WALKER: &str = r#"local UP = vector.create(0, 1, 0)
-local Walker = component("Walker", { speed = 1.5, steps = 0 })
+const STROLLER: &str = r#"local UP = vector.create(0, 1, 0)
+local Stroller = component("Stroller", { speed = 1.5, steps = 0 })
 
-function Walker.step(self, by)
+function Stroller.step(self, by)
     self.steps += by
 end
 
-function Walker.on_tick(self, dt)
+function Stroller.on_tick(self, dt)
     local t = self.Transform
     t:rotate(UP, self.speed * dt)
     local ahead = t:forward() + t:right() * 0.5 + t:up() * 0.1
@@ -124,6 +124,34 @@ function Walker.on_tick(self, dt)
         if child:has(Transform) then
             self:step(1)
         end
+    end
+end
+
+return Stroller
+"#;
+
+/// ADR 0114 §5's fourth example, as written there: the game's input.
+const WALKER: &str = r#"--!strict
+-- scripts/walker.luau: walks with "move" (faster with "run"); its camera looks with "look".
+local Walker = component("Walker", {
+    speed = 4.0, -- metres a second
+    sensitivity = 0.002, -- radians per count of mouse motion
+})
+type Self = Script<typeof(Walker.props)>
+local RIGHT = vector.create(1, 0, 0)
+
+function Walker.on_tick(self: Self, dt: number)
+    local move = input.vector("move") -- the tick's view: a tap shorter than a tick still counts
+    local speed = if input.pressed("run") then self.speed * 2 else self.speed
+    local t = self.Transform
+    t.translation += (t:right() * move.x + t:forward() * move.y) * (speed * dt)
+end
+
+function Walker.on_frame(self: Self, dt: number)
+    local look = input.vector("look") -- the frame's view: the camera follows the hand at once
+    local camera = self:find_child("Camera")
+    if camera then
+        camera.Transform:rotate(RIGHT, -look.y * self.sensitivity)
     end
 end
 
@@ -154,7 +182,8 @@ return Spin
 /// Watchers, each with a trigger, a ball falling through it and a floor named after it.
 const WATCHERS: usize = 10;
 
-/// Walkers, each with a camera and an arm.
+/// Strollers, each with a camera and an arm; walkers, each with a camera.
+const STROLLERS: usize = 10;
 const WALKERS: usize = 10;
 
 #[test]
@@ -165,6 +194,7 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
     std::fs::create_dir_all(dir.join("scripts")).unwrap();
     std::fs::write(dir.join("scripts/door.luau"), DOOR).unwrap();
     std::fs::write(dir.join("scripts/watcher.luau"), WATCHER).unwrap();
+    std::fs::write(dir.join("scripts/stroller.luau"), STROLLER).unwrap();
     std::fs::write(dir.join("scripts/walker.luau"), WALKER).unwrap();
     std::fs::write(dir.join("scripts/spin.luau"), SPIN).unwrap();
     let mut world = World::new();
@@ -223,17 +253,41 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
         balls.push((body, at + Vec3::new(0.0, 3.0, 0.0)));
     }
 
-    let walkers: Vec<Entity> = (0..WALKERS)
+    let strollers: Vec<Entity> = (0..STROLLERS)
         .map(|i| {
-            let walker = world.spawn((Transform::from_xyz(i as f32 * 3.0, 0.0, -30.0),));
+            let stroller = world.spawn((Transform::from_xyz(i as f32 * 3.0, 0.0, -30.0),));
             for name in ["Arm", "Camera"] {
                 let child = world.spawn((Name::new(name), Transform::IDENTITY));
-                world.set_parent(child, Some(walker)).unwrap();
+                world.set_parent(child, Some(stroller)).unwrap();
             }
+            assert!(scripts.add(&mut world, stroller, "Stroller"));
+            stroller
+        })
+        .collect();
+    // The game's input: walking with WASD, running with Shift, looking with the mouse.
+    let mut map = engine_input::InputMap::new();
+    let walk = map.add_axis2d("move").unwrap();
+    map.bind(walk, engine_input::Binding::wasd()).unwrap();
+    let run = map.add_button("run").unwrap();
+    map.bind(
+        run,
+        engine_input::Binding::button(engine_input::Key::ShiftLeft),
+    )
+    .unwrap();
+    let look = map.add_axis2d("look").unwrap();
+    map.bind(look, engine_input::Binding::mouse_motion(1.0))
+        .unwrap();
+    world.insert_resource(engine_input::Input::new(map));
+    let walkers: Vec<Entity> = (0..WALKERS)
+        .map(|i| {
+            let walker = world.spawn((Transform::from_xyz(i as f32 * 3.0, 0.0, -60.0),));
+            let camera = world.spawn((Name::new("Camera"), Transform::IDENTITY));
+            world.set_parent(camera, Some(walker)).unwrap();
             assert!(scripts.add(&mut world, walker, "Walker"));
             walker
         })
         .collect();
+    let started = std::time::Instant::now();
 
     let spinners: Vec<Entity> = (0..1000)
         .map(|i| {
@@ -256,10 +310,36 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
             }
         }
         physics.sync_triggers(world).unwrap();
+        // W held for 40 ticks of every 80, Shift for 20; the mouse moves every tick.
+        let now = started + std::time::Duration::from_millis(n as u64 * 16);
+        if let Some(input) = world.resource_mut::<engine_input::Input>() {
+            for (key, at) in [
+                (engine_input::Key::KeyW, 40),
+                (engine_input::Key::ShiftLeft, 20),
+            ] {
+                if n.is_multiple_of(80) || n % 80 == at {
+                    input.handle(&engine_input::InputEvent {
+                        time: now,
+                        kind: engine_input::EventKind::Key {
+                            key,
+                            pressed: n.is_multiple_of(80),
+                        },
+                    });
+                }
+            }
+            input.handle(&engine_input::InputEvent {
+                time: now,
+                kind: engine_input::EventKind::MouseMotion { dx: 1.0, dy: 2.0 },
+            });
+            input.sample_tick(now);
+        }
         let before = counting::allocations();
         scripts.tick_with(world, dt, Some(&physics));
         *counted += counting::allocations() - before;
         physics.step(world, dt).unwrap();
+        if let Some(input) = world.resource_mut::<engine_input::Input>() {
+            input.sample_frame(now);
+        }
         let before = counting::allocations();
         scripts.frame_with(world, dt, 1.0, Some(&physics));
         *counted += counting::allocations() - before;
@@ -301,22 +381,30 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
         turned.dot(expected).abs() > 0.999,
         "{turned:?} against {expected:?}"
     );
-    let id = scripts.component("Walker").unwrap();
-    let engine_reflect::TypeKind::Struct(walker_fields) =
+    let id = scripts.component("Stroller").unwrap();
+    let engine_reflect::TypeKind::Struct(stroller_fields) =
         &world.components().type_info(id).unwrap().kind
     else {
         unreachable!()
     };
-    let steps = walker_fields
+    let steps = stroller_fields
         .iter()
         .find(|f| f.name == "steps")
         .unwrap()
         .offset;
-    for &w in &walkers {
+    for &w in &strollers {
         let base = world.get_raw(w, id).unwrap().as_ptr();
-        // SAFETY: Walker's `steps`, an f32 at its offset.
+        // SAFETY: Stroller's `steps`, an f32 at its offset.
         let steps = unsafe { base.add(steps).cast::<f32>().read_unaligned() };
-        assert_eq!(steps, 840.0 * 2.0, "a walker stopped");
+        assert_eq!(steps, 840.0 * 2.0, "a stroller stopped");
+    }
+    // The walkers walked forward (−z) while W was held, and their cameras looked down.
+    for &w in &walkers {
+        let t = world.get::<Transform>(w).unwrap();
+        assert!(t.translation.z < -60.5, "{:?}", t.translation);
+        let camera = world.children(w).next().unwrap();
+        let pitch = world.get::<Transform>(camera).unwrap().rotation;
+        assert!((pitch * Vec3::NEG_Z).y < -0.1, "{pitch:?}");
     }
     for &w in &watchers {
         assert_eq!(read(w, "looks"), 840.0, "a watcher stopped");

@@ -1339,3 +1339,25 @@ there, and see the script's file in the inspector.
 - **Not in this step:** a query over an entity's children; the scene tree's order for
   queries (they visit archetypes in their order, the same on every machine for the same
   world).
+
+## As built (E7-5d, 2026-10-23): input
+
+- **`input.pressed`, `just_pressed`, `just_released`, `strength`, `axis`, `vector`**, by the
+  game's action names (its `InputMap`), are C functions over the world's
+  `engine_input::Input`. A name read through mlua would allocate.
+- **The view is the stage's:** the tick's sample in a tick's hooks (`on_start`, `on_tick`,
+  contacts, systems' `on_tick`), where a tap shorter than a tick still counts; the frame's
+  in a frame's (`on_frame`). The host marks the stage when it opens it.
+- **`vector`** gives a Luau vector (x, y, 0), at most 1 long.
+- **Without an input,** and for an action the map does not name, every read is released
+  (false, 0, the zero vector), as the Rust views read.
+- **Tests:**
+  - a press heard once by `just_pressed` and held by `pressed` in the next tick;
+  - WASD's vector;
+  - an unknown action reads as released;
+  - the frame's view held, then let go, while the tick's keeps its sample;
+  - the zero-allocation test runs ADR 0114's fourth example (the walker) with keys held
+    and the mouse moving: 0 allocations, the walkers walk and their cameras look down;
+  - the editor's checker takes it in strict mode, its `type Self =
+    Script<typeof(Walker.props)>` too: the definitions export `Script<P>` (`P &
+    ScriptSelf`) and `ComponentType` for annotations, as §5's examples write them.

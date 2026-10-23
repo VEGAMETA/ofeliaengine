@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 
 /// Names the definitions give their own types; a component of one of these names is left
 /// out (it would shadow them).
-const RESERVED: [&str; 8] = [
+const RESERVED: [&str; 9] = [
     "Entity",
     "Quat",
     "ScriptSelf",
@@ -30,6 +30,7 @@ const RESERVED: [&str; 8] = [
     "PhysicsFilter",
     "ComponentType",
     "Query",
+    "Script",
 ];
 
 /// The definitions' first part: what does not depend on the program's components.
@@ -47,7 +48,7 @@ end
 
 -- What `has`, `add` and `remove` take: `Transform` (each component of the program is a
 -- global of its name), a script's `component` table, or a component's name.
-type ComponentType = { name: string }
+export type ComponentType = { name: string }
 
 -- What `prop.number` and the other helpers take after the default.
 type PropOptions = {
@@ -107,6 +108,10 @@ const TRANSFORM_METHODS: &str = r#"    -- Turns it by `angle` radians about `axi
 
 /// The definitions' last part: the libraries.
 const LIBRARIES: &str = r#"
+-- `self` of a component of props `P`, for an annotation:
+-- `type Self = Script<typeof(Door.props)>`, then `function Door.on_tick(self: Self, dt)`.
+export type Script<P> = P & ScriptSelf
+
 -- A script component's table, which `component` returns: its hooks, defined on it.
 type ScriptComponent<P> = {
     name: string,
@@ -173,6 +178,23 @@ declare physics: {
     overlap_sphere: (center: vector, radius: number, filter: PhysicsFilter?) -> () -> Entity?,
     -- The layers named so (`PhysicsSettings::layer_names`).
     filter: (layers: { string }) -> PhysicsFilter,
+}
+
+-- The game's input, by its actions' names (the game's input map): in tick hooks the
+-- tick's view (a tap shorter than a tick still counts), in frame hooks the frame's.
+declare input: {
+    -- Whether the action is held.
+    pressed: (action: string) -> boolean,
+    -- Whether it went down in this view.
+    just_pressed: (action: string) -> boolean,
+    -- Whether it went up in this view.
+    just_released: (action: string) -> boolean,
+    -- How far it is held, 0 to 1.
+    strength: (action: string) -> number,
+    -- A 1D axis, -1 to 1.
+    axis: (action: string) -> number,
+    -- A 2D axis as a vector (x, y, 0), at most 1 long.
+    vector: (action: string) -> vector,
 }
 
 declare time: {
