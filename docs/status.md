@@ -607,7 +607,7 @@ Last updated: 2026-10-22.
   - **Prefab following takes script components** (#372): an instance now gets a script's
     component its prefab added (E5-4 made only the program's types, through their
     `Default`); its texts at the script's defaults (`engine_ecs::DefaultValue`).
-  - **E9's research and ADR 0119** (#PR, proposed):
+  - **E9's research and ADR 0119** (#374, proposed):
     - research `docs/research/script-debugger.md` (Luau's debug interface, six debuggers,
       DAP, how to stop while the editor draws on the same thread);
     - UX `docs/research/ux/script-debugger.md`, replacing the note of 2026-10-17;
