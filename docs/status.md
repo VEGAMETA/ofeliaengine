@@ -544,7 +544,7 @@ Last updated: 2026-10-22.
     example on 1,000 entities with ten watchers: 1,237,831 allocations in 600 ticks → 0
     (`tests/zero_alloc_scripts.rs`); an empty hook 0.165 → 0.138 µs, 1,000 doors 0.63 →
     0.6 ms.
-  - **E7-5a, entities' methods** (#PR, ADR 0114's as-built): `has`, `add`, `remove`,
+  - **E7-5a, entities' methods** (#359, ADR 0114's as-built): `has`, `add`, `remove`,
     `despawn` (at the stage's end, with its children, after their `on_stop`), `children`
     (a loop that keeps nothing), `find_child` (the nearest), `parent`, on entities and
     `self`; `self:open()` calls `Door.open(self)`; components as values (globals of the
