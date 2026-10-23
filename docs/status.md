@@ -604,7 +604,7 @@ Last updated: 2026-10-22.
     and `net_skip`; a client's value starts from the script's defaults; the server reads
     columns that own texts. Prefabs from packs move to the one-button build (nothing
     packs scenes or scripts yet). Scripting v1 is complete.
-  - **Prefab following takes script components** (#PR): an instance now gets a script's
+  - **Prefab following takes script components** (#372): an instance now gets a script's
     component its prefab added (E5-4 made only the program's types, through their
     `Default`); its texts at the script's defaults (`engine_ecs::DefaultValue`).
   - **Next, in this order:**
