@@ -47,6 +47,11 @@ fn thread_name(id: u32) -> String {
     }
 }
 
+/// Heap allocations so far, every thread's.
+pub fn allocations() -> usize {
+    ALLOCATIONS.load(Ordering::Relaxed)
+}
+
 fn count() {
     ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
     if NOTING.load(Ordering::Relaxed) {

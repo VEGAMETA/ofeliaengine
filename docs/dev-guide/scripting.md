@@ -121,6 +121,9 @@ return Coin
   are Luau `vector`s, written whole. Rotations are `quat`s.
 - **`self.entity`:** the entity. `self.entity.name` is its `Name`, and
   `self.entity.alive` tells whether it still exists.
+- **An entity is a value:** two that name the same entity are equal (`==`, even
+  `rawequal`), and an entity is a table key like a number (`seen[other] = true`).
+  `typeof(e)` is `"Entity"`. Making one costs nothing.
 - **`self.locals`:** a table of your own, kept between hooks and never saved: caches and
   counters, not state the game needs back after a load.
 - In `on_stop` the component is gone, so its props are too. `self.entity` and
@@ -133,7 +136,7 @@ return Coin
 | `world.find(name)` | the entity with that `Name` (the first made, of several), or `nil` |
 | `time.now()`, `time.tick()`, `time.dt()` | the game's time in seconds, the tick's number, its length |
 | `quat.identity()`, `quat.axis_angle(axis, angle)`, `quat.euler(x, y, z)` | rotations, in radians; `q * v` rotates a vector, `a * b` composes |
-| `physics.raycast(origin, direction, max_distance, filter?)` | the first body along the ray: its entity (`nil` for a body without one), the point, the normal and the distance; nothing on a miss |
+| `physics.raycast(origin, direction, max_distance, filter?)` | the first body along the ray: its entity (`nil` for a body without one), the point, the normal and the distance; `nil`s on a miss |
 | `physics.overlap_sphere(center, radius, filter?)` | the entities whose bodies overlap the sphere, for a `for` loop |
 | `physics.filter({ "Moving" })` | the collision layers a query sees, by name (`PhysicsSettings::layer_names`); make it once, at the module's top |
 | `print(...)`, `warn(...)` | the engine's log, with the script's file and line |
@@ -187,15 +190,22 @@ Save a script (Ctrl+S in the editor, or in another editor) and it runs again at 
 ## What it costs
 
 Measured on ref-1 (Ryzen 7 7700, release):
-- an empty `on_tick` costs 0.17 µs per instance;
-- reading and writing a prop or a component's field costs about 36 ns each (a number, a
-  boolean, a vector);
-- 1,000 doors like the one above take 0.65 ms a tick.
+- an empty `on_tick` costs 0.14 µs per instance;
+- reading and writing a prop or a component's field costs about 37 ns each (a number, a
+  boolean, a vector, an entity);
+- 1,000 doors like the one above take 0.6 ms a tick.
 
-A field read is a call into the engine, though a short one. `self.Transform` is made once
-and kept, as are `self.entity` and `self.locals`. An entity from `world.find` and a
-component reached through it are made at each access: keep them in a local within a hook.
-Logic over thousands of objects every tick belongs in Rust.
+A field read is a call into the engine, though a short one: read it into a local when a
+hook uses it several times. Logic over thousands of objects every tick belongs in Rust.
+
+What the engine gives scripts allocates nothing while a game runs: entities, vectors and
+numbers are values, and `self.Transform` or `world.find("Player").Transform` is made once
+and given again. Your own tables, strings and closures do allocate, as in any Luau code.
+A few things allocate by their nature:
+- a `quat`, made or read from a component;
+- `tostring`;
+- a `physics.overlap_sphere` loop (its iterator);
+- an enum field written by its name.
 
 ## Types: in the editor and in VS Code
 
@@ -217,7 +227,10 @@ at it, so VS Code checks and completes your scripts the same way. The file is in
 
 ## Coming next
 
-- script components in saves;
-- systems over queries, `input`, `world.spawn`, `world.query`, entity methods (`has`, `add`,
-  `remove`, `despawn`);
-- `send`, `after` timers, `audio`, `random`, physics queries and triggers.
+- entity methods (`has`, `add`, `remove`, `despawn`, `children`, `find_child`, `parent`),
+  components as values (`e:has(Wallet)`), `Transform`'s methods (`rotate`, `look_at`,
+  `forward`, `right`, `up`);
+- `world.spawn`, `world.query` and systems over queries;
+- `input`;
+- `send`, `after` timers, `audio`, `random`, `world.instantiate`;
+- script components in saves.

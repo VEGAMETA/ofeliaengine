@@ -63,6 +63,7 @@ use engine_script::mlua::{
 use engine_script::{ScriptError, ScriptSettings, ScriptVm};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// What a prop holds.
@@ -100,8 +101,9 @@ struct Prop {
 /// A component a script declared, registered with the world.
 struct Declared {
     name: String,
-    /// The module that declared it, and its file (errors name it).
-    module: String,
+    /// The module that declared it, and its file (errors name it); shared, as each hook's
+    /// call names it.
+    module: Rc<str>,
     /// Its hooks, found on its table once its module ran.
     hooks: Hooks,
     info: &'static TypeInfo,
@@ -186,6 +188,11 @@ pub struct Scripts {
     instances: BTreeMap<(u32, u32), (Entity, Instance)>,
     /// The entities seen in this stage, for the instances gone (scratch).
     seen: HashSet<(u32, u32)>,
+    /// The instances called in a stage, in their order (scratch: a stage allocates
+    /// nothing).
+    order: Vec<(u32, u32)>,
+    /// The components that hear contacts (scratch).
+    listening: Vec<usize>,
     clock: Clock,
     /// Errors already in the log.
     reported: HashSet<String>,
@@ -265,6 +272,8 @@ impl Scripts {
             by_name: HashMap::new(),
             instances: BTreeMap::new(),
             seen: HashSet::new(),
+            order: Vec::new(),
+            listening: Vec::new(),
             clock: Clock::default(),
             reported: HashSet::new(),
             sources: HashMap::new(),
@@ -440,7 +449,7 @@ impl Scripts {
         let mut again = Vec::new();
         for (name, table, props) in declared {
             let result = match self.by_name.get(&name).copied() {
-                Some(k) if self.components[k].module == module => {
+                Some(k) if *self.components[k].module == *module => {
                     again.push(k);
                     self.redeclare(world, k, &table, props)
                         .map(|relaid| match relaid {
@@ -458,7 +467,7 @@ impl Scripts {
         }
         // What it no longer declares: the data stays, the hooks go.
         for (k, c) in self.components[..before].iter_mut().enumerate() {
-            if c.module == module && !again.contains(&k) {
+            if *c.module == *module && !again.contains(&k) {
                 c.hooks = Hooks::default();
                 out.gone.push(c.name.clone());
             }
@@ -468,7 +477,7 @@ impl Scripts {
             if self
                 .components
                 .get(k as usize)
-                .is_some_and(|c| c.module == module && c.hooks.any())
+                .is_some_and(|c| *c.module == *module && c.hooks.any())
             {
                 inst.stopped = false;
                 out.instances += 1;
@@ -603,7 +612,7 @@ impl Scripts {
         self.by_name.insert(name.to_owned(), self.components.len());
         self.components.push(Declared {
             name: name.to_owned(),
-            module: module.to_owned(),
+            module: module.into(),
             hooks,
             info,
             id,
@@ -626,7 +635,7 @@ impl Scripts {
     pub fn file_of(&self, name: &str) -> Option<&Path> {
         let k = *self.by_name.get(name)?;
         self.files
-            .get(&self.components[k].module)
+            .get(&*self.components[k].module)
             .map(PathBuf::as_path)
     }
 
@@ -651,16 +660,16 @@ impl Scripts {
         engine_profiler::zone!("scripts::tick");
         self.clock.ticks += 1;
         self.clock.dt = dt;
-        self.vm.lua().set_app_data(self.clock);
+        // In place: setting app data boxes it anew.
+        if let Some(mut clock) = self.vm.lua().app_data_mut::<Clock>() {
+            *clock = self.clock;
+        }
         self.open(world, physics);
         self.follow(world);
         if let Some(physics) = physics {
             self.touches(physics);
         }
-        let ids: Vec<(u32, u32)> = self.instances.keys().copied().collect();
-        for key in ids {
-            self.call(key, Stage::Tick, dt, 0.0);
-        }
+        self.call_all(Stage::Tick, dt, 0.0);
         self.close();
     }
 
@@ -683,11 +692,19 @@ impl Scripts {
         }
         self.open(world, physics);
         self.follow(world);
-        let ids: Vec<(u32, u32)> = self.instances.keys().copied().collect();
-        for key in ids {
-            self.call(key, Stage::Frame, dt, alpha);
-        }
+        self.call_all(Stage::Frame, dt, alpha);
         self.close();
+    }
+
+    /// Every instance's hook of `stage`, in the instances' order.
+    fn call_all(&mut self, stage: Stage, dt: f32, alpha: f32) {
+        let mut order = core::mem::take(&mut self.order);
+        order.clear();
+        order.extend(self.instances.keys().copied());
+        for &key in &order {
+            self.call(key, stage, dt, alpha);
+        }
+        self.order = order;
     }
 
     /// The world (and `physics`, if any) open to the scripts until [`Self::close`].
@@ -840,13 +857,14 @@ impl Scripts {
             return;
         }
         self.heard = at;
-        let listened: Vec<usize> = (0..self.components.len())
-            .filter(|&k| {
-                let h = &self.components[k].hooks;
-                h.touch.is_some() || h.untouch.is_some()
-            })
-            .collect();
+        let mut listened = core::mem::take(&mut self.listening);
+        listened.clear();
+        listened.extend((0..self.components.len()).filter(|&k| {
+            let h = &self.components[k].hooks;
+            h.touch.is_some() || h.untouch.is_some()
+        }));
         if listened.is_empty() {
+            self.listening = listened;
             return;
         }
         let events = engine_physics::PhysicsBackend::contact_events(physics.backend());
@@ -863,6 +881,7 @@ impl Scripts {
                 }
             }
         }
+        self.listening = listened;
     }
 
     /// Instance (`me`, component `k`) hears a contact with `other` (`begin`: it began).
@@ -905,14 +924,7 @@ impl Scripts {
         let Some(hook) = hook else {
             return;
         };
-        let lua = self.vm.lua();
-        let other = match other {
-            Some(o) => match entity_value(lua, o) {
-                Ok(v) => v,
-                Err(_) => return,
-            },
-            None => Value::Nil,
-        };
+        let other = other.map_or(Value::Nil, script_views::entity_value);
         let vector = |v: Vec3| Value::Vector(Vector::new(v.x, v.y, v.z));
         let result = if begin {
             self.vm.call_function::<_, ()>(
@@ -1453,19 +1465,13 @@ fn query_filter(
     Ok(out)
 }
 
-/// Entity `e` as a script's value.
-fn entity_value(lua: &Lua, e: Entity) -> mlua::Result<Value> {
-    // SAFETY: room for the one value pushed, returned.
-    unsafe { lua.exec_raw::<Value>((), |state| script_views::push_entity(state, e)) }
-}
-
 /// `physics.raycast(origin, direction, max_distance, filter?)`: the first body along the
 /// ray, as its entity (nil for a body without one), the hit's point and normal, and its
-/// distance; nothing when it hits nothing.
+/// distance; nils when it hits nothing. Four values, not a table: nothing is allocated.
 fn raycast(
-    lua: &Lua,
+    _: &Lua,
     (origin, direction, max, filter): (Vector, Vector, f32, Option<AnyUserData>),
-) -> mlua::Result<mlua::MultiValue> {
+) -> mlua::Result<(Value, Value, Value, Value)> {
     // SAFETY: the stage's physics world (`open_physics`), read within this callback only.
     let physics = unsafe { &*open_physics()? };
     let Some(direction) = Vec3::new(direction.x(), direction.y(), direction.z()).try_normalize()
@@ -1476,7 +1482,7 @@ fn raycast(
     };
     // No length (or not a number): nothing to hit.
     if max.is_nan() || max <= 0.0 {
-        return Ok(mlua::MultiValue::new());
+        return Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil));
     }
     let ray = engine_physics::Ray {
         origin: Vec3::new(origin.x(), origin.y(), origin.z()),
@@ -1484,19 +1490,17 @@ fn raycast(
     };
     let filter = query_filter(physics, filter.as_ref())?;
     let Some(hit) = engine_physics::PhysicsBackend::raycast(physics.backend(), &ray, filter) else {
-        return Ok(mlua::MultiValue::new());
+        return Ok((Value::Nil, Value::Nil, Value::Nil, Value::Nil));
     };
-    let entity = match engine_physics::ecs::user_data_entity(hit.user_data) {
-        Some(e) => entity_value(lua, e)?,
-        None => Value::Nil,
-    };
+    let entity = engine_physics::ecs::user_data_entity(hit.user_data)
+        .map_or(Value::Nil, script_views::entity_value);
     let vector = |v: Vec3| Value::Vector(Vector::new(v.x, v.y, v.z));
-    Ok(mlua::MultiValue::from_vec(vec![
+    Ok((
         entity,
         vector(hit.point),
         vector(hit.normal),
         Value::Number(f64::from(hit.fraction * max)),
-    ]))
+    ))
 }
 
 /// `physics.overlap_sphere(center, radius, filter?)`: the entities whose bodies overlap the
@@ -1525,9 +1529,11 @@ fn overlap_sphere(
         }
     }
     let next = core::cell::RefCell::new(entities.into_iter());
-    lua.create_function(move |lua, ()| match next.borrow_mut().next() {
-        Some(e) => entity_value(lua, e),
-        None => Ok(Value::Nil),
+    lua.create_function(move |_, ()| {
+        Ok(next
+            .borrow_mut()
+            .next()
+            .map_or(Value::Nil, script_views::entity_value))
     })
 }
 
@@ -1553,70 +1559,98 @@ fn named(lua: &Lua, name: &str) -> Option<(ComponentId, &'static TypeInfo)> {
     lua.app_data_ref::<Names>()?.by_name.get(name).copied()
 }
 
-/// `self.key` where the fast path hands over (ADR 0114 E7-1c): `entity`, `locals`, props
-/// of the kinds it does not read, and what is missing.
-fn self_index_slow(lua: &Lua, (ud, key): (AnyUserData, mlua::LuaString)) -> mlua::Result<Value> {
+/// The text of key `key` (made only where the fast path found no field: reading a string
+/// through mlua allocates).
+fn key_text(key: &Value) -> mlua::Result<mlua::BorrowedStr> {
+    match key {
+        Value::String(s) => s.to_str(),
+        _ => Err(mlua::Error::runtime("fields are named by strings")),
+    }
+}
+
+/// The field of `info` a slow path is asked for: at place `slot` when the fast path found
+/// it, else named by `key`.
+fn asked_field(
+    info: &'static TypeInfo,
+    key: &Value,
+    slot: Option<u32>,
+) -> mlua::Result<&'static Field> {
+    if let Some(i) = slot
+        && let TypeKind::Struct(fields) = &info.kind
+        && let Some(f) = fields.get(i as usize)
+    {
+        return Ok(f);
+    }
+    struct_field(info, &key_text(key)?)
+}
+
+/// `self.key` where the fast path hands over (ADR 0114 E7-1c): props of the kinds it does
+/// not read (`slot`: the field's place, as the fast path found it), and what is missing.
+fn self_index_slow(
+    lua: &Lua,
+    (ud, key, slot): (AnyUserData, Value, Option<u32>),
+) -> mlua::Result<Value> {
     // SAFETY: the fast path hands over `self`s of its tag only.
     let this = unsafe { *script_views::this_at(ud.to_pointer()) };
-    let key = key.to_str()?;
     // `self.entity` and `self.locals` are the fast path's own.
-    if key.starts_with(|c: char| c.is_ascii_uppercase()) {
-        return component_view(lua, this.entity, &key);
+    if slot.is_none() {
+        let key = key_text(&key)?;
+        if key.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return component_view(lua, this.entity, &key);
+        }
     }
+    let f = asked_field(this.info, &key, slot)?;
     // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
     let w = unsafe { &mut *world_ptr(lua)? };
-    field(lua, w, this.entity, this.id, this.info, 0, &key)
+    field(lua, w, this.entity, this.id, 0, f)
 }
 
 /// `self.key = value` where the fast path hands over: props of the kinds it does not write,
 /// and what cannot be written.
 fn self_newindex_slow(
     lua: &Lua,
-    (ud, key, value): (AnyUserData, mlua::LuaString, Value),
+    (ud, key, value, slot): (AnyUserData, Value, Value, Option<u32>),
 ) -> mlua::Result<()> {
     // SAFETY: as `self_index_slow`.
     let this = unsafe { *script_views::this_at(ud.to_pointer()) };
-    let key = key.to_str()?;
-    if key.starts_with(|c: char| c.is_ascii_uppercase()) {
-        return Err(mlua::Error::runtime(format!(
-            "`self.{key}` is a component: write its fields (`self.{key}.field = …`)"
-        )));
+    if slot.is_none() {
+        let key = key_text(&key)?;
+        if key.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return Err(mlua::Error::runtime(format!(
+                "`self.{key}` is a component: write its fields (`self.{key}.field = …`)"
+            )));
+        }
     }
+    let f = asked_field(this.info, &key, slot)?;
     // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
     let w = unsafe { &mut *world_ptr(lua)? };
-    set_field(lua, w, this.entity, this.id, this.info, 0, &key, value)
+    set_field(w, this.entity, this.id, this.info, 0, f, value)
 }
 
 /// `view.key` where the fast path hands over.
-fn view_index_slow(lua: &Lua, (ud, key): (AnyUserData, mlua::LuaString)) -> mlua::Result<Value> {
+fn view_index_slow(
+    lua: &Lua,
+    (ud, key, slot): (AnyUserData, Value, Option<u32>),
+) -> mlua::Result<Value> {
     // SAFETY: the fast path hands over views of their tag only.
     let view = unsafe { *script_views::view_at(ud.to_pointer()) };
-    let key = key.to_str()?;
+    let f = asked_field(view.info, &key, slot)?;
     // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
     let w = unsafe { &mut *world_ptr(lua)? };
-    field(lua, w, view.entity, view.id, view.info, view.offset, &key)
+    field(lua, w, view.entity, view.id, view.offset, f)
 }
 
 /// `view.key = value` where the fast path hands over.
 fn view_newindex_slow(
     lua: &Lua,
-    (ud, key, value): (AnyUserData, mlua::LuaString, Value),
+    (ud, key, value, slot): (AnyUserData, Value, Value, Option<u32>),
 ) -> mlua::Result<()> {
     // SAFETY: as `view_index_slow`.
     let view = unsafe { *script_views::view_at(ud.to_pointer()) };
-    let key = key.to_str()?;
+    let f = asked_field(view.info, &key, slot)?;
     // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
     let w = unsafe { &mut *world_ptr(lua)? };
-    set_field(
-        lua,
-        w,
-        view.entity,
-        view.id,
-        view.info,
-        view.offset,
-        &key,
-        value,
-    )
+    set_field(w, view.entity, view.id, view.info, view.offset, f, value)
 }
 
 /// A view of `entity`'s component `id` (described by `info`), or of a struct of type
@@ -1641,21 +1675,6 @@ fn new_view(
             script_views::push_view(state, &mut *tables, entity, id, info, offset);
         })
     }
-}
-
-/// The entity `value` is, if one.
-fn entity_of(lua: &Lua, value: &Value) -> mlua::Result<Option<Entity>> {
-    if !matches!(value, Value::UserData(_)) {
-        return Ok(None);
-    }
-    let mut found = None;
-    // SAFETY: the value is the one argument pushed, read where it lies.
-    unsafe {
-        lua.exec_raw::<()>(value.clone(), |state| {
-            found = script_views::entity_at(state, -1);
-        })?;
-    }
-    Ok(found)
 }
 
 /// A view of `entity`'s component `name`, or an error naming what is missing.
@@ -1721,11 +1740,9 @@ fn field(
     w: &World,
     entity: Entity,
     id: ComponentId,
-    info: &'static TypeInfo,
     offset: usize,
-    key: &str,
+    f: &'static Field,
 ) -> mlua::Result<Value> {
-    let f = struct_field(info, key)?;
     let base = w
         .get_raw(entity, id)
         .ok_or_else(|| mlua::Error::runtime("the entity is gone, or lost the component"))?;
@@ -1765,9 +1782,9 @@ fn read(
             _ => {}
         }
         if ty.name == "Entity" {
-            let e = at.cast::<Entity>().read_unaligned();
-            // SAFETY: room for the one value pushed.
-            return lua.exec_raw::<Value>((), |state| script_views::push_entity(state, e));
+            return Ok(script_views::entity_value(
+                at.cast::<Entity>().read_unaligned(),
+            ));
         }
         match &ty.kind {
             TypeKind::Primitive(p) => Ok(match p {
@@ -1833,26 +1850,28 @@ fn struct_field(info: &'static TypeInfo, key: &str) -> mlua::Result<&'static Fie
         .ok_or_else(|| mlua::Error::runtime(format!("{} has no field `{key}`", info.name)))
 }
 
-/// Writes `value` into field `key` of `info` at `offset` in `entity`'s component `id`,
+/// Writes `value` into field `f` of `info` at `offset` in `entity`'s component `id`,
 /// clamped to the field's range as the inspector does.
-#[allow(clippy::too_many_arguments)]
 fn set_field(
-    lua: &Lua,
     w: &mut World,
     entity: Entity,
     id: ComponentId,
     info: &'static TypeInfo,
     offset: usize,
-    key: &str,
+    f: &'static Field,
     value: Value,
 ) -> mlua::Result<()> {
-    let f = struct_field(info, key)?;
+    let key = f.name;
     let base = w
         .get_raw_mut(entity, id)
         .ok_or_else(|| mlua::Error::runtime("the entity is gone, or lost the component"))?;
     // SAFETY: the component's bytes, `f` inside them by its offset from reflection.
     let at = unsafe { base.as_ptr().add(offset + f.offset) };
-    let given = value.type_name();
+    let given = if script_views::value_entity(&value).is_some() {
+        "Entity"
+    } else {
+        value.type_name()
+    };
     let wrong =
         |what: &str| mlua::Error::runtime(format!("{}.{key} takes {what}, not {given}", info.name));
     let number = match &value {
@@ -1894,8 +1913,7 @@ fn set_field(
         if ty.name == "Entity" {
             let e = match &value {
                 Value::Nil => Entity::NULL,
-                Value::UserData(_) => entity_of(lua, &value)?.ok_or_else(|| wrong("an entity"))?,
-                _ => return Err(wrong("an entity")),
+                _ => script_views::value_entity(&value).ok_or_else(|| wrong("an entity"))?,
             };
             at.cast::<Entity>().write_unaligned(e);
             return Ok(());
@@ -2355,6 +2373,135 @@ return Ghost
         for line in [
             "scripts/wrong.luau:3: Wrong.speed takes a number, not string (Wrong.on_tick)",
             "scripts/ghost.luau:3: no component is called `Haunt` (Ghost.on_tick)",
+        ] {
+            assert!(reported.contains(&line), "{line} in {reported:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn entities_are_values_and_keys_and_find_follows_the_names() {
+        let dir = project(
+            "values",
+            &[
+                (
+                    "keys.luau",
+                    r#"local Keys = component("Keys", { checks = 0, ok = false, mate = prop.entity() })
+function Keys.on_tick(self, dt)
+    local p = world.find("Player")
+    local seen = self.locals
+    seen[p] = (seen[p] or 0) + 1
+    local by_value = seen[world.find("Player")] == seen[p]
+    self.mate = p
+    local typed = typeof(p) == "Entity" and type(p) == "userdata"
+    local stored = self.mate == p and rawequal(self.mate, p) and rawequal(p.Transform, p.Transform)
+    local set = {}
+    set[p] = true
+    set[self.entity] = true
+    set[world.find("Player")] = true
+    local count = 0
+    for _ in pairs(set) do
+        count += 1
+    end
+    self.ok = by_value and typed and stored and count == 2 and seen[p] == self.checks + 1
+    self.checks += 1
+end
+return Keys
+"#,
+                ),
+                (
+                    "finder.luau",
+                    r#"local Finder = component("Finder", { found = prop.entity(), other = prop.entity(), many = 0 })
+function Finder.on_tick(self, dt)
+    self.found = world.find("Player")
+    self.other = world.find("Other")
+    -- More entities than the kept views' places: each view still shows its own.
+    local right = 0
+    for i = 1, 300 do
+        local e = world.find("E" .. i)
+        if e and e.Transform.translation.x == i then
+            right += 1
+        end
+    end
+    self.many = right
+end
+return Finder
+"#,
+                ),
+                (
+                    "bad.luau",
+                    r#"local BadMate = component("BadMate", { mate = prop.entity() })
+function BadMate.on_tick(self, dt)
+    self.mate = 5
+end
+local BadSpeed = component("BadSpeed", { speed = 1 })
+function BadSpeed.on_tick(self, dt)
+    self.speed = world.find("Player")
+end
+return BadMate
+"#,
+                ),
+            ],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let first = world.spawn((Name::new("Player"), Transform::IDENTITY));
+        for i in 1..=300 {
+            world.spawn((
+                Name::new(format!("E{i}")),
+                Transform::from_xyz(i as f32, 0.0, 0.0),
+            ));
+        }
+        let keys = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, keys, "Keys");
+        let finder = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, finder, "Finder");
+        let bad = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, bad, "BadMate");
+        scripts.add(&mut world, bad, "BadSpeed");
+        let found = |world: &World, scripts: &Scripts| {
+            (
+                read_entity(world, scripts, finder, "Finder", "found"),
+                read_entity(world, scripts, finder, "Finder", "other"),
+            )
+        };
+        for _ in 0..3 {
+            scripts.tick(&mut world, 0.1);
+        }
+        assert_eq!(read_f32(&world, &scripts, keys, "Keys", "checks"), 3.0);
+        let id = scripts.component("Keys").unwrap();
+        let TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind else {
+            unreachable!()
+        };
+        let ok = fields.iter().find(|f| f.name == "ok").unwrap().offset;
+        // SAFETY: Keys' `ok`, a bool at its offset.
+        let ok = unsafe { world.get_raw(keys, id).unwrap().as_ptr().add(ok).read() };
+        assert_eq!(ok, 1, "entities compare, hash and type as values");
+        assert_eq!(read_entity(&world, &scripts, keys, "Keys", "mate"), first);
+        assert_eq!(read_f32(&world, &scripts, finder, "Finder", "many"), 300.0);
+        assert_eq!(found(&world, &scripts), (first, Entity::NULL));
+
+        // A second of the name comes after the first: the first stays found.
+        let second = world.spawn((Name::new("Player"), Transform::IDENTITY));
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(found(&world, &scripts), (first, Entity::NULL));
+        // The first gone: the second.
+        world.despawn(first);
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(found(&world, &scripts), (second, Entity::NULL));
+        // Renamed: found by its new name only.
+        *world.get_mut::<Name>(second).unwrap() = Name::new("Other");
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(found(&world, &scripts), (Entity::NULL, second));
+        // One that comes with the name is found from the next stage on.
+        let third = world.spawn((Name::new("Player"), Transform::IDENTITY));
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(found(&world, &scripts), (third, second));
+
+        let reported: Vec<&str> = scripts.reported.iter().map(String::as_str).collect();
+        for line in [
+            "scripts/bad.luau:3: BadMate.mate takes an entity, not number (BadMate.on_tick)",
+            "scripts/bad.luau:7: BadSpeed.speed takes a number, not Entity (BadSpeed.on_tick)",
         ] {
             assert!(reported.contains(&line), "{line} in {reported:?}");
         }
