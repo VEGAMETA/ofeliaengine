@@ -566,7 +566,7 @@ Last updated: 2026-10-22.
     `just_released`, `strength`, `axis`, `vector` by action name, the tick's view in tick
     hooks and the frame's in frame hooks; C functions, so nothing allocates (ADR 0114's
     walker in the zero-allocation test).
-  - **E7-5e1, messages and timers** (#PR, ADR 0114's as-built): `e:send(hook, …)` (at most
+  - **E7-5e1, messages and timers** (#363, ADR 0114's as-built): `e:send(hook, …)` (at most
     four plain values) delivered after the hook that sent it, up to 16 passes a stage;
     `self:after(seconds, hook, …)` at the start of a tick. Nothing allocates (the
     zero-allocation test's relays).
