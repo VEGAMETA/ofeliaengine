@@ -439,6 +439,8 @@ pub(crate) struct Tables {
     search: Vec<Entity>,
     /// Whether this stage is a frame's: `input` gives the frame's view, else the tick's.
     pub(crate) frame: bool,
+    /// The entity holding the world's generator, as last found.
+    random: Entity,
 }
 
 impl Default for Tables {
@@ -460,6 +462,7 @@ impl Default for Tables {
             despawns: Vec::new(),
             search: Vec::new(),
             frame: false,
+            random: Entity::NULL,
         }
     }
 }
@@ -1865,6 +1868,89 @@ unsafe extern "C-unwind" fn view_namecall(state: *mut ffi::lua_State) -> c_int {
         let message = format!("{} has no method `{text}`", (*view).info.name);
         drop(text);
         raise(state, message)
+    }
+}
+
+/// `draw` on the world's generator ([`crate::random::Random`]), found where it was last,
+/// else on the first entity that has one, else on a new entity made with the default seed.
+///
+/// # Safety
+///
+/// A C function's state.
+unsafe fn draw<R>(
+    state: *mut ffi::lua_State,
+    draw: impl FnOnce(&mut crate::random::Random) -> R,
+) -> R {
+    // SAFETY: as the caller says; the world and tables are the stage's.
+    unsafe {
+        let (world, tables) = match opened() {
+            Ok(open) => open,
+            Err(why) => raise(state, why.to_owned()),
+        };
+        let world = &mut *world;
+        if world
+            .get::<crate::random::Random>((*tables).random)
+            .is_none()
+        {
+            let found = world
+                .component_id::<crate::random::Random>()
+                .and_then(|id| {
+                    world
+                        .archetypes()
+                        .iter()
+                        .filter(|a| a.components().contains(&id))
+                        .find_map(|a| {
+                            (0..a.chunk_count()).find_map(|c| a.chunk_entities(c).first().copied())
+                        })
+                });
+            (*tables).random = match found {
+                Some(e) => e,
+                None => world.spawn((crate::random::Random::default(),)),
+            };
+        }
+        match world.get_mut::<crate::random::Random>((*tables).random) {
+            Some(r) => draw(r),
+            None => raise(state, String::from("random: the world's generator is gone")),
+        }
+    }
+}
+
+/// `random.number()`: a number in [0, 1).
+pub(crate) unsafe extern "C-unwind" fn random_number(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM.
+    unsafe {
+        let n = draw(state, crate::random::Random::number);
+        ffi::lua_pushnumber(state, n);
+        1
+    }
+}
+
+/// `random.integer(a, b)`: a whole number from `a` to `b`, both included.
+pub(crate) unsafe extern "C-unwind" fn random_integer(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM, called with the bounds.
+    unsafe {
+        let (mut a_ok, mut b_ok) = (0, 0);
+        let a = ffi::lua_tonumberx(state, 1, &mut a_ok);
+        let b = ffi::lua_tonumberx(state, 2, &mut b_ok);
+        if a_ok == 0 || b_ok == 0 || a.fract() != 0.0 || b.fract() != 0.0 || a > b {
+            raise(
+                state,
+                String::from("random.integer takes two whole numbers, the first no greater"),
+            );
+        }
+        let n = draw(state, |r| r.integer(a as i64, b as i64));
+        ffi::lua_pushnumber(state, n as f64);
+        1
+    }
+}
+
+/// `random.vector_in_sphere()`: a point inside the sphere of radius 1.
+pub(crate) unsafe extern "C-unwind" fn random_in_sphere(state: *mut ffi::lua_State) -> c_int {
+    // SAFETY: a C function of the VM.
+    unsafe {
+        let v = draw(state, crate::random::Random::in_sphere);
+        ffi::lua_pushvector(state, v.x, v.y, v.z);
+        1
     }
 }
 

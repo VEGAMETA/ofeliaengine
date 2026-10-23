@@ -287,6 +287,8 @@ local maths = require("@shared/maths") -- an alias of a .luaurc
 | `world.find(name)` | the entity with that `Name` (the first made, of several), or `nil` |
 | `input.pressed(a)`, `input.just_pressed(a)`, `input.just_released(a)` | your game's action `a` (its input map): held, gone down, gone up |
 | `input.strength(a)`, `input.axis(a)`, `input.vector(a)` | how far it is held (0 to 1), a 1D axis (−1 to 1), a 2D axis as a vector (x, y, 0) |
+| `random.number()`, `random.integer(a, b)`, `random.vector_in_sphere()` | the world's random numbers: in [0, 1), a whole number from `a` to `b` (both included), a point inside the sphere of radius 1. Seeded the same on every machine, kept by saves and network rollback; `math.random` is not |
+| `audio.play(sound, bus?)`, `audio.play_at(sound, position, bus?)` | a sound played once, as it is (bus `ui`) or at a place in the world (bus `effects`): an entity that despawns at the sound's end |
 | `time.now()`, `time.tick()`, `time.dt()` | the game's time in seconds, the tick's number, its length |
 | `quat.identity()`, `quat.axis_angle(axis, angle)`, `quat.euler(x, y, z)` | rotations, in radians; `q * v` rotates a vector, `a * b` composes |
 | `physics.raycast(origin, direction, max_distance, filter?)` | the first body along the ray: its entity (`nil` for a body without one), the point, the normal and the distance; `nil`s on a miss |
@@ -403,5 +405,6 @@ end
 
 ## Coming next
 
-- `random`, `audio.play`, `world.instantiate`;
+- `world.instantiate` and asset props (`prop.asset`);
+- props of text;
 - script components in saves, with their timers.

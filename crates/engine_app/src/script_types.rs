@@ -207,6 +207,25 @@ declare input: {
     vector: (action: string) -> vector,
 }
 
+-- The world's random numbers: seeded, the same on every machine, kept by saves and
+-- rollback (`math.random` is not).
+declare random: {
+    -- A number in [0, 1).
+    number: () -> number,
+    -- A whole number from `a` to `b`, both included.
+    integer: (a: number, b: number) -> number,
+    -- A point inside the sphere of radius 1.
+    vector_in_sphere: () -> vector,
+}
+
+-- Sounds that play once and go: their entities.
+declare audio: {
+    -- As it is, no place (the UI, a stinger), on `bus` (`ui` by default).
+    play: (sound: string, bus: string?) -> Entity,
+    -- At `position` in the world, on `bus` (`effects` by default).
+    play_at: (sound: string, position: vector, bus: string?) -> Entity,
+}
+
 declare time: {
     -- The game's time, in seconds.
     now: () -> number,

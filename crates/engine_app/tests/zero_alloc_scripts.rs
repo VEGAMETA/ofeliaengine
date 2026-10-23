@@ -4,8 +4,9 @@
 //! `self.entity`, `self.locals`, the time, a physics ray, contacts with a trigger), and
 //! walkers using entities' and `Transform`'s methods (`rotate`, `forward`, `look_at`,
 //! `find_child`, `children`, `has`, `parent`, a function of their own through `self:`),
-//! the spinning example (§5) as a system over a query of 1,000 entities, and relays
-//! sending each other messages and setting timers every tick, through 600
+//! the spinning example (§5) as a system over a query of 1,000 entities, relays sending
+//! each other messages and setting timers, and dice drawing the world's random numbers
+//! every tick, through 600
 //! ticks and frames after a warm-up: the heap allocations made in the scripts' stages
 //! are counted (the physics steps between them are not). One test per file, so nothing
 //! else allocates concurrently.
@@ -200,6 +201,17 @@ end
 return Relay
 "#;
 
+/// The world's random numbers (E7-5e2): drawn every tick.
+const DICE: &str = r#"local Dice = component("Dice", { sum = 0, inside = 0 })
+function Dice.on_tick(self, dt)
+    self.sum += random.integer(1, 6) + random.number()
+    if vector.magnitude(random.vector_in_sphere()) <= 1 then
+        self.inside += 1
+    end
+end
+return Dice
+"#;
+
 /// Watchers, each with a trigger, a ball falling through it and a floor named after it.
 const WATCHERS: usize = 10;
 
@@ -219,6 +231,7 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
     std::fs::write(dir.join("scripts/walker.luau"), WALKER).unwrap();
     std::fs::write(dir.join("scripts/spin.luau"), SPIN).unwrap();
     std::fs::write(dir.join("scripts/relay.luau"), RELAY).unwrap();
+    std::fs::write(dir.join("scripts/dice.luau"), DICE).unwrap();
     let mut world = World::new();
     let mut scripts = Scripts::load(&mut world, &dir, &dir.join("scripts")).unwrap();
     let mut physics = ScenePhysics::new(&PhysicsSettings {
@@ -332,6 +345,8 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
             unsafe { base.add(partner).cast::<Entity>().write_unaligned(other) };
         }
     }
+    let dice = world.spawn((Transform::IDENTITY,));
+    assert!(scripts.add(&mut world, dice, "Dice"));
     let started = std::time::Instant::now();
 
     let spinners: Vec<Entity> = (0..1000)
@@ -432,6 +447,24 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
         assert_eq!(got, 840.0, "a relay missed messages");
         assert!(fired >= 2.0 * 830.0, "{fired}");
     }
+    // The dice rolled every tick: about 4 a tick (3.5 and a half), every point inside.
+    let id = scripts.component("Dice").unwrap();
+    let engine_reflect::TypeKind::Struct(dice_fields) =
+        &world.components().type_info(id).unwrap().kind
+    else {
+        unreachable!()
+    };
+    let at = |name: &str| dice_fields.iter().find(|f| f.name == name).unwrap().offset;
+    let base = world.get_raw(dice, id).unwrap().as_ptr();
+    // SAFETY: Dice's `sum` and `inside`, f32s at their offsets.
+    let (sum, inside) = unsafe {
+        (
+            base.add(at("sum")).cast::<f32>().read_unaligned(),
+            base.add(at("inside")).cast::<f32>().read_unaligned(),
+        )
+    };
+    assert!((3.5..4.5).contains(&(sum / 840.0)), "{sum}");
+    assert_eq!(inside, 840.0);
     // The spinners turned 90° a second for 840 ticks.
     let turned = world.get::<Transform>(spinners[0]).unwrap().rotation;
     let expected =

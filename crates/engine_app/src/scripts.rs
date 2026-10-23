@@ -1997,6 +1997,23 @@ fn install(lua: &Lua) -> mlua::Result<()> {
         input.set(name, unsafe { lua.create_c_function(f)? })?;
     }
     globals.set("input", input)?;
+    // The world's generator (ADR 0114 §4), C functions too.
+    let random = lua.create_table()?;
+    let draws: [(&str, mlua::ffi::lua_CFunction); 3] = [
+        ("number", script_views::random_number),
+        ("integer", script_views::random_integer),
+        ("vector_in_sphere", script_views::random_in_sphere),
+    ];
+    for (name, f) in draws {
+        // SAFETY: C functions of the fast path's, which check their arguments.
+        random.set(name, unsafe { lua.create_c_function(f)? })?;
+    }
+    globals.set("random", random)?;
+    // Sounds (ADR 0114 §4, ADR 0105): entities that play once and go.
+    let audio = lua.create_table()?;
+    audio.set("play", lua.create_function(audio_play)?)?;
+    audio.set("play_at", lua.create_function(audio_play_at)?)?;
+    globals.set("audio", audio)?;
     let physics = lua.create_table()?;
     physics.set("raycast", lua.create_function(raycast)?)?;
     physics.set("overlap_sphere", lua.create_function(overlap_sphere)?)?;
@@ -2137,6 +2154,44 @@ fn declare_component(
     };
     loading.declared.push((name, table.clone(), list));
     Ok(table)
+}
+
+/// `audio.play(sound, bus?)` (ADR 0114 §4): an entity playing `sound` once as it is (no
+/// place: the UI, a stinger) on `bus` (`ui` by default), despawned at its end; the entity.
+fn audio_play(
+    lua: &Lua,
+    (sound, bus): (mlua::LuaString, Option<mlua::LuaString>),
+) -> mlua::Result<Value> {
+    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
+    let w = unsafe { &mut *world_ptr(lua)? };
+    let bus = bus.as_ref().map(mlua::LuaString::to_str).transpose()?;
+    let source = crate::AudioSource::new(&sound.to_str()?)
+        .on_bus(bus.as_deref().unwrap_or("ui"))
+        .despawned_at_end();
+    Ok(script_views::entity_value(w.spawn((source,))))
+}
+
+/// `audio.play_at(sound, position, bus?)` (ADR 0114 §4): an entity at `position` playing
+/// `sound` once in the world (fainter with distance, behind walls muffled) on `bus`
+/// (`effects` by default), despawned at its end; the entity.
+fn audio_play_at(
+    lua: &Lua,
+    (sound, at, bus): (mlua::LuaString, Vector, Option<mlua::LuaString>),
+) -> mlua::Result<Value> {
+    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
+    let w = unsafe { &mut *world_ptr(lua)? };
+    let bus = bus.as_ref().map(mlua::LuaString::to_str).transpose()?;
+    let mut source = crate::AudioSource3D::new(&sound.to_str()?).despawned_at_end();
+    if let Some(bus) = bus.as_deref() {
+        source = source.on_bus(bus);
+    }
+    let at = Vec3::new(at.x(), at.y(), at.z());
+    let e = w.spawn((
+        engine_ecs::Transform::from_translation(at),
+        engine_ecs::GlobalTransform(engine_core::math::Affine3A::from_translation(at)),
+        source,
+    ));
+    Ok(script_views::entity_value(e))
 }
 
 /// `system(name, hooks)`: a system of module that runs it (ADR 0114 §1), its hooks
@@ -4066,6 +4121,86 @@ return Table
             assert!(reported.contains(&line), "{line} in {reported:?}");
         }
         assert_eq!(reported.len(), 4, "{reported:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn random_draws_are_the_worlds_and_sounds_play_once() {
+        let dir = project(
+            "random",
+            &[(
+                "dice.luau",
+                r#"local Dice = component("Dice", { roll = 0, pick = 0, inside = false })
+function Dice.on_tick(self, dt)
+    self.roll = random.integer(1, 6)
+    self.pick = random.number()
+    self.inside = vector.magnitude(random.vector_in_sphere()) <= 1
+end
+local Sounder = component("Sounder", { played = prop.entity(), placed = prop.entity() })
+function Sounder.on_tick(self, dt)
+    if self.played == nil then
+        self.played = audio.play("ui/click.ogg")
+        self.placed = audio.play_at("sfx/shot.wav", vector.create(1, 2, 3), "voice")
+    end
+end
+return Dice
+"#,
+            )],
+        );
+        let run = |ticks: usize| {
+            let mut world = World::new();
+            let mut scripts = load(&dir, &mut world);
+            let dice = world.spawn((Transform::IDENTITY,));
+            scripts.add(&mut world, dice, "Dice");
+            let mut rolls = Vec::new();
+            for _ in 0..ticks {
+                scripts.tick(&mut world, 0.1);
+                rolls.push(read_f32(&world, &scripts, dice, "Dice", "pick"));
+            }
+            assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+            (world, scripts, dice, rolls)
+        };
+        // The same seed on two worlds: the same draws.
+        let (_, _, _, a) = run(5);
+        let (mut world, mut scripts, dice, b) = run(5);
+        assert_eq!(a, b);
+        assert!(a.windows(2).any(|w| w[0] != w[1]), "{a:?}");
+        let roll = read_f32(&world, &scripts, dice, "Dice", "roll");
+        assert!((1.0..=6.0).contains(&roll) && roll.fract() == 0.0);
+        // The generator is a component: a snapshot taken before a tick gives that tick's
+        // draws again (prediction's rollback).
+        let mut snapshot = engine_ecs::Snapshot::new();
+        world.save(&mut snapshot).unwrap();
+        scripts.tick(&mut world, 0.1);
+        let first = read_f32(&world, &scripts, dice, "Dice", "pick");
+        world.restore(&snapshot).unwrap();
+        scripts.tick(&mut world, 0.1);
+        assert_eq!(read_f32(&world, &scripts, dice, "Dice", "pick"), first);
+        // The sounds: an entity each, playing once and despawned at their ends.
+        let sounder = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, sounder, "Sounder");
+        scripts.tick(&mut world, 0.1);
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        let played = read_entity(&world, &scripts, sounder, "Sounder", "played");
+        let source = world.get::<crate::AudioSource>(played).unwrap();
+        assert_eq!(
+            (source.sound.as_str(), source.bus.as_str(), source.mode),
+            ("ui/click.ogg", "ui", crate::PlayMode::Despawn)
+        );
+        let placed = read_entity(&world, &scripts, sounder, "Sounder", "placed");
+        let source = world.get::<crate::AudioSource3D>(placed).unwrap();
+        assert_eq!(
+            (
+                source.source.sound.as_str(),
+                source.source.bus.as_str(),
+                source.source.mode
+            ),
+            ("sfx/shot.wav", "voice", crate::PlayMode::Despawn)
+        );
+        assert_eq!(
+            world.get::<Transform>(placed).unwrap().translation,
+            Vec3::new(1.0, 2.0, 3.0)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
