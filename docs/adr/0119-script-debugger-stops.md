@@ -1,6 +1,13 @@
 # 0119. The script debugger: a stop suspends the script stage
 
-- Status: Proposed (2026-10-23). The team's questions are at the end.
+- Status: **Accepted (team decision, 2026-10-23): every recommendation of the questions at
+  the end.**
+  - Stops: the stage on a fiber of its own (option 1).
+  - Edits: the editor edits the world at a stop; where the stage holds its borrows (a stop
+    inside a metamethod or a C library's callback), the world is read-only.
+  - VS Code: the extension is kept in the repository and installed from a `.vsix`; on the
+    Marketplace and Open VSX at the first public release.
+  - Pause on errors: on by default in the editor, once per line per Play.
 - Date: 2026-10-23
 - Amends: [ADR 0107](0107-editor.md) §6, the debugger's pausing. Builds on
   [ADR 0114](0114-luau-api.md) (the script host) and [ADR 0032](0032-scripting.md).
@@ -77,7 +84,7 @@
      undoing E3's Play on the scene's world. That is weeks of work, worth it for crash
      isolation later, not for the debugger.
 
-## Decision (proposed)
+## Decision
 
 - **The core is in `engine_script`, over Luau's interface:**
   - breakpoints set through each module's chunk, kept per module, and set again after every
@@ -94,9 +101,19 @@
   - native code stays on.
 - **While a session is on,** hooks are entered as Luau threads (one thread, reused), and
   `__namecall` gets a continuation, so `self:method()` can stop.
-- **Stops:** option 1 or 2 (question 1). The research recommends 1.
+- **Stops:** option 1, the stage on a fiber of its own (the team's answer 1).
+  - At a stop where Luau can yield, the editor edits the world as it does in a pause.
+  - At a stop where it cannot (inside a metamethod written in Luau, or a C library's
+    callback), the stage's frames hold borrows of the world. The world is read-only there
+    until the function returns, and the panel says so (the team's answer 2).
 - **VS Code:** DAP on 127.0.0.1 from a thread of its own, with the research note's minimal
   set and a small extension. It is left out of `shipping`.
+  - The extension is kept in the repository, and `ofeliaengine new` installs it from a
+    `.vsix`.
+  - It goes on the Marketplace and Open VSX at the first public release (the team's
+    answer 3).
+- **Pause on errors** is on by default in the editor, once per line per Play (the team's
+  answer 4).
 - **Steps:**
   1. **E9-1a**, which does not wait for the answers:
      - the gutter;
@@ -109,11 +126,15 @@
 
 ## Consequences
 
-- With either option, a stop pauses the game in the middle of a tick. The panel's header
-  says so ("tick 1,284, under way"), and Shift+F7 finishes the tick.
+- A stop pauses the game in the middle of a tick. The panel's header says so ("tick
+  1,284, under way"), and Shift+F7 finishes the tick.
 - Without breakpoints nothing changes: hooks go through `lua_pcall`, and no opcode is
   patched.
-- The defaults the UX note recommends are taken unless the team says otherwise:
+- Fibers enter the threading model (CLAUDE.md §5), and only this way:
+  - only the script stage runs on one, and only while a session is on;
+  - Tracy's zones are closed before a switch and opened again after it;
+  - a panic is caught at the fiber's entry.
+- The defaults the UX note recommends are taken:
   - breakpoints live in the editor's session, with no `breakpoint()` in scripts;
   - the standalone player listens only with `--debug`;
   - stepping past a hook's end stops at the next script line that runs;
@@ -122,6 +143,8 @@
   - v1 skips breakpoints in a module's top level and in `on_reload`, said at the line.
 
 ## Questions for the team
+
+Answered 2026-10-23 (team decision): a) to each, the recommendation.
 
 1. **How a stop suspends the stage:**
    - a) a fiber (option 1): it stops everywhere and leaves `scripts.rs` as it is; a new

@@ -497,6 +497,15 @@ single-stepping all the time (every Play would run interpreted), Tracy's fiber m
 
 ## Open questions for the team
 
+Answered in ADR 0119 (accepted 2026-10-23, team decision):
+
+- 1: the fiber;
+- 2: skipped with a note at the line in v1;
+- 3: native code stays on;
+- 4: edits at a stop, but read-only at a stop inside a metamethod or a C library's
+  callback;
+- 5: left to E9-1b's measurement of a `lua_resume` per hook.
+
 1. **Fiber (b2) or state machine (b1)** for the stopped stage? The fiber stops everywhere in
    a stage and leaves `scripts.rs` as it is; it is a new piece of the threading model (an
    ADR, CLAUDE.md §3) and needs Tracy's zones closed across it.

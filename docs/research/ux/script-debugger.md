@@ -370,6 +370,9 @@ Ctrl+Shift+D opens it. It opens by itself at a stop (Godot) and stays open after
 
 ## Questions for the team
 
+Settled 2026-10-23 with ADR 0119's acceptance (team decision): every recommendation. The
+first two were ADR 0119's questions 3 and 4; the other five are the defaults it takes.
+
 1. **The VS Code extension.** VS Code talks to a debugger only through an extension. Ours is
    small (TypeScript, about a hundred lines: find the running editor or player, connect).
    - a) Publish it on the VS Code Marketplace and Open VSX: one click to install, but it
