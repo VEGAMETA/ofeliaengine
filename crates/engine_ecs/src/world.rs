@@ -683,6 +683,28 @@ impl World {
         NonNull::new(arch.value_ptr(loc.chunk as usize, column, loc.row as usize))
     }
 
+    /// The first value of a column in one chunk, writable (`chunk_len` values, the
+    /// component's size apart): for code that writes the plain fields of values that are
+    /// not plain data as a whole (networking's script components, which own texts).
+    /// Writing through it is the caller's `unsafe`. `mark` stamps the column changed.
+    pub fn column_base_mut(
+        &mut self,
+        archetype: usize,
+        chunk: usize,
+        column: usize,
+        mark: bool,
+    ) -> Option<*mut u8> {
+        let tick = if mark { self.bump_change_tick() } else { 0 };
+        let arch = self.archetypes.get(archetype)?;
+        if chunk >= arch.chunks.len() || column >= arch.columns.len() {
+            return None;
+        }
+        if mark {
+            arch.mark_column(chunk, column, tick);
+        }
+        Some(arch.column_ptr(chunk, column))
+    }
+
     /// The bytes of a plain-data column in one chunk of archetype `archetype`, for
     /// writing by layout (replication applying or rounding state). `mark` stamps the
     /// column as changed, as a write through a query does; without it the write is

@@ -258,15 +258,11 @@ impl<I: InputData, T: Transport> Server<I, T> {
     /// [`NetSchema::endpoint_config`]'s channels).
     pub fn new(
         transport: T,
-        schema: NetSchema,
+        mut schema: NetSchema,
         settings: ServerSettings,
         world: &mut World,
     ) -> Self {
-        let comp_ids = schema
-            .components
-            .iter()
-            .map(|c| (c.register)(world))
-            .collect();
+        let comp_ids = schema.register(world);
         let replicated_id = world.register::<Replicated>();
         world.track_removals::<Replicated>();
         let lag_ticks = (settings.max_rewind * settings.tick_rate).ceil() as u32 + 2;
@@ -930,7 +926,7 @@ impl<I: InputData, T: Transport> Server<I, T> {
                             .chunk_version(chunk, self.comp_ids[si])
                             .is_some_and(|v| v <= self.built_at);
                     if unchanged && let Some(p) = prev {
-                        let bytes = world.archetypes()[ai].pod_column(chunk, col).unwrap_or(&[]);
+                        let bytes = column_bytes(&world.archetypes()[ai], chunk, col, c.size);
                         for (row, &s) in self.chunk_slots.iter().enumerate() {
                             if s == NONE {
                                 continue;
@@ -953,9 +949,14 @@ impl<I: InputData, T: Transport> Server<I, T> {
                         continue;
                     }
                     if c.lossy {
-                        let Some(bytes) = world.pod_column_mut(ai, chunk, col, false) else {
+                        let rows = world.archetypes()[ai].chunk_len(chunk);
+                        let Some(base) = world.column_base_mut(ai, chunk, col, false) else {
                             continue;
                         };
+                        // SAFETY: the chunk's `rows` initialized values of the component, the
+                        // world borrowed for the loop; the codecs read and write their plain
+                        // fields only (a script's component may own texts, never touched).
+                        let bytes = unsafe { core::slice::from_raw_parts_mut(base, rows * c.size) };
                         for (row, &s) in self.chunk_slots.iter().enumerate() {
                             if s == NONE {
                                 continue;
@@ -967,9 +968,7 @@ impl<I: InputData, T: Transport> Server<I, T> {
                             c.dequantize(words, value);
                         }
                     } else {
-                        let Some(bytes) = world.archetypes()[ai].pod_column(chunk, col) else {
-                            continue;
-                        };
+                        let bytes = column_bytes(&world.archetypes()[ai], chunk, col, c.size);
                         for (row, &s) in self.chunk_slots.iter().enumerate() {
                             if s == NONE {
                                 continue;
@@ -1406,6 +1405,19 @@ fn encode_record(
             true
         }
     })
+}
+
+/// The values of column `col` of `chunk` as bytes, for the codecs: a script's component may
+/// own texts (no plain data), and the codecs read only its plain fields.
+fn column_bytes(arch: &engine_ecs::Archetype, chunk: usize, col: usize, size: usize) -> &[u8] {
+    if let Some(bytes) = arch.pod_column(chunk, col) {
+        return bytes;
+    }
+    let len = arch.chunk_len(chunk) * size;
+    // SAFETY: the chunk's initialized values of the component (a script component's bytes
+    // are all written: its defaults start zeroed), borrowed with the archetype; the codecs
+    // read their plain fields only.
+    unsafe { core::slice::from_raw_parts(arch.column_base(chunk, col), len) }
 }
 
 fn words_of(schema: &NetSchema, mask: u64) -> usize {

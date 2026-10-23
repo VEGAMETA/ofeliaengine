@@ -288,6 +288,21 @@ bullet.Transform.translation += vector.create(0, 0.1, 0) -- there already
 A script's state is its props: they are saved, rolled back and, once your network schema
 names them, replicated. Keep `self.locals` for caches.
 
+Name a script's component in your game's schema (`docs/dev-guide/networking.md`):
+
+```rust
+fn schema() -> NetSchema {
+    NetSchema::new(MY_PROTOCOL)
+        .replicate::<Player>()
+        .replicate_script("Door") // found when the session starts, once scripts have loaded
+}
+```
+
+- Its props go with the precision you give them: `prop.number(0, { net_quantum = 0.01 })`
+  sends hundredths, `net_skip = true` keeps one local.
+- String props stay local.
+- A client's copy starts from your script's defaults: what is not sent keeps them.
+
 - `net.is_server()`: this side decides the world (playing alone, or hosting);
   `net.is_client()`: it plays on someone else's host.
 - On a client, only your own predicted entities' tick hooks run. They run again when the
@@ -443,5 +458,5 @@ end
 
 ## Coming next
 
-- script components in your network schema;
-- prefabs from a release's packs.
+- scripts, scenes and the prefabs scripts place read from a release's packs (with the
+  one-button build).

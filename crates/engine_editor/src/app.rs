@@ -19436,6 +19436,19 @@ return Keeper
         );
         let found = luau.check("keeper");
         assert!(found.is_empty(), "{found:?}");
+        // How the network sends props (E7-6b).
+        luau.set_source(
+            "gate",
+            "--!strict
+local Gate = component(\"Gate\", {
+    lift = prop.number(0, { net_quantum = 0.01 }),
+    spin = prop.number(0, { net_skip = true }),
+})
+return Gate
+",
+        );
+        let found = luau.check("gate");
+        assert!(found.is_empty(), "{found:?}");
         // ADR 0114's second example, its sound a string prop (E7-6a). Its touch takes
         // `Entity?`, as E7-3 made it (nil for a body without an entity). Loaded by a host
         // first, as the player loads the project's scripts: `Wallet` is then an entity's.

@@ -18,6 +18,7 @@ engine_ecs.workspace = true
 engine_net_transport.workspace = true
 engine_profiler.workspace = true
 engine_reflect.workspace = true
+log = "0.4"
 
 [dev-dependencies]
 # The co-op example and its test: characters on Jolt (ADR 0066).

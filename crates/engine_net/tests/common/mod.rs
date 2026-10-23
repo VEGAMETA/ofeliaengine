@@ -190,6 +190,8 @@ pub struct Sim {
     pub ticks: u64,
     /// Server-side hook run each tick after the shared systems.
     pub rules: Option<Rules>,
+    /// What builds the schema, on both sides.
+    pub schema: fn() -> NetSchema,
 }
 
 pub fn token(key: &Key, client_id: u64) -> ConnectToken {
@@ -210,11 +212,21 @@ pub fn token(key: &Key, client_id: u64) -> ConnectToken {
 
 impl Sim {
     pub fn new(seed: u64, conditions: LinkConditions, settings: ServerSettings) -> Self {
+        Self::with_schema(seed, conditions, settings, schema)
+    }
+
+    /// A simulation whose sides build their schema with `make`.
+    pub fn with_schema(
+        seed: u64,
+        conditions: LinkConditions,
+        settings: ServerSettings,
+        make: fn() -> NetSchema,
+    ) -> Self {
         let net = MemoryNetwork::new(seed);
         net.set_default_conditions(conditions);
         let key = Key::random();
         let t0 = Instant::now();
-        let schema = schema();
+        let schema = make();
         let endpoint = Endpoint::server(
             net.bind(addr(SERVER)),
             schema.endpoint_config(),
@@ -253,6 +265,7 @@ impl Sim {
             tick_us,
             ticks: 0,
             rules: None,
+            schema: make,
         }
     }
 
@@ -262,7 +275,7 @@ impl Sim {
 
     pub fn add_client(&mut self) -> usize {
         let i = self.clients.len();
-        let schema = schema();
+        let schema = (self.schema)();
         let endpoint = Endpoint::client(
             self.net.bind(addr(&format!("10.0.1.{}:5000", i + 1))),
             schema.endpoint_config(),

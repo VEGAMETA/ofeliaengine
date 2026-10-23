@@ -1569,3 +1569,42 @@ there, and see the script's file in the inspector.
   - the editor's checker takes the coin and `prop.string`.
 - **Not in this step:** text in messages' values (`e:send`) was already plain values of
   Luau's (strings included); lists and maps as props.
+
+## As built (E7-6b, 2026-10-23): script components in the network schema
+
+- **`NetSchema::replicate_script(name)`** (and `replicate_script_with(name, hints)`)
+  replicates a script's component by name, as §8 rule 5 planned.
+  - **It is found when a session starts:** `Server::new` and `Client::new` look it up
+    among the types made at run time (the latest of the name, `NetSchema::register`).
+    The game's schema function also runs when `NetConfig::new` takes its protocol id,
+    before the scripts load, so the schema cannot resolve it when built.
+  - A component not declared then, with no prop to replicate, or whose name another
+    component holds goes from the schema, said in the log. Both sides drop the same with
+    the same scripts, and the schemas' hashes, taken after, still match.
+- **Its props go as a Rust component's fields do:**
+  - with their reflection attributes: `prop.number(0, { net_quantum = 0.01 })` sends whole
+    hundredths, `net_skip = true` keeps it local;
+  - `net_quantum` is checked positive;
+  - text props are not sent (they have no fixed layout).
+- **A client's value starts from the script's default** (`NetComponent::write_initial`),
+  not zeros: its texts and the props not sent hold what the script declared.
+- **The server reads columns whatever they hold:**
+  - a script's component that owns texts is not plain data, and `pod_column` refused
+    it, so it would not have been sent;
+  - the server takes such columns through `Archetype::column_base` and the new
+    `World::column_base_mut`, and the codecs touch plain fields only.
+- **Tests:**
+  - in `engine_net`'s simulation, a script component with a quantized float, a boolean,
+    a skipped float and a text came to a client:
+    - its lift to a hundredth, its flag;
+    - its skipped prop and its text at the script's defaults;
+    - a later change followed;
+    - an undeclared name dropped on both sides;
+  - the host turns the props' options into reflection attributes and refuses a quantum
+    of 0;
+  - the editor's checker takes them in strict mode.
+- **Prefabs from a release's packs** are not a scripting step after all: nothing packs
+  scene files or scripts for a release yet. `world.instantiate`, the player's
+  `load_scene` and the script host all read the project's folder. They move to packs
+  together, with the one-button build (ADR 0107 §7's E14).
+- **Scripting v1 is complete** with this step.

@@ -24,8 +24,8 @@ Last updated: 2026-10-22.
   - **Where it stands (2026-10-23):** E1 to E6 are done (E2b but for the cook's path, E3
     but for the tree's marks on what changed), and material slots on `Model`. E8, the
     code editor, is done but for rename and references across the project. E7, scripting
-    v1 (ADR 0114), is done but for prefabs from packs and script components in the
-    network schema; nothing the engine gives scripts allocates in
+    v1 (ADR 0114), is done (reading scripts, scenes and prefabs from a release's packs
+    comes with the one-button build); nothing the engine gives scripts allocates in
     steady state (ADR 0114's examples in the zero-allocation test). E10-2, Slang in the
     code editor, is done: errors from the front end, completion, hover, signatures and
     definitions from `slangd`. E10-1 waits for the answer on the material file. The
@@ -599,11 +599,14 @@ Last updated: 2026-10-22.
     with them (`RuntimeType::write_default`, `DefaultValue` shared by saves, scenes, the
     inspector and undo), and move them on reload (`Relayout::take`). Read and written on
     the fast path with nothing made in steady state; ADR 0114's coin checks clean.
+  - **E7-6b, script components in the network schema** (#PR, ADR 0114's as-built):
+    `NetSchema::replicate_script(name)`, found when a session starts; props' `net_quantum`
+    and `net_skip`; a client's value starts from the script's defaults; the server reads
+    columns that own texts. Prefabs from packs move to the one-button build (nothing
+    packs scenes or scripts yet). Scripting v1 is complete.
   - **Next, in this order:**
-    1. scripting's remainders: prefabs from packs, script components in `NetSchema` by
-       name. E10-1 waits for the answer on the material file;
-    2. E9, the script debugger (ADR 0107 §7: the core, DAP for VS Code, the panel and the
-       gutter), its UX note first.
+    1. E9, the script debugger (ADR 0107 §7: the core, DAP for VS Code, the panel and the
+       gutter), its UX note first. E10-1 waits for the answer on the material file.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

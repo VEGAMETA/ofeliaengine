@@ -67,6 +67,10 @@ type PropOptions = {
     tooltip: string?,
     hidden: boolean?,
     skip: boolean?,
+    -- Once the game's network schema names the component: not sent, or sent in steps
+    -- of this size.
+    net_skip: boolean?,
+    net_quantum: number?,
 }
 "#;
 

@@ -257,15 +257,11 @@ impl<I: InputData, T: Transport> Client<I, T> {
     /// [`NetSchema::endpoint_config`]'s channels, connecting with its token).
     pub fn new(
         transport: T,
-        schema: NetSchema,
+        mut schema: NetSchema,
         settings: ClientSettings,
         world: &mut World,
     ) -> Self {
-        let comp_ids = schema
-            .components
-            .iter()
-            .map(|c| (c.register)(world))
-            .collect();
+        let comp_ids = schema.register(world);
         world.register::<Replicated>();
         world.register::<Predicted>();
         world.register::<NetInput<I>>();
@@ -925,12 +921,13 @@ impl<I: InputData, T: Transport> Client<I, T> {
             m &= m - 1;
             let c = &self.schema.components[i];
             let bytes = &mut self.bytes[..c.size];
-            bytes.fill(0);
+            c.write_initial(bytes);
             c.dequantize(&words[o..o + c.words], bytes);
             o += c.words;
-            // SAFETY: `bytes` holds a valid value of the component (plain data: any bytes
-            // are valid, `NetSchema::replicate` requires `Pod`), of its registered size;
-            // `insert_raw` copies it and the buffer is not used as that value again.
+            // SAFETY: `bytes` holds a valid value of the component (a Rust type's plain
+            // data, `NetSchema::replicate` requires `Pod`; a script's default, its plain
+            // fields written), of its registered size; `insert_raw` moves it into the world
+            // and the buffer is not used as that value again.
             unsafe { world.insert_raw(entity, self.comp_ids[i], bytes.as_ptr()) };
         }
         if e.owned {
@@ -970,7 +967,7 @@ impl<I: InputData, T: Transport> Client<I, T> {
             if e.mask & bit != 0 {
                 if s.mask & bit == 0 {
                     let bytes = &mut self.bytes[..c.size];
-                    bytes.fill(0);
+                    c.write_initial(bytes);
                     c.dequantize(&words[o..o + c.words], bytes);
                     // SAFETY: as in `spawn_local`.
                     unsafe { world.insert_raw(s.entity, self.comp_ids[i], bytes.as_ptr()) };
