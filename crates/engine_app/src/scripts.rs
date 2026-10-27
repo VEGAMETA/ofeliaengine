@@ -61,6 +61,8 @@ use engine_reflect::{Attrs, Field, Primitive, Reflect, TypeInfo, TypeKind};
 use engine_script::mlua::{
     self, AnyUserData, Function, Lua, MetaMethod, Table, UserData, UserDataMethods, Value, Vector,
 };
+/// The debugger's breakpoints as the host takes them (ADR 0119): the editor's.
+pub use engine_script::{BreakAction, BreakState, Breakpoint, Hits};
 use engine_script::{ScriptError, ScriptSettings, ScriptVm};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1418,10 +1420,29 @@ impl Scripts {
         self.vm.breakpoint_states(module)
     }
 
-    /// Whether a pause point was reached since the last call: the game pauses after its
-    /// tick.
-    pub fn take_debug_pause(&mut self) -> bool {
-        self.vm.take_pause()
+    /// The pause point reached since the last call, if one was: its file (relative to the
+    /// project, `scripts/door.luau`) and line. The game pauses after its tick.
+    pub fn take_debug_pause(&mut self) -> Option<(String, u32)> {
+        self.vm
+            .take_pause()
+            .map(|(module, line)| (self.file(&module), line))
+    }
+
+    /// Whether a pause point was reached and its pause not taken yet: the frame runs no
+    /// more ticks.
+    pub fn debug_pause_asked(&self) -> bool {
+        self.vm.pause_asked()
+    }
+
+    /// Every breakpoint's hits and latest message back to none: a new Play (ADR 0119).
+    pub fn reset_breakpoint_states(&mut self) {
+        self.vm.reset_breakpoint_states();
+    }
+
+    /// Raised whenever a breakpoint's state changes: the editor reads them again only
+    /// when it moved ([`Self::breakpoint_states`]).
+    pub fn breakpoints_version(&self) -> u64 {
+        self.vm.breakpoints_version()
     }
 
     /// The module of script file `file` (relative to the project, as the editor names it),
@@ -2001,6 +2022,16 @@ impl Drop for Scripts {
 enum Stage {
     Tick,
     Frame,
+}
+
+/// The module a project's script file is loaded as, from its path relative to the
+/// project (`scripts/npc/guard.luau` is `npc/guard`): what the editor sets its breakpoints
+/// in before the host loads it. None for a file outside `scripts/` or not a `.luau`.
+pub fn module_name(file: &Path) -> Option<String> {
+    if file.extension().is_none_or(|e| e != "luau") {
+        return None;
+    }
+    module_of(Path::new("scripts"), file).ok()
 }
 
 /// The module of script `file` under `folder`: its path from there, without `.luau`
@@ -5150,11 +5181,19 @@ return Bell
         let states = scripts.breakpoint_states("door");
         assert_eq!(states[0].placed, Some(24));
         assert_eq!(states[0].last.as_deref(), Some("near true lift 2.5"));
-        assert!(
+        assert!(scripts.debug_pause_asked());
+        assert_eq!(
             scripts.take_debug_pause(),
+            Some((String::from("scripts/door.luau"), 24)),
             "the pause point's condition held"
         );
-        assert!(!scripts.take_debug_pause());
+        assert!(scripts.take_debug_pause().is_none());
+        assert_eq!(
+            module_name(Path::new("scripts/npc/guard.luau")).as_deref(),
+            Some("npc/guard")
+        );
+        assert_eq!(module_name(Path::new("shaders/water.slang")), None);
+        assert_eq!(module_name(Path::new("notes/door.luau")), None);
         // Kept through a reload of the script.
         let file = dir.join("scripts/door.luau");
         std::fs::write(&file, DOOR.replace("lift = 2.5", "lift = 3")).unwrap();
@@ -5170,6 +5209,137 @@ return Bell
                 .as_deref()
                 .is_some_and(|l| l.starts_with("near true"))
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_logpoint_in_on_tick_logs_at_every_tick_of_every_instance() {
+        let hook = "local Spin = component(\"Spin\", { speed = 1.5 })
+local UP = vector.create(0, 1, 0)
+function Spin.on_tick(self, dt)
+    self.Transform:rotate(UP, self.speed * dt)
+end
+return Spin
+";
+        let dir = project("logpoint-ticks", &[("spin.luau", hook)]);
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        for i in 0..3 {
+            let e = world.spawn((Transform::from_xyz(i as f32, 0.0, 0.0),));
+            scripts.add(&mut world, e, "Spin");
+        }
+        scripts.set_breakpoints(
+            "spin",
+            vec![engine_script::Breakpoint {
+                line: 4,
+                action: engine_script::BreakAction::Log(String::from("speed {self.speed}")),
+                condition: None,
+                hits: engine_script::Hits::Every,
+                enabled: true,
+            }],
+        );
+        // Line 4's first instruction reads `self.Transform` through Luau's userdata
+        // instruction, whose slow path writes its own opcode back over the breakpoint: it
+        // is placed again after each hit.
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            scripts.tick(&mut world, 1.0 / 64.0);
+            seen.push(scripts.breakpoint_states("spin")[0].hits);
+        }
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        assert_eq!(seen, [3, 6, 9, 12], "every instance, every tick");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0119's costs (`--release -- --ignored --nocapture`): 1,000 instances of a
+    /// one-line `on_tick`, with no breakpoint, a logpoint turned off, a pause point whose
+    /// condition never holds, a logpoint on every 64th hit, and one logging every hit;
+    /// medians of 51 ticks.
+    #[test]
+    #[ignore = "a measurement"]
+    fn measure_breakpoints() {
+        let hook = "local Spin = component(\"Spin\", { speed = 1.5 })
+local UP = vector.create(0, 1, 0)
+function Spin.on_tick(self, dt)
+    self.Transform:rotate(UP, self.speed * dt)
+end
+return Spin
+";
+        let dir = project("measure-breakpoints", &[("spin.luau", hook)]);
+        let log =
+            |text: &str, hits: engine_script::Hits, enabled: bool| engine_script::Breakpoint {
+                line: 4,
+                action: engine_script::BreakAction::Log(text.to_owned()),
+                condition: None,
+                hits,
+                enabled,
+            };
+        let cases: [(&str, Vec<engine_script::Breakpoint>); 5] = [
+            ("no breakpoint", Vec::new()),
+            (
+                "a logpoint, off",
+                vec![log("speed {self.speed}", engine_script::Hits::Every, false)],
+            ),
+            (
+                "a pause point, its condition false",
+                vec![engine_script::Breakpoint {
+                    line: 4,
+                    action: engine_script::BreakAction::Pause,
+                    condition: Some(String::from("self.speed > 100")),
+                    hits: engine_script::Hits::Every,
+                    enabled: true,
+                }],
+            ),
+            (
+                "a logpoint on every 64th hit",
+                vec![log(
+                    "speed {self.speed}",
+                    engine_script::Hits::EveryNth(64),
+                    true,
+                )],
+            ),
+            (
+                "a logpoint on every hit",
+                vec![log("speed {self.speed}", engine_script::Hits::Every, true)],
+            ),
+        ];
+        println!("| 1,000 instances | tick | per instance |");
+        println!("|---|---:|---:|");
+        let mut base = 0.0;
+        for (name, breakpoints) in cases {
+            let mut world = World::new();
+            let mut scripts = load(&dir, &mut world);
+            for i in 0..1000 {
+                let e = world.spawn((Transform::from_xyz(i as f32, 0.0, 0.0),));
+                scripts.add(&mut world, e, "Spin");
+            }
+            scripts.set_breakpoints("spin", breakpoints);
+            scripts.tick(&mut world, 1.0 / 64.0);
+            let mut times: Vec<f64> = (0..51)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    scripts.tick(&mut world, 1.0 / 64.0);
+                    t.elapsed().as_secs_f64() * 1e6
+                })
+                .collect();
+            assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+            assert!(scripts.take_debug_pause().is_none());
+            times.sort_by(f64::total_cmp);
+            let median = times[times.len() / 2];
+            if base == 0.0 {
+                base = median;
+            }
+            let hits = scripts
+                .breakpoint_states("spin")
+                .first()
+                .map_or(0, |s| s.hits);
+            println!(
+                "| {name} ({hits} hits) | {:.3} ms | {:.2} µs (+{:.2}) |",
+                median / 1e3,
+                median / 1e3,
+                (median - base) / 1e3
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

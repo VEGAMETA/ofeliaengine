@@ -576,6 +576,9 @@ pub struct Player {
     previews: crate::previews::Previews,
     /// Ticks to run while the world is kept still ([`Player::step_tick`]).
     steps: u32,
+    /// The pause point a script reached (ADR 0119): the world was kept still after its
+    /// tick, and the editor is told ([`Player::take_debug_pause`]).
+    debug_pause: Option<(String, u32)>,
     /// The game's last error in [`Game::before_ticks`], said once.
     scene_error: Option<String>,
     /// The player's own physics world (`PlayerSettings::physics`, ADR 0114 E7-3), and its
@@ -1205,6 +1208,7 @@ impl Player {
             wait_for_assets: true,
             previews: crate::previews::Previews::new(settings.frames_in_flight),
             steps: 0,
+            debug_pause: None,
             scene_error: None,
             own_physics: None,
             physics_error: None,
@@ -1360,6 +1364,13 @@ impl Player {
     /// Steps asked for that have not run yet ([`Self::step_tick`]).
     pub fn steps_pending(&self) -> u32 {
         self.steps
+    }
+
+    /// The pause point a script reached since the last call (ADR 0119), its file
+    /// (`scripts/door.luau`) and line: the world was kept still after the tick it was
+    /// reached in, the frame's other ticks not run ([`Self::set_simulating`] goes on).
+    pub fn take_debug_pause(&mut self) -> Option<(String, u32)> {
+        self.debug_pause.take()
     }
 
     /// Ends what a run of the game left in the player (ADR 0107 E3, the editor's Stop):
@@ -1523,6 +1534,11 @@ impl Player {
     /// The project's scripts (ADR 0114), when it has a `scripts/` folder that loaded.
     pub fn scripts(&self) -> Option<&crate::scripts::Scripts> {
         self.scripts.as_ref()
+    }
+
+    /// The project's scripts, to change: the editor's breakpoints (ADR 0119).
+    pub fn scripts_mut(&mut self) -> Option<&mut crate::scripts::Scripts> {
+        self.scripts.as_mut()
     }
 
     /// Loads script `file` (in the project's `scripts/`) made after the start, the editor's
@@ -2656,6 +2672,8 @@ impl Player {
         let joined = self.net.as_ref().is_some_and(|n| n.is_client());
         let simulating = self.simulating;
         let mut steps = self.steps;
+        // A pause point reached in a tick (ADR 0119): the frame's other ticks wait.
+        let paused_by_script = Cell::new(false);
         let stages = {
             let game_cell = RefCell::new(&mut *game);
             // Scripts run in both stages, before the game's own hooks (ADR 0114 §7), only
@@ -2743,6 +2761,9 @@ impl Player {
                         }
                         // Kept still: the tick only places and extracts what is there, but
                         // for a step asked for (`Player::step_tick`).
+                        if paused_by_script.get() {
+                            return;
+                        }
                         if !simulating {
                             if steps == 0 {
                                 return;
@@ -2759,6 +2780,10 @@ impl Player {
                             let game = game_cell.borrow();
                             let own = own_physics.borrow();
                             scripts.tick_with(world, dt, game.physics().or(own.as_deref()));
+                            // The tick goes on to its end; the next ones wait.
+                            if scripts.debug_pause_asked() {
+                                paused_by_script.set(true);
+                            }
                         }
                         game_cell.borrow_mut().tick(world, dt);
                         if let Some(own) = own_physics.borrow_mut().as_mut()
@@ -2776,6 +2801,13 @@ impl Player {
             }
         };
         self.steps = steps;
+        // A pause point reached in a tick or in the frame's hooks: the world kept still
+        // from now on, and the editor told where.
+        if let Some(at) = self.scripts.as_mut().and_then(|s| s.take_debug_pause()) {
+            self.simulating = false;
+            self.steps = 0;
+            self.debug_pause = Some(at);
+        }
         report.ticks = stages.ticks;
         report.simulate = stages.simulate_us;
         report.propagate = stages.propagate_us;

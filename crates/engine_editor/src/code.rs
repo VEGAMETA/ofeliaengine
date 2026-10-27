@@ -96,6 +96,38 @@ pub(crate) struct Document {
     lines_copied: Option<String>,
     /// The first line changed since [`Self::take_changed`] last asked (highlighting's).
     changed: Option<usize>,
+    /// The edits across lines since [`Self::take_moves`] last asked: what lines followed
+    /// (the breakpoints'; [`follow_start`]).
+    moves: Vec<Move>,
+    /// Each line's line in the text as last saved, [`NEW_LINE`] for one made since: where
+    /// the code that runs has it (a breakpoint set on an unsaved line waits for the save).
+    origin: Vec<u32>,
+}
+
+/// An edit across lines: the text from `start` to `end` became text ending at `to`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Move {
+    pub(crate) start: Pos,
+    pub(crate) end: Pos,
+    pub(crate) to: Pos,
+}
+
+/// A line not in the text as last saved ([`Document::saved_line`]).
+const NEW_LINE: u32 = u32::MAX;
+
+/// Where line `line` is after `m`, and whether its start was taken out. A line goes with
+/// its start, as VS Code's breakpoints do: text put in before it moves it down (Enter at
+/// its start), its start joined to the line above moves it up (Backspace there), and a
+/// line whose start was taken out lands where the edit began.
+pub(crate) fn follow_start(line: usize, m: Move) -> (usize, bool) {
+    let p = Pos::new(line, 0);
+    if p < m.start {
+        (line, false)
+    } else if p >= m.end {
+        (line - m.end.line + m.to.line, false)
+    } else {
+        (m.start.line, true)
+    }
 }
 
 /// What an indentation level is.
@@ -104,10 +136,11 @@ pub(crate) const INDENT: &str = "    ";
 impl Document {
     /// A document of `text` (`\r\n` read as `\n`), the caret at its start.
     pub(crate) fn new(text: &str) -> Self {
-        let lines = text
+        let lines: Vec<String> = text
             .split('\n')
             .map(|l| l.strip_suffix('\r').unwrap_or(l).to_owned())
             .collect();
+        let origin = (0..lines.len() as u32).collect();
         Self {
             lines,
             carets: vec![Caret::default()],
@@ -119,6 +152,8 @@ impl Document {
             sealed: true,
             lines_copied: None,
             changed: None,
+            moves: Vec::new(),
+            origin,
         }
     }
 
@@ -128,10 +163,61 @@ impl Document {
         self.changed.take()
     }
 
+    /// The edits across lines since this was last asked, in the order made: what a
+    /// breakpoint's line follows ([`follow_start`]).
+    pub(crate) fn take_moves(&mut self) -> Vec<Move> {
+        std::mem::take(&mut self.moves)
+    }
+
+    /// Whether edits across lines wait for [`Self::take_moves`].
+    pub(crate) fn has_moves(&self) -> bool {
+        !self.moves.is_empty()
+    }
+
+    /// Line `line`'s line in the text as last saved: where the code that runs has it.
+    /// None for a line made since.
+    pub(crate) fn saved_line(&self, line: usize) -> Option<usize> {
+        self.origin
+            .get(line)
+            .filter(|&&o| o != NEW_LINE)
+            .map(|&o| o as usize)
+    }
+
     /// The text as it is now is not what its file holds (unsaved changes brought back from
-    /// an autosave).
-    pub(crate) fn mark_unsaved(&mut self) {
+    /// an autosave), which is `saved`: the lines both begin and end with are found in it,
+    /// those between are taken as new.
+    pub(crate) fn mark_unsaved(&mut self, saved: &str) {
         self.saved = None;
+        let file: Vec<&str> = saved
+            .split('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
+            .collect();
+        let (n, m) = (self.lines.len(), file.len());
+        let head = self
+            .lines
+            .iter()
+            .zip(&file)
+            .take_while(|(a, b)| a.as_str() == **b)
+            .count();
+        let tail = self
+            .lines
+            .iter()
+            .rev()
+            .zip(file.iter().rev())
+            .take(n.min(m) - head)
+            .take_while(|(a, b)| a.as_str() == **b)
+            .count();
+        self.origin = (0..n)
+            .map(|i| {
+                if i < head {
+                    i as u32
+                } else if i >= n - tail {
+                    (i + m - n) as u32
+                } else {
+                    NEW_LINE
+                }
+            })
+            .collect();
     }
 
     /// The text, lines joined by `\n`.
@@ -165,10 +251,12 @@ impl Document {
         self.saved != Some(self.undo.len())
     }
 
-    /// The text as it is now was saved.
+    /// The text as it is now was saved: its lines are where the code that runs has them.
     pub(crate) fn mark_saved(&mut self) {
         self.saved = Some(self.undo.len());
         self.sealed = true;
+        self.origin.clear();
+        self.origin.extend(0..self.lines.len() as u32);
     }
 
     /// The text between `a` and `b` (`a` first).
@@ -198,9 +286,29 @@ impl Document {
         );
         new[0].insert_str(0, &head);
         new[last].push_str(&tail);
+        let made = new.len();
         self.lines.splice(a.line..=b.line, new);
         self.version += 1;
         self.changed = Some(self.changed.map_or(a.line, |c| c.min(a.line)));
+        // Across lines: the lines after move, and the saved lines they hold follow them.
+        if a.line != b.line || made != 1 {
+            self.moves.push(Move {
+                start: a,
+                end: b,
+                to: end,
+            });
+            // A line goes with its start (`follow_start`): the first kept when the edit
+            // began after it, the last's own when the edit ended at its start.
+            let mut fresh = vec![NEW_LINE; made];
+            if b.col == 0 {
+                fresh[made - 1] = self.origin.get(b.line).copied().unwrap_or(NEW_LINE);
+            }
+            if a.col > 0 {
+                fresh[0] = self.origin.get(a.line).copied().unwrap_or(NEW_LINE);
+            }
+            let till = (b.line + 1).min(self.origin.len());
+            self.origin.splice(a.line.min(till)..till, fresh);
+        }
         end
     }
 
@@ -1419,6 +1527,73 @@ mod tests {
         doc.select(a, b, false);
         doc.drag_to(Pos::new(0, 8));
         assert_eq!(doc.selected_text(), "local  4");
+    }
+
+    /// Lines tracked through a document's edits, as breakpoints are: `line` after the
+    /// edits since the last ask.
+    fn followed(doc: &mut Document, line: usize) -> usize {
+        doc.take_moves()
+            .into_iter()
+            .fold(line, |l, m| follow_start(l, m).0)
+    }
+
+    #[test]
+    fn lines_follow_their_start_through_edits_and_keep_their_saved_line() {
+        let mut doc = Document::new("a\nb\nc\nd");
+        // Typing in a line moves nothing.
+        at(&mut doc, 2, 1);
+        doc.type_text("x");
+        assert!(!doc.has_moves());
+        // Enter at a line's start: the line goes down with its text, the new one is new.
+        at(&mut doc, 2, 0);
+        doc.newline();
+        assert_eq!(followed(&mut doc, 2), 3);
+        assert_eq!(doc.line(3), "cx");
+        assert_eq!(doc.saved_line(3), Some(2), "its text is the saved line 2");
+        assert_eq!(doc.saved_line(2), None, "made since");
+        // Enter inside a line keeps it there, the rest of it new.
+        at(&mut doc, 3, 1);
+        doc.newline();
+        assert_eq!(followed(&mut doc, 3), 3);
+        assert_eq!(
+            (doc.saved_line(3), doc.saved_line(4)),
+            (Some(2), None),
+            "c, then x"
+        );
+        // Backspace at a line's start joins it to the one above: it goes up.
+        at(&mut doc, 5, 0);
+        doc.backspace();
+        assert_eq!(followed(&mut doc, 5), 4);
+        // Lines taken out: one inside lands where the edit began, one after moves up.
+        let mut doc = Document::new("a\nb\nc\nd\ne");
+        doc.select(Pos::new(1, 0), Pos::new(3, 0), false);
+        doc.delete();
+        let moves = doc.take_moves();
+        let follow = |line: usize| moves.iter().fold(line, |l, &m| follow_start(l, m).0);
+        assert_eq!((follow(0), follow(2), follow(4)), (0, 1, 2));
+        assert_eq!(doc.text(), "a\nd\ne");
+        assert_eq!(
+            (0..3).map(|i| doc.saved_line(i)).collect::<Vec<_>>(),
+            [Some(0), Some(3), Some(4)]
+        );
+        // Undo brings the lines back through the same edits; saving makes every line its own.
+        assert!(doc.undo());
+        assert_eq!(followed(&mut doc, 2), 4);
+        doc.type_text("\n");
+        doc.mark_saved();
+        assert_eq!(doc.saved_line(1), Some(1));
+        assert_eq!(
+            doc.saved_line(doc.line_count() - 1),
+            Some(doc.line_count() - 1)
+        );
+        // Unsaved text brought back: the lines it shares with its file at either end.
+        let mut doc = Document::new("a\nb\nnew\nc\nd");
+        doc.mark_unsaved("a\nb\nc\nd");
+        assert!(doc.is_dirty());
+        assert_eq!(
+            (0..5).map(|i| doc.saved_line(i)).collect::<Vec<_>>(),
+            [Some(0), Some(1), None, Some(2), Some(3)]
+        );
     }
 
     /// The line array against ADR 0107's question (a rope or a gap buffer, by

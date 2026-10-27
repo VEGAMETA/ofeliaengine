@@ -74,6 +74,10 @@ pub struct Palette {
     pub find: Color,
     /// The match it is on.
     pub find_current: Color,
+    /// The script debugger's marks in the gutter (shapes tell them apart, ADR 0119).
+    pub breakpoint: Color,
+    /// A logpoint's latest message after its line.
+    pub logged: Color,
 }
 
 impl Default for Palette {
@@ -106,6 +110,8 @@ impl Default for Palette {
             ],
             find: srgb(98, 64, 28),
             find_current: srgb(156, 102, 36),
+            breakpoint: srgb(229, 72, 64),
+            logged: srgb(126, 176, 214),
         }
     }
 }
@@ -552,6 +558,43 @@ pub struct FindView<'a> {
     pub focus_replace: bool,
 }
 
+/// How a breakpoint's mark looks in the gutter (ADR 0119; `docs/research/ux/
+/// script-debugger.md` §1): by shape first, so color is never the only sign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkLook {
+    /// A logpoint (◆), else a pause point (‖).
+    pub log: bool,
+    /// On: the shape filled; off, hollow.
+    pub on: bool,
+    /// A condition or a hit rule limits it: a short bar inside.
+    pub limited: bool,
+    /// Something is wrong with it (its condition fails, no code from its line on): a
+    /// warning's dot beside it, and why after its line.
+    pub problem: bool,
+}
+
+/// A breakpoint's options, one line under its code (ADR 0119; the UX note's §8): what
+/// it does when hit, a logpoint's text, its condition and its hit rule. Tab moves between
+/// the fields, Enter keeps, Escape drops.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BreakOptionsView<'a> {
+    /// The breakpoint's line.
+    pub line: usize,
+    /// A logpoint, else a pause point.
+    pub log: bool,
+    /// A logpoint's text.
+    pub text: &'a str,
+    /// Its condition.
+    pub condition: &'a str,
+    /// Its hit rule, as typed.
+    pub hits: &'a str,
+    /// The field given the keys at the next frame: 0 the text, 1 the condition, 2 the
+    /// hits.
+    pub focus: Option<usize>,
+    /// Why Enter did not keep it (a hit rule that does not read); empty otherwise.
+    pub error: &'a str,
+}
+
 /// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
 /// the carets among them, by line and column; the shell puts them on the monospace grid.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -601,6 +644,18 @@ pub struct CodeView<'a> {
     /// The signature of the call the caret is in, above the caret: its line and column,
     /// the text before the argument at the caret, that argument, and the rest.
     pub signature: Option<(usize, usize, [&'a str; 3])>,
+    /// The breakpoints' column, the gutter's left part (ADR 0119): its width, 0 for a
+    /// file that cannot have breakpoints.
+    pub marks_width: f32,
+    /// The breakpoints' marks in view: a line and how its mark looks.
+    pub marks: &'a [(usize, MarkLook)],
+    /// A faint mark where a click in the column would put one, while the mouse is there.
+    pub mark_hint: Option<(usize, MarkLook)>,
+    /// What the breakpoints say after their lines: a line, a column, the text, and whether
+    /// it is a problem (else a logpoint's latest message).
+    pub break_notes: &'a [(usize, usize, &'a str, bool)],
+    /// A breakpoint's options under its line, while open.
+    pub break_options: Option<BreakOptionsView<'a>>,
 }
 
 /// Everything the shell shows.
@@ -733,6 +788,11 @@ pub struct ShellResponse {
     pub next_problem: bool,
     /// A row of the completion list was clicked: its place among the rows in view.
     pub completion_row: Option<usize>,
+    /// The breakpoint options' fields were used: the logpoint's text, the condition, the
+    /// hit rule (`Ui::edited_text` while one changes).
+    pub break_fields: [Option<TextFieldResponse>; 3],
+    /// Its switch of what it does was clicked: a logpoint becomes a pause point, or back.
+    pub break_act: bool,
     /// A tool was clicked.
     pub tool: Option<usize>,
     /// A scene tree row was clicked.
@@ -1413,6 +1473,18 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
             ui.mono_text_node("note", style, message, CODE_TEXT, color);
             ui.pop_id();
         }
+        // What the breakpoints say after their lines: a logpoint's latest message, a
+        // problem.
+        for (i, &(line, column, said, problem)) in view.break_notes.iter().enumerate() {
+            ui.push_id(i as u64);
+            let style = Style {
+                placed: Some([x(column as f32), y(line) + CODE_TEXT_TOP]),
+                ..Style::default()
+            };
+            let color = if problem { p.warning } else { p.logged };
+            ui.mono_text_node("break note", style, said, CODE_TEXT, color);
+            ui.pop_id();
+        }
         if view.blink {
             for (i, &(line, column)) in view.carets.iter().enumerate() {
                 ui.push_id(i as u64);
@@ -1426,6 +1498,21 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
             band([0.0, 0.0], [view.gutter, CODE_FAR], p.code),
             |_| {},
         );
+        // The breakpoints' column: their marks, and the faint one a click would put.
+        if view.marks_width > 0.0 {
+            for (i, &(line, look)) in view.marks.iter().enumerate() {
+                ui.push_id(i as u64);
+                gutter_mark(ui, view.marks_width, y(line), look, p.breakpoint, p);
+                ui.pop_id();
+            }
+            if let Some((line, look)) = view.mark_hint {
+                let [r, g, b, _] = p.breakpoint;
+                let faint = [r, g, b, 0.45];
+                ui.push_id(u64::MAX);
+                gutter_mark(ui, view.marks_width, y(line), look, faint, p);
+                ui.pop_id();
+            }
+        }
         if let Some(list) = &view.completion {
             let at = [
                 x(list.column as f32) - ICON - 12.0,
@@ -1492,7 +1579,148 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
             ui.mono_text_node("number", style, number, CODE_TEXT, color);
             ui.pop_id();
         }
+        if let Some(options) = &view.break_options {
+            let at = [view.marks_width + 4.0, y(options.line) + CODE_LINE + 2.0];
+            break_options(ui, options, at, p, out);
+        }
     })
+}
+
+/// A breakpoint's mark in the gutter's column `width` wide, on the line whose top is at
+/// `top`: its shape filled or hollow, a bar inside when a condition or a hit rule limits
+/// it, a warning's dot beside it when something is wrong.
+fn gutter_mark(ui: &mut Ui, width: f32, top: f32, look: MarkLook, color: Color, p: &Palette) {
+    let glyph = match (look.log, look.on) {
+        (true, true) => icons::LOGPOINT,
+        (true, false) => icons::LOGPOINT_OFF,
+        (false, true) => icons::PAUSE_POINT,
+        (false, false) => icons::PAUSE_POINT_OFF,
+    };
+    let cell = Style {
+        size: [Size::Fixed(width), Size::Fixed(CODE_LINE)],
+        placed: Some([0.0, top]),
+        align_main: Align::Center,
+        align_cross: Align::Center,
+        ..Style::default()
+    };
+    ui.container("mark", cell, |ui| {
+        text(ui, "glyph", glyph, ICON, color);
+    });
+    let center = [width * 0.5, top + CODE_LINE * 0.5];
+    if look.limited {
+        // Cut into a filled shape, drawn on a hollow one.
+        let bar = Style {
+            size: [Size::Fixed(6.0), Size::Fixed(2.0)],
+            placed: Some([center[0] - 3.0, center[1] - 1.0]),
+            background: Some(if look.on { p.code } else { color }),
+            ..Style::default()
+        };
+        ui.container("limited", bar, |_| {});
+    }
+    if look.problem {
+        let dot = Style {
+            size: [Size::Fixed(5.0), Size::Fixed(5.0)],
+            placed: Some([center[0] + 4.0, center[1] - 8.0]),
+            radius: 2.5,
+            background: Some(p.warning),
+            ..Style::default()
+        };
+        ui.container("problem", dot, |_| {});
+    }
+}
+
+/// A breakpoint's options under its line, at `at` in the code area (ADR 0119 §8): its
+/// switch of what it does, a logpoint's text, its condition, its hit rule; why Enter did
+/// not keep them, else how to.
+fn break_options(
+    ui: &mut Ui,
+    view: &BreakOptionsView<'_>,
+    at: [f32; 2],
+    p: &Palette,
+    out: &mut ShellResponse,
+) {
+    let style = Style {
+        floating: Some(at),
+        padding: [6.0, 4.0, 8.0, 4.0],
+        gap: 6.0,
+        radius: 3.0,
+        background: Some(p.header),
+        border: Some((p.selection_dim, 1.0)),
+        align_cross: Align::Center,
+        ..Style::default()
+    };
+    ui.row("break options", style, |ui| {
+        let (glyph, what) = if view.log {
+            (icons::LOGPOINT, "Log")
+        } else {
+            (icons::PAUSE_POINT, "Pause")
+        };
+        let switch = Style {
+            padding: [6.0, 2.0, 8.0, 2.0],
+            gap: 4.0,
+            radius: 3.0,
+            background: Some(p.field),
+            align_cross: Align::Center,
+            ..Style::default()
+        };
+        let id = ui.row("act", switch, |ui| {
+            text(ui, "icon", glyph, ICON, p.breakpoint);
+            text(ui, "label", what, SMALL, p.text);
+        });
+        out.break_act = ui.sense(id, false).clicked;
+        let fields: [(&str, &str, &str, f32); 3] = [
+            ("text", view.text, "speed = {self.speed}", 300.0),
+            ("condition", view.condition, "Condition", 220.0),
+            ("hits", view.hits, "Hits: 10, >= 10, % 64", 150.0),
+        ];
+        for (k, (key, now, hint, width)) in fields.into_iter().enumerate() {
+            // A pause point has no text.
+            if k == 0 && !view.log {
+                continue;
+            }
+            out.break_fields[k] = option_field(ui, key, now, hint, width, view.focus == Some(k), p);
+        }
+        if view.error.is_empty() {
+            text(ui, "how", "Enter keeps · Esc drops", SMALL, p.text_dim);
+        } else {
+            text(ui, "error", view.error, SMALL, p.error);
+        }
+    });
+}
+
+/// One of a breakpoint's options' fields, `width` wide, with its hint; `focus` gives it the
+/// keys from the next frame.
+fn option_field(
+    ui: &mut Ui,
+    key: &str,
+    text_now: &str,
+    hint: &str,
+    width: f32,
+    focus: bool,
+    p: &Palette,
+) -> Option<TextFieldResponse> {
+    let mut response = None;
+    let style = Style {
+        size: [Size::Fixed(width), Size::Fixed(24.0)],
+        padding: [8.0, 0.0, 4.0, 0.0],
+        radius: 3.0,
+        background: Some(p.field),
+        align_cross: Align::Center,
+        ..Style::default()
+    };
+    ui.row(key, style, |ui| {
+        let style = Style {
+            size: [Size::Grow(1.0), Size::Fixed(22.0)],
+            align_cross: Align::Center,
+            ..Style::default()
+        };
+        let r = ui.text_field("text", text_now, &field_look(p, style, hint, false));
+        if focus && !r.editing {
+            ui.edit_field(r.id);
+        }
+        response = used(r);
+    });
+    response
 }
 
 /// The completion list at `at` in the code area: a row each, its kind's icon, what is

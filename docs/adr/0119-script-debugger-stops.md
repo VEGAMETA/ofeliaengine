@@ -219,3 +219,87 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
 - **Next (E9-1a-2):** the editor's gutter, keys and options; breakpoints kept in the
   session and given to each Play's host; a logpoint's latest message at its line; a pause
   point pausing Play.
+
+## As built (E9-1a-2, 2026-10-28): the gutter, the session, Play
+
+- **A bug the first step's tests missed, fixed:** a breakpoint was reached once and never
+  again on most lines.
+  - Luau's loader turns field reads, field writes and method calls with known names into
+    userdata instructions (`GETUDATAKS`, `SETUDATAKS`, `NAMECALLUDATA`). On their slow path
+    they write the plain instruction's opcode back over their own (`VM_PATCH_OP`), so the
+    breakpoint's `LOP_BREAK` in that byte went too.
+  - E9-1a-1's tests broke on arithmetic (`speed * 2`), which has no such instruction. A
+    component's `self.Transform:rotate(…)` line has one.
+  - Now each hit is noted, and those lines are placed again through their modules' chunks
+    (kept as registry references) at the next interrupt (a call, a return, a loop's turn)
+    and before the next call into a script. The callback sets the flag as it returns:
+    placed again from inside it (a logpoint's text calls and returns), the instruction
+    would undo it.
+  - A host test now ticks a logpoint in `on_tick` over three instances: 3, 6, 9, 12 hits.
+- **The core's additions:**
+  - a list given again keeps the states (hits, message, error) of the breakpoints it still
+    asks for, since the editor gives a module's whole list when one changes;
+  - `reset_breakpoint_states` at each Play;
+  - `breakpoints_version`, which the editor compares before it reads the states;
+  - a pause point reports its module and line.
+- **The player:** a pause point reached in a tick ends the frame's ticks after that one and
+  keeps the world still (`Player::take_debug_pause`); the editor pauses Play as F7 does and
+  says where.
+- **The editor** (`docs/research/ux/script-debugger.md` §1, §2, §8):
+  - a breakpoints' column left of the numbers, in the game's scripts (`.luau` under
+    `scripts/`);
+  - marks by shape: ◆ a logpoint, a pause point a circled ‖, both hollow when off, a bar
+    inside for a condition or a hit rule, a warning's dot for a problem; a faint mark where
+    the mouse is;
+  - after each line, a logpoint's latest message and its hits (`speed = 2  ×312`), or why
+    it does nothing (no code from its line on, its condition's error, waiting for a save);
+  - the mouse: a click sets or removes, Shift a logpoint, Alt off or on, the middle button
+    removes, the right one opens the options;
+  - the keys in a script's tab: F9, Shift+F9 (a logpoint), Ctrl+F9 (off or on), Alt+F9
+    (options), Ctrl+Shift+F9 (remove all; the palette's "Restore Removed Breakpoints" brings
+    them back);
+  - the options line under the code: what it does (Log or Pause), the text, the condition,
+    the hit rule (`10`, `>= 10`, `% 64`); Tab between the fields, Enter keeps (a press in
+    the code too, once they read), Escape drops;
+  - **until stops come (E9-1b), F9 and a click make a pause point**; with E9-1b they make a
+    breakpoint that stops at the line, and a pause point comes from the options;
+  - breakpoints follow their lines through edits (a line goes with its start, as VS
+    Code's); two brought to one line keep the one whose text is there;
+  - the host gets the lines of the code that runs: a document keeps each line's line in
+    the text as last saved, so unsaved edits move the marks only, and a breakpoint on a
+    line made since waits for the save; a script closed without saving takes its marks
+    back to its file's lines;
+  - a comment's or a blank line's breakpoint moves to the line the host placed it on;
+  - kept in the session as `[breakpoint]` blocks (lines from 1), brought back at the start;
+    given to the host where they changed (once a frame, after the scripts that changed ran
+    again) and all again to a new host.
+- **The platform:** F10 alone no longer starts Windows' window menu (the frames waited for
+  the next key); the step over (E9-1b) and games get it.
+- **Measured** (ref-1, release; 1,000 instances of a one-line `on_tick`, medians of 51
+  ticks; `measure_breakpoints`):
+
+  | | tick | per instance |
+  |---|---:|---:|
+  | no breakpoint | 0.28 ms | 0.28 µs |
+  | a logpoint turned off | 0.25 ms | 0.25 µs |
+  | a logpoint on every 64th hit | 0.86 ms | 0.86 µs |
+  | a pause point, its condition false | 1.33 ms | 1.33 µs |
+  | a logpoint on every hit | 1.64 ms | 1.64 µs |
+
+  - Nothing without breakpoints: none is placed, the editor gives and reads nothing, and its
+    frame allocates nothing (the zero-allocation test).
+  - A hit costs the callback, its line placed again, and its condition or text. The
+    function runs interpreted, since native code has no breakpoints.
+- **Not done:**
+  - a logpoint's message allocates (its text, the log's record): the UX note's "into the
+    log's ring" is left for later;
+  - the options line lies over the lines below it, which VS Code moves down;
+  - the "only for" filter of entities waits for the stops' header (E9-1b);
+  - the Breakpoints list waits for the panel (E9-1b).
+- **Tests:**
+  - the code core: lines followed, saved lines kept, unsaved text against its file;
+  - the breakpoints: hit rules, following, the host's lines, removing all and back;
+  - the session file's `[breakpoint]` blocks;
+  - in the editor on the player, a logpoint from the session logs in Play (its message at
+    its line), F9 sets a pause point that pauses Play, Alt+F9 gives it a condition that
+    lets Play go on, and the session keeps both.

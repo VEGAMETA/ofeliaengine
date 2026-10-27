@@ -34,7 +34,7 @@ use windows_sys::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_F10,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -1366,8 +1366,10 @@ unsafe extern "system" fn window_proc(
                     repeat: pressed && (lp >> 30) & 1 != 0,
                 },
             );
-            // Let the system handle Alt+F4 and the window menu.
-            if matches!(msg, WM_SYSKEYDOWN | WM_SYSKEYUP) {
+            // Let the system handle Alt+F4 and the window menu. F10 stays the application's
+            // (a game's key, the script debugger's step over): Windows would start the
+            // window menu's loop with it, the frames waiting until the next key.
+            if matches!(msg, WM_SYSKEYDOWN | WM_SYSKEYUP) && loword(wparam) != VK_F10 {
                 // SAFETY: default processing.
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             }

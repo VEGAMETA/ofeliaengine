@@ -10,6 +10,7 @@
 //! - [`Base`]: what a scene file was when it was loaded or saved, to tell whether it
 //!   changed on disk since.
 
+use crate::breakpoints::{Act, Mark};
 use engine_platform::time::HighResTimer;
 use engine_platform::window::WindowPlacement;
 use engine_scene::text::{quote_into, split_assignment, split_items, unquote};
@@ -277,6 +278,9 @@ pub(crate) struct SessionFile {
     pub(crate) editor: EditorState,
     pub(crate) documents: Vec<Document>,
     pub(crate) scripts: Vec<ScriptDoc>,
+    /// The scripts' breakpoints (ADR 0119): a script's file (relative to the project) and
+    /// one of its breakpoints, a `[breakpoint]` block each.
+    pub(crate) breakpoints: Vec<(PathBuf, Mark)>,
 }
 
 /// The session file's version. Keys and sections it does not know are skipped, so a
@@ -411,6 +415,30 @@ impl SessionFile {
             let ((line, col), [x, y]) = (s.caret, s.scroll);
             let _ = writeln!(out, "caret = ({line}, {col})\nscroll = ({x}, {y})");
         }
+        // Lines as people read them, from 1.
+        for (path, m) in &self.breakpoints {
+            out.push_str("\n[breakpoint]\npath = ");
+            quote_into(&mut out, &slashes(path));
+            let _ = writeln!(out, "\nline = {}", m.line + 1);
+            match m.act {
+                Act::Log => {
+                    out.push_str("log = ");
+                    quote_into(&mut out, &m.log);
+                    out.push('\n');
+                }
+                Act::Pause => out.push_str("pause = true\n"),
+            }
+            for (key, text) in [("condition", &m.condition), ("hits", &m.hits)] {
+                if !text.is_empty() {
+                    let _ = write!(out, "{key} = ");
+                    quote_into(&mut out, text);
+                    out.push('\n');
+                }
+            }
+            if !m.enabled {
+                out.push_str("enabled = false\n");
+            }
+        }
         out
     }
 
@@ -424,6 +452,7 @@ impl SessionFile {
             Editor,
             Document,
             Script,
+            Breakpoint,
             /// A section of a later editor: skipped.
             Other,
         }
@@ -465,6 +494,12 @@ impl SessionFile {
                             scroll: [0.0; 2],
                         });
                         Section::Script
+                    }
+                    "[breakpoint]" => {
+                        // No line until its `line` key: a block without one is dropped.
+                        file.breakpoints
+                            .push((PathBuf::new(), Mark::new(usize::MAX, Act::Pause)));
+                        Section::Breakpoint
                     }
                     _ => Section::Other,
                 };
@@ -570,10 +605,54 @@ impl SessionFile {
                     };
                     read_script_key(s, key, value).map_err(at)?;
                 }
+                Section::Breakpoint => {
+                    let Some((path, m)) = file.breakpoints.last_mut() else {
+                        continue;
+                    };
+                    read_breakpoint_key(path, m, key, value).map_err(at)?;
+                }
             }
         }
+        // A block without its file or line names nothing.
+        file.breakpoints
+            .retain(|(path, m)| !path.as_os_str().is_empty() && m.line != usize::MAX);
         Ok(file)
     }
+}
+
+/// One `key = value` of a `[breakpoint]` block; keys of a later editor are skipped.
+fn read_breakpoint_key(
+    path: &mut PathBuf,
+    m: &mut Mark,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let flag = |value: &str| match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!("`{other}` is not true or false")),
+    };
+    match key {
+        "path" => *path = PathBuf::from(unquote(value)?),
+        "line" => {
+            let line: usize = parse_number(value)?;
+            m.line = line.checked_sub(1).unwrap_or(usize::MAX);
+        }
+        "log" => {
+            m.act = Act::Log;
+            m.log = unquote(value)?;
+        }
+        "pause" => {
+            if flag(value)? {
+                m.act = Act::Pause;
+            }
+        }
+        "condition" => m.condition = unquote(value)?,
+        "hits" => m.hits = unquote(value)?,
+        "enabled" => m.enabled = flag(value)?,
+        _ => {}
+    }
+    Ok(())
 }
 
 /// One `key = value` of a `[document]` block; keys of a later editor are skipped.
@@ -1059,6 +1138,24 @@ mod tests {
                 active: Some(1),
                 script: Some(0),
             },
+            breakpoints: vec![
+                (
+                    PathBuf::from("scripts/door.luau"),
+                    Mark {
+                        log: String::from("speed = {self.speed} \"fast\""),
+                        hits: String::from("% 64"),
+                        ..Mark::new(13, Act::Log)
+                    },
+                ),
+                (
+                    PathBuf::from("scripts/ui/menu.luau"),
+                    Mark {
+                        condition: String::from("self.hp < 0"),
+                        enabled: false,
+                        ..Mark::new(0, Act::Pause)
+                    },
+                ),
+            ],
         };
         let text = file.to_text();
         assert!(text.starts_with("[session version=1]\n"), "{text}");
@@ -1066,7 +1163,13 @@ mod tests {
             text.contains("base = (1442, 1760000000123456789, 0123456789abcdef)"),
             "{text}"
         );
+        assert!(text.contains("line = 14\nlog = "), "lines from 1: {text}");
         assert_eq!(SessionFile::parse(&text).unwrap(), file);
+        // A breakpoint without its line is dropped.
+        let lineless =
+            SessionFile::parse("[session version=1]\n[breakpoint]\npath = \"scripts/a.luau\"\n")
+                .unwrap();
+        assert!(lineless.breakpoints.is_empty());
         assert!(SessionFile::parse("[session version=2]\n").is_err());
         // A later editor's keys and sections are skipped; a value that does not read is
         // an error on its line.

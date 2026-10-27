@@ -111,6 +111,17 @@ impl Script {
         self.path.to_string_lossy().replace('\\', "/")
     }
 
+    /// Whether it can have breakpoints (ADR 0119): a game's script, a `.luau` file under
+    /// `scripts/` that the player's host loads.
+    pub(crate) fn breakpoints(&self) -> bool {
+        self.language == Language::Luau && engine_app::scripts::module_name(&self.path).is_some()
+    }
+
+    /// The gutter's breakpoints' column width: none for a file without breakpoints.
+    pub(crate) fn marks_width(&self) -> f32 {
+        if self.breakpoints() { MARKS_WIDTH } else { 0.0 }
+    }
+
     /// The text as its file holds it: its line endings and its byte order mark kept.
     pub(crate) fn file_text(&self) -> String {
         let mut text = self.doc.text();
@@ -190,11 +201,14 @@ impl Script {
     }
 }
 
-/// The gutter's width in a script of `lines` lines: room for the largest number, two
-/// digits at least.
-pub(crate) fn gutter_width(lines: usize, advance: f32) -> f32 {
+/// The breakpoints' column, the gutter's left part (ADR 0119): its width.
+pub(crate) const MARKS_WIDTH: f32 = 18.0;
+
+/// The gutter's width in a script of `lines` lines: the breakpoints' column, `marks`
+/// wide (0 without one), then room for the largest number, two digits at least.
+pub(crate) fn gutter_width(lines: usize, advance: f32, marks: f32) -> f32 {
     let digits = (lines.max(1).ilog10() + 1).max(2) as f32;
-    (digits + 1.0) * advance + CODE_PAD
+    marks + (digits + 1.0) * advance + CODE_PAD
 }
 
 /// What a key did in a script, besides editing it.
@@ -440,7 +454,16 @@ mod tests {
         let s = Script::new(PathBuf::from("a.luau"), "\u{feff}a\r\nb\r\n", None);
         assert_eq!(s.doc.line(0), "a");
         assert_eq!(s.file_text(), "\u{feff}a\r\nb\r\n");
-        assert_eq!(gutter_width(9, 8.0), 3.0 * 8.0 + CODE_PAD);
-        assert_eq!(gutter_width(1500, 8.0), 5.0 * 8.0 + CODE_PAD);
+        assert_eq!(gutter_width(9, 8.0, 0.0), 3.0 * 8.0 + CODE_PAD);
+        assert_eq!(gutter_width(1500, 8.0, 0.0), 5.0 * 8.0 + CODE_PAD);
+        assert_eq!(
+            gutter_width(9, 8.0, MARKS_WIDTH),
+            MARKS_WIDTH + 3.0 * 8.0 + CODE_PAD,
+            "the breakpoints' column first"
+        );
+        assert!(!s.breakpoints(), "not under scripts/");
+        let game = |path: &str| Script::new(PathBuf::from(path), "", None).breakpoints();
+        assert!(game("scripts/npc/guard.luau"));
+        assert!(!game("shaders/water.slang"));
     }
 }
