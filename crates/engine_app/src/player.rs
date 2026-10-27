@@ -3594,6 +3594,11 @@ impl Player {
         self.frame_time = seconds;
     }
 
+    /// The time each frame advances by, when it is fixed ([`Self::set_frame_time`]).
+    pub fn frame_time(&self) -> Option<f64> {
+        self.frame_time
+    }
+
     /// Whether the swapchain no longer matches the window's client area.
     fn needs_new_swapchain(&self) -> bool {
         let extent = self.extent();

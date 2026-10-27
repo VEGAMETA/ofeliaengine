@@ -2270,6 +2270,9 @@ struct Editor {
     frames: u64,
     since: Instant,
     fps: f64,
+    /// The time the player's frames advance by when it is fixed (`Player::frame_time`):
+    /// the rate shown is then that, not the wall clock's.
+    fixed_frame: Option<f64>,
 }
 
 /// The session while the editor runs (ADR 0107 §4): the project's lock, the writer, and
@@ -2870,6 +2873,7 @@ impl Editor {
             frames: 0,
             since: Instant::now(),
             fps: 0.0,
+            fixed_frame: None,
         })
     }
 
@@ -3125,7 +3129,12 @@ impl Editor {
         self.sync_game_mouse(world);
         self.collect_rows(world);
         self.frames += 1;
-        let elapsed = self.since.elapsed().as_secs_f64();
+        // A player whose frames advance by a fixed time (tests, recordings) runs at that
+        // rate, whatever the GPU's speed.
+        let elapsed = self.fixed_frame.map_or_else(
+            || self.since.elapsed().as_secs_f64(),
+            |dt| self.frames as f64 * dt,
+        );
         if elapsed >= 0.5 {
             self.fps = self.frames as f64 / elapsed;
             self.frames = 0;
@@ -14808,6 +14817,7 @@ impl<G> EditorGame<G> {
     pub fn sync_assets(&mut self, player: &mut Player) {
         self.play_frame(player);
         let mut shared = self.shared.borrow_mut();
+        shared.fixed_frame = player.frame_time();
         if !shared.pending_assets.is_empty() {
             player.assets_mut().add_paths(&shared.pending_assets);
             shared.pending_assets = AssetPaths::new();

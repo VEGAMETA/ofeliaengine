@@ -658,6 +658,12 @@ Last updated: 2026-10-28.
     2. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
        per hook (`script Door.on_tick`) and each script's time and allocations in the
        editor's profiler; Tracy has only the stages' zones (`scripts::tick`).
+    3. The editor's text layouts allocate when a text changes (found 2026-10-28): the
+       status line's FPS every half second makes a new layout (its string and glyphs).
+       Reuse the layouts that go out of use. The zero-allocation test missed it because
+       its frames ran faster than the FPS's update; on the Radeon they did not, on `main`
+       too. The editor's FPS now follows a fixed frame time (`Player::frame_time`), so the
+       test is the same on both GPUs.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
