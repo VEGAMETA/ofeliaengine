@@ -38,6 +38,15 @@ thread_local! {
     /// the breakpoints reached are placed again at the next interrupt (a call, a return, a
     /// loop's turn) and before the next call into a script.
     static REARM: Cell<bool> = const { Cell::new(false) };
+    /// A stop was answered [`Resume::Abort`], until the host ends it
+    /// ([`ScriptDebugger::end_abort`]): later stops answer it too, without the handler, and
+    /// calls into scripts fail at once, so the host's stage runs out fast.
+    static ABORTING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether calls into scripts fail at once ([`ABORTING`]).
+pub(crate) fn aborting() -> bool {
+    ABORTING.get()
 }
 
 /// Whether breakpoints reached wait to be placed again ([`rearm`]).
@@ -438,6 +447,12 @@ impl ScriptDebugger {
     pub fn set_stop_handler(&self, handler: Option<StopHandler>) {
         self.with(|d| d.handler = handler);
     }
+
+    /// Calls into scripts run again after a stop answered [`Resume::Abort`]: the host's
+    /// stage ran out.
+    pub fn end_abort(&self) {
+        ABORTING.set(false);
+    }
 }
 
 /// Places module `module`'s enabled breakpoints through its chunk, the registry reference
@@ -647,6 +662,9 @@ fn ask_pause(lua: &Lua, module: &str, line: u32) {
 ///
 /// As [`debugbreak`]'s.
 unsafe fn stop_at(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32) -> bool {
+    if ABORTING.get() {
+        return true;
+    }
     // Out of the state while it runs: the editor's frames meanwhile read and set
     // breakpoints.
     let handler = lua
@@ -666,7 +684,11 @@ unsafe fn stop_at(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32
         resume
     });
     match resume {
-        Some(resume) => resume == Resume::Abort,
+        Some(Resume::Abort) => {
+            ABORTING.set(true);
+            true
+        }
+        Some(Resume::Continue) => false,
         None => {
             ask_pause(lua, module, line);
             false
@@ -1249,8 +1271,13 @@ return M
                 module: String::from("door")
             }))
         );
-        // The VM goes on as before.
+        // Calls fail at once until the host ends the abort; then the VM goes on.
         vm.set_breakpoints("door", Vec::new());
+        assert!(matches!(
+            vm.call::<_, f64>("door", "tick", 5.0),
+            Err(ScriptError::Aborted { .. })
+        ));
+        vm.debugger().end_abort();
         assert_eq!(vm.call::<_, f64>("door", "tick", 5.0).unwrap(), 20.0);
     }
 

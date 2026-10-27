@@ -388,6 +388,11 @@ impl ScriptVm {
         function: &str,
         args: A,
     ) -> Result<R, ScriptError> {
+        if debug::aborting() {
+            return Err(ScriptError::Aborted {
+                module: module.to_owned(),
+            });
+        }
         let m = self
             .modules
             .get(module)
@@ -415,6 +420,11 @@ impl ScriptVm {
         function: &Function,
         args: A,
     ) -> Result<R, ScriptError> {
+        if debug::aborting() {
+            return Err(ScriptError::Aborted {
+                module: module.to_owned(),
+            });
+        }
         self.arm();
         let r = function.call::<R>(args);
         self.disarm();
