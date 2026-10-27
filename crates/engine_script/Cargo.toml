@@ -17,6 +17,10 @@ engine_profiler.workspace = true
 # Luau's native code generator (x64). ADR 0032.
 mlua = { version = "0.12", features = ["luau", "luau-jit"] }
 
+[dev-dependencies]
+# Fibers: the stops' tests run their calls on one, as the editor's player does.
+engine_platform.workspace = true
+
 [[bench]]
 name = "boids"
 harness = false

@@ -9,9 +9,12 @@
 //!   module's line, tests their condition and hit rule, and does what they say:
 //!   - a **logpoint** formats its text, Luau's interpolation (`speed = {self.speed}`), and the
 //!     host logs it at its line; the script goes on;
-//!   - a **pause point** asks the game to pause after its tick (Rider's pausepoint).
-//!
-//!   Stops in the middle of a hook come with ADR 0119's answer (E9-1b).
+//!   - a **pause point** asks the game to pause after its tick (Rider's pausepoint);
+//!   - a **stop** describes the frame ([`Stopped`]) and calls the host's [`StopHandler`],
+//!     which waits until the developer goes on: the host's stage runs on a fiber, and the
+//!     handler gives the thread back to the editor (ADR 0119). The call's time budget is
+//!     held meanwhile. [`Resume::Abort`] ends the call with an error raised once the
+//!     callback's own frames are done. Where the host cannot wait, a stop is a pause point.
 //! - **Evaluation:** a condition or a text is compiled once into a function whose
 //!   parameters are the frame's locals and its function's upvalues, by name, with the
 //!   module's globals as its environment. Each hit passes the values. Breakpoints reached
@@ -94,6 +97,9 @@ pub enum BreakAction {
     Log(String),
     /// Asks the game to pause after the tick it is reached in.
     Pause,
+    /// Stops the script at its line until the developer goes on ([`StopHandler`]); a pause
+    /// point where the host cannot wait.
+    Stop,
 }
 
 /// Which of a breakpoint's hits (counted when its condition holds) it acts on.
@@ -162,6 +168,59 @@ pub struct Logged {
     pub text: String,
 }
 
+/// Where a script stopped and what its frame holds, as text: values are read as they
+/// are, never through their metamethods.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stopped {
+    /// The module.
+    pub module: String,
+    /// The line, where its breakpoint was placed.
+    pub line: u32,
+    /// The frame's locals in the order they were made: a name made again comes again.
+    pub locals: Vec<Variable>,
+    /// Its function's upvalues.
+    pub upvalues: Vec<Variable>,
+    /// The frames from the stopped one out to the host's call.
+    pub stack: Vec<Frame>,
+}
+
+/// A named value, as text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variable {
+    /// Its name.
+    pub name: String,
+    /// Its value: `3`, `"open"`, `table #4`, `(1, 2, 3)`, a userdata's `__type`.
+    pub value: String,
+}
+
+/// A frame of a stop's stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    /// Its module, or `[C]` for a function of the host or a library.
+    pub source: String,
+    /// The line it is at; none in a C function.
+    pub line: Option<u32>,
+    /// Its function's name, if it has one.
+    pub function: Option<String>,
+}
+
+/// How a stopped script goes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Resume {
+    /// From where it stopped.
+    #[default]
+    Continue,
+    /// The call into the script ends with [`crate::ScriptError::Aborted`] (Play stops). A
+    /// `pcall` in the script catches it as any error.
+    Abort,
+}
+
+/// The host's side of a stop: given where the script stopped, it waits until the
+/// developer says how to go on (ADR 0119: it suspends the fiber the host's stage runs on,
+/// and the editor's frames go on meanwhile). None when it cannot wait: the breakpoint
+/// pauses the game after its tick instead, as a pause point.
+pub type StopHandler = Box<dyn FnMut(&Stopped) -> Option<Resume>>;
+
 /// One breakpoint of a module.
 struct Slot {
     asked: Breakpoint,
@@ -196,6 +255,8 @@ pub(crate) struct Debugger {
     chunks: HashMap<String, c_int>,
     /// The modules' lines reached since the last [`rearm`].
     reached: Vec<(String, u32)>,
+    /// What a stop calls; taken out while it runs.
+    handler: Option<StopHandler>,
 }
 
 impl Debugger {
@@ -303,6 +364,117 @@ impl Debugger {
     }
 }
 
+/// The VM's debugger apart from the VM (ADR 0119): what the editor reads and sets while a
+/// script is stopped, when the host's stage holds the VM halfway through a call. It holds
+/// the VM weakly: with the VM gone, it does nothing.
+#[derive(Clone)]
+pub struct ScriptDebugger {
+    lua: mlua::WeakLua,
+}
+
+impl ScriptDebugger {
+    pub(crate) fn new(lua: &Lua) -> Self {
+        Self { lua: lua.weak() }
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&mut Debugger) -> R) -> Option<R> {
+        let lua = self.lua.try_upgrade()?;
+        let mut dbg = lua.app_data_mut::<Debugger>()?;
+        Some(f(&mut dbg))
+    }
+
+    /// Module `module`'s breakpoints from now on, replacing its others; placed at once
+    /// when it is loaded, else when it loads. Kept through its reloads.
+    pub fn set_breakpoints(&self, module: &str, breakpoints: Vec<Breakpoint>) {
+        let Some(lua) = self.lua.try_upgrade() else {
+            return;
+        };
+        let Some((old, chunk)) = lua
+            .app_data_mut::<Debugger>()
+            .map(|mut d| (d.set(module, breakpoints), d.chunks.get(module).copied()))
+        else {
+            return;
+        };
+        if let Some(chunk) = chunk {
+            for line in old {
+                breakpoint(&lua, chunk, line, false);
+            }
+            place(&lua, module, chunk);
+        }
+    }
+
+    /// How module `module`'s breakpoints are doing, in the order they were set.
+    pub fn breakpoint_states(&self, module: &str) -> Vec<BreakState> {
+        self.with(|d| d.states(module)).unwrap_or_default()
+    }
+
+    /// The logpoints' messages since the last call.
+    pub fn take_logged(&self) -> Vec<Logged> {
+        self.with(Debugger::take_logged).unwrap_or_default()
+    }
+
+    /// The module and line of the pause point reached since the last call, if one was.
+    pub fn take_pause(&self) -> Option<(String, u32)> {
+        self.with(Debugger::take_pause).flatten()
+    }
+
+    /// Whether a pause point was reached and its pause not taken yet.
+    pub fn pause_asked(&self) -> bool {
+        self.with(|d| d.pause_asked()).unwrap_or(false)
+    }
+
+    /// Every breakpoint's hits, latest message and error back to none; where they are
+    /// placed is kept.
+    pub fn reset_breakpoint_states(&self) {
+        self.with(Debugger::reset);
+    }
+
+    /// Raised whenever a breakpoint's state changes.
+    pub fn breakpoints_version(&self) -> u64 {
+        self.with(|d| d.version()).unwrap_or(0)
+    }
+
+    /// What a stop calls from now on; without one, stops pause the game after their tick.
+    pub fn set_stop_handler(&self, handler: Option<StopHandler>) {
+        self.with(|d| d.handler = handler);
+    }
+}
+
+/// Places module `module`'s enabled breakpoints through its chunk, the registry reference
+/// `chunk`.
+pub(crate) fn place(lua: &Lua, module: &str, chunk: c_int) {
+    let wanted = lua
+        .app_data_ref::<Debugger>()
+        .map(|d| d.wanted(module))
+        .unwrap_or_default();
+    for (slot, line) in wanted {
+        let placed = breakpoint(lua, chunk, line, true);
+        if let Some(mut d) = lua.app_data_mut::<Debugger>() {
+            d.placed(module, slot, placed);
+        }
+    }
+}
+
+/// Sets (or clears) a breakpoint on `line` of the chunk kept as registry reference
+/// `chunk` and the functions in it: the line Luau placed it on (the next one with code),
+/// none when no line from there has code.
+fn breakpoint(lua: &Lua, chunk: c_int, line: u32, enabled: bool) -> Option<u32> {
+    let line = c_int::try_from(line).ok()?;
+    // SAFETY: the chunk is pushed from the registry; `lua_breakpoint` reads its function
+    // and patches instructions in place, and the placed line is pushed back as the result.
+    let placed = unsafe {
+        lua.exec_raw::<c_int>((), |state| {
+            ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, chunk);
+            let placed = ffi::lua_breakpoint(state, -1, line, c_int::from(enabled));
+            // What stays on the stack is the result.
+            ffi::lua_settop(state, 0);
+            ffi::lua_pushinteger(state, placed as _);
+        })
+    }
+    .ok()?;
+    u32::try_from(placed).ok().filter(|&l| l > 0)
+}
+
 /// What a reached breakpoint asks, copied out of the state before any Luau runs.
 struct Ask {
     slot: usize,
@@ -322,40 +494,54 @@ pub(crate) unsafe extern "C-unwind" fn debugbreak(
     let evaluating = EVALUATING.get();
     // A panic never crosses Luau's frames: the breakpoint is passed over then.
     // SAFETY: as the caller says.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        reached(state, evaluating);
-    }));
+    let abort = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        reached(state, evaluating)
+    }))
+    .unwrap_or(false);
     // Its instruction may write its own opcode back over the breakpoint as it goes on,
     // once this returns: placed again at the next interrupt (`REARM`), not at one of the
     // evaluations' interrupts above.
     REARM.set(true);
+    if abort {
+        // SAFETY: Luau's callbacks may raise; nothing with a destructor is alive in this
+        // frame.
+        unsafe {
+            ffi::lua_pushlstring_(
+                state,
+                crate::ABORT_MARKER.as_ptr().cast(),
+                crate::ABORT_MARKER.len(),
+            );
+            ffi::lua_error(state);
+        }
+    }
 }
 
 /// [`debugbreak`]'s body: the line reached noted for [`rearm`], then, unless one of
 /// the debugger's own evaluations reached it (`evaluating`), what its breakpoints do.
+/// Whether the call is to be aborted ([`Resume::Abort`]).
 ///
 /// # Safety
 ///
 /// As [`debugbreak`]'s.
-unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) {
+unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) -> bool {
     // SAFETY: as the caller says; `ar` is filled by `lua_getinfo` for the running frame,
     // its source a C string Luau keeps.
     unsafe {
         let mut ar: ffi::lua_Debug = core::mem::zeroed();
         if ffi::lua_getinfo(state, 0, c"sl".as_ptr(), &mut ar) == 0 || ar.source.is_null() {
-            return;
+            return false;
         }
         let source = CStr::from_ptr(ar.source).to_string_lossy();
         let Some(module) = source.strip_prefix('=') else {
-            return;
+            return false;
         };
         let Ok(line) = u32::try_from(ar.currentline) else {
-            return;
+            return false;
         };
         let lua = Lua::get_or_init_from_ptr(state);
         let asks: Vec<Ask> = {
             let Some(mut dbg) = lua.app_data_mut::<Debugger>() else {
-                return;
+                return false;
             };
             for id in dbg.dropped.drain(..) {
                 ffi::lua_unref(state, id);
@@ -364,10 +550,10 @@ unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) {
                 dbg.reached.push((module.to_owned(), line));
             }
             if evaluating {
-                return;
+                return false;
             }
             let Some(slots) = dbg.modules.get(module) else {
-                return;
+                return false;
             };
             slots
                 .iter()
@@ -380,6 +566,7 @@ unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) {
                 })
                 .collect()
         };
+        let mut stop = false;
         for ask in asks {
             if let Some(condition) = &ask.condition {
                 match evaluate(state, lua, module, ask.slot, true, condition) {
@@ -393,7 +580,7 @@ unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) {
             }
             let admitted = {
                 let Some(mut dbg) = lua.app_data_mut::<Debugger>() else {
-                    return;
+                    return false;
                 };
                 let Some(s) = dbg
                     .modules
@@ -434,15 +621,203 @@ unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) {
                     Ok(_) => {}
                     Err(e) => note_error(lua, module, ask.slot, e),
                 },
-                BreakAction::Pause => {
-                    if let Some(mut dbg) = lua.app_data_mut::<Debugger>()
-                        && dbg.pause.is_none()
-                    {
-                        dbg.pause = Some((module.to_owned(), line));
-                    }
-                }
+                BreakAction::Pause => ask_pause(lua, module, line),
+                BreakAction::Stop => stop = true,
             }
         }
+        // After the line's logpoints, once however many stops it has.
+        stop && stop_at(state, lua, module, line)
+    }
+}
+
+/// A pause after the tick, asked at `module`'s `line` unless one was asked already.
+fn ask_pause(lua: &Lua, module: &str, line: u32) {
+    if let Some(mut dbg) = lua.app_data_mut::<Debugger>()
+        && dbg.pause.is_none()
+    {
+        dbg.pause = Some((module.to_owned(), line));
+    }
+}
+
+/// A stop acted on at `module`'s `line`: the host's handler waits, the call's time budget
+/// held meanwhile; a pause after the tick where it cannot. Whether the call is to be
+/// aborted.
+///
+/// # Safety
+///
+/// As [`debugbreak`]'s.
+unsafe fn stop_at(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32) -> bool {
+    // Out of the state while it runs: the editor's frames meanwhile read and set
+    // breakpoints.
+    let handler = lua
+        .app_data_mut::<Debugger>()
+        .and_then(|mut d| d.handler.take());
+    let resume = handler.and_then(|mut handler| {
+        // SAFETY: as the caller says.
+        let stopped = unsafe { describe(state, module, line) };
+        let held = crate::hold_budget();
+        let resume = handler(&stopped);
+        crate::release_budget(held);
+        if let Some(mut d) = lua.app_data_mut::<Debugger>()
+            && d.handler.is_none()
+        {
+            d.handler = Some(handler);
+        }
+        resume
+    });
+    match resume {
+        Some(resume) => resume == Resume::Abort,
+        None => {
+            ask_pause(lua, module, line);
+            false
+        }
+    }
+}
+
+/// The frame at level 0 of `state`, the stopped one, as text: its locals, its function's
+/// upvalues, and the stack out to the host's call.
+///
+/// # Safety
+///
+/// `state` is a running thread inside Luau's breakpoint callback.
+unsafe fn describe(state: *mut ffi::lua_State, module: &str, line: u32) -> Stopped {
+    let mut stopped = Stopped {
+        module: module.to_owned(),
+        line,
+        locals: Vec::new(),
+        upvalues: Vec::new(),
+        stack: Vec::new(),
+    };
+    // SAFETY: as the caller says; each value pushed is read, then popped, and the stack is
+    // put back as it was.
+    unsafe {
+        let top = ffi::lua_gettop(state);
+        if ffi::lua_checkstack(state, 4) == 0 {
+            return stopped;
+        }
+        for n in 1..=200 {
+            let name = ffi::lua_getlocal(state, 0, n);
+            if name.is_null() {
+                break;
+            }
+            let name = CStr::from_ptr(name).to_string_lossy().into_owned();
+            if is_name(&name) {
+                let value = value_text(state, -1);
+                stopped.locals.push(Variable { name, value });
+            }
+            ffi::lua_settop(state, -2);
+        }
+        let mut ar: ffi::lua_Debug = core::mem::zeroed();
+        if ffi::lua_getinfo(state, 0, c"f".as_ptr(), &mut ar) != 0 {
+            let function = ffi::lua_gettop(state);
+            for n in 1..=255 {
+                let name = ffi::lua_getupvalue(state, function, n);
+                if name.is_null() {
+                    break;
+                }
+                let name = CStr::from_ptr(name).to_string_lossy().into_owned();
+                if is_name(&name) {
+                    let value = value_text(state, -1);
+                    stopped.upvalues.push(Variable { name, value });
+                }
+                ffi::lua_settop(state, -2);
+            }
+        }
+        ffi::lua_settop(state, top);
+        for level in 0..64 {
+            let mut ar: ffi::lua_Debug = core::mem::zeroed();
+            if ffi::lua_getinfo(state, level, c"sln".as_ptr(), &mut ar) == 0 {
+                break;
+            }
+            let text = |p: *const core::ffi::c_char| {
+                (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+            };
+            let source = text(ar.source).unwrap_or_default();
+            stopped.stack.push(Frame {
+                source: source.strip_prefix('=').unwrap_or(&source).to_owned(),
+                line: u32::try_from(ar.currentline).ok().filter(|&l| l > 0),
+                function: text(ar.name),
+            });
+        }
+    }
+    stopped
+}
+
+/// The value at `idx` as text, never through its metamethods: a string quoted and cut, a
+/// table with its length, a userdata by its metatable's `__type`.
+///
+/// # Safety
+///
+/// `idx` is a valid index of `state`, with room for two more values.
+unsafe fn value_text(state: *mut ffi::lua_State, idx: c_int) -> String {
+    // SAFETY: as the caller says; a metatable and its field are popped after they are read.
+    unsafe {
+        let idx = ffi::lua_absindex(state, idx);
+        match ffi::lua_type(state, idx) {
+            ffi::LUA_TNIL => String::from("nil"),
+            ffi::LUA_TBOOLEAN => String::from(if ffi::lua_toboolean(state, idx) != 0 {
+                "true"
+            } else {
+                "false"
+            }),
+            ffi::LUA_TNUMBER => number_text(ffi::lua_tonumber(state, idx)),
+            ffi::LUA_TSTRING => {
+                let text = text_at(state, idx).unwrap_or_default();
+                let mut cut: String = text.chars().take(VALUE_CHARS).collect();
+                if cut.len() < text.len() {
+                    cut.push('\u{2026}');
+                }
+                format!("{cut:?}")
+            }
+            ffi::LUA_TVECTOR => {
+                let v = ffi::lua_tovector(state, idx);
+                if v.is_null() {
+                    String::from("vector")
+                } else {
+                    let v = core::slice::from_raw_parts(v, 3);
+                    let [x, y, z] = [v[0], v[1], v[2]].map(|c| number_text(f64::from(c)));
+                    format!("({x}, {y}, {z})")
+                }
+            }
+            ffi::LUA_TTABLE => match ffi::lua_objlen(state, idx) {
+                0 => String::from("table"),
+                n => format!("table #{n}"),
+            },
+            ffi::LUA_TFUNCTION => String::from("function"),
+            ffi::LUA_TUSERDATA => {
+                let mut name = None;
+                if ffi::lua_getmetatable(state, idx) != 0 {
+                    if ffi::lua_rawgetfield(state, -1, c"__type".as_ptr()) == ffi::LUA_TSTRING {
+                        name = text_at(state, -1);
+                    }
+                    ffi::lua_settop(state, -3);
+                }
+                name.unwrap_or_else(|| String::from("userdata"))
+            }
+            ffi::LUA_TLIGHTUSERDATA => String::from("userdata"),
+            ffi::LUA_TTHREAD => String::from("thread"),
+            ffi::LUA_TBUFFER => format!("buffer #{}", ffi::lua_objlen(state, idx)),
+            _ => String::from("?"),
+        }
+    }
+}
+
+/// The characters of a string a value's text shows.
+const VALUE_CHARS: usize = 60;
+
+/// A number as Luau prints it: whole ones without a fraction, the rest the shortest that
+/// reads back.
+fn number_text(n: f64) -> String {
+    if n.is_nan() {
+        String::from("nan")
+    } else if n.is_infinite() {
+        String::from(if n > 0.0 { "inf" } else { "-inf" })
+    } else if n == n.trunc() && n.abs() < 1e15 {
+        format!("{n:.0}")
+    } else if n == n.trunc() {
+        format!("{n:e}")
+    } else {
+        format!("{n}")
     }
 }
 
@@ -619,7 +994,14 @@ unsafe fn text_at(state: *mut ffi::lua_State, idx: c_int) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BreakAction, Breakpoint, Hits, Logged, ScriptSettings, ScriptVm};
+    use crate::{
+        BreakAction, Breakpoint, Frame, Hits, Logged, Resume, ScriptError, ScriptSettings,
+        ScriptVm, Stopped, Variable,
+    };
+    use core::ffi::c_void;
+    use engine_platform::fiber::{self, Fiber, Ran};
+    use std::cell::{Cell, RefCell};
+    use std::time::Duration;
 
     const DOOR: &str = "
 local BASE = 10
@@ -644,6 +1026,52 @@ return M
 
     fn texts(vm: &ScriptVm) -> Vec<String> {
         vm.take_logged().into_iter().map(|l| l.text).collect()
+    }
+
+    fn stop(line: u32) -> Breakpoint {
+        Breakpoint {
+            line,
+            action: BreakAction::Stop,
+            condition: None,
+            hits: Hits::Every,
+            enabled: true,
+        }
+    }
+
+    thread_local! {
+        static AT: RefCell<Option<Stopped>> = const { RefCell::new(None) };
+        static ANSWER: Cell<Resume> = const { Cell::new(Resume::Continue) };
+    }
+
+    /// The tests' host: keeps the stop and gives the thread back, where a fiber runs the
+    /// call; it cannot wait elsewhere.
+    fn wait_on_fiber(stopped: &Stopped) -> Option<Resume> {
+        AT.set(Some(stopped.clone()));
+        fiber::suspend().then(|| ANSWER.get())
+    }
+
+    /// A call into module `module`'s function on a fiber.
+    struct Call {
+        vm: *const ScriptVm,
+        module: &'static str,
+        f: mlua::Function,
+        arg: f64,
+        result: Option<Result<f64, ScriptError>>,
+    }
+
+    unsafe fn call(context: *mut c_void) {
+        // SAFETY: the test's `Call` and its VM, alive and only read until the job is done.
+        let call = unsafe { &mut *context.cast::<Call>() };
+        // SAFETY: as above.
+        let vm = unsafe { &*call.vm };
+        call.result = Some(vm.call_function(call.module, &call.f, call.arg));
+    }
+
+    fn named(variables: &[Variable]) -> Vec<(&str, &str)> {
+        variables
+            .iter()
+            .map(|v| (v.name.as_str(), v.value.as_str()))
+            .collect()
     }
 
     #[test]
@@ -749,6 +1177,130 @@ return M
             None,
             "off: not placed"
         );
+    }
+
+    #[test]
+    fn a_stop_waits_with_its_frame_then_goes_on_or_ends_the_call() {
+        let settings = ScriptSettings {
+            call_budget: Duration::from_millis(20),
+            ..ScriptSettings::default()
+        };
+        let mut vm = ScriptVm::new(settings).unwrap();
+        vm.load_module("door", DOOR).unwrap();
+        vm.set_breakpoints("door", vec![stop(7)]);
+        // No handler: a pause point.
+        assert_eq!(vm.call::<_, f64>("door", "tick", 3.0).unwrap(), 16.0);
+        assert_eq!(vm.take_pause(), Some((String::from("door"), 7)));
+        // A handler, but no fiber to wait on: a pause point again.
+        vm.set_stop_handler(Some(Box::new(wait_on_fiber)));
+        assert_eq!(vm.call::<_, f64>("door", "tick", 3.0).unwrap(), 16.0);
+        assert_eq!(vm.take_pause(), Some((String::from("door"), 7)));
+        // On a fiber: the call waits at line 7, with its frame.
+        let fiber = Fiber::new(1 << 20).unwrap();
+        let tick: mlua::Function = vm.exports("door").unwrap().get("tick").unwrap();
+        let mut c = Call {
+            vm: &raw const vm,
+            module: "door",
+            f: tick,
+            arg: 3.0,
+            result: None,
+        };
+        // SAFETY: `c` and the VM outlive the job, only read meanwhile.
+        let ran = unsafe { fiber.run(call, (&raw mut c).cast()) };
+        assert_eq!(ran, Ran::Suspended);
+        assert!(c.result.is_none(), "it waits");
+        let at = AT.take().unwrap();
+        assert_eq!((at.module.as_str(), at.line), ("door", 7));
+        assert_eq!(named(&at.locals), [("speed", "3"), ("doubled", "6")]);
+        assert_eq!(named(&at.upvalues), [("BASE", "10")]);
+        assert_eq!(
+            at.stack[0],
+            Frame {
+                source: String::from("door"),
+                line: Some(7),
+                function: Some(String::from("tick")),
+            }
+        );
+        // The editor's frames meanwhile: they read the breakpoints and change them, and
+        // the time past the call's budget does not count.
+        let debugger = vm.debugger();
+        assert_eq!(debugger.breakpoint_states("door")[0].hits, 3);
+        debugger.set_breakpoints("door", vec![log(7, "doubled {doubled}"), stop(7)]);
+        #[allow(clippy::disallowed_methods)] // a test's wait: no precision needed
+        std::thread::sleep(Duration::from_millis(40));
+        ANSWER.set(Resume::Continue);
+        assert_eq!(fiber.resume(), Ran::Done);
+        assert_eq!(c.result.take(), Some(Ok(16.0)));
+        assert!(
+            vm.take_logged().is_empty(),
+            "set after its line was reached"
+        );
+        // The next call logs, then stops: ended there, the call fails as aborted.
+        c.arg = 4.0;
+        // SAFETY: as above.
+        let ran = unsafe { fiber.run(call, (&raw mut c).cast()) };
+        assert_eq!(ran, Ran::Suspended);
+        assert_eq!(texts(&vm), ["doubled 8"]);
+        ANSWER.set(Resume::Abort);
+        assert_eq!(fiber.resume(), Ran::Done);
+        assert_eq!(
+            c.result.take(),
+            Some(Err(ScriptError::Aborted {
+                module: String::from("door")
+            }))
+        );
+        // The VM goes on as before.
+        vm.set_breakpoints("door", Vec::new());
+        assert_eq!(vm.call::<_, f64>("door", "tick", 5.0).unwrap(), 20.0);
+    }
+
+    #[test]
+    fn a_stops_values_are_read_as_they_are() {
+        let mut vm = ScriptVm::new(ScriptSettings::default()).unwrap();
+        let source = "
+local M = {}
+function M.look(n)
+    local text = string.rep('ab', 40)
+    local v = vector.create(1, 2.5, -3)
+    local list = {1, 2, 3}
+    local yes, none = true, nil
+    local big, part = 2^60, 0.1 + 0.2
+    return n + #list
+end
+return M
+";
+        vm.load_module("look", source).unwrap();
+        vm.set_breakpoints("look", vec![stop(9)]);
+        vm.set_stop_handler(Some(Box::new(wait_on_fiber)));
+        let fiber = Fiber::new(1 << 20).unwrap();
+        let look: mlua::Function = vm.exports("look").unwrap().get("look").unwrap();
+        let mut c = Call {
+            vm: &raw const vm,
+            module: "look",
+            f: look,
+            arg: 1.0,
+            result: None,
+        };
+        // SAFETY: `c` and the VM outlive the job, only read meanwhile.
+        let ran = unsafe { fiber.run(call, (&raw mut c).cast()) };
+        assert_eq!(ran, Ran::Suspended);
+        let at = AT.take().unwrap();
+        let cut = format!("\"{}\u{2026}\"", "ab".repeat(30));
+        assert_eq!(
+            named(&at.locals),
+            [
+                ("n", "1"),
+                ("text", cut.as_str()),
+                ("v", "(1, 2.5, -3)"),
+                ("list", "table #3"),
+                ("yes", "true"),
+                ("none", "nil"),
+                ("big", "1.152921504606847e18"),
+                ("part", "0.30000000000000004"),
+            ]
+        );
+        assert_eq!(fiber.resume(), Ran::Done);
+        assert_eq!(c.result.take(), Some(Ok(4.0)));
     }
 
     #[test]

@@ -51,7 +51,10 @@
 pub use mlua;
 
 pub mod debug;
-pub use debug::{BreakAction, BreakState, Breakpoint, Hits, Logged};
+pub use debug::{
+    BreakAction, BreakState, Breakpoint, Frame, Hits, Logged, Resume, ScriptDebugger, StopHandler,
+    Stopped, Variable,
+};
 
 use mlua::chunk::Compiler;
 use mlua::{FromLuaMulti, Function, IntoLuaMulti, Lua, Table, Value};
@@ -82,6 +85,24 @@ fn clock_epoch() -> Instant {
 /// Nanoseconds since [`clock_epoch`].
 fn now_ns() -> u64 {
     clock_epoch().elapsed().as_nanos() as u64
+}
+
+/// The running call's budget held while its script is stopped (ADR 0119): what was left
+/// of it; none when no call runs under one.
+pub(crate) fn hold_budget() -> Option<u64> {
+    let deadline = DEADLINE.get();
+    (deadline != 0).then(|| {
+        DEADLINE.set(0);
+        deadline.saturating_sub(now_ns())
+    })
+}
+
+/// The budget [`hold_budget`] held, running again from now.
+pub(crate) fn release_budget(left: Option<u64>) {
+    if let Some(left) = left {
+        DEADLINE.set(now_ns().saturating_add(left).max(1));
+        SINCE_CHECK.set(0);
+    }
 }
 
 /// Luau's interrupt, at calls and loops' back edges: a call past its deadline is stopped
@@ -171,6 +192,11 @@ pub enum ScriptError {
         /// Module name.
         module: String,
     },
+    /// The developer ended the call at a stop ([`Resume::Abort`]).
+    Aborted {
+        /// Module name.
+        module: String,
+    },
     /// The script ran out of its memory limit.
     OutOfMemory,
     /// No module with this name is loaded.
@@ -199,6 +225,7 @@ impl core::fmt::Display for ScriptError {
                 message,
             } => write!(f, "{module}{}: {message}", at(line)),
             Self::Timeout { module } => write!(f, "{module}: script exceeded its time budget"),
+            Self::Aborted { module } => write!(f, "{module}: {ABORT_MARKER}"),
             Self::OutOfMemory => write!(f, "scripts ran out of memory"),
             Self::UnknownModule(m) => write!(f, "no script module `{m}`"),
             Self::UnknownFunction { module, function } => {
@@ -211,11 +238,14 @@ impl core::fmt::Display for ScriptError {
 impl std::error::Error for ScriptError {}
 
 const TIMEOUT_MARKER: &str = "script exceeded its time budget";
+/// The error a call ended at a stop raises ([`ScriptError::Aborted`]).
+pub(crate) const ABORT_MARKER: &str = "ended by the debugger at a stop";
 
 struct Module {
     exports: Table,
     state: Table,
-    /// The chunk that made it: breakpoints are set through it.
+    /// The chunk that made it: what the debugger places breakpoints through again when a
+    /// reload fails.
     chunk: Function,
 }
 
@@ -302,17 +332,23 @@ impl ScriptVm {
         let function = chunk.into_function().map_err(|e| compile_error(name, &e))?;
         // Its breakpoints before it runs: its top level and the closures it makes have them.
         self.keep_chunk(name, &function);
-        self.place_breakpoints(name, &function);
         self.arm();
         let result = function.call::<Value>(state.clone());
         self.disarm();
-        let exports = match result.map_err(|e| self.map(name, e))? {
-            Value::Table(t) => t,
-            other => {
-                return Err(ScriptError::Runtime {
-                    module: name.to_owned(),
-                    line: None,
-                    message: format!("a module must return a table, not {}", other.type_name()),
+        let exports = match result {
+            Ok(Value::Table(t)) => t,
+            failed => {
+                // The old version stays, and the debugger goes back to its chunk.
+                if let Some(old) = self.modules.get(name).map(|m| m.chunk.clone()) {
+                    self.keep_chunk(name, &old);
+                }
+                return Err(match failed {
+                    Err(e) => self.map(name, e),
+                    Ok(other) => ScriptError::Runtime {
+                        module: name.to_owned(),
+                        line: None,
+                        message: format!("a module must return a table, not {}", other.type_name()),
+                    },
                 });
             }
         };
@@ -385,74 +421,62 @@ impl ScriptVm {
         r.map_err(|e| self.map(module, e))
     }
 
+    /// The debugger apart from the VM: what reads and sets breakpoints while a script is
+    /// stopped and the host's stage holds the VM ([`ScriptDebugger`]).
+    pub fn debugger(&self) -> ScriptDebugger {
+        ScriptDebugger::new(&self.lua)
+    }
+
     /// Module `module`'s breakpoints from now on (ADR 0119), replacing its others; placed
     /// at once when it is loaded, else when it loads. Kept through its reloads.
-    pub fn set_breakpoints(&mut self, module: &str, breakpoints: Vec<Breakpoint>) {
-        let old = self
-            .lua
-            .app_data_mut::<debug::Debugger>()
-            .map(|mut d| d.set(module, breakpoints))
-            .unwrap_or_default();
-        if let Some(chunk) = self.modules.get(module).map(|m| m.chunk.clone()) {
-            for line in old {
-                breakpoint(&self.lua, &chunk, line, false);
-            }
-            self.place_breakpoints(module, &chunk);
-        }
+    pub fn set_breakpoints(&self, module: &str, breakpoints: Vec<Breakpoint>) {
+        self.debugger().set_breakpoints(module, breakpoints);
     }
 
     /// How module `module`'s breakpoints are doing, in the order they were set: where they
     /// were placed, their hits, a logpoint's latest message, an error.
     pub fn breakpoint_states(&self, module: &str) -> Vec<BreakState> {
-        self.lua
-            .app_data_ref::<debug::Debugger>()
-            .map(|d| d.states(module))
-            .unwrap_or_default()
+        self.debugger().breakpoint_states(module)
     }
 
     /// The logpoints' messages since the last call.
     pub fn take_logged(&self) -> Vec<Logged> {
-        self.lua
-            .app_data_mut::<debug::Debugger>()
-            .map(|mut d| d.take_logged())
-            .unwrap_or_default()
+        self.debugger().take_logged()
     }
 
     /// The module and line of the pause point reached since the last call, if one was:
     /// the game pauses after the tick it was reached in.
     pub fn take_pause(&self) -> Option<(String, u32)> {
-        self.lua
-            .app_data_mut::<debug::Debugger>()
-            .and_then(|mut d| d.take_pause())
+        self.debugger().take_pause()
     }
 
     /// Whether a pause point was reached and its pause not taken yet ([`Self::take_pause`]):
     /// the ticks left in the frame are not run.
     pub fn pause_asked(&self) -> bool {
-        self.lua
-            .app_data_ref::<debug::Debugger>()
-            .is_some_and(|d| d.pause_asked())
+        self.debugger().pause_asked()
     }
 
     /// Every breakpoint's hits, latest message and error back to none, as a new Play
     /// starts; where they are placed is kept.
     pub fn reset_breakpoint_states(&self) {
-        if let Some(mut d) = self.lua.app_data_mut::<debug::Debugger>() {
-            d.reset();
-        }
+        self.debugger().reset_breakpoint_states();
     }
 
     /// Raised whenever a breakpoint's state changes (placed, hit, a message, an error): the
     /// editor reads [`Self::breakpoint_states`] again only when it moved.
     pub fn breakpoints_version(&self) -> u64 {
-        self.lua
-            .app_data_ref::<debug::Debugger>()
-            .map_or(0, |d| d.version())
+        self.debugger().breakpoints_version()
+    }
+
+    /// What a stop calls from now on ([`StopHandler`]); without one, stops pause the game
+    /// after their tick.
+    pub fn set_stop_handler(&self, handler: Option<StopHandler>) {
+        self.debugger().set_stop_handler(handler);
     }
 
     /// Module `module`'s chunk kept in the registry for the debugger, which places its
-    /// breakpoints again through it after they were reached (`debug::rearm`); the old
-    /// chunk's let go of.
+    /// breakpoints through it (at once, again after they were reached, and when the editor
+    /// changes them); the old chunk's let go of.
     fn keep_chunk(&self, module: &str, chunk: &Function) {
         // SAFETY: the chunk is the one argument pushed; `lua_ref` keeps it in the registry
         // and leaves it there.
@@ -478,21 +502,7 @@ impl ScriptVm {
                 })
             };
         }
-    }
-
-    /// Places module `module`'s enabled breakpoints in `chunk`.
-    fn place_breakpoints(&self, module: &str, chunk: &Function) {
-        let wanted = self
-            .lua
-            .app_data_ref::<debug::Debugger>()
-            .map(|d| d.wanted(module))
-            .unwrap_or_default();
-        for (slot, line) in wanted {
-            let placed = breakpoint(&self.lua, chunk, line, true);
-            if let Some(mut d) = self.lua.app_data_mut::<debug::Debugger>() {
-                d.placed(module, slot, placed);
-            }
-        }
+        debug::place(&self.lua, module, id);
     }
 
     /// Bytes the VM's heap uses.
@@ -544,24 +554,6 @@ impl ScriptVm {
     }
 }
 
-/// Sets (or clears) a breakpoint on `line` of `chunk` and the functions in it: the line
-/// Luau placed it on (the next one with code), none when no line from there has code.
-fn breakpoint(lua: &Lua, chunk: &Function, line: u32, enabled: bool) -> Option<u32> {
-    let line = c_int::try_from(line).ok()?;
-    // SAFETY: the chunk is the one argument pushed; `lua_breakpoint` reads its function and
-    // patches instructions in place, and the placed line is pushed back as the result.
-    let placed = unsafe {
-        lua.exec_raw::<c_int>(chunk.clone(), |state| {
-            let placed = mlua::ffi::lua_breakpoint(state, -1, line, c_int::from(enabled));
-            // What stays on the stack is the result.
-            mlua::ffi::lua_settop(state, 0);
-            mlua::ffi::lua_pushinteger(state, placed as _);
-        })
-    }
-    .ok()?;
-    u32::try_from(placed).ok().filter(|&l| l > 0)
-}
-
 /// `name:12: message` → (12, message).
 fn split_location<'a>(module: &str, text: &'a str) -> (Option<u32>, &'a str) {
     let prefix = format!("{module}:");
@@ -599,6 +591,11 @@ fn runtime_error(module: &str, e: &mlua::Error) -> ScriptError {
     };
     if text.contains(TIMEOUT_MARKER) {
         return ScriptError::Timeout {
+            module: module.to_owned(),
+        };
+    }
+    if text.contains(ABORT_MARKER) {
+        return ScriptError::Aborted {
             module: module.to_owned(),
         };
     }
