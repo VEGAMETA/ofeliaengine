@@ -443,6 +443,13 @@ impl ScriptDebugger {
         self.with(|d| d.version()).unwrap_or(0)
     }
 
+    /// Whether module `module` is loaded: a breakpoint it did not place has no code from
+    /// its line on.
+    pub fn is_loaded(&self, module: &str) -> bool {
+        self.with(|d| d.chunks.contains_key(module))
+            .unwrap_or(false)
+    }
+
     /// What a stop calls from now on; without one, stops pause the game after their tick.
     pub fn set_stop_handler(&self, handler: Option<StopHandler>) {
         self.with(|d| d.handler = handler);

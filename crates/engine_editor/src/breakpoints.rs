@@ -5,13 +5,15 @@
 //! runs: a script's unsaved edits move its marks, not the code the host has.
 
 use crate::code::{Document, Move, follow_start};
-use engine_app::scripts::{BreakAction, BreakState, Breakpoint, Hits, Scripts, module_name};
+use engine_app::scripts::{BreakAction, BreakState, Breakpoint, Hits, ScriptDebugger, module_name};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// What a breakpoint does when a script reaches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Act {
+    /// Stops the script at its line, the game in the middle of its tick, until F5 (●).
+    Stop,
     /// Logs its text and the script goes on: a logpoint (◆).
     Log,
     /// Pauses the game after the tick it is reached in: a pause point (‖).
@@ -64,6 +66,7 @@ impl Mark {
         Ok(Breakpoint {
             line,
             action: match self.act {
+                Act::Stop => BreakAction::Stop,
                 Act::Log => BreakAction::Log(self.log.clone()),
                 Act::Pause => BreakAction::Pause,
             },
@@ -335,7 +338,8 @@ impl BreakEdit {
 }
 
 /// What the player's script host was given and says of the breakpoints: their lines in
-/// the order given, their states, read again only when the host's version moves.
+/// the order given, their states, read again only when the host's version moves. It is
+/// reached through the host's debugger, which works while a stage is stopped too.
 #[derive(Debug, Default)]
 pub(crate) struct HostView {
     /// Each file's breakpoints' lines (from 1), in the order the host was given them.
@@ -358,7 +362,7 @@ impl HostView {
     pub(crate) fn sync<'a>(
         &mut self,
         marks: &mut Breakpoints,
-        scripts: Option<&mut Scripts>,
+        scripts: Option<&ScriptDebugger>,
         doc_of: impl Fn(&Path) -> Option<&'a Document>,
     ) {
         let Some(scripts) = scripts else {
@@ -400,7 +404,7 @@ impl HostView {
             let Some(module) = module_name(file) else {
                 continue;
             };
-            if scripts.module_of(file).is_some() {
+            if scripts.is_loaded(&module) {
                 self.loaded.insert(file.clone());
             }
             let states = scripts.breakpoint_states(&module);

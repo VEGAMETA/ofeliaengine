@@ -282,7 +282,7 @@ fn tap<G: Game>(game: &mut EditorGame<G>, virtual_key: u16, scancode: u16) {
 }
 
 #[test]
-fn a_logpoint_from_the_session_logs_in_play_and_f9_pauses_it() {
+fn a_logpoint_logs_in_play_and_f9_stops_the_script_at_its_line() {
     let dir = temp_dir("breakpoints");
     write_project(&dir, "Front door", true);
     // The last session left the script's tab shown, the caret on line 3 (`local t`), and
@@ -336,17 +336,39 @@ fn a_logpoint_from_the_session_logs_in_play_and_f9_pauses_it() {
         .unwrap();
         std::fs::write(path, png).unwrap();
     }
-    // F9 on the caret's line: a pause point; the tick that reaches it pauses Play.
+    // F9 on the caret's line: a breakpoint; the next tick stops there, the script's tab in
+    // front, the arrow and the band on the line, the frame's values after it.
     tap(&mut game, 0x78, 0x43);
     for _ in 0..4 {
         frame(&mut player, &mut game, &mut overlay);
     }
     let said = game.message().unwrap_or_default();
     assert!(
-        said.contains("pause point at scripts/spin.luau:3"),
+        said.starts_with("Stopped at scripts/spin.luau:3 in on_tick"),
         "{said}"
     );
-    assert!(game.playing() && !player.simulating(), "paused");
+    assert_eq!(game.stopped_line(), Some(3));
+    let values = game.breakpoint_note(3).unwrap_or_default();
+    assert!(
+        values.starts_with("self = ") && values.contains("dt = "),
+        "{values}"
+    );
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_STOP_PNG") {
+        let extent = player.extent();
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    // Stopped: the world kept still but for the editor's edits.
     let rotation =
         |player: &mut Player| player.world_mut().get::<Transform>(door).unwrap().rotation;
     let still = rotation(&mut player);
@@ -354,32 +376,64 @@ fn a_logpoint_from_the_session_logs_in_play_and_f9_pauses_it() {
         frame(&mut player, &mut game, &mut overlay);
     }
     assert_eq!(rotation(&mut player), still, "the world kept still");
-    // Alt+F9: its options under the line, the keys to its condition; typed, Enter keeps it.
-    send(
-        &mut game,
-        WindowEventKind::Key {
-            virtual_key: 0x12,
-            scancode: 0x38,
-            extended: false,
-            pressed: true,
-            repeat: false,
-        },
-    );
+    assert!(player.script_stop().is_some() && game.playing());
+    player
+        .world_mut()
+        .get_mut::<Transform>(door)
+        .unwrap()
+        .translation
+        .y = 2.0;
+    // Ctrl+F9 turns the breakpoint off, F5 goes on: the tick ends, the door turns again.
+    let ctrl = |game: &mut EditorGame<Still>, pressed: bool| {
+        send(
+            game,
+            WindowEventKind::Key {
+                virtual_key: 0x11,
+                scancode: 0x1D,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        );
+    };
+    ctrl(&mut game, true);
     tap(&mut game, 0x78, 0x43);
-    send(
-        &mut game,
-        WindowEventKind::Key {
-            virtual_key: 0x12,
-            scancode: 0x38,
-            extended: false,
-            pressed: false,
-            repeat: false,
-        },
-    );
+    ctrl(&mut game, false);
+    frame(&mut player, &mut game, &mut overlay);
+    tap(&mut game, 0x74, 0x3F);
+    for _ in 0..6 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(player.script_stop().is_none(), "gone on");
+    assert_eq!(game.stopped_line(), None);
+    assert_ne!(rotation(&mut player), still, "it turns again");
+    let y = player
+        .world_mut()
+        .get::<Transform>(door)
+        .unwrap()
+        .translation
+        .y;
+    assert_eq!(y, 2.0, "the edit at the stop stays");
+    // Alt+F9: its options under the line, the keys to its condition; typed, Enter keeps it.
+    let alt = |game: &mut EditorGame<Still>, pressed: bool| {
+        send(
+            game,
+            WindowEventKind::Key {
+                virtual_key: 0x12,
+                scancode: 0x38,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        );
+    };
+    alt(&mut game, true);
+    tap(&mut game, 0x78, 0x43);
+    alt(&mut game, false);
     for _ in 0..2 {
         frame(&mut player, &mut game, &mut overlay);
     }
-    for c in "self.rate > 5".chars() {
+    for c in "self.rate > 1".chars() {
         send(&mut game, WindowEventKind::Char(c));
     }
     frame(&mut player, &mut game, &mut overlay);
@@ -402,23 +456,37 @@ fn a_logpoint_from_the_session_logs_in_play_and_f9_pauses_it() {
     frame(&mut player, &mut game, &mut overlay);
     let said = game.message().unwrap_or_default();
     assert!(
-        said.starts_with("Pause point at scripts/spin.luau:3"),
+        said.starts_with("Breakpoint at scripts/spin.luau:3"),
         "{said}"
     );
-    // F7 goes on: the condition does not hold, the door turns.
-    tap(&mut game, 0x76, 0x41);
-    for _ in 0..6 {
+    // On again: its condition holds, the script stops; F8 stops Play there, the stopped
+    // call ending without an error, the world put back.
+    ctrl(&mut game, true);
+    tap(&mut game, 0x78, 0x43);
+    ctrl(&mut game, false);
+    for _ in 0..4 {
         frame(&mut player, &mut game, &mut overlay);
     }
-    assert!(player.simulating(), "going on");
-    assert_ne!(rotation(&mut player), still, "it turns again");
-    // Kept in the session: both breakpoints, lines from 1.
-    assert!(game.run_command(player.world_mut(), "play.stop"));
-    frame(&mut player, &mut game, &mut overlay);
+    assert!(player.script_stop().is_some(), "stopped again");
+    tap(&mut game, 0x77, 0x42);
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(!game.playing() && player.script_stop().is_none());
+    let said = game.message().unwrap_or_default();
+    assert!(!said.contains("error"), "{said}");
+    let y = player
+        .world_mut()
+        .get::<Transform>(door)
+        .unwrap()
+        .translation
+        .y;
+    assert_eq!(y, 0.0, "the world as Play found it");
+    // Kept in the session: a breakpoint that stops says no more than its condition.
     game.end_session(player.world_mut());
     let session = std::fs::read_to_string(dir.join(".ofelia/session")).unwrap();
     assert!(
-        session.contains("line = 3\npause = true\ncondition = \"self.rate > 5\""),
+        session.contains("line = 3\ncondition = \"self.rate > 1\"\n"),
         "{session}"
     );
     assert!(

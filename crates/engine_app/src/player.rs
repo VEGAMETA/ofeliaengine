@@ -2881,10 +2881,8 @@ impl Player {
                         None => scripts.frame_with(world, frame_dt, alpha, physics),
                     }
                 }
-                // The game's presentation waits for a stopped stage.
-                if !held.get() {
-                    game_cell.borrow_mut().present(world, alpha);
-                }
+                // As while paused: a game in the editor draws the editor's frame here.
+                game_cell.borrow_mut().present(world, alpha);
                 // Models (ADR 0108): their meshes and materials reach the GPU this frame,
                 // the pools beginning theirs after the simulation.
                 assets.sync(

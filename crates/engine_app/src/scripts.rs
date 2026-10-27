@@ -62,7 +62,9 @@ use engine_script::mlua::{
     self, AnyUserData, Function, Lua, MetaMethod, Table, UserData, UserDataMethods, Value, Vector,
 };
 /// The debugger's breakpoints as the host takes them (ADR 0119): the editor's.
-pub use engine_script::{BreakAction, BreakState, Breakpoint, Hits};
+pub use engine_script::{
+    BreakAction, BreakState, Breakpoint, Hits, ScriptDebugger, Stopped, Variable,
+};
 use engine_script::{ScriptError, ScriptSettings, ScriptVm};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

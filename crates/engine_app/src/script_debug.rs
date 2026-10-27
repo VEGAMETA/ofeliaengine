@@ -320,10 +320,8 @@ return Count
         let c = world.spawn((Transform::default(),));
         debug.debugger().set_breakpoints("count", Vec::new());
         // SAFETY: as above.
-        assert!(
-            unsafe { debug.go_on(&mut world, core::ptr::null()) }.is_none(),
-            "not told"
-        );
+        let untold = unsafe { debug.go_on(&mut world, core::ptr::null()) };
+        assert!(untold.is_none(), "not told");
         debug.held.as_mut().unwrap().answer = Some(Resume::Continue);
         // SAFETY: as above.
         let ended = unsafe { debug.go_on(&mut world, core::ptr::null()) }.unwrap();
