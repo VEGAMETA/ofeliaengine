@@ -637,7 +637,7 @@ Last updated: 2026-10-28.
     - the VS Code extension is kept in the repository and installed from a `.vsix`; on the
       Marketplace and Open VSX at the first public release;
     - pause on errors is on by default in the editor, once per line per Play.
-  - **E9-1a-2, logpoints and pause points in the editor** (#PR, ADR 0119's as-built):
+  - **E9-1a-2, logpoints and pause points in the editor** (#379, ADR 0119's as-built):
     - a breakpoints' column in the game's scripts' gutter: ◆ logpoints and circled ‖ pause
       points, hollow when off, a bar for a condition or a hit rule; a click, Shift, Alt,
       the middle and right buttons; F9, Shift+F9, Ctrl+F9, Alt+F9, Ctrl+Shift+F9;
