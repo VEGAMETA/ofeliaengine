@@ -151,3 +151,12 @@ pub const RESET: &str = "\u{F054C}";
 /// Something needs a look (`md-alert`): a scene's file changed on disk since its unsaved
 /// changes.
 pub const ALERT: &str = "\u{F0026}";
+
+/// A logpoint in the gutter (`cod-debug_breakpoint_log`): it logs, the script goes on.
+pub const LOGPOINT: &str = "\u{EAAB}";
+/// A logpoint turned off (`cod-debug_breakpoint_log_unverified`).
+pub const LOGPOINT_OFF: &str = "\u{EAAA}";
+/// A pause point in the gutter (`md-pause_circle`): the game pauses after the tick.
+pub const PAUSE_POINT: &str = "\u{F03E5}";
+/// A pause point turned off (`md-pause_circle_outline`).
+pub const PAUSE_POINT_OFF: &str = "\u{F03E6}";

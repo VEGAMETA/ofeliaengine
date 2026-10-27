@@ -265,6 +265,170 @@ fn a_project_without_scripts_gets_its_script_host_from_its_first_new_script() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A key pressed and released.
+fn tap<G: Game>(game: &mut EditorGame<G>, virtual_key: u16, scancode: u16) {
+    for pressed in [true, false] {
+        send(
+            game,
+            WindowEventKind::Key {
+                virtual_key,
+                scancode,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        );
+    }
+}
+
+#[test]
+fn a_logpoint_from_the_session_logs_in_play_and_f9_pauses_it() {
+    let dir = temp_dir("breakpoints");
+    write_project(&dir, "Front door", true);
+    // The last session left the script's tab shown, the caret on line 3 (`local t`), and
+    // a logpoint on line 4 (ADR 0119).
+    std::fs::create_dir_all(dir.join(".ofelia")).unwrap();
+    std::fs::write(
+        dir.join(".ofelia/session"),
+        "[session version=1]\n\n[editor]\nscript = 0\n\n[script]\npath = \
+         \"scripts/spin.luau\"\ncaret = (2, 4)\nscroll = (0, 0)\n\n[breakpoint]\npath = \
+         \"scripts/spin.luau\"\nline = 4\nlog = \"rate {self.rate}\"\n",
+    )
+    .unwrap();
+    let Some((mut player, settings)) = player(&dir) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let door = find_named(player.world_mut(), "Front door").unwrap();
+    assert!(player.add_script(door, "EditorSpin"));
+    // Editing: no hook runs, nothing logged.
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(game.breakpoint_note(4), None);
+    // Play: the logpoint's latest message after its line, with its hits.
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let note = game.breakpoint_note(4).unwrap_or_default();
+    assert!(note.starts_with("rate 2  ×"), "{note}");
+    let hits: u64 = note.rsplit('×').next().unwrap().parse().unwrap();
+    assert!(hits >= 5, "{note}");
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_BREAKPOINTS_PNG") {
+        let extent = player.extent();
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    // F9 on the caret's line: a pause point; the tick that reaches it pauses Play.
+    tap(&mut game, 0x78, 0x43);
+    for _ in 0..4 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let said = game.message().unwrap_or_default();
+    assert!(
+        said.contains("pause point at scripts/spin.luau:3"),
+        "{said}"
+    );
+    assert!(game.playing() && !player.simulating(), "paused");
+    let rotation =
+        |player: &mut Player| player.world_mut().get::<Transform>(door).unwrap().rotation;
+    let still = rotation(&mut player);
+    for _ in 0..5 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(rotation(&mut player), still, "the world kept still");
+    // Alt+F9: its options under the line, the keys to its condition; typed, Enter keeps it.
+    send(
+        &mut game,
+        WindowEventKind::Key {
+            virtual_key: 0x12,
+            scancode: 0x38,
+            extended: false,
+            pressed: true,
+            repeat: false,
+        },
+    );
+    tap(&mut game, 0x78, 0x43);
+    send(
+        &mut game,
+        WindowEventKind::Key {
+            virtual_key: 0x12,
+            scancode: 0x38,
+            extended: false,
+            pressed: false,
+            repeat: false,
+        },
+    );
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    for c in "self.rate > 5".chars() {
+        send(&mut game, WindowEventKind::Char(c));
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_BREAK_OPTIONS_PNG") {
+        let extent = player.extent();
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    enter(&mut game);
+    frame(&mut player, &mut game, &mut overlay);
+    let said = game.message().unwrap_or_default();
+    assert!(
+        said.starts_with("Pause point at scripts/spin.luau:3"),
+        "{said}"
+    );
+    // F7 goes on: the condition does not hold, the door turns.
+    tap(&mut game, 0x76, 0x41);
+    for _ in 0..6 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(player.simulating(), "going on");
+    assert_ne!(rotation(&mut player), still, "it turns again");
+    // Kept in the session: both breakpoints, lines from 1.
+    assert!(game.run_command(player.world_mut(), "play.stop"));
+    frame(&mut player, &mut game, &mut overlay);
+    game.end_session(player.world_mut());
+    let session = std::fs::read_to_string(dir.join(".ofelia/session")).unwrap();
+    assert!(
+        session.contains("line = 3\npause = true\ncondition = \"self.rate > 5\""),
+        "{session}"
+    );
+    assert!(
+        session.contains("line = 4\nlog = \"rate {self.rate}\""),
+        "{session}"
+    );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_script_changed_on_disk_runs_again_its_values_kept_by_name() {
     let dir = temp_dir("reload");

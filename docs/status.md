@@ -4,7 +4,7 @@ Where the engine stands and how work on it is run. A new session (coordinator or
 reads this after `CLAUDE.md` and `docs/agent-rules.md`. Keep it current: whoever merges a
 PR that changes the picture updates this file in the same PR.
 
-Last updated: 2026-10-23.
+Last updated: 2026-10-28.
 
 ## 0. Now (2026-10-22)
 
@@ -21,7 +21,7 @@ Last updated: 2026-10-23.
   - asset ids: ids inside our own files, a `.meta` beside foreign ones, references by id
     and path, the local database only a cache;
   - any scene can be a prefab.
-  - **Where it stands (2026-10-23):** E1 to E6 are done (E2b but for the cook's path, E3
+  - **Where it stands (2026-10-28):** E1 to E6 are done (E2b but for the cook's path, E3
     but for the tree's marks on what changed), and material slots on `Model`. E8, the
     code editor, is done but for rename and references across the project. E7, scripting
     v1 (ADR 0114), is done (reading scripts, scenes and prefabs from a release's packs
@@ -29,8 +29,9 @@ Last updated: 2026-10-23.
     steady state (ADR 0114's examples in the zero-allocation test). E10-2, Slang in the
     code editor, is done: errors from the front end, completion, hover, signatures and
     definitions from `slangd`. E9, the script debugger (ADR 0119, accepted), is under way:
-    its core's logpoints and pause points are in. E10-1 waits for the answer on the
-    material file. The entries below are in the order merged.
+    logpoints and pause points work from the code editor's gutter (E9-1a); stops,
+    stepping and the panel come next (E9-1b). E10-1 waits for the answer on the material
+    file. The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
@@ -636,15 +637,33 @@ Last updated: 2026-10-23.
     - the VS Code extension is kept in the repository and installed from a `.vsix`; on the
       Marketplace and Open VSX at the first public release;
     - pause on errors is on by default in the editor, once per line per Play.
+  - **E9-1a-2, logpoints and pause points in the editor** (#379, ADR 0119's as-built):
+    - a breakpoints' column in the game's scripts' gutter: ◆ logpoints and circled ‖ pause
+      points, hollow when off, a bar for a condition or a hit rule; a click, Shift, Alt,
+      the middle and right buttons; F9, Shift+F9, Ctrl+F9, Alt+F9, Ctrl+Shift+F9;
+    - an options line under the code: Log or Pause, the text, the condition, the hit rule;
+    - a logpoint's latest message and hits after its line while Play runs; a pause point
+      pauses Play after its tick;
+    - breakpoints follow their lines through edits, kept in the session, given to the
+      host on the lines of the code that runs (unsaved edits move the marks only);
+    - until stops come, F9 and a click make pause points;
+    - fixed: a breakpoint was reached once and lost on most lines (Luau's userdata
+      instructions write their own opcode back); placed again after each hit;
+    - measured: nothing without breakpoints; 0.6–1.4 µs a hit; F10 kept from the window
+      menu.
   - **Next, in this order:**
-    1. E9-1a-2:
-       - the gutter;
-       - breakpoints kept in the session and set in the VM;
-       - logpoints and pause points, with conditions and hit counts;
-       - measured: nothing without breakpoints;
-    2. E9-1b: stops on the stage's fiber, stepping, the panel, pause on errors; then E9-2
+    1. E9-1b: stops on the stage's fiber, stepping, the panel, pause on errors; then E9-2
        (DAP, VS Code) and E9-3 (the player). E10-1 waits for the answer on the material
        file.
+    2. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
+       per hook (`script Door.on_tick`) and each script's time and allocations in the
+       editor's profiler; Tracy has only the stages' zones (`scripts::tick`).
+    3. The editor's text layouts allocate when a text changes (found 2026-10-28): the
+       status line's FPS every half second makes a new layout (its string and glyphs).
+       Reuse the layouts that go out of use. The zero-allocation test missed it because
+       its frames ran faster than the FPS's update; on the Radeon they did not, on `main`
+       too. The editor's FPS now follows a fixed frame time (`Player::frame_time`), so the
+       test is the same on both GPUs.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
@@ -888,10 +907,11 @@ decisions). In short:
 
 ## 3. What is done (merged to main)
 
-Estimate of 2026-10-22 (after the view modes' V1b): the technical core about **94 %** done,
-the editor about **57 %** of its fifteen phases (E1 to E6 done, E8's core, E7 and E10
-begun), Luau about **45 %**, the whole engine about **80 %** (2026-10-20: 93 % and 66 %;
-2026-10-17: 92 % and 61 %; 2026-10-11: 74 % and 50 %). What comes after the base (queue item 10: terrain, water,
+Estimate of 2026-10-28 (after E9-1a-2): the technical core about **94 %** done, the editor
+about **63 %** of its fifteen phases (E1 to E8 done but E8's rename, E9 and E10 begun),
+Luau about **70 %** (scripting v1 done; the debugger's stops, DAP and the scripts'
+profiling left), the whole engine about **84 %** (2026-10-22: 94 %, 57 %, 45 % and 80 %;
+2026-10-20: 93 % and 66 %; 2026-10-17: 92 % and 61 %; 2026-10-11: 74 % and 50 %). What comes after the base (queue item 10: terrain, water,
 foliage, HLOD and impostors, VST3 hosting) is not counted.
 
 Done since 2026-10-17:
@@ -946,8 +966,8 @@ Left in the core: recording on the job system.
 | **Sound in the player**: `AudioSource`, `AudioSource3D`, `AudioListener` and `ReverbZone` components, positions saved; walls muffling and the room's reverb from rays through the physics world; one mixer for sources and videos; sounds from a live folder while developing, a sound pack in a release | done | ADR 0105 |
 | Audio, text, 2D, basic UI | solid / basic | §11, ADR 0015 |
 | Tests: golden images (FLIP, per vendor), per-pass perf gate, determinism, zero-allocation tests | solid | ADR 0062 |
-| Editor | E1, the foundation, done but for autosave, the session and the restart (E1-5b, E1-5c); E2–E14 ahead | ADR 0107 |
-| Luau | skeleton only, by plan (E7–E9) | §10 |
+| Editor | E1 to E7 done; E8, the code editor, but for rename across the project; E9, the debugger, begun (logpoints and pause points); E10-2 done; E10-1 and E11 to E14 ahead | ADR 0107 |
+| Luau | scripting v1 done: components and hooks, queries and systems, physics, input, messages and timers, saves, networking, reload on save, types; the debugger begun | §10, ADRs 0114, 0119 |
 
 ## 4. In flight
 

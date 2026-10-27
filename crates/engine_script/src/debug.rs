@@ -29,6 +29,62 @@ use std::ffi::{CStr, c_int};
 thread_local! {
     /// Set while a breakpoint's condition or text runs: breakpoints it reaches pass.
     static EVALUATING: Cell<bool> = const { Cell::new(false) };
+    /// A breakpoint was reached since the last [`rearm`]. Luau's loader turns field reads,
+    /// writes and method calls with known names into userdata instructions whose slow
+    /// path writes the plain instruction's opcode over its own, the breakpoint's with it:
+    /// the breakpoints reached are placed again at the next interrupt (a call, a return, a
+    /// loop's turn) and before the next call into a script.
+    static REARM: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether breakpoints reached wait to be placed again ([`rearm`]).
+pub(crate) fn rearm_pending() -> bool {
+    REARM.get()
+}
+
+/// Places the breakpoints reached since the last call again, through their modules'
+/// chunks: the instructions they patched may have patched themselves back
+/// ([`REARM`]). Their lines are placed as they were, so nothing else changes.
+///
+/// # Safety
+///
+/// `state` is a thread of the VM, outside any other call into Luau's API.
+pub(crate) unsafe fn rearm(state: *mut ffi::lua_State) {
+    REARM.set(false);
+    // SAFETY: as the caller says; each chunk is pushed, its breakpoints placed through it,
+    // and popped.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        let lua = Lua::get_or_init_from_ptr(state);
+        let mut wanted = {
+            let Some(mut dbg) = lua.app_data_mut::<Debugger>() else {
+                return;
+            };
+            let reached = std::mem::take(&mut dbg.reached);
+            let mut wanted = Vec::with_capacity(reached.len());
+            for (module, line) in reached {
+                let placed = dbg.modules.get(&module).is_some_and(|slots| {
+                    slots
+                        .iter()
+                        .any(|s| s.asked.enabled && s.state.placed == Some(line))
+                });
+                if let (true, Some(&chunk)) = (placed, dbg.chunks.get(&module)) {
+                    wanted.push((chunk, line));
+                }
+            }
+            wanted
+        };
+        wanted.dedup();
+        if ffi::lua_checkstack(state, 1) == 0 {
+            return;
+        }
+        for (chunk, line) in wanted {
+            ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, chunk);
+            if let Ok(line) = c_int::try_from(line) {
+                ffi::lua_breakpoint(state, -1, line, 1);
+            }
+            ffi::lua_settop(state, ffi::lua_gettop(state) - 1);
+        }
+    }));
 }
 
 /// What a breakpoint does when a script reaches it and its condition and hits allow.
@@ -131,28 +187,59 @@ pub(crate) struct Debugger {
     /// References no longer used, given back at the next breakpoint.
     dropped: Vec<c_int>,
     logged: Vec<Logged>,
-    pause: bool,
+    /// The module and line of the pause point that asked for a pause.
+    pause: Option<(String, u32)>,
+    /// Raised whenever a state changes: what the editor compares before it reads them.
+    version: u64,
+    /// Each module's chunk, as a registry reference: what [`rearm`] places breakpoints
+    /// through again.
+    chunks: HashMap<String, c_int>,
+    /// The modules' lines reached since the last [`rearm`].
+    reached: Vec<(String, u32)>,
 }
 
 impl Debugger {
-    /// Module `module`'s breakpoints from now on, none placed yet; the old ones returned to
-    /// be taken out.
+    /// Module `module`'s breakpoints from now on, none placed yet; the old ones' lines
+    /// returned to be taken out. One asked for as before keeps its hits, its message and
+    /// its error: the editor gives a module's whole list when one of them changes.
     pub(crate) fn set(&mut self, module: &str, asked: Vec<Breakpoint>) -> Vec<u32> {
-        let old = self.modules.insert(
-            module.to_owned(),
-            asked
-                .into_iter()
-                .map(|asked| Slot {
-                    asked,
-                    state: BreakState::default(),
-                })
-                .collect(),
-        );
+        let mut old = self.modules.remove(module).unwrap_or_default();
+        let lines = old.iter().filter_map(|s| s.state.placed).collect();
+        let slots = asked
+            .into_iter()
+            .map(|asked| {
+                let state = old
+                    .iter()
+                    .position(|s| s.asked == asked)
+                    .map(|k| old.swap_remove(k).state)
+                    .map(|s| BreakState { placed: None, ..s })
+                    .unwrap_or_default();
+                Slot { asked, state }
+            })
+            .collect();
+        self.modules.insert(module.to_owned(), slots);
         self.forget_code(module);
-        old.into_iter()
-            .flatten()
-            .filter_map(|s| s.state.placed)
-            .collect()
+        self.version += 1;
+        lines
+    }
+
+    /// Every breakpoint's hits, message and error back to none (a new Play), where they
+    /// are placed kept.
+    pub(crate) fn reset(&mut self) {
+        for slot in self.modules.values_mut().flatten() {
+            slot.state = BreakState {
+                placed: slot.state.placed,
+                ..BreakState::default()
+            };
+        }
+        self.logged.clear();
+        self.pause = None;
+        self.version += 1;
+    }
+
+    /// Raised whenever a breakpoint's state changes.
+    pub(crate) fn version(&self) -> u64 {
+        self.version
     }
 
     /// Module `module`'s compiled code goes (its breakpoints changed, or its chunk).
@@ -186,6 +273,7 @@ impl Debugger {
         }
         // A new chunk: its code is compiled again for it.
         self.forget_code(module);
+        self.version += 1;
     }
 
     /// Module `module`'s breakpoints' states, in the order they were set.
@@ -199,8 +287,19 @@ impl Debugger {
         std::mem::take(&mut self.logged)
     }
 
-    pub(crate) fn take_pause(&mut self) -> bool {
-        std::mem::take(&mut self.pause)
+    pub(crate) fn take_pause(&mut self) -> Option<(String, u32)> {
+        self.pause.take()
+    }
+
+    /// Whether a pause point asked for a pause that is not taken yet.
+    pub(crate) fn pause_asked(&self) -> bool {
+        self.pause.is_some()
+    }
+
+    /// Module `module`'s chunk from now on, as a registry reference; the one it replaces,
+    /// to be let go of.
+    pub(crate) fn set_chunk(&mut self, module: &str, chunk: c_int) -> Option<c_int> {
+        self.chunks.insert(module.to_owned(), chunk)
     }
 }
 
@@ -220,20 +319,25 @@ pub(crate) unsafe extern "C-unwind" fn debugbreak(
     state: *mut ffi::lua_State,
     _: *mut ffi::lua_Debug,
 ) {
-    if EVALUATING.get() {
-        return;
-    }
+    let evaluating = EVALUATING.get();
     // A panic never crosses Luau's frames: the breakpoint is passed over then.
     // SAFETY: as the caller says.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { reached(state) }));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        reached(state, evaluating);
+    }));
+    // Its instruction may write its own opcode back over the breakpoint as it goes on,
+    // once this returns: placed again at the next interrupt (`REARM`), not at one of the
+    // evaluations' interrupts above.
+    REARM.set(true);
 }
 
-/// [`debugbreak`]'s body.
+/// [`debugbreak`]'s body: the line reached noted for [`rearm`], then, unless one of
+/// the debugger's own evaluations reached it (`evaluating`), what its breakpoints do.
 ///
 /// # Safety
 ///
 /// As [`debugbreak`]'s.
-unsafe fn reached(state: *mut ffi::lua_State) {
+unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) {
     // SAFETY: as the caller says; `ar` is filled by `lua_getinfo` for the running frame,
     // its source a C string Luau keeps.
     unsafe {
@@ -255,6 +359,12 @@ unsafe fn reached(state: *mut ffi::lua_State) {
             };
             for id in dbg.dropped.drain(..) {
                 ffi::lua_unref(state, id);
+            }
+            if !dbg.reached.iter().any(|(m, l)| *l == line && m == module) {
+                dbg.reached.push((module.to_owned(), line));
+            }
+            if evaluating {
+                return;
             }
             let Some(slots) = dbg.modules.get(module) else {
                 return;
@@ -293,7 +403,9 @@ unsafe fn reached(state: *mut ffi::lua_State) {
                     continue;
                 };
                 s.state.hits += 1;
-                s.asked.hits.admits(s.state.hits)
+                let admits = s.asked.hits.admits(s.state.hits);
+                dbg.version += 1;
+                admits
             };
             if !admitted {
                 continue;
@@ -311,6 +423,7 @@ unsafe fn reached(state: *mut ffi::lua_State) {
                                 s.state.last = Some(t.clone());
                                 s.state.error = None;
                             }
+                            dbg.version += 1;
                             dbg.logged.push(Logged {
                                 module: module.to_owned(),
                                 line,
@@ -322,8 +435,10 @@ unsafe fn reached(state: *mut ffi::lua_State) {
                     Err(e) => note_error(lua, module, ask.slot, e),
                 },
                 BreakAction::Pause => {
-                    if let Some(mut dbg) = lua.app_data_mut::<Debugger>() {
-                        dbg.pause = true;
+                    if let Some(mut dbg) = lua.app_data_mut::<Debugger>()
+                        && dbg.pause.is_none()
+                    {
+                        dbg.pause = Some((module.to_owned(), line));
                     }
                 }
             }
@@ -342,10 +457,11 @@ fn truthy(e: &Evaluated) -> bool {
 }
 
 fn note_error(lua: &Lua, module: &str, slot: usize, error: String) {
-    if let Some(mut dbg) = lua.app_data_mut::<Debugger>()
-        && let Some(s) = dbg.modules.get_mut(module).and_then(|m| m.get_mut(slot))
-    {
-        s.state.error = Some(error);
+    if let Some(mut dbg) = lua.app_data_mut::<Debugger>() {
+        if let Some(s) = dbg.modules.get_mut(module).and_then(|m| m.get_mut(slot)) {
+            s.state.error = Some(error);
+        }
+        dbg.version += 1;
     }
 }
 
@@ -589,10 +705,16 @@ return M
         }
         // Held for 3 and 4 (hits 1 and 2): the second logs; no pause yet.
         assert_eq!(texts(&vm), ["speed 4"]);
-        assert!(!vm.take_pause());
+        assert!(vm.take_pause().is_none());
         vm.call::<_, f64>("door", "tick", 5.0).unwrap();
-        assert!(vm.take_pause(), "doubled 10");
-        assert!(!vm.take_pause(), "taken");
+        assert!(vm.pause_asked());
+        assert_eq!(
+            vm.take_pause(),
+            Some((String::from("door"), 7)),
+            "doubled 10"
+        );
+        assert!(vm.take_pause().is_none(), "taken");
+        assert!(!vm.pause_asked());
         // A condition that does not compile, a text that fails: the error is kept, the
         // script goes on.
         let mut broken = log(7, "{speed + nil}");
@@ -627,5 +749,37 @@ return M
             None,
             "off: not placed"
         );
+    }
+
+    #[test]
+    fn a_list_given_again_keeps_the_states_of_what_it_still_asks_for() {
+        let mut vm = ScriptVm::new(ScriptSettings::default()).unwrap();
+        vm.load_module("door", DOOR).unwrap();
+        let kept = log(7, "kept {speed}");
+        vm.set_breakpoints("door", vec![kept.clone(), log(6, "dropped")]);
+        for speed in [1.0, 2.0] {
+            vm.call::<_, f64>("door", "tick", speed).unwrap();
+        }
+        let before = vm.breakpoints_version();
+        // The editor gives the module's whole list when one of them changes.
+        vm.set_breakpoints("door", vec![log(6, "new"), kept]);
+        assert!(vm.breakpoints_version() > before);
+        let states = vm.breakpoint_states("door");
+        assert_eq!((states[0].hits, states[0].placed), (0, Some(6)), "new");
+        assert_eq!(states[1].hits, 2, "kept: its hits");
+        assert_eq!(states[1].last.as_deref(), Some("kept 2"));
+        assert_eq!(states[1].placed, Some(7), "and placed again");
+        // A new Play: hits and messages back to none, the places kept.
+        vm.reset_breakpoint_states();
+        let states = vm.breakpoint_states("door");
+        assert_eq!(
+            (states[1].hits, states[1].last.as_deref(), states[1].placed),
+            (0, None, Some(7))
+        );
+        // Nothing reached: the version stays.
+        let still = vm.breakpoints_version();
+        assert_eq!(vm.breakpoints_version(), still);
+        vm.call::<_, f64>("door", "tick", 3.0).unwrap();
+        assert!(vm.breakpoints_version() > still, "hits raise it");
     }
 }

@@ -54,6 +54,7 @@
 //!   Ctrl+Y or Ctrl+Shift+Z redo, Ctrl+S save, Delete, Ctrl+D duplicate, Ctrl+A add, Y
 //!   snapping by default, F2 rename.
 
+use crate::breakpoints::{Act, BreakEdit, Breakpoints, HostView, Mark};
 use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
@@ -78,9 +79,10 @@ use crate::session::{
     self, Base, Document, EditorState, LastRun, Lock, ScriptDoc, SessionFile, View, Writer,
 };
 use crate::shell::{
-    CODE_LINE, CODE_TEXT, CodeRun, CodeSide, CodeView, Field, FieldAction, FieldEvent, FileItem,
-    FileKind, MenuEntry, MenuItem, OpenFile, OutlineRow, Palette, PaletteAction, PaletteRow,
-    PaletteView, Section, ShellModel, ShellResponse, Token, TreeItem, Widget, build, dismissed,
+    BreakOptionsView, CODE_LINE, CODE_TEXT, CodeRun, CodeSide, CodeView, Field, FieldAction,
+    FieldEvent, FileItem, FileKind, MarkLook, MenuEntry, MenuItem, OpenFile, OutlineRow, Palette,
+    PaletteAction, PaletteRow, PaletteView, Section, ShellModel, ShellResponse, Token, TreeItem,
+    Widget, build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
 use crate::thumbnails::{self, Subject, Thumbnails};
@@ -758,6 +760,15 @@ struct CommandIds {
     set_bookmark: [CommandId; 9],
     /// "Add Cube" and the rest: the add menu's kinds, in its order.
     add_kinds: [CommandId; ADD.len()],
+    /// The script debugger's breakpoints on the caret's line (ADR 0119): set or removed
+    /// (a pause point until stops come), a logpoint, off or on, its options; every one
+    /// removed, and brought back.
+    toggle_breakpoint: CommandId,
+    logpoint: CommandId,
+    enable_breakpoint: CommandId,
+    breakpoint_options: CommandId,
+    remove_breakpoints: CommandId,
+    restore_breakpoints: CommandId,
 }
 
 /// The editor's commands.
@@ -904,6 +915,24 @@ fn commands() -> (Commands, CommandIds) {
             let name = format!("scene.add.{}", kind.to_lowercase().replace(' ', "_"));
             c.register(&name, "Scene", &format!("Add {kind}"))
         }),
+        toggle_breakpoint: c.register("debug.toggle_breakpoint", "Debug", "Toggle Breakpoint"),
+        logpoint: c.register("debug.logpoint", "Debug", "Add Logpoint…"),
+        enable_breakpoint: c.register(
+            "debug.enable_breakpoint",
+            "Debug",
+            "Enable or Disable Breakpoint",
+        ),
+        breakpoint_options: c.register("debug.breakpoint_options", "Debug", "Breakpoint Options…"),
+        remove_breakpoints: c.register(
+            "debug.remove_breakpoints",
+            "Debug",
+            "Remove All Breakpoints",
+        ),
+        restore_breakpoints: c.register(
+            "debug.restore_breakpoints",
+            "Debug",
+            "Restore Removed Breakpoints",
+        ),
     };
     (c, ids)
 }
@@ -1020,7 +1049,9 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         .into_iter()
         .chain(preset_keys.iter().copied())
         .map(|(chord, id)| (chord, id, KeyContext::Global));
-    // VS Code's, in a script's tab.
+    // VS Code's, in a script's tab; the breakpoints' (`docs/research/ux/script-debugger.md`
+    // §2): F9 as everywhere, Ctrl+F9 and Ctrl+Shift+F9 Visual Studio's, ours on Shift and
+    // Alt.
     let code = [
         ("Ctrl+F", ids.code_find),
         ("Ctrl+H", ids.code_replace),
@@ -1028,6 +1059,11 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Shift+F3", ids.find_previous),
         ("Ctrl+G", ids.go_to_line),
         ("F12", ids.go_to_definition),
+        ("F9", ids.toggle_breakpoint),
+        ("Shift+F9", ids.logpoint),
+        ("Ctrl+F9", ids.enable_breakpoint),
+        ("Alt+F9", ids.breakpoint_options),
+        ("Ctrl+Shift+F9", ids.remove_breakpoints),
     ]
     .map(|(chord, id)| (chord, id, CODE_KEYS));
     for (chord, id, context) in global.chain(tree).chain(code) {
@@ -1871,6 +1907,16 @@ struct Editor {
     code_drag: bool,
     /// The shown script's view, made before the UI's frame.
     code_shown: CodeShown,
+    /// The scripts' breakpoints (ADR 0119 E9-1a-2), kept in the session; what the player's
+    /// script host was given and says of them; the options line open under one.
+    breakpoints: Breakpoints,
+    host_breaks: HostView,
+    break_edit: Option<BreakEdit>,
+    /// A press in the breakpoints' column this frame: its line, the button, Shift and Alt.
+    gutter_press: Option<(usize, Button, bool, bool)>,
+    /// A press in the code away from the options line: what it holds is kept, as Enter
+    /// keeps it, when it reads.
+    break_blur: bool,
     /// When the open scripts' files were last compared with what was read.
     scripts_checked: Instant,
     /// The checkers on their threads (E8-3b, E10-2a), each started with its language's
@@ -2224,6 +2270,9 @@ struct Editor {
     frames: u64,
     since: Instant,
     fps: f64,
+    /// The time the player's frames advance by when it is fixed (`Player::frame_time`):
+    /// the rate shown is then that, not the wall clock's.
+    fixed_frame: Option<f64>,
 }
 
 /// The session while the editor runs (ADR 0107 §4): the project's lock, the writer, and
@@ -2297,6 +2346,14 @@ struct CodeShown {
     problem_count: String,
     place: String,
     path: String,
+    /// The breakpoints' column's width (ADR 0119), their marks in view, the faint one under
+    /// the mouse, and what they say after their lines (a line, a column, a range of
+    /// `break_text`, a problem).
+    marks_width: f32,
+    marks: Vec<(usize, MarkLook)>,
+    mark_hint: Option<(usize, MarkLook)>,
+    break_notes: Vec<(usize, usize, usize, usize, bool)>,
+    break_text: String,
 }
 
 /// A scene open in a tab but not in the world (ADR 0107 §4, E5-5a): its text as its tab
@@ -2612,6 +2669,11 @@ impl Editor {
             code_drag: false,
             find_focus: None,
             code_shown: CodeShown::default(),
+            breakpoints: Breakpoints::default(),
+            host_breaks: HostView::default(),
+            break_edit: None,
+            gutter_press: None,
+            break_blur: false,
             scripts_checked: Instant::now(),
             checkers: Checkers::default(),
             generations: 0,
@@ -2811,6 +2873,7 @@ impl Editor {
             frames: 0,
             since: Instant::now(),
             fps: 0.0,
+            fixed_frame: None,
         })
     }
 
@@ -3066,7 +3129,12 @@ impl Editor {
         self.sync_game_mouse(world);
         self.collect_rows(world);
         self.frames += 1;
-        let elapsed = self.since.elapsed().as_secs_f64();
+        // A player whose frames advance by a fixed time (tests, recordings) runs at that
+        // rate, whatever the GPU's speed.
+        let elapsed = self.fixed_frame.map_or_else(
+            || self.since.elapsed().as_secs_f64(),
+            |dt| self.frames as f64 * dt,
+        );
         if elapsed >= 0.5 {
             self.fps = self.frames as f64 / elapsed;
             self.frames = 0;
@@ -3934,6 +4002,18 @@ impl Editor {
                 (line, column, shown.messages.get(a..b).unwrap_or(""), error)
             })
             .collect();
+        let code_break_notes: Vec<(usize, usize, &str, bool)> = shown
+            .break_notes
+            .iter()
+            .map(|&(line, column, a, b, problem)| {
+                (
+                    line,
+                    column,
+                    shown.break_text.get(a..b).unwrap_or(""),
+                    problem,
+                )
+            })
+            .collect();
         let code_rows: Vec<(&str, &str, &str)> = shown
             .list
             .iter()
@@ -4011,6 +4091,23 @@ impl Editor {
                     text.as_str(),
                 )
             }),
+            marks_width: shown.marks_width,
+            marks: &shown.marks,
+            mark_hint: shown.mark_hint,
+            break_notes: &code_break_notes,
+            break_options: self
+                .break_edit
+                .as_ref()
+                .filter(|e| e.file == s.path)
+                .map(|e| BreakOptionsView {
+                    line: e.line,
+                    log: e.act == Act::Log,
+                    text: &e.log,
+                    condition: &e.condition,
+                    hits: &e.hits,
+                    focus: e.focus,
+                    error: &e.error,
+                }),
         });
         // A code tab's panel: the open files the filter keeps, and the shown file's outline.
         let side_labels: Vec<(usize, String, String, String, bool)> = if code.is_some() {
@@ -4250,6 +4347,9 @@ impl Editor {
         }
         self.find_focus = None;
         self.find_frame(&response);
+        // The breakpoints' column's presses and the options line (ADR 0119).
+        self.gutter_frame(world);
+        self.break_options_frame(world, &response);
         if response.next_problem {
             self.next_problem();
         }
@@ -7951,6 +8051,12 @@ impl Editor {
             ids.go_to_line,
             ids.go_to_definition,
             ids.find_in_files,
+            ids.toggle_breakpoint,
+            ids.logpoint,
+            ids.enable_breakpoint,
+            ids.breakpoint_options,
+            ids.remove_breakpoints,
+            ids.restore_breakpoints,
         ]
         .contains(&id)
     }
@@ -7989,7 +8095,7 @@ impl Editor {
         let cursor = self.input.cursor().map(|[x, y]| [x / scale, y / scale]);
         let (shift, alt) = (self.input.shift(), self.input.alt());
         let script = &mut self.scripts[k];
-        let gutter = script::gutter_width(script.doc.line_count(), advance);
+        let gutter = script::gutter_width(script.doc.line_count(), advance, script.marks_width());
         let page = rect.map_or(20, |r| {
             ((r.size[1] / CODE_LINE) as usize).saturating_sub(1).max(1)
         });
@@ -8139,12 +8245,30 @@ impl Editor {
                 None => script.completing = None,
             }
         }
+        // The line the mouse is on in the breakpoints' column: a faint mark there.
+        let mut hint_line = None;
         if let (Some(r), Some(at)) = (rect, cursor)
             && !popup
         {
             let local = [at[0] - r.pos[0], at[1] - r.pos[1]];
             let inside = r.contains(at);
-            if inside && !self.input.held(Button::Left) {
+            // The breakpoints' column (ADR 0119): its presses set and change breakpoints,
+            // not the caret; the options line under one takes its own.
+            let in_marks = inside && local[0] < script.marks_width();
+            let on_options = self.break_edit.as_ref().is_some_and(|e| {
+                let top = (e.line + 1) as f32 * CODE_LINE - script.scroll[1];
+                e.file == script.path && (top..top + 34.0).contains(&local[1])
+            });
+            if in_marks {
+                let line = script.char_at(local, advance, gutter).line;
+                hint_line = Some(line);
+                for button in [Button::Left, Button::Middle, Button::Right] {
+                    if self.input.pressed(button) {
+                        self.gutter_press = Some((line, button, shift, alt));
+                    }
+                }
+            }
+            if inside && !in_marks && !self.input.held(Button::Left) {
                 let pos = script.char_at(local, advance, gutter);
                 let (a, b) = script.doc.word_range(pos);
                 let on_word = a != b && pos.col < b.col;
@@ -8173,7 +8297,9 @@ impl Editor {
                 self.hover_probe = None;
                 script.hover = None;
             }
-            if inside && self.input.pressed(Button::Left) {
+            if inside && !in_marks && !on_options && self.input.pressed(Button::Left) {
+                // Away from a breakpoint's options: what they hold is kept, as Enter would.
+                self.break_blur = self.break_edit.is_some();
                 script.completing = None;
                 let pos = script.pos_at(local, advance, gutter);
                 // Ctrl+click: where it is defined, as F12.
@@ -8248,6 +8374,17 @@ impl Editor {
             script.highlight.changed(line);
             script.changed_at = Some(Instant::now());
             script.stale_from = Some(script.stale_from.map_or(line, |s| s.min(line)));
+        }
+        // Breakpoints go with their lines through the edits (ADR 0119), the options line
+        // with its breakpoint.
+        if script.doc.has_moves() {
+            let moves = script.doc.take_moves();
+            self.breakpoints.follow(&script.path, &moves);
+            if let Some(e) = self.break_edit.as_mut().filter(|e| e.file == script.path) {
+                e.line = moves
+                    .iter()
+                    .fold(e.line, |l, &m| crate::code::follow_start(l, m).0);
+            }
         }
         if let Some(find) = &mut script.find {
             find.refresh(&script.doc);
@@ -8413,6 +8550,90 @@ impl Editor {
                 shown
                     .notes
                     .push((line, column, start, shown.messages.len(), error));
+            }
+        }
+        // The breakpoints in view (ADR 0119): their marks, and what they say after their
+        // lines: a problem, the wait for a save, a logpoint's latest message and its hits.
+        shown.marks.clear();
+        shown.break_notes.clear();
+        shown.break_text.clear();
+        shown.marks_width = script.marks_width();
+        shown.mark_hint = None;
+        if shown.marks_width > 0.0 {
+            let file = &script.path;
+            for m in self.breakpoints.of(file) {
+                if !(shown.first..shown.last).contains(&m.line) {
+                    continue;
+                }
+                let state = self.host_breaks.state(file, Some(doc), m.line);
+                let error = state.and_then(|s| s.error.as_deref());
+                let unplaced = m.enabled
+                    && state.is_some_and(|s| s.placed.is_none())
+                    && self.host_breaks.loaded(file);
+                let waiting = doc.saved_line(m.line).is_none();
+                let problem = error.is_some() || unplaced;
+                let look = MarkLook {
+                    log: m.act == Act::Log,
+                    on: m.enabled,
+                    limited: m.limited(),
+                    problem,
+                };
+                shown.marks.push((m.line, look));
+                let start = shown.break_text.len();
+                let said = &mut shown.break_text;
+                match state {
+                    _ if error.is_some() => said.push_str(error.unwrap_or("")),
+                    _ if unplaced => said.push_str("no code from this line on"),
+                    _ if waiting => said.push_str("set once the script is saved"),
+                    Some(s) if s.hits > 0 => match (&s.last, m.act) {
+                        (Some(last), Act::Log) => {
+                            let _ = write!(said, "{last}  ×{}", s.hits);
+                        }
+                        _ => {
+                            let _ = write!(said, "×{}", s.hits);
+                        }
+                    },
+                    _ => {}
+                }
+                if shown.break_text.len() > start {
+                    // After the line's text, and after the checker's message there.
+                    let text = doc.line(m.line);
+                    let column = shown.notes.iter().find(|n| n.0 == m.line).map_or_else(
+                        || char_column(text, text.len()) + 4,
+                        |n| n.1 + shown.messages[n.2..n.3].chars().count() + 3,
+                    );
+                    let end = shown.break_text.len();
+                    shown
+                        .break_notes
+                        .push((m.line, column, start, end, problem));
+                }
+            }
+            // A new breakpoint being made shows where it goes.
+            if let Some(e) = self
+                .break_edit
+                .as_ref()
+                .filter(|e| e.new && e.file == *file)
+                && (shown.first..shown.last).contains(&e.line)
+            {
+                let look = MarkLook {
+                    log: e.act == Act::Log,
+                    on: true,
+                    limited: false,
+                    problem: false,
+                };
+                shown.marks.push((e.line, look));
+            }
+            // The faint mark a click would put, where there is none.
+            if let Some(line) = hint_line
+                && !shown.marks.iter().any(|&(l, _)| l == line)
+            {
+                let look = MarkLook {
+                    log: shift,
+                    on: false,
+                    limited: false,
+                    problem: false,
+                };
+                shown.mark_hint = Some((line, look));
             }
         }
         let s = |n: i32| if n == 1 { "" } else { "s" };
@@ -8916,6 +9137,14 @@ impl Editor {
             return;
         }
         let s = self.scripts.remove(k);
+        // Its unsaved edits dropped: its breakpoints go back to the file's lines.
+        if s.doc.is_dirty() {
+            self.breakpoints
+                .remap(&s.path, |line| s.doc.saved_line(line));
+        }
+        if self.break_edit.as_ref().is_some_and(|e| e.file == s.path) {
+            self.break_edit = None;
+        }
         if let Some(checker) = self.checkers.of(s.language) {
             checker.forget(&s.module());
         }
@@ -8944,6 +9173,8 @@ impl Editor {
         match session::write_whole(&file, s.file_text().as_bytes(), 0, Duration::ZERO) {
             Ok(()) => {
                 s.doc.mark_saved();
+                // Its breakpoints' lines are the new code's (ADR 0119).
+                self.breakpoints.touch(&s.path);
                 s.base = Base::of(&file);
                 s.closing = false;
                 let message = format!("Saved {}", s.path.display());
@@ -8958,6 +9189,190 @@ impl Editor {
             }
             Err(e) => self.say(format!("Not saved: {e}")),
         }
+    }
+
+    /// The shown script and its caret's line, where breakpoints can be set (ADR 0119);
+    /// else why not, said.
+    fn breakpoint_line(&mut self) -> Option<(PathBuf, usize)> {
+        let Some(s) = self.active_script.and_then(|k| self.scripts.get(k)) else {
+            self.say(String::from("Breakpoints are set in a script's tab"));
+            return None;
+        };
+        if !s.breakpoints() {
+            self.say(String::from(
+                "Breakpoints are set in the game's scripts (.luau files under scripts/)",
+            ));
+            return None;
+        }
+        Some((s.path.clone(), s.doc.primary().head.line))
+    }
+
+    /// F9 or a click in the breakpoints' column: a breakpoint on `line` of `file`, or the
+    /// one there removed. Until stops come (E9-1b) the one set is a pause point: Play
+    /// pauses after the tick that reaches it.
+    fn toggle_breakpoint(&mut self, world: &World, file: &Path, line: usize) {
+        self.break_edit = None;
+        let at = format!("{}:{}", file.to_string_lossy().replace('\\', "/"), line + 1);
+        if self.breakpoints.remove(file, line).is_some() {
+            self.say(format!("Breakpoint removed at {at}"));
+        } else {
+            self.breakpoints.put(file, Mark::new(line, Act::Pause));
+            self.say(format!(
+                "Pause point at {at}: Play pauses after the tick that reaches it (Shift+F9: a \
+                 logpoint, Alt+F9: its options)"
+            ));
+        }
+        self.write_session(world);
+    }
+
+    /// Shift+F9 or a Shift+click: the options of the breakpoint on `line` (a new logpoint's
+    /// when there is none), the keys to its text.
+    fn open_logpoint(&mut self, file: &Path, line: usize) {
+        let edit = match self.breakpoints.at(file, line) {
+            Some(m) => BreakEdit::of(file, m, false),
+            None => BreakEdit::of(file, &Mark::new(line, Act::Log), true),
+        };
+        self.break_edit = Some(edit);
+        self.code_focus = false;
+    }
+
+    /// Alt+F9 or a right click: the options of the breakpoint on `line`, a new pause
+    /// point's when there is none.
+    fn open_break_options(&mut self, file: &Path, line: usize) {
+        let edit = match self.breakpoints.at(file, line) {
+            Some(m) => BreakEdit::of(file, m, false),
+            None => BreakEdit::of(file, &Mark::new(line, Act::Pause), true),
+        };
+        self.break_edit = Some(edit);
+        self.code_focus = false;
+    }
+
+    /// Ctrl+F9 or an Alt+click: the breakpoint on `line` off, or on again.
+    fn enable_breakpoint(&mut self, world: &World, file: &Path, line: usize) {
+        let at = format!("{}:{}", file.to_string_lossy().replace('\\', "/"), line + 1);
+        let Some(mut mark) = self.breakpoints.at(file, line).cloned() else {
+            self.say(format!("No breakpoint at {at}"));
+            return;
+        };
+        mark.enabled = !mark.enabled;
+        let now = if mark.enabled { "on" } else { "off" };
+        self.breakpoints.put(file, mark);
+        self.say(format!("Breakpoint at {at} {now}"));
+        self.write_session(world);
+    }
+
+    /// A press in the breakpoints' column this frame (`docs/research/ux/script-debugger.md`
+    /// §1): a click sets or removes, Shift makes a logpoint, Alt turns one off or on, the
+    /// middle button removes, the right one opens the options.
+    fn gutter_frame(&mut self, world: &World) {
+        let Some((line, button, shift, alt)) = self.gutter_press.take() else {
+            return;
+        };
+        let Some(file) = self
+            .active_script
+            .and_then(|k| self.scripts.get(k))
+            .filter(|s| s.breakpoints())
+            .map(|s| s.path.clone())
+        else {
+            return;
+        };
+        match button {
+            Button::Left if shift => self.open_logpoint(&file, line),
+            Button::Left if alt => self.enable_breakpoint(world, &file, line),
+            Button::Left => self.toggle_breakpoint(world, &file, line),
+            Button::Middle => {
+                if self.breakpoints.remove(&file, line).is_some() {
+                    self.break_edit = None;
+                    self.write_session(world);
+                }
+            }
+            Button::Right => self.open_break_options(&file, line),
+        }
+    }
+
+    /// The breakpoint options' frame, after the UI's (ADR 0119 §8): their fields' text and
+    /// the switch of what it does. Enter, or a press in the code away from them, keeps
+    /// them once they read; Escape drops them.
+    fn break_options_frame(&mut self, world: &World, response: &ShellResponse) {
+        let blur = std::mem::take(&mut self.break_blur);
+        let enter = self.ui.input().keys.contains(&UiKey::Enter);
+        let escape = self.input.chords().contains(&Chord::key(Key::Escape));
+        let Some(edit) = self.break_edit.as_mut() else {
+            return;
+        };
+        edit.focus = None;
+        if response.break_act {
+            edit.act = match edit.act {
+                Act::Log => Act::Pause,
+                Act::Pause => Act::Log,
+            };
+            edit.focus = Some(if edit.act == Act::Log { 0 } else { 1 });
+        }
+        let (mut keep, mut drop) = (blur, escape);
+        for (k, r) in response.break_fields.iter().enumerate() {
+            let Some(r) = r else {
+                continue;
+            };
+            drop |= r.cancelled;
+            if r.started || r.changed || r.committed {
+                let field = match k {
+                    0 => &mut edit.log,
+                    1 => &mut edit.condition,
+                    _ => &mut edit.hits,
+                };
+                field.clear();
+                field.push_str(self.ui.edited_text());
+            }
+            keep |= r.committed && enter;
+        }
+        if drop {
+            self.break_edit = None;
+            self.code_focus = true;
+            return;
+        }
+        if !keep {
+            return;
+        }
+        let made = match edit.mark() {
+            Ok(m) if m.act == Act::Log && m.log.trim().is_empty() => {
+                Err(String::from("A logpoint needs its text"))
+            }
+            other => other,
+        };
+        match made {
+            Ok(mark) => {
+                let file = edit.file.clone();
+                let at = format!(
+                    "{}:{}",
+                    file.to_string_lossy().replace('\\', "/"),
+                    mark.line + 1
+                );
+                let what = match mark.act {
+                    Act::Log => "Logpoint",
+                    Act::Pause => "Pause point",
+                };
+                self.break_edit = None;
+                self.code_focus = true;
+                self.breakpoints.put(&file, mark);
+                self.say(format!("{what} at {at}"));
+                self.write_session(world);
+            }
+            Err(e) => {
+                edit.error = e;
+                edit.focus = Some(if edit.hits.trim().is_empty() { 0 } else { 2 });
+            }
+        }
+    }
+
+    /// The breakpoints given to the player's script host where they changed, and what it
+    /// says of them read back (ADR 0119): once a frame, after the scripts that changed run
+    /// again.
+    fn sync_breakpoints(&mut self, player: &mut Player) {
+        let scripts = &self.scripts;
+        self.host_breaks
+            .sync(&mut self.breakpoints, player.scripts_mut(), |file| {
+                scripts.iter().find(|s| s.path == file).map(|s| &s.doc)
+            });
     }
 
     /// Script `path` (relative to the project) to run again at the player's next frame.
@@ -9082,7 +9497,10 @@ impl Editor {
         let mut script = match unsaved {
             Some(text) => {
                 let mut s = Script::new(d.path, &text, Base::of(&file));
-                s.doc.mark_unsaved();
+                // Against its file: the lines the code that runs has (breakpoints').
+                let saved = std::fs::read_to_string(&file).unwrap_or_default();
+                s.doc
+                    .mark_unsaved(saved.strip_prefix('\u{feff}').unwrap_or(&saved));
                 s.autosaved = Some(s.doc.version());
                 s
             }
@@ -9130,6 +9548,7 @@ impl Editor {
                 fresh.scroll = s.scroll;
                 fresh.clamp_scroll();
                 *s = fresh;
+                self.breakpoints.touch(&s.path);
                 told = Some(format!("{} changed on disk: read again", s.path.display()));
             }
         }
@@ -10311,6 +10730,35 @@ impl Editor {
             self.open_palette(world, ":");
         } else if id == ids.go_to_definition {
             self.ask_definition(None);
+        } else if id == ids.toggle_breakpoint {
+            if let Some((file, line)) = self.breakpoint_line() {
+                self.toggle_breakpoint(world, &file, line);
+            }
+        } else if id == ids.logpoint {
+            if let Some((file, line)) = self.breakpoint_line() {
+                self.open_logpoint(&file, line);
+            }
+        } else if id == ids.enable_breakpoint {
+            if let Some((file, line)) = self.breakpoint_line() {
+                self.enable_breakpoint(world, &file, line);
+            }
+        } else if id == ids.breakpoint_options {
+            if let Some((file, line)) = self.breakpoint_line() {
+                self.open_break_options(&file, line);
+            }
+        } else if id == ids.remove_breakpoints {
+            let n = self.breakpoints.remove_all();
+            self.break_edit = None;
+            let s = if n == 1 { "" } else { "s" };
+            self.say(format!(
+                "Removed {n} breakpoint{s}: \"Restore Removed Breakpoints\" brings them back"
+            ));
+            self.write_session(world);
+        } else if id == ids.restore_breakpoints {
+            let n = self.breakpoints.restore_removed();
+            let s = if n == 1 { "" } else { "s" };
+            self.say(format!("Restored {n} breakpoint{s}"));
+            self.write_session(world);
         } else if id == ids.find_in_files {
             // What one line selected holds is what is looked for, as VS Code does.
             let selected = self
@@ -12875,6 +13323,7 @@ impl Editor {
         // The session's other tabs, and where the scene opened goes among them.
         let mut others = Vec::new();
         let mut script_docs = Vec::new();
+        let mut break_docs = Vec::new();
         let mut at = 0;
         let doc = match std::fs::read_to_string(&previous) {
             Err(_) => None,
@@ -12883,6 +13332,7 @@ impl Editor {
                     editor_state = Some(f.editor);
                     others = f.documents;
                     script_docs = f.scripts;
+                    break_docs = f.breakpoints;
                     let found = others.iter().position(|d| d.path == self.scene_path);
                     at = found.unwrap_or(0);
                     found.map(|i| others.remove(i))
@@ -12986,6 +13436,10 @@ impl Editor {
         // The session's scripts: their unsaved text from their autosaves, else their files.
         for d in script_docs {
             self.restore_script(d);
+        }
+        // Their breakpoints (ADR 0119), on the lines of the text as the session left it.
+        for (file, mark) in break_docs {
+            self.breakpoints.put(&file, mark);
         }
         self.active_script = editor_state
             .as_ref()
@@ -13193,6 +13647,11 @@ impl Editor {
                 }
             })
             .collect();
+        let breakpoints = self
+            .breakpoints
+            .files()
+            .flat_map(|(file, marks)| marks.iter().map(|m| (file.to_path_buf(), m.clone())))
+            .collect();
         let mut view = Some(self.view(world));
         let Some(s) = &mut self.session else {
             return;
@@ -13225,6 +13684,7 @@ impl Editor {
             editor,
             documents,
             scripts,
+            breakpoints,
         };
         let text = file.to_text();
         if text != s.last_text {
@@ -14161,6 +14621,18 @@ impl<G> EditorGame<G> {
             }
             None => {}
         }
+        // A pause point reached (ADR 0119): the player kept the world still after its
+        // tick, and Play is paused as F7 pauses it.
+        if let Some((file, line)) = player.take_debug_pause() {
+            let mut shared = self.shared.borrow_mut();
+            if let Some(p) = shared.play.as_mut() {
+                p.paused = true;
+                self.stepping = false;
+                shared.say(format!(
+                    "Paused by the pause point at {file}:{line} (F7 goes on)"
+                ));
+            }
+        }
     }
 
     /// Whether the game's hooks are called: playing and not paused, or a step running.
@@ -14212,6 +14684,11 @@ impl<G> EditorGame<G> {
             }
         }
         player.set_simulating(true);
+        // The breakpoints' hits and messages counted from this Play on (ADR 0119).
+        if let Some(scripts) = player.scripts_mut() {
+            scripts.reset_breakpoint_states();
+        }
+        self.shared.borrow_mut().host_breaks.refresh();
         let start = self.start;
         let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start(player)));
         let failed = match made {
@@ -14340,6 +14817,7 @@ impl<G> EditorGame<G> {
     pub fn sync_assets(&mut self, player: &mut Player) {
         self.play_frame(player);
         let mut shared = self.shared.borrow_mut();
+        shared.fixed_frame = player.frame_time();
         if !shared.pending_assets.is_empty() {
             player.assets_mut().add_paths(&shared.pending_assets);
             shared.pending_assets = AssetPaths::new();
@@ -14397,6 +14875,9 @@ impl<G> EditorGame<G> {
             let reloaded = player.reload_script(&shared.root.join(&path));
             shared.script_reloaded(&path, reloaded);
         }
+        // The breakpoints (ADR 0119), given where they changed once the scripts that
+        // changed ran again: their lines are the new code's.
+        shared.sync_breakpoints(player);
         // The models' colliders (ADR 0117): their lines again when one moved or a
         // collider came.
         if shared.show_colliders {
@@ -14560,6 +15041,18 @@ impl<G> EditorGame<G> {
         let shared = self.shared.borrow();
         let view = ViewProj::new(&shared.orbit, shared.view_rect?);
         view.screen(p).map(|p| p.to_array())
+    }
+
+    /// What the breakpoint on line `line` (from 1) of the shown script says after its text
+    /// (ADR 0119): a logpoint's latest message and hits, or a problem; for tests.
+    pub fn breakpoint_note(&self, line: usize) -> Option<String> {
+        let shared = self.shared.borrow();
+        let shown = &shared.code_shown;
+        shown
+            .break_notes
+            .iter()
+            .find(|n| n.0 + 1 == line)
+            .map(|n| shown.break_text[n.2..n.3].to_owned())
     }
 
     /// The middle of where the last frame drew the text `s` (physical pixels), the first
@@ -22592,7 +23085,7 @@ return Coin
         ed.update(&mut world);
         ed.update(&mut world);
         let r = ed.code_rect.unwrap();
-        let gutter = script::gutter_width(3, ed.code_advance);
+        let gutter = script::gutter_width(3, ed.code_advance, 0.0);
         // The second line, after `local `.
         let at = [
             r.pos[0] + gutter + crate::shell::CODE_PAD + 6.0 * ed.code_advance + 1.0,
@@ -23109,7 +23602,7 @@ return Coin
         );
         // The mouse resting on `Door` tells what it is.
         let r = ed.code_rect.unwrap();
-        let gutter = script::gutter_width(4, ed.code_advance);
+        let gutter = script::gutter_width(4, ed.code_advance, 0.0);
         let at = [
             r.pos[0] + gutter + crate::shell::CODE_PAD + 7.5 * ed.code_advance,
             r.pos[1] + 1.5 * CODE_LINE,

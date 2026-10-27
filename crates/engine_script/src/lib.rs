@@ -94,6 +94,11 @@ unsafe extern "C-unwind" fn interrupt(state: *mut mlua::ffi::lua_State, gc: c_in
     if gc >= 0 {
         return;
     }
+    // Breakpoints reached since: placed again (`debug::rearm`), before the next lines run.
+    if debug::rearm_pending() {
+        // SAFETY: the running thread, between two instructions.
+        unsafe { debug::rearm(state) };
+    }
     let deadline = DEADLINE.get();
     if deadline == 0 {
         return;
@@ -296,6 +301,7 @@ impl ScriptVm {
             .set_environment(env);
         let function = chunk.into_function().map_err(|e| compile_error(name, &e))?;
         // Its breakpoints before it runs: its top level and the closures it makes have them.
+        self.keep_chunk(name, &function);
         self.place_breakpoints(name, &function);
         self.arm();
         let result = function.call::<Value>(state.clone());
@@ -412,11 +418,66 @@ impl ScriptVm {
             .unwrap_or_default()
     }
 
-    /// Whether a pause point was reached since the last call.
-    pub fn take_pause(&self) -> bool {
+    /// The module and line of the pause point reached since the last call, if one was:
+    /// the game pauses after the tick it was reached in.
+    pub fn take_pause(&self) -> Option<(String, u32)> {
         self.lua
             .app_data_mut::<debug::Debugger>()
-            .is_some_and(|mut d| d.take_pause())
+            .and_then(|mut d| d.take_pause())
+    }
+
+    /// Whether a pause point was reached and its pause not taken yet ([`Self::take_pause`]):
+    /// the ticks left in the frame are not run.
+    pub fn pause_asked(&self) -> bool {
+        self.lua
+            .app_data_ref::<debug::Debugger>()
+            .is_some_and(|d| d.pause_asked())
+    }
+
+    /// Every breakpoint's hits, latest message and error back to none, as a new Play
+    /// starts; where they are placed is kept.
+    pub fn reset_breakpoint_states(&self) {
+        if let Some(mut d) = self.lua.app_data_mut::<debug::Debugger>() {
+            d.reset();
+        }
+    }
+
+    /// Raised whenever a breakpoint's state changes (placed, hit, a message, an error): the
+    /// editor reads [`Self::breakpoint_states`] again only when it moved.
+    pub fn breakpoints_version(&self) -> u64 {
+        self.lua
+            .app_data_ref::<debug::Debugger>()
+            .map_or(0, |d| d.version())
+    }
+
+    /// Module `module`'s chunk kept in the registry for the debugger, which places its
+    /// breakpoints again through it after they were reached (`debug::rearm`); the old
+    /// chunk's let go of.
+    fn keep_chunk(&self, module: &str, chunk: &Function) {
+        // SAFETY: the chunk is the one argument pushed; `lua_ref` keeps it in the registry
+        // and leaves it there.
+        let id = unsafe {
+            self.lua.exec_raw::<c_int>(chunk.clone(), |state| {
+                let id = mlua::ffi::lua_ref(state, -1);
+                mlua::ffi::lua_settop(state, 0);
+                mlua::ffi::lua_pushinteger(state, id as _);
+            })
+        };
+        let Ok(id) = id else {
+            return;
+        };
+        let old = self
+            .lua
+            .app_data_mut::<debug::Debugger>()
+            .and_then(|mut d| d.set_chunk(module, id));
+        if let Some(old) = old {
+            // SAFETY: a reference this VM made; nothing else holds it.
+            let _ = unsafe {
+                self.lua.exec_raw::<()>((), |state| {
+                    mlua::ffi::lua_unref(state, old);
+                })
+            };
+        }
     }
 
     /// Places module `module`'s enabled breakpoints in `chunk`.
@@ -466,6 +527,12 @@ impl ScriptVm {
         let budget = self.settings.call_budget.as_nanos() as u64;
         DEADLINE.set(now_ns().saturating_add(budget).max(1));
         SINCE_CHECK.set(0);
+        // Breakpoints reached in the last call, whose instructions may have patched
+        // themselves back, before this one runs (`debug::rearm`).
+        if debug::rearm_pending() {
+            // SAFETY: the VM's state between calls.
+            let _ = unsafe { self.lua.exec_raw::<()>((), |state| debug::rearm(state)) };
+        }
     }
 
     fn disarm(&self) {
