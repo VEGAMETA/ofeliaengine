@@ -29,8 +29,9 @@ Last updated: 2026-10-28.
     steady state (ADR 0114's examples in the zero-allocation test). E10-2, Slang in the
     code editor, is done: errors from the front end, completion, hover, signatures and
     definitions from `slangd`. E9, the script debugger (ADR 0119, accepted), is under way:
-    logpoints and pause points work from the code editor's gutter (E9-1a); stops,
-    stepping and the panel come next (E9-1b). E10-1 waits for the answer on the material
+    logpoints and pause points work from the code editor's gutter (E9-1a), and a
+    breakpoint stops a script at its line in Play, F5 going on (E9-1b-1); stepping and the
+    panel come next. E10-1 waits for the answer on the material
     file. The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
@@ -651,10 +652,27 @@ Last updated: 2026-10-28.
       instructions write their own opcode back); placed again after each hit;
     - measured: nothing without breakpoints; 0.6–1.4 µs a hit; F10 kept from the window
       menu.
+  - **E9-1b-1, stops** (#PR, ADR 0119's as-built):
+    - fibers in `engine_platform` (one made once, `suspend`, `resume`, panics handed back);
+    - `BreakAction::Stop`: the frame described (locals, upvalues, the stack, values never
+      through metamethods), the host's handler waits with the call's budget held;
+      `Resume::Abort` ends the call (`ScriptError::Aborted`) and the stage runs out;
+    - the player's script stages on the fiber while debugging is on (the editor's Play): a
+      stop holds the stage, the frames go on without ticks; Continue goes on with the
+      frame's world opened anew, then the rest of the tick; Play's Stop ends it;
+    - the stage holds no borrow of the world while it waits (open pointers read again
+      after each hook, contacts copied out, the host boxed): the world is editable at
+      every stop;
+    - the editor: F9 and a click make ● breakpoints; at a stop the script's tab at the line
+      with the arrow, an amber band and the frame's values, the viewport's edge amber, the
+      mouse freed; F5 goes on, F8 stops Play; breakpoints changed at a stop reach the VM;
+    - Tracy's zones of the stage closed at a stop and opened again after it (a zone 18.0
+      -> 19.2 ns); the stage on the fiber costs nothing measurable (0.26 ms a tick of
+      1,000 spinners either way).
   - **Next, in this order:**
-    1. E9-1b: stops on the stage's fiber, stepping, the panel, pause on errors; then E9-2
-       (DAP, VS Code) and E9-3 (the player). E10-1 waits for the answer on the material
-       file.
+    1. E9-1b-2 on: stepping (F10, F11, Shift+F11), the Debugger panel (stack, variables,
+       the header), values on the lines above, pause on errors; then E9-2 (DAP, VS Code)
+       and E9-3 (the player). E10-1 waits for the answer on the material file.
     2. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
        per hook (`script Door.on_tick`) and each script's time and allocations in the
        editor's profiler; Tracy has only the stages' zones (`scripts::tick`).

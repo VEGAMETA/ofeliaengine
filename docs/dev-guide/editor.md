@@ -187,13 +187,13 @@ editor = ["dep:engine_editor"]
 | Edit the selected brushes' faces, edges and corners ([editing faces](#editing-faces)), with the pointer over the viewport | Tab |
 | Drag the selection over surfaces | Ctrl+Shift with a move handle |
 | What rotating and scaling turn about: the middle, each entity's own origin, the active entity | . (Period) |
-| Play the scene, stop ([playing](#playing)) | F5, F8 |
+| Play the scene, stop ([playing](#playing)); while playing, go on from a breakpoint or a pause | F5, F8; F5 |
 | Play from the editor's camera; restart | Shift+F5; Ctrl+F5 |
 | Pause or go on; step one tick | F7; Shift+F7 |
 | Eject (the editor's camera and tools on the running game), return | Shift+F8 |
 | While playing: free the mouse from the game, give it back | Shift+F1 |
 | While playing: keep the selection's changes at Stop; pick from what changed | Ctrl+K; Ctrl+Shift+K |
-| In a script's tab: a breakpoint on the caret's line, or none; a logpoint ([breakpoints](scripting.md#logpoints-and-pause-points)) | F9; Shift+F9 |
+| In a script's tab: a breakpoint on the caret's line, or none; a logpoint ([breakpoints](scripting.md#breakpoints-logpoints-and-pause-points)) | F9; Shift+F9 |
 | In a script's tab: the line's breakpoint off or on; its options; remove them all | Ctrl+F9; Alt+F9; Ctrl+Shift+F9 |
 
 These are our keys, the default (team decision, 2026-10-21): the left hand stays beside
@@ -936,11 +936,13 @@ ones `luau-analyze` and VS Code's luau-lsp use:
 - **Inside a call's parentheses**, its signature shows above the line, the argument you
   are at lit. Ctrl+Shift+Space shows it, Escape hides it.
 
-**Breakpoints** sit in the column left of the line numbers, in the game's scripts: logpoints
-(◆) that write a message while Play runs and pause points (‖) that pause it after the
-tick. A click or F9 sets one, Shift+click or Shift+F9 a logpoint, a right click or Alt+F9
-opens its options; [Scripting in Luau](scripting.md#logpoints-and-pause-points) has the
-rest.
+**Breakpoints** sit in the column left of the line numbers, in the game's scripts: ● stops
+the script at its line during Play (F5 goes on, F8 stops Play there), ◆ logpoints write a
+message and the script goes on, ‖ pause points pause Play after the tick. A click or F9
+sets one, Shift+click or Shift+F9 a logpoint, a right click or Alt+F9 opens its options;
+[Scripting in Luau](scripting.md#breakpoints-logpoints-and-pause-points) has the rest.
+At a stop the script's tab comes to the front with the arrow on the line and the frame's
+values after it, the viewport's edge turns amber, and the editor works as while paused.
 
 **Slang modules** (`.slang`) open in code tabs too, with Slang's colors:
 

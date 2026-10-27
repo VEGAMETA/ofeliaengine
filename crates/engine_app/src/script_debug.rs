@@ -348,3 +348,73 @@ return Count
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod measure {
+    #![allow(clippy::unwrap_used, clippy::print_stdout)]
+
+    use super::*;
+    use engine_ecs::Transform;
+
+    /// ADR 0119's cost of the stage on the fiber (`--release -- --ignored --nocapture`):
+    /// 1,000 instances of a one-line `on_tick`, ticked straight and on the fiber; medians of
+    /// 101 ticks.
+    #[test]
+    #[ignore = "a measurement"]
+    fn measure_stage_on_fiber() {
+        let dir = std::env::temp_dir().join(format!("ofelia-fiber-cost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/spin.luau"),
+            "local Spin = component(\"Spin\", { speed = 1.5 })
+local UP = vector.create(0, 1, 0)
+function Spin.on_tick(self, dt)
+    self.Transform:rotate(UP, self.speed * dt)
+end
+return Spin
+",
+        )
+        .unwrap();
+        let mut world = World::new();
+        let mut scripts = Box::new(Scripts::load(&mut world, &dir, &dir.join("scripts")).unwrap());
+        for i in 0..1000 {
+            let e = world.spawn((Transform::from_xyz(i as f32, 0.0, 0.0),));
+            scripts.add(&mut world, e, "Spin");
+        }
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let mut straight = Vec::new();
+        for _ in 0..101 {
+            let t = std::time::Instant::now();
+            scripts.tick(&mut world, 1.0 / 64.0);
+            straight.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        let mut debug = ScriptDebug::new(&scripts).unwrap();
+        let host: *mut Scripts = &mut *scripts;
+        let mut fiber = Vec::new();
+        for _ in 0..101 {
+            let t = std::time::Instant::now();
+            // SAFETY: the host and the world outlive the stage, which never stops here.
+            let held = unsafe {
+                debug.run(
+                    host,
+                    &mut world,
+                    core::ptr::null(),
+                    StageKind::Tick { dt: 1.0 / 64.0 },
+                )
+            };
+            fiber.push(t.elapsed().as_secs_f64() * 1e3);
+            assert!(!held);
+        }
+        println!(
+            "| straight | {:.3} ms |\n| on the fiber | {:.3} ms |",
+            median(straight),
+            median(fiber)
+        );
+        drop(debug);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
