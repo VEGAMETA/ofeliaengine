@@ -1265,8 +1265,8 @@ Until its shaders are made, the material draws its colour.
 - **Saving** writes the file; the materials that name the graph draw it again (ADR 0123
   E10-3c). Unsaved graphs are autosaved as scenes are, and the session brings the tabs
   back, with their unsaved edits.
-- **Not yet:** a preview of the material while its graph is shown (the scene's tab shows
-  it after Ctrl+S), reroutes and frames (E10-3e-2), errors on nodes (E10-3f).
+- **Not yet:** the material's preview in the canvas's corner (next; until then the scene's
+  tab shows it after Ctrl+S), reroutes and frames (E10-3e-2), errors on nodes (E10-3f).
 
 ## Autosave and the session
 

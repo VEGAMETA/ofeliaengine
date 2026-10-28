@@ -426,8 +426,7 @@ written by hand.
   - in the editor: the model by its list, the colour clicked on the canvas, its red typed,
     its green dragged as one step, an image dropped from the dock onto a texture node's
     row, undo, and the file read back as saved.
-- **Open (a question for the team):** a preview of the material while its graph is shown;
-  the 3D view is behind the canvas.
+- **Next (the team's answer, below):** the material's preview while its graph is shown.
 
 ## The team's answers (2026-10-28)
 
@@ -438,3 +437,6 @@ written by hand.
    own, as code does; no panel under the viewport for shaders or graphs. The bottom bar's
    Shader placeholder goes. This replaces the materials UX note's sixth point (shader
    code and graphs in a panel under the viewport).
+4. **The preview while a graph is shown** (asked with E10-3f-1; the 3D view is behind the
+   canvas): a sphere in the canvas's corner drawing the graph as it is, its numbers live
+   (the owner's «а», over the canvas and the viewport side by side, or switching tabs).
