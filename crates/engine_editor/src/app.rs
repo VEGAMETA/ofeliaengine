@@ -2005,6 +2005,15 @@ struct Editor {
     /// The session in the project's `.ofelia/` (ADR 0107 §4): none until
     /// `begin_session`, so editors that tests and tools make write nothing there.
     session: Option<Session>,
+    /// VS Code's way to the scripts' debugger (ADR 0119 E9-2), the session's; the requests
+    /// of a frame (kept for their room), the references a stop's values have (a frame, a
+    /// section: 0 locals, 1 upvalues, 2 an evaluation's value, and the path down to them),
+    /// the evaluations' values, and why the next stop comes (`step`, `pause`).
+    dap: Option<crate::dap::Dap>,
+    dap_requests: Vec<crate::dap::Request>,
+    dap_refs: Vec<(usize, u8, Vec<usize>)>,
+    dap_values: Vec<engine_app::scripts::Variable>,
+    stop_reason: Option<&'static str>,
     /// The game's crate when the editor runs inside the game's build (`run_game`).
     game_crate: Option<GameCrate>,
     /// Builds of the game's code (E1-5c): none until `begin_builds`, nor while the
@@ -2773,6 +2782,11 @@ impl Editor {
             output_shown: Vec::new(),
             last_file_click: None,
             session: None,
+            dap: None,
+            dap_requests: Vec::new(),
+            dap_refs: Vec::new(),
+            dap_values: Vec::new(),
+            stop_reason: None,
             game_crate: None,
             builds: None,
             problems: Vec::new(),
@@ -9925,6 +9939,14 @@ impl Editor {
     fn stop_frame(&mut self, world: &World, stopped: Option<(&engine_app::scripts::Stopped, u64)>) {
         let Some((stopped, count)) = stopped else {
             if let Some(stop) = self.stop.take() {
+                self.dap_refs.clear();
+                self.dap_values.clear();
+                if let Some(dap) = &mut self.dap {
+                    dap.event(
+                        "continued",
+                        serde_json::json!({ "threadId": 1, "allThreadsContinued": true }),
+                    );
+                }
                 if stop.mouse {
                     self.set_game_mouse(true);
                 }
@@ -9936,6 +9958,25 @@ impl Editor {
         };
         if self.stop.as_ref().is_some_and(|s| s.count == count) {
             return;
+        }
+        // VS Code's view of it (ADR 0119 E9-2): the references of the last stop's values go.
+        self.dap_refs.clear();
+        self.dap_values.clear();
+        let reason = match &stopped.error {
+            Some(_) => "exception",
+            None => self.stop_reason.take().unwrap_or("breakpoint"),
+        };
+        if let Some(dap) = &mut self.dap {
+            let mut body = serde_json::json!({
+                "reason": reason,
+                "threadId": 1,
+                "allThreadsStopped": true,
+            });
+            if let Some(e) = &stopped.error {
+                body["description"] = serde_json::json!("Error");
+                body["text"] = serde_json::json!(e.message);
+            }
+            dap.event("stopped", body);
         }
         let file = PathBuf::from(engine_app::scripts::module_file(&stopped.module));
         // The frame's values, as they are: locals, then its function's upvalues; at an
@@ -10034,6 +10075,332 @@ impl Editor {
             "F5 goes on, F8 stops (no steps here: a call from C code)"
         };
         self.say(format!("Stopped at {shown}:{}{hook}: {keys}", line + 1));
+    }
+
+    /// VS Code's requests over DAP (ADR 0119 E9-2), answered in this frame, with the
+    /// player there for what needs it (an evaluation); the scripts' log records to its
+    /// console.
+    fn dap_frame(&mut self, player: &mut Player) {
+        let Some(mut dap) = self.dap.take() else {
+            return;
+        };
+        let mut requests = std::mem::take(&mut self.dap_requests);
+        dap.take(&mut requests);
+        for r in requests.drain(..) {
+            let attached = dap.attached();
+            let body = match r.command.as_str() {
+                "initialize" => Ok(self.dap_capabilities()),
+                "attach" => {
+                    if dap.attach(r.arguments["token"].as_str().unwrap_or_default()) {
+                        Ok(serde_json::Value::Null)
+                    } else {
+                        Err(String::from(
+                            "this editor's token is in .ofelia/debug/editor.json: attach \
+                             through the ofeliaengine extension",
+                        ))
+                    }
+                }
+                "disconnect" => Ok(serde_json::Value::Null),
+                _ if !attached => Err(String::from("attach first")),
+                _ => self.dap_request(player, &r),
+            };
+            dap.respond(r.seq, &r.command, body);
+            match r.command.as_str() {
+                "initialize" => dap.event("initialized", serde_json::json!({})),
+                "disconnect" => dap.drop_client(),
+                "attach" if !dap.attached() => dap.drop_client(),
+                "attach" => {
+                    // A stop already waiting: VS Code sees it at once.
+                    if let Some(stop) = &self.stop {
+                        let mut body = serde_json::json!({
+                            "reason": if stop.stopped.error.is_some() { "exception" } else { "breakpoint" },
+                            "threadId": 1,
+                            "allThreadsStopped": true,
+                        });
+                        if let Some(e) = &stop.stopped.error {
+                            body["text"] = serde_json::json!(e.message);
+                        }
+                        dap.event("stopped", body);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.dap_requests = requests;
+        dap.forward_log();
+        self.dap = Some(dap);
+    }
+
+    /// What the editor's debugger does for VS Code (`initialize`'s answer): the breakpoints'
+    /// conditions, hits and logs, which errors stop, hovers.
+    fn dap_capabilities(&self) -> serde_json::Value {
+        serde_json::json!({
+            "supportsConfigurationDoneRequest": true,
+            "supportsConditionalBreakpoints": true,
+            "supportsHitConditionalBreakpoints": true,
+            "supportsLogPoints": true,
+            "supportsEvaluateForHovers": true,
+            "exceptionBreakpointFilters": [
+                {
+                    "filter": "uncaught",
+                    "label": "Errors the script does not catch",
+                    "default": self.error_stops.uncaught,
+                },
+                {
+                    "filter": "caught",
+                    "label": "Errors caught by pcall",
+                    "default": self.error_stops.caught,
+                },
+            ],
+        })
+    }
+
+    /// An attached client's request (`r`): its answer's body, or why not.
+    fn dap_request(
+        &mut self,
+        player: &mut Player,
+        r: &crate::dap::Request,
+    ) -> Result<serde_json::Value, String> {
+        use serde_json::{Value, json};
+        let args = &r.arguments;
+        match r.command.as_str() {
+            "configurationDone" => Ok(Value::Null),
+            "setBreakpoints" => {
+                let path = args["source"]["path"].as_str().unwrap_or_default();
+                let asked = args["breakpoints"].as_array().cloned().unwrap_or_default();
+                let Some(file) = self.dap_file(path) else {
+                    let not = asked
+                        .iter()
+                        .map(|b| {
+                            json!({
+                                "verified": false,
+                                "line": b["line"],
+                                "message": "not a script of the project the editor has open",
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    return Ok(json!({ "breakpoints": not }));
+                };
+                // VS Code's lines are the file's; the editor's marks follow its text.
+                let doc = self.scripts.iter().find(|s| s.path == file).map(|s| &s.doc);
+                let lines: Vec<usize> = asked
+                    .iter()
+                    .map(|b| {
+                        let saved = (b["line"].as_u64().unwrap_or(1).max(1) - 1) as usize;
+                        doc.and_then(|d| d.line_of_saved(saved)).unwrap_or(saved)
+                    })
+                    .collect();
+                let old: Vec<usize> = self.breakpoints.of(&file).iter().map(|m| m.line).collect();
+                for line in old {
+                    self.breakpoints.remove(&file, line);
+                }
+                let mut answers = Vec::new();
+                for (b, &line) in asked.iter().zip(&lines) {
+                    let log = b["logMessage"].as_str();
+                    let mut mark =
+                        Mark::new(line, if log.is_some() { Act::Log } else { Act::Stop });
+                    mark.log = log.unwrap_or_default().to_owned();
+                    mark.condition = b["condition"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned();
+                    mark.hits = b["hitCondition"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned();
+                    match crate::breakpoints::parse_hits(&mark.hits) {
+                        Ok(_) => {
+                            self.breakpoints.put(&file, mark);
+                            answers.push(json!({ "verified": true, "line": b["line"] }));
+                        }
+                        Err(why) => {
+                            answers.push(
+                                json!({ "verified": false, "line": b["line"], "message": why }),
+                            );
+                        }
+                    }
+                }
+                self.write_session(player.world_mut());
+                Ok(json!({ "breakpoints": answers }))
+            }
+            "setExceptionBreakpoints" => {
+                let filters = args["filters"].as_array().cloned().unwrap_or_default();
+                let has = |f: &str| filters.iter().any(|v| v == f);
+                self.error_stops = ErrorStops {
+                    uncaught: has("uncaught"),
+                    caught: has("caught"),
+                };
+                self.write_session(player.world_mut());
+                Ok(Value::Null)
+            }
+            "threads" => Ok(json!({ "threads": [{ "id": 1, "name": "Scripts" }] })),
+            "stackTrace" => {
+                let Some(stop) = &self.stop else {
+                    return Ok(json!({ "stackFrames": [], "totalFrames": 0 }));
+                };
+                let frames: Vec<Value> = stop
+                    .stopped
+                    .stack
+                    .iter()
+                    .enumerate()
+                    .map(|(k, f)| {
+                        let name = f
+                            .function
+                            .clone()
+                            .unwrap_or_else(|| String::from("(function)"));
+                        match f.line {
+                            Some(line) => {
+                                let file = engine_app::scripts::module_file(&f.source);
+                                let path = std::path::absolute(self.root.join(&file))
+                                    .unwrap_or_else(|_| self.root.join(&file));
+                                json!({
+                                    "id": k,
+                                    "name": name,
+                                    "line": line,
+                                    "column": 1,
+                                    "source": {
+                                        "name": file_name(&file),
+                                        "path": path,
+                                    },
+                                })
+                            }
+                            None => json!({
+                                "id": k,
+                                "name": "engine",
+                                "line": 0,
+                                "column": 0,
+                                "presentationHint": "subtle",
+                            }),
+                        }
+                    })
+                    .collect();
+                let total = frames.len();
+                Ok(json!({ "stackFrames": frames, "totalFrames": total }))
+            }
+            "scopes" => {
+                let frame = args["frameId"].as_u64().unwrap_or(0) as usize;
+                let locals = self.dap_ref(frame, 0, Vec::new());
+                let upvalues = self.dap_ref(frame, 1, Vec::new());
+                Ok(json!({ "scopes": [
+                    { "name": "Locals", "variablesReference": locals, "expensive": false },
+                    { "name": "Upvalues", "variablesReference": upvalues, "expensive": false },
+                ] }))
+            }
+            "variables" => {
+                let reference = args["variablesReference"].as_u64().unwrap_or(0) as usize;
+                let Some((frame, section, path)) = reference
+                    .checked_sub(1)
+                    .and_then(|k| self.dap_refs.get(k))
+                    .cloned()
+                else {
+                    return Ok(json!({ "variables": [] }));
+                };
+                let names: Vec<(String, String, bool)> = self
+                    .dap_children(frame, section, &path)
+                    .iter()
+                    .map(|v| (v.name.clone(), v.value.clone(), !v.children.is_empty()))
+                    .collect();
+                let mut out = Vec::new();
+                for (i, (name, value, opens)) in names.into_iter().enumerate() {
+                    let child = if opens {
+                        let mut down = path.clone();
+                        down.push(i);
+                        self.dap_ref(frame, section, down)
+                    } else {
+                        0
+                    };
+                    out.push(json!({ "name": name, "value": value, "variablesReference": child }));
+                }
+                Ok(json!({ "variables": out }))
+            }
+            "evaluate" => {
+                let code = args["expression"].as_str().unwrap_or_default();
+                let frame = args["frameId"].as_u64().unwrap_or(0) as usize;
+                let v = player.evaluate_script(frame, code)?;
+                let reference = if v.children.is_empty() {
+                    0
+                } else {
+                    self.dap_values.push(v.clone());
+                    self.dap_ref(self.dap_values.len() - 1, 2, Vec::new())
+                };
+                Ok(json!({ "result": v.value, "variablesReference": reference }))
+            }
+            "continue" => {
+                self.play_request = Some(PlayRequest::Continue);
+                Ok(json!({ "allThreadsContinued": true }))
+            }
+            "next" | "stepIn" | "stepOut" => {
+                let how = match r.command.as_str() {
+                    "next" => Resume::StepOver,
+                    "stepIn" => Resume::StepInto,
+                    _ => Resume::StepOut,
+                };
+                self.play_request = Some(PlayRequest::ScriptStep(how));
+                Ok(Value::Null)
+            }
+            "pause" => {
+                if self.stop.is_none() && self.play.is_some() {
+                    self.play_request = Some(PlayRequest::BreakNext);
+                }
+                Ok(Value::Null)
+            }
+            other => Err(format!("`{other}` is not a request the editor answers")),
+        }
+    }
+
+    /// The reference VS Code reads the values at `(frame, section, path)` by (from 1):
+    /// valid until the stop goes on.
+    fn dap_ref(&mut self, frame: usize, section: u8, path: Vec<usize>) -> usize {
+        let key = (frame, section, path);
+        match self.dap_refs.iter().position(|r| *r == key) {
+            Some(k) => k + 1,
+            None => {
+                self.dap_refs.push(key);
+                self.dap_refs.len()
+            }
+        }
+    }
+
+    /// The values at `(frame, section, path)`: a frame's locals (section 0) or upvalues (1),
+    /// an evaluation's value's children (2), then down `path` by index.
+    fn dap_children(
+        &self,
+        frame: usize,
+        section: u8,
+        path: &[usize],
+    ) -> &[engine_app::scripts::Variable] {
+        let mut level: &[engine_app::scripts::Variable] = match section {
+            0 | 1 => match self.stop.as_ref().and_then(|s| s.stopped.stack.get(frame)) {
+                Some(f) if section == 0 => &f.locals,
+                Some(f) => &f.upvalues,
+                None => &[],
+            },
+            _ => self
+                .dap_values
+                .get(frame)
+                .map_or(&[], |v| v.children.as_slice()),
+        };
+        for &i in path {
+            level = level.get(i).map_or(&[], |v| v.children.as_slice());
+        }
+        level
+    }
+
+    /// The project's script file VS Code names by `path` (absolute), relative to the
+    /// project; none for one outside it.
+    fn dap_file(&self, path: &str) -> Option<PathBuf> {
+        let root = std::path::absolute(&self.root).unwrap_or_else(|_| self.root.clone());
+        let root = root.to_string_lossy().replace('\\', "/");
+        let root = root.trim_end_matches('/');
+        let given = path.replace('\\', "/");
+        let head = given.get(..root.len())?;
+        if !head.eq_ignore_ascii_case(root) {
+            return None;
+        }
+        let rest = given[root.len()..].trim_start_matches('/');
+        (!rest.is_empty()).then(|| PathBuf::from(rest))
     }
 
     /// Script `path` (relative to the project) to run again at the player's next frame.
@@ -14105,6 +14472,19 @@ impl Editor {
             }
         }
         s.lock = Some(lock);
+        // VS Code's way to the scripts' debugger (ADR 0119 E9-2), beside the lock.
+        let project = std::path::absolute(&self.root).unwrap_or_else(|_| self.root.clone());
+        match crate::dap::Dap::start(&s.dir.join("debug"), &project) {
+            Ok(dap) => {
+                log::info!(
+                    target: "editor",
+                    "VS Code can debug the scripts on 127.0.0.1:{}",
+                    dap.port()
+                );
+                self.dap = Some(dap);
+            }
+            Err(e) => log::warn!(target: "editor", "no script debugging for VS Code: {e}"),
+        }
         // By the scene's id after a restore (an untitled scene's comes from its autosave).
         s.autosave = s.dir.join(session::autosave_name(
             self.scene_path.as_deref(),
@@ -14532,6 +14912,7 @@ impl Editor {
         if self.session.is_none() {
             return;
         }
+        self.dap = None;
         self.keep_autosave(world, true);
         self.keep_script_autosaves(world, true);
         self.write_session(world);
@@ -15303,6 +15684,7 @@ impl<G> EditorGame<G> {
 
     fn play_frame(&mut self, player: &mut Player) {
         self.evaluate_frame(player);
+        self.shared.borrow_mut().dap_frame(player);
         // The game's window: closed by its button, Stop; ejected or not, the view there
         // or in the viewport.
         if player.view_window_close_requested() {
@@ -15342,7 +15724,10 @@ impl<G> EditorGame<G> {
             Some((PlayRequest::ScriptStep(how), _)) => {
                 let mut shared = self.shared.borrow_mut();
                 match player.script_stop().map(|s| s.steppable) {
-                    Some(true) => player.step_script(how),
+                    Some(true) => {
+                        shared.stop_reason = Some("step");
+                        player.step_script(how);
+                    }
                     Some(false) => shared.say(String::from(
                         "This stop cannot be stepped from: it is in a call from the engine's \
                          or a library's C code (a sort's comparison, a metamethod); F5 goes on",
@@ -15359,6 +15744,7 @@ impl<G> EditorGame<G> {
                         "A script is stopped: F10 steps to its next line",
                     ));
                 } else if player.script_debugger().is_some_and(|d| d.break_next()) {
+                    shared.stop_reason = Some("pause");
                     shared.say(String::from("Stops at the next line a script runs"));
                 } else {
                     shared.say(String::from("No scripts run in this game"));
@@ -15368,6 +15754,7 @@ impl<G> EditorGame<G> {
             Some((PlayRequest::Continue, _)) => {
                 let mut shared = self.shared.borrow_mut();
                 if player.script_stop().is_some() {
+                    shared.stop_reason = None;
                     player.continue_script();
                 } else if let Some(p) = shared.play.as_mut()
                     && p.paused

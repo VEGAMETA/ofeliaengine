@@ -50,7 +50,10 @@ engine_ui.workspace = true
 engine_frame.workspace = true
 engine_physics.workspace = true
 engine_save.workspace = true
-# Cargo's build messages, read as JSON (E1-5c; already in the tree through glTF import).
+# Cargo's build messages, read as JSON (E1-5c; already in the tree through glTF import);
+# the script debugger's DAP messages (ADR 0119 E9-2).
 serde_json = "1"
+# The DAP session's token, from the system's random generator (ADR 0119 E9-2).
+engine_net_transport.workspace = true
 
 [dev-dependencies]

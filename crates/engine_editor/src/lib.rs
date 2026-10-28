@@ -14,6 +14,7 @@ pub mod camera;
 mod checker;
 mod code;
 mod complete;
+mod dap;
 mod draw;
 mod drop;
 pub mod expr;
