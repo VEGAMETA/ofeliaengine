@@ -694,7 +694,9 @@ fn handle_command(state: &ThreadState, control: HWND, command: Command) {
             }
         }
         Command::Foreground(id) => {
-            if let Some(hwnd) = state.hwnd_of(id) {
+            if let Some(hwnd) = state.hwnd_of(id)
+                && !hidden_windows()
+            {
                 // SAFETY: live window of this thread.
                 unsafe { SetForegroundWindow(hwnd) };
             }
@@ -755,7 +757,7 @@ fn windowed_rect(monitor: &Monitor, width: u32, height: u32, style: WINDOW_STYLE
     let dpi = monitor.dpi.max(96);
     let mut frame = RECT::default();
     // SAFETY: `frame` is a valid in/out pointer.
-    unsafe { AdjustWindowRectExForDpi(&mut frame, style, 0, WS_EX_APPWINDOW, dpi) };
+    unsafe { AdjustWindowRectExForDpi(&mut frame, style, 0, ex_style(), dpi) };
     let client = (
         i64::from(width) * i64::from(dpi) / 96,
         i64::from(height) * i64::from(dpi) / 96,
@@ -934,8 +936,44 @@ fn set_mode(state: &ThreadState, hwnd: HWND, mode: WindowMode) {
     }
 }
 
-/// Cloaks or uncloaks a window (`DWMWA_CLOAK`).
+/// Whether this process keeps its windows out of sight: `ENGINE_HIDDEN_WINDOWS` set (not
+/// empty, not `0`), as `tools/check.ps1` sets it for its runs, so tests never cover the
+/// desktop or take the keyboard from whoever works at it. Each window is then made cloaked
+/// (composed, its swapchain presenting, never on the screen) with no taskbar button, and
+/// shown without being activated; uncloaking it and bringing it to the front do nothing.
+/// Read once.
+pub fn hidden_windows() -> bool {
+    static HIDDEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HIDDEN.get_or_init(|| hidden_value(std::env::var("ENGINE_HIDDEN_WINDOWS").ok().as_deref()))
+}
+
+/// Whether a value of `ENGINE_HIDDEN_WINDOWS` hides windows.
+fn hidden_value(value: Option<&str>) -> bool {
+    value.is_some_and(|v| !v.trim().is_empty() && v.trim() != "0")
+}
+
+/// A window's extended style: an application window, or (hidden, [`hidden_windows`]) one
+/// that is never activated and has no taskbar button.
+fn ex_style() -> WINDOW_EX_STYLE {
+    if hidden_windows() {
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+    } else {
+        WS_EX_APPWINDOW
+    }
+}
+
+/// How a window is shown: as it is asked, or without being activated when hidden.
+fn show_command(asked: SHOW_WINDOW_CMD) -> SHOW_WINDOW_CMD {
+    if hidden_windows() && asked != SW_HIDE {
+        SW_SHOWNOACTIVATE
+    } else {
+        asked
+    }
+}
+
+/// Cloaks or uncloaks a window (`DWMWA_CLOAK`); hidden windows stay cloaked.
 fn set_cloak(hwnd: HWND, cloaked: bool) {
+    let cloaked = cloaked || hidden_windows();
     let value = i32::from(cloaked);
     // SAFETY: live window of this thread; a `BOOL` of the attribute's size, outliving the
     // call. A failure (DWM off) leaves the window as it is.
@@ -971,7 +1009,7 @@ fn create_window(state: &ThreadState, desc: &WindowDesc) -> io::Result<WindowHan
     // SAFETY: registered class; the state pointer outlives the window.
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_APPWINDOW,
+            ex_style(),
             class_name.as_ptr(),
             title.as_ptr(),
             style,
@@ -1030,7 +1068,7 @@ fn create_window(state: &ThreadState, desc: &WindowDesc) -> io::Result<WindowHan
         push_client_size(state, id, hwnd);
     }
     state.push(id, WindowEventKind::ScaleChanged { dpi });
-    if desc.cloaked {
+    if desc.cloaked || hidden_windows() {
         set_cloak(hwnd, true);
     }
     match desc.placement {
@@ -1042,9 +1080,9 @@ fn create_window(state: &ThreadState, desc: &WindowDesc) -> io::Result<WindowHan
                 showCmd: if !desc.visible {
                     SW_HIDE as u32
                 } else if p.maximized {
-                    SW_SHOWMAXIMIZED as u32
+                    show_command(SW_SHOWMAXIMIZED) as u32
                 } else {
-                    SW_SHOWNORMAL as u32
+                    show_command(SW_SHOWNORMAL) as u32
                 },
                 ptMinPosition: POINT { x: -1, y: -1 },
                 ptMaxPosition: POINT { x: -1, y: -1 },
@@ -1063,7 +1101,7 @@ fn create_window(state: &ThreadState, desc: &WindowDesc) -> io::Result<WindowHan
         _ => {
             if desc.visible {
                 // SAFETY: live window of this thread.
-                unsafe { ShowWindow(hwnd, SW_SHOW) };
+                unsafe { ShowWindow(hwnd, show_command(SW_SHOW)) };
             }
         }
     }
@@ -1418,6 +1456,62 @@ mod tests {
     use super::*;
     use crate::time::HighResTimer;
     use core::time::Duration;
+
+    #[test]
+    fn hidden_windows_follow_their_variable() {
+        assert!(!hidden_value(None));
+        assert!(!hidden_value(Some("")));
+        assert!(!hidden_value(Some("0")));
+        assert!(hidden_value(Some("1")));
+        assert!(hidden_value(Some(" yes ")));
+    }
+
+    #[test]
+    fn a_hidden_window_is_cloaked_and_never_takes_the_keyboard() {
+        if !hidden_windows() {
+            // The run's windows are shown (`tools/check.ps1 -ShowWindows`, or cargo by
+            // hand): nothing to see here.
+            return;
+        }
+        let system = WindowSystem::start(256).unwrap();
+        let window = system
+            .create_window(&WindowDesc {
+                title: String::from("engine hidden window test"),
+                width: 200,
+                height: 100,
+                ..WindowDesc::default()
+            })
+            .unwrap();
+        // Uncloaking and bringing it to the front change nothing.
+        system.set_cloaked(window.id, false).unwrap();
+        system.bring_to_front(window.id).unwrap();
+        // Time for the window's thread to run them.
+        HighResTimer::new()
+            .unwrap()
+            .sleep(Duration::from_millis(100))
+            .unwrap();
+        let hwnd = window.hwnd as HWND;
+        let mut cloaked = 0u32;
+        // SAFETY: a live window; a `DWORD` out of the attribute's size.
+        let read = unsafe {
+            windows_sys::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+                hwnd,
+                windows_sys::Win32::Graphics::Dwm::DWMWA_CLOAKED as u32,
+                (&raw mut cloaked).cast(),
+                core::mem::size_of::<u32>() as u32,
+            )
+        };
+        if read == 0 {
+            assert_ne!(cloaked, 0, "cloaked");
+        }
+        // SAFETY: a live window.
+        let ex = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
+        assert_ne!(ex & WS_EX_TOOLWINDOW, 0, "no taskbar button");
+        assert_ne!(ex & WS_EX_NOACTIVATE, 0, "never activated");
+        // SAFETY: no arguments.
+        assert_ne!(unsafe { GetForegroundWindow() }, hwnd, "not in front");
+        system.destroy_window(window.id).unwrap();
+    }
 
     /// Collects events until `predicate` holds or `timeout` elapses.
     fn wait_for(
