@@ -111,6 +111,10 @@ pub(crate) enum Command {
     RemoveEffect {
         slot: u32,
     },
+    /// Clears an effect's tails and envelopes (a bypassed effect coming back).
+    ResetEffect {
+        slot: u32,
+    },
     EffectParam {
         slot: u32,
         index: u32,

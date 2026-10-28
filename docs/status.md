@@ -809,9 +809,16 @@ Last updated: 2026-10-28.
   - **E11-1b-3, the mixer's changes in Play** (#405, ADR 0107's as-built): heard at once and
     kept after Stop, a dot on each strip changed since Play, one step "Mixer: changes in
     Play" after Stop, and a command taking them back. E11-1 is done.
+  - **E11-2a, effects and sends in the mixer file** (#PR, ADR 0121's version 2): each bus's
+    (and the master's) effects in order, a kind of the twelve built-in by name with its
+    parameters by name and unit, bypass and sidechain; sends keyed by the bus they feed;
+    loops left out in one order; the player follows live, effects carrying on through
+    moves (a reverb's tail rings on); `engine_audio` moves and bypasses effects, publishes
+    gain reduction, and describes the built-in kinds.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-2, effects and sends on the mixer's buses (built-in DSP, their parameters in
-       the inspector, the room reverb's strip). Then
+    1. E11-2b, the mixer panel's effects and sends: rows on the strips (bypass, gain
+       reduction), + effect and + send, the picked effect's parameters in the inspector,
+       B, reordering; the room reverb's strip. Then
        E11-4b, handles and hearing in place, and E11-3's last part: sounds dropped on the
        viewport, the tree or an entity, and the sound and bus fields.
   - **Settled (2026-10-28, team decisions, every recommendation):**

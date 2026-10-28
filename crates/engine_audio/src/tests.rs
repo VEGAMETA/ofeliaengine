@@ -390,6 +390,165 @@ fn effects_process_in_order_and_come_back_to_be_freed() {
     assert_eq!(audio.remove_effect(b), Err(AudioError::Unknown("effect")));
 }
 
+/// Times its input by its gain, then adds 0.25: two of them in a chain give a different
+/// sound in each order.
+struct Affine(f32);
+
+impl Effect for Affine {
+    fn prepare(&mut self, _: u32) {}
+    fn set_param(&mut self, _: u32, value: f32) {
+        self.0 = value;
+    }
+    fn process(&mut self, block: Block<'_>) {
+        for x in block.left.iter_mut().chain(block.right.iter_mut()) {
+            *x = *x * self.0 + 0.25;
+        }
+    }
+}
+
+fn left_tone(audio: &mut Audio) {
+    audio
+        .play_with(
+            &mono(&[1.0; 48_000]),
+            &PlayParams {
+                pan: -1.0,
+                looping: true,
+                ..PlayParams::default()
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn effects_move_within_their_chain() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    let a = audio.add_effect(BusId::MASTER, Affine(2.0)).unwrap();
+    let b = audio.add_effect(BusId::MASTER, Affine(0.5)).unwrap();
+    left_tone(&mut audio);
+    let l = left(&render(&mut renderer, 10));
+    assert!((l[0] - 1.375).abs() < 1e-6, "a then b: {}", l[0]);
+    // b first: (1 * 0.5 + 0.25) * 2 + 0.25.
+    audio.move_effect(b, 0).unwrap();
+    let l = left(&render(&mut renderer, 10));
+    assert!((l[0] - 1.75).abs() < 1e-6, "b then a: {}", l[0]);
+    // Past the end is the end; moving to where it is changes nothing.
+    audio.move_effect(b, 9).unwrap();
+    audio.move_effect(a, 0).unwrap();
+    let l = left(&render(&mut renderer, 10));
+    assert!((l[0] - 1.375).abs() < 1e-6, "a then b again: {}", l[0]);
+    audio.remove_effect(b).unwrap();
+    assert_eq!(audio.move_effect(b, 0), Err(AudioError::Unknown("effect")));
+}
+
+#[test]
+fn a_bypassed_effect_is_left_out_and_comes_back_from_silence() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    let a = audio.add_effect(BusId::MASTER, Affine(2.0)).unwrap();
+    // Fully wet, no feedback: what went in comes out 10 ms (480 frames) later.
+    let echo = audio
+        .add_effect(BusId::MASTER, Delay::new(0.01, 0.0, 1.0))
+        .unwrap();
+    let mut click = vec![0.0; 4_800];
+    click[0] = 1.0;
+    audio
+        .play_with(
+            &mono(&click),
+            &PlayParams {
+                pan: -1.0,
+                ..PlayParams::default()
+            },
+        )
+        .unwrap();
+    // The echo has heard the click (2.25 after a) and holds it for 380 more frames.
+    let l = left(&render(&mut renderer, 100));
+    assert!(l.iter().all(|&x| x == 0.0), "not out yet");
+    // Bypassed: the dry signal, untouched by either (the click is over).
+    audio.set_effect_bypass(echo, true).unwrap();
+    audio.set_effect_bypass(a, true).unwrap();
+    let l = left(&render(&mut renderer, 1_000));
+    assert!(l.iter().all(|&x| x == 0.0), "dry silence");
+    // Back on, from silence: no echo of the click, only a's offset coming through it.
+    audio.set_effect_bypass(echo, false).unwrap();
+    audio.set_effect_bypass(a, false).unwrap();
+    audio.set_effect_bypass(a, false).unwrap();
+    let l = left(&render(&mut renderer, 1_000));
+    assert!(
+        l.iter().all(|&x| x <= 0.25 + 1e-6),
+        "the click's echo came back: {}",
+        l.iter().copied().fold(0.0f32, f32::max)
+    );
+    assert!((l[999] - 0.25).abs() < 1e-6, "{}", l[999]);
+    audio.remove_effect(echo).unwrap();
+    assert_eq!(
+        audio.set_effect_bypass(echo, true),
+        Err(AudioError::Unknown("effect"))
+    );
+}
+
+#[test]
+fn dynamics_publish_how_far_they_lower_the_gain() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    let comp = audio
+        .add_effect(BusId::MASTER, Compressor::new(-20.0, 4.0))
+        .unwrap();
+    let limiter = audio
+        .add_effect(BusId::MASTER, Limiter::new(-18.0))
+        .unwrap();
+    let filter = audio
+        .add_effect(BusId::MASTER, Biquad::low_pass(2_000.0, 0.707))
+        .unwrap();
+    assert_eq!(audio.take_reduction(comp), 0.0, "nothing yet");
+    left_tone(&mut audio);
+    render(&mut renderer, 4_800);
+    // 0 dBFS in, 4:1 above −20: the compressor takes about 15 dB, and the limiter the 3 dB
+    // left above its ceiling.
+    let reduced = audio.take_reduction(comp);
+    assert!(reduced > 10.0 && reduced < 16.0, "compressor {reduced}");
+    let limited = audio.take_reduction(limiter);
+    assert!(limited > 2.0, "limiter {limited}");
+    assert_eq!(audio.take_reduction(filter), 0.0, "filters do not reduce");
+    assert_eq!(audio.take_reduction(comp), 0.0, "a read takes it");
+    // A bypassed compressor says nothing.
+    audio.set_effect_bypass(comp, true).unwrap();
+    render(&mut renderer, 256);
+    let _ = audio.take_reduction(comp);
+    render(&mut renderer, 256);
+    assert_eq!(audio.take_reduction(comp), 0.0);
+}
+
+#[test]
+fn built_in_effects_stay_finite_across_their_ranges() {
+    use crate::dsp::{EFFECTS, ParamInfo};
+    let picks: [fn(&ParamInfo) -> f32; 3] = [|p| p.min, |p| p.max, |p| p.default];
+    for info in EFFECTS {
+        for pick in picks {
+            let mut effect = info.make();
+            effect.prepare(48_000);
+            for p in info.params {
+                effect.set_param(p.index, p.effect_value(pick(p)));
+            }
+            // A sine going on across 16 blocks.
+            for block in 0..16 {
+                let mut l: Vec<f32> = (0..128)
+                    .map(|i| ((block * 128 + i) as f32 * 0.1).sin())
+                    .collect();
+                let mut r = l.clone();
+                effect.process(Block {
+                    left: &mut l,
+                    right: &mut r,
+                    sidechain: None,
+                });
+                assert!(
+                    l.iter().chain(&r).all(|x| x.is_finite() && x.abs() < 100.0),
+                    "{} at {:?}",
+                    info.kind,
+                    info.params.iter().map(pick).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn sidechain_compressor_ducks_music_under_dialogue() {
     let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());

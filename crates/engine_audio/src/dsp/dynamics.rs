@@ -133,6 +133,10 @@ impl Effect for Compressor {
         self.reduction_db = y;
     }
 
+    fn reduction_db(&self) -> f32 {
+        self.reduction_db
+    }
+
     fn reset(&mut self) {
         self.reduction_db = 0.0;
     }
@@ -297,6 +301,10 @@ impl Effect for Limiter {
         if self.frame % 65_536 < block.left.len() as u64 {
             self.sum = self.window.iter().map(|&x| f64::from(x)).sum();
         }
+    }
+
+    fn reduction_db(&self) -> f32 {
+        -gain_to_db(self.smoothed).min(0.0)
     }
 
     fn reset(&mut self) {

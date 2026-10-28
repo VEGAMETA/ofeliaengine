@@ -699,6 +699,11 @@ impl Renderer {
                     self.give_back(Return::Effect(old));
                 }
             }
+            Command::ResetEffect { slot } => {
+                if let Some(Some(effect)) = self.effects.get_mut(slot as usize) {
+                    effect.reset();
+                }
+            }
             Command::EffectParam { slot, index, value } => {
                 if let Some(Some(effect)) = self.effects.get_mut(slot as usize) {
                     effect.set_param(index, value);
@@ -1043,6 +1048,10 @@ impl Renderer {
                         right: &mut r[..n],
                         sidechain: None,
                     });
+                }
+                let reduction = effect.reduction_db();
+                if reduction > 0.0 {
+                    shared.raise_reduction(fx.slot as usize, reduction);
                 }
             }
 

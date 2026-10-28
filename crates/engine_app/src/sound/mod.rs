@@ -33,11 +33,14 @@ pub use components::{
     AudioListener, AudioSource, AudioSource3D, Falloff, PlayMode, ReverbZone, Room,
 };
 use layout::linear;
-pub use layout::{BusLayout, MIXER_FILE_EXTENSION, MasterLayout, MixerFile, PlacedBus};
+pub use layout::{
+    BusLayout, EffectLayout, MIXER_FILE_EXTENSION, MasterLayout, MixerFile, PlacedBus, Routes,
+    SendLayout,
+};
 pub use waveform::{Waveform, waveform};
 
 use acoustics::{Acoustics, PROBE_RAYS_PER_FRAME};
-use engine_audio::dsp::Reverb;
+use engine_audio::dsp::{Reverb, effect_info};
 use engine_audio::output::{Output, OutputConfig};
 use engine_audio::spatial::{Emitter, Listener, Rolloff};
 use engine_audio::{
@@ -251,6 +254,135 @@ struct Bus {
     fader: f32,
     /// What the layout gave it last.
     layout: BusLayout,
+    /// Its effects as made, one for each of the layout's in its order.
+    effects: Vec<LiveEffect>,
+    /// Its sends as made.
+    sends: Vec<LiveSend>,
+}
+
+/// An effect of a bus as the layout made it.
+struct LiveEffect {
+    /// What the layout gave it last.
+    layout: EffectLayout,
+    /// The effect (`None`: a kind the engine does not have, holding its place).
+    id: Option<EffectId>,
+    /// The bus keying it, as made.
+    keyed_by: Option<String>,
+}
+
+/// A send of a bus as the layout made it.
+struct LiveSend {
+    /// The bus it feeds.
+    to: String,
+    id: SendId,
+    pre_fader: bool,
+    /// Its level in dB, as given.
+    gain: f32,
+}
+
+/// For each effect of `wanted`, the one of `live` it carries on, its state with it: one
+/// given the same, else of the same kind at the same place, else the first of its kind
+/// left; `None`: a new one.
+fn match_effects(live: &[LiveEffect], wanted: &[EffectLayout]) -> Vec<Option<usize>> {
+    let mut taken = vec![false; live.len()];
+    let mut out = vec![None; wanted.len()];
+    let rules: [&dyn Fn(usize, usize) -> bool; 3] = [
+        &|i, j| live[j].layout == wanted[i],
+        &|i, j| i == j && live[j].layout.kind == wanted[i].kind,
+        &|i, j| live[j].layout.kind == wanted[i].kind,
+    ];
+    for fits in rules {
+        for (i, slot) in out.iter_mut().enumerate() {
+            if slot.is_none()
+                && let Some(j) = (0..live.len()).find(|&j| !taken[j] && fits(i, j))
+            {
+                *slot = Some(j);
+                taken[j] = true;
+            }
+        }
+    }
+    out
+}
+
+/// Effect `id`'s parameters and bypass from `before` to `after` (of one kind), where they
+/// changed.
+fn set_effect(audio: &mut Audio, id: EffectId, before: &EffectLayout, after: &EffectLayout) {
+    if let Some(info) = effect_info(&after.kind) {
+        for p in info.params {
+            let value = after.param(p.name);
+            if value != before.param(p.name)
+                && let Some(value) = value
+            {
+                audio.set_effect_param(id, p.index, p.effect_value(value));
+            }
+        }
+    }
+    if before.bypass != after.bypass {
+        let _ = audio.set_effect_bypass(id, after.bypass);
+    }
+}
+
+/// Bus `bus`'s effects laid out as `wanted`, carrying on those `matches` gives (the others
+/// are gone already): new ones made, each moved to its place, parameters and bypass set
+/// where they changed.
+fn lay_effects(
+    audio: &mut Audio,
+    bus: &mut Bus,
+    wanted: &[EffectLayout],
+    matches: &[Option<usize>],
+) {
+    let mut old: Vec<Option<LiveEffect>> = bus.effects.drain(..).map(Some).collect();
+    // The chain as the engine has it: what carries on, in its order, then what is new.
+    let mut chain: Vec<EffectId> = old.iter().flatten().filter_map(|e| e.id).collect();
+    let mut effects = Vec::with_capacity(wanted.len());
+    for (i, w) in wanted.iter().enumerate() {
+        let carried = matches
+            .get(i)
+            .copied()
+            .flatten()
+            .and_then(|j| old.get_mut(j)?.take());
+        let effect = match carried {
+            Some(mut e) => {
+                if let Some(id) = e.id {
+                    set_effect(audio, id, &e.layout, w);
+                }
+                w.clone_into(&mut e.layout);
+                e
+            }
+            None => {
+                let id = effect_info(&w.kind).and_then(|info| {
+                    match audio.add_boxed_effect(bus.id, info.make()) {
+                        Ok(id) => Some(id),
+                        Err(e) => {
+                            log::warn!(target: "engine_app::sound", "an effect on `{}`: {e}", bus.name);
+                            None
+                        }
+                    }
+                });
+                if let Some(id) = id {
+                    chain.push(id);
+                    set_effect(audio, id, &EffectLayout::new(&w.kind), w);
+                }
+                LiveEffect {
+                    layout: w.clone(),
+                    id,
+                    keyed_by: None,
+                }
+            }
+        };
+        effects.push(effect);
+    }
+    // Each to its place.
+    for (p, id) in effects.iter().filter_map(|e| e.id).enumerate() {
+        if chain.get(p) != Some(&id)
+            && let Some(q) = chain.iter().position(|&c| c == id)
+        {
+            let _ = audio.move_effect(id, p);
+            let moved = chain.remove(q);
+            chain.insert(p, moved);
+        }
+    }
+    bus.effects = effects;
 }
 
 /// What a sound of the cache is.
@@ -771,6 +903,8 @@ impl Sound {
             parent: None,
             fader: 1.0,
             layout: BusLayout::new(),
+            effects: Vec::new(),
+            sends: Vec::new(),
         });
         sound.audio = Some(audio);
         sound.renderer = Some(renderer);
@@ -797,11 +931,27 @@ impl Sound {
         Some(self.audio.as_ref()?.take_peak(id))
     }
 
+    /// How far effect `effect` (its place in the layout's chain) of bus `bus` (`master` for
+    /// the master's) lowered the gain since the last call, in dB: the editor's gain
+    /// reduction meters.
+    pub(crate) fn take_reduction(&self, bus: &str, effect: usize) -> Option<f32> {
+        let id = self
+            .buses
+            .iter()
+            .find(|b| b.name == bus)?
+            .effects
+            .get(effect)?
+            .id?;
+        Some(self.audio.as_ref()?.take_reduction(id))
+    }
+
     /// The mixer laid out as `layout` says (ADR 0121), at the start and again whenever it
     /// changes: buses it no longer has go (their voices on to the master), new ones are
     /// made, the others moved, faded, balanced and limited where they stand, so what plays
-    /// goes on. The world's [`Mixer`] follows with the next update, keeping the game's
-    /// volumes of the buses that stay.
+    /// goes on. Effects carry on where the layout keeps them (a reverb's tail rings on),
+    /// new ones are made and each is moved to its place; sends and sidechains follow. The
+    /// world's [`Mixer`] follows with the next update, keeping the game's volumes of the
+    /// buses that stay.
     pub(crate) fn set_layout(&mut self, layout: &MixerFile) {
         for problem in layout.problems() {
             log::warn!(target: "engine_app::sound", "mixer layout: {problem}");
@@ -810,6 +960,46 @@ impl Sound {
             return;
         };
         let order = layout.order();
+        let routes = layout.routes();
+        // What carries on of each bus's effects; what does not goes now, with the sends
+        // and sidechains the layout no longer has, so no move below loops through them.
+        let mut plans: Vec<(String, Vec<Option<usize>>)> = Vec::with_capacity(self.buses.len());
+        for bus in &mut self.buses {
+            let wanted = layout.effects(&bus.name).unwrap_or(&[]);
+            let matches = match_effects(&bus.effects, wanted);
+            for (j, effect) in bus.effects.iter_mut().enumerate() {
+                let Some(id) = effect.id else {
+                    continue;
+                };
+                match matches.iter().position(|&m| m == Some(j)) {
+                    None => {
+                        let _ = audio.remove_effect(id);
+                        effect.id = None;
+                    }
+                    Some(i) => {
+                        let source = routes
+                            .sidechains
+                            .iter()
+                            .find(|r| r.0 == bus.name && r.1 == i)
+                            .map(|r| r.2);
+                        if effect.keyed_by.is_some() && effect.keyed_by.as_deref() != source {
+                            let _ = audio.set_sidechain(id, None);
+                            effect.keyed_by = None;
+                        }
+                    }
+                }
+            }
+            bus.sends.retain(|s| {
+                let keep = routes.sends.iter().any(|(from, to, send)| {
+                    *from == bus.name && *to == s.to && send.pre_fader == s.pre_fader
+                });
+                if !keep {
+                    let _ = audio.remove_send(s.id);
+                }
+                keep
+            });
+            plans.push((bus.name.clone(), matches));
+        }
         // The master's fader and balance.
         self.buses[0].fader = linear(layout.master.gain);
         audio.set_bus_gain(BusId::MASTER, self.buses[0].fader, FADE);
@@ -828,6 +1018,7 @@ impl Sound {
             let _ = audio.remove_bus(bus.id);
         }
         // Then every bus of the layout, each after the bus it feeds.
+        let mut retry: Vec<(BusId, BusId)> = Vec::new();
         let mut made: Vec<Bus> = Vec::with_capacity(order.len() + 1);
         made.push(self.buses.remove(0));
         for placed in &order {
@@ -842,8 +1033,10 @@ impl Sound {
                 .map(|k| self.buses.remove(k));
             let mut bus = match existing {
                 Some(mut bus) => {
-                    if bus.parent.as_deref() != placed.parent {
-                        let _ = audio.set_bus_parent(bus.id, parent);
+                    if bus.parent.as_deref() != placed.parent
+                        && audio.set_bus_parent(bus.id, parent) == Err(AudioError::Cycle)
+                    {
+                        retry.push((bus.id, parent));
                     }
                     bus.parent = placed.parent.map(str::to_owned);
                     bus
@@ -856,6 +1049,8 @@ impl Sound {
                         parent: placed.parent.map(str::to_owned),
                         fader: 1.0,
                         layout: BusLayout::new(),
+                        effects: Vec::new(),
+                        sends: Vec::new(),
                     },
                     Err(e) => {
                         log::warn!(target: "engine_app::sound", "bus {}: {e}", placed.name);
@@ -891,6 +1086,100 @@ impl Sound {
             made.push(bus);
         }
         self.buses = made;
+        if !retry.is_empty() {
+            // A move that would loop through a send or a sidechain the layout keeps: they
+            // go, the move is made, and they come back below.
+            for bus in &mut self.buses {
+                for send in bus.sends.drain(..) {
+                    let _ = audio.remove_send(send.id);
+                }
+                for effect in &mut bus.effects {
+                    if let (Some(id), Some(_)) = (effect.id, effect.keyed_by.take()) {
+                        let _ = audio.set_sidechain(id, None);
+                    }
+                }
+            }
+            for (bus, parent) in retry {
+                if let Err(e) = audio.set_bus_parent(bus, parent) {
+                    log::warn!(target: "engine_app::sound", "mixer layout: a bus not moved: {e}");
+                }
+            }
+        }
+        // Each bus's effects.
+        for bus in &mut self.buses {
+            let wanted = layout.effects(&bus.name).unwrap_or(&[]);
+            let matches = plans
+                .iter()
+                .find(|(name, _)| *name == bus.name)
+                .map_or(&[][..], |(_, m)| m.as_slice());
+            lay_effects(audio, bus, wanted, matches);
+        }
+        // The sends, coming in over a fade.
+        for &(from, to, send) in &routes.sends {
+            let Some(target) = self.buses.iter().find(|b| b.name == to).map(|b| b.id) else {
+                continue;
+            };
+            let Some(bus) = self.buses.iter_mut().find(|b| b.name == from) else {
+                continue;
+            };
+            let live = bus
+                .sends
+                .iter_mut()
+                .find(|s| s.to == to && s.pre_fader == send.pre_fader);
+            match live {
+                Some(live) => {
+                    if live.gain != send.gain {
+                        audio.set_send_gain(live.id, linear(send.gain), FADE);
+                        live.gain = send.gain;
+                    }
+                }
+                None => {
+                    let tap = if send.pre_fader {
+                        SendTap::PreFader
+                    } else {
+                        SendTap::PostFader
+                    };
+                    match audio.add_send(bus.id, target, 0.0, tap) {
+                        Ok(id) => {
+                            audio.set_send_gain(id, linear(send.gain), FADE);
+                            bus.sends.push(LiveSend {
+                                to: to.to_owned(),
+                                id,
+                                pre_fader: send.pre_fader,
+                                gain: send.gain,
+                            });
+                        }
+                        Err(e) => {
+                            log::warn!(target: "engine_app::sound", "mixer layout: `{from}`'s send into `{to}`: {e}");
+                        }
+                    }
+                }
+            }
+        }
+        // The sidechains.
+        for &(keyed, k, source) in &routes.sidechains {
+            let Some(source_id) = self.buses.iter().find(|b| b.name == source).map(|b| b.id) else {
+                continue;
+            };
+            let Some(effect) = self
+                .buses
+                .iter_mut()
+                .find(|b| b.name == keyed)
+                .and_then(|b| b.effects.get_mut(k))
+            else {
+                continue;
+            };
+            if let Some(id) = effect.id
+                && effect.keyed_by.as_deref() != Some(source)
+            {
+                match audio.set_sidechain(id, Some(source_id)) {
+                    Ok(()) => effect.keyed_by = Some(source.to_owned()),
+                    Err(e) => {
+                        log::warn!(target: "engine_app::sound", "mixer layout: the sidechain `{source}` on `{keyed}`: {e}");
+                    }
+                }
+            }
+        }
         self.layout_changed = true;
     }
 

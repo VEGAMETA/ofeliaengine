@@ -248,7 +248,7 @@ impl Audio {
         // effect; room for all of them at once plus schedules means the renderer never
         // has to hold on to one.
         let (returns_tx, returns) = spsc::channel(max_voices + max_effects + 256);
-        let shared = Arc::new(Shared::new(max_buses, max_voices));
+        let shared = Arc::new(Shared::new(max_buses, max_voices, max_effects));
         let graph = Graph::new();
         let schedule = Box::new(graph.compile().unwrap_or_default());
         let renderer = Renderer::new(RendererParts {
@@ -803,6 +803,7 @@ impl Audio {
         self.graph.effects[index] = Some(EffectNode {
             bus: bus.0,
             sidechain: NO_BUS,
+            bypassed: false,
         });
         if let Some(node) = self.graph.buses[usize::from(bus.0)].as_mut() {
             node.effects.push(index as u32);
@@ -841,6 +842,62 @@ impl Audio {
         self.compile_and_send();
         self.send(Command::RemoveEffect { slot: effect.index });
         Ok(())
+    }
+
+    /// Moves an effect to place `index` in its bus's chain (0: first; past the end: last).
+    /// Its state goes with it: a reverb's tail keeps ringing.
+    pub fn move_effect(&mut self, effect: EffectId, index: usize) -> Result<(), AudioError> {
+        let bus = self
+            .effect_node(effect)
+            .ok_or(AudioError::Unknown("effect"))?
+            .bus;
+        let node = self.graph.buses[usize::from(bus)]
+            .as_mut()
+            .ok_or(AudioError::Unknown("bus"))?;
+        let Some(at) = node.effects.iter().position(|&e| e == effect.index) else {
+            return Err(AudioError::Unknown("effect"));
+        };
+        let to = index.min(node.effects.len() - 1);
+        if at != to {
+            let slot = node.effects.remove(at);
+            node.effects.insert(to, slot);
+            self.compile_and_send();
+        }
+        Ok(())
+    }
+
+    /// Leaves an effect out of the mix (`true`) or puts it back. A bypassed effect costs
+    /// nothing; coming back, its tails and envelopes start from silence.
+    pub fn set_effect_bypass(
+        &mut self,
+        effect: EffectId,
+        bypassed: bool,
+    ) -> Result<(), AudioError> {
+        if self.effect_node(effect).is_none() {
+            return Err(AudioError::Unknown("effect"));
+        }
+        let node = self.graph.effects[effect.index as usize]
+            .as_mut()
+            .ok_or(AudioError::Unknown("effect"))?;
+        if node.bypassed == bypassed {
+            return Ok(());
+        }
+        node.bypassed = bypassed;
+        if !bypassed {
+            // Cleared before the schedule that runs it again arrives.
+            self.send(Command::ResetEffect { slot: effect.index });
+        }
+        self.compile_and_send();
+        Ok(())
+    }
+
+    /// The most an effect lowered the gain since the last call, in dB (0 or more): a
+    /// compressor's or a limiter's gain reduction, for its meter. A read takes it.
+    pub fn take_reduction(&self, effect: EffectId) -> f32 {
+        if self.effect_node(effect).is_none() {
+            return 0.0;
+        }
+        self.shared.take_reduction(effect.index as usize)
     }
 
     /// Sets an effect parameter (indices are the effect's associated constants).
