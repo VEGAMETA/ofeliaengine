@@ -148,6 +148,17 @@ struct LayoutCache {
 }
 
 impl LayoutCache {
+    /// An empty cache with room for twice [`CACHE_SOFT_LIMIT`] layouts, made once: the
+    /// entries [`Self::end_frame`] removes leave deleted slots behind, and with at most half
+    /// its room in use the map rehashes them away in place when its room runs out, never by
+    /// growing into a larger table (which allocates, at a frame the hash's seed decides).
+    fn new() -> Self {
+        Self {
+            map: HashMap::with_capacity(2 * CACHE_SOFT_LIMIT),
+            ..Self::default()
+        }
+    }
+
     /// The layout of `text`, laid out with `shaper` if it is not cached.
     fn get(
         &mut self,
@@ -245,7 +256,7 @@ impl UiText {
             stack: vec![text, symbols, icons],
             mono: vec![symbols, text, icons],
             layout: TextLayout::new(),
-            cache: LayoutCache::default(),
+            cache: LayoutCache::new(),
             atlas: GlyphAtlas::new(ATLAS_SIZE, ATLAS_SIZE),
         })
     }

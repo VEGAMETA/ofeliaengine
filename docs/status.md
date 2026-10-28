@@ -775,10 +775,13 @@ Last updated: 2026-10-28.
     `.material` picked in the dock shows its rows (a material type's from its reflected
     `Params`); edits draw by the next frame with nothing compiled, are steps of the one
     history (file steps: its text before and after) and Ctrl+S writes them.
+  - **E10-1c-2, materials from the object and the material commands** (#399, ADR 0120's
+    as-built): a selected object's material file shows its rows after its components,
+    with how many objects use it; New Material, Make Variant (a copy with its own id) and
+    Apply to Selection, each one undo step; unsaved material edits kept with the session.
+    E10-1 is done.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E10-1c-2: editing from a selected object's `Model.material`, New Material, Make
-       Variant (a copy), Apply to Selection; unsaved material edits in the autosave.
-    2. E11-3b and E11-3c, previews: ▶, Space and Auto Play in the dock on an editor bus,
+    1. E11-3b and E11-3c, previews: ▶, Space and Auto Play in the dock on an editor bus,
        the inspector's waveform with seeking. Then E11-1, the mixer file (`main.mixer`)
        and panel, E11-2, effects and sends, E11-4b, handles and hearing in place.
   - **Settled (2026-10-28, team decisions, every recommendation):**
