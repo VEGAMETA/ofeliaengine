@@ -6,7 +6,7 @@
 //! format, and loaded through an I/O ring with zstd per entry (`cook`, `pack`; ADR 0056).
 //! HDR panoramas (`.hdr`) are read, and their sun found, for HDRI environments (`hdr`, ADR
 //! 0083), and cooked into BC6H cube maps for the derived data cache and packs
-//! (`panorama`). Material files (`*.material.ron`) set a material type's parameters and
+//! (`panorama`). Material files (`.material`, ADR 0120) set a material type's parameters and
 //! replace a scene's glTF materials (`material_file`, ADR 0092); glTF's unlit, clear coat
 //! and sheen become materials of the engine's built-in types (`gltf_models`); PSO records
 //! (`pso_record`) let a cook compile only the entry points a game draws. A glTF's outline

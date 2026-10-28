@@ -1,0 +1,7 @@
+[material version=2 id=dace7dcc74ab4d75bca421e67d1794aa]
+
+# Unlit: a flat green. (ADR 0092; a golden shot's material file.)
+shader = asset("materials/models.slang", 33adfbf6a80549d9af5445182f10c03a)
+type = "UnlitMaterial"
+numbers["roughness"] = 0.5
+vectors["base"] = [0.2, 0.75, 0.35, 1]

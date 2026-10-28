@@ -1,35 +1,41 @@
-//! Material files (ADR 0092): a material type's instance as text, `*.material.ron`.
+//! Material files (ADR 0092, ADR 0120): `.material`, in the editor's grammar (ADR 0108),
+//! its id in its header. With no shader it is the engine's standard material; with one, a
+//! material type's instance.
 //!
-//! ```ron
-//! // red_velvet.material.ron
-//! (
-//!     shader: "velvet.slang",          // the module defining the type
-//!     type: "VelvetMaterial",          // the type implementing `IMaterial`
-//!     params: {                        // its `Params` fields, by name
-//!         "color": (0.40, 0.05, 0.05, 1.0),
-//!         "sheen_color": (0.9, 0.6, 0.6),
-//!         "sheen_roughness": 0.6,
-//!         "pattern": Texture("../textures/velvet.png", Color),
-//!     },
-//!     // The glTF look while its shaders compile, and in GI's rays (default: the glTF
-//!     // material it replaces, or grey).
-//!     fallback: (base_color: (0.40, 0.05, 0.05, 1.0), roughness: 0.9),
-//!     alpha: Opaque,                   // Opaque | Mask(0.5) | Blend
-//!     double_sided: false,
-//! )
+//! ```text
+//! [material version=2 id=4f8e1d2c3b4a59687706f5e4d3c2b1a0]
+//!
+//! shader = asset("materials/velvet.slang", 7d1c0e9a2b3f4c5d8e6f7a8b9c0d1e2f)
+//! type = "VelvetMaterial"
+//! numbers["sheen_roughness"] = 0.6
+//! vectors["color"] = [0.4, 0.05, 0.05, 1]
+//! vectors["sheen_color"] = [0.9, 0.6, 0.6]
+//! textures["pattern"].image = asset("textures/velvet.png", 0a1b2c3d4e5f60718293a4b5c6d7e8f9)
+//! textures["pattern"].encoding = Color
+//! look = Own
+//! base_color = [0.4, 0.05, 0.05, 1]
+//! roughness = 0.9
+//! alpha = Mask
+//! alpha_cutoff = 0.5
+//! double_sided = true
 //! ```
 //!
-//! - Paths are relative to the file's folder.
-//! - A parameter is a number, a vector `(x, y, z)`, an array `[a, b, c]` (of numbers or
-//!   vectors) or a `Texture(path, Color | Data | Normal)` for a `TextureRef` field; nested
-//!   structs' fields are named `outer.inner`, arrays of structs' `name[i].inner`.
-//! - [`MaterialFile::build_params`] lays the values out as the type's `Params` struct
-//!   (from Slang's reflection, `engine_shader::StructLayout`). A field the file does not set
-//!   is zero (a texture none: white) and listed in [`BuiltParams::unset`]; a name the
-//!   struct does not have, or a value of the wrong shape, is an error naming it.
+//! - **The type's parameters** by their `Params` field's name (`outer.inner` for a nested
+//!   struct's field, `items[2].inner` for an array of structs'): `numbers` for a field of one
+//!   number, `vectors` for a vector's values or an array's in order (an array of vectors
+//!   written flat), `textures` for a `TextureRef` field's image and encoding.
+//! - **The look** (`look`): what a typed material looks like before its shaders are made and
+//!   in GI's rays: its own standard values (`Own`), or the glTF material it replaces in a
+//!   scene's map (`Replaced`).
+//! - **Paths are asset references** from the project's root ([`MaterialFile::typed`] is given
+//!   it); an absolute path is used as it is.
+//! - [`TypedMaterial::build_params`] lays the values out as the type's `Params` struct (from
+//!   Slang's reflection, `engine_shader::StructLayout`). A field the file does not set is zero
+//!   (a texture none: white) and listed in [`BuiltParams::unset`]; a name the struct does not
+//!   have, or a value of the wrong shape, is an error naming it.
 //!
 //! A scene's glTF materials are replaced by material files through a file next to it,
-//! `<scene>.materials.ron` ([`MaterialMap`]): `{ "glTF material name": "file.material.ron" }`;
+//! `<scene>.materials.ron` ([`MaterialMap`]): `{ "glTF material name": "file.material" }`;
 //! `"#3"` names the scene's fourth material (glTF materials need not have names).
 
 use crate::gltf_import::{
@@ -37,19 +43,22 @@ use crate::gltf_import::{
     TypedMaterialData,
 };
 use crate::pso_record::PsoRecord;
+use engine_reflect::Reflect;
+use engine_scene::{AssetId, AssetPaths, AssetRef, LoadError, ValueReport};
 use engine_shader::{FieldKind, StructLayout};
-use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// The extension of material files.
-pub const MATERIAL_FILE_EXTENSION: &str = "material.ron";
+pub const MATERIAL_FILE_EXTENSION: &str = "material";
 
 /// How a texture parameter's image is encoded (the texture pipeline's usage).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Reflect)]
+#[repr(u8)]
 pub enum TextureEncoding {
     /// sRGB color (BC7).
+    #[default]
     Color,
     /// Linear data, one value per channel (BC7).
     Data,
@@ -57,35 +66,54 @@ pub enum TextureEncoding {
     Normal,
 }
 
-/// A parameter's value.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// A parameter's value, resolved.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ParamValue {
-    /// `Texture("path", Color)`: an image for a `TextureRef` field.
+    /// An image for a `TextureRef` field.
     Texture(PathBuf, TextureEncoding),
     /// A number.
-    #[serde(untagged)]
     Number(f64),
-    /// A vector `(x, y, z)` or an array `[a, b, c]`.
-    #[serde(untagged)]
+    /// A vector's or an array's values.
     List(Vec<ParamValue>),
 }
 
-/// How a material's alpha is used.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Deserialize)]
+/// How a material uses alpha.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+#[repr(u8)]
 pub enum Alpha {
-    /// Fully opaque.
+    /// Alpha is ignored.
     #[default]
     Opaque,
-    /// Cut out below this coverage.
-    Mask(f32),
+    /// Fragments below the file's `alpha_cutoff` are cut away (foliage, fences).
+    Mask,
     /// Blended over what is behind.
     Blend,
 }
 
+/// Whose look a typed material has before its shaders are made, and in GI's rays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+#[repr(u8)]
+pub enum Look {
+    /// Its own standard values (`base_color`, `metallic`, `roughness`, `emissive`).
+    #[default]
+    Own,
+    /// The glTF material it replaces in a scene's map; its own values where it replaces
+    /// none.
+    Replaced,
+}
+
+/// A texture parameter of a material file: its image and how it is encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+pub struct MaterialTexture {
+    /// The image, by asset.
+    pub image: AssetRef,
+    /// How the cook compresses it.
+    pub encoding: TextureEncoding,
+}
+
 /// The glTF look of a material of a type: its first frames (before its shaders are made)
 /// and what GI's rays see (ADR 0092).
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fallback {
     /// Linear base color and alpha.
     pub base_color: [f32; 4],
@@ -109,26 +137,81 @@ impl Default for Fallback {
     }
 }
 
-/// A material file (see the module documentation), its paths resolved.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A material file (`.material`, see the module documentation): the engine's standard
+/// material, or with a shader a material type's instance.
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct MaterialFile {
+    /// The Slang module defining its type; none: the standard material.
+    pub shader: AssetRef,
+    /// The type's name in it.
+    #[reflect(rename = "type")]
+    pub type_name: String,
+    /// Its type's fields of one number, by name.
+    pub numbers: BTreeMap<String, f32>,
+    /// Its type's vectors and arrays, by name: the values in order.
+    pub vectors: BTreeMap<String, Vec<f32>>,
+    /// Its type's textures, by name.
+    pub textures: BTreeMap<String, MaterialTexture>,
+    /// A typed material's look before its shaders are made, and in GI's rays.
+    pub look: Look,
+    /// Linear base color and alpha.
+    #[reflect(hint = "color")]
+    pub base_color: [f32; 4],
+    /// 0 dielectric … 1 metal.
+    #[reflect(min = 0.0, max = 1.0)]
+    pub metallic: f32,
+    /// Perceptual roughness, 0 (mirror) … 1.
+    #[reflect(min = 0.0, max = 1.0)]
+    pub roughness: f32,
+    /// Emitted radiance, linear (above 1 for bright emitters).
+    #[reflect(hint = "color")]
+    pub emissive: [f32; 3],
+    /// How alpha is used.
+    pub alpha: Alpha,
+    /// With [`Alpha::Mask`], alpha below this is cut away.
+    #[reflect(min = 0.0, max = 1.0)]
+    pub alpha_cutoff: f32,
+    /// Both faces drawn and lit.
+    pub double_sided: bool,
+}
+
+impl Default for MaterialFile {
+    /// The standard material: grey (0.8), dielectric, roughness 0.5, opaque.
+    fn default() -> Self {
+        Self {
+            shader: AssetRef::NONE,
+            type_name: String::new(),
+            numbers: BTreeMap::new(),
+            vectors: BTreeMap::new(),
+            textures: BTreeMap::new(),
+            look: Look::Own,
+            base_color: [0.8, 0.8, 0.8, 1.0],
+            metallic: 0.0,
+            roughness: 0.5,
+            emissive: [0.0; 3],
+            alpha: Alpha::Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+        }
+    }
+}
+
+/// A typed material file resolved: what the cook and the run time build its parameters from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedMaterial {
     /// The Slang module defining the type.
     pub shader: PathBuf,
     /// The type's name in it.
-    #[serde(rename = "type")]
     pub type_name: String,
     /// Its parameters by field name.
-    #[serde(default)]
     pub params: BTreeMap<String, ParamValue>,
     /// Its glTF look; `None`: the replaced glTF material's, or [`Fallback::default`].
-    #[serde(default)]
     pub fallback: Option<Fallback>,
     /// Alpha.
-    #[serde(default)]
     pub alpha: Alpha,
+    /// With [`Alpha::Mask`], alpha below this is cut away.
+    pub alpha_cutoff: f32,
     /// Drawn without back-face culling.
-    #[serde(default)]
     pub double_sided: bool,
 }
 
@@ -186,15 +269,7 @@ fn resolve(dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn resolve_values(dir: &Path, value: &mut ParamValue) {
-    match value {
-        ParamValue::Texture(path, _) => *path = resolve(dir, path),
-        ParamValue::List(values) => values.iter_mut().for_each(|v| resolve_values(dir, v)),
-        ParamValue::Number(_) => {}
-    }
-}
-
-/// RON as material files are written: optional fields without `Some(...)`.
+/// RON as material maps are written: optional fields without `Some(...)`.
 fn ron_options() -> ron::Options {
     ron::Options::default().with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
 }
@@ -207,33 +282,142 @@ fn ron_error(path: Option<&Path>, e: &ron::error::SpannedError) -> MaterialFileE
 }
 
 impl MaterialFile {
-    /// Parses a material file's text, resolving its relative paths against `dir` (the
-    /// file's folder).
-    pub fn parse(text: &str, dir: &Path) -> Result<Self, MaterialFileError> {
-        let mut file: Self = ron_options()
-            .from_str(text)
-            .map_err(|e| ron_error(None, &e))?;
-        file.shader = resolve(dir, &file.shader);
-        for value in file.params.values_mut() {
-            resolve_values(dir, value);
-        }
-        Ok(file)
+    /// The header's kind.
+    pub const KIND: &'static str = "material";
+    /// The format's version (version 1: the standard material's values alone).
+    pub const VERSION: u32 = 2;
+
+    /// Whether it is a material type's instance (a shader and a type), not the standard
+    /// material.
+    pub fn is_typed(&self) -> bool {
+        self.shader != AssetRef::NONE && !self.type_name.is_empty()
     }
 
-    /// Reads and parses `path`.
-    pub fn load(path: &Path) -> Result<Self, MaterialFileError> {
+    /// The file's text, with its id; asset references written with no path.
+    pub fn to_text(&self, id: AssetId) -> String {
+        self.text(id, None)
+    }
+
+    /// The file's text, with its id, its asset references written with their paths from
+    /// `assets`.
+    pub fn to_text_with(&self, id: AssetId, assets: &AssetPaths) -> String {
+        self.text(id, Some(assets))
+    }
+
+    /// The text: every field, but the type's when they hold nothing (a standard material's
+    /// file reads as version 1's did; a missing field reads as its default).
+    fn text(&self, id: AssetId, assets: Option<&AssetPaths>) -> String {
+        let mut all = String::new();
+        engine_scene::write_value(Self::KIND, Self::VERSION, Some(id), self, assets, &mut all);
+        let typed = self.is_typed();
+        let mut out = String::with_capacity(all.len());
+        for line in all.lines() {
+            let empty = matches!(
+                line,
+                "shader = none" | "type = \"\"" | "numbers = {}" | "vectors = {}" | "textures = {}"
+            ) || (!typed && line == "look = Own");
+            if !empty {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// A material from its file's text, and what reading it reported: its id, the paths its
+    /// asset references were written with, lines it skipped.
+    ///
+    /// # Errors
+    ///
+    /// Not a material file, a newer one, or a bad line (with its number).
+    pub fn parse(text: &str) -> Result<(Self, ValueReport), LoadError> {
+        let mut file = Self::default();
+        let report = engine_scene::read_value(Self::KIND, Self::VERSION, text, &mut file)?;
+        Ok((file, report))
+    }
+
+    /// Reads and parses the file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// When it cannot be read or parsed.
+    pub fn load(path: &Path) -> Result<(Self, ValueReport), MaterialFileError> {
         let error = |message: String| MaterialFileError {
             path: Some(path.to_owned()),
             message,
         };
         let text = std::fs::read_to_string(path).map_err(|e| error(e.to_string()))?;
-        let dir = path.parent().unwrap_or(Path::new(""));
-        Self::parse(&text, dir).map_err(|e| MaterialFileError {
-            path: Some(path.to_owned()),
-            message: e.message,
-        })
+        Self::parse(&text).map_err(|e| error(e.to_string()))
     }
 
+    /// A typed file resolved for the cook and the run time: its shader's and textures' paths
+    /// as `paths` has them (those it was written with), from the project's `root` (an
+    /// absolute path as it is). `None` for the standard material.
+    ///
+    /// # Errors
+    ///
+    /// A reference with no path, or a field set twice (as a number and as a vector).
+    pub fn typed(
+        &self,
+        paths: &AssetPaths,
+        root: &Path,
+    ) -> Result<Option<TypedMaterial>, MaterialFileError> {
+        if !self.is_typed() {
+            return Ok(None);
+        }
+        let error = |message: String| MaterialFileError {
+            path: None,
+            message,
+        };
+        let path_of = |asset: AssetRef, what: &str| {
+            paths
+                .get(asset)
+                .filter(|p| !p.is_empty())
+                .map(|p| resolve(root, Path::new(p)))
+                .ok_or_else(|| error(format!("`{what}`: no path written for {}", asset.file)))
+        };
+        let shader = path_of(self.shader, "shader")?;
+        let mut params = BTreeMap::new();
+        let mut put = |name: &String, value: ParamValue| {
+            if params.insert(name.clone(), value).is_some() {
+                return Err(error(format!("`{name}` is set twice")));
+            }
+            Ok(())
+        };
+        for (name, &n) in &self.numbers {
+            put(name, ParamValue::Number(f64::from(n)))?;
+        }
+        for (name, values) in &self.vectors {
+            let list = values.iter().map(|&v| ParamValue::Number(f64::from(v)));
+            put(name, ParamValue::List(list.collect()))?;
+        }
+        for (name, texture) in &self.textures {
+            put(
+                name,
+                ParamValue::Texture(path_of(texture.image, name)?, texture.encoding),
+            )?;
+        }
+        Ok(Some(TypedMaterial {
+            shader,
+            type_name: self.type_name.clone(),
+            params,
+            fallback: match self.look {
+                Look::Own => Some(Fallback {
+                    base_color: self.base_color,
+                    metallic: self.metallic,
+                    roughness: self.roughness,
+                    emissive: self.emissive,
+                }),
+                Look::Replaced => None,
+            },
+            alpha: self.alpha,
+            alpha_cutoff: self.alpha_cutoff,
+            double_sided: self.double_sided,
+        }))
+    }
+}
+
+impl TypedMaterial {
     /// The parameters laid out as `layout` (the type's `Params`, from
     /// `engine_shader::Compiler::reflect_struct`); see the module documentation.
     pub fn build_params(&self, layout: &StructLayout) -> Result<BuiltParams, MaterialFileError> {
@@ -264,15 +448,31 @@ impl MaterialFile {
                 out.unset.push(field.name.clone());
                 continue;
             };
+            let per = match field.kind {
+                FieldKind::Float(n) | FieldKind::Uint(n) | FieldKind::Int(n) => usize::from(n),
+                FieldKind::Texture => 1,
+            };
+            let chunked: Vec<ParamValue>;
             let values: Vec<&ParamValue> = match (field.count, value) {
                 (1, value) => vec![value],
                 (count, ParamValue::List(list)) if list.len() == count as usize => {
                     list.iter().collect()
                 }
+                // An array of vectors written flat (ADR 0120).
+                (count, ParamValue::List(list))
+                    if per > 1 && list.len() == count as usize * per =>
+                {
+                    chunked = list
+                        .chunks(per)
+                        .map(|c| ParamValue::List(c.to_vec()))
+                        .collect();
+                    chunked.iter().collect()
+                }
                 (count, _) => {
                     return Err(error(format!(
-                        "`{}`: an array of {count}, written `[...]` with {count} values",
-                        field.name
+                        "`{}`: an array of {count}: {count} values, or {} numbers written flat",
+                        field.name,
+                        count as usize * per
                     )));
                 }
             };
@@ -501,14 +701,16 @@ impl MaterialTypeBuilder for SlangMaterialTypes {
     }
 }
 
-/// Replaces `scene`'s materials named in `map` by their material files: each becomes a
-/// material of its file's type (built once per module and type), its parameters laid out,
-/// its texture parameters added to the scene's textures, its glTF record the fallback
-/// (overridden by the file's `fallback`, `alpha` and `double_sided`). Returns warnings:
-/// names the scene does not have, fields the files leave unset.
+/// Replaces `scene`'s materials named in `map` by their material files: a typed one becomes
+/// a material of its file's type (built once per module and type), its parameters laid out,
+/// its texture parameters added to the scene's textures, its glTF record the look
+/// (overridden by the file's own look, `alpha` and `double_sided`); a standard one sets the
+/// glTF record's values. The files' paths are read from the project's `root`. Returns
+/// warnings: names the scene does not have, fields the files leave unset.
 pub fn apply_material_map(
     scene: &mut ImportedScene,
     map: &MaterialMap,
+    root: &Path,
     builder: &mut dyn MaterialTypeBuilder,
 ) -> Result<Vec<String>, MaterialFileError> {
     let mut warnings = Vec::new();
@@ -531,7 +733,28 @@ pub fn apply_material_map(
             path: Some(path.clone()),
             message,
         };
-        let file = MaterialFile::load(path)?;
+        let (source, report) = MaterialFile::load(path)?;
+        let alpha = |file_alpha: Alpha, cutoff: f32| match file_alpha {
+            Alpha::Opaque => AlphaMode::Opaque,
+            Alpha::Mask => AlphaMode::Mask(cutoff.to_bits()),
+            Alpha::Blend => AlphaMode::Blend,
+        };
+        let Some(file) = source
+            .typed(&report.assets, root)
+            .map_err(|e| error(e.message))?
+        else {
+            // The standard material: its values on the glTF record.
+            for material in matching {
+                let m = &mut scene.materials[material];
+                m.base_color = source.base_color;
+                m.metallic = source.metallic;
+                m.roughness = source.roughness;
+                m.emissive = source.emissive;
+                m.alpha = alpha(source.alpha, source.alpha_cutoff);
+                m.double_sided = source.double_sided;
+            }
+            continue;
+        };
         let module = file.shader.to_string_lossy().into_owned();
         let ty = match scene
             .material_types
@@ -585,11 +808,7 @@ pub fn apply_material_map(
                 m.roughness = f.roughness;
                 m.emissive = f.emissive;
             }
-            m.alpha = match file.alpha {
-                Alpha::Opaque => AlphaMode::Opaque,
-                Alpha::Mask(cutoff) => AlphaMode::Mask(cutoff.to_bits()),
-                Alpha::Blend => AlphaMode::Blend,
-            };
+            m.alpha = alpha(file.alpha, file.alpha_cutoff);
             m.double_sided = file.double_sided;
             scene.typed_materials.push(TypedMaterialData {
                 material,
@@ -604,6 +823,8 @@ pub fn apply_material_map(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
     use engine_shader::Field;
 
@@ -617,7 +838,7 @@ mod tests {
         };
         StructLayout {
             name: String::from("VelvetParams"),
-            size: 48,
+            size: 72,
             fields: vec![
                 field("color", 0, FieldKind::Float(4), 1, 16),
                 field("sheen_color", 16, FieldKind::Float(3), 1, 12),
@@ -625,27 +846,30 @@ mod tests {
                 field("pattern", 32, FieldKind::Texture, 1, 4),
                 field("layers", 36, FieldKind::Uint(1), 2, 4),
                 field("detail", 44, FieldKind::Texture, 1, 4),
+                field("points", 48, FieldKind::Float(3), 2, 12),
             ],
         }
     }
 
     const VELVET: &str = r#"
-        // A comment.
-        (
-            shader: "velvet.slang",
-            type: "VelvetMaterial",
-            params: {
-                "color": (0.40, 0.05, 0.05, 1.0),
-                "sheen_color": (0.9, 0.6, 0.6),
-                "sheen_roughness": 0.6,
-                "pattern": Texture("../textures/velvet.png", Color),
-                "layers": [3, 7],
-            },
-            fallback: (base_color: (0.40, 0.05, 0.05, 1.0), roughness: 0.9),
-            alpha: Mask(0.5),
-            double_sided: true,
-        )
-    "#;
+[material version=2 id=4f8e1d2c3b4a59687706f5e4d3c2b1a0]
+
+# A comment.
+shader = asset("materials/velvet.slang", 7d1c0e9a2b3f4c5d8e6f7a8b9c0d1e2f)
+type = "VelvetMaterial"
+numbers["sheen_roughness"] = 0.6
+vectors["color"] = [0.4, 0.05, 0.05, 1]
+vectors["sheen_color"] = [0.9, 0.6, 0.6]
+vectors["layers"] = [3, 7]
+vectors["points"] = [1, 2, 3, 4, 5, 6]
+textures["pattern"].image = asset("textures/velvet.png", 0a1b2c3d4e5f60718293a4b5c6d7e8f9)
+textures["pattern"].encoding = Color
+base_color = [0.4, 0.05, 0.05, 1]
+roughness = 0.9
+alpha = Mask
+alpha_cutoff = 0.5
+double_sided = true
+"#;
 
     fn f32_at(bytes: &[u8], offset: usize) -> f32 {
         f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
@@ -656,29 +880,33 @@ mod tests {
     }
 
     #[test]
-    fn parses_resolves_and_lays_out_a_material_file() {
-        let dir = Path::new("assets/materials");
-        let file = MaterialFile::parse(VELVET, dir).unwrap();
-        assert_eq!(file.shader, dir.join("velvet.slang"));
-        assert_eq!(file.type_name, "VelvetMaterial");
-        assert_eq!(file.alpha, Alpha::Mask(0.5));
-        assert!(file.double_sided);
-        let fallback = file.fallback.unwrap();
-        assert_eq!(fallback.base_color, [0.40, 0.05, 0.05, 1.0]);
+    fn a_material_file_reads_resolves_and_lays_out() {
+        let (file, report) = MaterialFile::parse(VELVET).unwrap();
+        assert!(file.is_typed());
+        assert_eq!(report.version, 2);
+        let root = Path::new("project");
+        let typed = file.typed(&report.assets, root).unwrap().unwrap();
+        assert_eq!(typed.shader, root.join("materials/velvet.slang"));
+        assert_eq!(typed.type_name, "VelvetMaterial");
+        assert_eq!((typed.alpha, typed.alpha_cutoff), (Alpha::Mask, 0.5));
+        assert!(typed.double_sided);
+        let fallback = typed.fallback.unwrap();
+        assert_eq!(fallback.base_color, [0.4, 0.05, 0.05, 1.0]);
         assert_eq!(fallback.roughness, 0.9);
-        assert_eq!(
-            fallback.metallic, 0.0,
-            "unset fallback fields keep the default"
-        );
+        assert_eq!(fallback.metallic, 0.0, "unset values keep the default");
 
-        let built = file.build_params(&layout()).unwrap();
-        assert_eq!(built.bytes.len(), 48);
-        assert_eq!(f32_at(&built.bytes, 0), 0.40);
+        let built = typed.build_params(&layout()).unwrap();
+        assert_eq!(built.bytes.len(), 72);
+        assert_eq!(f32_at(&built.bytes, 0), 0.4);
         assert_eq!(f32_at(&built.bytes, 12), 1.0);
         assert_eq!(f32_at(&built.bytes, 24), 0.6);
         assert_eq!(f32_at(&built.bytes, 28), 0.6);
         assert_eq!(u32_at(&built.bytes, 36), 3);
         assert_eq!(u32_at(&built.bytes, 40), 7);
+        // An array of vectors written flat.
+        assert_eq!(f32_at(&built.bytes, 48), 1.0);
+        assert_eq!(f32_at(&built.bytes, 60), 4.0);
+        assert_eq!(f32_at(&built.bytes, 68), 6.0);
         assert_eq!(
             u32_at(&built.bytes, 32),
             u32::MAX,
@@ -689,65 +917,101 @@ mod tests {
             built.textures,
             vec![TextureParam {
                 offset: 32,
-                path: dir.join("../textures/velvet.png"),
+                path: root.join("textures/velvet.png"),
                 encoding: TextureEncoding::Color,
             }]
         );
         assert_eq!(built.unset, vec![String::from("detail")]);
+
+        // Written again with its paths, it reads the same.
+        let text = file.to_text_with(report.id.unwrap(), &report.assets);
+        let (again, again_report) = MaterialFile::parse(&text).unwrap();
+        assert_eq!(again, file);
+        assert_eq!(
+            again.typed(&again_report.assets, root).unwrap().unwrap(),
+            typed
+        );
+    }
+
+    #[test]
+    fn version_1_is_the_standard_material_and_absolute_paths_stay() {
+        let (file, report) = MaterialFile::parse(
+            "[material version=1 id=4f8e1d2c3b4a59687706f5e4d3c2b1a0]\nroughness = 0.25\n",
+        )
+        .unwrap();
+        assert_eq!(report.version, 1);
+        assert!(!file.is_typed());
+        assert_eq!(file.roughness, 0.25);
+        assert_eq!(file.typed(&report.assets, Path::new("p")).unwrap(), None);
+        // A file outside any project names its files by absolute paths.
+        let module = std::env::temp_dir().join("velvet.slang");
+        let text = format!(
+            "[material version=2 id=4f8e1d2c3b4a59687706f5e4d3c2b1a0]\n\
+             shader = asset({}, 7d1c0e9a2b3f4c5d8e6f7a8b9c0d1e2f)\ntype = \"V\"\nlook = Replaced\n",
+            engine_scene::text::quote(&module.to_string_lossy())
+        );
+        let (file, report) = MaterialFile::parse(&text).unwrap();
+        let typed = file
+            .typed(&report.assets, Path::new("elsewhere"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(typed.shader, module);
+        assert_eq!(typed.fallback, None, "the replaced glTF material's look");
     }
 
     #[test]
     fn errors_name_the_field() {
-        let error = |params: &str| {
-            let text = format!("(shader: \"v.slang\", type: \"V\", params: {{ {params} }})");
-            MaterialFile::parse(&text, Path::new(""))
+        let error = |lines: &str| {
+            let text = format!(
+                "[material version=2]\nshader = asset(\"v.slang\", 7d1c0e9a2b3f4c5d8e6f7a8b9c0d1e2f)\ntype = \"V\"\n{lines}\n"
+            );
+            let (file, report) = MaterialFile::parse(&text).unwrap();
+            file.typed(&report.assets, Path::new(""))
+                .unwrap()
                 .unwrap()
                 .build_params(&layout())
                 .unwrap_err()
                 .message
         };
-        let unknown = error("\"colour\": 1.0");
+        let unknown = error("numbers[\"colour\"] = 1");
         assert!(
             unknown.contains("`colour`") && unknown.contains("color"),
             "{unknown}"
         );
-        let shape = error("\"sheen_color\": (1.0, 0.5)");
+        let shape = error("vectors[\"sheen_color\"] = [1, 0.5]");
         assert!(
             shape.contains("`sheen_color`") && shape.contains("3 numbers"),
             "{shape}"
         );
-        let texture = error("\"sheen_roughness\": Texture(\"a.png\", Data)");
-        assert!(texture.contains("not a texture"), "{texture}");
-        let not_texture = error("\"pattern\": 1.0");
+        let not_texture = error("numbers[\"pattern\"] = 1");
         assert!(not_texture.contains("TextureRef"), "{not_texture}");
-        let uint = error("\"layers\": [1.5, 2]");
+        let uint = error("vectors[\"layers\"] = [1.5, 2]");
         assert!(uint.contains("not a uint"), "{uint}");
-        let array = error("\"layers\": 3");
+        let array = error("numbers[\"layers\"] = 3");
         assert!(array.contains("an array of 2"), "{array}");
-
-        let syntax = MaterialFile::parse("(shader: \"v.slang\", type: )", Path::new(""))
+        // Set twice.
+        let text = "[material version=2]\nshader = asset(\"v.slang\", 7d1c0e9a2b3f4c5d8e6f7a8b9c0d1e2f)\ntype = \"V\"\nnumbers[\"a\"] = 1\nvectors[\"a\"] = [1]\n";
+        let (file, report) = MaterialFile::parse(text).unwrap();
+        let twice = file
+            .typed(&report.assets, Path::new(""))
             .unwrap_err()
             .message;
-        assert!(syntax.starts_with("1:"), "line and column: {syntax}");
-        let unknown_key = MaterialFile::parse(
-            "(shader: \"v.slang\", type: \"V\", colour: 1)",
-            Path::new(""),
-        )
-        .unwrap_err()
-        .message;
-        assert!(unknown_key.contains("colour"), "{unknown_key}");
+        assert!(twice.contains("`a` is set twice"), "{twice}");
+        // A bad line names its number.
+        let bad = MaterialFile::parse("[material version=2]\ntype = \n").unwrap_err();
+        assert!(bad.to_string().contains('2'), "{bad}");
     }
 
     #[test]
     fn a_material_map_resolves_against_its_folder() {
         let map = MaterialMap::parse(
-            r#"{ "fabric_red": "materials/red_velvet.material.ron" }"#,
+            r#"{ "fabric_red": "materials/red_velvet.material" }"#,
             Path::new("scenes"),
         )
         .unwrap();
         assert_eq!(
             map.files["fabric_red"],
-            Path::new("scenes").join("materials/red_velvet.material.ron")
+            Path::new("scenes").join("materials/red_velvet.material")
         );
         assert_eq!(
             MaterialMap::path_for(Path::new("scenes/Sponza.gltf")),

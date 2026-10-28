@@ -3,6 +3,7 @@
 - Status: Accepted (2026-10-12, the owner: "agree with everything"; ubershaders to be tried;
   more shading models in the first version)
 - Date: 2026-10-12
+- Amended by: [ADR 0120](0120-one-material-file.md): material files are `.material`, in the editor's grammar; `*.material.ron` is retired (2026-10-28).
 - Builds on:
   - [ADR 0040](0040-materials-and-textures.md): the material table;
   - [ADR 0055](0055-pipeline-cache-and-warm-up.md), [ADR 0079](0079-pipelines-on-first-use.md):

@@ -2383,39 +2383,48 @@ let floor = materials.add_typed(checker, MaterialDesc::solid([0.5; 3], 0.0, 0.6)
 
 ### Material files
 
-Materials of a type are text files, `*.material.ron` (ADR 0092), paths relative to the
-file:
+A material is a `.material` file (ADR 0120), the same file the editor writes: with no
+shader the engine's standard material, with one an instance of your type. Paths are the
+project's, from its root, each with its file's id (ADR 0108):
 
-```ron
-// red_velvet.material.ron
-(
-    shader: "velvet.slang",
-    type: "VelvetMaterial",
-    params: {
-        "color": (0.40, 0.05, 0.05, 1.0),
-        "sheen_color": (0.9, 0.6, 0.6),
-        "sheen_roughness": 0.6,
-        "pattern": Texture("../textures/velvet.png", Color),   // a TextureRef field
-    },
-    fallback: (base_color: (0.40, 0.05, 0.05, 1.0), roughness: 0.9),
-    alpha: Opaque,          // Opaque | Mask(0.5) | Blend
-    double_sided: false,
-)
+```text
+[material version=2 id=4f8e1d2c3b4a59687706f5e4d3c2b1a0]
+
+shader = asset("materials/velvet.slang", 7d1c0e9a2b3f4c5d8e6f7a8b9c0d1e2f)
+type = "VelvetMaterial"
+numbers["sheen_roughness"] = 0.6
+vectors["color"] = [0.4, 0.05, 0.05, 1]
+vectors["sheen_color"] = [0.9, 0.6, 0.6]
+textures["pattern"].image = asset("textures/velvet.png", 0a1b2c3d4e5f60718293a4b5c6d7e8f9)
+textures["pattern"].encoding = Color
+look = Own
+base_color = [0.4, 0.05, 0.05, 1]
+roughness = 0.9
+alpha = Opaque
+double_sided = false
 ```
 
-- `params` names the fields of the type's `Params` struct: numbers, vectors `(x, y, z)`,
-  arrays `[a, b]`, nested structs as `"outer.inner"`. Types: 32-bit `float`, `uint` and
-  `int` scalars and vectors, `TextureRef`, arrays and structs of them; at most 256 bytes.
+- The type's `Params` fields go by name: `numbers` for a field of one number, `vectors`
+  for a vector's values or an array's in order (an array of vectors written flat: a
+  `float3 points[2]` takes six numbers), `textures` for a `TextureRef` field's image and
+  encoding. Nested structs' fields are named `outer.inner`, arrays of structs'
+  `items[2].inner`. Types: 32-bit `float`, `uint` and `int` scalars and vectors,
+  `TextureRef`, arrays and structs of them; at most 256 bytes.
 - A field you leave out is zero (a texture: none, white); a misspelled name or a value of
   the wrong shape is an error that names the field.
 - Textures in parameters are `TextureRef` fields, sampled with `ctx.sample(p.pattern)`;
   `Color` is sRGB, `Data` linear, `Normal` a tangent-space normal map.
+- **The look** (`look`) is what the material looks like before its shaders are made and in
+  GI's rays: its own `base_color`, `metallic`, `roughness` and `emissive` (`Own`), or the
+  glTF material it replaces in a scene's map (`Replaced`).
+- `alpha` is `Opaque`, `Mask` (cut below `alpha_cutoff`) or `Blend`.
 - To put material files on a glTF scene's meshes, write `<scene>.materials.ron` next to
-  it: `{ "glTF material name": "materials/red_velvet.material.ron" }` (`"#14"` for an
-  unnamed glTF material, by index). `ofeliaengine cook` applies it (or `--materials
-  <MAP>`): the replaced glTF material becomes the fallback unless the file sets one, the
-  texture parameters are cooked like the scene's, and the types' shaders are compiled into
-  the pack (about 3 s per type), so a game never compiles them.
+  it: `{ "glTF material name": "materials/red_velvet.material" }` (`"#14"` for an unnamed
+  glTF material, by index). `ofeliaengine cook` applies it (or `--materials <MAP>`; the
+  files' paths are read from `--project <DIR>`, the current folder by default): a typed
+  file's texture parameters are cooked like the scene's and its type's shaders compiled
+  into the pack (about 3 s per type), so a game never compiles them; a standard one sets
+  the glTF material's values.
 - Loading such a pack: `engine_streaming::register_material_types` then `add_materials`
   (as `flight` does).
 - **Hot reload** (development): `ForwardRenderer::set_material_hot_reload(true)` watches

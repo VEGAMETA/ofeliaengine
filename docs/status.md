@@ -759,11 +759,14 @@ Last updated: 2026-10-28.
   - **E11-3a, sounds' waveforms in the dock** (#394, ADR 0107's as-built): a sound's tile is
     its waveform, read once on the thumbnail thread (`engine_app::waveform`) and cached;
     3 minutes of Ogg in 188 ms, off the frame.
+  - **E10-1a, one material file** (#PR, ADR 0120): `.material` version 2 holds a type's
+    instance (its shader and type, numbers, vectors and textures by field name, its look);
+    the cook (`--project`) and the run time read it with the project's root; the six golden
+    files converted; `.material.ron` retired.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E10-1, materials in the inspector: the one `.material` file (it takes what
-       `.material.ron` holds; the cook reads it; the six golden files converted), typed
-       materials made by the player, parameters in the inspector, New Material, Make
-       Variant (a copy), Apply to Selection.
+    1. E10-1b and E10-1c: typed materials made by the player (the type registered, its
+       entry points compiled off the frame, the look meanwhile), parameters in the
+       inspector, New Material, Make Variant (a copy), Apply to Selection.
     2. The script debugger's "Full script debugging" switch (off: native code, as the
        game runs; on: interpreted, every frame's locals at an error stop; from the next
        Play; kept in the session).

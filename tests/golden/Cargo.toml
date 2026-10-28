@@ -32,6 +32,8 @@ engine_streaming.workspace = true
 # The runtime path (ECS extraction into a GPU scene, camera entities; ADR 0064, ADR 0072).
 engine_ecs.workspace = true
 engine_runtime.workspace = true
+# Material files' text (ADR 0120): quoting paths, ids.
+engine_scene.workspace = true
 # The CPU check's spinning component (`cpu.rs`): its derive names the crate; already in the
 # tree through engine_ecs.
 bytemuck = { version = "1.25", features = ["derive"] }
