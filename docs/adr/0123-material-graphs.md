@@ -478,6 +478,39 @@ The team's «а» (answer 4 below).
     parameter reaching it.
 - **Next:** errors on nodes and Show Slang (E10-3f-3), then E10-3e-2.
 
+## As built (E10-3f-3, 2026-10-28): errors on nodes, Show Slang
+
+- **Errors on nodes:** the shown graph's generation (its editing build, made after each
+  edit for the preview) keeps what stopped it (`GraphDoc::error`, at its node when it has
+  one).
+  - The canvas frames that node in red, with why under the box.
+  - The bar says why ("not drawn: node a: …"); the preview's sphere keeps its last
+    drawing.
+  - What reaches it: what the canvas cannot make but a file can hold, such as a loop a
+    merge left, or a kind or a port that is not there (a newer engine's file).
+  - Slang's own errors at their nodes (the line map, `Generated::node_at`) wait for
+    E10-3g: the generator's code compiles (73 types checked in the gate), so nothing
+    could reach them before nodes whose code the user writes.
+- **Show Slang:** the bar's button and the palette's `graph.show_slang`.
+  - What it opens: the saved build (what the player and the cook write, unnamed numbers
+    as literals), of the graph as its tab has it, in a code tab at `<graph>.slang`,
+    never on disk. The Slang highlighting, outline and checker are a code tab's.
+  - Read only (`code::Document::set_read_only`): every edit refused at the one place
+    edits go through, and said once; a cut copies.
+  - Following the graph: made again where the graph's revision moved, while its tab is
+    open (`Document::show_text`: no undo step, the caret kept where the text has room).
+  - Ctrl+S writes nothing; the session and autosaves leave it out.
+- **Tests:**
+  - a loop in a file: the error at one of its nodes and in the bar, gone with the link;
+  - the read only document: edits refused and told, a cut that copies, a new text
+    without a step;
+  - Show Slang: the tab, its label and the saved build's numbers; typing refused and
+    told; Ctrl+S writing nothing; a value changed in the graph followed; the session
+    without it.
+  - The editor's and the graph tab's frames still allocate nothing.
+- **Next:** reroutes and frames (E10-3e-2, the file's version 2), then functions
+  (E10-3g), with Slang's errors at their nodes.
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,

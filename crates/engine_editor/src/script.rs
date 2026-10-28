@@ -68,6 +68,10 @@ pub(crate) struct Script {
     pub(crate) due: Option<Instant>,
     /// Closing it was asked with unsaved changes: asked again, they are dropped.
     pub(crate) closing: bool,
+    /// The graph whose saved build it shows (Show Slang, ADR 0123's E10-3f-3) and the
+    /// graph's revision it was made at: read only, made again while the graph's tab is
+    /// open and its revision moves; never saved, autosaved or kept in the session.
+    pub(crate) generated: Option<(engine_scene::AssetId, u64)>,
     /// Its file's lines end with `\r\n`, and it starts with a byte order mark: saved so
     /// again.
     crlf: bool,
@@ -103,6 +107,7 @@ impl Script {
             autosaved: None,
             due: None,
             closing: false,
+            generated: None,
         }
     }
 
@@ -140,7 +145,9 @@ impl Script {
             .path
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        if self.doc.is_dirty() {
+        if self.generated.is_some() {
+            format!("{name} (read only)")
+        } else if self.doc.is_dirty() {
             format!("{name} *")
         } else {
             name

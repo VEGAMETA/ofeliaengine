@@ -1008,6 +1008,8 @@ pub struct ShellResponse {
     pub graph_canvas: u64,
     /// Id of its preview's picture (none: 0): presses there are not the canvas's.
     pub graph_preview: u64,
+    /// Its bar's Show Slang was clicked (E10-3f-3).
+    pub show_slang: bool,
     /// The find bar's query field was used (`Ui::edited_text` while it changes).
     pub find_query: Option<TextFieldResponse>,
     /// Its replace field was.
@@ -1401,6 +1403,8 @@ fn center(
                 text(ui, "path", graph.path, TEXT, p.text_dim);
                 ui.spacer("fill");
                 text(ui, "status", graph.status, TEXT, p.text_dim);
+                // Its code, read only in a tab of its own (E10-3f-3).
+                out.show_slang = label_button(ui, "show slang", "Show Slang", false, p.field, p);
             });
             // Its preview in the top right corner, over the canvas the app draws.
             let mut preview = 0;
@@ -4489,7 +4493,7 @@ fn mixer_panel(
                     _ => {}
                 }
                 // Monitor: every solo and mute aside, and back (FMOD's).
-                if listen_button(ui, "monitor", "Monitor", view.monitor, p.selection, p) {
+                if label_button(ui, "monitor", "Monitor", view.monitor, p.selection, p) {
                     out.mixer_monitor = true;
                 }
                 let hovered = ui.is_hovered(ui.id("add"));
@@ -4611,7 +4615,7 @@ fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &
                     text(ui, "effects", strip.effects, SMALL, color);
                     if !strip.effects.is_empty() && !strip.room {
                         ui.spacer("fill");
-                        if listen_button(ui, "bypass", "B", strip.bypassed, p.warning, p) {
+                        if label_button(ui, "bypass", "B", strip.bypassed, p.warning, p) {
                             out.mixer_bypass = Some(i);
                         }
                     }
@@ -4788,10 +4792,10 @@ fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &
                     text(ui, "gain", strip.gain, SMALL, color);
                     ui.spacer("fill");
                     if strip.depth > 0 {
-                        if listen_button(ui, "mute", "M", strip.muted, p.warning, p) {
+                        if label_button(ui, "mute", "M", strip.muted, p.warning, p) {
                             out.mixer_mute = Some(i);
                         }
-                        if listen_button(ui, "solo", "S", strip.soloed, p.accent, p) {
+                        if label_button(ui, "solo", "S", strip.soloed, p.accent, p) {
                             out.mixer_solo = Some(i);
                         }
                     }
@@ -4804,9 +4808,9 @@ fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &
     }
 }
 
-/// A small button of the mixer's listening aids (M, S, Monitor), lit in `lit` while `on`:
-/// clicked this frame.
-fn listen_button(ui: &mut Ui, key: &str, label: &str, on: bool, lit: Color, p: &Palette) -> bool {
+/// A small button with a label (the mixer's listening aids M, S and Monitor, the graph bar's
+/// Show Slang), lit in `lit` while `on`: clicked this frame.
+fn label_button(ui: &mut Ui, key: &str, label: &str, on: bool, lit: Color, p: &Palette) -> bool {
     let hovered = ui.is_hovered(ui.id(key));
     let background = if on {
         Some(lit)
