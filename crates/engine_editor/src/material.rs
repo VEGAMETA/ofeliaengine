@@ -560,26 +560,50 @@ pub(crate) struct MaterialDoc {
     pub(crate) rows: Vec<Row>,
     pub(crate) texts: Vec<String>,
     pub(crate) spans: Vec<(usize, usize)>,
+    /// A variant's base, resolved, with the paths its references were written with
+    /// (E10-4a): `file` is it under the variant's own values, and the text the variant's
+    /// own lines.
+    pub(crate) base: Option<(MaterialFile, AssetPaths)>,
 }
 
 impl MaterialDoc {
-    /// Material file `id` at `path` (from the project's root `root`), read.
-    pub(crate) fn open(root: &Path, id: AssetId, path: &str) -> Result<Self, String> {
+    /// Material file `id` at `path` (from the project's root `root`), read over its bases
+    /// (a variant's, E10-4a: each as `open` holds it, else from its file).
+    pub(crate) fn open(
+        root: &Path,
+        id: AssetId,
+        path: &str,
+        open: &dyn Fn(AssetRef) -> Option<(MaterialFile, AssetPaths)>,
+    ) -> Result<Self, String> {
         let text = std::fs::read_to_string(root.join(path)).map_err(|e| format!("{path}: {e}"))?;
-        Self::from_text(id, path, &text)
+        Self::from_text(id, path, &text, root, open)
     }
 
-    /// Material file `id` at `path` from its text.
-    pub(crate) fn from_text(id: AssetId, path: &str, text: &str) -> Result<Self, String> {
-        let (file, report) = MaterialFile::parse(text).map_err(|e| format!("{path}:{e}"))?;
-        let written = report.assets;
+    /// Material file `id` at `path` from its text, read over its bases as [`Self::open`]
+    /// reads them.
+    pub(crate) fn from_text(
+        id: AssetId,
+        path: &str,
+        text: &str,
+        root: &Path,
+        open: &dyn Fn(AssetRef) -> Option<(MaterialFile, AssetPaths)>,
+    ) -> Result<Self, String> {
+        let read = MaterialFile::read_with_bases(text, root, open).map_err(|e| match &e.path {
+            Some(_) => e.to_string(),
+            None => format!("{path}: {}", e.message),
+        })?;
+        let (file, written, base) = (read.file, read.report.assets, read.base);
         // As the editor writes it: unsaved only once edited.
-        let text = file.to_text_with(id, &written);
+        let text = match &base {
+            Some((under, _)) => file.to_variant_text(id, &written, under),
+            None => file.to_text_with(id, &written),
+        };
         let mut doc = Self {
             id,
             path: path.to_owned(),
             file,
             written,
+            base,
             saved: text.clone(),
             text,
             revision: 0,
@@ -608,7 +632,7 @@ impl MaterialDoc {
         edit: impl FnOnce(&mut MaterialFile, &mut AssetPaths),
     ) -> Option<(String, String)> {
         edit(&mut self.file, &mut self.written);
-        let after = self.file.to_text_with(self.id, &self.written);
+        let after = self.file_text();
         if after == self.text {
             return None;
         }
@@ -619,11 +643,55 @@ impl MaterialDoc {
         Some((before, after))
     }
 
+    /// Its text as the editor writes it: a variant's lines its base has not (E10-4a), else
+    /// every value.
+    fn file_text(&self) -> String {
+        match &self.base {
+            Some((under, _)) => self.file.to_variant_text(self.id, &self.written, under),
+            None => self.file.to_text_with(self.id, &self.written),
+        }
+    }
+
+    /// Text `text` of it read: over its base where it names the one it has (E10-4a).
+    fn read_text(&self, text: &str) -> Result<(MaterialFile, AssetPaths), String> {
+        let (own, report) = MaterialFile::parse(text).map_err(|e| format!("{}:{e}", self.path))?;
+        match &self.base {
+            Some((under, paths)) if !own.base.is_none() => {
+                let (file, report) = MaterialFile::read_over(text, under)
+                    .map_err(|e| format!("{}:{e}", self.path))?;
+                let mut written = paths.clone();
+                written.extend(&report.assets);
+                Ok((file, written))
+            }
+            _ => Ok((own, report.assets)),
+        }
+    }
+
+    /// A variant's base as it is now (`base`: its resolved values and their paths; E10-4a):
+    /// its own values kept over it, and given to the player again. Whether it changed.
+    pub(crate) fn set_base(&mut self, base: (MaterialFile, AssetPaths)) -> bool {
+        if self.base.as_ref().map(|(b, _)| b) == Some(&base.0) {
+            return false;
+        }
+        let Ok((file, report)) = MaterialFile::read_over(&self.text, &base.0) else {
+            return false;
+        };
+        let mut written = base.1.clone();
+        written.extend(&report.assets);
+        self.file = file;
+        self.written = written;
+        self.base = Some(base);
+        self.given = false;
+        self.revision += 1;
+        self.refresh();
+        true
+    }
+
     /// Its text put back (undo, redo).
     pub(crate) fn put_text(&mut self, text: &str) -> Result<(), String> {
-        let (file, report) = MaterialFile::parse(text).map_err(|e| format!("{}:{e}", self.path))?;
+        let (file, written) = self.read_text(text)?;
         self.file = file;
-        self.written = report.assets;
+        self.written = written;
         self.text = text.to_owned();
         self.given = false;
         self.revision += 1;
@@ -829,7 +897,11 @@ mod tests {
     fn a_doc_edits_its_text_and_takes_it_back() {
         let id = AssetId::new();
         let text = MaterialFile::default().to_text_with(id, &AssetPaths::new());
-        let mut doc = MaterialDoc::from_text(id, "materials/red.material", &text).unwrap();
+        let mut doc =
+            MaterialDoc::from_text(id, "materials/red.material", &text, Path::new("."), &|_| {
+                None
+            })
+            .unwrap();
         assert!(!doc.dirty() && !doc.given);
         assert_eq!(doc.row_texts(0), ["0.8", "0.8", "0.8", "1"]);
         let (before, after) = doc
@@ -846,5 +918,58 @@ mod tests {
         doc.put_text(&before).unwrap();
         assert_eq!(doc.file.roughness, MaterialFile::default().roughness);
         assert!(!doc.dirty());
+    }
+    /// E10-4a: a variant's doc shows its base's values under its own and writes only what
+    /// it changes; its base changed, it follows, its own values kept; its text put back
+    /// (undo) is read over the base again.
+    #[test]
+    fn a_variants_doc_writes_what_it_changes_and_follows_its_base() {
+        let (red, blue) = (AssetId::new(), AssetId::new());
+        let base = MaterialFile {
+            base_color: [1.0, 0.0, 0.0, 1.0],
+            roughness: 0.25,
+            ..MaterialFile::default()
+        };
+        let mut paths = AssetPaths::new();
+        paths.insert(AssetRef::file(red), "materials/red.material");
+        let text = format!(
+            "[material version=2 id={blue}]\n\nbase = asset(\"materials/red.material\", {red})\n\
+             metallic = 1\n"
+        );
+        let open = |r: AssetRef| (r == AssetRef::file(red)).then(|| (base.clone(), paths.clone()));
+        let mut doc = MaterialDoc::from_text(
+            blue,
+            "materials/blue.material",
+            &text,
+            Path::new("."),
+            &open,
+        )
+        .unwrap();
+        assert_eq!(doc.file.base_color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(doc.file.metallic, 1.0);
+        assert!(!doc.dirty(), "{}", doc.text);
+        let (_, after) = doc.edit(|f, _| f.roughness = 0.9).unwrap();
+        assert!(after.contains("roughness = 0.9"), "{after}");
+        assert!(after.contains("metallic = 1"), "{after}");
+        assert!(
+            after.contains("base = asset(\"materials/red.material\""),
+            "{after}"
+        );
+        assert!(!after.contains("base_color"), "{after}");
+        // The base changed: followed, its own values kept.
+        let mut green = base.clone();
+        green.base_color = [0.0, 1.0, 0.0, 1.0];
+        assert!(doc.set_base((green.clone(), paths.clone())));
+        assert_eq!(doc.file.base_color, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(doc.file.roughness, 0.9);
+        assert!(!doc.given);
+        assert!(
+            !doc.set_base((green, paths.clone())),
+            "the same base changes nothing"
+        );
+        // Undo: the text before, over the base as it is.
+        doc.put_text(&text).unwrap();
+        assert_eq!(doc.file.roughness, 0.25);
+        assert_eq!(doc.file.base_color, [0.0, 1.0, 0.0, 1.0]);
     }
 }

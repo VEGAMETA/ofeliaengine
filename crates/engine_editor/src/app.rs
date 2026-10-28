@@ -16394,7 +16394,9 @@ impl Editor {
         if self.material_docs.iter().any(|d| d.id == id) || self.material_unreadable.contains(&id) {
             return;
         }
-        match crate::material::MaterialDoc::open(&self.root, id, path) {
+        let docs = &self.material_docs;
+        let open = |r: AssetRef| held_material(docs, r);
+        match crate::material::MaterialDoc::open(&self.root, id, path, &open) {
             Ok(doc) => self.material_docs.push(doc),
             Err(e) => {
                 self.material_unreadable.insert(id);
@@ -16714,7 +16716,7 @@ impl Editor {
         Some((folder, outline.maps.get(k)?.clone()))
     }
 
-    /// "Make Variant" (E10-1c): the material shown copied beside its file (`Red 2`, …), its
+    /// "Make Variant" (E10-1c, E10-4a): a variant of the material shown beside its file (`Red 2`, …), its
     /// unsaved edits with it, an id of its own, and given to the selected models in one
     /// step (the original stays as it is).
     fn make_variant(&mut self, world: &mut World) {
@@ -16732,8 +16734,13 @@ impl Editor {
         let stem = name.strip_suffix(".material").unwrap_or(name);
         let path = unique_file(&self.root, folder, stem, "material");
         let id = AssetId::new();
-        let text = doc.file.to_text_with(id, &doc.written);
-        let written = doc.written.clone();
+        // A variant of it (E10-4a): its file names its base alone, so it draws as its base
+        // (an unsaved edit of the base's with it while the inspector holds it) until edited.
+        let mut written = doc.written.clone();
+        written.insert(AssetRef::file(doc.id), &doc.path);
+        let mut variant = doc.file.clone();
+        variant.base = AssetRef::file(doc.id);
+        let text = variant.to_variant_text(id, &written, &doc.file);
         if let Err(e) = self.write_material_file(&path, id, &text) {
             self.say(format!("{path} could not be written: {e}"));
             return;
@@ -16952,7 +16959,9 @@ impl Editor {
         else {
             return;
         };
-        match crate::material::MaterialDoc::open(&self.root, id, &path) {
+        let docs = &self.material_docs;
+        let open = |r: AssetRef| held_material(docs, r);
+        match crate::material::MaterialDoc::open(&self.root, id, &path, &open) {
             Ok(mut doc) => match doc.put_text(&text) {
                 Ok(()) => {
                     doc.autosaved = Some(doc.revision);
@@ -22605,11 +22614,35 @@ impl<G> EditorGame<G> {
                 && !shared.material_docs[k].dirty()
             {
                 let path = shared.material_docs[k].path.clone();
-                match crate::material::MaterialDoc::open(&shared.root, id, &path) {
+                let docs = &shared.material_docs;
+                let open = |r: AssetRef| held_material(docs, r);
+                match crate::material::MaterialDoc::open(&shared.root, id, &path, &open) {
                     Ok(mut doc) => {
                         doc.layout = shared.material_docs[k].layout.take();
                         doc.refresh();
                         shared.material_docs[k] = doc;
+                    }
+                    Err(e) => log::warn!(target: "engine_editor", "{e}"),
+                }
+            }
+            // The variants of it the inspector holds (E10-4a), over its file as it is now
+            // where the inspector does not hold it (a held base is followed below).
+            if !shared.material_docs.iter().any(|d| d.id == id)
+                && let Some(entry) = shared.asset_db.get(id)
+                && shared
+                    .material_docs
+                    .iter()
+                    .any(|d| d.file.base == AssetRef::file(id))
+            {
+                let full = shared.root.join(&entry.path);
+                match engine_app::MaterialFile::load_with_bases(&full, &shared.root) {
+                    Ok(read) => {
+                        let base = (read.file, read.report.assets);
+                        for doc in &mut shared.material_docs {
+                            if doc.file.base == AssetRef::file(id) {
+                                doc.set_base(base.clone());
+                            }
+                        }
                     }
                     Err(e) => log::warn!(target: "engine_editor", "{e}"),
                 }
@@ -22742,6 +22775,33 @@ impl<G> EditorGame<G> {
         // rows.
         let inspected = shared.shown_material;
         let shared = &mut *shared;
+        // Variants follow the bases the inspector holds (E10-4a), unsaved edits and all; a
+        // steady frame compares and copies nothing.
+        for k in 0..shared.material_docs.len() {
+            let base = shared.material_docs[k].file.base;
+            if base.is_none() {
+                continue;
+            }
+            let Some(j) = shared
+                .material_docs
+                .iter()
+                .position(|d| AssetRef::file(d.id) == base)
+            else {
+                continue;
+            };
+            let followed = shared.material_docs[k]
+                .base
+                .as_ref()
+                .is_some_and(|(b, _)| *b == shared.material_docs[j].file);
+            if followed || j == k {
+                continue;
+            }
+            let held = (
+                shared.material_docs[j].file.clone(),
+                shared.material_docs[j].written.clone(),
+            );
+            shared.material_docs[k].set_base(held);
+        }
         for doc in &mut shared.material_docs {
             if !doc.given {
                 player.set_material_file(doc.id, Some((doc.file.clone(), doc.written.clone())));
@@ -24048,6 +24108,17 @@ fn unique_file(root: &Path, folder: &str, name: &str, ext: &str) -> String {
         k += 1;
     }
     path
+}
+
+/// Material file `r` as the inspector holds it (E10-1c), for reading a variant over it
+/// (E10-4a): its values and the paths its references were written with.
+fn held_material(
+    docs: &[crate::material::MaterialDoc],
+    r: AssetRef,
+) -> Option<(engine_app::MaterialFile, AssetPaths)> {
+    docs.iter()
+        .find(|d| r.part == 0 && d.id == r.file)
+        .map(|d| (d.file.clone(), d.written.clone()))
 }
 
 /// A graph's revision with the stamp of what it calls ([`Editor::callees_stamp`]): what a
@@ -27409,8 +27480,8 @@ mod tests {
         };
         assert_eq!(doc(&ed, made).roughness, 0.3);
         assert_eq!(ed.history.steps().count(), 2);
-        // Make Variant: a copy beside it, the edit with it, given to the box; the original
-        // stays.
+        // Make Variant: a variant beside it, its file naming its base alone, given to the
+        // box; drawn with the base's values, the base's unsaved edit with them (E10-4a).
         ed.run(&mut world, ed.ids.make_variant);
         let variant = ed
             .asset_db
@@ -27420,10 +27491,16 @@ mod tests {
         assert_ne!(variant, made);
         assert_eq!(material(&world), AssetRef::file(variant));
         let text = std::fs::read_to_string(dir.join("props/New Material 2.material")).unwrap();
-        assert!(text.contains("roughness = 0.3"), "{text}");
+        assert!(
+            text.contains("base = asset(\"props/New Material.material\""),
+            "{text}"
+        );
+        assert!(!text.contains("roughness"), "{text}");
         assert!(dir.join("props/New Material.material").is_file());
         ed.update(&mut world);
         assert_eq!(ed.shown_material, Some(variant), "the box's material now");
+        assert_eq!(doc(&ed, variant).roughness, 0.3, "its base's, unsaved");
+        assert_eq!(doc(&ed, variant).base, AssetRef::file(made));
         // Undo gives the box the original again.
         ed.run(&mut world, ed.ids.undo);
         assert_eq!(material(&world), AssetRef::file(made));

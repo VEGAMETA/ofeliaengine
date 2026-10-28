@@ -106,7 +106,11 @@ impl LiveMaterialFiles {
     ) -> Result<MaterialId, String> {
         let built = self.build(path, fallback, forward, texture)?;
         let material = table.add_typed(built.ty, built.desc, Some(built.params));
-        let keys = vec![path_key(path), path_key(&built.module)];
+        // Its bases' files too (a variant, E10-4a): a change to one is the variant's.
+        let keys: Vec<PathBuf> = [path_key(path), path_key(&built.module)]
+            .into_iter()
+            .chain(built.bases.iter().map(|b| path_key(b)))
+            .collect();
         if let Some(watch) = &mut self.watch {
             for key in &keys {
                 watch_folder(watch, key);
@@ -156,20 +160,21 @@ impl LiveMaterialFiles {
             let (path, fallback, material) = (file.path.clone(), file.fallback, file.material);
             let result = self.build(&path, fallback, forward, texture).map(|built| {
                 table.set_typed(material, built.ty, built.desc, Some(built.params));
-                built.module
+                (built.module, built.bases)
             });
             let file = &mut self.files[k];
             file.changed = None;
             match result {
-                Ok(module) => {
+                Ok((module, bases)) => {
                     file.error = None;
-                    // The type may now come from another module.
-                    let key = path_key(&module);
-                    if !file.keys.contains(&key) {
-                        if let Some(watch) = &mut self.watch {
-                            watch_folder(watch, &key);
+                    // The type may now come from another module, the file from other bases.
+                    for key in core::iter::once(&module).chain(&bases).map(|p| path_key(p)) {
+                        if !file.keys.contains(&key) {
+                            if let Some(watch) = &mut self.watch {
+                                watch_folder(watch, &key);
+                            }
+                            file.keys.push(key);
                         }
-                        file.keys.push(key);
                     }
                     read.push((path, Ok(())));
                 }
@@ -201,8 +206,10 @@ impl LiveMaterialFiles {
         forward: &mut ForwardRenderer,
         texture: &mut TextureResolver<'_>,
     ) -> Result<Built, String> {
-        let (source, report): (MaterialFile, _) =
-            MaterialFile::load(path).map_err(|e| e.to_string())?;
+        // A variant over its bases (E10-4a).
+        let read = MaterialFile::load_with_bases(path, &self.root).map_err(|e| e.to_string())?;
+        let (source, report) = (read.file, read.report);
+        let bases: Vec<PathBuf> = read.bases.into_iter().filter_map(|(_, at)| at).collect();
         let paths: &AssetPaths = &report.assets;
         let file = source
             .typed(paths, &self.root)
@@ -285,6 +292,7 @@ impl LiveMaterialFiles {
                 textures,
             },
             module,
+            bases,
         })
     }
 }
@@ -294,6 +302,8 @@ struct Built {
     desc: MaterialDesc,
     params: MaterialParams,
     module: PathBuf,
+    /// The files of its bases (a variant's, E10-4a).
+    bases: Vec<PathBuf>,
 }
 
 /// Watches the folder of `key` (a [`path_key`]).
