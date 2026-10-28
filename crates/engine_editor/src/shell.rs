@@ -876,6 +876,9 @@ pub struct ShellModel<'a> {
     pub movable: [usize; 2],
     /// A sound file's waveform and its controls, under one of them (E11-3c).
     pub sound: Option<SoundPanel<'a>>,
+    /// The active entity's 3D sound's level over distance, the camera's distance marked
+    /// (E11-4c, Unity's red line).
+    pub falloff: Option<FalloffView<'a>>,
     /// The inspector shows entities: its Add Component button after the sections.
     pub add_component: bool,
     /// Where the add menu opens, in logical pixels of the window: at the pointer when
@@ -2375,6 +2378,99 @@ fn asset_box(
     } else {
         ui.sense(id, false).clicked.then_some(FieldAction::Pick)
     }
+}
+
+/// A 3D sound's falloff (E11-4c): what it is at the camera's distance, then its level over
+/// distance as bars with the camera's place marked, the distances at the ends.
+fn falloff_panel(ui: &mut Ui, view: &FalloffView<'_>, p: &Palette) {
+    const HEIGHT: f32 = 44.0;
+    ui.column(
+        "falloff",
+        Style {
+            size: [Size::Grow(1.0), Size::Fit],
+            padding: [SOUND_PAD, 6.0, SOUND_PAD, 4.0],
+            gap: 3.0,
+            ..Style::default()
+        },
+        |ui| {
+            ui.row(
+                "head",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(18.0)],
+                    gap: 6.0,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    text(ui, "title", "Falloff", TEXT, p.text_dim);
+                    ui.spacer("fill");
+                    text(ui, "label", view.label, TEXT, p.text);
+                },
+            );
+            ui.row(
+                "bars",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(HEIGHT)],
+                    gap: 1.0,
+                    radius: 3.0,
+                    clip: true,
+                    background: Some(p.field),
+                    ..Style::default()
+                },
+                |ui| {
+                    // The camera's place: its bar drawn whole, in the error color.
+                    let n = view.bars.len();
+                    let marked = view.mark.map(|at| {
+                        ((at.clamp(0.0, 1.0) * n as f32) as usize).min(n.saturating_sub(1))
+                    });
+                    for (k, &h) in view.bars.iter().enumerate() {
+                        ui.push_id(k as u64);
+                        ui.column(
+                            "bar",
+                            Style {
+                                size: [Size::Grow(1.0), Size::Fixed(HEIGHT)],
+                                align_main: Align::End,
+                                background: (marked == Some(k)).then_some(p.error),
+                                ..Style::default()
+                            },
+                            |ui| {
+                                let h = (h.clamp(0.0, 1.0) * HEIGHT).round();
+                                if h >= 1.0 {
+                                    ui.container(
+                                        "level",
+                                        Style {
+                                            size: [Size::Grow(1.0), Size::Fixed(h)],
+                                            background: Some(if marked == Some(k) {
+                                                p.text
+                                            } else {
+                                                p.playing
+                                            }),
+                                            ..Style::default()
+                                        },
+                                        |_| {},
+                                    );
+                                }
+                            },
+                        );
+                        ui.pop_id();
+                    }
+                },
+            );
+            ui.row(
+                "ends",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(14.0)],
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    text(ui, "near", view.ends[0], SMALL, p.text_dim);
+                    ui.spacer("fill");
+                    text(ui, "far", view.ends[1], SMALL, p.text_dim);
+                },
+            );
+        },
+    );
 }
 
 /// The inspector's sound file (E11-3c): its waveform at the inspector's width, its silence
@@ -3952,6 +4048,10 @@ fn inspector_dock(
                     }
                     ui.pop_id();
                 }
+                // A 3D sound's falloff (E11-4c), after its components.
+                if let Some(view) = &model.falloff {
+                    falloff_panel(ui, view, p);
+                }
                 // Add Component, after the components (Unity's place).
                 if model.add_component {
                     ui.row(
@@ -4176,6 +4276,20 @@ pub struct StripView<'a> {
     pub room: bool,
     /// The chosen snapshot sets its fader (E11-5b): its gain in the accent color.
     pub marked: bool,
+}
+
+/// A 3D sound's level over distance (E11-4c): bars from its place out, the camera's
+/// distance marked, and what it is there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FalloffView<'a> {
+    /// Each bar's height, 0 (−48 dB or silent) to 1 (full), from 0 m out.
+    pub bars: &'a [f32],
+    /// Where the camera is along them, 0 to 1 (none: beyond them).
+    pub mark: Option<f32>,
+    /// What it is there: "−18 dB at 22 m".
+    pub label: &'a str,
+    /// The distances at the ends: "0 m", "40 m".
+    pub ends: [&'a str; 2],
 }
 
 /// A strip's fader pressed, dragged or let go this frame (E11-1b): the strip and the

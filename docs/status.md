@@ -21,23 +21,22 @@ Last updated: 2026-10-28.
   - asset ids: ids inside our own files, a `.meta` beside foreign ones, references by id
     and path, the local database only a cache;
   - any scene can be a prefab.
-  - **Where it stands (2026-10-28):** E1 to E6 are done (E2b but for the cook's path, E3
-    but for the tree's marks on what changed), and material slots on `Model`. E8, the
-    code editor, is done but for rename and references across the project. E7, scripting
-    v1 (ADR 0114), is done (reading scripts, scenes and prefabs from a release's packs
-    comes with the one-button build); nothing the engine gives scripts allocates in
-    steady state (ADR 0114's examples in the zero-allocation test). E10-2, Slang in the
-    code editor, is done: errors from the front end, completion, hover, signatures and
-    definitions from `slangd`. E9, the script debugger (ADR 0119, accepted), is under way:
-    logpoints and pause points work from the code editor's gutter (E9-1a), a breakpoint
-    stops a script at its line in Play, F5 going on (E9-1b-1), F10, F11 and Shift+F11 step
-    from a stop (E9-1b-2), the Debugger panel shows the stop, its call stack, the frame's
-    values and every breakpoint (E9-1b-3), errors stop scripts at their lines (E9-1b-4),
-    and a stop shows its values in the code, opens them in the Variables and evaluates
-    Luau, with watches (E9-1b-5). VS Code attaches to the editor over DAP with the engine's
-    extension (E9-2), and to a development build of the game started with `--debug`
-    (E9-3). E10-1 waits for the answer on the material
-    file. The entries below are in the order merged.
+  - **Where it stands (2026-10-28):** E1 to E9 are done (E2b but for the cook's path, E3
+    but for the tree's marks on what changed, E8 but for rename and references across
+    the project), and material slots on `Model`.
+    - E7, scripting v1 (ADR 0114): reading scripts, scenes and prefabs from a release's
+      packs comes with the one-button build; nothing the engine gives scripts allocates
+      in steady state (ADR 0114's examples in the zero-allocation test).
+    - E9, the script debugger (ADR 0119): logpoints, pause points and breakpoints from the
+      gutter, steps, the Debugger panel, stops at errors, values at a stop, VS Code over
+      DAP to the editor and to a development build started with `--debug`.
+    - E10-1, materials in the inspector (one `.material` file, ADR 0120), and E10-2, Slang
+      in the code editor (`slangd`), are done; E10-3, the graph, and E10-4 are ahead.
+    - E11, sound, is done: the mixer file and panel (meters, effects, sends, the room's
+      strip, snapshots, ADRs 0121 and 0122), previews and fields, the viewport's gizmos
+      and hearing in place, the falloff curve.
+
+    The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
       lists, maps and optional values;
@@ -856,14 +855,26 @@ Last updated: 2026-10-28.
     each snapshot, + Snapshot); a chosen snapshot shows over the mix and is heard alone,
     and the panel's value edits go into it (one step each, ↺ takes one out, buses and
     effects refused); its section names it and sets its fade. E11-5 is done.
+  - **E11-4c, the last sound gizmos and the falloff curve** (#PR, ADR 0107's as-built):
+    View: Sound Ranges (every source's outer ring and every zone's box, dim); a 3D
+    sound's level over distance in the inspector, the camera's distance in red with the
+    level there; in Play, ejected, sources filled while they play and hollow while
+    silent; the camera that hears without a listener marked with an ear; a selected
+    zone's room and priority on a label; a zone added with a selection takes its box.
+    **E11, sound, is done.**
   - **Test runs keep their windows out of sight** (#411; the owner's request, 2026-10-28):
     `tools/check.ps1` sets `ENGINE_HIDDEN_WINDOWS=1`, and every window `engine_platform`
     makes is then cloaked (composed, its swapchain presenting, never on the screen), with
     no taskbar button, shown without being activated; uncloaking and bringing it to the
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11's last two: View: Sound Ranges and the inspector's falloff curve with the
-       camera's distance.
+    1. E10's rest (the owner's order: materials first of the tools, then animation and
+       2D): what E10-2's row in `docs/research/ux/materials.md` lists beyond the code
+       editor (New Material Type from a template; a type's new fields in the inspector
+       after its save, values kept by name), checked against the code first; then
+       E10-3, the graph (question 3's register measurements first); then E10-4,
+       previews, stats and variants with a base.
+    2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
     the later in the file's list winning where they meet; scripts blend one in and out
@@ -1183,7 +1194,7 @@ Left in the core: recording on the job system.
 | **Sound in the player**: `AudioSource`, `AudioSource3D`, `AudioListener` and `ReverbZone` components, positions saved; walls muffling and the room's reverb from rays through the physics world; one mixer for sources and videos; sounds from a live folder while developing, a sound pack in a release | done | ADR 0105 |
 | Audio, text, 2D, basic UI | solid / basic | §11, ADR 0015 |
 | Tests: golden images (FLIP, per vendor), per-pass perf gate, determinism, zero-allocation tests | solid | ADR 0062 |
-| Editor | E1 to E7 done; E8, the code editor, but for rename across the project; E9, the debugger, begun (logpoints and pause points); E10-2 done; E10-1 and E11 to E14 ahead | ADR 0107 |
+| Editor | E1 to E9 done (E8, the code editor, but for rename across the project); E10-1 and E10-2 done, E10-3 (the graph) and E10-4 ahead; E11, sound, done; E12 to E14 ahead | ADR 0107 |
 | Luau | scripting v1 done: components and hooks, queries and systems, physics, input, messages and timers, saves, networking, reload on save, types; the debugger begun | §10, ADRs 0114, 0119 |
 
 ## 4. In flight
