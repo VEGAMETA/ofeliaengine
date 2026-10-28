@@ -72,6 +72,39 @@ fn a_string_is_laid_out_once() {
     assert_eq!(text.cached_layouts(), 3);
 }
 
+#[test]
+fn a_changing_text_is_laid_out_into_layouts_long_out_of_use() {
+    use std::fmt::Write as _;
+    let mut text = UiText::new().unwrap();
+    let mut label = String::with_capacity(64);
+    // A frame rate, as the status line shows it: a new text every frame.
+    let mut frame = |text: &mut UiText, n: u32| {
+        label.clear();
+        let _ = write!(label, "{} fps · {}.{} ms", 1000 + n, n % 97, n % 89);
+        std::hint::black_box(text.measure(&label, 13.0, None));
+        text.end_frame();
+    };
+    // Warm-up: the glyphs, and layouts enough to cycle through.
+    for n in 0..400 {
+        frame(&mut text, n);
+    }
+    let (made, kept) = (text.layouts_made(), text.cached_layouts());
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    COUNTING.with(|c| c.set(true));
+    for n in 400..1000 {
+        frame(&mut text, n);
+    }
+    COUNTING.with(|c| c.set(false));
+    let n = ALLOCATIONS.load(Ordering::Relaxed) - before;
+    assert_eq!(n, 0, "{n} allocations laying out 600 new texts");
+    assert_eq!(text.layouts_made(), made + 600, "each laid out once");
+    assert!(
+        text.cached_layouts() <= kept + 1,
+        "{} kept",
+        text.cached_layouts()
+    );
+}
+
 fn item<'a>(depth: u16, icon: &'a str, name: &'a str, kind: &'a str) -> TreeItem<'a> {
     TreeItem {
         depth,
