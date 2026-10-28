@@ -6,7 +6,9 @@
 //!   and widths the UI measured with ([`UiText`] is the UI's [`TextMeasure`]), so what is
 //!   measured is what is drawn.
 //! - Laid-out strings are kept while they stay on screen: a label is shaped once, not in
-//!   every frame's layout and again in every paint.
+//!   every frame's layout and again in every paint. A text that changes (a counter, the
+//!   frame rate) is laid out into a layout long out of use, its buffers reused: nothing is
+//!   allocated once the editor has run a while.
 //! - Clip commands become canvas clip rectangles.
 //!
 //! Quads keep the UI's paint order (one canvas layer, submission order). Things drawn
@@ -25,6 +27,10 @@ pub const ATLAS_SIZE: u32 = 1024;
 
 /// Above this many cached layouts, those unused this frame and the last are dropped.
 const CACHE_SOFT_LIMIT: usize = 4096;
+
+/// A layout unused for this many frames (two seconds at 60 Hz) is laid out into again by
+/// the next new text, its buffers reused; one used more lately waits for its text.
+const STALE_FRAMES: u64 = 120;
 
 /// Fonts, laid-out strings and the glyph atlas of the UI.
 pub struct UiText {
@@ -113,13 +119,32 @@ struct CachedLayout {
     frame: u64,
 }
 
+impl CachedLayout {
+    /// A layout with no text and no buffers (nothing allocated).
+    const fn empty() -> Self {
+        Self {
+            text: String::new(),
+            mono: false,
+            size: 0,
+            max_width: 0,
+            glyphs: Vec::new(),
+            extent: [0.0; 2],
+            frame: 0,
+        }
+    }
+}
+
 /// Layouts by a hash of (text, size, wrap width); an entry is only used if all three
 /// match, so a hash collision costs a layout, never the wrong text.
 #[derive(Default)]
 struct LayoutCache {
     map: HashMap<u64, CachedLayout>,
+    /// Layouts out of use, their buffers kept for the next new texts.
+    spare: Vec<CachedLayout>,
     frame: u64,
     layouts: u64,
+    /// A text was laid out this frame.
+    missed: bool,
 }
 
 impl LayoutCache {
@@ -138,53 +163,71 @@ impl LayoutCache {
         h.write_u64(u64::from(size_bits) | (u64::from(width_bits) << 32));
         // The monospace stack's layouts kept apart.
         h.write_u64(u64::from(mono));
-        let frame = self.frame;
-        let lay_out = |fonts: &mut Fonts, layout: &mut TextLayout| {
+        let spare = &mut self.spare;
+        let (entry, hit) = match self.map.entry(h.finish()) {
+            Entry::Occupied(o) => {
+                let e = o.into_mut();
+                let hit = e.text == text
+                    && e.mono == mono
+                    && e.size == size_bits
+                    && e.max_width == width_bits;
+                (e, hit)
+            }
+            // A new text: into a layout out of use where there is one.
+            Entry::Vacant(v) => (
+                v.insert(spare.pop().unwrap_or(CachedLayout::empty())),
+                false,
+            ),
+        };
+        if !hit {
+            self.layouts += 1;
+            self.missed = true;
             let style = TextStyle {
                 size,
                 max_width,
                 ..TextStyle::default()
             };
             layout.layout(fonts, stack, text, &style);
-            CachedLayout {
-                text: text.to_owned(),
-                mono,
-                size: size_bits,
-                max_width: width_bits,
-                glyphs: layout.glyphs().to_vec(),
-                extent: [layout.width(), layout.height()],
-                frame,
-            }
-        };
-        let entry = match self.map.entry(h.finish()) {
-            Entry::Occupied(o)
-                if o.get().text == text
-                    && o.get().mono == mono
-                    && o.get().size == size_bits
-                    && o.get().max_width == width_bits =>
-            {
-                o.into_mut()
-            }
-            Entry::Occupied(mut o) => {
-                self.layouts += 1;
-                o.insert(lay_out(fonts, layout));
-                o.into_mut()
-            }
-            Entry::Vacant(v) => {
-                self.layouts += 1;
-                v.insert(lay_out(fonts, layout))
-            }
-        };
-        entry.frame = frame;
+            // Room to the next power of two: a text a little longer fits the next time.
+            entry.text.clear();
+            entry.text.reserve(text.len().next_power_of_two());
+            entry.text.push_str(text);
+            entry.mono = mono;
+            entry.size = size_bits;
+            entry.max_width = width_bits;
+            entry.glyphs.clear();
+            entry
+                .glyphs
+                .reserve(layout.glyphs().len().next_power_of_two());
+            entry.glyphs.extend_from_slice(layout.glyphs());
+            entry.extent = [layout.width(), layout.height()];
+        }
+        entry.frame = self.frame;
         entry
     }
 
-    /// Ends a frame: drops what went unused this frame and the last, once the cache is big.
+    /// Ends a frame: drops what went unused this frame and the last, once the cache is big;
+    /// after a frame that laid texts out with no spare layout left, takes those long out of
+    /// use for the next ([`STALE_FRAMES`]; the map keeps its capacity: nothing freed or
+    /// allocated).
     fn end_frame(&mut self) {
         if self.map.len() > CACHE_SOFT_LIMIT {
             let keep_from = self.frame.saturating_sub(1);
             self.map.retain(|_, e| e.frame >= keep_from);
+        } else if self.missed
+            && self.spare.is_empty()
+            && let Some(before) = self.frame.checked_sub(STALE_FRAMES)
+        {
+            let spare = &mut self.spare;
+            self.map.retain(|_, e| {
+                if e.frame >= before {
+                    return true;
+                }
+                spare.push(core::mem::replace(e, CachedLayout::empty()));
+                false
+            });
         }
+        self.missed = false;
         self.frame += 1;
     }
 }
@@ -215,6 +258,12 @@ impl UiText {
     /// How many laid-out strings are kept.
     pub fn cached_layouts(&self) -> usize {
         self.cache.map.len()
+    }
+
+    /// Ends a frame of the laid-out strings, as painting one does: those long out of use
+    /// are laid out into again.
+    pub fn end_frame(&mut self) {
+        self.cache.end_frame();
     }
 }
 
