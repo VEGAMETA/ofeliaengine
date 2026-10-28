@@ -57,6 +57,12 @@ pub struct PlayerSettings {
     /// which inlines nothing, so a step goes into a function as its text reads. The
     /// editor's player has it; it costs nothing measurable on ADR 0114's scenes.
     pub debuggable_scripts: bool,
+    /// VS Code's script debugger (ADR 0119 E9-3): the player listens for it as the editor
+    /// does, its scripts compiled to be debugged. `None` (the default): nothing listens. A
+    /// game's `main` ([`run`](crate::run)) sets it from `--debug` and `--wait-for-debugger`;
+    /// only development builds (debug assertions on: `cargo run`) listen, never a release or
+    /// shipping one.
+    pub debugger: Option<DebuggerSettings>,
     /// The derived data cache's folder (ADR 0041, ADR 0108's E4-8): the textures of glTF
     /// files the player makes are compressed into it in the background (BC7, BC5 for
     /// normal maps, as the cooker does) and swapped in once compressed; a later run loads
@@ -179,6 +185,37 @@ pub struct PlayerSettings {
     pub physics: Option<engine_physics::PhysicsSettings>,
 }
 
+/// VS Code's script debugger in a standalone player (ADR 0119 E9-3,
+/// [`PlayerSettings::debugger`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DebuggerSettings {
+    /// The world waits, kept still, until VS Code has attached and set its breakpoints
+    /// (`--wait-for-debugger`, Unity's "Wait For Managed Debugger"): the scripts' first
+    /// hooks can stop.
+    pub wait: bool,
+}
+
+impl DebuggerSettings {
+    /// What a command line (the program's arguments, without its name) asks: `--debug`
+    /// listens, `--wait-for-debugger` listens and waits; none without either. The game's
+    /// own arguments are left to it.
+    pub fn from_args<I: IntoIterator<Item = S>, S: AsRef<std::ffi::OsStr>>(
+        args: I,
+    ) -> Option<Self> {
+        let mut asked = None;
+        for arg in args {
+            match arg.as_ref().to_str() {
+                Some("--debug") => {
+                    asked.get_or_insert(Self::default());
+                }
+                Some("--wait-for-debugger") => asked = Some(Self { wait: true }),
+                _ => {}
+            }
+        }
+        asked
+    }
+}
+
 /// How many frames a second the player draws at most (ADR 0023's addendum of 2026-10-22).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FrameCap {
@@ -244,6 +281,7 @@ impl Default for PlayerSettings {
             scene: None,
             project: None,
             debuggable_scripts: false,
+            debugger: None,
             derived_data: None,
             window: Window::FullScreen,
             monitor: None,
@@ -288,6 +326,23 @@ impl Default for PlayerSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_debugger_is_asked_on_the_command_line_beside_the_games_own_arguments() {
+        assert_eq!(DebuggerSettings::from_args(["--level", "3"]), None);
+        assert_eq!(
+            DebuggerSettings::from_args(["--debug", "--level", "3"]),
+            Some(DebuggerSettings { wait: false })
+        );
+        assert_eq!(
+            DebuggerSettings::from_args(["--wait-for-debugger"]),
+            Some(DebuggerSettings { wait: true })
+        );
+        assert_eq!(
+            DebuggerSettings::from_args(["--wait-for-debugger", "--debug"]),
+            Some(DebuggerSettings { wait: true })
+        );
+    }
 
     #[test]
     fn the_display_cap_keeps_a_few_frames_under_the_refresh_rate_without_vsync() {

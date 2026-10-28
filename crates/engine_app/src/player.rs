@@ -59,6 +59,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+mod debugger;
+
 /// Peak luminance assumed for an HDR display that reports none: DisplayHDR 400, the
 /// lowest HDR certification.
 const FALLBACK_PEAK_NITS: f32 = 400.0;
@@ -584,6 +586,9 @@ pub struct Player {
     /// debugger's stage once they are: their fiber and the stage stopped on it.
     script_debugging: bool,
     script_debug: Option<crate::script_debug::ScriptDebug>,
+    /// VS Code's script debugger in a standalone player (ADR 0119 E9-3,
+    /// `PlayerSettings::debugger`): its endpoint and what its client asked.
+    debugger: Option<Box<debugger::Debugger>>,
     /// The game's last error in [`Game::before_ticks`], said once.
     scene_error: Option<String>,
     /// The player's own physics world (`PlayerSettings::physics`, ADR 0114 E7-3), and its
@@ -1216,6 +1221,7 @@ impl Player {
             debug_pause: None,
             script_debugging: false,
             script_debug: None,
+            debugger: None,
             scene_error: None,
             own_physics: None,
             physics_error: None,
@@ -1242,6 +1248,19 @@ impl Player {
         // white, HDR10's encode pass and the display's metadata.
         player.apply_levels(levels)?;
         player.start_presentation()?;
+        // VS Code's script debugger (ADR 0119 E9-3): a development build's only, its scripts
+        // compiled to be debugged.
+        let debugger = settings.debugger.filter(|_| cfg!(debug_assertions));
+        if settings.debugger.is_some() && debugger.is_none() {
+            log::warn!(
+                target: "script",
+                "--debug: this build has no script debugger; a development build has one \
+                 (`cargo run -- --debug`)"
+            );
+        }
+        if debugger.is_some() {
+            player.settings.debuggable_scripts = true;
+        }
         // The scripts before any scene: scenes name their components (ADR 0114 §1).
         if let Some(project) = &settings.project {
             let folder = project.join("scripts");
@@ -1269,6 +1288,9 @@ impl Player {
                 own.load_pack(pack, &jobs, &mut player.runtime.world, &instances)?;
             }
             player.own_physics = Some(own);
+        }
+        if let Some(asked) = debugger {
+            player.start_debugger(asked);
         }
         // Saved now as well as at exit: a crash does not cost the next start its cache.
         player.save_pipeline_cache();
@@ -2496,6 +2518,11 @@ impl Player {
         }
     }
 
+    /// Whether the cursor is locked over the window ([`Self::lock_cursor`]).
+    pub fn cursor_locked(&self) -> bool {
+        self.cursor_locked
+    }
+
     /// Locks the cursor over the view's own window ([`Self::open_view_window`]) as
     /// [`Self::lock_cursor`] does over the main one, or lets it go: a game playing there
     /// has the mouse. Windows lets it go when that window loses the keyboard.
@@ -2642,6 +2669,8 @@ impl Player {
         if self.closing {
             return Ok(None);
         }
+        // VS Code's requests (ADR 0119 E9-3), before a stopped script goes on.
+        self.debugger_frame();
         if self.minimized {
             // Nothing is presented while minimized: the next events are awaited.
             std::thread::yield_now();

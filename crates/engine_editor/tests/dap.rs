@@ -12,10 +12,11 @@ use engine_editor::{EditorGame, EditorOverlay};
 use engine_runtime::{Camera, Sun, look_rotation};
 use engine_scene::{AssetId, Name, SaveOptions, SceneId, SceneRegistry, find_named, save_with};
 use serde_json::{Value, json};
-use std::collections::VecDeque;
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+
+#[path = "../../engine_app/tests/common/dap_client.rs"]
+mod dap_client;
+use dap_client::{Client, event};
 
 struct Still;
 
@@ -112,116 +113,6 @@ fn player(dir: &Path) -> Option<(Player, PlayerSettings)> {
     }
 }
 
-/// A DAP client as VS Code is one: requests out, responses and events in.
-struct Client {
-    stream: TcpStream,
-    read: Vec<u8>,
-    seq: i64,
-    came: VecDeque<Value>,
-    closed: bool,
-}
-
-impl Client {
-    fn connect(port: u16) -> Self {
-        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        stream.set_nonblocking(true).unwrap();
-        Self {
-            stream,
-            read: Vec::new(),
-            seq: 0,
-            came: VecDeque::new(),
-            closed: false,
-        }
-    }
-
-    fn send(&mut self, command: &str, arguments: Value) -> i64 {
-        self.seq += 1;
-        let body = json!({
-            "seq": self.seq,
-            "type": "request",
-            "command": command,
-            "arguments": arguments,
-        })
-        .to_string();
-        let message = format!("Content-Length: {}\r\n\r\n{body}", body.len());
-        self.stream.write_all(message.as_bytes()).unwrap();
-        self.seq
-    }
-
-    /// What came since: whole messages into `came`.
-    fn pump(&mut self) {
-        let mut buf = [0u8; 8192];
-        loop {
-            match self.stream.read(&mut buf) {
-                Ok(0) => {
-                    self.closed = true;
-                    break;
-                }
-                Ok(n) => self.read.extend_from_slice(&buf[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => {
-                    self.closed = true;
-                    break;
-                }
-            }
-        }
-        while let Some(end) = self.read.windows(4).position(|w| w == b"\r\n\r\n") {
-            let head = String::from_utf8_lossy(&self.read[..end]).into_owned();
-            let length: usize = head
-                .lines()
-                .find_map(|l| l.strip_prefix("Content-Length:"))
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            if self.read.len() < end + 4 + length {
-                break;
-            }
-            let body = self.read[end + 4..end + 4 + length].to_vec();
-            self.read.drain(..end + 4 + length);
-            self.came.push_back(serde_json::from_slice(&body).unwrap());
-        }
-    }
-
-    /// The first message `wanted` takes, running the editor's frames until it comes.
-    fn wait(
-        &mut self,
-        player: &mut Player,
-        game: &mut EditorGame<Still>,
-        overlay: &mut EditorOverlay,
-        what: &str,
-        wanted: impl Fn(&Value) -> bool,
-    ) -> Value {
-        for _ in 0..240 {
-            self.pump();
-            if let Some(k) = self.came.iter().position(&wanted) {
-                return self.came.remove(k).unwrap();
-            }
-            frame(player, game, overlay);
-        }
-        panic!("no {what} came; came: {:#?}", self.came);
-    }
-
-    /// Request `command` sent and its response waited for.
-    fn request(
-        &mut self,
-        player: &mut Player,
-        game: &mut EditorGame<Still>,
-        overlay: &mut EditorOverlay,
-        command: &str,
-        arguments: Value,
-    ) -> Value {
-        let seq = self.send(command, arguments);
-        self.wait(player, game, overlay, command, |m| {
-            m["type"] == "response" && m["request_seq"] == seq
-        })
-    }
-}
-
-fn event(name: &'static str) -> impl Fn(&Value) -> bool {
-    move |m| m["type"] == "event" && m["event"] == name
-}
-
 #[test]
 fn vs_code_attaches_over_dap_and_debugs_a_stop() {
     // The logger the editor runs with: the scripts' messages reach VS Code's console from
@@ -257,14 +148,12 @@ fn vs_code_attaches_over_dap_and_debugs_a_stop() {
     // A wrong token: refused, and let go.
     let mut client = Client::connect(port);
     let r = client.request(
-        p,
-        g,
-        o,
+        &mut || frame(p, g, o),
         "initialize",
         json!({ "adapterID": "ofeliaengine" }),
     );
     assert_eq!(r["success"], true);
-    let r = client.request(p, g, o, "attach", json!({ "token": "nope" }));
+    let r = client.request(&mut || frame(p, g, o), "attach", json!({ "token": "nope" }));
     assert_eq!(r["success"], false, "{r}");
     for _ in 0..5 {
         frame(p, g, o);
@@ -274,23 +163,19 @@ fn vs_code_attaches_over_dap_and_debugs_a_stop() {
     // The right one.
     let mut client = Client::connect(port);
     let r = client.request(
-        p,
-        g,
-        o,
+        &mut || frame(p, g, o),
         "initialize",
         json!({ "adapterID": "ofeliaengine" }),
     );
     let filters = r["body"]["exceptionBreakpointFilters"].as_array().unwrap();
     assert_eq!(filters[0]["filter"], "uncaught");
     assert_eq!(filters[0]["default"], true);
-    client.wait(p, g, o, "initialized", event("initialized"));
-    let r = client.request(p, g, o, "attach", json!({ "token": token }));
+    client.wait(&mut || frame(p, g, o), "initialized", event("initialized"));
+    let r = client.request(&mut || frame(p, g, o), "attach", json!({ "token": token }));
     assert_eq!(r["success"], true, "{r}");
     let script = std::path::absolute(dir.join("scripts").join("spin.luau")).unwrap();
     let r = client.request(
-        p,
-        g,
-        o,
+        &mut || frame(p, g, o),
         "setBreakpoints",
         json!({
             "source": { "path": script },
@@ -300,22 +185,24 @@ fn vs_code_attaches_over_dap_and_debugs_a_stop() {
     let set = r["body"]["breakpoints"].as_array().unwrap();
     assert!(set.iter().all(|b| b["verified"] == true), "{r}");
     let r = client.request(
-        p,
-        g,
-        o,
+        &mut || frame(p, g, o),
         "setExceptionBreakpoints",
         json!({ "filters": ["uncaught"] }),
     );
     assert_eq!(r["success"], true);
-    let r = client.request(p, g, o, "configurationDone", json!({}));
+    let r = client.request(&mut || frame(p, g, o), "configurationDone", json!({}));
     assert_eq!(r["success"], true);
     // Play: the tick stops at the breakpoint.
     assert!(g.run_command(p.world_mut(), "play.play"));
-    let stopped = client.wait(p, g, o, "the stop", event("stopped"));
+    let stopped = client.wait(&mut || frame(p, g, o), "the stop", event("stopped"));
     assert_eq!(stopped["body"]["reason"], "breakpoint");
-    let r = client.request(p, g, o, "threads", json!({}));
+    let r = client.request(&mut || frame(p, g, o), "threads", json!({}));
     assert_eq!(r["body"]["threads"][0]["name"], "Scripts");
-    let r = client.request(p, g, o, "stackTrace", json!({ "threadId": 1 }));
+    let r = client.request(
+        &mut || frame(p, g, o),
+        "stackTrace",
+        json!({ "threadId": 1 }),
+    );
     let top = &r["body"]["stackFrames"][0];
     assert_eq!(
         (top["name"].as_str(), top["line"].as_u64()),
@@ -323,14 +210,12 @@ fn vs_code_attaches_over_dap_and_debugs_a_stop() {
     );
     let path = top["source"]["path"].as_str().unwrap().replace('\\', "/");
     assert!(path.ends_with("scripts/spin.luau"), "{path}");
-    let r = client.request(p, g, o, "scopes", json!({ "frameId": 0 }));
+    let r = client.request(&mut || frame(p, g, o), "scopes", json!({ "frameId": 0 }));
     let locals = r["body"]["scopes"][0]["variablesReference"]
         .as_u64()
         .unwrap();
     let r = client.request(
-        p,
-        g,
-        o,
+        &mut || frame(p, g, o),
         "variables",
         json!({ "variablesReference": locals }),
     );
@@ -340,9 +225,7 @@ fn vs_code_attaches_over_dap_and_debugs_a_stop() {
     let reference = this["variablesReference"].as_u64().unwrap();
     assert!(reference > 0, "self opens");
     let r = client.request(
-        p,
-        g,
-        o,
+        &mut || frame(p, g, o),
         "variables",
         json!({ "variablesReference": reference }),
     );
@@ -354,34 +237,34 @@ fn vs_code_attaches_over_dap_and_debugs_a_stop() {
         "{props:#?}"
     );
     let r = client.request(
-        p,
-        g,
-        o,
+        &mut || frame(p, g, o),
         "evaluate",
         json!({ "expression": "self.rate * 10", "frameId": 0, "context": "repl" }),
     );
     assert_eq!(r["body"]["result"], "20", "{r}");
     // A step: the next line, `step` its reason; then on, and the logpoint's message comes
     // to the console.
-    client.request(p, g, o, "next", json!({ "threadId": 1 }));
-    let stopped = client.wait(p, g, o, "the step's stop", event("stopped"));
+    client.request(&mut || frame(p, g, o), "next", json!({ "threadId": 1 }));
+    let stopped = client.wait(&mut || frame(p, g, o), "the step's stop", event("stopped"));
     assert_eq!(stopped["body"]["reason"], "step");
-    let r = client.request(p, g, o, "stackTrace", json!({ "threadId": 1 }));
+    let r = client.request(
+        &mut || frame(p, g, o),
+        "stackTrace",
+        json!({ "threadId": 1 }),
+    );
     assert_eq!(r["body"]["stackFrames"][0]["line"], 4);
     // The breakpoint taken away from VS Code: the editor's set follows.
     client.request(
-        p,
-        g,
-        o,
+        &mut || frame(p, g, o),
         "setBreakpoints",
         json!({
             "source": { "path": script },
             "breakpoints": [{ "line": 4, "logMessage": "rate {self.rate}" }],
         }),
     );
-    client.request(p, g, o, "continue", json!({ "threadId": 1 }));
-    client.wait(p, g, o, "continued", event("continued"));
-    let said = client.wait(p, g, o, "the logpoint's message", |m| {
+    client.request(&mut || frame(p, g, o), "continue", json!({ "threadId": 1 }));
+    client.wait(&mut || frame(p, g, o), "continued", event("continued"));
+    let said = client.wait(&mut || frame(p, g, o), "the logpoint's message", |m| {
         m["event"] == "output"
             && m["body"]["output"]
                 .as_str()
@@ -397,7 +280,7 @@ fn vs_code_attaches_over_dap_and_debugs_a_stop() {
         "no stop without the breakpoint: {:#?}",
         client.came
     );
-    let r = client.request(p, g, o, "disconnect", json!({}));
+    let r = client.request(&mut || frame(p, g, o), "disconnect", json!({}));
     assert_eq!(r["success"], true);
     // Attach and Play: the open scene plays, and the session's end stops it.
     g.stop_playing(p);
@@ -407,19 +290,21 @@ fn vs_code_attaches_over_dap_and_debugs_a_stop() {
     assert!(!g.playing());
     let mut client = Client::connect(port);
     client.request(
-        p,
-        g,
-        o,
+        &mut || frame(p, g, o),
         "initialize",
         json!({ "adapterID": "ofeliaengine" }),
     );
-    let r = client.request(p, g, o, "attach", json!({ "token": token, "play": true }));
+    let r = client.request(
+        &mut || frame(p, g, o),
+        "attach",
+        json!({ "token": token, "play": true }),
+    );
     assert_eq!(r["success"], true, "{r}");
     for _ in 0..3 {
         frame(p, g, o);
     }
     assert!(g.playing(), "attached and playing");
-    client.request(p, g, o, "disconnect", json!({}));
+    client.request(&mut || frame(p, g, o), "disconnect", json!({}));
     for _ in 0..3 {
         frame(p, g, o);
     }

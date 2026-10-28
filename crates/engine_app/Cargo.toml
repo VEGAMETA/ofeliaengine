@@ -53,6 +53,8 @@ engine_net.workspace = true
 engine_net_transport.workspace = true
 # Text errors of a live folder go to the log (engine_log's backend).
 log = "0.4"
+# The logger a game's `run` installs; its ring feeds VS Code's console (ADR 0119 E9-3).
+engine_log.workspace = true
 # A baked blockout group's glTF (ADR 0110 E2b-6): the file's JSON chunk.
 serde_json = "1"
 

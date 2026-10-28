@@ -274,6 +274,7 @@ dependencies = [
  "engine_input",
  "engine_latency",
  "engine_loc",
+ "engine_log",
  "engine_nav",
  "engine_net",
  "engine_net_transport",
