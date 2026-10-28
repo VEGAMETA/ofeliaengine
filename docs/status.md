@@ -32,7 +32,9 @@ Last updated: 2026-10-28.
     logpoints and pause points work from the code editor's gutter (E9-1a), a breakpoint
     stops a script at its line in Play, F5 going on (E9-1b-1), F10, F11 and Shift+F11 step
     from a stop (E9-1b-2), the Debugger panel shows the stop, its call stack, the frame's
-    values and every breakpoint (E9-1b-3), and errors stop scripts at their lines (E9-1b-4). E10-1 waits for the answer on the material
+    values and every breakpoint (E9-1b-3), errors stop scripts at their lines (E9-1b-4),
+    and a stop shows its values in the code, opens them in the Variables and evaluates
+    Luau, with watches (E9-1b-5). E10-1 waits for the answer on the material
     file. The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
@@ -700,11 +702,19 @@ Last updated: 2026-10-28.
       slower (the question below);
     - fixed: Continue after a step inside native code entered it halfway through a block
       (an access violation); the stepping loop now runs the rest of the hook.
+  - **E9-1b-5, values at a stop** (#384, ADR 0119's as-built):
+    - the lines above the stopped one show what they assigned (`t = Transform`,
+      `self.speed = 2`), the function's line its parameters; changed values lit;
+    - the Variables open: tables (raw, the first hundred), `self` (props, components,
+      entity), entities and components through reflection (the host's describer);
+    - Evaluate in the shown frame (its own thread and budget, the world opened to it) and
+      watches, evaluated at every stop, kept in the session;
+    - F5, F8 and the steps work while a field is typed in.
   - **Next, in this order:**
-    1. E9-1b-5 on: values on the lines above the stopped one, tables and entities opened
-       in the Variables, Watch and Evaluate; then E9-2 (DAP, VS Code) and E9-3 (the
-       player). Asked (2026-10-28): native code in the editor's Play, whose frames' locals
-       Luau does not read at a stop. E10-1 waits for the answer on the material file.
+    1. E9-2 (DAP, VS Code) and E9-3 (the player), then the debugger's leftovers (F2 to
+       change a value, the header's entity and tick with Shift+F7, "Only Front door").
+       Asked (2026-10-28): native code in the editor's Play, whose frames' locals Luau does
+       not read at a stop. E10-1 waits for the answer on the material file.
     2. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
        per hook (`script Door.on_tick`) and each script's time and allocations in the
        editor's profiler; Tracy has only the stages' zones (`scripts::tick`).

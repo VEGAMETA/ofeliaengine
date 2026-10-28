@@ -417,6 +417,98 @@ fn a_logpoint_logs_in_play_and_f9_stops_the_script_at_its_line() {
     }
     let values = game.breakpoint_note(5).unwrap_or_default();
     assert!(values.contains("t = "), "a local made since: {values}");
+    // The lines above it show what they assigned: the parameters on the function's line,
+    // `t` after line 3 and the field line 4 wrote, beside their breakpoints' notes.
+    assert_eq!(
+        game.line_notes(2),
+        ["self = EditorSpin · Front door", "dt = 0.015625"]
+    );
+    assert!(game.line_notes(3).contains(&String::from("t = Transform")));
+    let rotation = game.line_notes(4);
+    assert!(
+        rotation.iter().any(|n| n.starts_with("t.rotation = (")),
+        "{rotation:?}"
+    );
+    // The Variables: `self` open, its prop, its entity's components and the entity; a
+    // click opens a component.
+    let rows = game.debug_texts();
+    for row in [
+        "self = EditorSpin · Front door",
+        "  rate = 2",
+        "  Transform = component",
+        "  Name = \"Front door\"",
+        "  entity = Front door",
+        "t = Transform",
+    ] {
+        assert!(rows.iter().any(|r| r == row), "`{row}` in {rows:#?}");
+    }
+    click_text(&mut player, &mut game, &mut overlay, "MeshRenderer");
+    frame(&mut player, &mut game, &mut overlay);
+    let rows = game.debug_texts();
+    let under = rows
+        .iter()
+        .skip_while(|r| !r.starts_with("  MeshRenderer"))
+        .skip(1)
+        .take_while(|r| r.starts_with("    "))
+        .count();
+    assert!(under > 0, "MeshRenderer opened: {rows:#?}");
+    // Evaluate: a line of Luau in the shown frame, its answer above it; Ctrl+Enter makes
+    // a watch, evaluated at every stop.
+    click_text(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        "Evaluate in the shown frame: Enter; Ctrl+Enter watches it",
+    );
+    for c in "self.rate * 10".chars() {
+        send(&mut game, WindowEventKind::Char(c));
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    enter(&mut game);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let rows = game.debug_texts();
+    assert!(
+        rows.iter().any(|r| r == "self.rate * 10 = 20"),
+        "the answer: {rows:#?}"
+    );
+    for c in "dt * 2".chars() {
+        send(&mut game, WindowEventKind::Char(c));
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    let ctrl_key = |game: &mut EditorGame<Still>, pressed: bool| {
+        send(
+            game,
+            WindowEventKind::Key {
+                virtual_key: 0x11,
+                scancode: 0x1D,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        );
+    };
+    ctrl_key(&mut game, true);
+    enter(&mut game);
+    frame(&mut player, &mut game, &mut overlay);
+    ctrl_key(&mut game, false);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let rows = game.debug_texts();
+    assert_eq!(
+        rows.first().map(String::as_str),
+        Some("WATCH = "),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter().any(|r| r == "dt * 2 = 0.03125"),
+        "the watch: {rows:#?}"
+    );
+    // Escape leaves the Evaluate line: the keys are the code's again.
+    tap(&mut game, 0x1B, 0x01);
+    frame(&mut player, &mut game, &mut overlay);
     tap(&mut game, 0x74, 0x3F);
     for _ in 0..3 {
         frame(&mut player, &mut game, &mut overlay);
@@ -562,6 +654,7 @@ fn a_logpoint_logs_in_play_and_f9_stops_the_script_at_its_line() {
         session.contains("line = 4\nlog = \"rate {self.rate}\""),
         "{session}"
     );
+    assert!(session.contains("watches = [\"dt * 2\"]"), "{session}");
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

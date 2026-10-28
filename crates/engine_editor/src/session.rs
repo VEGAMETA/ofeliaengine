@@ -265,6 +265,8 @@ pub(crate) struct EditorState {
     /// Which errors stop a script in Play (ADR 0119 E9-1b-4): those it does not catch,
     /// those a `pcall` catches.
     pub(crate) error_stops: Option<(bool, bool)>,
+    /// The Debugger's watches (E9-1b-5c), Luau expressions in their order.
+    pub(crate) watches: Vec<String>,
     /// Where the editor's window was.
     pub(crate) window: Option<WindowPlacement>,
     /// Where the game's own window was when Play last ended (Play in a window).
@@ -340,6 +342,16 @@ impl SessionFile {
         }
         if let Some((uncaught, caught)) = self.editor.error_stops {
             let _ = writeln!(out, "error_stops = ({uncaught}, {caught})");
+        }
+        if !self.editor.watches.is_empty() {
+            out.push_str("watches = [");
+            for (i, w) in self.editor.watches.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                quote_into(&mut out, w);
+            }
+            out.push_str("]\n");
         }
         if let Some(pivot) = &self.editor.pivot {
             out.push_str("pivot = ");
@@ -541,6 +553,11 @@ impl SessionFile {
                     "recent" => {
                         file.editor.recent = items(value, '[', ']')
                             .and_then(|names| names.into_iter().map(unquote).collect())
+                            .map_err(at)?;
+                    }
+                    "watches" => {
+                        file.editor.watches = items(value, '[', ']')
+                            .and_then(|list| list.into_iter().map(unquote).collect())
                             .map_err(at)?;
                     }
                     "restart" => file.editor.restart = Some(unquote(value).map_err(at)?),
@@ -1142,6 +1159,7 @@ mod tests {
                 pivot: Some(String::from("origins")),
                 overlays: Some(false),
                 error_stops: Some((true, false)),
+                watches: vec![String::from("self.speed"), String::from("#\"a, b\"")],
                 window: Some(WindowPlacement {
                     left: -7,
                     top: 0,

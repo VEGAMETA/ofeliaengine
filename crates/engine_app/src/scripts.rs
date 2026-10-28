@@ -63,8 +63,8 @@ use engine_script::mlua::{
 };
 /// The debugger's breakpoints as the host takes them (ADR 0119): the editor's.
 pub use engine_script::{
-    BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Hits, Resume, ScriptDebugger,
-    Stopped, Variable,
+    BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Frame, Hits, Resume,
+    ScriptDebugger, Stopped, Variable,
 };
 use engine_script::{ScriptError, ScriptSettings, ScriptVm};
 use std::cell::RefCell;
@@ -573,6 +573,8 @@ impl Scripts {
             let require = script_require::require_function(lua, modules.clone())?;
             lua.globals().set("require", require)
         })?;
+        // A stop describes `self`, entities and views through reflection (ADR 0119).
+        vm.debugger().set_describer(Some(script_views::describe));
         let mut tables = Box::new(Tables::default());
         tables.slow = vm
             .lua()
@@ -3206,6 +3208,22 @@ fn overlap_sphere(
 /// The world the host opened for this stage (null outside), for the fast path.
 pub(crate) fn open_world() -> *mut World {
     OPEN_WORLD.get()
+}
+
+/// `f` with `world` open to scripts as a hook has it, the world and physics world open
+/// before put back after: an evaluation at a stop (ADR 0119 E9-1b-5c), with the world the
+/// frame has now.
+///
+/// # Safety
+///
+/// `world` is valid and borrowed by nothing else while `f` runs.
+pub(crate) unsafe fn with_world<R>(world: *mut World, f: impl FnOnce() -> R) -> R {
+    let (before, physics) = (OPEN_WORLD.get(), OPEN_PHYSICS.get());
+    OPEN_WORLD.set(world);
+    let r = f();
+    OPEN_WORLD.set(before);
+    OPEN_PHYSICS.set(physics);
+    r
 }
 
 /// A stage stopped halfway (ADR 0119) goes on with the world and the physics world of the

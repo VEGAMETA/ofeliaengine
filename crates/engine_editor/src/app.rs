@@ -1962,6 +1962,26 @@ struct Editor {
     debug_text: DebugText,
     /// Which errors stop a script in Play (E9-1b-4), kept in the session.
     error_stops: ErrorStops,
+    /// The Debugger's Variables' paths opened or closed by a click (E9-1b-5b), kept through
+    /// stops, and how many clicks there were.
+    debug_toggled: HashSet<String>,
+    debug_toggles: u64,
+    /// The Debugger's watches (E9-1b-5c), kept in the session; their values at the stop
+    /// shown and what they were evaluated for (the stop, the frame, the watches' revision);
+    /// the Evaluate line's text, what it asked and its answers; and how many times any of
+    /// it changed.
+    watches: Vec<String>,
+    watch_values: Vec<Result<engine_app::scripts::Variable, String>>,
+    watch_key: Option<(u64, usize, u64)>,
+    watches_rev: u64,
+    eval_text: String,
+    eval_focus: bool,
+    eval_queue: Vec<String>,
+    answers: Vec<(String, Result<engine_app::scripts::Variable, String>)>,
+    debug_values: u64,
+    /// The last stop's module, its function's first line and its locals, for what changed
+    /// at the next (E9-1b-5a).
+    last_values: Option<(String, Option<u32>, Vec<engine_app::scripts::Variable>)>,
     /// A break at the next script line waits for a hook to run.
     break_pending: bool,
     /// When the open scripts' files were last compared with what was read.
@@ -2730,6 +2750,18 @@ impl Editor {
                 uncaught: true,
                 caught: false,
             },
+            last_values: None,
+            debug_toggled: HashSet::new(),
+            debug_toggles: 0,
+            watches: Vec::new(),
+            watch_values: Vec::new(),
+            watch_key: None,
+            watches_rev: 0,
+            eval_text: String::new(),
+            eval_focus: false,
+            eval_queue: Vec::new(),
+            answers: Vec::new(),
+            debug_values: 0,
             break_pending: false,
             scripts_checked: Instant::now(),
             checkers: Checkers::default(),
@@ -4019,11 +4051,19 @@ impl Editor {
             .iter()
             .map(|(f, p)| (f.as_str(), p.as_str()))
             .collect();
-        let debug_variables: Vec<(&str, &str)> = self
+        let debug_variables: Vec<crate::shell::VariableRow<'_>> = self
             .debug_text
             .variables
             .iter()
-            .map(|(n, v)| (n.as_str(), v.as_str()))
+            .map(|v| crate::shell::VariableRow {
+                name: &v.name,
+                value: &v.value,
+                changed: v.changed,
+                depth: v.depth,
+                open: v.open,
+                error: v.error,
+                removable: v.watch.is_some(),
+            })
             .collect();
         let debug_breakpoints: Vec<crate::shell::BreakpointRow<'_>> = self
             .debug_text
@@ -4049,6 +4089,13 @@ impl Editor {
                 frames: &debug_frames,
                 frame: self.debug_frame,
                 variables: &debug_variables,
+                evaluate: &self.eval_text,
+                evaluate_hint: if self.stop.is_some() {
+                    "Evaluate in the shown frame: Enter; Ctrl+Enter watches it"
+                } else {
+                    "Evaluates at a stop; Ctrl+Enter adds a watch"
+                },
+                evaluate_focus: self.eval_focus,
                 breakpoints: &debug_breakpoints,
             });
         let task_rows: Vec<crate::shell::TaskRow<'_>> = self
@@ -4520,6 +4567,49 @@ impl Editor {
         {
             self.enable_breakpoint(world, &file, line);
         }
+        if let Some(k) = response.debug_variable
+            && let Some(path) = self.debug_text.variables.get(k).map(|v| v.path.clone())
+        {
+            if !self.debug_toggled.remove(&path) {
+                self.debug_toggled.insert(path);
+            }
+            self.debug_toggles += 1;
+        }
+        // The Evaluate line (E9-1b-5c): Enter evaluates it in the shown frame at the next
+        // frame, Ctrl+Enter adds it to the watches; the keys stay in it.
+        self.eval_focus = false;
+        if let Some(r) = response.debug_evaluate {
+            if r.started || r.changed {
+                self.eval_text.clear();
+                self.eval_text.push_str(self.ui.edited_text());
+            }
+            if r.committed && self.ui.input().keys.contains(&UiKey::Enter) {
+                let code = self.ui.edited_text().trim().to_owned();
+                if !code.is_empty() {
+                    if self.input.ctrl() {
+                        if !self.watches.contains(&code) {
+                            self.watches.push(code);
+                            self.watches_rev += 1;
+                            self.write_session(world);
+                        }
+                    } else {
+                        self.eval_queue.push(code);
+                    }
+                }
+                self.eval_text.clear();
+                self.eval_focus = true;
+            } else if r.cancelled {
+                self.eval_text.clear();
+            }
+        }
+        if let Some(k) = response.debug_unwatch
+            && let Some(i) = self.debug_text.variables.get(k).and_then(|v| v.watch)
+        {
+            self.watches.remove(i);
+            self.watches_rev += 1;
+            self.debug_values += 1;
+            self.write_session(world);
+        }
         match response.debug_errors {
             Some(0) => self.run(world, self.ids.errors_uncaught),
             Some(1) => self.run(world, self.ids.errors_caught),
@@ -4792,9 +4882,20 @@ impl Editor {
             let merge = drag.merge;
             self.history.revert(world, merge);
         }
-        // The shortcuts; while a field is typed in, only saving (the keys are the field's),
-        // and none while the right button flies the camera (the letters are the flight's).
+        // The shortcuts; while a field is typed in, only saving and Play's and the steps'
+        // function keys (the rest are the field's: the Debugger's Evaluate line keeps the
+        // keys between its lines, F10 still steps), and none while the right button flies
+        // the camera (the letters are the flight's).
         let typing_text = self.ui.editing().is_some();
+        let ids = &self.ids;
+        let through_typing = [
+            ids.save,
+            ids.play,
+            ids.stop,
+            ids.step_over,
+            ids.step_into,
+            ids.step_out,
+        ];
         // A script shown: its code's keys (Ctrl+F, F3, Ctrl+G) before the editor's.
         let contexts: &[KeyContext] = match (self.tree_focus, self.active_script.is_some()) {
             (true, true) => &[TREE_KEYS, CODE_KEYS],
@@ -4831,7 +4932,7 @@ impl Editor {
             }
             if let Some(id) = self.keymap.lookup(chord, contexts)
                 && (!typing_text
-                    || id == self.ids.save
+                    || through_typing.contains(&id)
                     || (finding
                         && [
                             self.ids.find_next,
@@ -8796,6 +8897,60 @@ impl Editor {
                 };
                 shown.break_notes.push((line, column, start, end, kind));
             }
+            // The lines above the shown frame's, in its function (E9-1b-5a): what each
+            // assigns after it, dimmer than the code, lit where it changed since the last
+            // stop; its function's line has its parameters.
+            if let Some(stop) = self.stop.as_ref()
+                && let Some(f) = stop.stopped.stack.get(self.debug_frame)
+                && stop.files.get(self.debug_frame) == Some(file)
+                && let (Some(at), Some(defined)) = (f.line, f.defined)
+            {
+                let changed =
+                    |name: &str| self.debug_frame == 0 && stop.changed.iter().any(|c| c == name);
+                for line in shown.first..shown.last {
+                    let Some(saved) = doc.saved_line(line).and_then(|l| u32::try_from(l + 1).ok())
+                    else {
+                        continue;
+                    };
+                    if saved < defined || saved >= at {
+                        continue;
+                    }
+                    // After the line's text, the checker's message and its breakpoint's.
+                    let text = doc.line(line);
+                    let mut column = shown.notes.iter().find(|n| n.0 == line).map_or_else(
+                        || char_column(text, text.len()) + 4,
+                        |n| n.1 + shown.messages[n.2..n.3].chars().count() + 3,
+                    );
+                    for n in shown.break_notes.iter().filter(|n| n.0 == line) {
+                        column = column.max(n.1 + shown.break_text[n.2..n.3].chars().count() + 3);
+                    }
+                    let mut put = |name: &str, value: &str| {
+                        let start = shown.break_text.len();
+                        shown.break_text.push_str(name);
+                        shown.break_text.push_str(" = ");
+                        shown.break_text.push_str(value);
+                        let end = shown.break_text.len();
+                        let kind = if changed(name) {
+                            crate::shell::NoteKind::Changed
+                        } else {
+                            crate::shell::NoteKind::Value
+                        };
+                        shown.break_notes.push((line, column, start, end, kind));
+                        column += shown.break_text[start..end].chars().count() + 3;
+                    };
+                    if saved == defined {
+                        for v in f.locals.iter().take(usize::from(f.params)) {
+                            put(&v.name, &v.value);
+                        }
+                    } else {
+                        assigned_names(text, |path| {
+                            if let Some(v) = variable_at(f, path) {
+                                put(path, &v.value);
+                            }
+                        });
+                    }
+                }
+            }
             // A new breakpoint being made shows where it goes.
             if let Some(e) = self
                 .break_edit
@@ -9577,6 +9732,8 @@ impl Editor {
             self.breakpoints.revision(),
             self.host_breaks.version(),
             self.break_pending,
+            self.debug_toggles,
+            self.debug_values,
         );
         if self.debug_text.key == Some(key) {
             return;
@@ -9586,6 +9743,24 @@ impl Editor {
         text.header.clear();
         text.frames.clear();
         text.variables.clear();
+        // The watches first (E9-1b-5c), evaluated at each stop in the shown frame.
+        if !self.watches.is_empty() {
+            text.variables.push(VarText::title("WATCH"));
+            for (i, w) in self.watches.iter().enumerate() {
+                let at = text.variables.len();
+                let path = format!("WATCH/{w}");
+                match self.watch_values.get(i) {
+                    Some(Ok(v)) => {
+                        variable_rows(&mut text.variables, v, path, 0, false, &self.debug_toggled);
+                    }
+                    Some(Err(e)) => text.variables.push(VarText::said(w, e, true, path)),
+                    None => text
+                        .variables
+                        .push(VarText::said(w, "not stopped", false, path)),
+                }
+                text.variables[at].watch = Some(i);
+            }
+        }
         match &self.stop {
             Some(stop) => {
                 let s = &stop.stopped;
@@ -9632,21 +9807,30 @@ impl Editor {
                     // Luau does not read a native frame's locals; a breakpoint in its function
                     // runs it interpreted.
                     if f.native {
-                        text.variables.push((
-                            String::from(
-                                "LOCALS · not readable: the function runs as native code \
-                                 (a breakpoint in it shows them)",
-                            ),
-                            String::new(),
+                        text.variables.push(VarText::title(
+                            "LOCALS · not readable: the function runs as native code \
+                             (a breakpoint in it shows them)",
                         ));
                     }
                     for (title, vars) in [("LOCALS", &f.locals), ("UPVALUES", &f.upvalues)] {
                         if vars.is_empty() {
                             continue;
                         }
-                        text.variables.push((String::from(title), String::new()));
+                        text.variables.push(VarText::title(title));
                         for v in vars {
-                            text.variables.push((v.name.clone(), v.value.clone()));
+                            // Lit where it changed since the last stop (the stopped frame).
+                            let changed = self.debug_frame == 0
+                                && title == "LOCALS"
+                                && stop.changed.contains(&v.name);
+                            let path = format!("{title}/{}", v.name);
+                            variable_rows(
+                                &mut text.variables,
+                                v,
+                                path,
+                                0,
+                                changed,
+                                &self.debug_toggled,
+                            );
                         }
                     }
                 }
@@ -9657,6 +9841,19 @@ impl Editor {
             None => text.header.push_str(
                 "No script is stopped: a breakpoint (F9 in a script's tab) stops one in Play",
             ),
+        }
+        // The Evaluate line's answers, above it.
+        if !self.answers.is_empty() {
+            text.variables.push(VarText::title("EVALUATED"));
+            for (i, (code, r)) in self.answers.iter().enumerate() {
+                let path = format!("EVALUATED/{i}");
+                match r {
+                    Ok(v) => {
+                        variable_rows(&mut text.variables, v, path, 0, false, &self.debug_toggled);
+                    }
+                    Err(e) => text.variables.push(VarText::said(code, e, true, path)),
+                }
+            }
         }
         text.breakpoints.clear();
         for (file, marks) in self.breakpoints.files() {
@@ -9768,6 +9965,34 @@ impl Editor {
             Some(stop) => stop.mouse,
             None => self.play.as_ref().is_some_and(|p| p.mouse),
         };
+        // What changed since the last stop in the same function.
+        let top = stopped.stack.first();
+        let changed = match (&self.last_values, top) {
+            (Some((module, defined, old)), Some(f))
+                if *module == stopped.module && *defined == f.defined =>
+            {
+                f.locals
+                    .iter()
+                    .filter(|v| {
+                        old.iter()
+                            .rev()
+                            .find(|o| o.name == v.name)
+                            .is_some_and(|o| o.value != v.value)
+                    })
+                    .map(|v| v.name.clone())
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        self.last_values = top.map(|f| (stopped.module.clone(), f.defined, f.locals.clone()));
+        let files = stopped
+            .stack
+            .iter()
+            .map(|f| match f.line {
+                Some(_) => PathBuf::from(engine_app::scripts::module_file(&f.source)),
+                None => PathBuf::new(),
+            })
+            .collect();
         self.set_game_mouse(false);
         let line = stopped.line.saturating_sub(1) as usize;
         let shown = file.to_string_lossy().replace('\\', "/");
@@ -9786,6 +10011,8 @@ impl Editor {
             line,
             values,
             mouse,
+            files,
+            changed,
         });
         self.open_script(world, &file, Some((line + 1, 1)));
         if let Some(e) = &stopped.error {
@@ -13958,6 +14185,7 @@ impl Editor {
         if let Some((uncaught, caught)) = state.error_stops {
             self.error_stops = ErrorStops { uncaught, caught };
         }
+        self.watches.clone_from(&state.watches);
         if let Some(on) = state.scale_lock {
             self.scale_lock = on;
         }
@@ -14107,6 +14335,7 @@ impl Editor {
             pivot: Some(String::from(self.pivot.name())),
             overlays: Some(self.overlays),
             error_stops: Some((self.error_stops.uncaught, self.error_stops.caught)),
+            watches: self.watches.clone(),
             window: self.window,
             game_window: self.game_window,
             active: Some(self.active_tab()),
@@ -15042,7 +15271,38 @@ impl<G> EditorGame<G> {
     /// Play's transitions once the frame is drawn (ADR 0107 E3): Play (the world kept,
     /// the game made by its `start` on it, the world's time running) or Stop (the game
     /// dropped, what it left in the player ended, the world put back).
+    /// The Debugger's evaluations (E9-1b-5c), with the player: what the Evaluate line
+    /// asked, then the watches again where the stop, the shown frame or the watches changed.
+    fn evaluate_frame(&mut self, player: &mut Player) {
+        let mut shared = self.shared.borrow_mut();
+        let ed = &mut *shared;
+        let frame = ed.debug_frame;
+        for code in std::mem::take(&mut ed.eval_queue) {
+            let result = player.evaluate_script(frame, &code);
+            ed.answers.push((code, result));
+            if ed.answers.len() > ANSWERS {
+                drop(ed.answers.remove(0));
+            }
+            ed.debug_values += 1;
+        }
+        let key = ed.stop.as_ref().map(|s| (s.count, frame, ed.watches_rev));
+        if key != ed.watch_key {
+            ed.watch_key = key;
+            let values = match key {
+                Some(_) => ed
+                    .watches
+                    .iter()
+                    .map(|w| player.evaluate_script(frame, w))
+                    .collect(),
+                None => Vec::new(),
+            };
+            ed.watch_values = values;
+            ed.debug_values += 1;
+        }
+    }
+
     fn play_frame(&mut self, player: &mut Player) {
+        self.evaluate_frame(player);
         // The game's window: closed by its button, Stop; ejected or not, the view there
         // or in the viewport.
         if player.view_window_close_requested() {
@@ -15240,6 +15500,14 @@ impl<G> EditorGame<G> {
         // A stage stopped at a breakpoint ends first, its stopped call failing, before the
         // game goes and the world is put back (ADR 0119).
         player.end_script_stop();
+        {
+            let mut shared = self.shared.borrow_mut();
+            shared.last_values = None;
+            shared.answers.clear();
+            shared.watch_values.clear();
+            shared.watch_key = None;
+            shared.debug_values += 1;
+        }
         self.game = None;
         self.failed = None;
         self.stepping = false;
@@ -15570,6 +15838,38 @@ impl<G> EditorGame<G> {
         let shared = self.shared.borrow();
         let view = ViewProj::new(&shared.orbit, shared.view_rect?);
         view.screen(p).map(|p| p.to_array())
+    }
+
+    /// Every note after line `line` (from 1) of the shown script, in order: what its
+    /// breakpoint says, the values it assigned at a stop (E9-1b-5a); for tests.
+    pub fn line_notes(&self, line: usize) -> Vec<String> {
+        let shared = self.shared.borrow();
+        let shown = &shared.code_shown;
+        shown
+            .break_notes
+            .iter()
+            .filter(|n| n.0 + 1 == line)
+            .map(|n| shown.break_text[n.2..n.3].to_owned())
+            .collect()
+    }
+
+    /// The Debugger panel's Variables as their rows read (`  name = value`, indented by
+    /// depth); for tests.
+    pub fn debug_texts(&self) -> Vec<String> {
+        self.shared
+            .borrow()
+            .debug_text
+            .variables
+            .iter()
+            .map(|v| {
+                format!(
+                    "{}{} = {}",
+                    "  ".repeat(usize::from(v.depth)),
+                    v.name,
+                    v.value
+                )
+            })
+            .collect()
     }
 
     /// The line (from 1) of the shown script a stopped script runs next, as the code shows
@@ -16656,18 +16956,100 @@ struct StopShown {
     values: String,
     /// The game had the mouse: it gets it back when the script goes on.
     mouse: bool,
+    /// Each frame's script file, relative to the project (empty for the engine's).
+    files: Vec<PathBuf>,
+    /// The stopped frame's locals whose values changed since the last stop in its
+    /// function (E9-1b-5a): lit.
+    changed: Vec<String>,
 }
+
+/// What the Debugger panel's texts were made for: the stop's number, the shown frame, the
+/// breakpoints' revision, the host's states' version, a break waiting, the Variables'
+/// clicks and the evaluations' changes.
+type DebugTextKey = (u64, usize, u64, Option<u64>, bool, u64, u64);
 
 /// The Debugger panel's texts (ADR 0119 E9-1b-3), kept between frames.
 #[derive(Default)]
 struct DebugText {
-    /// What they were made for: the stop's number, the frame, the breakpoints' revision,
-    /// the host's states' version.
-    key: Option<(u64, usize, u64, Option<u64>, bool)>,
+    /// What they were made for.
+    key: Option<DebugTextKey>,
     header: String,
     frames: Vec<(String, String)>,
-    variables: Vec<(String, String)>,
+    variables: Vec<VarText>,
     breakpoints: Vec<DebugBreakpoint>,
+}
+
+/// A row of the Debugger panel's Variables (E9-1b-5b), with the path that opens it.
+struct VarText {
+    name: String,
+    value: String,
+    changed: bool,
+    depth: u8,
+    open: Option<bool>,
+    /// Its section and names down to it (`LOCALS/self/Transform`).
+    path: String,
+    /// Its value is an error's message.
+    error: bool,
+    /// The watch it is (E9-1b-5c).
+    watch: Option<usize>,
+}
+
+impl VarText {
+    /// A section's title.
+    fn title(title: &str) -> Self {
+        Self::said(title, "", false, String::new())
+    }
+
+    /// A row that holds nothing: `name`, what is said of it, whether that is an error.
+    fn said(name: &str, value: &str, error: bool, path: String) -> Self {
+        Self {
+            name: String::from(name),
+            value: String::from(value),
+            changed: false,
+            depth: 0,
+            open: None,
+            path,
+            error,
+            watch: None,
+        }
+    }
+}
+
+/// The Evaluate line's answers the Debugger keeps (E9-1b-5c).
+const ANSWERS: usize = 20;
+
+/// Variable `v`'s row at `depth` (its section and names down to it: `path`), then, where it
+/// is open, its children's: `self` opens by default, the rest when clicked (`toggled` keeps
+/// the paths clicked).
+fn variable_rows(
+    rows: &mut Vec<VarText>,
+    v: &engine_app::scripts::Variable,
+    path: String,
+    depth: u8,
+    changed: bool,
+    toggled: &HashSet<String>,
+) {
+    let open = (!v.children.is_empty()).then(|| {
+        let by_default = depth == 0 && path == "LOCALS/self";
+        by_default != toggled.contains(&path)
+    });
+    let shown = open == Some(true);
+    rows.push(VarText {
+        name: v.name.clone(),
+        value: v.value.clone(),
+        changed,
+        depth,
+        open,
+        path: path.clone(),
+        error: false,
+        watch: None,
+    });
+    if shown {
+        for child in &v.children {
+            let path = format!("{path}/{}", child.name);
+            variable_rows(rows, child, path, depth.saturating_add(1), false, toggled);
+        }
+    }
 }
 
 /// A row of the Debugger panel's breakpoints, with where it goes.
@@ -16691,6 +17073,123 @@ fn cut(text: &str, chars: usize) -> String {
         out.push('\u{2026}');
     }
     out
+}
+
+/// The names line `line` of Luau assigns, given to `found` in order (E9-1b-5a): `local a,
+/// b = …` and `local a`, `a = …` and `a, b = …` (compound ones too: `a += …`), `for i = …`
+/// and `for k, v in …`. A string's and a comment's text is not code, and an `=` inside
+/// brackets is a table's field.
+fn assigned_names<'a>(line: &'a str, mut found: impl FnMut(&'a str)) {
+    let b = line.as_bytes();
+    let (mut depth, mut quote, mut eq, mut end) = (0i32, None, None, b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 1;
+            } else if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' | b'\'' | b'`' => quote = Some(c),
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                end = i;
+                break;
+            }
+            // A long string: the rest is not read.
+            b'[' if matches!(b.get(i + 1), Some(b'[' | b'=')) => {
+                end = i;
+                break;
+            }
+            b'(' | b'{' | b'[' => depth += 1,
+            b')' | b'}' | b']' => depth -= 1,
+            b'=' if depth == 0 => {
+                if b.get(i + 1) == Some(&b'=') {
+                    i += 2;
+                    continue;
+                }
+                if i == 0 || !matches!(b[i - 1], b'~' | b'<' | b'>' | b'=') {
+                    eq = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let code = line[..end].trim_start();
+    let left = match eq {
+        Some(at) => line[..at]
+            .trim_end_matches(['+', '-', '*', '/', '%', '^', '.'])
+            .trim_start(),
+        None => {
+            if let Some(rest) = code.strip_prefix("for ")
+                && let Some(k) = rest.find(" in ")
+            {
+                names(&rest[..k], &mut found);
+            } else if code.starts_with("local ") {
+                names_after_local(code, &mut found);
+            }
+            return;
+        }
+    };
+    if let Some(rest) = left.strip_prefix("for ") {
+        names(rest, &mut found);
+    } else if left.starts_with("local ") {
+        names_after_local(left, &mut found);
+    } else {
+        names(left, &mut found);
+    }
+}
+
+/// [`assigned_names`]'s names after `local` (none for `local function`).
+fn names_after_local<'a>(code: &'a str, found: &mut impl FnMut(&'a str)) {
+    let rest = code["local ".len()..].trim_start();
+    if !rest.starts_with("function") {
+        names(rest, found);
+    }
+}
+
+/// The names of a list (`a, b: number`, `self.speed`), their types left out; anything else
+/// in it is not a name.
+fn names<'a>(list: &'a str, found: &mut impl FnMut(&'a str)) {
+    for part in list.split(',') {
+        let name = part.split(':').next().unwrap_or_default().trim();
+        let is_word = |w: &str| {
+            w.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !matches!(w, "local" | "function" | "return" | "then" | "do" | "end")
+        };
+        if !name.is_empty() && name.split('.').all(is_word) {
+            found(name);
+        }
+    }
+}
+
+/// The variable of frame `f` at `path` (`t`, `self.speed`): a local (the latest of its
+/// name) or an upvalue, then what it holds by name.
+fn variable_at<'f>(
+    f: &'f engine_app::scripts::Frame,
+    path: &str,
+) -> Option<&'f engine_app::scripts::Variable> {
+    let mut parts = path.split('.');
+    let first = parts.next()?;
+    let mut v = f
+        .locals
+        .iter()
+        .rev()
+        .find(|v| v.name == first)
+        .or_else(|| f.upvalues.iter().find(|v| v.name == first))?;
+    for part in parts {
+        v = v.children.iter().find(|c| c.name == part)?;
+    }
+    Some(v)
 }
 
 /// A file's name, the last part of its path (`scripts/npc/guard.luau` is `guard.luau`).
@@ -17495,6 +17994,40 @@ mod tests {
     }
 
     reflect_component!(Mover);
+
+    /// The names a line assigns (E9-1b-5a's values in the code).
+    fn assigned(line: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        assigned_names(line, |n| out.push(n));
+        out
+    }
+
+    #[test]
+    fn a_lines_assigned_names_are_read_past_strings_comments_and_fields() {
+        assert_eq!(assigned("    local t = self.Transform"), ["t"]);
+        assert_eq!(assigned("local a, b: number = 1, 2"), ["a", "b"]);
+        assert_eq!(assigned("local declared"), ["declared"]);
+        assert_eq!(assigned("x += 1  -- y = 2"), ["x"]);
+        assert_eq!(assigned("name ..= \"=\""), ["name"]);
+        assert_eq!(assigned("a, b = b, a"), ["a", "b"]);
+        assert_eq!(assigned("for i = 1, 10 do"), ["i"]);
+        assert_eq!(assigned("for key, value in pairs(t) do"), ["key", "value"]);
+        assert_eq!(assigned("self.speed = 3"), ["self.speed"]);
+        assert_eq!(assigned("t.rotation *= q"), ["t.rotation"]);
+        // Not assignments, or not to a name.
+        for line in [
+            "if a == b then",
+            "while a <= 10 do",
+            "return a ~= b",
+            "f({ speed = 2 })",
+            "t[1] = 1",
+            "local function helper(x)",
+            "print(\"a = b\")",
+            "-- c = 4",
+        ] {
+            assert!(assigned(line).is_empty(), "{line}");
+        }
+    }
 
     fn folder(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ofelia-editor-{name}-{}", std::process::id()));

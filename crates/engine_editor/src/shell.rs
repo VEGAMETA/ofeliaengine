@@ -147,6 +147,10 @@ pub enum NoteKind {
     Problem,
     /// The error a script stopped at (E9-1b-4).
     Error,
+    /// A value a line above the stopped one assigned (E9-1b-5a), dimmer than the code.
+    Value,
+    /// One that changed since the last stop: lit.
+    Changed,
 }
 
 /// What the Debugger panel's header buttons ask (ADR 0119 E9-1b-3).
@@ -183,10 +187,35 @@ pub struct DebuggerView<'a> {
     pub frames: &'a [(&'a str, &'a str)],
     /// The frame whose variables are shown.
     pub frame: usize,
-    /// Its variables: a section's title (`LOCALS`, no value) or a name and its value.
-    pub variables: &'a [(&'a str, &'a str)],
+    /// Its variables, and what those open hold under them.
+    pub variables: &'a [VariableRow<'a>],
+    /// The Evaluate line under them (E9-1b-5c): its text.
+    pub evaluate: &'a str,
+    /// What it says while empty.
+    pub evaluate_hint: &'a str,
+    /// It takes the keys again (after a line was evaluated).
+    pub evaluate_focus: bool,
     /// Every breakpoint.
     pub breakpoints: &'a [BreakpointRow<'a>],
+}
+
+/// A row of the Debugger panel's Variables (E9-1b-5b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VariableRow<'a> {
+    /// Its name, or a section's title (`LOCALS`).
+    pub name: &'a str,
+    /// Its value; empty for a section's title.
+    pub value: &'a str,
+    /// It changed since the last stop: lit.
+    pub changed: bool,
+    /// How far under its frame's variable it is.
+    pub depth: u8,
+    /// Whether it is open, where it holds anything.
+    pub open: Option<bool>,
+    /// Its value is an error's message (an evaluation's, E9-1b-5c).
+    pub error: bool,
+    /// A watch: a click on its × takes it away.
+    pub removable: bool,
 }
 
 /// A row of the Debugger panel's Breakpoints list.
@@ -973,6 +1002,12 @@ pub struct ShellResponse {
     pub debug_toggle: Option<usize>,
     /// A row of which errors stop was clicked (0 not caught, 1 caught by `pcall`).
     pub debug_errors: Option<usize>,
+    /// A row of the Variables was clicked: it opens or closes.
+    pub debug_variable: Option<usize>,
+    /// The Evaluate line's field (E9-1b-5c).
+    pub debug_evaluate: Option<TextFieldResponse>,
+    /// A watch's × was clicked: its row.
+    pub debug_unwatch: Option<usize>,
     /// The scene dock's tab was clicked (0 the tree, 1 History).
     pub scene_dock_tab: Option<usize>,
     /// A History row was clicked: its place.
@@ -1607,6 +1642,8 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
                 NoteKind::Said => p.logged,
                 NoteKind::Problem => p.warning,
                 NoteKind::Error => p.error,
+                NoteKind::Value => p.text_dim,
+                NoteKind::Changed => p.warning,
             };
             ui.mono_text_node("break note", style, said, CODE_TEXT, color);
             ui.pop_id();
@@ -3803,18 +3840,77 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
             ui.container("variables", column(Size::Grow(1.0)), |ui| {
                 text(ui, "title", "VARIABLES", SMALL, p.text_dim);
                 ui.scroll_column("values", |ui| {
-                    for (i, &(name, value)) in view.variables.iter().enumerate() {
+                    for (i, v) in view.variables.iter().enumerate() {
                         ui.push_id(i as u64);
-                        ui.container("variable", row, |ui| {
-                            if value.is_empty() {
-                                text(ui, "section", name, SMALL, p.text_dim);
+                        let id = ui.container("variable", row, |ui| {
+                            ui.container(
+                                "indent",
+                                Style {
+                                    size: [
+                                        Size::Fixed(f32::from(v.depth) * 14.0),
+                                        Size::Fixed(1.0),
+                                    ],
+                                    ..Style::default()
+                                },
+                                |_| {},
+                            );
+                            let mark = match v.open {
+                                Some(true) => icons::EXPANDED,
+                                Some(false) => icons::COLLAPSED,
+                                None => "",
+                            };
+                            icon(ui, "open", mark, p.text_dim);
+                            if v.value.is_empty() {
+                                text(ui, "section", v.name, SMALL, p.text_dim);
                             } else {
-                                text(ui, "name", name, SMALL, p.text);
-                                text(ui, "value", value, SMALL, p.logged);
+                                text(ui, "name", v.name, SMALL, p.text);
+                                let color = match (v.error, v.changed) {
+                                    (true, _) => p.error,
+                                    (false, true) => p.warning,
+                                    (false, false) => p.logged,
+                                };
+                                text(ui, "value", v.value, SMALL, color);
+                            }
+                            if v.removable {
+                                ui.spacer("fill");
+                                let x = ui.container("unwatch", Style::default(), |ui| {
+                                    text(ui, "x", "\u{00d7}", SMALL, p.text_dim);
+                                });
+                                if ui.sense(x, false).clicked {
+                                    out.debug_unwatch = Some(i);
+                                }
                             }
                         });
+                        if out.debug_unwatch != Some(i)
+                            && v.open.is_some()
+                            && ui.sense(id, false).clicked
+                        {
+                            out.debug_variable = Some(i);
+                        }
                         ui.pop_id();
                     }
+                });
+                // The Evaluate line: one line of Luau in the shown frame.
+                let line = Style {
+                    size: [Size::Grow(1.0), Size::Fixed(24.0)],
+                    padding: [8.0, 0.0, 4.0, 0.0],
+                    radius: 3.0,
+                    background: Some(p.field),
+                    align_cross: Align::Center,
+                    ..Style::default()
+                };
+                ui.row("evaluate", line, |ui| {
+                    let style = Style {
+                        size: [Size::Grow(1.0), Size::Fixed(22.0)],
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    };
+                    let look = field_look(p, style, view.evaluate_hint, false);
+                    let r = ui.text_field("evaluate", view.evaluate, &look);
+                    if view.evaluate_focus && !r.editing {
+                        ui.edit_field(r.id);
+                    }
+                    out.debug_evaluate = used(r);
                 });
             });
             ui.container("breakpoints", column(Size::Fixed(480.0)), |ui| {

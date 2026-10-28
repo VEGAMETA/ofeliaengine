@@ -949,7 +949,10 @@ values after it, the viewport's edge turns amber, and the editor works as while 
 F10, F11 and Shift+F11 step (over, into, out). The Debugger panel opens with it: the call
 stack, the shown frame's values and every breakpoint. An error a script does not catch
 stops it the same way, at the failing line, in red with its message (once a line a Play;
-the Breakpoints list's first rows choose which errors stop).
+the Breakpoints list's first rows choose which errors stop). At a stop the lines above
+show what they assigned, the Variables open into tables, components and entities, and the
+Evaluate line under them evaluates Luau in the shown frame (Ctrl+Enter keeps it as a
+watch).
 
 **Slang modules** (`.slang`) open in code tabs too, with Slang's colors:
 
