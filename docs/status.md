@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3g-3a, `[Node]` functions in the engine** (#PR, ADR 0123's as-built; the
+  - **E10-3g-3a, `[Node]` functions in the engine** (#433, ADR 0123's as-built; the
     `.mgraph` file's version 3): Slang functions marked `[Node("Title", "Group")]` are read
     through Slang's reflection. A call node keeps the function, its module and its
     signature, so the cook and the player generate without Slang; the generated module
