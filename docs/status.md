@@ -688,7 +688,7 @@ Last updated: 2026-10-28.
       its hits (its mark toggles it, its row goes to its line);
     - its texts made again only when the stop, the frame, the breakpoints or their states
       change.
-  - **E9-1b-4, stops at errors** (#PR, ADR 0119's as-built):
+  - **E9-1b-4, stops at errors** (#383, ADR 0119's as-built):
     - an error a script does not catch stops it at its line in Play, before its frames
       unwind (the hook's message handler, or the frames a failed resume leaves), once a
       line a Play; one a `pcall` catches when asked (Luau's protected-error callback);
