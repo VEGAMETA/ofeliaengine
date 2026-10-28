@@ -2231,3 +2231,25 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **Not done:** blockout's cylinders' and spheres' radius handles (ADR 0110 left them; the
   same drag fits them), the inspector's falloff curve marking the camera's distance,
   View: Sound Ranges, and hearing in place (P, Listen to the Scene: E11-4b-2).
+
+## As built (E11-4b-2, 2026-10-28): hearing in place
+
+- **P** ("Sound: Hear Selection in Place") plays the selected sources (`AudioSource`,
+  `AudioSource3D`) where they are, looping, until P again, Escape (when nothing else takes
+  it) or another selection. **Sound: Listen to the Scene** plays every source set to play
+  (`playing`), and the selection may change while the camera flies; Escape or the command
+  again ends it. Play ends either: the game's own sound begins.
+- **The player** (`Player::audition`): while the world is kept still, the sound update
+  follows only those entities, each from a copy of its component kept between frames (its
+  settings taken from the component every frame, where it has got to kept in the copy,
+  playing and looping), so nothing is written back (no `position`, no `playing` cleared,
+  no despawn at a one-shot's end: the copy loops). The camera hears, whatever
+  `AudioListener` the scene has; the zones answer; occlusion and the room from geometry
+  need the game's physics and come with Play.
+- **Tests:** on the player (no device), a still world silent, a one-shot heard in place
+  looping past its end with its component unchanged and its entity kept, a 3D source heard
+  from the camera with a listener 1 km away, silence when the list empties; in the editor,
+  P over nothing, P on and off, another selection, Listen to the Scene through a new
+  selection, Escape, Play.
+- **E11-4 is done** but for View: Sound Ranges, the inspector's falloff curve with the
+  camera's distance, and blockout's radius handles.

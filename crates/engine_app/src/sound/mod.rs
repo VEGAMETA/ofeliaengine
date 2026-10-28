@@ -675,6 +675,12 @@ pub(crate) struct Sound {
     /// The next 3D track an occlusion ray goes to.
     next_occluded: usize,
     despawn: Vec<Entity>,
+    /// The editor's hearing in place (E11-4b): while the world stands still, these
+    /// entities' sources play where they are, looping, heard from the camera; each from a
+    /// copy of its component kept here, so nothing is written back into the world.
+    audition: Vec<Entity>,
+    audition_plain: Vec<(Entity, AudioSource)>,
+    audition_placed: Vec<(Entity, AudioSource3D)>,
     /// The editor's preview of a file (E11-3b), its bus (made with the first), and the
     /// last preview's ticket.
     preview: Option<Preview>,
@@ -888,6 +894,9 @@ impl Sound {
             absorption: Vec::new(),
             next_occluded: 0,
             despawn: Vec::new(),
+            audition: Vec::new(),
+            audition_plain: Vec::new(),
+            audition_placed: Vec::new(),
             preview: None,
             preview_bus: None,
             previews: 0,
@@ -911,6 +920,24 @@ impl Sound {
         sound.set_layout(layout);
         sound.layout_changed = false;
         sound
+    }
+
+    /// The editor's hearing in place (E11-4b): while the world stands still, `entities`'
+    /// sources play where they are, looping, heard from the camera (the zones too; walls and
+    /// the room from geometry wait for the game's physics in Play); none: silence again.
+    /// Nothing is written back into the world.
+    pub(crate) fn set_audition(&mut self, entities: &[Entity]) {
+        if self.audition != entities {
+            self.audition.clear();
+            self.audition.extend_from_slice(entities);
+            self.audition_plain.retain(|(e, _)| entities.contains(e));
+            self.audition_placed.retain(|(e, _)| entities.contains(e));
+        }
+    }
+
+    /// The entities heard in place.
+    pub(crate) fn audition(&self) -> &[Entity] {
+        &self.audition
     }
 
     /// The editor's listening aids (E11-1b): `muted` buses silent, and while any bus is in
@@ -1294,24 +1321,35 @@ impl Sound {
         self.watch_folder();
         self.apply_mixer(world);
         // The world kept still (the editor while editing, a pause): its sources are silent,
-        // and where each one is stays as it was.
+        // and where each one is stays as it was; but those heard in place play.
         if !simulating {
+            if self.audition.is_empty() {
+                if let Some(audio) = self.audio.as_mut() {
+                    self.plain.clear(audio);
+                    self.placed.clear(audio);
+                }
+                return;
+            }
+            self.make_queries(world);
+            let live = self.manual || self.output.is_some();
+            // The camera hears, whatever listener the scene has.
+            let listener = self.listen(world, camera, dt, live, true);
+            self.stamp = self.stamp.wrapping_add(1);
+            if self.follow_audition(world, dt, live) {
+                self.want_output();
+            }
             if let Some(audio) = self.audio.as_mut() {
-                self.plain.clear(audio);
-                self.placed.clear(audio);
+                self.plain.drop_unseen(self.stamp, audio);
+                self.placed.drop_unseen(self.stamp, audio);
+            }
+            if live {
+                self.hear_the_world(world, listener, None, dt);
             }
             return;
         }
-        if self.queries.is_none() {
-            self.queries = Some(Queries {
-                plain: QueryState::new(world),
-                placed: QueryState::new(world),
-                listeners: QueryState::new(world),
-                zones: QueryState::new(world),
-            });
-        }
+        self.make_queries(world);
         let live = self.manual || self.output.is_some();
-        let listener = self.listen(world, camera, dt, live);
+        let listener = self.listen(world, camera, dt, live, false);
         self.stamp = self.stamp.wrapping_add(1);
         let wanted = self.follow_sources(world, dt, live);
         if wanted {
@@ -1505,14 +1543,17 @@ impl Sound {
         camera: Option<&ViewCamera>,
         dt: f64,
         live: bool,
+        camera_hears: bool,
     ) -> Option<Vec3> {
         let queries = self.queries.as_mut()?;
         let mut found: Option<Affine3A> = None;
-        queries.listeners.for_each_readonly(world, |(_, global)| {
-            if found.is_none() {
-                found = Some(global.0);
-            }
-        });
+        if !camera_hears {
+            queries.listeners.for_each_readonly(world, |(_, global)| {
+                if found.is_none() {
+                    found = Some(global.0);
+                }
+            });
+        }
         let (position, rotation) = match found {
             Some(at) => {
                 let (_, rotation, translation) = at.to_scale_rotation_translation();
@@ -1582,6 +1623,105 @@ impl Sound {
             let placement = Placement::of(source, global.map(GlobalTransform::translation));
             follow(&mut ctx, track, entity, &mut source.source, Some(placement));
         });
+        ctx.wanted
+    }
+
+    /// The queries the frame reads, made once.
+    fn make_queries(&mut self, world: &mut World) {
+        if self.queries.is_none() {
+            self.queries = Some(Queries {
+                plain: QueryState::new(world),
+                placed: QueryState::new(world),
+                listeners: QueryState::new(world),
+                zones: QueryState::new(world),
+            });
+        }
+    }
+
+    /// The sources heard in place (E11-4b), each from its copy: the component's settings
+    /// every frame, playing and looping where the copy has got to; the world itself is
+    /// only read. Whether any wants to play.
+    fn follow_audition(&mut self, world: &World, dt: f64, live: bool) -> bool {
+        let Self {
+            settings,
+            audio,
+            buses,
+            loader,
+            sounds,
+            tickets,
+            prepared,
+            plain,
+            placed,
+            stamp,
+            audition,
+            audition_plain,
+            audition_placed,
+            ..
+        } = self;
+        let Some(audio) = audio.as_mut() else {
+            return false;
+        };
+        // A copy loops, so none ends by itself; and none would despawn anything.
+        let mut nothing = Vec::new();
+        let mut ctx = Ctx {
+            audio,
+            live,
+            buses,
+            loader,
+            sounds,
+            tickets,
+            prepared,
+            despawn: &mut nothing,
+            stream_from: settings.stream_from,
+            stamp: *stamp,
+            dt,
+            wanted: false,
+        };
+        // Where the copy has got to stays its own; the rest follows the component.
+        fn heard(copy: &mut AudioSource, from: &AudioSource) {
+            let at = copy.position;
+            copy.clone_from(from);
+            copy.position = at;
+            copy.playing = true;
+            copy.mode = PlayMode::Loop;
+        }
+        for &entity in audition.iter() {
+            if let Some(source) = world.get::<AudioSource>(entity) {
+                let k = match audition_plain.iter().position(|(e, _)| *e == entity) {
+                    Some(k) => k,
+                    None => {
+                        let mut copy = source.clone();
+                        copy.position = 0.0;
+                        audition_plain.push((entity, copy));
+                        audition_plain.len() - 1
+                    }
+                };
+                let copy = &mut audition_plain[k].1;
+                heard(copy, source);
+                let track = plain.get_or_insert(entity, copy.position);
+                follow(&mut ctx, track, entity, copy, None);
+            } else if let Some(source) = world.get::<AudioSource3D>(entity) {
+                let k = match audition_placed.iter().position(|(e, _)| *e == entity) {
+                    Some(k) => k,
+                    None => {
+                        let mut copy = source.clone();
+                        copy.source.position = 0.0;
+                        audition_placed.push((entity, copy));
+                        audition_placed.len() - 1
+                    }
+                };
+                let copy = &mut audition_placed[k].1;
+                let at = copy.source.position;
+                copy.clone_from(source);
+                copy.source.position = at;
+                copy.source.playing = true;
+                copy.source.mode = PlayMode::Loop;
+                let global = world.get::<GlobalTransform>(entity);
+                let placement = Placement::of(copy, global.map(GlobalTransform::translation));
+                let track = placed.get_or_insert(entity, copy.source.position);
+                follow(&mut ctx, track, entity, &mut copy.source, Some(placement));
+            }
+        }
         ctx.wanted
     }
 

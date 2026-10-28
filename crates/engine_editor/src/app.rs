@@ -712,6 +712,9 @@ struct CommandIds {
     mixer: CommandId,
     add_bus: CommandId,
     take_back_mixer: CommandId,
+    /// Hearing in place (E11-4b): the selection's sources (P), every playing one.
+    hear: CommandId,
+    listen_scene: CommandId,
     /// The script debugger's panel (ADR 0119 E9-1b-3) opened or closed.
     debugger: CommandId,
     find: CommandId,
@@ -878,6 +881,8 @@ fn commands() -> (Commands, CommandIds) {
             "Audio",
             "Take Back Play's Mixer Changes",
         ),
+        hear: c.register("sound.hear", "Sound", "Hear Selection in Place"),
+        listen_scene: c.register("sound.listen_scene", "Sound", "Listen to the Scene"),
         debugger: c.register("view.debugger", "View", "Debugger"),
         find: c.register("scene.find", "Scene", "Go to Object"),
         select_next: c.register("scene.select_next", "Scene", "Select Next Row"),
@@ -1089,6 +1094,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         // VS Code's Run and Debug view.
         ("Ctrl+Shift+D", ids.debugger),
         ("Alt+A", ids.mixer),
+        ("P", ids.hear),
         ("Ctrl+P", ids.find),
         ("Ctrl+R", ids.restart),
         ("Space", ids.local_axes),
@@ -1235,6 +1241,14 @@ struct MixerDrag {
     fader: Option<(f32, f32)>,
     merge: u64,
     moved: bool,
+}
+
+/// Sounds heard in place (E11-4b): the entities, and the selection P heard (another one
+/// ends it); none for Listen to the Scene, which the camera flies through.
+#[derive(Debug, Clone, PartialEq)]
+struct Hearing {
+    entities: Vec<Entity>,
+    selection: Option<Vec<Entity>>,
 }
 
 /// A section of the picked bus after its Bus section (E11-2b).
@@ -2386,6 +2400,9 @@ struct Editor {
     /// The mixer's layout as the last Play began (E11-1b-3, the team's 3a): its changes in
     /// Play stay, marked while playing, and one command takes them back until the next Play.
     mixer_at_play: Option<engine_app::MixerFile>,
+    /// Sounds heard in place (E11-4b), and whether the player has been told.
+    hearing: Option<Hearing>,
+    hearing_given: bool,
     mixer_muted: Vec<String>,
     mixer_soloed: Vec<String>,
     monitor: bool,
@@ -3215,6 +3232,8 @@ impl Editor {
             meters: Vec::new(),
             meters_at: None,
             mixer_at_play: None,
+            hearing: None,
+            hearing_given: true,
             mixer_muted: Vec::new(),
             mixer_soloed: Vec::new(),
             monitor: false,
@@ -5861,6 +5880,18 @@ impl Editor {
             drag.cancelled = true;
             let merge = drag.merge;
             self.history.revert(world, merge);
+        }
+        // Hearing in place (E11-4b) ends with Escape, when nothing else takes it, and with
+        // another selection than the one P heard.
+        if let Some(h) = &self.hearing {
+            let escape = self.ui.input().keys.contains(&UiKey::Escape)
+                && self.command_palette.is_none()
+                && self.ui.editing().is_none()
+                && self.drag.is_none();
+            let moved_on = h.selection.as_ref().is_some_and(|s| *s != self.selection);
+            if escape || moved_on {
+                self.stop_hearing();
+            }
         }
         // Escape stops a sound's preview (E11-3b), when nothing else takes it.
         if self.ui.input().keys.contains(&UiKey::Escape)
@@ -9029,6 +9060,8 @@ impl Editor {
     /// entities, its resources, the history's place and the selection.
     fn prepare_play(&mut self, world: &mut World, from_here: bool) -> Playing {
         let started = Instant::now();
+        // Hearing in place ends: the game's own sound begins.
+        self.stop_hearing();
         // The mixer as Play begins (E11-1b-3): what its changes in Play are measured from.
         self.open_mixer();
         self.mixer_at_play = self.mixer.as_ref().map(|d| d.layout.clone());
@@ -13213,6 +13246,10 @@ impl Editor {
             self.add_bus(world);
         } else if id == ids.take_back_mixer {
             self.take_back_mixer(world);
+        } else if id == ids.hear {
+            self.hear_selection(world);
+        } else if id == ids.listen_scene {
+            self.listen_to_scene(world);
         } else if id == ids.debugger {
             self.bottom = if self.bottom == Some(DEBUGGER_TAB) {
                 None
@@ -15215,6 +15252,90 @@ impl Editor {
         self.history.change_file(id, &before, &after);
         self.history.commit(world);
         true
+    }
+
+    /// P (E11-4b): the selected sources heard where they are, looping, from the editor's
+    /// camera, until P again, Escape or another selection; nothing written back.
+    fn hear_selection(&mut self, world: &World) {
+        if self.hearing.as_ref().is_some_and(|h| h.selection.is_some()) {
+            self.stop_hearing();
+            return;
+        }
+        if self.play.is_some() {
+            self.say(String::from("The game is playing: its own sound plays"));
+            return;
+        }
+        let entities: Vec<Entity> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&e| {
+                world.get::<AudioSource>(e).is_some() || world.get::<AudioSource3D>(e).is_some()
+            })
+            .collect();
+        if entities.is_empty() {
+            self.say(String::from(
+                "Nothing selected plays a sound (Sound: Listen to the Scene hears them all)",
+            ));
+            return;
+        }
+        let n = entities.len();
+        self.hearing = Some(Hearing {
+            entities,
+            selection: Some(self.selection.clone()),
+        });
+        self.hearing_given = false;
+        self.say(if n == 1 {
+            String::from("Hearing the sound where it is (P or Escape stops)")
+        } else {
+            format!("Hearing {n} sounds where they are (P or Escape stops)")
+        });
+    }
+
+    /// Sound: Listen to the Scene (E11-4b): every source set to play heard where it is
+    /// while the camera flies, until Escape or the command again.
+    fn listen_to_scene(&mut self, world: &mut World) {
+        if self.hearing.as_ref().is_some_and(|h| h.selection.is_none()) {
+            self.stop_hearing();
+            return;
+        }
+        if self.play.is_some() {
+            self.say(String::from("The game is playing: its own sound plays"));
+            return;
+        }
+        let mut entities = Vec::new();
+        let mut plain = QueryState::<(Entity, &AudioSource)>::new(world);
+        plain.for_each_readonly(world, |(e, s)| {
+            if s.playing {
+                entities.push(e);
+            }
+        });
+        let mut placed = QueryState::<(Entity, &AudioSource3D)>::new(world);
+        placed.for_each_readonly(world, |(e, s)| {
+            if s.source.playing {
+                entities.push(e);
+            }
+        });
+        if entities.is_empty() {
+            self.say(String::from("No source in the scene is set to play"));
+            return;
+        }
+        let n = entities.len();
+        self.hearing = Some(Hearing {
+            entities,
+            selection: None,
+        });
+        self.hearing_given = false;
+        self.say(format!(
+            "Listening to the scene: {n} sounds where they are (Escape stops)"
+        ));
+    }
+
+    /// Hearing in place ends, if it was on.
+    fn stop_hearing(&mut self) {
+        if self.hearing.take().is_some() {
+            self.hearing_given = false;
+        }
     }
 
     /// The mixer's changes since the last Play began taken back, as one step (E11-1b-3).
@@ -19217,6 +19338,11 @@ impl<G> EditorGame<G> {
                     player.set_mixer_listening(&shared.mixer_muted, &shared.mixer_soloed);
                 }
                 shared.listening_given = true;
+            }
+            // Hearing in place (E11-4b).
+            if !shared.hearing_given {
+                player.audition(shared.hearing.as_ref().map_or(&[][..], |h| &h.entities));
+                shared.hearing_given = true;
             }
         }
         // Sound previews (E11-3b): what the editor asked, then the preview as it plays.
@@ -25719,6 +25845,75 @@ mod tests {
         let brush = world.get::<Brush>(room).unwrap();
         assert_eq!(brush.hollow, ROOM_WALLS);
         assert!((brush.size - Vec3::new(4.0, 3.0, 3.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn p_hears_the_selected_sounds_in_place_until_p_escape_or_another_selection() {
+        let mut world = World::new();
+        let mut ed = draw_editor("hear-in-place", &mut world);
+        let hum = world.spawn((
+            SceneId::new(),
+            Name::new("Hum"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            AudioSource3D::new("hum.wav"),
+        ));
+        let mut rain = AudioSource::new("rain.wav");
+        rain.playing = false;
+        let rain = world.spawn((
+            SceneId::new(),
+            Name::new("Rain"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            rain,
+        ));
+        let rock = world.spawn((
+            SceneId::new(),
+            Name::new("Rock"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        ed.update(&mut world);
+        let heard = |ed: &Editor| ed.hearing.as_ref().map(|h| h.entities.clone());
+        // P over something that plays nothing: said, nothing heard.
+        ed.select_only(rock);
+        chord(&mut ed, &mut world, &[P]);
+        assert!(ed.hearing.is_none());
+        // P on the hum: heard, the player to be told; P again stops it.
+        ed.select_only(hum);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[P]);
+        assert_eq!(heard(&ed), Some(vec![hum]));
+        assert!(!ed.hearing_given, "the player is told with the next frame");
+        chord(&mut ed, &mut world, &[P]);
+        assert!(ed.hearing.is_none());
+        // Another selection ends it.
+        chord(&mut ed, &mut world, &[P]);
+        assert!(ed.hearing.is_some());
+        ed.select_only(rock);
+        ed.update(&mut world);
+        assert!(ed.hearing.is_none(), "another selection");
+        // Listen to the Scene: every source set to play (the hum, not the rain); a new
+        // selection keeps it, Escape ends it.
+        let listen = ed.ids.listen_scene;
+        ed.run(&mut world, listen);
+        assert_eq!(heard(&ed), Some(vec![hum]));
+        ed.select_only(rain);
+        ed.update(&mut world);
+        assert_eq!(
+            heard(&ed),
+            Some(vec![hum]),
+            "the camera flies, the scene plays"
+        );
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert!(ed.hearing.is_none());
+        // Play ends it too.
+        ed.select_only(hum);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[P]);
+        assert!(ed.hearing.is_some());
+        let _ = ed.prepare_play(&mut world, false);
+        assert!(ed.hearing.is_none(), "the game's own sound plays");
     }
 
     #[test]

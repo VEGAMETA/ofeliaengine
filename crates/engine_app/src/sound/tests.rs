@@ -686,6 +686,54 @@ fn sends_and_sidechains_follow_the_layout() {
 }
 
 #[test]
+fn sources_heard_in_place_play_while_the_world_stands_and_nothing_is_written_back() {
+    let mut bed = Bed::new("audition", AudioSettings::default());
+    write_level_wav(&bed.folder.join("level.wav"), u64::from(RATE), 0.25);
+    // A one-shot, not playing, that would despawn its entity at its end; the world kept
+    // still, as the editor keeps it: silence.
+    let mut once = AudioSource::new("level.wav").on_bus("music");
+    once.mode = PlayMode::Despawn;
+    once.playing = false;
+    let e = bed.world.spawn((once,));
+    bed.simulating = false;
+    bed.frame(20);
+    assert_eq!(energy(bed.frame(20).into_iter()), 0.0);
+    // Heard in place: it plays, and loops past its end (1 s) without despawning anything.
+    bed.sound.set_audition(&[e]);
+    bed.until(|b| b.voice(e).is_some());
+    bed.frame(100);
+    assert!(energy(bed.frame(20).into_iter()) > 0.0, "heard");
+    for _ in 0..12 {
+        bed.frame(100);
+    }
+    assert!(bed.world.contains(e), "not despawned");
+    assert!(energy(bed.frame(20).into_iter()) > 0.0, "looping");
+    let s = bed.source(e);
+    assert!(!s.playing && s.position == 0.0, "the component as it was");
+    // A 3D sound 2 m in front of the camera, a listener far away: the camera hears it.
+    let mut near = AudioSource3D::new("level.wav");
+    near.max_distance = 10.0;
+    let placed = bed.world.spawn((
+        near,
+        GlobalTransform(Affine3A::from_translation(Vec3::new(0.0, 0.0, -2.0))),
+    ));
+    bed.world.spawn((
+        AudioListener,
+        GlobalTransform(Affine3A::from_translation(Vec3::new(1000.0, 0.0, 0.0))),
+    ));
+    bed.sound.set_audition(&[placed]);
+    bed.until(|b| b.voice(placed).is_some());
+    bed.frame(100);
+    assert!(energy(bed.frame(20).into_iter()) > 0.0, "the camera hears");
+    assert!(bed.voice(e).is_none(), "the first is no longer heard");
+    // No more: silence again.
+    bed.sound.set_audition(&[]);
+    bed.frame(100);
+    assert_eq!(energy(bed.frame(20).into_iter()), 0.0);
+    assert!(bed.world.contains(e) && bed.world.contains(placed));
+}
+
+#[test]
 fn the_editors_solo_and_mute_listen_on_top_of_the_games_mutes() {
     let mut bed = Bed::new("listening", AudioSettings::default());
     write_level_wav(&bed.folder.join("level.wav"), u64::from(RATE), 0.25);
