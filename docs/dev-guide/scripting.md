@@ -422,6 +422,17 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
     steps as buttons, the call stack (a click on a caller shows its line and its values),
     the shown frame's locals and upvalues, and every breakpoint with what it does and its
     hits (a click on its mark turns it off or on, on its row goes to its line).
+  - **The header** says what stopped, in which hook, for which entity, where, and in which
+    tick: `Stopped · on_tick · Front door · scripts/door.luau:14 · tick 1,284, under way`
+    (the hooks before this one ran, the rest wait).
+  - **Shift+F7 finishes the tick** (or Finish tick in the header): the rest of the tick
+    runs, its stops passed, then Play is paused, a whole world with every hook of the tick
+    done. F7 goes on from there.
+  - **"Only Front door"** in the header limits the breakpoint that stopped to that
+    entity: the next instances of the script pass it. Its row says `only Front door`, its
+    mark shows a bar, and the header's button reads "Every instance" to take the filter
+    away. A scene entity is kept by its scene id in the session; one the game made in Play
+    is kept until Play stops.
   - **Values in the code:** the lines above the stopped one, in its function, show what
     they assigned at their ends (`t = Transform`, `self.speed = 2`), dimmer than the code;
     the function's line has its parameters. A value that changed since the last stop is
@@ -477,7 +488,7 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
 
 Without breakpoints nothing is paid. A function with one runs Luau's interpreter instead of
 native code until its script runs again, and each hit costs a microsecond or so (below).
-Changing a value from the Variables (F2) and the header's entity and tick come next.
+Changing a value from the Variables (F2) comes next.
 
 ### Debugging from VS Code
 

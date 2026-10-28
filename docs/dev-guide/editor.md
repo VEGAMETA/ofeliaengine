@@ -604,7 +604,8 @@ Keeping the scene and putting it back take milliseconds: 7 and 8 ms for 10,000 e
 - **F7** (or ⏸) pauses: the world's time stands (its timers, tweens and sounds), your
   game's hooks are not called, and the frame shows where it stopped. F7 again goes on.
 - **Shift+F7** runs one tick while paused (pausing first): one `Game::tick`, timers and
-  tweens one tick on, then paused again.
+  tweens one tick on, then paused again. At a script's stop it finishes the stopped tick
+  instead, its stops passed, and pauses after it ([scripting.md](scripting.md)).
 - **Shift+F5** plays from the editor's camera:
   - the scene's main camera starts where the editor's camera is;
   - `engine_app::PlayFrom` (its position and rotation) is in the world while the game's
