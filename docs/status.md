@@ -727,7 +727,7 @@ Last updated: 2026-10-28.
       goes with it;
     - the extension's "Attach to the player"; `engine_app::run` installs the engine's logger;
       the game template's shipping profile unwinds (ADR 0118).
-  - **E9-4a, the stopped entity** (#PR, ADR 0119's as-built): the host tells the VM
+  - **E9-4a, the stopped entity** (#387, ADR 0119's as-built): the host tells the VM
     whose hook runs; the Debugger's header names the entity and the tick; Shift+F7 finishes
     the stopped tick and pauses; "Only Front door" limits a breakpoint to an entity (kept by
     scene id in the session). Fixed on the way: the player counted the steps a still world
