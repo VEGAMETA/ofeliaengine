@@ -401,6 +401,33 @@ has graphs).
   - the editor's and the graph tab's frames still allocate nothing.
 - **Next (E10-3e-2):** reroutes and frames (the file's version 2).
 
+## As built (E10-3f-1, 2026-10-28): values in the inspector
+
+Taken before E10-3e-2 (reroutes and frames): without it a graph's values could only be
+written by hand.
+
+- **Rows** (`graph::NodeRow`): what the inspector shows while a graph's tab is shown.
+  - With no node selected alone, the graph's shading model.
+  - For a node: its parameter's name, a constant's value (a colour's channels), its
+    unlinked inputs' own values (an input whose kind fills it with a value; a dynamic one
+    shows one number and fills every component with it), a texture's image, and its
+    note. The surface shows only its model's inputs.
+- **Texts:** made every frame into the same room (the zero-allocation tests unchanged).
+- **Edits:** each is a file step of the one history; a drag's moves merge into one.
+  - Numbers: dragged with the editor's snapping, typed with its expressions.
+  - Names: a parameter's name must be a Slang field's and no other node's, else refused
+    with why.
+  - The model: by its list.
+  - Reset (↺, Backspace): back to the kind's own (no parameter, its input's value, no
+    image, no note, the lit model).
+  - The image: picked in the palette (`#texture:`), or dropped from the dock onto its row.
+- **Tests:**
+  - every row kind, texts, edits, refusals and resets;
+  - in the editor: the model by its list, the colour clicked on the canvas, its red typed,
+    its green dragged as one step, an image dropped from the dock onto a texture node's
+    row, undo, and the file read back as saved.
+- **Next (the team's answer, below):** the material's preview while its graph is shown.
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,
@@ -410,3 +437,6 @@ has graphs).
    own, as code does; no panel under the viewport for shaders or graphs. The bottom bar's
    Shader placeholder goes. This replaces the materials UX note's sixth point (shader
    code and graphs in a panel under the viewport).
+4. **The preview while a graph is shown** (asked with E10-3f-1; the 3D view is behind the
+   canvas): a sphere in the canvas's corner drawing the graph as it is, its numbers live
+   (the owner's «а», over the canvas and the viewport side by side, or switching tabs).
