@@ -423,6 +423,24 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
     the shown frame's locals and upvalues, and every breakpoint with what it does and its
     hits (a click on its mark turns it off or on, on its row goes to its line).
   - A script saved while stopped runs again once it goes on.
+- **Errors stop a script too** while Play runs, before its frames unwind: an error the
+  script does not catch stops it at the failing line, the line in red with the error's
+  message after it, the viewport's edge red, the Debugger panel open on its stack.
+  - **F5 lets the error take its course:** the instance stops, as it does without the
+    debugger, and the Output has its row. **F8 stops Play.** There are no steps from an
+    error.
+  - **Once a line a Play:** other errors at that line (the same bug in a hundred coins)
+    go to the Output without stopping.
+  - The time budget's error (a loop that never ends) stops where the time ran out, inside
+    the loop.
+  - The Debugger's Breakpoints list begins with which errors stop: **Errors the script
+    does not catch** (on) and **Errors caught by pcall** (off), each a click (or the
+    palette's Debug commands) away. Kept in the session.
+  - An error inside a function running as Luau's native code shows its line, its message
+    and the stack, but not that frame's locals: Luau does not read them. A breakpoint in
+    the function runs it interpreted, and the next stop there shows them.
+- **Break at the Next Script Line** (the palette): the next line any script runs stops,
+  as a breakpoint does, wherever it is.
 - **A logpoint** (◆) writes a message each time the line runs, and the script goes on:
   Shift+click the column, or Shift+F9, and type its text. `{…}` takes any Luau expression
   in the line's scope, as Luau's own string interpolation does: `speed = {self.speed}, near
@@ -448,7 +466,11 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
 Without breakpoints nothing is paid. A function with one runs Luau's interpreter instead of
 native code until its script runs again, and each hit costs a microsecond or so (below).
 Values on the lines above the stopped one, tables and entities opened in the Variables,
-watches and evaluation, and stopping at errors come next.
+and watches and evaluation come next.
+
+Stopping at errors costs nothing until an error comes: hooks are called with a message
+handler, as they were with mlua's own, 14 ns a call more at most (below). "Errors caught by
+pcall" runs hooks on the debugger's thread, 0.12 µs a hook, only while it is on.
 
 In the editor, the scripts are compiled to be debugged: Luau's optimization level 1, which
 inlines nothing, so a step goes into a local function as its text reads. It costs nothing

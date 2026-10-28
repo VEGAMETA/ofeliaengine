@@ -566,6 +566,140 @@ fn a_logpoint_logs_in_play_and_f9_stops_the_script_at_its_line() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A script whose hook fails at its line 4.
+const FAULTY: &str = r#"local Faulty = component("Faulty", { rate = 2 })
+function Faulty.on_tick(self, dt: number)
+    local target = nil
+    local x = target.x
+end
+return Faulty
+"#;
+
+#[test]
+fn an_error_stops_play_at_its_line_once_and_f5_lets_it_take_its_course() {
+    let dir = temp_dir("errors");
+    write_project(&dir, "Front door", true);
+    std::fs::write(dir.join("scripts/faulty.luau"), FAULTY).unwrap();
+    let Some((mut player, settings)) = player(&dir) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    // Two instances of the failing script: a bug in one line stops once.
+    let door = find_named(player.world_mut(), "Front door").unwrap();
+    let sun = find_named(player.world_mut(), "Sun").unwrap();
+    assert!(player.add_script(door, "Faulty"));
+    assert!(player.add_script(sun, "Faulty"));
+    frame(&mut player, &mut game, &mut overlay);
+    // Play: the first instance's error stops at its line (errors not caught stop by
+    // default), the script in front, the line in the error's colors with the message.
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..6 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let said = game.message().unwrap_or_default();
+    assert!(
+        said.starts_with("Error at scripts/faulty.luau:4 in on_tick: attempt to index nil"),
+        "{said}"
+    );
+    assert_eq!(game.stopped_line(), Some(4));
+    let note = game.breakpoint_note(4).unwrap_or_default();
+    assert!(note.starts_with("attempt to index nil"), "{note}");
+    let stop = player.script_stop().cloned().unwrap();
+    let error = stop.error.clone().unwrap();
+    assert!(!error.caught);
+    for drawn in [
+        format!(
+            "Error · on_tick · scripts/faulty.luau:4 · {}",
+            error.message
+        )
+        .as_str(),
+        "Errors the script does not catch",
+        "Errors caught by pcall",
+    ] {
+        assert!(game.text_at(drawn).is_some(), "`{drawn}` in the Debugger");
+    }
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_ERROR_PNG") {
+        let extent = player.extent();
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    // F5: the error takes its course; the other instance's error at the same line does
+    // not stop again.
+    tap(&mut game, 0x74, 0x3F);
+    for _ in 0..6 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(player.script_stop().is_none(), "gone on");
+    assert_eq!(game.stopped_line(), None);
+    assert!(game.playing());
+    // A break at the next line: the spinning script's first line stops, and F5 goes on.
+    assert!(player.add_script(door, "EditorSpin"));
+    assert!(game.run_command(player.world_mut(), "debug.break_next"));
+    for _ in 0..4 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let said = game.message().unwrap_or_default();
+    assert!(
+        said.starts_with("Stopped at scripts/spin.luau:3 in on_tick"),
+        "{said}"
+    );
+    tap(&mut game, 0x74, 0x3F);
+    for _ in 0..4 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(player.script_stop().is_none(), "gone on");
+    // Stopped; the Debugger's row turns errors not caught off: the next Play's error goes
+    // to the Output, the game going on.
+    tap(&mut game, 0x77, 0x42);
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(!game.playing());
+    click_text(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        "Errors the script does not catch",
+    );
+    let said = game.message().unwrap_or_default();
+    assert!(
+        said.starts_with("Errors scripts do not catch go to the Output"),
+        "{said}"
+    );
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..6 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(player.script_stop().is_none() && game.playing());
+    tap(&mut game, 0x77, 0x42);
+    frame(&mut player, &mut game, &mut overlay);
+    // Kept in the session.
+    game.end_session(player.world_mut());
+    let session = std::fs::read_to_string(dir.join(".ofelia/session")).unwrap();
+    assert!(
+        session.contains("error_stops = (false, false)"),
+        "{session}"
+    );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_script_changed_on_disk_runs_again_its_values_kept_by_name() {
     let dir = temp_dir("reload");

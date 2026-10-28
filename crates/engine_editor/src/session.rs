@@ -262,6 +262,9 @@ pub(crate) struct EditorState {
     pub(crate) pivot: Option<String>,
     /// Whether the viewport shows its overlays (lights' and cameras' icons and reach).
     pub(crate) overlays: Option<bool>,
+    /// Which errors stop a script in Play (ADR 0119 E9-1b-4): those it does not catch,
+    /// those a `pcall` catches.
+    pub(crate) error_stops: Option<(bool, bool)>,
     /// Where the editor's window was.
     pub(crate) window: Option<WindowPlacement>,
     /// Where the game's own window was when Play last ended (Play in a window).
@@ -334,6 +337,9 @@ impl SessionFile {
         }
         if let Some(on) = self.editor.overlays {
             let _ = writeln!(out, "overlays = {on}");
+        }
+        if let Some((uncaught, caught)) = self.editor.error_stops {
+            let _ = writeln!(out, "error_stops = ({uncaught}, {caught})");
         }
         if let Some(pivot) = &self.editor.pivot {
             out.push_str("pivot = ");
@@ -546,6 +552,18 @@ impl SessionFile {
                             "false" => false,
                             other => return Err(at(format!("`{other}` is not true or false"))),
                         });
+                    }
+                    "error_stops" => {
+                        let parts = items(value, '(', ')').map_err(at)?;
+                        let truth = |word: &str| match word {
+                            "true" => Ok(true),
+                            "false" => Ok(false),
+                            other => Err(at(format!("`{other}` is not true or false"))),
+                        };
+                        let [uncaught, caught] = parts[..] else {
+                            return Err(at(format!("`{value}` is not (not caught, caught)")));
+                        };
+                        file.editor.error_stops = Some((truth(uncaught)?, truth(caught)?));
                     }
                     "fly" => file.editor.fly = Some(parse_number(value).map_err(at)?),
                     "active" | "script" => {
@@ -1123,6 +1141,7 @@ mod tests {
                 view_mode: Some(String::from("wireframe")),
                 pivot: Some(String::from("origins")),
                 overlays: Some(false),
+                error_stops: Some((true, false)),
                 window: Some(WindowPlacement {
                     left: -7,
                     top: 0,

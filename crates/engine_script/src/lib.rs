@@ -16,8 +16,8 @@
 //! - **Errors** name the module and line ([`ScriptError`]), for the editor's "jump to the
 //!   line".
 //! - **The debugger** ([`debug`], ADR 0119): breakpoints set on a module's lines, kept
-//!   through its reloads; logpoints and pause points, with conditions and hit rules.
-//!   Nothing is paid without them.
+//!   through its reloads; logpoints and pause points, with conditions and hit rules; stops
+//!   at errors. Nothing is paid without them.
 //!
 //! ```
 //! use engine_script::{ScriptSettings, ScriptVm};
@@ -52,8 +52,8 @@ pub use mlua;
 
 pub mod debug;
 pub use debug::{
-    BreakAction, BreakState, Breakpoint, Frame, Hits, Logged, Resume, ScriptDebugger, StopHandler,
-    Stopped, Variable,
+    BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Frame, Hits, Logged, Resume,
+    ScriptDebugger, StopHandler, Stopped, Variable,
 };
 
 use mlua::chunk::Compiler;
@@ -119,6 +119,14 @@ unsafe extern "C-unwind" fn interrupt(state: *mut mlua::ffi::lua_State, gc: c_in
     if debug::rearm_pending() {
         // SAFETY: the running thread, between two instructions.
         unsafe { debug::rearm(state) };
+    }
+    // Ended at a stop that could not raise (an error a `pcall` caught): the call ends here.
+    if debug::aborting() {
+        // SAFETY: an interrupt may raise; nothing with a destructor is alive in this frame.
+        unsafe {
+            mlua::ffi::lua_pushlstring_(state, ABORT_MARKER.as_ptr().cast(), ABORT_MARKER.len());
+            mlua::ffi::lua_error(state);
+        }
     }
     let deadline = DEADLINE.get();
     if deadline == 0 {
@@ -261,8 +269,11 @@ pub struct ScriptVm {
     /// The thread hooks run on while debugging ([`Self::set_debugging`]), as a registry
     /// reference.
     hook_thread: Cell<Option<c_int>>,
-    /// A hook runs on it now: a call into a script from inside one is made the plain way.
+    /// A hook runs on it, or with the debugger's message handler, now: a call into a script
+    /// from inside one is made the plain way (an error stops once, in the outer hook).
     in_hook: Cell<bool>,
+    /// The debugger's message handler ([`debug::error_handler`]), as a registry reference.
+    error_handler: c_int,
 }
 
 impl ScriptVm {
@@ -297,6 +308,22 @@ impl ScriptVm {
                 (*callbacks).debugbreak = Some(debug::debugbreak);
                 // Called only while a thread single-steps (a step under way).
                 (*callbacks).debugstep = Some(debug::debugstep);
+                // Called only for an error a `pcall` caught.
+                (*callbacks).debugprotectederror = Some(debug::protected_error);
+            })
+        }
+        .map_err(|e| ScriptError::Runtime {
+            module: String::new(),
+            line: None,
+            message: e.to_string(),
+        })?;
+        // SAFETY: the C function is kept in the registry, its reference the result.
+        let error_handler = unsafe {
+            lua.exec_raw::<c_int>((), |state| {
+                mlua::ffi::lua_pushcfunction(state, debug::error_handler);
+                let id = mlua::ffi::lua_ref(state, -1);
+                mlua::ffi::lua_settop(state, 0);
+                mlua::ffi::lua_pushinteger(state, id as _);
             })
         }
         .map_err(|e| ScriptError::Runtime {
@@ -317,6 +344,7 @@ impl ScriptVm {
             modules: HashMap::new(),
             hook_thread: Cell::new(None),
             in_hook: Cell::new(false),
+            error_handler,
         })
     }
 
@@ -439,13 +467,20 @@ impl ScriptVm {
                 module: module.to_owned(),
             });
         }
-        // On the hook thread only where a stop could be stepped from: a breakpoint that
-        // stops is set, or a step is under way (a resume costs 0.12 µs a hook more).
-        if let Some(thread) = self.hook_thread.get()
-            && debug::thread_wanted()
-            && !self.in_hook.get()
-        {
-            return self.resume_hook(module, thread, function, args);
+        if !self.in_hook.get() {
+            // On the hook thread only where a stop could be stepped from: a breakpoint that
+            // stops is set, a step is under way, or a break asked (a resume costs 0.12 µs a
+            // hook more).
+            if let Some(thread) = self.hook_thread.get()
+                && debug::thread_wanted()
+            {
+                return self.resume_hook(module, thread, function, args);
+            }
+            // Errors not caught stop: the plain call with the debugger's message handler,
+            // which costs what mlua's own does.
+            if debug::uncaught_wanted() {
+                return self.call_handled(module, function, args);
+            }
         }
         self.arm();
         let r = function.call::<R>(args);
@@ -529,11 +564,86 @@ impl ScriptVm {
                     ffi::lua_pushstring(state, c"a hook cannot yield".as_ptr());
                 } else {
                     ffi::lua_xmove(co, state, 1);
+                    // The thread's frames are as the error left them until it is reset: a
+                    // stop there, the message read where functions can run.
+                    if status == ffi::LUA_ERRRUN && debug::uncaught_wanted() {
+                        let message = debug::error_message(state, -1);
+                        if debug::error_stop(co, message, false) {
+                            ffi::lua_settop(state, -2);
+                            ffi::lua_pushlstring_(
+                                state,
+                                ABORT_MARKER.as_ptr().cast(),
+                                ABORT_MARKER.len(),
+                            );
+                        }
+                    }
                 }
                 ffi::lua_resetthread(co);
                 ffi::lua_error(state);
             })
         };
+        self.disarm();
+        self.in_hook.set(false);
+        r.map_err(|e| self.map(module, e))
+    }
+
+    /// [`Self::call_function`] the plain way with the debugger's message handler, which
+    /// Luau calls where an error the hook does not catch was raised, before its frames
+    /// unwind: a stop there ([`debug::error_handler`]). It is mlua's own call made through
+    /// its raw interface (`exec_raw_lua`, hidden from its documentation; mlua is pinned),
+    /// and the error is taken back as mlua takes it (the host's errors and panics as they
+    /// were raised).
+    fn call_handled<A: IntoLuaMulti, R: FromLuaMulti>(
+        &self,
+        module: &str,
+        function: &Function,
+        args: A,
+    ) -> Result<R, ScriptError> {
+        use mlua::ffi;
+        self.in_hook.set(true);
+        self.arm();
+        let r = self.lua.exec_raw_lua(|raw| {
+            let state = raw.state();
+            /// The stack as it was, whatever happens.
+            struct Top(*mut ffi::lua_State, c_int);
+            impl Drop for Top {
+                fn drop(&mut self) {
+                    // SAFETY: the VM's state, its top put back where it was.
+                    unsafe { ffi::lua_settop(self.0, self.1) };
+                }
+            }
+            // SAFETY: the handler, the function and its arguments are pushed above the
+            // stack's top, called with `lua_pcall`, and what it left read; the stack is put
+            // back as it was.
+            unsafe {
+                let top = Top(state, ffi::lua_gettop(state));
+                if ffi::lua_checkstack(state, 3) == 0 {
+                    return Err(mlua::Error::StackError);
+                }
+                ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, self.error_handler);
+                let handler = ffi::lua_gettop(state);
+                raw.push(function)?;
+                let n = args.push_into_stack_multi(raw)?;
+                let status = ffi::lua_pcall(state, n, ffi::LUA_MULTRET, handler);
+                if status != ffi::LUA_OK {
+                    return Err(match raw.pop::<Value>()? {
+                        Value::Error(e) => *e,
+                        Value::String(s) if status == ffi::LUA_ERRMEM => {
+                            mlua::Error::MemoryError(s.to_string_lossy())
+                        }
+                        Value::String(s) => mlua::Error::RuntimeError(s.to_string_lossy()),
+                        other => mlua::Error::RuntimeError(format!(
+                            "(error object is a {} value)",
+                            other.type_name()
+                        )),
+                    });
+                }
+                let results = ffi::lua_gettop(state) - handler;
+                let r = R::from_stack_multi(results, raw);
+                drop(top);
+                r
+            }
+        });
         self.disarm();
         self.in_hook.set(false);
         r.map_err(|e| self.map(module, e))
