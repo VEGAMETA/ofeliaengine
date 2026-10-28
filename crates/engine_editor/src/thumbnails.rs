@@ -427,33 +427,10 @@ fn made(cache: &Path, job: &Job) -> Option<Vec<u8>> {
 /// each column from its lowest to its highest sample in the sounds' colour (the dock's), a
 /// column at full scale (it may clip) in a warning colour.
 pub(crate) fn waveform_tile(waveform: &engine_app::Waveform) -> Vec<u8> {
-    const WAVE: [u8; 4] = [180, 130, 220, 255];
-    const CLIPS: [u8; 4] = [240, 110, 90, 255];
-    const MIDDLE: [u8; 4] = [180, 130, 220, 90];
     let side = SIZE as usize;
     let mut out = vec![0u8; side * side * 4];
-    let middle = side / 2;
     // Room above and below, so the loudest column does not touch the tile's edge.
-    let half = (side / 2 - 10) as f32;
-    let mut put = |x: usize, y: usize, color: [u8; 4]| {
-        let o = (y * side + x) * 4;
-        out[o..o + 4].copy_from_slice(&color);
-    };
-    for x in 0..side {
-        put(x, middle, MIDDLE);
-    }
-    for (x, &[low, high]) in waveform.columns.iter().take(side).enumerate() {
-        let color = if high >= 0.999 || low <= -0.999 {
-            CLIPS
-        } else {
-            WAVE
-        };
-        let row = |v: f32| (middle as f32 - v.clamp(-1.0, 1.0) * half).round() as usize;
-        let (top, bottom) = (row(high), row(low));
-        for y in top.min(bottom)..=bottom.max(top) {
-            put(x, y.min(side - 1), color);
-        }
-    }
+    crate::sound_view::band(&mut out, side, 0, side, 10, &waveform.columns);
     out
 }
 
@@ -542,11 +519,13 @@ mod tests {
             })
             .collect();
         let waveform = engine_app::Waveform {
+            channel_columns: vec![columns.clone()],
             columns,
             sample_rate: 48_000,
             channels: 2,
             frames: 48_000,
             peak: 1.0,
+            silence: [0, 0],
         };
         let tile = waveform_tile(&waveform);
         assert_eq!(tile.len(), (SIZE * SIZE * 4) as usize);

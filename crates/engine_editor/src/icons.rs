@@ -10,6 +10,8 @@ pub const PLAY: &str = "\u{F040A}";
 pub const PAUSE: &str = "\u{F03E4}";
 /// Stop (`md-stop`).
 pub const STOP: &str = "\u{F04DB}";
+/// Plays again from the start when it ends: a sound's loop (`md-repeat`).
+pub const REPEAT: &str = "\u{F0456}";
 /// Closes a scene's tab (`md-close`).
 pub const CLOSE: &str = "\u{F0156}";
 /// An Output row whose text names its cause: a click shows it (`md-open_in_new`).

@@ -554,6 +554,16 @@ pub fn editor<G: Game>(
         thumbnails::ATLAS,
     )?;
     editor.thumbnails.set_atlas(atlas.sampled_index());
+    // The inspector's sound waveform (E11-3c): one picture at a time.
+    let wave = engine_render::texture::GpuTexture::new(
+        setup.device,
+        setup.allocator,
+        setup.bindless,
+        engine_rhi::ash::vk::Format::R8G8B8A8_SRGB,
+        crate::sound_view::TEXTURE[0],
+        crate::sound_view::TEXTURE[1],
+    )?;
+    editor.wave_texture = Some(wave.sampled_index());
     let shared = Rc::new(RefCell::new(editor));
     // Editing: the world's time stands until Play (ADR 0107 E3), so a scene's tweens,
     // timers and sounds do not change it.
@@ -597,6 +607,7 @@ pub fn editor<G: Game>(
             line_lists,
             unlit,
             atlas,
+            wave,
         },
     ))
 }
@@ -1184,7 +1195,11 @@ impl engine_scene::text::ReadRefs for IndexRefs<'_> {
 /// What the editor asks of the player's sound preview (E11-3b), sent with its next frame.
 #[derive(Debug, Clone, PartialEq)]
 enum PreviewAsk {
-    Play { file: PathBuf, from: f64 },
+    Play {
+        file: PathBuf,
+        from: f64,
+        looping: bool,
+    },
     Stop,
 }
 
@@ -1196,6 +1211,45 @@ struct Previewing {
     position: f64,
     length: Option<f64>,
     heard: bool,
+}
+
+/// The inspector's sound panel under section `section` (E11-3c): sound `view`, as the
+/// preview plays it, its picture in texture `texture` once uploaded.
+fn sound_panel(
+    view: Option<&crate::sound_view::SoundView>,
+    preview: Option<Previewing>,
+    texture: Option<u32>,
+    section: usize,
+) -> Option<crate::shell::SoundPanel<'_>> {
+    let view = view?;
+    let playing = preview.filter(|p| p.id == view.id);
+    let length = view.seconds.or(playing.and_then(|p| p.length));
+    let playhead = view.scrub.map(|(along, _)| along).or_else(|| {
+        let (p, length) = (playing?, length?);
+        Some((p.position / length.max(1e-9)) as f32)
+    });
+    let image = texture
+        .filter(|_| view.shown)
+        .map(|texture| engine_ui::UiImage {
+            texture,
+            uv: view.uv(),
+        });
+    let reading = if view.reading() {
+        "Reading\u{2026}"
+    } else {
+        ""
+    };
+    Some(crate::shell::SoundPanel {
+        section,
+        image,
+        note: view.failed.as_deref().unwrap_or(reading),
+        channels: view.channels,
+        playing: playing.is_some(),
+        playhead,
+        looping: view.looping,
+        time: &view.time,
+        silence: view.silence,
+    })
 }
 
 /// A material row's number being dragged in the inspector (ADR 0120's E10-1c): the row,
@@ -2198,6 +2252,10 @@ struct Editor {
     preview_ask: Option<PreviewAsk>,
     preview: Option<Previewing>,
     browser_columns: usize,
+    /// The sound file the inspector shows (E11-3c), and its waveform's texture (the
+    /// overlay's bindless index; none without an overlay).
+    sound_view: Option<crate::sound_view::SoundView>,
+    wave_texture: Option<u32>,
     /// The material whose rows the inspector shows (the one picked in the dock, else the
     /// selected object's), its section's title, the models query that counts its users, and
     /// the material files that could not be read (not tried again until written anew).
@@ -2992,6 +3050,8 @@ impl Editor {
             preview_ask: None,
             preview: None,
             browser_columns: 4,
+            sound_view: None,
+            wave_texture: None,
             shown_material: None,
             material_title: String::new(),
             material_models: None,
@@ -3419,6 +3479,7 @@ impl Editor {
             self.ensure_prefab_bases(world);
         }
         self.thumbnails.begin_frame();
+        self.follow_sound_view();
         if let Some(under) = self.under_pointer.take() {
             self.offer_under_pointer(world, under);
         }
@@ -3758,6 +3819,7 @@ impl Editor {
         let mut material_values: Vec<&str> =
             recycle(std::mem::take(&mut self.lists.material_values));
         self.material_section = None;
+        let mut sound_section = None;
         let scale_value: [&str; 1];
         if let Some(asset) = &self.inspected {
             scale_value = [asset.scale_text.as_str()];
@@ -3793,6 +3855,26 @@ impl Editor {
                 });
             }
             let imports = asset_fields.len();
+            // A sound file's facts (E11-3c), once read.
+            let view = self
+                .sound_view
+                .as_ref()
+                .filter(|v| v.id == asset.id && v.seconds.is_some());
+            for (name, value) in view.into_iter().flat_map(|v| {
+                [
+                    ("length", v.length.as_str()),
+                    ("format", v.format.as_str()),
+                    ("peak", v.peak.as_str()),
+                    ("silence", v.quiet.as_str()),
+                ]
+            }) {
+                asset_fields.push(Field {
+                    name,
+                    widget: Widget::Text(value),
+                    changed: false,
+                });
+            }
+            let facts = asset_fields.len();
             // A material file's own rows (E10-1c), edited live.
             let doc = self
                 .shown_material
@@ -3821,11 +3903,20 @@ impl Editor {
                     removable: false,
                 });
             }
+            if self.sound_view.as_ref().is_some_and(|v| v.id == asset.id) {
+                sound_section = Some(sections.len());
+                sections.push(Section {
+                    title: "Sound",
+                    fields: &asset_fields[imports..facts],
+                    script: "",
+                    removable: false,
+                });
+            }
             if doc.is_some() {
                 self.material_section = Some(sections.len());
                 sections.push(Section {
                     title: self.material_title.as_str(),
-                    fields: &asset_fields[imports..],
+                    fields: &asset_fields[facts..],
                     script: "",
                     removable: false,
                 });
@@ -4667,6 +4758,14 @@ impl Editor {
             folders: &folder_items,
             files: &file_items,
             auto_play: self.auto_play,
+            sound: sound_section.and_then(|section| {
+                sound_panel(
+                    self.sound_view.as_ref(),
+                    self.preview,
+                    self.wave_texture,
+                    section,
+                )
+            }),
             tile: self.tile,
             columns,
             bottom_tabs: &[
@@ -4759,6 +4858,29 @@ impl Editor {
         if let Some(i) = response.tool {
             self.active_tool = i;
         }
+        // The inspector's sound (E11-3c): ▶ or ■, the loop, the waveform.
+        if response.sound_play
+            && let Some((id, looping)) = self.sound_view.as_ref().map(|v| (v.id, v.looping))
+        {
+            if self.preview.is_some_and(|p| p.id == id) {
+                self.stop_preview();
+            } else {
+                self.play_preview(id, 0.0, looping);
+            }
+        }
+        if response.sound_loop
+            && let Some(view) = self.sound_view.as_mut()
+        {
+            view.looping = !view.looping;
+            // Playing: on from where it is, looped now or not.
+            let (id, looping) = (view.id, view.looping);
+            if let Some(p) = self.preview.filter(|p| p.id == id) {
+                self.play_preview(id, p.position, looping);
+            }
+        }
+        if let Some(wave) = response.sound_wave {
+            self.use_wave(wave);
+        }
         // Sound previews (E11-3b): ▶ on a tile, a click along a playing one, Auto Play.
         if let Some(i) = response.file_play
             && let Some(id) = self.browser.listing.get(i).and_then(|l| l.asset)
@@ -4771,7 +4893,7 @@ impl Editor {
             && let (Some(r), Some([x, _])) = (self.ui.rect_of(tile), self.ui.input().mouse)
         {
             let along = crate::shell::tile_along(r, self.tile, x);
-            self.play_preview(id, f64::from(along) * length);
+            self.play_preview(id, f64::from(along) * length, false);
         }
         if response.auto_play {
             // The listing's header: the dock's keys stay the dock's.
@@ -13289,6 +13411,64 @@ impl Editor {
         self.say(format!("{path} ({})", kind.name()));
     }
 
+    /// The inspector's sound file follows the file it shows (E11-3c): read on a thread of
+    /// its own when a sound is picked, its answer taken, gone when another file or the
+    /// entities are shown; its time written for the frame.
+    fn follow_sound_view(&mut self) {
+        let shown = self
+            .inspected
+            .as_ref()
+            .filter(|i| i.kind == engine_scene::AssetKind::Sound)
+            .map(|i| i.id);
+        if shown != self.sound_view.as_ref().map(|v| v.id) {
+            self.sound_view = shown.and_then(|id| {
+                let path = self.root.join(&self.asset_db.get(id)?.path);
+                Some(crate::sound_view::SoundView::open(id, path, self.scale))
+            });
+        }
+        let playing = self.preview;
+        if let Some(view) = self.sound_view.as_mut() {
+            view.poll();
+            let at = match (view.scrub, view.seconds) {
+                (Some((along, _)), Some(seconds)) => f64::from(along) * seconds,
+                _ => playing
+                    .filter(|p| p.id == view.id)
+                    .map_or(0.0, |p| p.position),
+            };
+            view.write_time(at);
+        }
+    }
+
+    /// The inspector's waveform pressed, dragged or let go (E11-3c): a press plays from
+    /// there, a drag holds the playhead under the pointer, and a release away from where
+    /// it was pressed plays from there.
+    fn use_wave(&mut self, wave: crate::shell::WaveUse) {
+        let (Some(r), Some([x, _])) = (self.ui.rect_of(wave.node), self.ui.input().mouse) else {
+            return;
+        };
+        let along = ((x - r.pos[0]) / r.size[0].max(1.0)).clamp(0.0, 1.0);
+        let Some(view) = self.sound_view.as_mut() else {
+            return;
+        };
+        let Some(seconds) = view.seconds else {
+            return;
+        };
+        let (id, looping) = (view.id, view.looping);
+        if wave.pressed {
+            view.scrub = Some((along, along));
+            self.play_preview(id, f64::from(along) * seconds, looping);
+        } else if wave.released {
+            let pressed = view.scrub.take().map_or(along, |(_, pressed)| pressed);
+            if (along - pressed).abs() > 0.002 {
+                self.play_preview(id, f64::from(along) * seconds, looping);
+            }
+        } else if wave.held
+            && let Some((at, _)) = view.scrub.as_mut()
+        {
+            *at = along;
+        }
+    }
+
     /// Asset `id` is a sound file.
     fn is_sound(&self, id: AssetId) -> bool {
         self.asset_db
@@ -13302,7 +13482,7 @@ impl Editor {
         if self.preview.is_some_and(|p| p.id == id) {
             self.stop_preview();
         } else if self.is_sound(id) {
-            self.play_preview(id, 0.0);
+            self.play_preview(id, 0.0, false);
         }
     }
 
@@ -13313,14 +13493,15 @@ impl Editor {
             return;
         }
         if self.is_sound(id) {
-            self.play_preview(id, 0.0);
+            self.play_preview(id, 0.0, false);
         } else {
             self.stop_preview();
         }
     }
 
-    /// Sound `id` played from `from` seconds, on the player's preview bus (E11-3b).
-    fn play_preview(&mut self, id: AssetId, from: f64) {
+    /// Sound `id` played from `from` seconds, looped or not, on the player's preview bus
+    /// (E11-3b).
+    fn play_preview(&mut self, id: AssetId, from: f64, looping: bool) {
         let Some(path) = self.asset_db.get(id).map(|e| e.path.clone()) else {
             return;
         };
@@ -13328,6 +13509,7 @@ impl Editor {
         self.preview_ask = Some(PreviewAsk::Play {
             file: self.root.join(&path),
             from,
+            looping,
         });
         self.preview = Some(Previewing {
             id,
@@ -17376,6 +17558,10 @@ impl<G> EditorGame<G> {
         // Files written anew (E4-5): made again, the old versions drawn until then.
         for id in core::mem::take(&mut shared.changed_assets) {
             shared.material_unreadable.remove(&id);
+            // The inspector's sound written anew: read again (E11-3c).
+            if shared.sound_view.as_ref().is_some_and(|v| v.id == id) {
+                shared.sound_view = None;
+            }
             // A material the inspector holds, unedited: read again (edited, its edits stay
             // until Ctrl+S writes them).
             if let Some(k) = shared.material_docs.iter().position(|d| d.id == id)
@@ -17398,7 +17584,11 @@ impl<G> EditorGame<G> {
         }
         // Sound previews (E11-3b): what the editor asked, then the preview as it plays.
         match shared.preview_ask.take() {
-            Some(PreviewAsk::Play { file, from }) => player.preview_sound(&file, from, false),
+            Some(PreviewAsk::Play {
+                file,
+                from,
+                looping,
+            }) => player.preview_sound(&file, from, looping),
             Some(PreviewAsk::Stop) => player.stop_sound_preview(),
             None => {}
         }
@@ -19481,6 +19671,8 @@ pub struct EditorOverlay {
     unlit: Unlit,
     /// The listing's thumbnails, in cells (ADR 0112).
     atlas: engine_render::texture::GpuTexture,
+    /// The inspector's sound waveform (E11-3c).
+    wave: engine_render::texture::GpuTexture,
 }
 
 impl EditorOverlay {
@@ -19499,6 +19691,8 @@ impl EditorOverlay {
                 .texture_mut()
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
             self.atlas
+                .destroy(setup.device, setup.allocator, setup.bindless, 0);
+            self.wave
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
             self.picker.destroy(setup.allocator);
         }
@@ -19907,6 +20101,22 @@ impl Overlay for EditorOverlay {
                 self.atlas
                     .upload_region(pass.fg, pass.ring, (x, y, side, side), pixels)
                     .map_err(AppError::at("a thumbnail"))?;
+            }
+            // The inspector's sound waveform, once read, into the texture's corner (E11-3c).
+            if let Some(([width, height], pixels)) = editor
+                .sound_view
+                .as_mut()
+                .and_then(crate::sound_view::SoundView::take_upload)
+            {
+                if !self.wave.is_initialized() {
+                    let [w, h] = crate::sound_view::TEXTURE;
+                    self.wave
+                        .upload(pass.fg, pass.ring, &vec![0u8; (w * h * 4) as usize])
+                        .map_err(AppError::at("the sounds' waveform texture"))?;
+                }
+                self.wave
+                    .upload_region(pass.fg, pass.ring, (0, 0, width, height), &pixels)
+                    .map_err(AppError::at("a sound's waveform"))?;
             }
         }
         self.canvas.prepare();
@@ -22387,6 +22597,7 @@ mod tests {
             Some(PreviewAsk::Play {
                 file: dir.join(file),
                 from,
+                looping: false,
             })
         };
         const SPACE: (u16, u16) = (0x20, 0x39);
@@ -22465,7 +22676,7 @@ mod tests {
         let along = [label[0] + ed.tile / 4.0, label[1] - ed.tile / 2.0];
         click(&mut ed, &mut world, along);
         match &ed.preview_ask {
-            Some(PreviewAsk::Play { file, from }) => {
+            Some(PreviewAsk::Play { file, from, .. }) => {
                 assert_eq!(file, &dir.join("props/hum.wav"));
                 assert!((from - 1.5).abs() < 0.1, "from {from}");
             }
@@ -22482,6 +22693,162 @@ mod tests {
         let at = middle(texts(&ed, "zap.ogg")[0]);
         click(&mut ed, &mut world, at);
         assert_eq!(ed.preview, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stereo 16-bit WAV file of `frames` frames at 48 kHz: its left channel `left` of the
+    /// frame, its right silent.
+    fn stereo_wav(frames: u32, left: impl Fn(u32) -> f32) -> Vec<u8> {
+        let data = frames * 4;
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&48_000u32.to_le_bytes());
+        out.extend_from_slice(&192_000u32.to_le_bytes());
+        out.extend_from_slice(&4u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data.to_le_bytes());
+        for i in 0..frames {
+            let v = (left(i).clamp(-1.0, 1.0) * 32767.0) as i16;
+            out.extend_from_slice(&v.to_le_bytes());
+            out.extend_from_slice(&0i16.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn a_picked_sound_shows_its_waveform_and_facts_and_plays_from_where_it_is_clicked() {
+        let (dir, mut world, mut ed, _) = drop_project("sound-inspector");
+        // 2 s: the left a tone at 0.8 after half a second, the right silent.
+        let tone = |i: u32| {
+            if i >= 24_000 {
+                0.8 * (i as f32 * 0.05).sin()
+            } else {
+                0.0
+            }
+        };
+        std::fs::write(dir.join("props/hum.wav"), stereo_wav(96_000, tone)).unwrap();
+        ed.asset_db.scan();
+        ed.refresh_browser();
+        ed.update(&mut world);
+        // The overlay's waveform texture, as its bindless index.
+        ed.wave_texture = Some(9);
+        let hum = ed.asset_db.find("props/hum.wav").unwrap().id;
+        let at = middle(texts(&ed, "hum.wav")[0]);
+        click(&mut ed, &mut world, at);
+        assert_eq!(ed.inspected.as_ref().map(|i| i.id), Some(hum));
+        // Read on a thread of its own: its facts once read.
+        let started = Instant::now();
+        while ed.sound_view.as_ref().is_none_or(|v| v.seconds.is_none()) {
+            assert!(started.elapsed() < Duration::from_secs(5), "read in time");
+            ed.update(&mut world);
+            std::thread::yield_now();
+        }
+        ed.update(&mut world);
+        for fact in [
+            "Sound",
+            "0:02.00",
+            "48 kHz \u{b7} stereo",
+            "\u{2212}1.9 dBFS",
+            "0.50 s first",
+            "0:00.00 / 0:02.00",
+        ] {
+            assert!(!texts(&ed, fact).is_empty(), "{fact} shown");
+        }
+        // Its picture to the texture (what the overlay does), then drawn, a band a channel.
+        // At the panel's size in pixels (a column a pixel), a band a channel.
+        let (size, pixels) = ed.sound_view.as_mut().unwrap().take_upload().unwrap();
+        assert_eq!(size, [300, 88]);
+        assert_eq!(pixels.len(), 300 * 88 * 4);
+        ed.update(&mut world);
+        let drawn = ed
+            .ui
+            .last_frame()
+            .commands
+            .iter()
+            .filter(|c| matches!(c, DrawCmd::Image { image, .. } if image.texture == 9))
+            .count();
+        assert_eq!(drawn, 1, "the waveform drawn");
+        let left = texts(&ed, "L")
+            .into_iter()
+            .find(|r| r.pos[0] > 900.0)
+            .expect("the left band's label");
+        // The waveform's corner, from its label's place in it.
+        let corner = [left.pos[0] - 4.0, left.pos[1] - 2.0];
+        let width = crate::shell::INSPECTOR_WIDTH - 20.0;
+        let button = |ed: &Editor, glyph: &str| {
+            let r = texts(ed, glyph)
+                .into_iter()
+                .find(|r| r.pos[0] > 900.0 && r.pos[1] > left.pos[1])
+                .unwrap_or_else(|| panic!("{glyph} under the waveform"));
+            middle(r)
+        };
+        let file = dir.join("props/hum.wav");
+        let play = |from: f64, looping: bool| {
+            Some(PreviewAsk::Play {
+                file: file.clone(),
+                from,
+                looping,
+            })
+        };
+        // ▶ plays it from its start; ■ stops it.
+        let at = button(&ed, icons::PLAY);
+        click(&mut ed, &mut world, at);
+        assert_eq!(ed.preview_ask, play(0.0, false));
+        assert_eq!(ed.preview.map(|p| p.id), Some(hum));
+        ed.update(&mut world);
+        let at = button(&ed, icons::STOP);
+        click(&mut ed, &mut world, at);
+        assert_eq!(ed.preview, None);
+        // The loop on: ▶ plays it looped.
+        let at = button(&ed, icons::REPEAT);
+        click(&mut ed, &mut world, at);
+        assert!(ed.sound_view.as_ref().unwrap().looping);
+        let at = button(&ed, icons::PLAY);
+        click(&mut ed, &mut world, at);
+        assert_eq!(ed.preview_ask, play(0.0, true));
+        // A click three quarters along plays from 1.5 s.
+        let along = |share: f32| [corner[0] + share * width, corner[1] + 30.0];
+        click(&mut ed, &mut world, along(0.75));
+        match &ed.preview_ask {
+            Some(PreviewAsk::Play { from, looping, .. }) => {
+                assert!((from - 1.5).abs() < 0.02, "from {from}");
+                assert!(looping);
+            }
+            other => panic!("{other:?}"),
+        }
+        // A drag: pressed at a quarter, the playhead follows the pointer to the middle and
+        // the time with it; let go, it plays from there.
+        mouse(&mut ed, along(0.25), None);
+        ed.update(&mut world);
+        mouse(&mut ed, along(0.25), Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, along(0.5), None);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let (at, pressed) = ed.sound_view.as_ref().unwrap().scrub.unwrap();
+        assert!((at - 0.5).abs() < 0.01 && (pressed - 0.25).abs() < 0.01);
+        assert!(
+            !texts(&ed, "0:01.00 / 0:02.00").is_empty(),
+            "the time follows"
+        );
+        mouse(&mut ed, along(0.5), Some(false));
+        ed.update(&mut world);
+        match &ed.preview_ask {
+            Some(PreviewAsk::Play { from, .. }) => assert!((from - 1.0).abs() < 0.02, "{from}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(ed.sound_view.as_ref().unwrap().scrub.is_none());
+        // Another file picked: the view goes.
+        let at = middle(texts(&ed, "crate.gltf")[0]);
+        click(&mut ed, &mut world, at);
+        ed.update(&mut world);
+        assert!(ed.sound_view.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

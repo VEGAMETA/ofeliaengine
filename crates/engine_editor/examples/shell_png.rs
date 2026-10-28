@@ -442,6 +442,7 @@ fn main() {
         folders: &folders,
         files: &files,
         auto_play: false,
+        sound: None,
         tile: 64.0,
         columns: 6,
         bottom_tabs: &[

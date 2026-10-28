@@ -559,6 +559,50 @@ pub struct Section<'a> {
     pub removable: bool,
 }
 
+/// The inspector's sound file (E11-3c): its waveform, a band per channel, under its
+/// section's header, with ▶ or ■, the loop and where it plays.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SoundPanel<'a> {
+    /// The section it shows under.
+    pub section: usize,
+    /// The waveform's picture; none while it is read.
+    pub image: Option<UiImage>,
+    /// Shown instead of the picture: that it is being read, or why it could not be.
+    pub note: &'a str,
+    /// Its channels: a band each, the first on top.
+    pub channels: u16,
+    /// It plays now.
+    pub playing: bool,
+    /// The playhead, 0 to 1 along it, when its length is known.
+    pub playhead: Option<f32>,
+    /// It plays looped.
+    pub looping: bool,
+    /// Where it plays, of its length: "0:01.20 / 0:03.20".
+    pub time: &'a str,
+    /// Its silence at the start and at the end, as parts of its length: shaded.
+    pub silence: [f32; 2],
+}
+
+/// The inspector's waveform pressed, held or let go this frame (E11-3c): its node, whose
+/// laid-out rectangle says where along it the pointer is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WaveUse {
+    /// The waveform's node.
+    pub node: u64,
+    /// The button went down on it.
+    pub pressed: bool,
+    /// The button is held since it went down on it.
+    pub held: bool,
+    /// The button went up after going down on it.
+    pub released: bool,
+}
+
+/// The waveform's width in the inspector, its padding on each side, and a channel's band's
+/// height.
+const SOUND_PAD: f32 = 10.0;
+pub(crate) const SOUND_WIDTH: f32 = INSPECTOR_WIDTH - 2.0 * SOUND_PAD;
+pub(crate) const SOUND_BAND: f32 = 44.0;
+
 /// What a file is, for its icon color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
@@ -820,6 +864,8 @@ pub struct ShellModel<'a> {
     pub prefab: bool,
     /// Inspector sections.
     pub inspector: &'a [Section<'a>],
+    /// A sound file's waveform and its controls, under one of them (E11-3c).
+    pub sound: Option<SoundPanel<'a>>,
     /// The inspector shows entities: its Add Component button after the sections.
     pub add_component: bool,
     /// Where the add menu opens, in logical pixels of the window: at the pointer when
@@ -964,6 +1010,12 @@ pub struct ShellResponse {
     pub section_script: Option<usize>,
     /// A section's × was clicked: its component is taken away.
     pub remove_section: Option<usize>,
+    /// The inspector's sound (E11-3c): ▶ or ■ was clicked.
+    pub sound_play: bool,
+    /// Its loop was toggled.
+    pub sound_loop: bool,
+    /// Its waveform was pressed, dragged along or let go.
+    pub sound_wave: Option<WaveUse>,
     /// The inspector field under the mouse (section, field): Backspace resets it, Ctrl+C
     /// and Ctrl+V copy and paste its value.
     pub hovered_field: Option<(usize, usize)>,
@@ -1095,7 +1147,7 @@ const SMALL: f32 = 11.0;
 const ICON: f32 = 14.0;
 /// Width of the scene and inspector docks.
 const SCENE_WIDTH: f32 = 270.0;
-const INSPECTOR_WIDTH: f32 = 320.0;
+pub(crate) const INSPECTOR_WIDTH: f32 = 320.0;
 /// Height of the file browser under the viewport.
 const FILES_HEIGHT: f32 = 190.0;
 /// Indentation per tree level.
@@ -2246,6 +2298,151 @@ fn asset_box(ui: &mut Ui, preview: Option<UiImage>, icon: &str, name: &str, p: &
                 }
             });
             text(ui, "name", name, TEXT, p.text);
+        },
+    );
+    ui.sense(id, false).clicked
+}
+
+/// The inspector's sound file (E11-3c): its waveform at the inspector's width, its silence
+/// shaded and the playhead over it, then ▶ or ■, the loop and the time.
+fn sound_panel(ui: &mut Ui, panel: &SoundPanel<'_>, p: &Palette, out: &mut ShellResponse) {
+    let bands = f32::from(panel.channels.clamp(1, 2));
+    let height = SOUND_BAND * bands;
+    ui.column(
+        "sound",
+        Style {
+            size: [Size::Grow(1.0), Size::Fit],
+            padding: [SOUND_PAD, 6.0, SOUND_PAD, 4.0],
+            gap: 4.0,
+            ..Style::default()
+        },
+        |ui| {
+            let id = ui.container(
+                "wave",
+                Style {
+                    size: [Size::Fixed(SOUND_WIDTH), Size::Fixed(height)],
+                    radius: 3.0,
+                    clip: true,
+                    background: Some(p.field),
+                    image: panel.image,
+                    align_main: Align::Center,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    if panel.image.is_none() {
+                        text(ui, "note", panel.note, SMALL, p.text_dim);
+                    }
+                    // Silence at its ends, darkened.
+                    let shade = [0.0, 0.0, 0.0, 0.35];
+                    let [head, tail] = panel.silence.map(|s| (s * SOUND_WIDTH).round());
+                    for (key, x, w) in [
+                        ("quiet start", 0.0, head),
+                        ("quiet end", SOUND_WIDTH - tail, tail),
+                    ] {
+                        if w >= 1.0 {
+                            ui.container(
+                                key,
+                                Style {
+                                    size: [Size::Fixed(w), Size::Fixed(height)],
+                                    background: Some(shade),
+                                    placed: Some([x, 0.0]),
+                                    ..Style::default()
+                                },
+                                |_| {},
+                            );
+                        }
+                    }
+                    // Each band's channel.
+                    if panel.channels == 2 {
+                        for (key, label, y) in
+                            [("left", "L", 2.0), ("right", "R", SOUND_BAND + 2.0)]
+                        {
+                            ui.container(
+                                key,
+                                Style {
+                                    placed: Some([4.0, y]),
+                                    ..Style::default()
+                                },
+                                |ui| {
+                                    text(ui, "text", label, SMALL, p.text_dim);
+                                },
+                            );
+                        }
+                    }
+                    if let Some(at) = panel.playhead {
+                        let x = (at.clamp(0.0, 1.0) * SOUND_WIDTH).round();
+                        ui.container(
+                            "playhead",
+                            Style {
+                                size: [Size::Fixed(2.0), Size::Fixed(height)],
+                                background: Some(p.accent),
+                                placed: Some([(x - 1.0).clamp(0.0, SOUND_WIDTH - 2.0), 0.0]),
+                                ..Style::default()
+                            },
+                            |_| {},
+                        );
+                    }
+                },
+            );
+            let used = ui.sense(id, false);
+            if used.pressed || used.active || used.released {
+                out.sound_wave = Some(WaveUse {
+                    node: id,
+                    pressed: used.pressed,
+                    held: used.active,
+                    released: used.released,
+                });
+            }
+            ui.row(
+                "controls",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(24.0)],
+                    gap: 4.0,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    let glyph = if panel.playing {
+                        icons::STOP
+                    } else {
+                        icons::PLAY
+                    };
+                    if panel_button(ui, "play", glyph, false, p) {
+                        out.sound_play = true;
+                    }
+                    if panel_button(ui, "loop", icons::REPEAT, panel.looping, p) {
+                        out.sound_loop = true;
+                    }
+                    ui.spacer("fill");
+                    text(ui, "time", panel.time, SMALL, p.text_dim);
+                },
+            );
+        },
+    );
+}
+
+/// A small square button with an icon, lit while `on`: clicked this frame.
+fn panel_button(ui: &mut Ui, key: &str, glyph: &str, on: bool, p: &Palette) -> bool {
+    let hovered = ui.is_hovered(ui.id(key));
+    let background = if on {
+        Some(p.selection)
+    } else {
+        hovered.then_some(p.field_hover)
+    };
+    let id = ui.container(
+        key,
+        Style {
+            size: [Size::Fixed(22.0), Size::Fixed(22.0)],
+            radius: 3.0,
+            background,
+            align_main: Align::Center,
+            align_cross: Align::Center,
+            ..Style::default()
+        },
+        |ui| {
+            let color = if on || hovered { p.text } else { p.text_dim };
+            text(ui, "icon", glyph, ICON, color);
         },
     );
     ui.sense(id, false).clicked
@@ -3453,6 +3650,10 @@ fn inspector_dock(
                             }
                         },
                     );
+                    // A sound file's waveform and controls under its section's header.
+                    if let Some(panel) = model.sound.filter(|panel| panel.section == s) {
+                        sound_panel(ui, &panel, p, out);
+                    }
                     // A script's component: its file, as Godot's Script property.
                     if !section.script.is_empty() {
                         let id = ui.row(
