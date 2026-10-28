@@ -2820,6 +2820,7 @@ fn install(lua: &Lua) -> mlua::Result<()> {
     let audio = lua.create_table()?;
     audio.set("play", lua.create_function(audio_play)?)?;
     audio.set("play_at", lua.create_function(audio_play_at)?)?;
+    audio.set("blend", lua.create_function(audio_blend)?)?;
     globals.set("audio", audio)?;
     // The session (ADR 0114 §4, §8).
     let net = lua.create_table()?;
@@ -3018,6 +3019,21 @@ fn audio_play_at(
         source,
     ));
     Ok(script_views::entity_value(e))
+}
+
+/// `audio.blend(name, weight, fade?)` (ADR 0122): snapshot `name`'s weight moved to
+/// `weight` (0 to 1) over `fade` seconds (the snapshot's own fade when none); whether the
+/// mixer's layout has the snapshot. It sets a target, so a tick run again sets the same.
+fn audio_blend(
+    lua: &Lua,
+    (name, weight, fade): (mlua::LuaString, f32, Option<f32>),
+) -> mlua::Result<bool> {
+    // SAFETY: the host's world for this stage (`world_ptr`), used within this callback only.
+    let w = unsafe { &mut *world_ptr(lua)? };
+    let Some(mixer) = w.resource_mut::<crate::Mixer>() else {
+        return Ok(false);
+    };
+    Ok(mixer.blend(&name.to_str()?, weight, fade))
 }
 
 /// `system(name, hooks)`: a system of module that runs it (ADR 0114 §1), its hooks
@@ -5354,6 +5370,8 @@ function Sounder.on_tick(self, dt)
     if self.played == nil then
         self.played = audio.play("ui/click.ogg")
         self.placed = audio.play_at("sfx/shot.wav", vector.create(1, 2, 3), "voice")
+        -- No mixer in this world: no snapshot to blend.
+        assert(audio.blend("underwater", 1, 0.5) == false)
     end
 end
 return Dice

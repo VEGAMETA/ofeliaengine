@@ -574,6 +574,12 @@ pub(crate) fn remove_effect(layout: &mut MixerFile, bus: &str, k: usize) {
         && k < chain.len()
     {
         chain.remove(k);
+        // The snapshots' values of it go; those of the effects after it follow them.
+        renumber_effects(layout, bus, |j| match j.cmp(&k) {
+            core::cmp::Ordering::Less => Some(j),
+            core::cmp::Ordering::Equal => None,
+            core::cmp::Ordering::Greater => Some(j - 1),
+        });
     }
 }
 
@@ -586,7 +592,46 @@ pub(crate) fn move_effect(layout: &mut MixerFile, bus: &str, k: usize, to: usize
     let to = to.min(chain.len() - 1);
     let effect = chain.remove(k);
     chain.insert(to, effect);
+    // The snapshots' values follow the effects to their places.
+    renumber_effects(layout, bus, |j| {
+        Some(if j == k {
+            to
+        } else if k < to && (k + 1..=to).contains(&j) {
+            j - 1
+        } else if to < k && (to..k).contains(&j) {
+            j + 1
+        } else {
+            j
+        })
+    });
     Some(to)
+}
+
+/// Each snapshot's paths rewritten by `f` (a path: its new one, or none to drop the value):
+/// what renames, moves and removals do to the values snapshots set (ADR 0122).
+fn retarget(layout: &mut MixerFile, mut f: impl FnMut(&str) -> Option<String>) {
+    for s in &mut layout.snapshots {
+        let old = core::mem::take(&mut s.values);
+        for (path, value) in old {
+            if let Some(path) = f(&path) {
+                s.values.insert(path, value);
+            }
+        }
+    }
+}
+
+/// The snapshots' values of bus `bus`'s effects moved to the places `place` gives each
+/// one's old place (none: the effect is gone, and its values with it).
+fn renumber_effects(layout: &mut MixerFile, bus: &str, place: impl Fn(usize) -> Option<usize>) {
+    let head = format!("{bus}/effects/");
+    retarget(layout, |path| {
+        let Some(rest) = path.strip_prefix(&head) else {
+            return Some(path.to_owned());
+        };
+        let (k, tail) = rest.split_once('/')?;
+        let k: usize = k.parse().ok()?;
+        place(k).map(|j| format!("{head}{j}/{tail}"))
+    });
 }
 
 /// Parameter `name` of effect `k` of bus `bus` set to `value` (in its unit), within its
@@ -633,7 +678,15 @@ pub(crate) fn set_shape(layout: &mut MixerFile, bus: &str, k: usize, kind: &str)
         }
         shaped.bypass = e.bypass;
         *e = shaped;
+    } else {
+        return;
     }
+    // The snapshots' values of parameters the new shape lacks go.
+    let head = format!("{bus}/effects/{k}/");
+    retarget(layout, |path| match path.strip_prefix(&head) {
+        Some("bypass") | None => Some(path.to_owned()),
+        Some(param) => info.param(param).map(|_| path.to_owned()),
+    });
 }
 
 /// The buses that can key effect `k` of bus `bus` without looping the sound back, in the
@@ -714,6 +767,8 @@ pub(crate) fn remove_send(layout: &mut MixerFile, bus: &str, to: &str) {
     if let Some(b) = layout.buses.get_mut(bus) {
         b.sends.remove(to);
     }
+    let gone = format!("{bus}/sends/{to}");
+    retarget(layout, |path| (path != gone).then(|| path.to_owned()));
 }
 
 /// Bus `bus`'s send into `to` at `db`, within a fader's travel.
@@ -874,6 +929,12 @@ pub(crate) fn remove_bus(layout: &mut MixerFile, bus: &str) {
             e.sidechain.clear();
         }
     }
+    // The snapshots' values of it, and of sends into it, go.
+    let head = format!("{bus}/");
+    retarget(layout, |path| {
+        let into = path.split_once("/sends/").is_some_and(|(_, to)| to == bus);
+        (!path.starts_with(&head) && !into).then(|| path.to_owned())
+    });
 }
 
 /// Every effect of the layout, the master's among them.
@@ -900,6 +961,11 @@ pub(crate) fn rename_bus(layout: &mut MixerFile, from: &str, to: &str) -> Result
             "`{to}` is a name the player keeps for a bus of its own"
         ));
     }
+    if to.contains('/') {
+        return Err(String::from(
+            "a bus's name cannot hold `/` (snapshots name values by paths)",
+        ));
+    }
     if layout.buses.contains_key(to) {
         return Err(format!("there is a bus `{to}` already"));
     }
@@ -920,6 +986,18 @@ pub(crate) fn rename_bus(layout: &mut MixerFile, from: &str, to: &str) -> Result
             to.clone_into(&mut e.sidechain);
         }
     }
+    // The snapshots' values of it, and of sends into it, follow the name.
+    let head = format!("{from}/");
+    retarget(layout, |path| {
+        let path = match path.strip_prefix(&head) {
+            Some(rest) => format!("{to}/{rest}"),
+            None => path.to_owned(),
+        };
+        Some(match path.split_once("/sends/") {
+            Some((bus, into)) if into == from => format!("{bus}/sends/{to}"),
+            _ => path,
+        })
+    });
     Ok(())
 }
 
@@ -928,6 +1006,67 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn snapshots_values_follow_renames_moves_and_removals() {
+        let mut l = MixerFile::builtin();
+        add_effect(&mut l, "music", "compressor");
+        add_effect(&mut l, "music", "low_pass");
+        add_effect(&mut l, "music", "delay");
+        add_send(&mut l, "effects", "music");
+        l.snapshots.push(
+            engine_app::SnapshotLayout::new("dive")
+                .with("music/gain", -12.0)
+                .with("music/effects/0/threshold_db", -30.0)
+                .with("music/effects/1/frequency_hz", 600.0)
+                .with("music/effects/2/time_ms", 300.0)
+                .with("effects/sends/music", -6.0)
+                .with("ui/gain", -3.0),
+        );
+        let paths = |l: &MixerFile| l.snapshots[0].values.keys().cloned().collect::<Vec<_>>();
+        // The low-pass moved first: its values and the compressor's follow.
+        move_effect(&mut l, "music", 1, 0);
+        assert_eq!(
+            paths(&l),
+            [
+                "effects/sends/music",
+                "music/effects/0/frequency_hz",
+                "music/effects/1/threshold_db",
+                "music/effects/2/time_ms",
+                "music/gain",
+                "ui/gain",
+            ]
+        );
+        // The compressor removed: its value goes, the delay's moves up.
+        remove_effect(&mut l, "music", 1);
+        assert!(paths(&l).contains(&String::from("music/effects/1/time_ms")));
+        assert!(!paths(&l).iter().any(|p| p.contains("threshold_db")));
+        // A shape without the parameter: its value goes.
+        set_shape(&mut l, "music", 0, "high_pass");
+        assert!(paths(&l).contains(&String::from("music/effects/0/frequency_hz")));
+        // Music renamed: its values and the send into it follow.
+        rename_bus(&mut l, "music", "score").unwrap();
+        assert_eq!(
+            paths(&l),
+            [
+                "effects/sends/score",
+                "score/effects/0/frequency_hz",
+                "score/effects/1/time_ms",
+                "score/gain",
+                "ui/gain",
+            ]
+        );
+        assert!(
+            rename_bus(&mut l, "score", "a/b").is_err(),
+            "no `/` in names"
+        );
+        // The send removed, then the bus: their values go.
+        remove_send(&mut l, "effects", "score");
+        assert!(!paths(&l).contains(&String::from("effects/sends/score")));
+        remove_bus(&mut l, "score");
+        assert_eq!(paths(&l), ["ui/gain"]);
+        assert!(l.problems().is_empty(), "{:?}", l.problems());
+    }
 
     #[test]
     fn the_faders_travel_has_more_room_near_nothing() {

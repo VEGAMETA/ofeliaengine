@@ -66,7 +66,7 @@ world.spawn((
   3D sounds of effects and voice reverberating. The editor's mixer panel writes the
   file; by hand it reads:
   ```text
-  [mixer version=3 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
+  [mixer version=4 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
 
   master.gain = 0
   master.effects.0.kind = "limiter"
@@ -91,6 +91,8 @@ world.spawn((
     does not move a send taken before it);
   - `room.gain`: the room's reverb's fader in dB, a trim on what it returns (its
     parameters follow the room; see below);
+  - `snapshots` (ADR 0122): moods your game moves between, each a name, a `fade` in
+    seconds and the values it sets by path; the next point says how;
   - a send or a sidechain that would loop the sound back is left out, and the log says
     which;
   - a file names its buses and no others: the four above play only without one;
@@ -108,6 +110,30 @@ world.spawn((
   | `delay` | `time_ms` (1 to 2,000, 250), `feedback` (0 to 0.98, 0.35), `mix` (0 to 1, 0.35) |
   | `reverb` (for a bus sends feed: fully wet) | `decay_s` (0.1 to 30, 1.5), `size` (0 to 1, 0.5), `damping_hz` (500 to 20,000, 8,000), `pre_delay_ms` (0 to 500, 20), `early` (0 to 1, 0.5), `mix` (0 to 1, 1) |
 
+- **Snapshots:** a pause that muffles everything, a dive that dulls the music, combat
+  that lowers the ambience. Each sets only what it names:
+  ```text
+  snapshots.0.name = "underwater"
+  snapshots.0.fade = 0.5
+  snapshots.0.values["music/gain"] = -14
+  snapshots.0.values["music/effects/0/frequency_hz"] = 600
+  snapshots.0.values["effects/sends/canyon"] = -6
+  snapshots.1.name = "paused"
+  snapshots.1.values["effects/gain"] = -40
+  ```
+  - paths: `<bus>/gain` and `<bus>/balance` (`master/...` for the master's),
+    `<bus>/sends/<to>`, `<bus>/effects/<place>/<parameter>` (its unit, as the table
+    below), `<bus>/effects/<place>/bypass` (1 or 0), `room/gain`;
+  - `mixer.blend("underwater", 1.0, None)` fades it in over its own `fade` (or
+    `Some(seconds)`), `mixer.blend("underwater", 0.0, None)` out; anything between is
+    that much of it. `mixer.weight("underwater")` is how much is heard now; `blend`
+    returns `false` for a name the file has no snapshot for;
+  - several at once stack in the file's order: where two set one value, the later wins
+    at full weight, and at 0.5 it is halfway between the one below and its own value
+    (dB in dB, parameters in their units, a bypass on from the half);
+  - the game's volumes (`set_volume`) still multiply what the snapshots leave;
+  - weights are not in saves and not sent over the network: set them again from your
+    game's state when a save loads.
 - **Hearing in place** (the editor's P): `player.audition(&entities)` plays those
   entities' sources while the world is kept still (`set_simulating(false)`), looping, heard
   from the main camera with the reverb zones, from copies of their components, so the

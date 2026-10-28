@@ -1416,6 +1416,10 @@ there, and see the script's file in the inspector.
   named) and **`audio.play_at(sound, position, bus?)`** one with an `AudioSource3D` (on
   `effects`) at that place, its `GlobalTransform` set at once. Both play once and despawn
   at their end (`PlayMode::Despawn`), and return the entity.
+- **`audio.blend(name, weight, fade?)`** (ADR 0122, the team's answer of 2026-10-28):
+  the mixer's snapshot `name` moved to `weight` over `fade` seconds (the snapshot's own
+  fade when none); whether the layout has it. It sets a target, so a tick run again sets
+  the same.
 - **Found:** a world holding sounds cannot be snapshotted (`AudioSource` holds strings:
   `SnapshotError::NotPlainData`), so a predicted world keeps its sounds out, as it keeps
   out other text. The test takes its rollback before the sounds.
