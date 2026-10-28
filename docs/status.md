@@ -669,7 +669,7 @@ Last updated: 2026-10-28.
     - Tracy's zones of the stage closed at a stop and opened again after it (a zone 18.0
       -> 19.2 ns); the stage on the fiber costs nothing measurable (0.26 ms a tick of
       1,000 spinners either way).
-  - **E9-1b-2, steps** (#PR, ADR 0119's as-built):
+  - **E9-1b-2, steps** (#381, ADR 0119's as-built):
     - hooks resumed on a Luau thread of the debugger's while a breakpoint that stops is set
       or a step is under way (0.12 µs a hook more; nothing without);
     - a step turns single-stepping on and breaks out of the interpreter, which is entered
