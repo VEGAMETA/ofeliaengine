@@ -743,6 +743,8 @@ struct CommandIds {
     /// Which errors stop a script (E9-1b-4), and a break at the next line a script runs.
     errors_uncaught: CommandId,
     errors_caught: CommandId,
+    /// Full script debugging (ADR 0119): the scripts interpreted from the next Play.
+    full_debugging: CommandId,
     break_next: CommandId,
     find_references: CommandId,
     /// Prefabs (E5-2): the selection made a prefab's instance, an instance unpacked.
@@ -900,6 +902,7 @@ fn commands() -> (Commands, CommandIds) {
             "Debug",
             "Stop at Errors Caught by pcall",
         ),
+        full_debugging: c.register("debug.full_debugging", "Debug", "Full Script Debugging"),
         break_next: c.register("debug.break_next", "Debug", "Break at the Next Script Line"),
         find_references: c.register("assets.references", "Assets", "Find References"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
@@ -2006,6 +2009,9 @@ struct Editor {
     debug_text: DebugText,
     /// Which errors stop a script in Play (E9-1b-4), kept in the session.
     error_stops: ErrorStops,
+    /// Full script debugging (ADR 0119): the next Play runs the scripts interpreted, so a
+    /// stop shows every frame's locals; kept in the session.
+    full_debugging: bool,
     /// The Debugger's Variables' paths opened or closed by a click (E9-1b-5b), kept through
     /// stops, and how many clicks there were.
     debug_toggled: HashSet<String>,
@@ -2841,6 +2847,7 @@ impl Editor {
                 uncaught: true,
                 caught: false,
             },
+            full_debugging: false,
             last_values: None,
             debug_toggled: HashSet::new(),
             debug_toggles: 0,
@@ -4241,6 +4248,7 @@ impl Editor {
                     .as_ref()
                     .is_some_and(|s| s.stopped.error.is_some()),
                 error_stops: [self.error_stops.uncaught, self.error_stops.caught],
+                full_debugging: self.full_debugging,
                 steppable: self.stop.as_ref().is_some_and(|s| s.stopped.steppable),
                 frames: &debug_frames,
                 frame: self.debug_frame,
@@ -4806,6 +4814,7 @@ impl Editor {
         match response.debug_errors {
             Some(0) => self.run(world, self.ids.errors_uncaught),
             Some(1) => self.run(world, self.ids.errors_caught),
+            Some(2) => self.run(world, self.ids.full_debugging),
             _ => {}
         }
         // The bottom panel's tabs: Output opens and closes; the others come later.
@@ -8573,6 +8582,7 @@ impl Editor {
             ids.step_out,
             ids.errors_uncaught,
             ids.errors_caught,
+            ids.full_debugging,
             ids.break_next,
             ids.debugger,
             ids.code_find,
@@ -10102,11 +10112,12 @@ impl Editor {
                 }
                 if let Some(f) = s.stack.get(self.debug_frame) {
                     // Luau does not read a native frame's locals; a breakpoint in its function
-                    // runs it interpreted.
+                    // runs it interpreted, and full script debugging every function.
                     if f.native {
                         text.variables.push(VarText::title(
                             "LOCALS · not readable: the function runs as native code \
-                             (a breakpoint in it shows them)",
+                             (a breakpoint in it, or full script debugging from the next Play, \
+                             shows them)",
                         ));
                     }
                     for (title, vars) in [("LOCALS", &f.locals), ("UPVALUES", &f.upvalues)] {
@@ -12425,6 +12436,15 @@ impl Editor {
                 (false, false) => "Errors scripts do not catch go to the Output, the game going on",
                 (true, true) => "An error a pcall catches stops the script in Play, at its line",
                 (true, false) => "Errors a pcall catches do not stop scripts",
+            }));
+        } else if id == ids.full_debugging {
+            self.full_debugging = !self.full_debugging;
+            self.write_session(world);
+            self.say(String::from(if self.full_debugging {
+                "Full script debugging from the next Play: the scripts run interpreted, slower, \
+                 and a stop shows every frame's locals"
+            } else {
+                "The scripts run as native code from the next Play, as the game runs them"
             }));
         } else if id == ids.break_next {
             if self.play.is_some() {
@@ -15022,6 +15042,9 @@ impl Editor {
         if let Some((uncaught, caught)) = state.error_stops {
             self.error_stops = ErrorStops { uncaught, caught };
         }
+        if let Some(on) = state.full_debugging {
+            self.full_debugging = on;
+        }
         self.watches.clone_from(&state.watches);
         if let Some(on) = state.scale_lock {
             self.scale_lock = on;
@@ -15172,6 +15195,7 @@ impl Editor {
             pivot: Some(String::from(self.pivot.name())),
             overlays: Some(self.overlays),
             error_stops: Some((self.error_stops.uncaught, self.error_stops.caught)),
+            full_debugging: Some(self.full_debugging),
             watches: self.watches.clone(),
             window: self.window,
             game_window: self.game_window,
@@ -16335,6 +16359,11 @@ impl<G> EditorGame<G> {
         player.set_simulating(true);
         // Stops wait on the script stage's fiber (ADR 0119 E9-1b).
         player.set_script_debugging(true);
+        // Full script debugging (ADR 0119): the scripts interpreted, every frame's locals at
+        // a stop, or native code as the game runs them; their modules run again when the
+        // choice changed since the last Play.
+        let interpreted = self.shared.borrow().full_debugging;
+        player.set_interpreted_scripts(interpreted);
         // The breakpoints' hits and messages counted from this Play on (ADR 0119).
         if let Some(scripts) = player.scripts_mut() {
             scripts.reset_breakpoint_states();
@@ -16362,7 +16391,12 @@ impl<G> EditorGame<G> {
             p.entered = asked.elapsed();
             p.ticks0 = player.ticks_run();
             let ms = p.entered.as_secs_f64() * 1e3;
-            shared.say(format!("Play started in {ms:.1} ms"));
+            let how = if interpreted {
+                ", the scripts interpreted (full script debugging)"
+            } else {
+                ""
+            };
+            shared.say(format!("Play started in {ms:.1} ms{how}"));
         }
     }
 

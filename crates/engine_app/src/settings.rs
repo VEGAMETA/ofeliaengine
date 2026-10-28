@@ -57,6 +57,12 @@ pub struct PlayerSettings {
     /// which inlines nothing, so a step goes into a function as its text reads. The
     /// editor's player has it; it costs nothing measurable on ADR 0114's scenes.
     pub debuggable_scripts: bool,
+    /// Run the game's scripts interpreted, not as Luau's native code (ADR 0119's full script
+    /// debugging, the editor's switch): a stop at an error then reads every frame's locals,
+    /// and the scripts run 8-33 % slower on ADR 0114's scenes. Off (the default): native
+    /// code, as games run. [`Player::set_interpreted_scripts`](crate::Player::set_interpreted_scripts)
+    /// switches scripts already loaded.
+    pub interpreted_scripts: bool,
     /// VS Code's script debugger (ADR 0119 E9-3): the player listens for it as the editor
     /// does, its scripts compiled to be debugged. `None` (the default): nothing listens. A
     /// game's `main` ([`run`](crate::run)) sets it from `--debug` and `--wait-for-debugger`;
@@ -264,10 +270,11 @@ impl FrameCap {
 
 impl PlayerSettings {
     /// The scripts' VM settings: debuggable (Luau's optimization level 1) when asked
-    /// ([`Self::debuggable_scripts`]).
+    /// ([`Self::debuggable_scripts`]), interpreted when asked ([`Self::interpreted_scripts`]).
     pub(crate) fn script_settings(&self) -> engine_script::ScriptSettings {
         engine_script::ScriptSettings {
             optimization_level: if self.debuggable_scripts { 1 } else { 2 },
+            native: !self.interpreted_scripts,
             ..engine_script::ScriptSettings::default()
         }
     }
@@ -281,6 +288,7 @@ impl Default for PlayerSettings {
             scene: None,
             project: None,
             debuggable_scripts: false,
+            interpreted_scripts: false,
             debugger: None,
             derived_data: None,
             window: Window::FullScreen,

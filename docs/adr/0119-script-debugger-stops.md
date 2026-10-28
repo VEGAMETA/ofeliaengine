@@ -748,3 +748,41 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
 - **Not done:** a breakpoint VS Code removes while the editor changed its options in the
   same instant (the later one wins).
 
+## As built (full script debugging, 2026-10-28)
+
+The team's answer to E9-1b-4's question about native frames' locals (2026-10-28): a switch,
+off by default.
+
+- **The switch:** the Debugger's Breakpoints list's third row ("Full script debugging:
+  every frame's locals, slower") and the palette's Debug: Full Script Debugging.
+  - On: the next Play runs every script interpreted, so a stop at an error (or anywhere)
+    reads every frame's locals.
+  - Off, the default: native code, as the game runs them.
+  - Turned on or off during Play, it waits for the next Play, as its message says.
+  - The Play's start message names it while it is on. The session keeps it
+    (`full_debugging = true`).
+  - The Variables' note on a native frame names it beside a breakpoint.
+- **How:**
+  - `ScriptVm::set_native` turns Luau's code generator on or off for the chunks loaded
+    from then on.
+  - `Scripts::set_native` runs every module that ran again, in the order they require each
+    other. Its instances go on with their state, as after a reload.
+  - `Player::set_interpreted_scripts` calls it, and `PlayerSettings::interpreted_scripts`
+    covers a host made later.
+  - The editor's Play start calls it. Nothing runs again unless the choice changed since the
+    last Play: 3 modules ran again in 0.23 ms (the host's test project, dev build).
+- **Cost:** off, nothing (native code, as before); on, the interpreter's 8-33 % (E9-1b-4's
+  measurements on ADR 0114's scenes).
+- **Tests:**
+  - The core: a module loaded again without native code shows every frame's locals (the
+    erring frame's `t`).
+  - The host: every module runs again and its instances go on (started once, ticks counted
+    on, a required module's value, the door higher). Nothing runs again when the scripts are
+    compiled so already, and the switch goes back.
+  - The editor: the first Play's error shows the native frame's note. The row turns the
+    switch on, and the next Play's error shows the frame's locals. The palette's command and
+    the session are covered too.
+- **Not done:**
+  - A game's `--debug` (VS Code attached to the standalone player) keeps native code.
+  - A function made before the switch and kept (a timer's, one stored in a table) keeps the
+    code it was made with until it is made again.

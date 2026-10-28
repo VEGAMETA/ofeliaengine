@@ -191,6 +191,9 @@ pub struct DebuggerView<'a> {
     /// Which errors stop scripts (E9-1b-4): the errors not caught, those a `pcall` catches;
     /// the Breakpoints list's first rows.
     pub error_stops: [bool; 2],
+    /// Full script debugging (ADR 0119): the scripts interpreted from the next Play; the row
+    /// after those.
+    pub full_debugging: bool,
     /// And it can be stepped from there: the steps work.
     pub steppable: bool,
     /// The stack's frames, the stopped one first: its function and its place.
@@ -1013,7 +1016,8 @@ pub struct ShellResponse {
     pub debug_breakpoint: Option<usize>,
     /// A breakpoint's mark there was clicked: it is turned off or on.
     pub debug_toggle: Option<usize>,
-    /// A row of which errors stop was clicked (0 not caught, 1 caught by `pcall`).
+    /// A row of which errors stop was clicked (0 not caught, 1 caught by `pcall`), or full
+    /// script debugging's (2).
     pub debug_errors: Option<usize>,
     /// A row of the Variables was clicked: it opens or closes.
     pub debug_variable: Option<usize>,
@@ -3995,11 +3999,19 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
             ui.container("breakpoints", column(Size::Fixed(480.0)), |ui| {
                 text(ui, "title", "BREAKPOINTS", SMALL, p.text_dim);
                 ui.scroll_column("marks", |ui| {
-                    // Which errors stop (E9-1b-4), as VS Code's exception filters.
-                    let kinds = ["Errors the script does not catch", "Errors caught by pcall"];
+                    // Which errors stop (E9-1b-4), as VS Code's exception filters, and full
+                    // script debugging (the scripts interpreted from the next Play).
+                    let kinds = [
+                        "Errors the script does not catch",
+                        "Errors caught by pcall",
+                        "Full script debugging: every frame's locals, slower",
+                    ];
                     for (k, label) in kinds.into_iter().enumerate() {
                         ui.push_id(1000 + k as u64);
-                        let on = view.error_stops[k];
+                        let on = match k {
+                            2 => view.full_debugging,
+                            _ => view.error_stops[k],
+                        };
                         let id = ui.container("errors", row, |ui| {
                             ui.container(
                                 "box",

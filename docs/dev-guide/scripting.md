@@ -462,6 +462,11 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
   - An error inside a function running as Luau's native code shows its line, its message
     and the stack, but not that frame's locals: Luau does not read them. A breakpoint in
     the function runs it interpreted, and the next stop there shows them.
+  - **Full script debugging** (the Breakpoints list's third row, or the palette's Debug:
+    Full Script Debugging) runs every script interpreted from the next Play, so a stop
+    anywhere shows every frame's locals. The scripts run slower meanwhile (8–33 % on the
+    engine's script scenes). Off, the default, they run as native code, as the game runs
+    them. Kept in the session.
 - **Break at the Next Script Line** (the palette): the next line any script runs stops,
   as a breakpoint does, wherever it is.
 - **A logpoint** (◆) writes a message each time the line runs, and the script goes on:

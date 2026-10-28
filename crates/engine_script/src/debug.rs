@@ -3283,6 +3283,35 @@ return M
     }
 
     #[test]
+    fn a_module_loaded_again_without_native_code_shows_every_frames_locals() {
+        let (mut vm, _) = faults("tick", true);
+        vm.set_native(false);
+        assert!(!vm.settings().native);
+        vm.load_module("faults", FAULTS).unwrap();
+        let f: mlua::Function = vm.exports("faults").unwrap().get("tick").unwrap();
+        let mut c = Call {
+            vm: core::ptr::null(),
+            module: "faults",
+            f,
+            arg: 1.0,
+            result: None,
+        };
+        c.vm = &raw const vm;
+        let fiber = Fiber::new(1 << 20).unwrap();
+        vm.debugger().set_error_stops(UNCAUGHT);
+        STOPS.take();
+        assert!(run_through(&fiber, &mut c, &[]).is_err());
+        let stops = STOPS.take();
+        assert_eq!(stops[0].line, 4);
+        assert_eq!(
+            stops[0].stack.iter().map(|f| f.native).collect::<Vec<_>>(),
+            [false, false]
+        );
+        let names: Vec<&str> = stops[0].locals.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["t"], "the erring frame's locals are read");
+    }
+
+    #[test]
     fn an_error_raised_stops_at_the_scripts_line_with_its_message() {
         let (vm, mut c) = faults("raise", true);
         c.vm = &raw const vm;
