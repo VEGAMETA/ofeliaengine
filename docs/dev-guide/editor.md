@@ -83,7 +83,11 @@ editor = ["dep:engine_editor"]
     - **Blockout:** brushes ([blockout.md](blockout.md)): a box, wedge, stairs, cylinder,
       cone, truncated cone, sphere or torus. A brush joins the selection's blockout group
       (or the scene's first), or a new "Blockout" group, at its end;
-    - **Light:** a sun, a point light or a spot light.
+    - **Light:** a sun, a point light or a spot light;
+    - **Sound:** a sound heard as it is (`AudioSource`: music, the UI), a sound in the
+      world (`AudioSource3D`), the listener (`AudioListener`) or a reverb zone
+      (`ReverbZone`). A new source is silent until the inspector gives it a sound
+      ([audio.md](audio.md)).
 
     It is named after its kind, numbered when a sibling has that name ("Cube 2"); the
     palette has every kind ("Scene: Add Torus Brush");
@@ -330,13 +334,21 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
 - What is picked is what is drawn: masked surfaces through their holes, skinned meshes in
   their current pose, transparent ones too. **Viewport: Pick Transparent Surfaces** in the
   palette turns the last off, so clicks go through glass; the session keeps it.
-- **Lights and cameras** show as icons in the viewport (a bulb, a spot, a sun, a camera on
-  a dark disk), above the scene: a click on one selects it, a box takes the icons in it,
-  and the one under the pointer turns white (the selected ones orange). A plain click
-  again on the icon it selected goes through to what lies under it, as cycling does.
-  Empty entities have nothing to show: pick them in the tree.
+- **Lights, cameras and sounds** show as icons in the viewport (a bulb, a spot, a sun, a
+  camera, a speaker for a sound in the world, a loudspeaker for one heard as it is, an ear
+  for the listener, surround waves for a reverb zone, each on a dark disk), above the
+  scene: a click on one selects it, a box takes the icons in it, and the one under the
+  pointer turns white (the selected ones orange). A plain click again on the icon it
+  selected goes through to what lies under it, as cycling does. Empty entities have
+  nothing to show: pick them in the tree.
 - **Their reach:** a selected point light shows its range as three circles, a spot light
-  its cone, a camera its view's pyramid (2 m deep), the sun its direction.
+  its cone, a camera its view's pyramid (2 m deep), the sun its direction. A selected
+  sound in the world shows its two distances, each as a ring on the level plane through it
+  and as its outline facing the camera: full volume inside the first (green), the
+  falloff's end at the second (fainter), dashed when the sound holds its level beyond it
+  (`Inverse`) and solid when it falls silent there (`Linear`). A selected reverb zone shows
+  its box (violet), turned and scaled with its entity, and dashed, where its room fades
+  out.
   **View: Overlays** in the palette hides icons and reach; the session keeps it.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's

@@ -1928,3 +1928,36 @@ Research: `docs/research/slang-in-the-editor.md` ("slangd, probed again").
   - a code tab;
   - a multiple selection (the inspector's comparison);
   - Play.
+
+## As built (E11-4a, 2026-10-28): sounds in the viewport
+
+E11 starts with its UX note, `docs/research/ux/sound.md` (Godot, Unity, Unreal, FMOD,
+Wwise and REAPER's meters, checked 2026-10-28). It orders E11's steps: the mixer file and
+panel (E11-1), effects and sends (E11-2), previews (E11-3), gizmos and hearing in place
+(E11-4), later steps (E11-5), and asks four questions (where the bus layout is kept,
+snapshots, mixer edits made in Play, how components name a sound). E11-1 and E11-2 wait
+for the first answer. This step is the part of E11-4 that needs none.
+
+- **Icons** (E2-7's, picked the same way): a loudspeaker for an `AudioSource`, a speaker
+  for an `AudioSource3D`, an ear for an `AudioListener`, surround waves for a
+  `ReverbZone`. The tree shows the same icons, and their kinds read "Sound", "Listener"
+  and "Reverb zone".
+- **The add menu's Sound group:** Sound, Sound 3D, Listener, Reverb Zone, each one undo
+  step, the palette's "Add …" commands with them. A new source is silent until it is given
+  a sound.
+- **A selected `AudioSource3D`:** its full-volume distance and the falloff's end, each as a
+  ring on the level plane through it and as its outline facing the camera. The far one is
+  dashed when the sound holds its level beyond it (`Inverse`) and solid when it falls
+  silent there (`Linear`): shapes, not colour alone.
+- **A selected `ReverbZone`:** its box, turned and scaled with its entity, and the box
+  `fade` metres out, dashed (the room fades out over a rounded region; the box bounds it).
+- **Lines are kinds,** each with its colour (`Reach`): a light's, a camera's, a sound's
+  near and far, a zone's and its fade.
+- **Not done (E11-4b):** radius handles on the rings (ADR 0110's, shared with blockout's
+  round brushes), the zone's side and fade handles, the hover's labels ("40 m · −16 dB,
+  held"), hearing the selected sources in place (P) and Listen to the Scene, the falloff
+  curve with the camera's distance, View: Sound Ranges, filled icons for sources playing in
+  Play.
+- **Tests:** the reach of each kind counted by kind (two rings of 48 pieces, a dashed ring
+  of 24 a circle, a box of 12 edges, a dashed box of 48 pieces); the add menu's four kinds,
+  their names and icons, undone one step each.

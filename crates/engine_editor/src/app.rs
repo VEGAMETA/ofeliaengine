@@ -92,9 +92,9 @@ use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Matc
 use core::any::TypeId;
 use engine_app::scripts::{ErrorStops, Place, Resume};
 use engine_app::{
-    AppError, AssetMeta, Brush, BrushGroup, BrushOp, BrushShape, ColliderState, Game, Model,
-    ModelCollider, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup, Window,
-    builtin,
+    AppError, AssetMeta, AudioListener, AudioSource, AudioSource3D, Brush, BrushGroup, BrushOp,
+    BrushShape, ColliderState, Game, Model, ModelCollider, Overlay, OverlayOutput, OverlayPass,
+    Player, PlayerSettings, ReverbZone, Setup, Window, builtin,
 };
 use engine_core::math::{Affine3A, Quat, Vec2, Vec3, Vec4, look_at, vulkan_orthographic};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
@@ -130,8 +130,9 @@ pub type Start<G> = fn(&mut Player) -> Result<G, Error>;
 
 /// What the scene dock's add menu offers: each kind's name (its command, "Add …", and a new
 /// entity's name), its label in its group, and its icon, the same in the menu, the tree and
-/// the palette. The menu groups them ([`ADD_MESHES`], [`ADD_BLOCKOUT`], [`ADD_LIGHTS`]).
-const ADD: [(&str, &str, &str); 17] = [
+/// the palette. The menu groups them ([`ADD_MESHES`], [`ADD_BLOCKOUT`], [`ADD_LIGHTS`],
+/// [`ADD_SOUND`]).
+const ADD: [(&str, &str, &str); 21] = [
     ("Point", "Point", icons::NODE_3D),
     ("Cube", "Cube", icons::CUBE),
     ("Sphere", "Sphere", icons::SPHERE),
@@ -149,6 +150,10 @@ const ADD: [(&str, &str, &str); 17] = [
     ("Truncated Cone Brush", "Truncated Cone", icons::CONE),
     ("Sphere Brush", "Sphere", icons::SPHERE),
     ("Torus Brush", "Torus", icons::TORUS),
+    ("Sound", "Sound", icons::SOUND),
+    ("Sound 3D", "Sound 3D", icons::SPEAKER),
+    ("Listener", "Listener", icons::LISTENER),
+    ("Reverb Zone", "Reverb Zone", icons::REVERB),
 ];
 
 /// The add menu's groups: its meshes, its blockout brushes, its lights (the owner,
@@ -156,9 +161,13 @@ const ADD: [(&str, &str, &str); 17] = [
 const ADD_MESHES: [usize; 4] = [1, 2, 3, 4];
 const ADD_BLOCKOUT: [usize; 8] = [9, 10, 11, 12, 13, 14, 15, 16];
 const ADD_LIGHTS: [usize; 3] = [5, 6, 7];
+/// Its sounds (ADR 0107 E11, `docs/research/ux/sound.md`): one heard as it is, one in the
+/// world, the listener, a reverb zone.
+const ADD_SOUND: [usize; 4] = [17, 18, 19, 20];
 
-/// The first of the add menu's brushes.
-const FIRST_BRUSH: usize = 9;
+/// The first of the add menu's brushes (tests add one).
+#[cfg(test)]
+const FIRST_BRUSH: usize = ADD_BLOCKOUT[0];
 
 /// Where the scene tree's keys apply: after a click in it.
 const TREE_KEYS: KeyContext = KeyContext::Panel(1);
@@ -1511,7 +1520,42 @@ const SUN_REACH: f32 = 1.5;
 /// others (they have geometry, or nothing to show).
 fn icon_of(world: &World, e: Entity) -> Option<&'static str> {
     let (glyph, kind) = kind_of(world, e);
-    matches!(kind, "Camera" | "Sun" | "Light").then_some(glyph)
+    matches!(
+        kind,
+        "Camera" | "Sun" | "Light" | "Sound" | "Reverb zone" | "Listener"
+    )
+    .then_some(glyph)
+}
+
+/// What an overlay's line shows, which gives it its color (ADR 0107 E2-7, E11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// A light's range or cone, the sun's direction.
+    Light,
+    /// A camera's pyramid.
+    Camera,
+    /// A sound's full volume, up to its `min_distance`.
+    Sound,
+    /// Where a sound fades out, at its `max_distance`.
+    SoundFar,
+    /// A reverb zone's box.
+    Zone,
+    /// Where its room fades out, `fade` metres outside the box.
+    ZoneFade,
+}
+
+impl Reach {
+    /// Its line's color.
+    fn color(self) -> Vec4 {
+        match self {
+            Reach::Light => Vec4::new(1.0, 0.85, 0.45, 0.8),
+            Reach::Camera => Vec4::new(0.55, 0.75, 1.0, 0.8),
+            Reach::Sound => Vec4::new(0.45, 0.95, 0.75, 0.85),
+            Reach::SoundFar => Vec4::new(0.45, 0.95, 0.75, 0.4),
+            Reach::Zone => Vec4::new(0.8, 0.6, 1.0, 0.85),
+            Reach::ZoneFade => Vec4::new(0.8, 0.6, 1.0, 0.35),
+        }
+    }
 }
 
 /// A world segment's part in front of the eye, on the screen.
@@ -2339,7 +2383,7 @@ struct Editor {
     overlays: bool,
     view_icons: Vec<ViewIcon>,
     icon_hover: Option<Entity>,
-    reach_lines: Vec<(Vec2, Vec2, bool)>,
+    reach_lines: Vec<(Vec2, Vec2, Reach)>,
     /// What the overlay outlines (ADR 0109): the GPU scene's slots of the selection, its
     /// children and the hovered entity, as [`Editor::outline`] last found them.
     outline_items: Vec<OutlineItem>,
@@ -2515,6 +2559,14 @@ fn kind_of(world: &World, e: Entity) -> (&'static str, &'static str) {
         )
     } else if world.get::<BrushGroup>(e).is_some() {
         (icons::BLOCKOUT, "Blockout")
+    } else if world.get::<AudioSource3D>(e).is_some() {
+        (icons::SPEAKER, "Sound")
+    } else if world.get::<AudioSource>(e).is_some() {
+        (icons::SOUND, "Sound")
+    } else if world.get::<ReverbZone>(e).is_some() {
+        (icons::REVERB, "Reverb zone")
+    } else if world.get::<AudioListener>(e).is_some() {
+        (icons::LISTENER, "Listener")
     } else {
         (icons::NODE_3D, "Entity")
     }
@@ -2674,7 +2726,20 @@ fn spawn(world: &mut World, what: usize, name: &str, at: Vec3) -> Entity {
         8 => {
             world.insert(e, Camera::perspective(60f32.to_radians(), 0.1, 500.0));
         }
-        9.. => {
+        // A new source is silent until it is given a sound.
+        17 => {
+            world.insert(e, AudioSource::default());
+        }
+        18 => {
+            world.insert(e, AudioSource3D::default());
+        }
+        19 => {
+            world.insert(e, AudioListener);
+        }
+        20 => {
+            world.insert(e, ReverbZone::default());
+        }
+        9..=16 => {
             let brush = match what {
                 9 => Brush::new(BrushShape::Box, Vec3::splat(2.0)),
                 10 => Brush::new(BrushShape::Wedge, Vec3::new(2.0, 1.0, 3.0)),
@@ -3729,6 +3794,7 @@ impl Editor {
         let meshes = ADD_MESHES.map(leaf);
         let blockout = ADD_BLOCKOUT.map(leaf);
         let lights = ADD_LIGHTS.map(leaf);
+        let sound = ADD_SOUND.map(leaf);
         let group = |icon, label, children| MenuEntry {
             icon,
             label,
@@ -3740,6 +3806,7 @@ impl Editor {
             group(icons::MODEL, "Mesh", &meshes[..]),
             group(icons::BLOCKOUT, "Blockout", &blockout[..]),
             group(icons::LIGHT, "Light", &lights[..]),
+            group(icons::SPEAKER, "Sound", &sound[..]),
             leaf(8),
         ];
         // The view modes' menu: the current one checked.
@@ -6430,9 +6497,9 @@ impl Editor {
                 Vec3::from(g.0.matrix3.y_axis).normalize_or_zero(),
                 Vec3::from(g.0.matrix3.z_axis).normalize_or_zero(),
             );
-            let mut line = |a: Vec3, b: Vec3, camera: bool| {
+            let mut line = |a: Vec3, b: Vec3, reach: Reach| {
                 if let Some((a, b)) = segment_on_screen(&view, a, b) {
-                    self.reach_lines.push((a, b, camera));
+                    self.reach_lines.push((a, b, reach));
                 }
             };
             // A circle of `radius` about `center` across `u` and `v`.
@@ -6440,28 +6507,106 @@ impl Editor {
                           u: Vec3,
                           v: Vec3,
                           radius: f32,
-                          line: &mut dyn FnMut(Vec3, Vec3, bool)| {
+                          reach: Reach,
+                          line: &mut dyn FnMut(Vec3, Vec3, Reach)| {
                 const SEGMENTS: usize = 48;
                 let point = |k: usize| {
                     let t = k as f32 / SEGMENTS as f32 * core::f32::consts::TAU;
                     center + (u * t.cos() + v * t.sin()) * radius
                 };
                 for k in 0..SEGMENTS {
-                    line(point(k), point(k + 1), false);
+                    line(point(k), point(k + 1), reach);
+                }
+            };
+            // A sound's sphere as two rings: on the level plane through it, and its outline
+            // facing the camera (`docs/research/ux/sound.md`); every other piece left out
+            // when `dashed`.
+            let facing = (at - view.eye).normalize_or(view.forward);
+            let across = facing.cross(Vec3::Y).normalize_or(Vec3::X);
+            let upward = across.cross(facing);
+            let rings = |radius: f32,
+                         reach: Reach,
+                         dashed: bool,
+                         line: &mut dyn FnMut(Vec3, Vec3, Reach)| {
+                let mut piece = 0usize;
+                let mut dash = |a: Vec3, b: Vec3, reach: Reach| {
+                    if !dashed || piece.is_multiple_of(2) {
+                        line(a, b, reach);
+                    }
+                    piece += 1;
+                };
+                circle(at, Vec3::X, Vec3::Z, radius, reach, &mut dash);
+                circle(at, across, upward, radius, reach, &mut dash);
+            };
+            // A box about `center` along unit axes `axes`, of half sizes `half`; each edge in
+            // eight pieces, every other one drawn, when `dashed`.
+            let cuboid = |center: Vec3,
+                          axes: [Vec3; 3],
+                          half: Vec3,
+                          reach: Reach,
+                          dashed: bool,
+                          line: &mut dyn FnMut(Vec3, Vec3, Reach)| {
+                let corner = |k: usize| {
+                    let sign = |bit: usize| if k & bit == 0 { -1.0 } else { 1.0 };
+                    center
+                        + axes[0] * (half.x * sign(1))
+                        + axes[1] * (half.y * sign(2))
+                        + axes[2] * (half.z * sign(4))
+                };
+                for k in 0..8 {
+                    for bit in [1, 2, 4] {
+                        if k & bit != 0 {
+                            continue;
+                        }
+                        let (a, b) = (corner(k), corner(k | bit));
+                        if !dashed {
+                            line(a, b, reach);
+                            continue;
+                        }
+                        for p in (0..8).step_by(2) {
+                            line(
+                                a.lerp(b, p as f32 / 8.0),
+                                a.lerp(b, (p + 1) as f32 / 8.0),
+                                reach,
+                            );
+                        }
+                    }
                 }
             };
             if let Some(light) = world.get::<engine_runtime::PointLight>(e) {
                 for (u, v) in [(Vec3::X, Vec3::Y), (Vec3::Y, Vec3::Z), (Vec3::Z, Vec3::X)] {
-                    circle(at, u, v, light.range, &mut line);
+                    circle(at, u, v, light.range, Reach::Light, &mut line);
                 }
             } else if let Some(light) = world.get::<engine_runtime::SpotLight>(e) {
                 // Down its −Z: the cone's base where the range ends.
                 let (sin, cos) = light.outer.sin_cos();
                 let base = at - back * (light.range * cos);
                 let radius = light.range * sin;
-                circle(base, right, up, radius, &mut line);
+                circle(base, right, up, radius, Reach::Light, &mut line);
                 for dir in [right, -right, up, -up] {
-                    line(at, base + dir * radius, false);
+                    line(at, base + dir * radius, Reach::Light);
+                }
+            } else if let Some(sound) = world.get::<AudioSource3D>(e) {
+                // Full volume inside the first (ADR 0105). The falloff ends at the second:
+                // dashed where the sound holds its level beyond it (`Inverse`), solid where
+                // it falls silent there (`Linear`).
+                let holds = sound.falloff == engine_app::Falloff::Inverse;
+                rings(sound.min_distance, Reach::Sound, false, &mut line);
+                rings(sound.max_distance, Reach::SoundFar, holds, &mut line);
+            } else if let Some(zone) = world.get::<ReverbZone>(e) {
+                // The box in its entity's space (turned and scaled), then `fade` metres out.
+                let m = g.0.matrix3;
+                let lengths = Vec3::new(
+                    Vec3::from(m.x_axis).length(),
+                    Vec3::from(m.y_axis).length(),
+                    Vec3::from(m.z_axis).length(),
+                );
+                let half = zone.half_extents.abs() * lengths;
+                let axes = [right, up, back];
+                cuboid(at, axes, half, Reach::Zone, false, &mut line);
+                if zone.fade > 0.0 {
+                    let out = half + Vec3::splat(zone.fade);
+                    cuboid(at, axes, out, Reach::ZoneFade, true, &mut line);
                 }
             } else if let Some(camera) = world.get::<engine_runtime::Camera>(e) {
                 let aspect = rect[2] as f32 / rect[3].max(1) as f32;
@@ -6478,12 +6623,12 @@ impl Editor {
                 };
                 let (near, far) = (corners(camera.near), corners(CAMERA_REACH.min(camera.far)));
                 for k in 0..4 {
-                    line(near[k], near[(k + 1) % 4], true);
-                    line(far[k], far[(k + 1) % 4], true);
-                    line(near[k], far[k], true);
+                    line(near[k], near[(k + 1) % 4], Reach::Camera);
+                    line(far[k], far[(k + 1) % 4], Reach::Camera);
+                    line(near[k], far[k], Reach::Camera);
                 }
             } else if world.get::<engine_runtime::Sun>(e).is_some() {
-                line(at, at - back * SUN_REACH, false);
+                line(at, at - back * SUN_REACH, Reach::Light);
             }
         }
     }
@@ -7622,7 +7767,7 @@ impl Editor {
         let at = (self.orbit.target / step).round() * step;
         let kind = ADD[what].0;
         self.history.begin(&format!("Add {kind}"), None);
-        let e = if what >= FIRST_BRUSH {
+        let e = if ADD_BLOCKOUT.contains(&what) {
             let host = self
                 .active()
                 .filter(|&b| world.get::<Brush>(b).is_some() && baked_group(world, b).is_none());
@@ -16887,13 +17032,8 @@ fn draw_overlays(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, can
     let scale = editor.scale.max(0.5);
     canvas.set_clip(Some(clip_of(rect)));
     let order = Order::layer(-1);
-    for &(a, b, camera) in &editor.reach_lines {
-        let color = if camera {
-            Vec4::new(0.55, 0.75, 1.0, 0.8)
-        } else {
-            Vec4::new(1.0, 0.85, 0.45, 0.8)
-        };
-        canvas.draw(&Quad::line(a, b, scale).color(color).order(order));
+    for &(a, b, reach) in &editor.reach_lines {
+        canvas.draw(&Quad::line(a, b, scale).color(reach.color()).order(order));
     }
     let active = editor.active();
     for icon in &editor.view_icons {
@@ -24617,6 +24757,39 @@ return Coin
     }
 
     #[test]
+    fn the_add_menu_adds_sounds_a_reverb_zone_and_a_listener() {
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder("add-sound"),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        let kinds = ["Sound", "Sound", "Listener", "Reverb zone"];
+        let mut added = Vec::new();
+        for (what, kind) in ADD_SOUND.into_iter().zip(kinds) {
+            ed.add(&mut world, what);
+            let e = ed.active().unwrap();
+            assert_eq!(kind_of(&world, e).1, kind, "{}", ADD[what].0);
+            assert_eq!(world.get::<Name>(e).unwrap().as_str(), ADD[what].0);
+            added.push(e);
+        }
+        let sound = added[1];
+        assert!(world.get::<AudioSource3D>(sound).is_some());
+        // One step each: undone, they go.
+        let listener = added[2];
+        assert!(world.get::<AudioListener>(listener).is_some());
+        let undo = ed.ids.undo;
+        for _ in 0..ADD_SOUND.len() {
+            ed.run(&mut world, undo);
+        }
+        assert!(!world.contains(sound) && !world.contains(listener));
+    }
+
+    #[test]
     fn the_selected_lights_and_cameras_show_their_reach() {
         let mut world = World::new();
         let point = thing_at(
@@ -24648,15 +24821,44 @@ return Coin
         ed.update(&mut world);
         ed.update(&mut world);
         assert!(ed.reach_lines.is_empty(), "nothing selected");
-        for (e, lines, of_camera) in [
-            (point, 3 * 48, false),
-            (spot, 48 + 4, false),
-            (camera, 12, true),
+        // Sounds (ADR 0107 E11-4a): a source's two distances as two rings each, the far one
+        // dashed where the sound holds beyond it; a zone's box, its fade dashed.
+        let sound = thing_at(
+            &mut world,
+            "Engine hum",
+            Vec3::new(0.0, 1.0, -3.0),
+            AudioSource3D::new("sfx/hum.wav").within(1.0, 2.5),
+        );
+        let zone = thing_at(
+            &mut world,
+            "Cave",
+            Vec3::new(0.0, 0.0, -8.0),
+            ReverbZone::default(),
+        );
+        let listener = thing_at(&mut world, "Ears", Vec3::new(0.5, 1.5, 2.0), AudioListener);
+        ed.update(&mut world);
+        for e in [sound, zone, listener] {
+            assert!(icon_of(&world, e).is_some(), "{:?}", world.get::<Name>(e));
+        }
+        assert_eq!(kind_of(&world, zone), (icons::REVERB, "Reverb zone"));
+        for (e, expected) in [
+            (point, vec![(Reach::Light, 3 * 48)]),
+            (spot, vec![(Reach::Light, 48 + 4)]),
+            (camera, vec![(Reach::Camera, 12)]),
+            (sound, vec![(Reach::Sound, 2 * 48), (Reach::SoundFar, 48)]),
+            (zone, vec![(Reach::Zone, 12), (Reach::ZoneFade, 12 * 4)]),
+            (listener, vec![]),
         ] {
             ed.selection = vec![e];
             ed.update(&mut world);
-            assert_eq!(ed.reach_lines.len(), lines, "{:?}", world.get::<Name>(e));
-            assert!(ed.reach_lines.iter().all(|l| l.2 == of_camera));
+            let mut seen: Vec<(Reach, usize)> = Vec::new();
+            for &(_, _, reach) in &ed.reach_lines {
+                match seen.iter_mut().find(|(r, _)| *r == reach) {
+                    Some((_, n)) => *n += 1,
+                    None => seen.push((reach, 1)),
+                }
+            }
+            assert_eq!(seen, expected, "{:?}", world.get::<Name>(e));
         }
         // The session keeps the overlays off.
         let dir = project("overlays-kept");
