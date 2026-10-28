@@ -90,6 +90,7 @@ use crate::transform::{self, KeyTransform};
 use crate::undo::{PlayChange, PlayMark, WorldSnapshot};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
 use core::any::TypeId;
+use engine_app::scripts::Resume;
 use engine_app::{
     AppError, AssetMeta, Brush, BrushGroup, BrushOp, BrushShape, ColliderState, Game, Model,
     ModelCollider, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup, Window,
@@ -296,6 +297,8 @@ fn run_inner<G: Game>(
         settings.window_placement = Some(placement);
     }
     settings.start_hidden = restarted.is_some();
+    // The game's scripts compiled to be debugged: a step follows their text (ADR 0119).
+    settings.debuggable_scripts = true;
     let mut player = Player::new(&settings)?;
     let (mut game, mut overlay) = editor(&mut player, &settings, start)?;
     // The scene's unsaved changes from the last run, back (ADR 0107 §4).
@@ -719,6 +722,11 @@ struct CommandIds {
     /// Keeping changes made while playing (E3-3).
     keep: CommandId,
     keep_list: CommandId,
+    /// A stopped script's steps (ADR 0119 E9-1b-2): over a call, into it, out of the
+    /// function.
+    step_over: CommandId,
+    step_into: CommandId,
+    step_out: CommandId,
     find_references: CommandId,
     /// Prefabs (E5-2): the selection made a prefab's instance, an instance unpacked.
     make_prefab: CommandId,
@@ -861,6 +869,9 @@ fn commands() -> (Commands, CommandIds) {
         ),
         keep: c.register("play.keep", "Play", "Keep the Selection's Changes"),
         keep_list: c.register("play.keep_list", "Play", "Keep Changes…"),
+        step_over: c.register("debug.step_over", "Debug", "Step Over"),
+        step_into: c.register("debug.step_into", "Debug", "Step Into"),
+        step_out: c.register("debug.step_out", "Debug", "Step Out"),
         find_references: c.register("assets.references", "Assets", "Find References"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
         unpack_prefab: c.register("scene.unpack_prefab", "Scene", "Unpack Prefab"),
@@ -1007,6 +1018,10 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         // Unreal's K, with Ctrl: plain letters are the game's while it plays.
         ("Ctrl+K", ids.keep),
         ("Ctrl+Shift+K", ids.keep_list),
+        // VS Code's, Visual Studio's and Roblox's steps, at a script's stop (ADR 0119).
+        ("F10", ids.step_over),
+        ("F11", ids.step_into),
+        ("Shift+F11", ids.step_out),
         ("Shift+F12", ids.find_references),
     ];
     // The transforms and the tools (`docs/research/ux/viewport-tools.md` §2):
@@ -2901,6 +2916,15 @@ impl Editor {
                         match virtual_key {
                             0x70 if self.view_shift => self.toggle_game_mouse(),
                             0x74 => self.play_request = Some(PlayRequest::Continue),
+                            0x79 => {
+                                self.play_request = Some(PlayRequest::ScriptStep(Resume::StepOver));
+                            }
+                            0x7A if self.view_shift => {
+                                self.play_request = Some(PlayRequest::ScriptStep(Resume::StepOut));
+                            }
+                            0x7A => {
+                                self.play_request = Some(PlayRequest::ScriptStep(Resume::StepInto));
+                            }
                             0x76 => self.play_request = Some(PlayRequest::Pause),
                             0x77 => self.play_request = Some(PlayRequest::Stop),
                             _ => {}
@@ -8052,6 +8076,9 @@ impl Editor {
             ids.step,
             ids.eject,
             ids.game_mouse,
+            ids.step_over,
+            ids.step_into,
+            ids.step_out,
             ids.code_find,
             ids.code_replace,
             ids.find_next,
@@ -9409,8 +9436,8 @@ impl Editor {
 
     /// Where a script stopped in Play (ADR 0119 E9-1b), once a frame: a new stop brings its
     /// script to the front at the line, frees the mouse and says where; its end says so.
-    fn stop_frame(&mut self, world: &World, stopped: Option<&engine_app::scripts::Stopped>) {
-        let Some(stopped) = stopped else {
+    fn stop_frame(&mut self, world: &World, stopped: Option<(&engine_app::scripts::Stopped, u64)>) {
+        let Some((stopped, count)) = stopped else {
             if let Some(stop) = self.stop.take() {
                 if stop.mouse {
                     self.set_game_mouse(true);
@@ -9421,8 +9448,7 @@ impl Editor {
             }
             return;
         };
-        let at = (stopped.module.clone(), stopped.line);
-        if self.stop.as_ref().is_some_and(|s| s.at == at) {
+        if self.stop.as_ref().is_some_and(|s| s.count == count) {
             return;
         }
         let file = PathBuf::from(engine_app::scripts::module_file(&stopped.module));
@@ -9438,7 +9464,11 @@ impl Editor {
             }
             let _ = write!(values, "{} = {}", v.name, v.value);
         }
-        let mouse = self.play.as_ref().is_some_and(|p| p.mouse);
+        // A step's next stop keeps the mouse as the first stop found it.
+        let mouse = match &self.stop {
+            Some(stop) => stop.mouse,
+            None => self.play.as_ref().is_some_and(|p| p.mouse),
+        };
         self.set_game_mouse(false);
         let line = stopped.line.saturating_sub(1) as usize;
         let shown = file.to_string_lossy().replace('\\', "/");
@@ -9448,17 +9478,19 @@ impl Editor {
             .and_then(|f| f.function.as_deref())
             .map_or_else(String::new, |f| format!(" in {f}"));
         self.stop = Some(StopShown {
-            at,
+            count,
             file: file.clone(),
             line,
             values,
             mouse,
         });
         self.open_script(world, &file, Some((line + 1, 1)));
-        self.say(format!(
-            "Stopped at {shown}:{}{hook}: F5 goes on, F8 stops",
-            line + 1
-        ));
+        let keys = if stopped.steppable {
+            "F10 steps over, F11 into, Shift+F11 out, F5 goes on, F8 stops"
+        } else {
+            "F5 goes on, F8 stops (no steps here: a call from C code)"
+        };
+        self.say(format!("Stopped at {shown}:{}{hook}: {keys}", line + 1));
     }
 
     /// Script `path` (relative to the project) to run again at the player's next frame.
@@ -11000,6 +11032,15 @@ impl Editor {
             } else {
                 "Play shows the game in the viewport"
             }));
+        } else if id == ids.step_over || id == ids.step_into || id == ids.step_out {
+            let how = if id == ids.step_over {
+                Resume::StepOver
+            } else if id == ids.step_into {
+                Resume::StepInto
+            } else {
+                Resume::StepOut
+            };
+            self.play_request = Some(PlayRequest::ScriptStep(how));
         } else if id == ids.keep {
             self.keep_selection(world);
         } else if id == ids.keep_list {
@@ -14688,6 +14729,20 @@ impl<G> EditorGame<G> {
                 self.end_play(player, None);
                 self.begin_play(player, from_here);
             }
+            // F10, F11, Shift+F11: a stopped script's step, where it can step.
+            Some((PlayRequest::ScriptStep(how), _)) => {
+                let mut shared = self.shared.borrow_mut();
+                match player.script_stop().map(|s| s.steppable) {
+                    Some(true) => player.step_script(how),
+                    Some(false) => shared.say(String::from(
+                        "This stop cannot be stepped from: it is in a call from the engine's \
+                         or a library's C code (a sort's comparison, a metamethod); F5 goes on",
+                    )),
+                    None => shared.say(String::from(
+                        "No script is stopped: F9 sets a breakpoint in a script's tab",
+                    )),
+                }
+            }
             // F5 while playing: a stopped script goes on, else a paused game.
             Some((PlayRequest::Continue, _)) => {
                 let mut shared = self.shared.borrow_mut();
@@ -14726,7 +14781,8 @@ impl<G> EditorGame<G> {
         // A script stopped at a breakpoint, or gone on (ADR 0119 E9-1b).
         {
             let mut shared = self.shared.borrow_mut();
-            shared.stop_frame(&player.runtime().world, player.script_stop());
+            let stopped = player.script_stop().map(|s| (s, player.script_stops()));
+            shared.stop_frame(&player.runtime().world, stopped);
         }
         // A pause point reached (ADR 0119): the player kept the world still after its
         // tick, and Play is paused as F7 pauses it.
@@ -16217,14 +16273,16 @@ enum PlayRequest {
     Pause,
     /// Go on: a stopped script, else a paused game (F5 while playing).
     Continue,
+    /// A stopped script's step (F10, F11, Shift+F11).
+    ScriptStep(Resume),
     /// One tick while paused (pausing first).
     Step,
 }
 
 /// Where a script stopped in Play (ADR 0119 E9-1b), as the editor shows it.
 struct StopShown {
-    /// The stop's module and line, as the host gives them: a new stop is another.
-    at: (String, u32),
+    /// The stop's number ([`Player::script_stops`]): a step's next stop is another.
+    count: u64,
     /// Its script's file, relative to the project.
     file: PathBuf,
     /// Its line (from 0) in the script's text as last saved, the code that runs.

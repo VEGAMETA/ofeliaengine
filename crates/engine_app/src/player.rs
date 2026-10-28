@@ -1247,7 +1247,8 @@ impl Player {
             let folder = project.join("scripts");
             if folder.is_dir() {
                 let world = &mut player.runtime.world;
-                match crate::scripts::Scripts::load(world, project, &folder) {
+                let script_settings = player.settings.script_settings();
+                match crate::scripts::Scripts::load_with(world, project, &folder, script_settings) {
                     Ok(scripts) => player.scripts = Some(Box::new(scripts)),
                     Err(e) => {
                         log::error!(target: "script", "the scripts' VM: {e}");
@@ -1578,6 +1579,9 @@ impl Player {
         if !on {
             self.end_script_stop();
             self.script_debug = None;
+            if let Some(scripts) = self.scripts.as_deref() {
+                scripts.set_debugging(false);
+            }
         }
     }
 
@@ -1587,10 +1591,23 @@ impl Player {
         Some(&held.at)
     }
 
+    /// How many times scripts stopped since debugging began: a step's next stop is a new
+    /// one, at the same line or not.
+    pub fn script_stops(&self) -> u64 {
+        self.script_debug.as_ref().map_or(0, |d| d.stops)
+    }
+
     /// The stopped stage goes on at the next frame, and the rest of its tick after it.
     pub fn continue_script(&mut self) {
+        self.step_script(engine_script::Resume::Continue);
+    }
+
+    /// The stopped script goes on at the next frame as `how` says: on, or a step to the next
+    /// line (over a call, into it, or out of the function; ADR 0119 E9-1b-2). A stop that
+    /// cannot be stepped from ([`engine_script::Stopped::steppable`]) goes on.
+    pub fn step_script(&mut self, how: engine_script::Resume) {
         if let Some(held) = self.script_debug.as_mut().and_then(|d| d.held.as_mut()) {
-            held.answer = Some(engine_script::Resume::Continue);
+            held.answer = Some(how);
         }
     }
 
@@ -1617,7 +1634,11 @@ impl Player {
             return;
         };
         match crate::script_debug::ScriptDebug::new(scripts) {
-            Ok(debug) => self.script_debug = Some(debug),
+            Ok(debug) => {
+                // Hooks on the debugger's thread, so its stops can be stepped from.
+                scripts.set_debugging(true);
+                self.script_debug = Some(debug);
+            }
             Err(e) => {
                 log::error!(target: "script", "the script debugger's fiber: {e}");
                 self.script_debugging = false;
@@ -1673,7 +1694,8 @@ impl Player {
         let folder = project.join("scripts");
         if self.scripts.is_none() {
             let world = &mut self.runtime.world;
-            let scripts = crate::scripts::Scripts::load(world, &project, &folder)
+            let settings = self.settings.script_settings();
+            let scripts = crate::scripts::Scripts::load_with(world, &project, &folder, settings)
                 .map_err(|e| e.to_string())?;
             self.scripts = Some(Box::new(scripts));
             // The project's first script: the host made now loads every file, this one too.

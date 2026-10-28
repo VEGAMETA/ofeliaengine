@@ -657,7 +657,13 @@ pub(crate) unsafe fn install(state: *mut ffi::lua_State) {
         for (tag, name, functions) in methods {
             ffi::lua_createtable(state, 0, 4);
             for &(key, f) in functions {
-                ffi::lua_pushcfunctiond(state, f, key.as_ptr());
+                // `self:open()` calls the script's `Door.open`: with a continuation, a stop
+                // in it can be stepped from (Luau can break out across the call).
+                if tag == TAG_SELF && key == c"__namecall" {
+                    ffi::lua_pushcclosurek(state, f, key.as_ptr(), 0, Some(namecall_cont));
+                } else {
+                    ffi::lua_pushcfunctiond(state, f, key.as_ptr());
+                }
                 ffi::lua_rawsetfield(state, -2, key.as_ptr());
             }
             ffi::lua_pushstring(state, name.as_ptr());
@@ -1756,6 +1762,11 @@ unsafe fn entity_method(
                 ffi::lua_insert(state, 1);
                 let args = ffi::lua_gettop(state) - 1;
                 ffi::lua_call(state, args, ffi::LUA_MULTRET);
+                // The script debugger broke out of the method (a step, ADR 0119): `self`'s
+                // `__namecall` has a continuation, which returns its results when resumed.
+                if ffi::lua_status(state) != ffi::LUA_OK {
+                    return -1;
+                }
                 return ffi::lua_gettop(state);
             }
             ffi::lua_pop(state, 2);
@@ -1790,6 +1801,13 @@ unsafe extern "C-unwind" fn entity_namecall(state: *mut ffi::lua_State) -> c_int
 }
 
 /// `self:method(…)`: its entity's methods, then its component's own functions.
+/// `self`'s `__namecall` resumed after the script debugger broke out of the method it
+/// called (ADR 0119): the method's results, on the stack, are the call's.
+unsafe extern "C-unwind" fn namecall_cont(state: *mut ffi::lua_State, _status: c_int) -> c_int {
+    // SAFETY: Luau calls it with the frame of the `__namecall` it resumes.
+    unsafe { ffi::lua_gettop(state) }
+}
+
 unsafe extern "C-unwind" fn self_namecall(state: *mut ffi::lua_State) -> c_int {
     // SAFETY: as `entity_namecall`, for `self`.
     unsafe {

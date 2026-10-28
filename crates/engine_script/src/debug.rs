@@ -15,6 +15,13 @@
 //!     handler gives the thread back to the editor (ADR 0119). The call's time budget is
 //!     held meanwhile. [`Resume::Abort`] ends the call with an error raised once the
 //!     callback's own frames are done. Where the host cannot wait, a stop is a pause point.
+//! - **Steps** (E9-1b-2): while debugging, hooks run on a thread of their own, resumed
+//!   rather than called ([`crate::ScriptVm::set_debugging`]). A step from a stop on it turns
+//!   Luau's single-stepping on and breaks out of the interpreter (`lua_break`), which the
+//!   host resumes at once, now in the stepping loop: [`debugstep`] runs before every
+//!   instruction and stops at the step's line. Continue turns it off the same way. A stop
+//!   where Luau cannot yield (under a C function without a continuation: a sort's
+//!   comparison, a metamethod written in Luau) cannot be stepped from ([`Stopped::steppable`]).
 //! - **Evaluation:** a condition or a text is compiled once into a function whose
 //!   parameters are the frame's locals and its function's upvalues, by name, with the
 //!   module's globals as its environment. Each hit passes the values. Breakpoints reached
@@ -42,6 +49,24 @@ thread_local! {
     /// ([`ScriptDebugger::end_abort`]): later stops answer it too, without the handler, and
     /// calls into scripts fail at once, so the host's stage runs out fast.
     static ABORTING: Cell<bool> = const { Cell::new(false) };
+    /// The debugger broke out of the interpreter at a breakpoint (to enter or leave the
+    /// stepping loop): the resume runs its BREAK again, which is passed once.
+    static PASS_BREAK: Cell<bool> = const { Cell::new(false) };
+    /// Calls made on the hook thread: a step past its hook's end stops in the next one.
+    static HOOK_CALLS: Cell<u64> = const { Cell::new(0) };
+    /// Hooks go through the hook thread: a breakpoint that stops is set, or a step is
+    /// under way. Without, they are called the plain way, a stop there not steppable.
+    static THREAD_WANTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether hooks go through the hook thread now ([`THREAD_WANTED`]).
+pub(crate) fn thread_wanted() -> bool {
+    THREAD_WANTED.get()
+}
+
+/// A hook begins on the hook thread ([`HOOK_CALLS`]).
+pub(crate) fn hook_called() {
+    HOOK_CALLS.set(HOOK_CALLS.get().wrapping_add(1));
 }
 
 /// Whether calls into scripts fail at once ([`ABORTING`]).
@@ -191,6 +216,10 @@ pub struct Stopped {
     pub upvalues: Vec<Variable>,
     /// The frames from the stopped one out to the host's call.
     pub stack: Vec<Frame>,
+    /// Whether the script can be stepped from here: it runs on the hook thread (the host
+    /// debugs), and no C function without a continuation lies between (a sort's
+    /// comparison, a metamethod written in Luau).
+    pub steppable: bool,
 }
 
 /// A named value, as text.
@@ -219,6 +248,12 @@ pub enum Resume {
     /// From where it stopped.
     #[default]
     Continue,
+    /// To the next line that runs, into a function the line calls (F11).
+    StepInto,
+    /// To the next line of this function, or of the one it returns to (F10).
+    StepOver,
+    /// To the line this function returns to (Shift+F11).
+    StepOut,
     /// The call into the script ends with [`crate::ScriptError::Aborted`] (Play stops). A
     /// `pcall` in the script catches it as any error.
     Abort,
@@ -266,6 +301,25 @@ pub(crate) struct Debugger {
     reached: Vec<(String, u32)>,
     /// What a stop calls; taken out while it runs.
     handler: Option<StopHandler>,
+    /// The thread hooks run on while debugging: a stop there can be stepped from.
+    hook_thread: Option<core::ptr::NonNull<ffi::lua_State>>,
+    /// Single-stepping is on for the hook thread.
+    single: bool,
+    /// The step under way, if one is.
+    step: Option<Step>,
+}
+
+/// A step asked for at a stop: how far it goes and where it began.
+#[derive(Clone, Copy)]
+struct Step {
+    how: Resume,
+    /// The stack's depth there.
+    depth: c_int,
+    /// The frame's source (a pointer Luau keeps) and line.
+    source: *const core::ffi::c_char,
+    line: c_int,
+    /// The hook call it began in ([`HOOK_CALLS`]).
+    call: u64,
 }
 
 impl Debugger {
@@ -290,7 +344,19 @@ impl Debugger {
         self.modules.insert(module.to_owned(), slots);
         self.forget_code(module);
         self.version += 1;
+        self.want_thread();
         lines
+    }
+
+    /// Hooks go through the hook thread where a stop could be stepped from
+    /// ([`THREAD_WANTED`]).
+    fn want_thread(&self) {
+        let stops = self
+            .modules
+            .values()
+            .flatten()
+            .any(|s| s.asked.enabled && s.asked.action == BreakAction::Stop);
+        THREAD_WANTED.set(self.hook_thread.is_some() && (stops || self.step.is_some()));
     }
 
     /// Every breakpoint's hits, message and error back to none (a new Play), where they
@@ -304,6 +370,14 @@ impl Debugger {
         }
         self.logged.clear();
         self.pause = None;
+        self.step = None;
+        if self.single
+            && let Some(thread) = self.hook_thread
+        {
+            // SAFETY: the hook thread, not running between two Plays.
+            unsafe { ffi::lua_singlestep(thread.as_ptr(), 0) };
+            self.single = false;
+        }
         self.version += 1;
     }
 
@@ -456,9 +530,33 @@ impl ScriptDebugger {
     }
 
     /// Calls into scripts run again after a stop answered [`Resume::Abort`]: the host's
-    /// stage ran out.
+    /// stage ran out. A step under way ends with it.
     pub fn end_abort(&self) {
         ABORTING.set(false);
+        PASS_BREAK.set(false);
+        self.with(Debugger::reset_step);
+    }
+}
+
+impl Debugger {
+    /// The hook thread from now on (none: hooks are called the plain way).
+    pub(crate) fn set_hook_thread(&mut self, thread: Option<core::ptr::NonNull<ffi::lua_State>>) {
+        self.reset_step();
+        self.hook_thread = thread;
+        self.want_thread();
+    }
+
+    /// No step under way, single-stepping off.
+    fn reset_step(&mut self) {
+        self.step = None;
+        if self.single
+            && let Some(thread) = self.hook_thread
+        {
+            // SAFETY: the hook thread; the flag is read at the interpreter's next entry.
+            unsafe { ffi::lua_singlestep(thread.as_ptr(), 0) };
+        }
+        self.single = false;
+        self.want_thread();
     }
 }
 
@@ -513,57 +611,175 @@ pub(crate) unsafe extern "C-unwind" fn debugbreak(
     state: *mut ffi::lua_State,
     _: *mut ffi::lua_Debug,
 ) {
+    // Its instruction may write its own opcode back over the breakpoint as it goes on,
+    // once this returns: placed again at the next interrupt (`REARM`), not at one of the
+    // evaluations' interrupts below.
+    if PASS_BREAK.replace(false) {
+        REARM.set(true);
+        return;
+    }
     let evaluating = EVALUATING.get();
     // A panic never crosses Luau's frames: the breakpoint is passed over then.
     // SAFETY: as the caller says.
-    let abort = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+    let then = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         reached(state, evaluating)
     }))
-    .unwrap_or(false);
-    // Its instruction may write its own opcode back over the breakpoint as it goes on,
-    // once this returns: placed again at the next interrupt (`REARM`), not at one of the
-    // evaluations' interrupts above.
+    .unwrap_or(Then::Go);
     REARM.set(true);
-    if abort {
-        // SAFETY: Luau's callbacks may raise; nothing with a destructor is alive in this
-        // frame.
+    if then == Then::Break {
+        PASS_BREAK.set(true);
+    }
+    // SAFETY: as the caller says.
+    unsafe { then.apply(state) };
+}
+
+/// Luau's step callback, before each instruction of a single-stepping thread: the step
+/// under way stops where it reaches its line.
+///
+/// # Safety
+///
+/// Luau calls it with a running thread in its stepping loop.
+pub(crate) unsafe extern "C-unwind" fn debugstep(
+    state: *mut ffi::lua_State,
+    _: *mut ffi::lua_Debug,
+) {
+    if EVALUATING.get() {
+        return;
+    }
+    // SAFETY: as the caller says.
+    let then = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { stepped(state) }))
+        .unwrap_or(Then::Go);
+    // SAFETY: as the caller says.
+    unsafe { then.apply(state) };
+}
+
+/// What a callback does once its own frames are done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Then {
+    /// The script goes on.
+    Go,
+    /// It breaks out of the interpreter, which the host resumes at once: to enter or to
+    /// leave the stepping loop.
+    Break,
+    /// The call ends with [`crate::ScriptError::Aborted`].
+    Abort,
+}
+
+impl Then {
+    /// # Safety
+    ///
+    /// `state` is the thread in Luau's callback; nothing with a destructor is alive in the
+    /// caller's frame (an abort raises, a break may not be legal elsewhere but where it was
+    /// checked).
+    unsafe fn apply(self, state: *mut ffi::lua_State) {
+        // SAFETY: as the caller says.
         unsafe {
-            ffi::lua_pushlstring_(
-                state,
-                crate::ABORT_MARKER.as_ptr().cast(),
-                crate::ABORT_MARKER.len(),
-            );
-            ffi::lua_error(state);
+            match self {
+                Self::Go => {}
+                Self::Break => {
+                    ffi::lua_break(state);
+                }
+                Self::Abort => {
+                    ffi::lua_pushlstring_(
+                        state,
+                        crate::ABORT_MARKER.as_ptr().cast(),
+                        crate::ABORT_MARKER.len(),
+                    );
+                    ffi::lua_error(state);
+                }
+            }
         }
+    }
+}
+
+/// [`debugstep`]'s body: whether the step under way has reached its line, and if so the
+/// stop there.
+///
+/// # Safety
+///
+/// As [`debugstep`]'s.
+unsafe fn stepped(state: *mut ffi::lua_State) -> Then {
+    // SAFETY: as the caller says; `ar` is filled for the running frame, its source a C
+    // string Luau keeps.
+    unsafe {
+        let lua = Lua::get_or_init_from_ptr(state);
+        if !step_due(state, lua) {
+            return Then::Go;
+        }
+        let mut ar: ffi::lua_Debug = core::mem::zeroed();
+        ffi::lua_getinfo(state, 0, c"sl".as_ptr(), &mut ar);
+        let source = CStr::from_ptr(ar.source).to_string_lossy();
+        let (Some(module), Ok(line)) = (source.strip_prefix('='), u32::try_from(ar.currentline))
+        else {
+            return Then::Go;
+        };
+        stop_at(state, lua, module, line)
+    }
+}
+
+/// Whether the step under way stops where `state` is now: over a call at the same depth
+/// once the line moved, into anything once it moved or the depth changed, out once the
+/// depth dropped; in a later hook call, at once.
+///
+/// # Safety
+///
+/// `state` is a running thread inside one of Luau's debug callbacks.
+unsafe fn step_due(state: *mut ffi::lua_State, lua: &Lua) -> bool {
+    let (step, ours) = match lua.app_data_ref::<Debugger>() {
+        Some(d) => (
+            d.step,
+            d.hook_thread.map(core::ptr::NonNull::as_ptr) == Some(state),
+        ),
+        None => return false,
+    };
+    // A coroutine made while stepping copies the flag: it goes on.
+    let (Some(step), true) = (step, ours) else {
+        return false;
+    };
+    // SAFETY: as the caller says.
+    unsafe {
+        let depth = ffi::lua_stackdepth(state);
+        let mut ar: ffi::lua_Debug = core::mem::zeroed();
+        if ffi::lua_getinfo(state, 0, c"sl".as_ptr(), &mut ar) == 0 || ar.source.is_null() {
+            return false;
+        }
+        let later = HOOK_CALLS.get() != step.call;
+        let moved = ar.source != step.source || ar.currentline != step.line;
+        later
+            || match step.how {
+                Resume::StepInto => moved || depth != step.depth,
+                Resume::StepOver => depth < step.depth || (depth == step.depth && moved),
+                Resume::StepOut => depth < step.depth,
+                Resume::Continue | Resume::Abort => false,
+            }
     }
 }
 
 /// [`debugbreak`]'s body: the line reached noted for [`rearm`], then, unless one of
 /// the debugger's own evaluations reached it (`evaluating`), what its breakpoints do.
-/// Whether the call is to be aborted ([`Resume::Abort`]).
 ///
 /// # Safety
 ///
 /// As [`debugbreak`]'s.
-unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) -> bool {
+unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) -> Then {
     // SAFETY: as the caller says; `ar` is filled by `lua_getinfo` for the running frame,
     // its source a C string Luau keeps.
     unsafe {
         let mut ar: ffi::lua_Debug = core::mem::zeroed();
         if ffi::lua_getinfo(state, 0, c"sl".as_ptr(), &mut ar) == 0 || ar.source.is_null() {
-            return false;
+            return Then::Go;
         }
         let source = CStr::from_ptr(ar.source).to_string_lossy();
         let Some(module) = source.strip_prefix('=') else {
-            return false;
+            return Then::Go;
         };
         let Ok(line) = u32::try_from(ar.currentline) else {
-            return false;
+            return Then::Go;
         };
         let lua = Lua::get_or_init_from_ptr(state);
         let asks: Vec<Ask> = {
             let Some(mut dbg) = lua.app_data_mut::<Debugger>() else {
-                return false;
+                return Then::Go;
             };
             for id in dbg.dropped.drain(..) {
                 ffi::lua_unref(state, id);
@@ -572,10 +788,10 @@ unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) -> bool {
                 dbg.reached.push((module.to_owned(), line));
             }
             if evaluating {
-                return false;
+                return Then::Go;
             }
             let Some(slots) = dbg.modules.get(module) else {
-                return false;
+                return Then::Go;
             };
             slots
                 .iter()
@@ -602,7 +818,7 @@ unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) -> bool {
             }
             let admitted = {
                 let Some(mut dbg) = lua.app_data_mut::<Debugger>() else {
-                    return false;
+                    return Then::Go;
                 };
                 let Some(s) = dbg
                     .modules
@@ -647,8 +863,14 @@ unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) -> bool {
                 BreakAction::Stop => stop = true,
             }
         }
-        // After the line's logpoints, once however many stops it has.
-        stop && stop_at(state, lua, module, line)
+        // After the line's logpoints, once however many stops it has; or where a step
+        // reaches a breakpoint's line (its first instruction is the breakpoint, which the
+        // stepping loop does not step).
+        if stop || step_due(state, lua) {
+            stop_at(state, lua, module, line)
+        } else {
+            Then::Go
+        }
     }
 }
 
@@ -662,15 +884,14 @@ fn ask_pause(lua: &Lua, module: &str, line: u32) {
 }
 
 /// A stop acted on at `module`'s `line`: the host's handler waits, the call's time budget
-/// held meanwhile; a pause after the tick where it cannot. Whether the call is to be
-/// aborted.
+/// held meanwhile; a pause after the tick where it cannot. What the callback does then.
 ///
 /// # Safety
 ///
 /// As [`debugbreak`]'s.
-unsafe fn stop_at(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32) -> bool {
+unsafe fn stop_at(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32) -> Then {
     if ABORTING.get() {
-        return true;
+        return Then::Abort;
     }
     // Out of the state while it runs: the editor's frames meanwhile read and set
     // breakpoints.
@@ -679,7 +900,7 @@ unsafe fn stop_at(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32
         .and_then(|mut d| d.handler.take());
     let resume = handler.and_then(|mut handler| {
         // SAFETY: as the caller says.
-        let stopped = unsafe { describe(state, module, line) };
+        let stopped = unsafe { describe(state, lua, module, line) };
         let held = crate::hold_budget();
         let resume = handler(&stopped);
         crate::release_budget(held);
@@ -690,16 +911,93 @@ unsafe fn stop_at(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32
         }
         resume
     });
-    match resume {
-        Some(Resume::Abort) => {
-            ABORTING.set(true);
-            true
+    // SAFETY: as the caller says.
+    unsafe {
+        match resume {
+            Some(Resume::Abort) => {
+                ABORTING.set(true);
+                if let Some(mut d) = lua.app_data_mut::<Debugger>() {
+                    d.reset_step();
+                }
+                Then::Abort
+            }
+            Some(Resume::Continue) => end_steps(state, lua),
+            Some(how) => step_from(state, lua, how),
+            None => {
+                ask_pause(lua, module, line);
+                end_steps(state, lua)
+            }
         }
-        Some(Resume::Continue) => false,
-        None => {
-            ask_pause(lua, module, line);
-            false
+    }
+}
+
+/// Whether the script stopped on `state` can be stepped from there.
+///
+/// # Safety
+///
+/// `state` is a running thread.
+unsafe fn steppable(state: *mut ffi::lua_State, lua: &Lua) -> bool {
+    let ours = lua
+        .app_data_ref::<Debugger>()
+        .and_then(|d| d.hook_thread)
+        .is_some_and(|t| t.as_ptr() == state);
+    // SAFETY: as the caller says.
+    ours && unsafe { ffi::lua_isyieldable(state) } != 0
+}
+
+/// The script goes on with no step: single-stepping off, and out of the stepping loop
+/// where Luau can break.
+///
+/// # Safety
+///
+/// As [`debugbreak`]'s.
+unsafe fn end_steps(state: *mut ffi::lua_State, lua: &Lua) -> Then {
+    let was = lua.app_data_mut::<Debugger>().is_some_and(|mut d| {
+        let was = d.single;
+        d.reset_step();
+        was
+    });
+    // SAFETY: as the caller says.
+    if was && unsafe { steppable(state, lua) } {
+        Then::Break
+    } else {
+        Then::Go
+    }
+}
+
+/// A step from the stop on `state`, `how` far: single-stepping on, and into the stepping
+/// loop at the next resume. Where it cannot step, the script goes on.
+///
+/// # Safety
+///
+/// As [`debugbreak`]'s.
+unsafe fn step_from(state: *mut ffi::lua_State, lua: &Lua, how: Resume) -> Then {
+    // SAFETY: as the caller says.
+    unsafe {
+        if !steppable(state, lua) {
+            return end_steps(state, lua);
         }
+        let mut ar: ffi::lua_Debug = core::mem::zeroed();
+        ffi::lua_getinfo(state, 0, c"sl".as_ptr(), &mut ar);
+        let step = Step {
+            how,
+            depth: ffi::lua_stackdepth(state),
+            source: ar.source,
+            line: ar.currentline,
+            call: HOOK_CALLS.get(),
+        };
+        let Some(mut d) = lua.app_data_mut::<Debugger>() else {
+            return Then::Go;
+        };
+        d.step = Some(step);
+        d.want_thread();
+        if d.single {
+            // In the stepping loop already: it goes on there.
+            return Then::Go;
+        }
+        d.single = true;
+        ffi::lua_singlestep(state, 1);
+        Then::Break
     }
 }
 
@@ -709,13 +1007,15 @@ unsafe fn stop_at(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32
 /// # Safety
 ///
 /// `state` is a running thread inside Luau's breakpoint callback.
-unsafe fn describe(state: *mut ffi::lua_State, module: &str, line: u32) -> Stopped {
+unsafe fn describe(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32) -> Stopped {
     let mut stopped = Stopped {
         module: module.to_owned(),
         line,
         locals: Vec::new(),
         upvalues: Vec::new(),
         stack: Vec::new(),
+        // SAFETY: as the caller says.
+        steppable: unsafe { steppable(state, lua) },
     };
     // SAFETY: as the caller says; each value pushed is read, then popped, and the stack is
     // put back as it was.
@@ -1030,6 +1330,7 @@ mod tests {
     use core::ffi::c_void;
     use engine_platform::fiber::{self, Fiber, Ran};
     use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use std::time::Duration;
 
     const DOOR: &str = "
@@ -1094,6 +1395,37 @@ return M
         // SAFETY: as above.
         let vm = unsafe { &*call.vm };
         call.result = Some(vm.call_function(call.module, &call.f, call.arg));
+    }
+
+    thread_local! {
+        /// Each stop's line and whether it could be stepped from, and the answers given in
+        /// turn (then Continue).
+        static SEEN: RefCell<Vec<(u32, bool)>> = const { RefCell::new(Vec::new()) };
+        static ANSWERS: RefCell<VecDeque<Resume>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    /// The stepping tests' host: notes each stop and answers the next answer.
+    fn answer_in_turn(stopped: &Stopped) -> Option<Resume> {
+        SEEN.with_borrow_mut(|s| s.push((stopped.line, stopped.steppable)));
+        if !fiber::suspend() {
+            return None;
+        }
+        Some(
+            ANSWERS
+                .with_borrow_mut(VecDeque::pop_front)
+                .unwrap_or_default(),
+        )
+    }
+
+    /// `call` run on `fiber` through every stop, answered in turn: its result.
+    fn run_through(fiber: &Fiber, c: &mut Call, answers: &[Resume]) -> Result<f64, ScriptError> {
+        ANSWERS.set(answers.iter().copied().collect());
+        // SAFETY: `c` and its VM outlive the job, only read meanwhile.
+        let mut ran = unsafe { fiber.run(call, core::ptr::from_mut(c).cast()) };
+        while ran == Ran::Suspended {
+            ran = fiber.resume();
+        }
+        c.result.take().unwrap()
     }
 
     fn named(variables: &[Variable]) -> Vec<(&str, &str)> {
@@ -1286,6 +1618,108 @@ return M
         ));
         vm.debugger().end_abort();
         assert_eq!(vm.call::<_, f64>("door", "tick", 5.0).unwrap(), 20.0);
+    }
+
+    const STEPS: &str = "
+local M = {}
+local function double(x)
+    local y = x * 2
+    return y
+end
+function M.tick(speed)
+    local a = speed + 1
+    local b = double(a)
+    local c = b + 1
+    return c
+end
+function M.sorted(n)
+    local t = {3, 1, 2}
+    table.sort(t, function(p, q)
+        return p < q
+    end)
+    return t[1] + n
+end
+return M
+";
+
+    #[test]
+    fn steps_go_over_into_and_out_and_past_the_hooks_end() {
+        // Level 1: `double` is called, not inlined into `tick`.
+        let settings = ScriptSettings {
+            optimization_level: 1,
+            ..ScriptSettings::default()
+        };
+        let mut vm = ScriptVm::new(settings).unwrap();
+        vm.load_module("steps", STEPS).unwrap();
+        vm.set_debugging(true);
+        vm.set_stop_handler(Some(Box::new(answer_in_turn)));
+        vm.set_breakpoints("steps", vec![stop(8)]);
+        let fiber = Fiber::new(1 << 20).unwrap();
+        let tick: mlua::Function = vm.exports("steps").unwrap().get("tick").unwrap();
+        let mut c = Call {
+            vm: &raw const vm,
+            module: "steps",
+            f: tick,
+            arg: 1.0,
+            result: None,
+        };
+        // Over to the next line, into `double`, over its line, out to the line after the
+        // call, over again; then on.
+        let answers = [
+            Resume::StepOver,
+            Resume::StepInto,
+            Resume::StepOver,
+            Resume::StepOut,
+            Resume::StepOver,
+        ];
+        SEEN.take();
+        assert_eq!(run_through(&fiber, &mut c, &answers), Ok(5.0));
+        let lines: Vec<u32> = SEEN.take().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(lines, [8, 9, 4, 5, 10, 11]);
+        // A step over the hook's last line: the next hook call stops at its first line.
+        vm.set_breakpoints("steps", vec![stop(11)]);
+        assert_eq!(run_through(&fiber, &mut c, &[Resume::StepOver]), Ok(5.0));
+        vm.set_breakpoints("steps", Vec::new());
+        assert_eq!(run_through(&fiber, &mut c, &[]), Ok(5.0));
+        let seen = SEEN.take();
+        assert_eq!(seen, [(11, true), (8, true)], "stopped in the next call");
+        // Nothing under way: the hooks run straight.
+        assert_eq!(run_through(&fiber, &mut c, &[]), Ok(5.0));
+        assert!(SEEN.take().is_empty());
+        // Debugging off: called the plain way, a stop there cannot be stepped from.
+        vm.set_debugging(false);
+        vm.set_breakpoints("steps", vec![stop(8)]);
+        assert_eq!(run_through(&fiber, &mut c, &[Resume::StepOver]), Ok(5.0));
+        assert_eq!(SEEN.take(), [(8, false)]);
+    }
+
+    #[test]
+    fn a_stop_under_a_c_function_cannot_be_stepped_from() {
+        let mut vm = ScriptVm::new(ScriptSettings::default()).unwrap();
+        vm.load_module("steps", STEPS).unwrap();
+        vm.set_debugging(true);
+        vm.set_stop_handler(Some(Box::new(answer_in_turn)));
+        // In `table.sort`'s comparison (its first): a step there goes on instead.
+        let mut first = stop(16);
+        first.hits = Hits::Nth(1);
+        vm.set_breakpoints("steps", vec![first, stop(18)]);
+        let fiber = Fiber::new(1 << 20).unwrap();
+        let sorted: mlua::Function = vm.exports("steps").unwrap().get("sorted").unwrap();
+        let mut c = Call {
+            vm: &raw const vm,
+            module: "steps",
+            f: sorted,
+            arg: 10.0,
+            result: None,
+        };
+        SEEN.take();
+        let answers = [Resume::StepOver, Resume::StepOver];
+        assert_eq!(run_through(&fiber, &mut c, &answers), Ok(11.0));
+        // Line 18 returns: the step goes on into the next call, whose first line stops.
+        assert_eq!(SEEN.take(), [(16, false), (18, true)]);
+        vm.set_breakpoints("steps", Vec::new());
+        assert_eq!(run_through(&fiber, &mut c, &[]), Ok(11.0));
+        assert_eq!(SEEN.take(), [(14, true)]);
     }
 
     #[test]

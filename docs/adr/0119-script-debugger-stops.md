@@ -391,3 +391,67 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
     still, an edit at the stop kept, Ctrl+F9 and F5 go on, a condition from the options,
     F8 at a stop ends Play with the world put back, the session keeps the breakpoint.
 
+## As built (E9-1b-2, 2026-10-28): steps
+
+- **Hooks on a thread of the debugger's** (`ScriptVm::set_debugging`, the editor's Play):
+  - a Luau thread made once, kept in the registry; a hook's function and arguments move to
+    it, it is resumed (`lua_resume`) until it returns, its results or its error's value
+    move back; a failed thread is reset;
+  - only while a breakpoint that stops is set or a step is under way: a resume costs
+    0.12 µs a hook more than `lua_pcall` (below), and a stop on a hook called the plain way
+    cannot be stepped from (`Stopped::steppable`);
+  - a call into a script from inside a hook is made the plain way.
+- **A step** (`Resume::StepOver`, `StepInto`, `StepOut`):
+  - from a stop on the hook thread where Luau can yield, single-stepping goes on and the
+    callback breaks out of the interpreter (`lua_break`); the host resumes at once, and
+    the interpreter, entered again, runs its stepping loop (Luau reads the flag at entry);
+  - the resume runs the breakpoint's BREAK again, which is passed once;
+  - `debugstep`, before each instruction, stops where the step is due: over a call at the
+    same depth once the line moved; into anything once the line moved or the depth
+    changed; out once the depth dropped; in a later hook call at once (a step past a
+    hook's end stops at the next script line that runs, the UX note's default);
+  - the stepping loop does not step a BREAK: a step reaching a breakpoint's line stops at
+    the breakpoint, after its logpoints;
+  - Continue at a stop turns stepping off and breaks out again, so the rest runs in the
+    plain loop;
+  - a coroutine made while stepping copies the flag; it goes on (no steps in coroutines in
+    this step).
+- **`self:method()`:** `self`'s `__namecall` calls the component's own function from C. With a
+  continuation (`lua_pushcclosurek`), Luau can break out across it: a stop in the method
+  can be stepped from and out of, the continuation returning the method's results. Where
+  no continuation exists (a `table.sort` comparison, a metamethod written in Luau, a C
+  library's callback), a stop cannot be stepped from; the editor says so and F5 goes on.
+- **Debuggable compilation:** `ScriptSettings::optimization_level`; the editor's player
+  (`PlayerSettings::debuggable_scripts`) compiles with level 1, which inlines nothing: at
+  level 2 a small local function is inlined into its caller, and a step goes through its
+  lines in the caller's frame. Measured below: level 1 costs nothing measurable. Native
+  code stays on; in the stepping loop it is never entered.
+- **The player:** `step_script(how)`, the stop's count (`script_stops`, a step's next stop is
+  a new one at the same line or not).
+- **The editor:** F10, F11, Shift+F11 (VS Code's, Visual Studio's, Roblox's), in the game's
+  window too and while a code tab has the keys; each stop's status says which keys go on.
+- **Measured** (ref-1, release; ADR 0114 §13's scenes, `measure_hooks_and_views`, medians
+  of 51 ticks):
+
+  | | level 2 | level 1 | level 1, a stop set |
+  |---|---:|---:|---:|
+  | an empty `on_tick` | 0.145 µs | 0.143 µs | 0.26 µs |
+  | 1,000 doors | 0.591 ms | 0.591 ms | 0.79 ms |
+  | 10,000 spinners, a system | 1.243 ms | 1.220 ms | 1.24 ms |
+  | 10,000 spinners, a hook each | 2.809 ms | 2.843 ms | 4.38-4.44 ms |
+
+  Debugging with no breakpoint that stops costs nothing more (0.143 µs, the hooks called the
+  plain way).
+- **Not done:**
+  - steps in coroutines;
+  - the Debugger panel (the stack, the variables, the header), values on the lines above;
+  - pause on errors; the Pause command stopping at the next line.
+- **Tests:**
+  - the core: over, into, out through a local function (level 1), past a hook's end into the
+    next call; debugging off, a stop is not steppable; in `table.sort`'s comparison, not
+    steppable, and a step from the line after goes on into the next call;
+  - the host: a stop in `self:open()` is steppable, out of it to the line after the call,
+    the method's result kept;
+  - the editor on the player: F10 twice (the logpoint's line, the hook's end, a local made
+    since among the values), F5 to the next tick's stop, then E9-1b-1's flow.
+

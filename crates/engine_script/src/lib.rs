@@ -153,6 +153,9 @@ pub struct ScriptSettings {
     /// conditions and logpoints read (bytes of names, no cost per instruction); 1 keeps
     /// lines and functions' names, enough for errors' traces.
     pub debug_level: u8,
+    /// Luau's optimization level: 2 inlines small local functions and unrolls loops; 1
+    /// does neither, so a step goes into a function as its text reads (ADR 0119).
+    pub optimization_level: u8,
 }
 
 impl Default for ScriptSettings {
@@ -162,6 +165,7 @@ impl Default for ScriptSettings {
             call_budget: Duration::from_millis(50),
             native: true,
             debug_level: 2,
+            optimization_level: 2,
         }
     }
 }
@@ -254,6 +258,11 @@ pub struct ScriptVm {
     lua: Lua,
     settings: ScriptSettings,
     modules: HashMap<String, Module>,
+    /// The thread hooks run on while debugging ([`Self::set_debugging`]), as a registry
+    /// reference.
+    hook_thread: Cell<Option<c_int>>,
+    /// A hook runs on it now: a call into a script from inside one is made the plain way.
+    in_hook: Cell<bool>,
 }
 
 impl ScriptVm {
@@ -271,7 +280,7 @@ impl ScriptVm {
         let lua = Lua::new();
         lua.set_compiler(
             Compiler::new()
-                .set_optimization_level(2)
+                .set_optimization_level(settings.optimization_level)
                 .set_debug_level(settings.debug_level)
                 .set_type_info_level(1),
         );
@@ -286,6 +295,8 @@ impl ScriptVm {
                 (*callbacks).interrupt = Some(interrupt);
                 // Called only at a patched instruction: nothing without breakpoints.
                 (*callbacks).debugbreak = Some(debug::debugbreak);
+                // Called only while a thread single-steps (a step under way).
+                (*callbacks).debugstep = Some(debug::debugstep);
             })
         }
         .map_err(|e| ScriptError::Runtime {
@@ -304,6 +315,8 @@ impl ScriptVm {
             lua,
             settings,
             modules: HashMap::new(),
+            hook_thread: Cell::new(None),
+            in_hook: Cell::new(false),
         })
     }
 
@@ -413,7 +426,8 @@ impl ScriptVm {
     }
 
     /// Calls `function`, a value of module `module` (a component's hook), with `args`
-    /// under the time budget; its errors name `module`.
+    /// under the time budget; its errors name `module`. While debugging it runs on the hook
+    /// thread ([`Self::set_debugging`]).
     pub fn call_function<A: IntoLuaMulti, R: FromLuaMulti>(
         &self,
         module: &str,
@@ -425,9 +439,103 @@ impl ScriptVm {
                 module: module.to_owned(),
             });
         }
+        // On the hook thread only where a stop could be stepped from: a breakpoint that
+        // stops is set, or a step is under way (a resume costs 0.12 µs a hook more).
+        if let Some(thread) = self.hook_thread.get()
+            && debug::thread_wanted()
+            && !self.in_hook.get()
+        {
+            return self.resume_hook(module, thread, function, args);
+        }
         self.arm();
         let r = function.call::<R>(args);
         self.disarm();
+        r.map_err(|e| self.map(module, e))
+    }
+
+    /// Debugging (ADR 0119 E9-1b-2): hooks run on a thread of their own from now on,
+    /// resumed rather than called, so a stop in one can be stepped from; off, they are
+    /// called the plain way again.
+    pub fn set_debugging(&self, on: bool) {
+        match (on, self.hook_thread.get()) {
+            (true, None) => {
+                // SAFETY: a thread made and kept in the registry; its reference is the
+                // result, and the thread's pointer is the debugger's.
+                let made = unsafe {
+                    self.lua.exec_raw::<c_int>((), |state| {
+                        let thread = mlua::ffi::lua_newthread(state);
+                        if let Some(mut d) = self.lua.app_data_mut::<debug::Debugger>() {
+                            d.set_hook_thread(core::ptr::NonNull::new(thread));
+                        }
+                        let id = mlua::ffi::lua_ref(state, -1);
+                        mlua::ffi::lua_settop(state, 0);
+                        mlua::ffi::lua_pushinteger(state, id as _);
+                    })
+                };
+                if let Ok(id) = made {
+                    self.hook_thread.set(Some(id));
+                }
+            }
+            (false, Some(id)) => {
+                if let Some(mut d) = self.lua.app_data_mut::<debug::Debugger>() {
+                    d.set_hook_thread(None);
+                }
+                // SAFETY: the reference `set_debugging` made; nothing else holds it.
+                let _ = unsafe {
+                    self.lua.exec_raw::<()>((), |state| {
+                        mlua::ffi::lua_unref(state, id);
+                    })
+                };
+                self.hook_thread.set(None);
+            }
+            _ => {}
+        }
+    }
+
+    /// [`Self::call_function`] on the hook thread (registry reference `thread`): resumed
+    /// until it returns, through the breaks the debugger makes to enter or leave its
+    /// stepping loop; its results moved back, an error raised again with its value.
+    fn resume_hook<A: IntoLuaMulti, R: FromLuaMulti>(
+        &self,
+        module: &str,
+        thread: c_int,
+        function: &Function,
+        args: A,
+    ) -> Result<R, ScriptError> {
+        use mlua::ffi;
+        self.in_hook.set(true);
+        debug::hook_called();
+        self.arm();
+        // SAFETY: the function and its arguments are the closure's stack; they move to the
+        // hook thread (not running: no hook is), which runs to its end, and what it returns
+        // (or its error's value) moves back. A failed thread is reset for the next hook.
+        let r = unsafe {
+            self.lua.exec_raw::<R>((function, args), |state| {
+                let n = ffi::lua_gettop(state);
+                ffi::lua_rawgeti_(state, ffi::LUA_REGISTRYINDEX, thread);
+                let co = ffi::lua_tothread(state, -1);
+                ffi::lua_settop(state, -2);
+                ffi::lua_xmove(state, co, n);
+                let mut status = ffi::lua_resume_(co, state, n - 1);
+                while status == ffi::LUA_BREAK {
+                    status = ffi::lua_resume_(co, state, 0);
+                }
+                if status == ffi::LUA_OK {
+                    let results = ffi::lua_gettop(co);
+                    ffi::lua_xmove(co, state, results);
+                    return;
+                }
+                if status == ffi::LUA_YIELD {
+                    ffi::lua_pushstring(state, c"a hook cannot yield".as_ptr());
+                } else {
+                    ffi::lua_xmove(co, state, 1);
+                }
+                ffi::lua_resetthread(co);
+                ffi::lua_error(state);
+            })
+        };
+        self.disarm();
+        self.in_hook.set(false);
         r.map_err(|e| self.map(module, e))
     }
 

@@ -29,9 +29,9 @@ Last updated: 2026-10-28.
     steady state (ADR 0114's examples in the zero-allocation test). E10-2, Slang in the
     code editor, is done: errors from the front end, completion, hover, signatures and
     definitions from `slangd`. E9, the script debugger (ADR 0119, accepted), is under way:
-    logpoints and pause points work from the code editor's gutter (E9-1a), and a
-    breakpoint stops a script at its line in Play, F5 going on (E9-1b-1); stepping and the
-    panel come next. E10-1 waits for the answer on the material
+    logpoints and pause points work from the code editor's gutter (E9-1a), a breakpoint
+    stops a script at its line in Play, F5 going on (E9-1b-1), and F10, F11 and Shift+F11
+    step from a stop (E9-1b-2); the panel comes next. E10-1 waits for the answer on the material
     file. The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
@@ -669,10 +669,21 @@ Last updated: 2026-10-28.
     - Tracy's zones of the stage closed at a stop and opened again after it (a zone 18.0
       -> 19.2 ns); the stage on the fiber costs nothing measurable (0.26 ms a tick of
       1,000 spinners either way).
+  - **E9-1b-2, steps** (#381, ADR 0119's as-built):
+    - hooks resumed on a Luau thread of the debugger's while a breakpoint that stops is set
+      or a step is under way (0.12 µs a hook more; nothing without);
+    - a step turns single-stepping on and breaks out of the interpreter, which is entered
+      again in its stepping loop: over, into, out, and past a hook's end into the next;
+    - `self`'s `__namecall` has a continuation, so `self:method()` can be stepped through;
+      a stop under C code without one cannot be stepped from, and says so;
+    - the editor's scripts compiled at Luau's optimization level 1 (no inlining: steps follow
+      the text), measured free on ADR 0114's scenes;
+    - F10, F11, Shift+F11 in the editor and the game's window.
   - **Next, in this order:**
-    1. E9-1b-2 on: stepping (F10, F11, Shift+F11), the Debugger panel (stack, variables,
-       the header), values on the lines above, pause on errors; then E9-2 (DAP, VS Code)
-       and E9-3 (the player). E10-1 waits for the answer on the material file.
+    1. E9-1b-3 on: the Debugger panel (stack, variables, the header), values on the lines
+       above the stopped one, pause on errors, Pause stopping at the next line; then E9-2
+       (DAP, VS Code) and E9-3 (the player). E10-1 waits for the answer on the material
+       file.
     2. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
        per hook (`script Door.on_tick`) and each script's time and allocations in the
        editor's profiler; Tracy has only the stages' zones (`scripts::tick`).
