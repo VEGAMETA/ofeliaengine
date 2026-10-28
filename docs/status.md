@@ -680,7 +680,7 @@ Last updated: 2026-10-28.
     - the editor's scripts compiled at Luau's optimization level 1 (no inlining: steps follow
       the text), measured free on ADR 0114's scenes;
     - F10, F11, Shift+F11 in the editor and the game's window.
-  - **E9-1b-3, the Debugger panel** (#PR, ADR 0119's as-built):
+  - **E9-1b-3, the Debugger panel** (#382, ADR 0119's as-built):
     - a bottom tab (Ctrl+Shift+D) opening by itself at a stop: Continue and the steps, the
       stop's hook and place;
     - the call stack (a caller's line and values a click away), the frame's locals and
