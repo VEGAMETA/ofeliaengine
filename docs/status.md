@@ -809,7 +809,7 @@ Last updated: 2026-10-28.
   - **E11-1b-3, the mixer's changes in Play** (#405, ADR 0107's as-built): heard at once and
     kept after Stop, a dot on each strip changed since Play, one step "Mixer: changes in
     Play" after Stop, and a command taking them back. E11-1 is done.
-  - **E11-2a, effects and sends in the mixer file** (#PR, ADR 0121's version 2): each bus's
+  - **E11-2a, effects and sends in the mixer file** (#406, ADR 0121's version 2): each bus's
     (and the master's) effects in order, a kind of the twelve built-in by name with its
     parameters by name and unit, bypass and sidechain; sends keyed by the bus they feed;
     loops left out in one order; the player follows live, effects carrying on through
