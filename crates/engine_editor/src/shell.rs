@@ -189,6 +189,12 @@ pub struct DebuggerView<'a> {
     pub frame: usize,
     /// Its variables, and what those open hold under them.
     pub variables: &'a [VariableRow<'a>],
+    /// The Evaluate line under them (E9-1b-5c): its text.
+    pub evaluate: &'a str,
+    /// What it says while empty.
+    pub evaluate_hint: &'a str,
+    /// It takes the keys again (after a line was evaluated).
+    pub evaluate_focus: bool,
     /// Every breakpoint.
     pub breakpoints: &'a [BreakpointRow<'a>],
 }
@@ -206,6 +212,10 @@ pub struct VariableRow<'a> {
     pub depth: u8,
     /// Whether it is open, where it holds anything.
     pub open: Option<bool>,
+    /// Its value is an error's message (an evaluation's, E9-1b-5c).
+    pub error: bool,
+    /// A watch: a click on its × takes it away.
+    pub removable: bool,
 }
 
 /// A row of the Debugger panel's Breakpoints list.
@@ -994,6 +1004,10 @@ pub struct ShellResponse {
     pub debug_errors: Option<usize>,
     /// A row of the Variables was clicked: it opens or closes.
     pub debug_variable: Option<usize>,
+    /// The Evaluate line's field (E9-1b-5c).
+    pub debug_evaluate: Option<TextFieldResponse>,
+    /// A watch's × was clicked: its row.
+    pub debug_unwatch: Option<usize>,
     /// The scene dock's tab was clicked (0 the tree, 1 History).
     pub scene_dock_tab: Option<usize>,
     /// A History row was clicked: its place.
@@ -3850,15 +3864,53 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
                                 text(ui, "section", v.name, SMALL, p.text_dim);
                             } else {
                                 text(ui, "name", v.name, SMALL, p.text);
-                                let color = if v.changed { p.warning } else { p.logged };
+                                let color = match (v.error, v.changed) {
+                                    (true, _) => p.error,
+                                    (false, true) => p.warning,
+                                    (false, false) => p.logged,
+                                };
                                 text(ui, "value", v.value, SMALL, color);
                             }
+                            if v.removable {
+                                ui.spacer("fill");
+                                let x = ui.container("unwatch", Style::default(), |ui| {
+                                    text(ui, "x", "\u{00d7}", SMALL, p.text_dim);
+                                });
+                                if ui.sense(x, false).clicked {
+                                    out.debug_unwatch = Some(i);
+                                }
+                            }
                         });
-                        if v.open.is_some() && ui.sense(id, false).clicked {
+                        if out.debug_unwatch != Some(i)
+                            && v.open.is_some()
+                            && ui.sense(id, false).clicked
+                        {
                             out.debug_variable = Some(i);
                         }
                         ui.pop_id();
                     }
+                });
+                // The Evaluate line: one line of Luau in the shown frame.
+                let line = Style {
+                    size: [Size::Grow(1.0), Size::Fixed(24.0)],
+                    padding: [8.0, 0.0, 4.0, 0.0],
+                    radius: 3.0,
+                    background: Some(p.field),
+                    align_cross: Align::Center,
+                    ..Style::default()
+                };
+                ui.row("evaluate", line, |ui| {
+                    let style = Style {
+                        size: [Size::Grow(1.0), Size::Fixed(22.0)],
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    };
+                    let look = field_look(p, style, view.evaluate_hint, false);
+                    let r = ui.text_field("evaluate", view.evaluate, &look);
+                    if view.evaluate_focus && !r.editing {
+                        ui.edit_field(r.id);
+                    }
+                    out.debug_evaluate = used(r);
                 });
             });
             ui.container("breakpoints", column(Size::Fixed(480.0)), |ui| {

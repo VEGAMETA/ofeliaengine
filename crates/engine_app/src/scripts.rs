@@ -3210,6 +3210,22 @@ pub(crate) fn open_world() -> *mut World {
     OPEN_WORLD.get()
 }
 
+/// `f` with `world` open to scripts as a hook has it, the world and physics world open
+/// before put back after: an evaluation at a stop (ADR 0119 E9-1b-5c), with the world the
+/// frame has now.
+///
+/// # Safety
+///
+/// `world` is valid and borrowed by nothing else while `f` runs.
+pub(crate) unsafe fn with_world<R>(world: *mut World, f: impl FnOnce() -> R) -> R {
+    let (before, physics) = (OPEN_WORLD.get(), OPEN_PHYSICS.get());
+    OPEN_WORLD.set(world);
+    let r = f();
+    OPEN_WORLD.set(before);
+    OPEN_PHYSICS.set(physics);
+    r
+}
+
 /// A stage stopped halfway (ADR 0119) goes on with the world and the physics world of the
 /// frame that resumes it: the borrows it was opened with belong to an earlier frame.
 ///

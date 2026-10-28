@@ -97,11 +97,23 @@ pub(crate) fn hold_budget() -> Option<u64> {
     })
 }
 
+/// The running call's budget held, and one of `budget` from now instead (an evaluation at a
+/// stop): give what it returns to [`release_budget`] after.
+pub(crate) fn run_for(budget: Duration) -> Option<u64> {
+    let held = hold_budget();
+    DEADLINE.set(now_ns().saturating_add(budget.as_nanos() as u64).max(1));
+    SINCE_CHECK.set(0);
+    held
+}
+
 /// The budget [`hold_budget`] held, running again from now.
 pub(crate) fn release_budget(left: Option<u64>) {
-    if let Some(left) = left {
-        DEADLINE.set(now_ns().saturating_add(left).max(1));
-        SINCE_CHECK.set(0);
+    match left {
+        Some(left) => {
+            DEADLINE.set(now_ns().saturating_add(left).max(1));
+            SINCE_CHECK.set(0);
+        }
+        None => DEADLINE.set(0),
     }
 }
 

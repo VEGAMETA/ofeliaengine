@@ -404,6 +404,9 @@ pub(crate) struct Debugger {
     errors: ErrorStops,
     /// How the host's userdata are described at a stop.
     describer: Option<Describer>,
+    /// The thread a stop waits on and its stopped frame's level, while it waits: what
+    /// [`ScriptDebugger::evaluate`] reads.
+    waiting: Option<(core::ptr::NonNull<ffi::lua_State>, c_int)>,
     /// The modules' lines whose errors stopped since the states were reset: they stop
     /// once.
     errors_seen: Vec<(String, u32)>,
@@ -656,6 +659,39 @@ impl ScriptDebugger {
     /// one, by their `__type`.
     pub fn set_describer(&self, describer: Option<Describer>) {
         self.with(|d| d.describer = describer);
+    }
+
+    /// Luau expression `code` evaluated in frame `frame` (from the stopped one, 0) of the
+    /// stop waiting now (E9-1b-5c: the Debugger's Watch and Evaluate): its value, and what
+    /// it holds as a stop's variables do. It reads the frame's locals and its function's
+    /// upvalues by name and the module's globals, runs on a thread of its own under
+    /// `budget`, and the breakpoints it reaches pass. Called by the host while the stop
+    /// waits, with the world open to scripts as a hook has it.
+    ///
+    /// # Errors
+    ///
+    /// No stop waits, the frame is a C function's or its locals cannot be read (native
+    /// code; its upvalues and the globals still can), the code does not compile, or it
+    /// fails: the error's message.
+    pub fn evaluate(
+        &self,
+        frame: usize,
+        code: &str,
+        budget: std::time::Duration,
+    ) -> Result<Variable, String> {
+        let lua = self
+            .lua
+            .try_upgrade()
+            .ok_or_else(|| String::from("the scripts are gone"))?;
+        let (waiting, describer) = lua
+            .app_data_ref::<Debugger>()
+            .map(|d| (d.waiting, d.describer))
+            .ok_or_else(|| String::from("the scripts are gone"))?;
+        let (state, level) = waiting.ok_or_else(|| String::from("no script is stopped"))?;
+        let level = level + c_int::try_from(frame).map_err(|_| String::from("no such frame"))?;
+        // SAFETY: the thread the stop waits on, its frames as they stopped; nothing else
+        // runs on it while the stop waits.
+        unsafe { evaluate_at(state.as_ptr(), level, code, budget, describer) }
     }
 
     /// The first line a hook runs from now on stops ("Break at the Next Script Line"): the
@@ -1058,7 +1094,9 @@ unsafe fn stop_at(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32
         d.break_next = false;
     }
     // SAFETY: as the caller says.
-    let resume = wait(lua, || unsafe { describe(state, lua, module, line, 0) });
+    let resume = wait(lua, state, 0, || unsafe {
+        describe(state, lua, module, line, 0)
+    });
     // SAFETY: as the caller says.
     unsafe {
         match resume {
@@ -1083,14 +1121,25 @@ unsafe fn stop_at(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32
 /// handler), the call's time budget held meanwhile: how the developer goes on; none where
 /// the host cannot wait. The handler is out of the state while it runs: the editor's frames
 /// meanwhile read and set breakpoints.
-fn wait(lua: &Lua, stopped: impl FnOnce() -> Stopped) -> Option<Resume> {
+fn wait(
+    lua: &Lua,
+    state: *mut ffi::lua_State,
+    level: c_int,
+    stopped: impl FnOnce() -> Stopped,
+) -> Option<Resume> {
     let handler = lua
         .app_data_mut::<Debugger>()
         .and_then(|mut d| d.handler.take());
     handler.and_then(|mut handler| {
         let stopped = stopped();
         let held = crate::hold_budget();
+        if let Some(mut d) = lua.app_data_mut::<Debugger>() {
+            d.waiting = core::ptr::NonNull::new(state).map(|s| (s, level));
+        }
         let resume = handler(&stopped);
+        if let Some(mut d) = lua.app_data_mut::<Debugger>() {
+            d.waiting = None;
+        }
         crate::release_budget(held);
         if let Some(mut d) = lua.app_data_mut::<Debugger>()
             && d.handler.is_none()
@@ -1215,7 +1264,7 @@ pub(crate) unsafe fn error_stop(state: *mut ffi::lua_State, message: String, cau
         }
         let (_, message) = crate::split_location(&module, &message);
         let message = message.to_owned();
-        let resume = wait(lua, || {
+        let resume = wait(lua, state, level, || {
             let mut stopped = describe(state, lua, &module, line, level);
             stopped.steppable = false;
             stopped.error = Some(ErrorStop { message, caught });
@@ -1270,6 +1319,118 @@ pub(crate) unsafe fn error_message(state: *mut ffi::lua_State, idx: c_int) -> St
             }
         };
         text.lines().next().unwrap_or_default().to_owned()
+    }
+}
+
+/// [`ScriptDebugger::evaluate`]'s body: `code` in the frame at `level` of `state`, run on a
+/// new thread with the frame's names as parameters.
+///
+/// # Safety
+///
+/// `state` is a thread a stop waits on (inside one of Luau's debug callbacks, or one whose
+/// frames an error left); no function is called on it, and its stack is put back as it
+/// was.
+unsafe fn evaluate_at(
+    state: *mut ffi::lua_State,
+    level: c_int,
+    code: &str,
+    budget: std::time::Duration,
+    describer: Option<Describer>,
+) -> Result<Variable, String> {
+    // SAFETY: as the caller says; what is pushed onto `state` is popped before returning.
+    unsafe {
+        let top = ffi::lua_gettop(state);
+        if ffi::lua_checkstack(state, 300) == 0 {
+            return Err(String::from("no room on the script's stack"));
+        }
+        let mut ar: ffi::lua_Debug = core::mem::zeroed();
+        if ffi::lua_getinfo(state, level, c"sf".as_ptr(), &mut ar) == 0 {
+            return Err(String::from("no such frame"));
+        }
+        let function = ffi::lua_gettop(state);
+        if ffi::lua_iscfunction(state, function) != 0 {
+            ffi::lua_settop(state, top);
+            return Err(String::from(
+                "the engine's frame has no Luau to evaluate in",
+            ));
+        }
+        // The frame's names and where their values lie: a later local shadows an earlier
+        // one, and both an upvalue of the name.
+        let mut names: Vec<(String, c_int)> = Vec::new();
+        for n in 1..=200 {
+            let name = ffi::lua_getlocal(state, level, n);
+            if name.is_null() {
+                break;
+            }
+            let name = CStr::from_ptr(name).to_string_lossy().into_owned();
+            let at = ffi::lua_gettop(state);
+            if is_name(&name) {
+                names.retain(|(n, _)| *n != name);
+                names.push((name, at));
+            }
+        }
+        for n in 1..=255 {
+            let name = ffi::lua_getupvalue(state, function, n);
+            if name.is_null() {
+                break;
+            }
+            let name = CStr::from_ptr(name).to_string_lossy().into_owned();
+            let at = ffi::lua_gettop(state);
+            if is_name(&name) && !names.iter().any(|(n, _)| *n == name) {
+                names.push((name, at));
+            }
+        }
+        let parameters = names
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("return function({parameters}) return ({code}) end");
+        let bytecode = match mlua::chunk::Compiler::new().compile(&source) {
+            Ok(b) => b,
+            Err(e) => {
+                ffi::lua_settop(state, top);
+                return Err(e.to_string().replace("[string \"debugger\"]", ""));
+            }
+        };
+        // A thread of its own: the stopped one may be a dead one an error left.
+        let thread = ffi::lua_newthread(state);
+        if ffi::luau_load(
+            thread,
+            c"=evaluate".as_ptr(),
+            bytecode.as_ptr().cast(),
+            bytecode.len(),
+            0,
+        ) != 0
+            || ffi::lua_pcall(thread, 0, 1, 0) != 0
+        {
+            let why = error_message(thread, -1);
+            ffi::lua_settop(state, top);
+            return Err(why);
+        }
+        // The frame's environment, then its values.
+        ffi::lua_getfenv(state, function);
+        ffi::lua_xmove(state, thread, 1);
+        ffi::lua_setfenv(thread, -2);
+        for &(_, at) in &names {
+            ffi::lua_pushvalue(state, at);
+            ffi::lua_xmove(state, thread, 1);
+        }
+        EVALUATING.set(true);
+        let held = crate::run_for(budget);
+        let status = ffi::lua_pcall(thread, names.len() as c_int, 1, 0);
+        crate::release_budget(held);
+        EVALUATING.set(false);
+        let result = if status == 0 {
+            let mut left = DESCRIBED;
+            Ok(described(thread, code.to_owned(), 2, describer, &mut left))
+        } else {
+            let message = error_message(thread, -1);
+            let (_, message) = crate::split_location("evaluate", &message);
+            Err(message.to_owned())
+        };
+        ffi::lua_settop(state, top);
+        result
     }
 }
 
@@ -2397,6 +2558,65 @@ return M
         ANSWER.set(Resume::Continue);
         assert_eq!(fiber.resume(), Ran::Done);
         assert_eq!(c.result.take(), Some(Ok(152.0)));
+    }
+
+    #[test]
+    fn code_is_evaluated_in_a_stopped_frame_under_its_own_budget() {
+        let mut vm = ScriptVm::new(ScriptSettings::default()).unwrap();
+        vm.load_module("door", DOOR).unwrap();
+        vm.set_stop_handler(Some(Box::new(wait_on_fiber)));
+        vm.set_breakpoints("door", vec![stop(7)]);
+        let debugger = vm.debugger();
+        let budget = Duration::from_millis(20);
+        assert_eq!(
+            debugger.evaluate(0, "1 + 1", budget),
+            Err(String::from("no script is stopped"))
+        );
+        let fiber = Fiber::new(1 << 20).unwrap();
+        let tick: mlua::Function = vm.exports("door").unwrap().get("tick").unwrap();
+        let mut c = Call {
+            vm: &raw const vm,
+            module: "door",
+            f: tick,
+            arg: 3.0,
+            result: None,
+        };
+        // SAFETY: `c` and the VM outlive the job, only read meanwhile.
+        let ran = unsafe { fiber.run(call, (&raw mut c).cast()) };
+        assert_eq!(ran, Ran::Suspended);
+        AT.take();
+        // The frame's locals, its function's upvalues, the globals.
+        let v = debugger.evaluate(0, "doubled + BASE", budget).unwrap();
+        assert_eq!(
+            (v.name.as_str(), v.value.as_str()),
+            ("doubled + BASE", "16")
+        );
+        assert_eq!(
+            debugger
+                .evaluate(0, "math.max(speed, 5)", budget)
+                .unwrap()
+                .value,
+            "5"
+        );
+        // What it holds, as a stop's variables.
+        let t = debugger
+            .evaluate(0, "{ near = doubled > 5 }", budget)
+            .unwrap();
+        assert_eq!(named(&t.children), [("near", "true")]);
+        // Errors: where it fails, not compiling, not ending in its budget.
+        let failed = debugger.evaluate(0, "missing.x", budget).unwrap_err();
+        assert!(failed.contains("attempt to index nil"), "{failed}");
+        assert!(debugger.evaluate(0, "doubled +", budget).is_err());
+        let endless = debugger
+            .evaluate(0, "(function() while true do end end)()", budget)
+            .unwrap_err();
+        assert!(endless.contains("time budget"), "{endless}");
+        // The engine's frame below the hook has nothing to evaluate in.
+        assert!(debugger.evaluate(5, "1", budget).is_err());
+        // The stopped call goes on as it was.
+        ANSWER.set(Resume::Continue);
+        assert_eq!(fiber.resume(), Ran::Done);
+        assert_eq!(c.result.take(), Some(Ok(16.0)));
     }
 
     #[test]

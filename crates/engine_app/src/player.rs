@@ -1597,6 +1597,29 @@ impl Player {
         self.script_debug.as_ref().map_or(0, |d| d.stops)
     }
 
+    /// Luau expression `code` evaluated in frame `frame` (0: the stopped one) of the script
+    /// stopped now (ADR 0119 E9-1b-5c, the Debugger's Watch and Evaluate), with the world
+    /// open to it as a hook has it: its value and what it holds. It runs under the scripts'
+    /// call budget; breakpoints it reaches pass.
+    ///
+    /// # Errors
+    ///
+    /// No script is stopped, the frame has no Luau, the code does not compile or it fails.
+    pub fn evaluate_script(
+        &mut self,
+        frame: usize,
+        code: &str,
+    ) -> Result<engine_script::Variable, String> {
+        let debugger = self
+            .script_debugger()
+            .ok_or_else(|| String::from("no scripts run in this game"))?;
+        let budget = self.settings.script_settings().call_budget;
+        let world: *mut World = &mut self.runtime.world;
+        // SAFETY: the player's world, borrowed for this call only; the stopped stage holds
+        // no borrow of it while it waits (ADR 0119 E9-1b-1).
+        unsafe { crate::scripts::with_world(world, || debugger.evaluate(frame, code, budget)) }
+    }
+
     /// The stopped stage goes on at the next frame, and the rest of its tick after it.
     pub fn continue_script(&mut self) {
         self.step_script(engine_script::Resume::Continue);
