@@ -255,6 +255,26 @@ impl Player {
                 }
                 Ok(Value::Null)
             }
+            "setVariable" => {
+                let reference = args["variablesReference"]
+                    .as_u64()
+                    .and_then(|r| usize::try_from(r).ok())
+                    .unwrap_or(0);
+                let name = args["name"].as_str().unwrap_or_default();
+                let code = args["value"].as_str().unwrap_or_default();
+                let stop = d.told.as_ref().map(|(_, s)| s);
+                let (frame, place) = d
+                    .references
+                    .place(reference, name, stop)
+                    .ok_or_else(|| format!("`{name}` cannot be changed here"))?;
+                let v = self.set_script_value(frame, &place, code)?;
+                // The stop read again: what changed shows wherever it is.
+                if let (Some((_, stop)), Some(debugger)) = (d.told.as_mut(), self.script_debugger())
+                {
+                    debugger.refresh(stop);
+                }
+                Ok(d.references.set_answer(v))
+            }
             "continue" => {
                 self.continue_script();
                 Ok(json!({ "allThreadsContinued": true }))

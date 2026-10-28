@@ -52,7 +52,7 @@ pub use mlua;
 
 pub mod debug;
 pub use debug::{
-    BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Frame, Hits, Logged, Resume,
+    BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Frame, Hits, Logged, Place, Resume,
     ScriptDebugger, StopHandler, Stopped, Variable, with_instance,
 };
 

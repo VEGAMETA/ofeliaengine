@@ -692,3 +692,33 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
   selection), filters on systems (a condition does it: `e.name == "Front door"`), the
   player's DAP endpoint naming the entity.
 
+## As built (E9-4b, 2026-10-28): changing a value at a stop
+
+- **`ScriptDebugger::set_value(frame, place, code)`**: `code` evaluated in the frame and
+  given to a `Place`: `Local(name)` (the local in scope, `lua_setlocal`), `Upvalue(name)`
+  (`lua_setupvalue`) or `Field(target)` (`target = (code)` run in the frame's scope, the
+  names as parameters, so it writes through tables, `self`'s view and its components'
+  views); the place's value after. `evaluate` and it share one runner (`run_at`).
+  `ScriptDebugger::refresh` reads the waiting stop again after a change.
+- **What compiled code keeps:** Luau folds into constants a local never written and the
+  fields of a local table never written that never leaves its function, at level 1 too
+  (`buildTableConstantMap` in luau 0.736's compiler): a value written there changes where it
+  is kept, not in the code that runs. Said in the guide, as debuggers of compiled languages
+  do.
+- **The editor:** F2 over a Variables row, or a second click on it within 0.45 s, opens its
+  value as Luau in the row; Enter gives it at the next frame of Play (`set_queue`, the
+  player's). The row's path names the place (`LOCALS/self/Transform/translation` is
+  `self.Transform.translation`; a key shown as its text, a cut string or a section is not a
+  place). `self`'s props and components are one undo step on the stopped entity, put back
+  at Stop unless kept with Ctrl+K, as the inspector's edits in Play.
+- **VS Code:** `supportsSetVariable`, answered by the editor (through the same undo step)
+  and the standalone player; `References::place` turns a reference and a name into the
+  frame and the place.
+- **Tests:** a local, a table's field and an upvalue changed at a stop, the stop read
+  again, the call going on with them, a name the frame has not and code that fails
+  refused (engine_script); a double click on `dt`'s value, its Luau typed, Enter (the
+  editor); setVariable on `self.rate` and Ctrl+Z putting it back (the editor over DAP);
+  setVariable in the standalone player, the logpoint after it saying the new value.
+- **Not done:** the editor's breakpoints sent to VS Code (E9-4c); a changed value lit in
+  the code's inline values until the next stop.
+

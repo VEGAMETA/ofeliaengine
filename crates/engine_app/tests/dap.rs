@@ -182,12 +182,26 @@ fn vs_code_debugs_a_standalone_players_scripts() {
     let vars = r["body"]["variables"].as_array().unwrap().clone();
     let this = vars.iter().find(|v| v["name"] == "self").unwrap();
     assert_eq!(this["value"], "PlayerSpin \u{b7} Front door");
+    let this = this["variablesReference"].as_u64().unwrap();
     let r = client.request(
         &mut || run(p, g),
         "evaluate",
         json!({ "expression": "self.rate * 10", "frameId": 0, "context": "repl" }),
     );
     assert_eq!(r["body"]["result"], "20", "{r}");
+    // setVariable (E9-4b): self's prop, through the script's own view.
+    let r = client.request(
+        &mut || run(p, g),
+        "setVariable",
+        json!({ "variablesReference": this, "name": "rate", "value": "4 + 1" }),
+    );
+    assert_eq!(r["body"]["value"], "5", "{r}");
+    let r = client.request(
+        &mut || run(p, g),
+        "evaluate",
+        json!({ "expression": "self.rate * 10", "frameId": 0, "context": "repl" }),
+    );
+    assert_eq!(r["body"]["result"], "50", "{r}");
     // A step: the next line, `step` its reason.
     client.request(&mut || run(p, g), "next", json!({ "threadId": 1 }));
     let stopped = client.wait(&mut || run(p, g), "the step's stop", event("stopped"));
@@ -210,7 +224,7 @@ fn vs_code_debugs_a_standalone_players_scripts() {
         m["event"] == "output"
             && m["body"]["output"]
                 .as_str()
-                .is_some_and(|t| t.contains("rate 2"))
+                .is_some_and(|t| t.contains("rate 5"))
     });
     assert_eq!(said["body"]["category"], "console");
     assert!(p.cursor_locked(), "the mouse is the game's again");

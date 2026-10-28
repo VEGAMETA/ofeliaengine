@@ -1660,6 +1660,33 @@ impl Player {
         unsafe { crate::scripts::with_world(world, || debugger.evaluate(frame, code, budget)) }
     }
 
+    /// Luau expression `code`'s value given to `place` in frame `frame` of the script
+    /// stopped now (ADR 0119 E9-4b: F2 in the editor's Variables, VS Code's setVariable),
+    /// with the world open to it as a hook has it: the place's value after. It runs under
+    /// the scripts' call budget. A value the compiler folded into a constant (a local never
+    /// written, a field of a local table never written that never leaves its function)
+    /// changes where it is kept, not in the code that runs.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::evaluate_script`]'s, or the place cannot take the value.
+    pub fn set_script_value(
+        &mut self,
+        frame: usize,
+        place: &engine_script::Place,
+        code: &str,
+    ) -> Result<engine_script::Variable, String> {
+        let debugger = self
+            .script_debugger()
+            .ok_or_else(|| String::from("no scripts run in this game"))?;
+        let budget = self.settings.script_settings().call_budget;
+        let world: *mut World = &mut self.runtime.world;
+        // SAFETY: as `evaluate_script`'s.
+        unsafe {
+            crate::scripts::with_world(world, || debugger.set_value(frame, place, code, budget))
+        }
+    }
+
     /// The stopped stage goes on at the next frame with every stop passed until it ends,
     /// then the rest of its tick (ADR 0119 E9-4a, the UX note's §7: Shift+F7 finishes the
     /// tick); the caller keeps the world still after it ([`Self::set_simulating`]).
