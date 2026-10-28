@@ -17,6 +17,8 @@ pub(crate) type ReflectionType = c_void;
 pub(crate) type ReflectionTypeLayout = c_void;
 pub(crate) type ReflectionVariableLayout = c_void;
 pub(crate) type ReflectionVariable = c_void;
+pub(crate) type ReflectionFunction = c_void;
+pub(crate) type ReflectionUserAttribute = c_void;
 
 /// `SlangCompileTarget::SLANG_SPIRV`.
 pub(crate) const TARGET_SPIRV: c_int = 6;
@@ -43,6 +45,9 @@ pub(crate) const TYPE_KIND_SCALAR: u32 = 5;
 pub(crate) const SCALAR_INT32: u32 = 3;
 pub(crate) const SCALAR_UINT32: u32 = 4;
 pub(crate) const SCALAR_FLOAT32: u32 = 8;
+/// `SlangModifierID`: a parameter's `out` and `inout`.
+pub(crate) const MODIFIER_OUT: u32 = 9;
+pub(crate) const MODIFIER_INOUT: u32 = 10;
 
 pub(crate) struct Functions {
     pub(crate) create_session: unsafe extern "C" fn(*const c_char) -> *mut Session,
@@ -100,6 +105,29 @@ pub(crate) struct Functions {
     pub(crate) type_name: unsafe extern "C" fn(*mut ReflectionType) -> *const c_char,
     pub(crate) type_scalar: unsafe extern "C" fn(*mut ReflectionType) -> u32,
     pub(crate) type_element_count: unsafe extern "C" fn(*mut ReflectionType) -> usize,
+    /// Functions marked with an attribute (`crate::marked`): found by name, the mark, its
+    /// string arguments, the parameters with their types and directions, the result.
+    pub(crate) find_function_by_name:
+        unsafe extern "C" fn(*mut Reflection, *const c_char) -> *mut ReflectionFunction,
+    pub(crate) function_is_overloaded: unsafe extern "C" fn(*mut ReflectionFunction) -> bool,
+    pub(crate) function_user_attribute_by_name:
+        unsafe extern "C" fn(
+            *mut ReflectionFunction,
+            *mut Session,
+            *const c_char,
+        ) -> *mut ReflectionUserAttribute,
+    pub(crate) user_attribute_argument_count:
+        unsafe extern "C" fn(*mut ReflectionUserAttribute) -> u32,
+    pub(crate) user_attribute_argument_string:
+        unsafe extern "C" fn(*mut ReflectionUserAttribute, u32, *mut usize) -> *const c_char,
+    pub(crate) function_parameter_count: unsafe extern "C" fn(*mut ReflectionFunction) -> u32,
+    pub(crate) function_parameter:
+        unsafe extern "C" fn(*mut ReflectionFunction, u32) -> *mut ReflectionVariable,
+    pub(crate) function_result_type:
+        unsafe extern "C" fn(*mut ReflectionFunction) -> *mut ReflectionType,
+    pub(crate) variable_type: unsafe extern "C" fn(*mut ReflectionVariable) -> *mut ReflectionType,
+    pub(crate) variable_find_modifier:
+        unsafe extern "C" fn(*mut ReflectionVariable, u32) -> *mut c_void,
 }
 
 /// The loaded Slang compiler library.
@@ -209,6 +237,20 @@ impl SlangLibrary {
             type_name: symbol!("spReflectionType_GetName"),
             type_scalar: symbol!("spReflectionType_GetScalarType"),
             type_element_count: symbol!("spReflectionType_GetElementCount"),
+            find_function_by_name: symbol!("spReflection_FindFunctionByName"),
+            function_is_overloaded: symbol!("spReflectionFunction_isOverloaded"),
+            function_user_attribute_by_name: symbol!(
+                "spReflectionFunction_FindUserAttributeByName"
+            ),
+            user_attribute_argument_count: symbol!("spReflectionUserAttribute_GetArgumentCount"),
+            user_attribute_argument_string: symbol!(
+                "spReflectionUserAttribute_GetArgumentValueString"
+            ),
+            function_parameter_count: symbol!("spReflectionFunction_GetParameterCount"),
+            function_parameter: symbol!("spReflectionFunction_GetParameter"),
+            function_result_type: symbol!("spReflectionFunction_GetResultType"),
+            variable_type: symbol!("spReflectionVariable_GetType"),
+            variable_find_modifier: symbol!("spReflectionVariable_FindModifier"),
         };
         let build_tag: unsafe extern "C" fn() -> *const c_char = symbol!("spGetBuildTagString");
         // SAFETY: returns a static NUL-terminated string.

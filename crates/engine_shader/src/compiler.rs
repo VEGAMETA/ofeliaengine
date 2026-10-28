@@ -1,6 +1,7 @@
 //! One Slang session and the compile entry point.
 
 use crate::ShaderError;
+use crate::marked::{MarkedFunction, read_marked};
 use crate::reflect::{StructLayout, natural_layout};
 use crate::slang::{
     DEBUG_INFO_NONE, DEBUG_INFO_STANDARD, LANGUAGE_SLANG, LAYOUT_RULES_STRUCTURED_BUFFER,
@@ -423,6 +424,38 @@ impl Compiler {
             size: parts.size,
             fields: parts.fields,
         })
+    }
+
+    /// The functions named `names` that `path` (or what it includes) declares marked with
+    /// `attribute`, with their signatures, read from Slang's reflection: the front end only,
+    /// as [`Self::reflect_struct`]. The names come from the source the marks are in
+    /// ([`crate::marked_names`]); a name with no such mark is passed over (ADR 0123's
+    /// E10-3g-3: `[Node]` functions as the material graph's nodes).
+    pub fn marked_functions(
+        &mut self,
+        path: &Path,
+        options: &CompileOptions,
+        names: &[String],
+        attribute: &str,
+    ) -> Result<Vec<MarkedFunction>, ShaderError> {
+        engine_profiler::zone!("shader::Compiler::marked_functions");
+        let source = std::fs::read_to_string(path)?;
+        let (request, _, _) = self.run(path, &source, &[], options, Mode::Check)?;
+        let f = &self.library.functions;
+        // SAFETY: the request compiled; its reflection is read before it is destroyed, in
+        // the session it was made in.
+        let found = unsafe {
+            let reflection = (f.reflection)(request.raw.as_ptr());
+            if reflection.is_null() {
+                return Err(ShaderError::Compile {
+                    path: path.to_owned(),
+                    diagnostics: String::from("Slang produced no reflection data"),
+                });
+            }
+            read_marked(f, reflection, self.session.as_ptr(), names, attribute)
+        };
+        drop(request);
+        Ok(found)
     }
 
     /// The entry points (`[shader("<stage>")]` functions) of `path`, in source order,

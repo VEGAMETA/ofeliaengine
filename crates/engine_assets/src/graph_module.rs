@@ -5,7 +5,7 @@
 //! the material file's.
 
 use crate::material_file::{MaterialFileError, ParamValue, TextureEncoding};
-use engine_material_graph::{Build, Graph, GraphFile, ParamType, generate};
+use engine_material_graph::{Build, Graph, GraphFile, ParamType, generate_with};
 use engine_scene::AssetRef;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +27,18 @@ pub struct GraphModule {
     pub defaults: BTreeMap<String, ParamValue>,
     /// Its texture nodes' images by parameter, as assets.
     pub textures: BTreeMap<String, AssetRef>,
+}
+
+/// How a graph's module includes a Slang module its calls name (ADR 0123's E10-3g-3): from
+/// the cache's folder up to the project's, then the module's path as the graph's file
+/// writes it (an absolute path as it is), so the text is the same on every machine.
+pub fn include_path(module: &str) -> String {
+    let module = module.replace('\\', "/");
+    if Path::new(&module).is_absolute() {
+        module
+    } else {
+        format!("{}{module}", "../".repeat(GRAPH_CACHE.split('/').count()))
+    }
 }
 
 /// Whether `path` is a material graph's file.
@@ -51,7 +63,15 @@ pub fn graph_module(path: &Path, root: &Path) -> Result<GraphModule, MaterialFil
     let text = std::fs::read_to_string(path).map_err(|e| error(e.to_string()))?;
     let (file, report) = GraphFile::parse(&text).map_err(|e| error(e.to_string()))?;
     let graph = file.graph().map_err(error)?;
-    let generated = generate(&graph, GRAPH_TYPE, Build::Saved).map_err(|e| error(e.to_string()))?;
+    let modules = |m| {
+        report
+            .assets
+            .get(m)
+            .filter(|p| !p.is_empty())
+            .map(include_path)
+    };
+    let generated = generate_with(&graph, GRAPH_TYPE, Build::Saved, &modules)
+        .map_err(|e| error(e.to_string()))?;
     let id = report
         .id
         .map_or_else(|| format!("{:016x}", path_hash(path)), |id| id.to_string());
@@ -138,6 +158,21 @@ mod tests {
     use super::*;
     use crate::material_file::MaterialFile;
     use engine_scene::AssetId;
+
+    /// E10-3g-3: a call's module is included from the cache's folder, the same on every
+    /// machine for a path in the project; an absolute path as it is.
+    #[test]
+    fn a_calls_module_is_included_from_the_cache() {
+        assert_eq!(
+            include_path("shaders/mapping.slang"),
+            "../../../shaders/mapping.slang"
+        );
+        assert_eq!(
+            include_path(r"shaders\mapping.slang"),
+            "../../../shaders/mapping.slang"
+        );
+        assert_eq!(include_path("C:/lib/noise.slang"), "C:/lib/noise.slang");
+    }
 
     fn moss(graph: AssetId, image: AssetId, extra: &str) -> String {
         format!(

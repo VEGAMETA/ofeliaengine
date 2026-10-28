@@ -99,7 +99,7 @@ fn prefixed(prefix: &str, name: &str) -> String {
 /// # Safety
 ///
 /// `text` is null or a NUL-terminated string.
-unsafe fn string(text: *const c_char) -> String {
+pub(crate) unsafe fn string(text: *const c_char) -> String {
     if text.is_null() {
         String::new()
     } else {

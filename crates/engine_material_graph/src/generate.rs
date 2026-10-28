@@ -13,8 +13,10 @@
 //!   editing build every number is a parameter (`_<node>`), so a drag compiles nothing (the
 //!   team's 3a, measured in ADR 0123). A named number is a parameter in both.
 
+use crate::call::{Direction, node_kind};
 use crate::graph::{Graph, OUTPUT, PortRef, SURFACE_TERMS};
-use crate::library::{self, Body, Fill, Kind, OUTPUT_KIND, PortType};
+use crate::library::{Body, Fill, Kind, OUTPUT_KIND, PortType};
+use engine_scene::AssetRef;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
 
@@ -122,8 +124,20 @@ const RETURNS: [(&str, &str, &str, bool); 5] = [
     ("thickness", "float", "thickness", true),
 ];
 
-/// The module `graph` makes, its type named `type_name`.
+/// The module `graph` makes, its type named `type_name`. A graph with calls (E10-3g-3)
+/// needs [`generate_with`]: here their modules are not found.
 pub fn generate(graph: &Graph, type_name: &str, build: Build) -> Result<Generated, GraphError> {
+    generate_with(graph, type_name, build, &|_| None)
+}
+
+/// [`generate`], the Slang modules calls name included as `modules` spells them (a path
+/// from the generated module's folder): `None`, the call's module is not found.
+pub fn generate_with(
+    graph: &Graph,
+    type_name: &str,
+    build: Build,
+    modules: &dyn Fn(AssetRef) -> Option<String>,
+) -> Result<Generated, GraphError> {
     engine_profiler::zone!("material_graph::generate");
     if !identifier(type_name) {
         return Err(GraphError::graph(format!(
@@ -170,6 +184,30 @@ pub fn generate(graph: &Graph, type_name: &str, build: Build) -> Result<Generate
         "// Generated from a material graph (ADR 0123): edits here are lost; edit the graph.",
         None,
     );
+    // The modules its calls' functions are in (E10-3g-3), after the mark they use; each
+    // line its first call's, so a module not found is that node's.
+    let mut included: Vec<AssetRef> = Vec::new();
+    for &n in &every {
+        if !matches!(kinds[n].body, Body::Call(_)) {
+            continue;
+        }
+        let module = graph.nodes[n].module;
+        if included.contains(&module) {
+            continue;
+        }
+        if included.is_empty() {
+            out.line("#include \"nodes.slang\"", None);
+        }
+        let path = (!module.is_none())
+            .then(|| modules(module))
+            .flatten()
+            .ok_or_else(|| GraphError::at(n, "the module of its function is not found"))?;
+        out.line(
+            &format!("#include \"{}\"", path.replace('\\', "/")),
+            Some(n),
+        );
+        included.push(module);
+    }
     out.line(&format!("struct {type_name}Params"), None);
     out.line("{", None);
     if params.is_empty() {
@@ -306,8 +344,7 @@ fn check(graph: &Graph) -> Result<HashMap<&str, &'static Kind>, GraphError> {
         if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(GraphError::at(id, "a node's id is letters, digits and `_`"));
         }
-        let kind = library::kind(&node.kind)
-            .ok_or_else(|| GraphError::at(id, format!("no node kind `{}`", node.kind)))?;
+        let kind = node_kind(node).map_err(|why| GraphError::at(id, why))?;
         if kind.name == OUTPUT_KIND && id != OUTPUT {
             return Err(GraphError::at(id, "a graph has one surface"));
         }
@@ -599,6 +636,40 @@ impl Context<'_, '_> {
                         values.insert(port, call);
                     }
                 }
+                Body::Call(call) => {
+                    // Its `out` and `inout` parameters variables, its result one.
+                    let mut arguments: Vec<String> = Vec::new();
+                    if call.context {
+                        arguments.push(String::from("ctx"));
+                    }
+                    for p in call.parameters {
+                        let var = format!("n_{id}_{}", p.name);
+                        let ty = float_type(p.width);
+                        match p.direction {
+                            Direction::In => {
+                                arguments.push(self.input(kind, id, p.name, &values)?);
+                                continue;
+                            }
+                            Direction::Out => out.line(&format!("        {ty} {var};"), Some(id)),
+                            Direction::InOut => {
+                                let value = self.input(kind, id, p.name, &values)?;
+                                out.line(&format!("        {ty} {var} = {value};"), Some(id));
+                            }
+                        }
+                        arguments.push(var.clone());
+                        values.insert(PortRef::new(id, p.name), var);
+                    }
+                    let text = format!("{}({})", call.function, arguments.join(", "));
+                    match call.result {
+                        Some(w) => {
+                            let var = format!("n_{id}_out");
+                            let ty = float_type(w);
+                            out.line(&format!("        {ty} {var} = {text};"), Some(id));
+                            values.insert(PortRef::new(id, "out"), var);
+                        }
+                        None => out.line(&format!("        {text};"), Some(id)),
+                    }
+                }
                 Body::Output => {}
             }
         }
@@ -661,7 +732,7 @@ fn convert(value: &str, from: u8, to: u8) -> String {
 }
 
 /// Slang's float type of width `w`.
-fn float_type(w: u8) -> String {
+pub(crate) fn float_type(w: u8) -> String {
     match w {
         1 => String::from("float"),
         n => format!("float{n}"),
@@ -687,7 +758,7 @@ fn literal(v: [f32; 4], w: u8) -> String {
 }
 
 /// `name` can name a Slang type or field.
-fn identifier(name: &str) -> bool {
+pub(crate) fn identifier(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
@@ -731,6 +802,55 @@ mod tests {
 
     fn port(node: &str, port: &str) -> PortRef {
         PortRef::new(node, port)
+    }
+
+    /// E10-3g-3: a call's `inout` parameter a variable of its input's value, its `out` one
+    /// declared, both its outputs; a `void` call a statement; the module included once
+    /// after the mark's declaration, its line the first call's; a call naming no module, or
+    /// one not found, is its node's error.
+    #[test]
+    fn a_call_writes_its_out_and_inout_parameters_as_variables() {
+        let module = AssetRef::file(engine_scene::AssetId::from_u128(3));
+        let signature = "void(inout float2 uv, out float mask)";
+        let mut g = Graph::new(Model::Lit);
+        for (id, at) in [("w", 0.0), ("v", 200.0)] {
+            let mut call =
+                Node::new(crate::call::CALL_KIND, [at, 0.0]).with_call("warp", signature);
+            call.module = module;
+            g.add(id, call);
+        }
+        g.link(port("w", "uv"), port("v", "uv"))
+            .link(port("v", "mask"), port(OUTPUT, "roughness"));
+        let modules = |m: AssetRef| (m == module).then(|| String::from("../shaders/warp.slang"));
+        let out = generate_with(&g, "Warp", Build::Saved, &modules).unwrap();
+        let lines: Vec<&str> = out.text.lines().collect();
+        let include = lines
+            .iter()
+            .position(|l| *l == "#include \"../shaders/warp.slang\"")
+            .unwrap();
+        assert_eq!(lines[include - 1], "#include \"nodes.slang\"");
+        assert_eq!(
+            out.text
+                .matches("#include \"../shaders/warp.slang\"")
+                .count(),
+            1
+        );
+        assert_eq!(out.node_at(include), Some("w"));
+        for line in [
+            "        float2 n_w_uv = float2(0.0, 0.0);",
+            "        float n_w_mask;",
+            "        warp(n_w_uv, n_w_mask);",
+            "        float2 n_v_uv = n_w_uv;",
+            "        warp(n_v_uv, n_v_mask);",
+        ] {
+            assert!(lines.contains(&line), "{line}\n{}", out.text);
+        }
+        assert!(out.text.contains("s.roughness = n_v_mask"), "{}", out.text);
+        let missing = generate_with(&g, "Warp", Build::Saved, &|_| None).unwrap_err();
+        assert_eq!(missing.node.as_deref(), Some("w"));
+        g.nodes.get_mut("w").unwrap().module = AssetRef::NONE;
+        let none = generate_with(&g, "Warp", Build::Saved, &modules).unwrap_err();
+        assert_eq!(none.node.as_deref(), Some("w"));
     }
 
     /// E10-3g-1: an Expression node's Slang is a function of the type, its lines the node's;

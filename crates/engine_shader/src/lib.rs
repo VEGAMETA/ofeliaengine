@@ -23,6 +23,7 @@
 mod build;
 mod cache;
 mod compiler;
+mod marked;
 pub mod material_types;
 mod pool;
 mod reflect;
@@ -35,6 +36,7 @@ pub use cache::{CacheOutcome, ShaderCache};
 pub use compiler::{
     CompileOptions, CompileOutput, CompiledEntry, Compiler, EntryPoint, Finding, Stage, findings,
 };
+pub use marked::{Direction, MarkedFunction, Parameter, ValueType, marked_names};
 pub use pool::CompilerPool;
 pub use reflect::{Field, FieldKind, StructLayout, TEXTURE_REF};
 pub use reload::{HotReloadConfig, ShaderEvent, ShaderHotReload, ShaderSet};
