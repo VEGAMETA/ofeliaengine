@@ -790,7 +790,7 @@ Last updated: 2026-10-28.
     loop; a click or a drag along it plays from there; its length, rate and channels,
     peak in dBFS and silence at each end. E11-3 is done but for sounds dropped on the
     viewport, the tree or an entity, and the sound and bus fields.
-  - **E11-1a, the mixer file** (#PR, ADR 0121): the buses and faders in the project's
+  - **E11-1a, the mixer file** (#402, ADR 0121): the buses and faders in the project's
     `main.mixer` (buses keyed by name: parent, gain in dB, balance, voices, reverb; the
     master's gain and balance), the built-in four without it; the player lays its mixer
     out again live (`Player::set_mixer_layout`, and when the file is written), what plays
