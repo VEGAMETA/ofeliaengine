@@ -836,7 +836,7 @@ Last updated: 2026-10-28.
     its file's waveform and ▶, takes a dropped sound, and opens `#sound:` (the arrows
     playing each file with Auto Play); its bus is a list of the mixer's buses, a name the
     mixer lacks marked. The marks: `Hint::Sound`, `Hint::Bus` (`#[reflect(hint = ...)]`).
-  - **E11-3d-2b, renames follow the marks** (#PR, ADR 0107's as-built): a sound moved in
+  - **E11-3d-2b, renames follow the marks** (#413, ADR 0107's as-built): a sound moved in
     the dock renames the marked strings naming it in the world, in undo's and Play's
     records, in other tabs and in scenes and prefabs on disk (scripts listed, not
     changed); a bus renamed in the mixer takes the open scene's sources along in the same
