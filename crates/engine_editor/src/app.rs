@@ -115,7 +115,7 @@ use engine_scene::{
 };
 use engine_ui::{Theme, Ui, UiKey};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
@@ -2024,6 +2024,13 @@ struct Editor {
     stop_reason: Option<&'static str>,
     /// An attached client asked to play ("Attach and Play"): its end stops Play.
     dap_played: bool,
+    /// VS Code's view of the editor's breakpoints (E9-4c): what it was told, by file; the
+    /// next id given; whether its configuration is done (the editor's breakpoints go to it
+    /// from then on); the breakpoints' revision last compared with it.
+    dap_known: BTreeMap<PathBuf, Vec<KnownBreak>>,
+    dap_next_id: i64,
+    dap_configured: bool,
+    dap_synced: Option<u64>,
     /// The game's crate when the editor runs inside the game's build (`run_game`).
     game_crate: Option<GameCrate>,
     /// Builds of the game's code (E1-5c): none until `begin_builds`, nor while the
@@ -2801,6 +2808,10 @@ impl Editor {
             dap_refs: engine_app::dap::References::default(),
             stop_reason: None,
             dap_played: false,
+            dap_known: BTreeMap::new(),
+            dap_next_id: 1,
+            dap_configured: false,
+            dap_synced: None,
             game_crate: None,
             builds: None,
             problems: Vec::new(),
@@ -10385,6 +10396,11 @@ impl Editor {
             dap.respond(r.seq, &r.command, body);
             match r.command.as_str() {
                 "initialize" => dap.event("initialized", serde_json::json!({})),
+                "configurationDone" => {
+                    // From now on the editor's breakpoints go to VS Code (E9-4c).
+                    self.dap_configured = true;
+                    self.dap_synced = None;
+                }
                 "disconnect" => {
                     dap.drop_client();
                     if std::mem::take(&mut self.dap_played) && self.play.is_some() {
@@ -10410,8 +10426,95 @@ impl Editor {
             }
         }
         self.dap_requests = requests;
+        if !dap.attached() {
+            self.dap_known.clear();
+            self.dap_configured = false;
+        } else if self.dap_configured {
+            self.dap_sync_breakpoints(&mut dap);
+        }
         dap.forward_log();
         self.dap = Some(dap);
+    }
+
+    /// The editor's breakpoints VS Code was not told of, told it (E9-4c), once their
+    /// revision moved: `breakpoint` events, `removed` for those gone or changed here, `new`
+    /// for those it lacks, by their lines as saved (VS Code keeps only the lines of the
+    /// breakpoints an adapter makes, and the editor keeps their options).
+    fn dap_sync_breakpoints(&mut self, dap: &mut engine_app::dap::Dap) {
+        let revision = self.breakpoints.revision();
+        if self.dap_synced == Some(revision) {
+            return;
+        }
+        self.dap_synced = Some(revision);
+        let mut files: Vec<PathBuf> = self
+            .breakpoints
+            .files()
+            .map(|(f, _)| f.to_path_buf())
+            .collect();
+        for file in self.dap_known.keys() {
+            if !files.contains(file) {
+                files.push(file.clone());
+            }
+        }
+        for file in files {
+            let doc = self.scripts.iter().find(|s| s.path == file).map(|s| &s.doc);
+            let marks: Vec<(usize, Mark)> = self
+                .breakpoints
+                .of(&file)
+                .iter()
+                .filter_map(|m| {
+                    let saved = match doc {
+                        Some(doc) => doc.saved_line(m.line)?,
+                        None => m.line,
+                    };
+                    Some((saved, m.clone()))
+                })
+                .collect();
+            let known = self.dap_known.entry(file.clone()).or_default();
+            let mut told = Vec::with_capacity(known.len().max(marks.len()));
+            for k in known.drain(..) {
+                if marks
+                    .iter()
+                    .any(|(line, m)| *line == k.line && same_options(m, &k.mark))
+                {
+                    told.push(k);
+                } else {
+                    let body = serde_json::json!({
+                        "reason": "removed",
+                        "breakpoint": { "id": k.id, "verified": true },
+                    });
+                    dap.event("breakpoint", body);
+                }
+            }
+            let path = std::path::absolute(self.root.join(&file))
+                .unwrap_or_else(|_| self.root.join(&file));
+            let shown = file.to_string_lossy();
+            let name = file_name(&shown);
+            for (line, m) in marks {
+                if told.iter().any(|k| k.line == line) {
+                    continue;
+                }
+                let id = self.dap_next_id;
+                self.dap_next_id += 1;
+                let body = serde_json::json!({
+                    "reason": "new",
+                    "breakpoint": {
+                        "id": id,
+                        "verified": true,
+                        "line": line + 1,
+                        "source": { "name": name, "path": path },
+                    },
+                });
+                dap.event("breakpoint", body);
+                told.push(KnownBreak {
+                    id,
+                    line,
+                    sent: true,
+                    mark: m,
+                });
+            }
+            *known = told;
+        }
     }
 
     /// An attached client's request (`r`): its answer's body, or why not. The requests about
@@ -10456,21 +10559,48 @@ impl Editor {
                         doc.and_then(|d| d.line_of_saved(saved)).unwrap_or(saved)
                     })
                     .collect();
-                let old: Vec<usize> = self.breakpoints.of(&file).iter().map(|m| m.line).collect();
-                for line in old {
-                    self.breakpoints.remove(&file, line);
+                // What VS Code was told of this file (E9-4c), and the editor's marks now.
+                let known = self.dap_known.remove(&file).unwrap_or_default();
+                let old: Vec<Mark> = self.breakpoints.of(&file).to_vec();
+                for m in &old {
+                    self.breakpoints.remove(&file, m.line);
                 }
                 let mut answers = Vec::new();
+                let mut told = Vec::new();
                 for (b, &line) in asked.iter().zip(&lines) {
-                    let act = if b.log.is_some() { Act::Log } else { Act::Stop };
-                    let mut mark = Mark::new(line, act);
-                    mark.log = b.log.clone().unwrap_or_default();
-                    mark.condition = b.condition.clone();
-                    mark.hits = b.hits.clone();
+                    let saved = b.line as usize - 1;
+                    let plain = b.log.is_none() && b.condition.is_empty() && b.hits.is_empty();
+                    // VS Code knows this one by its line only (the editor told it, or the
+                    // two sets join as it attaches): the editor's options stay.
+                    let line_only =
+                        !self.dap_configured || known.iter().any(|k| k.line == saved && k.sent);
+                    let was = old
+                        .iter()
+                        .find(|m| m.line == line)
+                        .filter(|_| plain && line_only);
+                    let mark = match was {
+                        Some(m) => m.clone(),
+                        None => {
+                            let act = if b.log.is_some() { Act::Log } else { Act::Stop };
+                            let mut mark = Mark::new(line, act);
+                            mark.log = b.log.clone().unwrap_or_default();
+                            mark.condition = b.condition.clone();
+                            mark.hits = b.hits.clone();
+                            mark
+                        }
+                    };
                     match engine_app::scripts::Hits::parse(&mark.hits) {
                         Ok(_) => {
+                            let id = self.dap_next_id;
+                            self.dap_next_id += 1;
+                            told.push(KnownBreak {
+                                id,
+                                line: saved,
+                                sent: was.is_some(),
+                                mark: mark.clone(),
+                            });
                             self.breakpoints.put(&file, mark);
-                            answers.push(json!({ "verified": true, "line": b.line }));
+                            answers.push(json!({ "id": id, "verified": true, "line": b.line }));
                         }
                         Err(why) => {
                             answers
@@ -10478,6 +10608,18 @@ impl Editor {
                         }
                     }
                 }
+                // The editor's own breakpoints VS Code never knew (attaching joins the two
+                // sets): kept, and told it at the next sync.
+                for m in old {
+                    if lines.contains(&m.line) {
+                        continue;
+                    }
+                    let saved = doc.and_then(|d| d.saved_line(m.line)).unwrap_or(m.line);
+                    if !known.iter().any(|k| k.line == saved) {
+                        self.breakpoints.put(&file, m);
+                    }
+                }
+                self.dap_known.insert(file, told);
                 self.write_session(player.world_mut());
                 Ok(json!({ "breakpoints": answers }))
             }
@@ -17478,6 +17620,30 @@ enum PlayRequest {
     BreakNext,
     /// One tick while paused (pausing first).
     Step,
+}
+
+/// A breakpoint as VS Code was told of it (E9-4c).
+#[derive(Debug, Clone)]
+struct KnownBreak {
+    /// The id VS Code knows it by.
+    id: i64,
+    /// Its line in the file as saved (from 0).
+    line: usize,
+    /// VS Code knows its line only: the editor told it, not its options (VS Code keeps the
+    /// lines of the breakpoints an adapter makes).
+    sent: bool,
+    /// The editor's breakpoint as it was then (its line aside): a change tells VS Code anew.
+    mark: Mark,
+}
+
+/// Whether two breakpoints do the same, their lines aside.
+fn same_options(a: &Mark, b: &Mark) -> bool {
+    a.act == b.act
+        && a.log == b.log
+        && a.condition == b.condition
+        && a.hits == b.hits
+        && a.enabled == b.enabled
+        && a.only == b.only
 }
 
 /// The entity whose hook a script stopped in (E9-4a): the entity, how a filter names it,
