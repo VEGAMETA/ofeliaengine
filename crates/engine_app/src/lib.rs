@@ -122,8 +122,9 @@ pub use report::{FrameReport, Startup, StartupPipelines};
 pub use saves::{Autosave, QUICK_SLOT, SaveSettings, Saves};
 pub use settings::{DebuggerSettings, FrameCap, PlayerSettings, Window};
 pub use sound::{
-    AcousticSettings, AudioListener, AudioSettings, AudioSource, AudioSource3D, BusSettings,
-    Falloff, Mixer, PlayMode, PreviewState, ReverbZone, Room, SoundFiles, Waveform, waveform,
+    AcousticSettings, AudioListener, AudioSettings, AudioSource, AudioSource3D, BusLayout, Falloff,
+    MIXER_FILE_EXTENSION, MasterLayout, Mixer, MixerFile, PlacedBus, PlayMode, PreviewState,
+    ReverbZone, Room, SoundFiles, Waveform, waveform,
 };
 pub use text::TextSource;
 pub use videos::{MaterialSlot, VideoId, Videos};

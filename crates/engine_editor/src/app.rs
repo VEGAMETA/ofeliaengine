@@ -18993,7 +18993,7 @@ fn file_kind(kind: engine_scene::AssetKind) -> FileKind {
         K::Sound => FileKind::Audio,
         K::Script => FileKind::Script,
         K::Shader => FileKind::Shader,
-        K::Material | K::Video | K::Font => FileKind::Other,
+        K::Material | K::Video | K::Font | K::Mixer => FileKind::Other,
     }
 }
 

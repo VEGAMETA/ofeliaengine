@@ -408,6 +408,117 @@ fn the_mixer_sets_a_buses_volume() {
     assert_eq!(energy(bed.frame(10).into_iter()), 0.0);
 }
 
+/// A mono 32-bit float WAV file of `frames` frames, every one `v`: its energy tells gains
+/// apart wherever it plays.
+fn write_level_wav(path: &Path, frames: u64, v: f32) {
+    let data = (frames * 4) as u32;
+    let mut bytes = Vec::with_capacity(44 + data as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&3u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&RATE.to_le_bytes());
+    bytes.extend_from_slice(&(RATE * 4).to_le_bytes());
+    bytes.extend_from_slice(&4u16.to_le_bytes());
+    bytes.extend_from_slice(&32u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data.to_le_bytes());
+    for _ in 0..frames {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn a_new_layout_moves_fades_and_drops_buses_while_its_sounds_play() {
+    let mut bed = Bed::new("layout", AudioSettings::default());
+    write_level_wav(&bed.folder.join("level.wav"), u64::from(RATE), 0.25);
+    let e = bed
+        .world
+        .spawn((AudioSource::new("level.wav").on_bus("music").looped(),));
+    bed.until(|b| b.voice(e).is_some());
+    // The energy of 20 ms once the gains' ramps are over.
+    let level = |bed: &mut Bed| {
+        bed.frame(120);
+        energy(bed.frame(20).into_iter())
+    };
+    let full = level(&mut bed);
+    assert!(full > 0.0);
+    // Music under a new world bus at -6 dB, a new steps bus under effects, voice and ui
+    // gone.
+    let mut layout = MixerFile::default();
+    layout.buses.insert(String::from("world"), BusLayout::new());
+    layout.buses.insert(
+        String::from("music"),
+        BusLayout::new().under("world").at(-6.0),
+    );
+    layout
+        .buses
+        .insert(String::from("effects"), BusLayout::new().reverberant());
+    layout
+        .buses
+        .insert(String::from("steps"), BusLayout::new().under("effects"));
+    bed.sound.set_layout(&layout);
+    let names: Vec<&str> = bed.sound.buses.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["master", "effects", "steps", "world", "music"]);
+    // Its sound goes on, at a quarter of the power.
+    let fader = level(&mut bed);
+    assert!(bed.voice(e).is_some(), "still playing");
+    assert!((fader / full - 0.251).abs() < 0.01, "{fader} of {full}");
+    let world = bed.sound.buses[3].id;
+    let music = &bed.sound.buses[4];
+    assert_eq!(music.parent.as_deref(), Some("world"));
+    assert_ne!(music.id, world);
+    // The world's Mixer follows the buses; the game's volume multiplies the fader.
+    let mixer = bed.world.resource_mut::<Mixer>().unwrap();
+    assert_eq!(
+        mixer.buses().collect::<Vec<_>>(),
+        ["master", "effects", "steps", "world", "music"]
+    );
+    assert_eq!(mixer.volume("music"), Some(1.0));
+    assert!(mixer.set_volume("music", 0.5));
+    assert!(mixer.volume("voice").is_none(), "gone");
+    let both = level(&mut bed);
+    assert!((both / full - 0.0627).abs() < 0.005, "{both} of {full}");
+    // Effects keeps its world child; a bus made reverberant gets one, one made dry loses
+    // it; the game's volume stays across a new layout.
+    assert!(bed.sound.buses[1].world.is_some());
+    layout.buses.get_mut("music").unwrap().reverb = true;
+    layout.buses.get_mut("effects").unwrap().reverb = false;
+    bed.sound.set_layout(&layout);
+    assert!(bed.sound.buses[4].world.is_some());
+    assert!(bed.sound.buses[1].world.is_none());
+    let again = level(&mut bed);
+    assert!((again / both - 1.0).abs() < 0.02, "{again} after {both}");
+    assert_eq!(
+        bed.world.resource::<Mixer>().unwrap().volume("music"),
+        Some(0.5)
+    );
+}
+
+#[test]
+fn the_players_layout_comes_from_its_file_or_is_the_built_in_one() {
+    let dir = std::env::temp_dir().join(format!("ofelia-layout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("main.mixer");
+    // No file: the built-in four.
+    assert_eq!(crate::player::load_layout(&path), MixerFile::builtin());
+    // A file: its buses.
+    let mut layout = MixerFile::default();
+    layout
+        .buses
+        .insert(String::from("sfx"), BusLayout::new().at(-3.0));
+    std::fs::write(&path, layout.to_text(engine_scene::AssetId::new())).unwrap();
+    assert_eq!(crate::player::load_layout(&path), layout);
+    // A file that cannot be read: the built-in four again (and a warning).
+    std::fs::write(&path, "[mixer version=1]\nbuses[\"sfx\"].gain = loud\n").unwrap();
+    assert_eq!(crate::player::load_layout(&path), MixerFile::builtin());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_missing_sound_or_bus_does_no_harm() {
     let mut bed = Bed::new("missing", AudioSettings::default());

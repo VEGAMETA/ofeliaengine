@@ -208,10 +208,12 @@ pub enum AssetKind {
     Script,
     /// A Slang module (`.slang`): a material type or the code it imports (ADR 0092).
     Shader,
+    /// A mixer layout (`.mixer`): the buses and their faders (ADR 0121).
+    Mixer,
 }
 
 /// Every kind with its name and extensions.
-const KINDS: [(AssetKind, &str, &[&str]); 9] = [
+const KINDS: [(AssetKind, &str, &[&str]); 10] = [
     (AssetKind::Scene, "scene", &["scene"]),
     (AssetKind::Material, "material", &["material"]),
     (AssetKind::Model, "model", &["glb", "gltf"]),
@@ -225,6 +227,7 @@ const KINDS: [(AssetKind, &str, &[&str]); 9] = [
     (AssetKind::Font, "font", &["ttf", "otf"]),
     (AssetKind::Script, "script", &["luau"]),
     (AssetKind::Shader, "shader", &["slang"]),
+    (AssetKind::Mixer, "mixer", &["mixer"]),
 ];
 
 impl AssetKind {
