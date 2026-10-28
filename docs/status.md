@@ -735,25 +735,26 @@ Last updated: 2026-10-28.
   - **E9-4b, changing a value at a stop** (#388, ADR 0119's as-built): F2 or a second click
     on a Variables row gives it Luau; `self`'s props and components are an undo step; VS
     Code's Set Value in the editor and the standalone player.
+  - **E9-4c, one set of breakpoints with VS Code** (#389, ADR 0119's as-built): the editor's
+    breakpoints reach VS Code as `breakpoint` events, attaching joins the two sets, and VS
+    Code's own list keeps the editor's options. The script debugger's plan (E9) is done.
   - **Next, in this order:**
-    1. E9-4c, the editor's breakpoints sent to VS Code (DAP breakpoint events), the
-       editor's options kept across VS Code's own list.
-       Asked (2026-10-28): native code in the editor's Play, whose frames' locals Luau does
-       not read at a stop. E10-1 waits for the answer on the material file.
-    2. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
+    1. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
        per hook (`script Door.on_tick`) and each script's time and allocations in the
        editor's profiler; Tracy has only the stages' zones (`scripts::tick`).
-    3. The editor's text layouts allocate when a text changes (found 2026-10-28): the
+    2. The editor's text layouts allocate when a text changes (found 2026-10-28): the
        status line's FPS every half second makes a new layout (its string and glyphs).
        Reuse the layouts that go out of use. The zero-allocation test missed it because
        its frames ran faster than the FPS's update; on the Radeon they did not, on `main`
        too. The editor's FPS now follows a fixed frame time (`Player::frame_time`), so the
        test is the same on both GPUs.
-    4. The RTX's `forward` reads 3.1-3.7 % slower than its baseline in `sponza_fsr_quality`
+    3. The RTX's `forward` reads 3.1-3.7 % slower than its baseline in `sponza_fsr_quality`
        and `sponza_smaa_t2x`, in two gates in a row (#379, #380), on code those scenes do
        not run (they render through the frame renderer, not the player; registers
        unchanged), with every frame 0.3-2 % slower: measure `main` alone, and give the RTX
        a new baseline if it holds.
+  - **Asked (2026-10-28):** native code in the editor's Play, whose frames' locals Luau does
+    not read at a stop. E10-1 waits for the answer on the material file.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

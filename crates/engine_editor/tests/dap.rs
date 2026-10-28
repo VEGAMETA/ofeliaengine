@@ -329,3 +329,92 @@ fn vs_code_attaches_over_dap_and_debugs_a_stop() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_editors_breakpoints_reach_vs_code_and_keep_their_options() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-dap-marks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_project(&dir);
+    // The script's tab shown, its caret on line 3, and a logpoint on line 4.
+    std::fs::create_dir_all(dir.join(".ofelia")).unwrap();
+    std::fs::write(
+        dir.join(".ofelia/session"),
+        "[session version=1]\n\n[editor]\nscript = 0\n\n[script]\npath = \
+         \"scripts/spin.luau\"\ncaret = (2, 4)\nscroll = (0, 0)\n\n[breakpoint]\npath = \
+         \"scripts/spin.luau\"\nline = 4\nlog = \"rate {self.rate}\"\n",
+    )
+    .unwrap();
+    let Some((mut player, settings)) = player(&dir) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let endpoint: PathBuf = dir.join(".ofelia/debug/editor.json");
+    let found: Value = serde_json::from_str(&std::fs::read_to_string(&endpoint).unwrap()).unwrap();
+    let port = u16::try_from(found["port"].as_u64().unwrap()).unwrap();
+    let token = found["token"].as_str().unwrap().to_owned();
+    let (p, g, o) = (&mut player, &mut game, &mut overlay);
+    let mut client = Client::connect(port);
+    client.request(
+        &mut || frame(p, g, o),
+        "initialize",
+        json!({ "adapterID": "ofeliaengine" }),
+    );
+    let r = client.request(&mut || frame(p, g, o), "attach", json!({ "token": token }));
+    assert_eq!(r["success"], true, "{r}");
+    // VS Code has no breakpoints of its own here. Its configuration done, the editor's
+    // logpoint joins its set, by its line.
+    client.request(&mut || frame(p, g, o), "configurationDone", json!({}));
+    let breakpoint = |reason: &'static str| {
+        move |m: &Value| m["event"] == "breakpoint" && m["body"]["reason"] == reason
+    };
+    let new = client.wait(&mut || frame(p, g, o), "the logpoint", breakpoint("new"));
+    let told = &new["body"]["breakpoint"];
+    assert_eq!(told["line"], 4, "{new}");
+    let path = told["source"]["path"].as_str().unwrap().replace('\\', "/");
+    assert!(path.ends_with("scripts/spin.luau"), "{path}");
+    // One toggled in the editor reaches VS Code too.
+    assert!(g.run_command(p.world_mut(), "debug.toggle_breakpoint"));
+    let new = client.wait(&mut || frame(p, g, o), "the toggled one", breakpoint("new"));
+    assert_eq!(new["body"]["breakpoint"]["line"], 3, "{new}");
+    // VS Code's own list for the file, as it holds it now: their lines only. The editor
+    // keeps the logpoint's text, and has nothing more to tell.
+    let script = std::path::absolute(dir.join("scripts").join("spin.luau")).unwrap();
+    let r = client.request(
+        &mut || frame(p, g, o),
+        "setBreakpoints",
+        json!({ "source": { "path": script }, "breakpoints": [{ "line": 3 }, { "line": 4 }] }),
+    );
+    let set = r["body"]["breakpoints"].as_array().unwrap().clone();
+    assert!(set.iter().all(|b| b["verified"] == true), "{r}");
+    let id3 = set[0]["id"].as_i64().unwrap();
+    for _ in 0..3 {
+        frame(p, g, o);
+    }
+    client.pump();
+    assert!(
+        !client.came.iter().any(|m| m["event"] == "breakpoint"),
+        "{:#?}",
+        client.came
+    );
+    // Taken away in the editor: VS Code is told by the id it was given.
+    assert!(g.run_command(p.world_mut(), "debug.toggle_breakpoint"));
+    let removed = client.wait(&mut || frame(p, g, o), "the removal", breakpoint("removed"));
+    assert_eq!(removed["body"]["breakpoint"]["id"], id3, "{removed}");
+    client.request(&mut || frame(p, g, o), "disconnect", json!({}));
+    game.end_session(player.world_mut());
+    let session = std::fs::read_to_string(dir.join(".ofelia/session")).unwrap();
+    assert!(
+        session.contains("line = 4\nlog = \"rate {self.rate}\""),
+        "the logpoint kept its text: {session}"
+    );
+    assert!(!session.contains("line = 3\n"), "{session}");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
