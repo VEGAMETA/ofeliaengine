@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3g-3b, the editor's `[Node]` functions** (#PR, ADR 0123's as-built): the
+  - **E10-3g-3b, the editor's `[Node]` functions** (#434, ADR 0123's as-built): the
     project's Slang modules scanned on a thread of their own once a graph is shown; their
     marked functions in the node search under their groups (one a node cannot call with
     why); calls titled by their marks; a call's signature following its function when the
