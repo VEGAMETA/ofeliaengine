@@ -26,6 +26,7 @@ pub mod icons;
 mod import;
 pub mod input;
 pub mod inspector;
+mod marked;
 mod material;
 mod mixer;
 mod outline;
@@ -54,4 +55,4 @@ pub use palette::{
     Chord, CommandId, CommandInfo, Commands, Conflict, Fuzzy, KeyContext, Keymap, Match,
 };
 pub use snap::{Quantity, Snapping};
-pub use undo::{History, Kept, PlayChange, PlayMark, Transaction, WorldSnapshot};
+pub use undo::{History, Kept, PlayChange, PlayMark, Rewrite, Transaction, WorldSnapshot};
