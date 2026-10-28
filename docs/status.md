@@ -842,7 +842,7 @@ Last updated: 2026-10-28.
     changed); a bus renamed in the mixer takes the open scene's sources along in the same
     undo step and names the other scenes; Find References finds a sound's users. E11-3 is
     done.
-  - **E11-2c, the room's reverb strip** (#PR, ADR 0107's as-built, ADR 0121's version 3):
+  - **E11-2c, the room's reverb strip** (#414, ADR 0107's as-built, ADR 0121's version 3):
     "room (auto)" at the mixer's right end: the reverb's meter, what the room follows
     ("Hall 62 %", "the walls"), its fader a trim kept as `room.gain`; picked, the room
     heard now, read-only. E11-2 is done.
