@@ -1284,8 +1284,17 @@ Until its shaders are made, the material draws its colour.
   through, to lead it round other nodes; or add one from the node search ("Reroute").
   - Drag its middle to move it; its ends are its pins, as a node's ports are.
   - It is drawn in the colour of what passes through it, and it changes no code.
-- **Not yet:** frames (E10-3e-2b), functions (E10-3g); Slang's own errors marked at their
-  nodes come with E10-3g's nodes whose code you write.
+- **Frames:** select nodes and press **C** to put them in a frame, a titled area behind
+  them (Unreal's comment boxes).
+  - Drag its title bar to move it with the nodes it holds: a node is in a frame while its
+    box lies wholly inside it, so dragging a node in or out puts it in or takes it out.
+  - Drag its bottom right corner to resize it.
+  - Click its title bar to select it; its title is in the inspector. Delete removes the
+    frame and leaves its nodes.
+  - A frame is layout only: it changes no code. Files with frames are the format's
+    version 2; older files read as they are.
+- **Not yet:** functions (E10-3g); Slang's own errors marked at their nodes come with
+  E10-3g's nodes whose code you write.
 
 ## Autosave and the session
 

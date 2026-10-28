@@ -195,6 +195,19 @@ impl fmt::Display for PortRef {
     }
 }
 
+/// A frame on the canvas (the file's version 2, ADR 0123's E10-3e-2b): a titled
+/// rectangle that the nodes inside it move with, as Unreal's comment boxes do (no list of
+/// them: a node dragged in or out joins or leaves). Nothing of the code.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Frame {
+    /// Its top left on the canvas.
+    pub at: [f32; 2],
+    /// Its width and height, its title bar in them.
+    pub size: [f32; 2],
+    /// Its title.
+    pub title: String,
+}
+
 /// A material graph.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Graph {
@@ -204,6 +217,8 @@ pub struct Graph {
     pub nodes: BTreeMap<String, Node>,
     /// Its links by the input they feed: `links[input]` is the output it comes from.
     pub links: BTreeMap<PortRef, PortRef>,
+    /// Its frames by id (layout only).
+    pub frames: BTreeMap<String, Frame>,
 }
 
 impl Graph {
@@ -218,6 +233,7 @@ impl Graph {
             model,
             nodes,
             links: BTreeMap::new(),
+            frames: BTreeMap::new(),
         }
     }
 

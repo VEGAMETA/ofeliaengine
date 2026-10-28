@@ -545,6 +545,47 @@ What was built:
     graph draws one.
 - **Next:** frames (E10-3e-2b, the file's version 2).
 
+## As built (E10-3e-2b, 2026-10-28): frames, the file's version 2
+
+- **The decision:** Unreal's comment boxes (the study is in E10-3e-2a's as-built).
+  - A frame holds the nodes whose boxes lie wholly inside it when its drag starts: no list
+    in the file, so two branches' edits of the same frame merge as places do.
+  - Godot's and Blender's lists of attached nodes would keep a node in a frame it was
+    dragged out of until detached, and add a field per node to merge.
+- **The data:** `Graph::frames` by id (`Frame`: `at`, `size`, `title`), layout only, the
+  generated code the same with or without them (tested).
+- **The file's version 2:** `frames["frame1"].at`, `.size` and `.title` after the links.
+  Version 1 files, which have none, read as they are; the editor writes version 2.
+- **On the canvas** (`graph`):
+  - Drawing: under the links and the boxes, an area the grid shows through, a title bar
+    with the title, two strokes as a grip at the bottom right corner; selected, framed in
+    orange, under the pointer, faintly.
+  - Hits: the boxes stay on top; under them a frame's grip and title bar (the last frame
+    on top), its inside the canvas's, so a box selection or a pan starts there.
+  - Gestures:
+    - **C** frames the selection: the boxes' extent with 20 units round it and the title
+      bar above, titled "Frame", selected alone (refused with nothing selected).
+    - The title bar drags the frame with the nodes it holds (`Drag::Move` carries
+      frames).
+    - The grip resizes it, to at least 80 by 50 (`Drag::Size`).
+    - Escape takes either back; each is one step.
+  - Selection: frames are selected apart from the nodes (`GraphDoc::selected_frames`),
+    since a file could give a node and a frame the same id. Delete removes the selected
+    frames and leaves their nodes.
+  - The inspector shows a frame selected alone as "Frame · frame1" with its title (↺
+    puts back "Frame").
+- **Tests:**
+  - the file: frames written and read back, a version 1 file read, the code unchanged;
+  - the canvas: C (refused with nothing selected), the frame's place and size round the
+    node, the title bar dragging it with the node inside and not the one outside, the grip
+    resizing it, its inside the canvas's, the title in the inspector, Delete leaving the
+    node;
+  - in the editor: C as a step, undone and redone, the file written as version 2 with
+    the frame;
+  - the graph tab's frames allocate nothing with a frame shown, and the GPU test's graph
+    draws one.
+- **Next:** functions (E10-3g), with Slang's errors at their nodes.
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,

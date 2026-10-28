@@ -85,13 +85,15 @@ fn a_graph_tabs_frames_do_not_allocate() {
     std::fs::write(
         dir.join("materials/moss.mgraph"),
         format!(
-            "[mgraph version=1 id={}]\n\nmodel = \"lit\"\n\
+            "[mgraph version=2 id={}]\n\nmodel = \"lit\"\n\
              nodes[\"c\"].kind = \"color\"\nnodes[\"c\"].value = [0.25, 0.55, 0.2, 1]\n\
              nodes[\"k\"].kind = \"number\"\nnodes[\"k\"].at = [0, 110]\n\
              nodes[\"k\"].value = [0.8]\n\
              nodes[\"m\"].kind = \"multiply\"\nnodes[\"m\"].at = [220, 30]\n\
              nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [460, 0]\n\
              nodes[\"rr\"].kind = \"reroute\"\nnodes[\"rr\"].at = [380, 60]\n\
+             frames[\"frame1\"].at = [-20, -46]\nframes[\"frame1\"].size = [220, 220]\n\
+             frames[\"frame1\"].title = \"Tint\"\n\
              links[\"m.a\"] = \"c.rgba\"\nlinks[\"m.b\"] = \"k.value\"\n\
              links[\"rr.in\"] = \"m.out\"\nlinks[\"out.base\"] = \"rr.out\"\n",
             AssetId::new()
