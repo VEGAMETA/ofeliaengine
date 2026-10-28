@@ -59,9 +59,11 @@ usage:
                                                    detail levels and meshlets, entries zstd
                                                    level N (19);
                                                    <SCENE>.materials.ron (or --materials <MAP>)
-                                                   replaces glTF materials by material files,
-                                                   their types compiled into the pack
-                                                   (--engine-shaders <DIR>: forward.slang);
+                                                   replaces glTF materials by `.material`
+                                                   files, their types compiled into the pack
+                                                   (--engine-shaders <DIR>: forward.slang;
+                                                   --project <DIR>: the root their paths are
+                                                   read from, the current folder by default);
                                                    <SCENE>.pso.ron (or --pso <RECORD>): a PSO
                                                    record, only the entry points playtests
                                                    drew compiled for the types it names;
@@ -146,6 +148,8 @@ struct CookArgs {
     ddc: Option<PathBuf>,
     settings: CookSettings,
     materials: Option<PathBuf>,
+    /// The project's root: what material files' asset paths are read from (ADR 0120).
+    project: PathBuf,
     engine_shaders: PathBuf,
     pso: Option<PathBuf>,
 }
@@ -246,6 +250,7 @@ fn assets(dir: &std::path::Path, json: bool) -> Result<ExitCode, String> {
 fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String> {
     let (mut scene, mut out, mut ddc, mut materials, mut pso) = (None, None, None, None, None);
     let mut engine_shaders = PathBuf::from(ENGINE_SHADERS);
+    let mut project = PathBuf::from(".");
     let mut settings = CookSettings::default();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -253,6 +258,7 @@ fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String
             "-o" | "--out" => out = Some(PathBuf::from(value("-o")?)),
             "--ddc" => ddc = Some(PathBuf::from(value("--ddc")?)),
             "--materials" => materials = Some(PathBuf::from(value("--materials")?)),
+            "--project" => project = PathBuf::from(value("--project")?),
             "--engine-shaders" => engine_shaders = PathBuf::from(value("--engine-shaders")?),
             "--pso" => pso = Some(PathBuf::from(value("--pso")?)),
             "--no-lods" => settings.lods = false,
@@ -278,6 +284,7 @@ fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String
         ddc,
         settings,
         materials,
+        project,
         engine_shaders,
         pso,
     })
@@ -328,8 +335,8 @@ fn cook(args: &CookArgs) -> Result<ExitCode, String> {
             builder = builder.with_pso_record(record);
         }
         if !map.files.is_empty() {
-            let warnings =
-                apply_material_map(&mut scene, &map, &mut builder).map_err(|e| e.to_string())?;
+            let warnings = apply_material_map(&mut scene, &map, &args.project, &mut builder)
+                .map_err(|e| e.to_string())?;
             for warning in warnings {
                 eprintln!("warning: {warning}");
             }

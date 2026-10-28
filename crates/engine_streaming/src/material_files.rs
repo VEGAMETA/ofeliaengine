@@ -1,5 +1,6 @@
-//! Material files at run time (ADR 0092): materials made from `*.material.ron` files
-//! without cooking, kept live in development.
+//! Material files at run time (ADR 0092, ADR 0120): materials made from typed `.material`
+//! files without cooking, kept live in development. Their paths are read from the project's
+//! root.
 //!
 //! [`LiveMaterialFiles::load`] reads a file, registers its type with the forward renderer,
 //! lays its parameters out by the type's reflection (a Slang session of its own, opened on
@@ -16,6 +17,7 @@ use engine_render::forward::{ForwardRenderer, MaterialTypeDesc, reflect_material
 use engine_render::material::{
     AlphaMode, MaterialDesc, MaterialId, MaterialParams, MaterialTable, PARAMS_BYTES, TextureRef,
 };
+use engine_scene::AssetPaths;
 use engine_shader::{Compiler, SlangLibrary, StructLayout, path_key};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -41,6 +43,8 @@ struct LiveFile {
 /// Materials from material files, kept live (see the module documentation).
 pub struct LiveMaterialFiles {
     shader_dir: PathBuf,
+    /// The project's root, which the files' asset references are read from.
+    root: PathBuf,
     compiler: Option<Compiler>,
     files: Vec<LiveFile>,
     watch: Option<WatchSet>,
@@ -60,10 +64,12 @@ impl core::fmt::Debug for LiveMaterialFiles {
 
 impl LiveMaterialFiles {
     /// Materials whose types compile from `forward.slang` in `shader_dir` (the engine's,
-    /// `engine_render::forward::ENGINE_SHADER_DIR`).
-    pub fn new(shader_dir: &Path) -> Self {
+    /// `engine_render::forward::ENGINE_SHADER_DIR`), from files of the project in `root`
+    /// (their shaders' and textures' paths are read from it).
+    pub fn new(shader_dir: &Path, root: &Path) -> Self {
         Self {
             shader_dir: shader_dir.to_owned(),
+            root: root.to_owned(),
             compiler: None,
             files: Vec::new(),
             watch: None,
@@ -195,7 +201,18 @@ impl LiveMaterialFiles {
         forward: &mut ForwardRenderer,
         texture: &mut TextureResolver<'_>,
     ) -> Result<Built, String> {
-        let file = MaterialFile::load(path).map_err(|e| e.to_string())?;
+        let (source, report): (MaterialFile, _) =
+            MaterialFile::load(path).map_err(|e| e.to_string())?;
+        let paths: &AssetPaths = &report.assets;
+        let file = source
+            .typed(paths, &self.root)
+            .map_err(|e| format!("{}: {}", path.display(), e.message))?
+            .ok_or_else(|| {
+                format!(
+                    "{}: the standard material, not a material type's instance",
+                    path.display()
+                )
+            })?;
         let desc = MaterialTypeDesc {
             name: file.type_name.clone(),
             module: file.shader.clone(),
@@ -252,7 +269,9 @@ impl LiveMaterialFiles {
         };
         look.alpha = match file.alpha {
             Alpha::Opaque => AlphaMode::Opaque,
-            Alpha::Mask(cutoff) => AlphaMode::Mask { cutoff },
+            Alpha::Mask => AlphaMode::Mask {
+                cutoff: file.alpha_cutoff,
+            },
             Alpha::Blend => AlphaMode::Blend,
         };
         look.double_sided = file.double_sided;

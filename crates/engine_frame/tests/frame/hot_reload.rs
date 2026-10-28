@@ -203,9 +203,14 @@ struct TintMaterial : IMaterial
 }
 "#;
 
+/// A `.material` file of the tint type (ADR 0120), its module beside it in the project.
 fn tint_file(rgb: [f32; 3]) -> String {
     format!(
-        "(shader: \"tint.slang\", type: \"TintMaterial\", params: {{ \"color\": ({}, {}, {}, 1.0) }})",
+        "[material version=2 id=4f8e1d2c3b4a59687706f5e4d3c2b1a0]
+shader = asset(\"tint.slang\", 7d1c0e9a2b3f4c5d8e6f7a8b9c0d1e2f)
+type = \"TintMaterial\"
+vectors[\"color\"] = [{}, {}, {}, 1]
+",
         rgb[0], rgb[1], rgb[2]
     )
 }
@@ -218,9 +223,10 @@ fn a_material_file_reloads_when_it_changes() {
     let dir = std::env::temp_dir().join(format!("engine_frame_live_files_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("tint.slang"), TINT).unwrap();
-    let path = dir.join("wall.material.ron");
+    let path = dir.join("wall.material");
     std::fs::write(&path, tint_file([0.9, 0.05, 0.05])).unwrap();
-    let mut live = LiveMaterialFiles::new(Path::new(ENGINE_SHADER_DIR));
+    // The folder is the project the file's paths are read from.
+    let mut live = LiveMaterialFiles::new(Path::new(ENGINE_SHADER_DIR), &dir);
     live.set_hot_reload(true);
     let mut no_textures = |_: &Path, _| None;
     let material = match live.load(
@@ -291,7 +297,11 @@ fn a_material_file_reloads_when_it_changes() {
     );
 
     // A file that does not parse: its error is kept, green stays.
-    save_as(&path, "(shader: \"tint.slang\", type: ");
+    save_as(
+        &path,
+        "[material version=2]
+type = ",
+    );
     let start = Instant::now();
     while live.error(&path).is_none() && start.elapsed() < Duration::from_secs(20) {
         assert_eq!(
@@ -305,7 +315,7 @@ fn a_material_file_reloads_when_it_changes() {
         .map(str::to_owned)
         .expect("the error is kept");
     println!("the broken file's error: {error}");
-    assert!(error.contains("wall.material.ron"), "{error}");
+    assert!(error.contains("wall.material"), "{error}");
 
     // Fixed: blue.
     save_as(&path, &tint_file([0.05, 0.05, 0.9]));

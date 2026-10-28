@@ -21,6 +21,9 @@ engine_collision.workspace = true
 engine_nav.workspace = true
 engine_core.workspace = true
 engine_ecs.workspace = true
+# Material files in the editor's grammar, reflected (ADR 0120).
+engine_reflect.workspace = true
+engine_scene.workspace = true
 # Unbuffered reads through an I/O ring for packs (ADR 0056).
 engine_platform.workspace = true
 engine_profiler.workspace = true

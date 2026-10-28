@@ -1,0 +1,13 @@
+[material version=2 id=96e5e125516247c4bc91f6a0b1994961]
+
+# Toon: orange in two lit bands, a white highlight, a blue rim. (ADR 0092; a golden shot's material file.)
+shader = asset("materials/models.slang", 70453f8782af4df0833be2c3df97d8e9)
+type = "ToonMaterial"
+numbers["rim_width"] = 0.25
+numbers["roughness"] = 0.3
+numbers["toon_softness"] = 0.02
+numbers["toon_steps"] = 2
+vectors["base"] = [0.95, 0.55, 0.2, 1]
+vectors["rim"] = [0.25, 0.35, 0.6]
+vectors["toon_highlight"] = [0.9, 0.9, 0.9]
+look = Replaced

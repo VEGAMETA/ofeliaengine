@@ -1,0 +1,10 @@
+[material version=2 id=316d5370269c462c9c1c255f33141b25]
+
+# Cloth: blue fabric, a pale sheen of roughness 0.6. (ADR 0092; a golden shot's material file.)
+shader = asset("materials/models.slang", a7c751e4d0d74509934c4402147432c6)
+type = "ClothMaterial"
+numbers["roughness"] = 0.8
+numbers["sheen_roughness"] = 0.6
+vectors["base"] = [0.15, 0.2, 0.55, 1]
+vectors["sheen"] = [0.6, 0.6, 0.65]
+look = Replaced

@@ -1,0 +1,10 @@
+[material version=2 id=46beb88f2c784b07ba9717a454eafca1]
+
+# Clear coat: matte red paint under a sharp, full coat. (ADR 0092; a golden shot's material file.)
+shader = asset("materials/models.slang", 8c79146d2fe34fb5bff27fe839539925)
+type = "ClearcoatMaterial"
+numbers["clearcoat"] = 1
+numbers["clearcoat_roughness"] = 0.05
+numbers["roughness"] = 0.6
+vectors["base"] = [0.6, 0.05, 0.05, 1]
+look = Replaced

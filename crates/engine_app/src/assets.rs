@@ -54,7 +54,7 @@ use engine_render::mesh::{GeometryPool, MeshId, OwnedMeshData};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_rhi::{Allocator, Bindless, Device, Wrap};
 use engine_runtime::{Derived, MeshRenderer};
-use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, LoadError, ValueReport};
+use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -147,112 +147,27 @@ pub mod builtin {
     ];
 }
 
-/// How a material uses alpha.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
-#[repr(u8)]
-pub enum Alpha {
-    /// Alpha is ignored.
-    #[default]
-    Opaque,
-    /// Fragments below [`MaterialFile::alpha_cutoff`] are cut away (foliage, fences).
-    Mask,
-    /// Blended over what is behind.
-    Blend,
-}
+/// A material file (`.material`, ADR 0108, ADR 0120): the engine's standard material, or a
+/// material type's instance (drawn with its look until E10-1b draws its type).
+pub use engine_assets::material_file::{Alpha, MaterialFile};
 
-/// A material file (`.material`, ADR 0108): `[material version=1 id=…]`, then its values,
-/// one per line.
-///
-/// ```text
-/// [material version=1 id=4f8e1d2c3b4a59687706f5e4d3c2b1a0]
-///
-/// base_color = [0.8, 0.15, 0.1, 1]
-/// metallic = 0
-/// roughness = 0.4
-/// emissive = [0, 0, 0]
-/// alpha = Opaque
-/// alpha_cutoff = 0.5
-/// double_sided = false
-/// ```
-#[derive(Debug, Clone, PartialEq, Reflect)]
-pub struct MaterialFile {
-    /// Linear base color and alpha.
-    #[reflect(hint = "color")]
-    pub base_color: [f32; 4],
-    /// 0 dielectric … 1 metal.
-    #[reflect(min = 0.0, max = 1.0)]
-    pub metallic: f32,
-    /// Perceptual roughness, 0 (mirror) … 1.
-    #[reflect(min = 0.0, max = 1.0)]
-    pub roughness: f32,
-    /// Emitted radiance, linear (above 1 for bright emitters).
-    #[reflect(hint = "color")]
-    pub emissive: [f32; 3],
-    /// How alpha is used.
-    pub alpha: Alpha,
-    /// With [`Alpha::Mask`], alpha below this is cut away.
-    #[reflect(min = 0.0, max = 1.0)]
-    pub alpha_cutoff: f32,
-    /// Both faces drawn and lit.
-    pub double_sided: bool,
-}
-
-impl Default for MaterialFile {
-    /// The built-in material: grey (0.8), dielectric, roughness 0.5, opaque.
-    fn default() -> Self {
-        Self {
-            base_color: [0.8, 0.8, 0.8, 1.0],
-            metallic: 0.0,
-            roughness: 0.5,
-            emissive: [0.0; 3],
-            alpha: Alpha::Opaque,
-            alpha_cutoff: 0.5,
-            double_sided: false,
-        }
-    }
-}
-
-impl MaterialFile {
-    /// The header's kind.
-    pub const KIND: &'static str = "material";
-    /// The format's version.
-    pub const VERSION: u32 = 1;
-
-    /// The renderer's description.
-    pub fn desc(&self) -> MaterialDesc {
-        MaterialDesc {
-            base_color: self.base_color,
-            metallic: self.metallic,
-            roughness: self.roughness,
-            emissive: self.emissive,
-            alpha: match self.alpha {
-                Alpha::Opaque => AlphaMode::Opaque,
-                Alpha::Mask => AlphaMode::Mask {
-                    cutoff: self.alpha_cutoff,
-                },
-                Alpha::Blend => AlphaMode::Blend,
+/// The renderer's description of a material file: the standard material's values (a typed
+/// one's look).
+pub(crate) fn material_desc(file: &MaterialFile) -> MaterialDesc {
+    MaterialDesc {
+        base_color: file.base_color,
+        metallic: file.metallic,
+        roughness: file.roughness,
+        emissive: file.emissive,
+        alpha: match file.alpha {
+            Alpha::Opaque => AlphaMode::Opaque,
+            Alpha::Mask => AlphaMode::Mask {
+                cutoff: file.alpha_cutoff,
             },
-            double_sided: self.double_sided,
-            ..MaterialDesc::default()
-        }
-    }
-
-    /// The file's text, with its id.
-    pub fn to_text(&self, id: AssetId) -> String {
-        let mut out = String::new();
-        engine_scene::write_value(Self::KIND, Self::VERSION, Some(id), self, None, &mut out);
-        out
-    }
-
-    /// A material from its file's text.
-    ///
-    /// # Errors
-    ///
-    /// Not a material file, a newer one, or a bad line (with its number).
-    pub fn parse(text: &str) -> Result<(Self, ValueReport), LoadError> {
-        let mut file = Self::default();
-        let report = engine_scene::read_value(Self::KIND, Self::VERSION, text, &mut file)?;
-        Ok((file, report))
+            Alpha::Blend => AlphaMode::Blend,
+        },
+        double_sided: file.double_sided,
+        ..MaterialDesc::default()
     }
 }
 
@@ -1283,7 +1198,7 @@ impl Assets {
         };
         match file {
             Ok(file) => {
-                let material = table.add(file.desc());
+                let material = table.add(material_desc(&file));
                 self.materials.insert(asset, material);
                 Some(material)
             }
@@ -2109,14 +2024,19 @@ mod tests {
         };
         let id = AssetId::from_u128(42);
         let text = red.to_text(id);
-        assert!(text.starts_with("[material version=1 id="), "{text}");
+        assert!(text.starts_with("[material version=2 id="), "{text}");
         assert!(text.contains("base_color = [0.8, 0.15, 0.1, 1]"), "{text}");
+        // The standard material's file holds none of a type's fields (ADR 0120).
+        assert!(
+            !text.contains("shader") && !text.contains("numbers") && !text.contains("look"),
+            "{text}"
+        );
         assert!(text.contains("alpha = Mask"), "{text}");
         let (back, report) = MaterialFile::parse(&text).unwrap();
         assert_eq!(back, red);
         assert_eq!(report.id, Some(id));
         assert!(matches!(
-            back.desc().alpha,
+            material_desc(&back).alpha,
             AlphaMode::Mask { cutoff } if (cutoff - 0.5).abs() < 1e-6
         ));
     }

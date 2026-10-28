@@ -866,14 +866,23 @@ fn fabric_map(dir: &Path) -> MaterialMap {
             "(0.1, 0.2, 0.1)",
         ),
     ];
+    // Version 2 `.material` files (ADR 0120), outside any project: absolute paths, each file
+    // its own id; the look the replaced glTF material's.
+    let quote = |p: &Path| engine_scene::text::quote(&slash(p));
     let mut map = String::from("{\n");
     for (material, color, normal, sheen) in curtains {
-        let file = out.join(format!("fabric_{material}.material.ron"));
+        let file = out.join(format!("fabric_{material}.material"));
+        let id = || engine_scene::AssetId::new();
         let text = format!(
-            "(\n    shader: \"{}\",\n    type: \"FabricMaterial\",\n    params: {{\n        \"albedo\": Texture(\"{}\", Color),\n        \"normal\": Texture(\"{}\", Normal),\n        \"tint\": (1.0, 1.0, 1.0, 1.0),\n        \"sheen\": {sheen},\n        \"sheen_roughness\": 0.5,\n        \"roughness\": 0.9,\n    }},\n)\n",
-            slash(&module),
-            slash(&dir.join(color)),
-            slash(&dir.join(normal)),
+            "[material version=2 id={}]\n\nshader = asset({}, {})\ntype = \"FabricMaterial\"\nnumbers[\"sheen_roughness\"] = 0.5\nnumbers[\"roughness\"] = 0.9\nvectors[\"tint\"] = [1, 1, 1, 1]\nvectors[\"sheen\"] = [{}]\ntextures[\"albedo\"].image = asset({}, {})\ntextures[\"albedo\"].encoding = Color\ntextures[\"normal\"].image = asset({}, {})\ntextures[\"normal\"].encoding = Normal\nlook = Replaced\n",
+            id(),
+            quote(&module),
+            id(),
+            sheen.trim_matches(|c| c == '(' || c == ')'),
+            quote(&dir.join(color)),
+            id(),
+            quote(&dir.join(normal)),
+            id(),
         );
         std::fs::write(&file, text).expect("fabric file");
         map.push_str(&format!("    \"#{material}\": \"{}\",\n", slash(&file)));
@@ -916,7 +925,8 @@ pub(crate) fn load(
                 }
                 if fabric {
                     let map = fabric_map(dir.expect("the scene's folder"));
-                    apply_material_map(&mut scene, &map, &mut builder).expect("material map");
+                    apply_material_map(&mut scene, &map, Path::new(""), &mut builder)
+                        .expect("material map");
                 }
                 apply_gltf_models(&mut scene, &mut builder).expect("glTF's material extensions");
             }
@@ -1707,8 +1717,10 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let stripes = shot.stripes_floor && !loaded.procedural.is_empty();
     let models = shot.shading_models && loaded.procedural.len() > 11;
     let typed = stripes || models || typed_scene;
-    let mut live = LiveMaterialFiles::new(Path::new(ENGINE_SHADER_DIR));
-    let files = Path::new(env!("CARGO_MANIFEST_DIR")).join("materials");
+    // The golden test bed is the materials' project (ADR 0120).
+    let project = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut live = LiveMaterialFiles::new(Path::new(ENGINE_SHADER_DIR), project);
+    let files = project.join("materials");
     for (k, (mesh, material, world)) in loaded.procedural.iter().enumerate() {
         let id = geometry.add_mesh(&mesh.as_data()).expect("mesh");
         let file = if stripes && k == 0 {
@@ -1721,7 +1733,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         let material = match file {
             Some(name) => live
                 .load(
-                    &files.join(format!("{name}.material.ron")),
+                    &files.join(format!("{name}.material")),
                     *material,
                     frame.forward_mut(),
                     &mut materials,
