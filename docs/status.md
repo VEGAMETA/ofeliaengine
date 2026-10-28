@@ -846,14 +846,20 @@ Last updated: 2026-10-28.
     "room (auto)" at the mixer's right end: the reverb's meter, what the room follows
     ("Hall 62 %", "the walls"), its fader a trim kept as `room.gain`; picked, the room
     heard now, read-only. E11-2 is done.
+  - **E11-5a, snapshots in the file and the player** (#415, ADR 0122): named sets of
+    values by path in `main.mixer` (version 4), layered by weight in the file's order,
+    the later winning; `Mixer::blend(name, weight, seconds)` and Luau
+    `audio.blend(name, weight, fade?)`; fades on the game's thread, nothing allocated a
+    frame; the editor's mixer functions keep the paths through renames, moves and
+    removals.
   - **Test runs keep their windows out of sight** (#411; the owner's request, 2026-10-28):
     `tools/check.ps1` sets `ENGINE_HIDDEN_WINDOWS=1`, and every window `engine_platform`
     makes is then cloaked (composed, its swapchain presenting, never on the screen), with
     no taskbar button, shown without being activated; uncloaking and bringing it to the
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-5's layered snapshots (an ADR first: the file's snapshots, `audio.blend`),
-       then View: Sound Ranges and the falloff curve.
+    1. E11-5b, the panel's snapshots (the list, edits into the chosen one, its values
+       marked, heard while chosen), then View: Sound Ranges and the falloff curve.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
     the later in the file's list winning where they meet; scripts blend one in and out

@@ -35,7 +35,7 @@ pub use components::{
 use layout::linear;
 pub use layout::{
     BusLayout, EffectLayout, MIXER_FILE_EXTENSION, MasterLayout, MixerFile, PlacedBus, RoomLayout,
-    Routes, SendLayout,
+    Routes, SendLayout, SnapshotLayout, SnapshotTarget, snapshot_target,
 };
 pub use waveform::{Waveform, waveform};
 
@@ -163,10 +163,22 @@ impl Default for AcousticSettings {
 #[derive(Debug, Clone, Default)]
 pub struct Mixer {
     buses: Vec<MixerBus>,
+    /// The layout's snapshots (ADR 0122): their weights as heard, and what the game asked.
+    snapshots: Vec<MixerSnapshot>,
     /// Surface → absorption, sorted by surface.
     absorption: Vec<(u16, f32)>,
     absorption_changed: bool,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct MixerSnapshot {
+    name: String,
+    /// Its weight as heard now.
+    weight: f32,
+    /// A blend asked since the sound last read it: the weight, and the seconds (`None`:
+    /// the snapshot's fade).
+    asked: Option<(f32, Option<f32>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +223,36 @@ impl Mixer {
     /// A bus's id, for what plays outside sources (a video's sound, `VideoDesc::bus`).
     pub fn bus_id(&self, bus: &str) -> Option<BusId> {
         self.bus(bus).map(|b| b.id)
+    }
+
+    /// The layout's snapshots by name, in the order their layers stack (ADR 0122).
+    pub fn snapshots(&self) -> impl Iterator<Item = &str> {
+        self.snapshots.iter().map(|s| s.name.as_str())
+    }
+
+    /// Moves snapshot `name`'s weight to `weight` (0: not heard, 1: all of it) over
+    /// `seconds` (`None`: the snapshot's own fade), from where it is now: a pause menu's
+    /// `blend("paused", 1.0, None)`, and `0.0` to leave it. `false` for a name the layout
+    /// has no snapshot for.
+    pub fn blend(&mut self, name: &str, weight: f32, seconds: Option<f32>) -> bool {
+        let Some(s) = self.snapshots.iter_mut().find(|s| s.name == name) else {
+            return false;
+        };
+        let weight = if weight.is_nan() {
+            0.0
+        } else {
+            weight.clamp(0.0, 1.0)
+        };
+        s.asked = Some((weight, seconds.map(|t| t.max(0.0))));
+        true
+    }
+
+    /// Snapshot `name`'s weight as heard now.
+    pub fn weight(&self, name: &str) -> Option<f32> {
+        self.snapshots
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.weight)
     }
 
     /// What surface `surface` absorbs at each bounce, 0..1 (stone about 0.02, heavy cloth
@@ -320,6 +362,82 @@ fn set_effect(audio: &mut Audio, id: EffectId, before: &EffectLayout, after: &Ef
     if before.bypass != after.bypass {
         let _ = audio.set_effect_bypass(id, after.bypass);
     }
+}
+
+/// The values of `blended` (the layout under its snapshots, ADR 0122) given to what is laid
+/// out, where they changed: faders (whether one changed: the game's volumes then multiply
+/// them again), balances, sends' levels, effects' parameters and bypass, the room's trim.
+/// Nothing is made or moved.
+fn give_blended(
+    audio: &mut Audio,
+    buses: &mut [Bus],
+    blended: &MixerFile,
+    reverb: Option<&ReverbBus>,
+    room_trim: &mut f32,
+) -> bool {
+    let mut refader = false;
+    for bus in buses.iter_mut() {
+        let (gain, balance) = if bus.id == BusId::MASTER {
+            (blended.master.gain, blended.master.balance)
+        } else if let Some(l) = blended.buses.get(&bus.name) {
+            (l.gain, l.balance)
+        } else {
+            continue;
+        };
+        if bus.layout.gain != gain {
+            bus.layout.gain = gain;
+            bus.fader = linear(gain);
+            refader = true;
+        }
+        if bus.layout.balance != balance {
+            bus.layout.balance = balance;
+            audio.set_bus_pan(bus.id, balance, FADE);
+        }
+        if let Some(l) = blended.buses.get(&bus.name) {
+            for send in &mut bus.sends {
+                if let Some(s) = l.sends.get(&send.to)
+                    && s.gain != send.gain
+                {
+                    audio.set_send_gain(send.id, linear(s.gain), FADE);
+                    send.gain = s.gain;
+                }
+            }
+        }
+        let chain = blended.effects(&bus.name).unwrap_or(&[]);
+        for (live, want) in bus.effects.iter_mut().zip(chain) {
+            let Some(id) = live.id else {
+                continue;
+            };
+            if let Some(info) = effect_info(&want.kind) {
+                for p in info.params {
+                    let value = want.param(p.name);
+                    if value != live.layout.param(p.name)
+                        && let Some(value) = value
+                    {
+                        audio.set_effect_param(id, p.index, p.effect_value(value));
+                        match live.layout.params.get_mut(p.name) {
+                            Some(v) => *v = value,
+                            None => {
+                                live.layout.params.insert(p.name.to_owned(), value);
+                            }
+                        }
+                    }
+                }
+            }
+            if live.layout.bypass != want.bypass {
+                let _ = audio.set_effect_bypass(id, want.bypass);
+                live.layout.bypass = want.bypass;
+            }
+        }
+    }
+    let trim = linear(blended.room.gain);
+    if *room_trim != trim {
+        *room_trim = trim;
+        if let Some(reverb) = reverb {
+            audio.set_bus_gain(reverb.bus, trim, FADE);
+        }
+    }
+    refader
 }
 
 /// Bus `bus`'s effects laid out as `wanted`, carrying on those `matches` gives (the others
@@ -641,6 +759,25 @@ pub enum RoomFrom {
     },
 }
 
+/// A snapshot's weight (ADR 0122): heard now, where it goes, and how fast (per second).
+#[derive(Debug, Clone)]
+struct Snap {
+    name: String,
+    fade: f32,
+    current: f32,
+    target: f32,
+    rate: f32,
+}
+
+/// A path the snapshots set: the mix's value, and each snapshot's that sets it (by its
+/// place in the list).
+#[derive(Debug, Clone)]
+struct SnapPath {
+    path: String,
+    base: f32,
+    sets: Vec<(usize, f32)>,
+}
+
 /// The room's reverb: a bus with the reverb effect, fed by the reverberant buses' world
 /// children.
 struct ReverbBus {
@@ -689,6 +826,16 @@ pub(crate) struct Sound {
     /// (E11-2c).
     room_trim: f32,
     room_from: RoomFrom,
+    /// The layout's snapshots (ADR 0122): each one's weight, every path they set with the
+    /// mix's value under it, the layout as given and as blended (what was laid out), and
+    /// whether a weight moved since the values were given.
+    snaps: Vec<Snap>,
+    snap_paths: Vec<SnapPath>,
+    base: MixerFile,
+    blended: MixerFile,
+    snaps_moved: bool,
+    /// A fader changed under the game's volumes: every bus's gain is given again.
+    refader: bool,
     /// Where the sounds come from, said once at the start.
     note: String,
     live_folder: Option<LiveFolder>,
@@ -913,6 +1060,12 @@ impl Sound {
             reverb: None,
             room_trim: 1.0,
             room_from: RoomFrom::Nothing,
+            snaps: Vec::new(),
+            snap_paths: Vec::new(),
+            base: MixerFile::default(),
+            blended: MixerFile::default(),
+            snaps_moved: false,
+            refader: false,
             note,
             live_folder,
             loader: Loader::start(store),
@@ -1082,6 +1235,8 @@ impl Sound {
         self.buses[0].fader = linear(layout.master.gain);
         audio.set_bus_gain(BusId::MASTER, self.buses[0].fader, FADE);
         audio.set_bus_pan(BusId::MASTER, layout.master.balance, FADE);
+        self.buses[0].layout.gain = layout.master.gain;
+        self.buses[0].layout.balance = layout.master.balance;
         // Buses the layout no longer has, children first (their voices go on).
         let gone: Vec<usize> = (1..self.buses.len())
             .rev()
@@ -1263,7 +1418,108 @@ impl Sound {
         if let Some(reverb) = &self.reverb {
             audio.set_bus_gain(reverb.bus, self.room_trim, 0.05);
         }
+        self.lay_snapshots(layout);
         self.layout_changed = true;
+    }
+
+    /// The layout's snapshots laid out (ADR 0122): each keeps its weight by its name, and
+    /// every path they set is found with the mix's value under it; one that names nothing
+    /// is left out (the layout's problems say so). Blended again at the next update.
+    fn lay_snapshots(&mut self, layout: &MixerFile) {
+        let old = core::mem::take(&mut self.snaps);
+        self.snaps = layout
+            .snapshots
+            .iter()
+            .map(|s| {
+                let kept = old.iter().find(|o| o.name == s.name);
+                Snap {
+                    name: s.name.clone(),
+                    fade: s.fade.max(0.0),
+                    current: kept.map_or(0.0, |o| o.current),
+                    target: kept.map_or(0.0, |o| o.target),
+                    rate: kept.map_or(0.0, |o| o.rate),
+                }
+            })
+            .collect();
+        self.snap_paths.clear();
+        for (k, s) in layout.snapshots.iter().enumerate() {
+            for (path, &value) in &s.values {
+                let Some(base) = snapshot_target(path).and_then(|t| layout.value_at(t)) else {
+                    continue;
+                };
+                match self.snap_paths.iter_mut().find(|p| p.path == *path) {
+                    Some(p) => p.sets.push((k, value)),
+                    None => self.snap_paths.push(SnapPath {
+                        path: path.clone(),
+                        base,
+                        sets: vec![(k, value)],
+                    }),
+                }
+            }
+        }
+        self.base.clone_from(layout);
+        self.blended.clone_from(layout);
+        self.snaps_moved = true;
+    }
+
+    /// The game's blends taken, the weights moved over `dt`, and when one moved, every
+    /// value the snapshots set blended up their list and given where it changed (ADR 0122).
+    fn blend_snapshots(&mut self, mixer: &mut Mixer, dt: f32) {
+        for asked in &mut mixer.snapshots {
+            let Some((weight, seconds)) = asked.asked.take() else {
+                continue;
+            };
+            let Some(s) = self.snaps.iter_mut().find(|s| s.name == asked.name) else {
+                continue;
+            };
+            let seconds = seconds.unwrap_or(s.fade);
+            s.target = weight;
+            s.rate = if seconds > 0.0 {
+                (weight - s.current).abs() / seconds
+            } else {
+                f32::INFINITY
+            };
+        }
+        for s in &mut self.snaps {
+            if s.current == s.target {
+                continue;
+            }
+            let step = s.rate * dt;
+            s.current = if step >= (s.target - s.current).abs() {
+                s.target
+            } else {
+                s.current + step.copysign(s.target - s.current)
+            };
+            self.snaps_moved = true;
+        }
+        if !core::mem::take(&mut self.snaps_moved) {
+            return;
+        }
+        for p in &self.snap_paths {
+            let Some(target) = snapshot_target(&p.path) else {
+                continue;
+            };
+            let mut v = p.base;
+            for &(k, x) in &p.sets {
+                let w = self.snaps.get(k).map_or(0.0, |s| s.current);
+                if w > 0.0 {
+                    v += (x - v) * w;
+                }
+            }
+            self.blended.set_value(target, v);
+        }
+        if let Some(audio) = self.audio.as_mut() {
+            self.refader |= give_blended(
+                audio,
+                &mut self.buses,
+                &self.blended,
+                self.reverb.as_ref(),
+                &mut self.room_trim,
+            );
+        }
+        for (shown, s) in mixer.snapshots.iter_mut().zip(&self.snaps) {
+            shown.weight = s.current;
+        }
     }
 
     /// The world's [`Mixer`] for these buses: the game's volumes at 1, on top of the
@@ -1279,6 +1535,15 @@ impl Sound {
                     volume: 1.0,
                     muted: false,
                     changed: false,
+                })
+                .collect(),
+            snapshots: self
+                .snaps
+                .iter()
+                .map(|s| MixerSnapshot {
+                    name: s.name.clone(),
+                    weight: s.current,
+                    asked: None,
                 })
                 .collect(),
             absorption: Vec::new(),
@@ -1375,7 +1640,7 @@ impl Sound {
         }
         self.receive();
         self.watch_folder();
-        self.apply_mixer(world);
+        self.apply_mixer(world, dt as f32);
         // The world kept still (the editor while editing, a pause): its sources are silent,
         // and where each one is stays as it was; but those heard in place play.
         if !simulating {
@@ -1536,8 +1801,9 @@ impl Sound {
         }
     }
 
-    /// The game's changes to the world's [`Mixer`], and the error into it.
-    fn apply_mixer(&mut self, world: &mut World) {
+    /// The game's changes to the world's [`Mixer`] (its volumes, mutes, absorption and
+    /// snapshots' blends over `dt` seconds), and the error into it.
+    fn apply_mixer(&mut self, world: &mut World, dt: f32) {
         let Some(mixer) = world.resource_mut::<Mixer>() else {
             return;
         };
@@ -1548,13 +1814,29 @@ impl Sound {
             mixer.absorption_changed = false;
             self.absorption.clone_from(&mixer.absorption);
         }
-        let Some(audio) = self.audio.as_mut() else {
-            return;
-        };
         // A new layout: the buses that stay keep the game's volumes, new ones start at 1,
         // and every bus's gain is its fader again under them.
         // The editor's listening aids changed: every bus's mute again.
         let listening = core::mem::take(&mut self.listening_changed);
+        let laid_out = self.layout_changed;
+        if laid_out {
+            // The layout's snapshots, each keeping what was asked of it by its name.
+            let old = core::mem::take(&mut mixer.snapshots);
+            mixer.snapshots = self
+                .snaps
+                .iter()
+                .map(|s| MixerSnapshot {
+                    name: s.name.clone(),
+                    weight: s.current,
+                    asked: old.iter().find(|o| o.name == s.name).and_then(|o| o.asked),
+                })
+                .collect();
+        }
+        self.blend_snapshots(mixer, dt);
+        let refader = core::mem::take(&mut self.refader);
+        let Some(audio) = self.audio.as_mut() else {
+            return;
+        };
         if core::mem::take(&mut self.layout_changed) {
             let old = core::mem::take(&mut mixer.buses);
             mixer.buses = self
@@ -1573,7 +1855,7 @@ impl Sound {
                 .collect();
         }
         for bus in &mut mixer.buses {
-            if core::mem::take(&mut bus.changed) || listening {
+            if core::mem::take(&mut bus.changed) || listening || refader {
                 let fader = self
                     .buses
                     .iter()

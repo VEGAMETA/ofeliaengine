@@ -4,7 +4,7 @@
 //! ([`MixerFile::builtin`]).
 //!
 //! ```text
-//! [mixer version=3 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
+//! [mixer version=4 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
 //!
 //! master.gain = 0
 //! master.balance = 0
@@ -26,6 +26,10 @@
 //! buses["music"].effects.0.sidechain = "voice"
 //! buses["music"].effects.0.params["ratio"] = 4
 //! buses["music"].effects.0.params["threshold_db"] = -24
+//! snapshots.0.name = "underwater"
+//! snapshots.0.fade = 0.5
+//! snapshots.0.values["music/gain"] = -14
+//! snapshots.0.values["music/effects/0/threshold_db"] = -30
 //! ```
 //!
 //! - **A bus by its name,** under the master or the bus its `parent` names. Gains are in dB
@@ -47,6 +51,11 @@
 //! - **The room's reverb** (version 3): the player makes it and its parameters follow the
 //!   room around the listener (the walls, a reverb zone); `room.gain` is its fader, a trim
 //!   in dB on what it returns.
+//! - **Snapshots** (version 4, ADR 0122): named sets of values by path
+//!   ([`snapshot_target`]: `music/gain`, `music/balance`, `music/sends/canyon`,
+//!   `music/effects/0/<parameter>`, `music/effects/0/bypass`, `master/...`, `room/gain`),
+//!   layered by weight in the list's order, the later winning where they meet; a fade in
+//!   seconds for a blend that names none.
 //! - **The game's volumes** (`Mixer::set_volume`) multiply the faders: an options menu at
 //!   80 % keeps the mix's −6 dB.
 
@@ -59,8 +68,9 @@ use std::path::Path;
 /// The extension of mixer layout files.
 pub const MIXER_FILE_EXTENSION: &str = "mixer";
 
-/// Names the player gives buses of its own: a layout cannot use them.
-const KEPT: [&str; 3] = ["master", "reverb", "editor preview"];
+/// Names the player gives buses of its own (and `room`, the reverb's in snapshots' paths):
+/// a layout cannot use them.
+const KEPT: [&str; 4] = ["master", "reverb", "room", "editor preview"];
 
 /// The master's fader, balance and effects.
 #[derive(Debug, Clone, PartialEq, Default, Reflect)]
@@ -80,6 +90,107 @@ pub struct MasterLayout {
 pub struct RoomLayout {
     /// Its fader in dB: a trim on what the reverb returns (0 as the room gives it).
     pub gain: f32,
+}
+
+/// A snapshot (version 4, ADR 0122): the values it sets of the mix, by path, and the fade
+/// a blend takes when it names none. What it does not name keeps the mix's value.
+#[derive(Debug, Clone, PartialEq, Reflect)]
+pub struct SnapshotLayout {
+    /// What `Mixer::blend` and `audio.blend` call it.
+    pub name: String,
+    /// Seconds a blend takes when it names none.
+    #[reflect(min = 0.0)]
+    pub fade: f32,
+    /// The values it sets, by path ([`snapshot_target`]).
+    pub values: BTreeMap<String, f32>,
+}
+
+impl Default for SnapshotLayout {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            fade: 0.5,
+            values: BTreeMap::new(),
+        }
+    }
+}
+
+impl SnapshotLayout {
+    /// A snapshot called `name`, setting nothing yet.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            ..Self::default()
+        }
+    }
+
+    /// It sets `path` to `value`.
+    #[must_use]
+    pub fn with(mut self, path: &str, value: f32) -> Self {
+        self.values.insert(path.to_owned(), value);
+        self
+    }
+}
+
+/// What a snapshot's path names (ADR 0122), by bus name (`master` for the master's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotTarget<'a> {
+    /// A fader, in dB: `music/gain`, `master/gain`.
+    Gain(&'a str),
+    /// A balance, −1 to 1: `music/balance`.
+    Balance(&'a str),
+    /// The room's reverb's trim, in dB: `room/gain`.
+    Room,
+    /// A send's level, in dB: `music/sends/canyon`.
+    Send {
+        /// The bus it is taken from.
+        bus: &'a str,
+        /// The bus it feeds.
+        to: &'a str,
+    },
+    /// An effect's parameter, in its unit: `music/effects/0/frequency_hz`.
+    Param {
+        /// The effect's bus.
+        bus: &'a str,
+        /// Its place in the chain.
+        effect: usize,
+        /// The parameter's name.
+        param: &'a str,
+    },
+    /// An effect bypassed (1) or not (0): `music/effects/0/bypass`.
+    Bypass {
+        /// The effect's bus.
+        bus: &'a str,
+        /// Its place in the chain.
+        effect: usize,
+    },
+}
+
+/// What snapshot path `path` names, if it is one (ADR 0122).
+pub fn snapshot_target(path: &str) -> Option<SnapshotTarget<'_>> {
+    let mut parts = path.split('/');
+    let bus = parts.next().filter(|b| !b.is_empty())?;
+    let what = parts.next()?;
+    let (third, fourth, rest) = (parts.next(), parts.next(), parts.next());
+    if rest.is_some() {
+        return None;
+    }
+    match (bus, what, third, fourth) {
+        ("room", "gain", None, None) => Some(SnapshotTarget::Room),
+        (_, "gain", None, None) => Some(SnapshotTarget::Gain(bus)),
+        (_, "balance", None, None) => Some(SnapshotTarget::Balance(bus)),
+        (_, "sends", Some(to), None) if !to.is_empty() => Some(SnapshotTarget::Send { bus, to }),
+        (_, "effects", Some(k), Some("bypass")) => Some(SnapshotTarget::Bypass {
+            bus,
+            effect: k.parse().ok()?,
+        }),
+        (_, "effects", Some(k), Some(param)) if !param.is_empty() => Some(SnapshotTarget::Param {
+            bus,
+            effect: k.parse().ok()?,
+            param,
+        }),
+        _ => None,
+    }
 }
 
 /// An effect of a bus.
@@ -209,6 +320,8 @@ pub struct MixerFile {
     pub room: RoomLayout,
     /// The buses, by name.
     pub buses: BTreeMap<String, BusLayout>,
+    /// The snapshots, in the order their layers stack (version 4, ADR 0122).
+    pub snapshots: Vec<SnapshotLayout>,
 }
 
 /// A bus where the layout makes it: its name, its layout, and the bus it feeds (`None`:
@@ -227,9 +340,9 @@ pub struct PlacedBus<'a> {
 impl MixerFile {
     /// The kind in the file's header.
     pub const KIND: &'static str = "mixer";
-    /// The format's version: 2 adds effects and sends, 3 the room's fader (an older file
-    /// reads as one without them).
-    pub const VERSION: u32 = 3;
+    /// The format's version: 2 adds effects and sends, 3 the room's fader, 4 snapshots (an
+    /// older file reads as one without them).
+    pub const VERSION: u32 = 4;
 
     /// What plays without a file: music, effects, voice and ui into the master at 0 dB,
     /// the 3D sounds of effects and voice reverberating.
@@ -243,6 +356,84 @@ impl MixerFile {
             master: MasterLayout::default(),
             room: RoomLayout::default(),
             buses,
+            snapshots: Vec::new(),
+        }
+    }
+
+    /// The snapshot called `name`.
+    pub fn snapshot(&self, name: &str) -> Option<&SnapshotLayout> {
+        self.snapshots.iter().find(|s| s.name == name)
+    }
+
+    /// The mix's value of what `target` names (ADR 0122): an effect's parameter at its
+    /// default when the file leaves it out; none for what the layout lacks.
+    pub fn value_at(&self, target: SnapshotTarget<'_>) -> Option<f32> {
+        match target {
+            SnapshotTarget::Gain("master") => Some(self.master.gain),
+            SnapshotTarget::Gain(bus) => self.buses.get(bus).map(|b| b.gain),
+            SnapshotTarget::Balance("master") => Some(self.master.balance),
+            SnapshotTarget::Balance(bus) => self.buses.get(bus).map(|b| b.balance),
+            SnapshotTarget::Room => Some(self.room.gain),
+            SnapshotTarget::Send { bus, to } => self.buses.get(bus)?.sends.get(to).map(|s| s.gain),
+            SnapshotTarget::Param { bus, effect, param } => {
+                self.effects(bus)?.get(effect)?.param(param)
+            }
+            SnapshotTarget::Bypass { bus, effect } => self
+                .effects(bus)?
+                .get(effect)
+                .map(|e| if e.bypass { 1.0 } else { 0.0 }),
+        }
+    }
+
+    /// What `target` names set to `value` (a parameter within its range, a bypass on from
+    /// 0.5): whether the layout has it.
+    pub fn set_value(&mut self, target: SnapshotTarget<'_>, value: f32) -> bool {
+        match target {
+            SnapshotTarget::Gain("master") => self.master.gain = value,
+            SnapshotTarget::Balance("master") => self.master.balance = value.clamp(-1.0, 1.0),
+            SnapshotTarget::Gain(bus) => match self.buses.get_mut(bus) {
+                Some(b) => b.gain = value,
+                None => return false,
+            },
+            SnapshotTarget::Balance(bus) => match self.buses.get_mut(bus) {
+                Some(b) => b.balance = value.clamp(-1.0, 1.0),
+                None => return false,
+            },
+            SnapshotTarget::Room => self.room.gain = value,
+            SnapshotTarget::Send { bus, to } => {
+                match self.buses.get_mut(bus).and_then(|b| b.sends.get_mut(to)) {
+                    Some(s) => s.gain = value,
+                    None => return false,
+                }
+            }
+            SnapshotTarget::Param { bus, effect, param } => {
+                let Some(e) = self.effect_mut(bus, effect) else {
+                    return false;
+                };
+                let Some(info) = effect_info(&e.kind).and_then(|i| i.param(param)) else {
+                    return false;
+                };
+                let value = info.clamp(value);
+                match e.params.get_mut(param) {
+                    Some(v) => *v = value,
+                    None => {
+                        e.params.insert(param.to_owned(), value);
+                    }
+                }
+            }
+            SnapshotTarget::Bypass { bus, effect } => match self.effect_mut(bus, effect) {
+                Some(e) => e.bypass = value >= 0.5,
+                None => return false,
+            },
+        }
+        true
+    }
+
+    fn effect_mut(&mut self, bus: &str, k: usize) -> Option<&mut EffectLayout> {
+        if bus == "master" {
+            self.master.effects.get_mut(k)
+        } else {
+            self.buses.get_mut(bus)?.effects.get_mut(k)
         }
     }
 
@@ -489,6 +680,57 @@ impl MixerFile {
             }
         }
         out.extend(self.routes().refused);
+        // The snapshots (version 4).
+        for name in self.buses.keys().filter(|n| n.contains('/')) {
+            out.push(format!(
+                "`{name}` has a `/` in its name: snapshots cannot reach it"
+            ));
+        }
+        for (i, s) in self.snapshots.iter().enumerate() {
+            if s.name.is_empty() {
+                out.push(format!(
+                    "snapshot {} has no name: no blend reaches it",
+                    i + 1
+                ));
+            } else if self.snapshots[..i].iter().any(|o| o.name == s.name) {
+                out.push(format!(
+                    "two snapshots are called `{}`: the first is blended",
+                    s.name
+                ));
+            }
+            for (path, &value) in &s.values {
+                let Some(target) = snapshot_target(path) else {
+                    out.push(format!(
+                        "snapshot `{}`: `{path}` is not a path a snapshot sets: left out",
+                        s.name
+                    ));
+                    continue;
+                };
+                if self.value_at(target).is_none() {
+                    out.push(format!(
+                        "snapshot `{}`: `{path}` names what the layout does not have: left out",
+                        s.name
+                    ));
+                    continue;
+                }
+                if let SnapshotTarget::Param { bus, effect, param } = target
+                    && let Some(p) = self
+                        .effects(bus)
+                        .and_then(|c| c.get(effect))
+                        .and_then(|e| effect_info(&e.kind))
+                        .and_then(|i| i.param(param))
+                    && p.clamp(value) != value
+                {
+                    out.push(format!(
+                        "snapshot `{}`: `{path}` is {value}, beyond {} to {}: it plays at {}",
+                        s.name,
+                        p.min,
+                        p.max,
+                        p.clamp(value)
+                    ));
+                }
+            }
+        }
         out
     }
 }
@@ -524,6 +766,103 @@ mod tests {
     }
 
     #[test]
+    fn snapshots_set_values_by_path_and_say_what_they_cannot_reach() {
+        let mut file = MixerFile::builtin();
+        file.buses
+            .get_mut("music")
+            .unwrap()
+            .effects
+            .push(EffectLayout::new("low_pass"));
+        file.buses
+            .get_mut("effects")
+            .unwrap()
+            .sends
+            .insert(String::from("music"), SendLayout::default());
+        file.snapshots.push(
+            SnapshotLayout::new("underwater")
+                .with("music/gain", -14.0)
+                .with("music/effects/0/frequency_hz", 600.0)
+                .with("music/effects/0/bypass", 1.0)
+                .with("effects/sends/music", -6.0)
+                .with("master/balance", 0.25)
+                .with("room/gain", -3.0),
+        );
+        // Written as the grammar writes maps, read back the same.
+        let text = file.to_text(AssetId::new());
+        assert!(text.contains("snapshots.0.name = \"underwater\""), "{text}");
+        assert!(
+            text.contains("snapshots.0.values[\"music/gain\"] = -14"),
+            "{text}"
+        );
+        let (back, _) = MixerFile::parse(&text).unwrap();
+        assert_eq!(back, file);
+        assert!(file.problems().is_empty(), "{:?}", file.problems());
+        // Each path names a value of the mix, and sets it.
+        let paths = [
+            ("music/gain", 0.0, -14.0),
+            ("music/effects/0/frequency_hz", 2_000.0, 600.0),
+            ("music/effects/0/bypass", 0.0, 1.0),
+            ("effects/sends/music", 0.0, -6.0),
+            ("master/balance", 0.0, 0.25),
+            ("room/gain", 0.0, -3.0),
+        ];
+        let mut set = file.clone();
+        for (path, before, after) in paths {
+            let target = snapshot_target(path).unwrap();
+            assert_eq!(file.value_at(target), Some(before), "{path}");
+            assert!(set.set_value(target, after), "{path}");
+            assert_eq!(set.value_at(target), Some(after), "{path}");
+        }
+        assert!(set.buses["music"].effects[0].bypass);
+        // A bypass blended to under a half is off; a parameter stays in its range.
+        let bypass = snapshot_target("music/effects/0/bypass").unwrap();
+        set.set_value(bypass, 0.4);
+        assert!(!set.buses["music"].effects[0].bypass);
+        let frequency = snapshot_target("music/effects/0/frequency_hz").unwrap();
+        set.set_value(frequency, 1e9);
+        assert!(set.buses["music"].effects[0].params["frequency_hz"] <= 20_000.0);
+        // Not paths, and paths to what the layout lacks.
+        for bad in [
+            "music",
+            "music/volume",
+            "music/effects/x/gain",
+            "/gain",
+            "a/b/c/d/e",
+        ] {
+            assert!(snapshot_target(bad).is_none(), "{bad}");
+        }
+        let mut odd = file.clone();
+        odd.snapshots.push(
+            SnapshotLayout::new("underwater")
+                .with("drums/gain", -3.0)
+                .with("music/volume", 1.0)
+                .with("music/effects/0/frequency_hz", 1e9),
+        );
+        odd.snapshots.push(SnapshotLayout::new(""));
+        let problems = odd.problems().join("\n");
+        for said in [
+            "two snapshots are called `underwater`",
+            "`drums/gain` names what the layout does not have",
+            "`music/volume` is not a path",
+            "`music/effects/0/frequency_hz` is 1000000000",
+            "snapshot 3 has no name",
+        ] {
+            assert!(problems.contains(said), "{said}: {problems}");
+        }
+        // `room` is the reverb's in paths: a bus cannot be called it.
+        let mut kept = MixerFile::builtin();
+        kept.buses.insert(String::from("room"), BusLayout::new());
+        assert!(
+            kept.problems()
+                .iter()
+                .any(|p| p.contains("`room` is a name the player keeps"))
+        );
+        // A version 3 file reads with none.
+        let (old, _) = MixerFile::parse("[mixer version=3]\nroom.gain = -2\n").unwrap();
+        assert!(old.snapshots.is_empty());
+    }
+
+    #[test]
     fn the_rooms_fader_is_kept_in_the_file() {
         let mut file = MixerFile::builtin();
         file.room.gain = -4.5;
@@ -550,7 +889,7 @@ mod tests {
         let id = AssetId::new();
         let text = file.to_text(id);
         assert!(
-            text.starts_with(&format!("[mixer version=3 id={id}]")),
+            text.starts_with(&format!("[mixer version=4 id={id}]")),
             "{text}"
         );
         assert!(

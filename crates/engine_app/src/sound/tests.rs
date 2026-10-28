@@ -933,6 +933,123 @@ fn a_closed_room_gives_reverb_and_open_ground_none() {
 }
 
 #[test]
+fn snapshots_blend_their_values_over_the_mix_by_weight() {
+    let mut bed = Bed::new("snapshots", AudioSettings::default());
+    let mut layout = MixerFile::builtin();
+    layout
+        .buses
+        .get_mut("music")
+        .unwrap()
+        .effects
+        .push(EffectLayout::new("low_pass"));
+    layout.snapshots.push(
+        SnapshotLayout::new("underwater")
+            .with("music/gain", -20.0)
+            .with("music/effects/0/frequency_hz", 600.0)
+            .with("room/gain", -6.0),
+    );
+    layout
+        .snapshots
+        .push(SnapshotLayout::new("paused").with("music/gain", -40.0));
+    bed.sound.set_layout(&layout);
+    bed.frame(16);
+    fn music(bed: &Bed) -> &Bus {
+        bed.sound.buses.iter().find(|b| b.name == "music").unwrap()
+    }
+    let db = |bed: &Bed| 20.0 * music(bed).fader.log10();
+    let cutoff = |bed: &Bed| music(bed).effects[0].layout.param("frequency_hz").unwrap();
+    assert!(db(&bed).abs() < 0.01, "the mix as it is: {}", db(&bed));
+    // The game's mixer knows them; a name it lacks is refused.
+    {
+        let mixer = bed.world.resource_mut::<Mixer>().unwrap();
+        assert_eq!(
+            mixer.snapshots().collect::<Vec<_>>(),
+            ["underwater", "paused"]
+        );
+        assert!(!mixer.blend("nope", 1.0, None));
+        assert!(mixer.blend("underwater", 1.0, Some(0.0)));
+    }
+    bed.frame(16);
+    assert!((db(&bed) + 20.0).abs() < 0.01, "{}", db(&bed));
+    assert!((cutoff(&bed) - 600.0).abs() < 0.01, "{}", cutoff(&bed));
+    assert!(
+        (bed.sound.room_trim - 0.501).abs() < 0.01,
+        "{}",
+        bed.sound.room_trim
+    );
+    assert_eq!(
+        bed.world.resource::<Mixer>().unwrap().weight("underwater"),
+        Some(1.0)
+    );
+    // Halfway: halfway in dB and in hertz.
+    bed.world
+        .resource_mut::<Mixer>()
+        .unwrap()
+        .blend("underwater", 0.5, Some(0.0));
+    bed.frame(16);
+    assert!((db(&bed) + 10.0).abs() < 0.01, "{}", db(&bed));
+    // The low-pass from its default, 2 kHz.
+    let half = 2_000.0 + (600.0 - 2_000.0) * 0.5;
+    assert!((cutoff(&bed) - half).abs() < 1.0, "{}", cutoff(&bed));
+    // The later layer wins where they meet: paused at full weight over the half.
+    bed.world
+        .resource_mut::<Mixer>()
+        .unwrap()
+        .blend("paused", 1.0, Some(0.0));
+    bed.frame(16);
+    assert!((db(&bed) + 40.0).abs() < 0.01, "{}", db(&bed));
+    // A fade: half of 0.4 s gone, half of the way.
+    bed.world
+        .resource_mut::<Mixer>()
+        .unwrap()
+        .blend("paused", 0.0, Some(0.4));
+    for _ in 0..10 {
+        bed.frame(20);
+    }
+    let weight = bed
+        .world
+        .resource::<Mixer>()
+        .unwrap()
+        .weight("paused")
+        .unwrap();
+    assert!((weight - 0.5).abs() < 0.03, "{weight}");
+    for _ in 0..20 {
+        bed.frame(20);
+    }
+    assert_eq!(
+        bed.world.resource::<Mixer>().unwrap().weight("paused"),
+        Some(0.0)
+    );
+    assert!(
+        (db(&bed) + 10.0).abs() < 0.01,
+        "underwater's half again: {}",
+        db(&bed)
+    );
+    // A new layout keeps the weights by name.
+    let mut again = layout.clone();
+    again.buses.get_mut("music").unwrap().gain = -2.0;
+    bed.sound.set_layout(&again);
+    bed.frame(16);
+    assert_eq!(
+        bed.world.resource::<Mixer>().unwrap().weight("underwater"),
+        Some(0.5)
+    );
+    assert!(
+        (db(&bed) + 11.0).abs() < 0.01,
+        "halfway from −2 to −20: {}",
+        db(&bed)
+    );
+    // Back to 0: the mix as it is.
+    bed.world
+        .resource_mut::<Mixer>()
+        .unwrap()
+        .blend("underwater", 0.0, Some(0.0));
+    bed.frame(16);
+    assert!((db(&bed) + 2.0).abs() < 0.01, "{}", db(&bed));
+    assert!((cutoff(&bed) - 2_000.0).abs() < 0.01, "{}", cutoff(&bed));
+}
+
+#[test]
 fn a_reverb_zone_takes_over_where_the_listener_is() {
     let mut bed = Bed::new("zone", AudioSettings::default());
     let zone = bed.world.spawn((

@@ -243,6 +243,9 @@ declare audio: {
     play: (sound: string, bus: string?) -> Entity?,
     -- At `position` in the world, on `bus` (`effects` by default).
     play_at: (sound: string, position: vector, bus: string?) -> Entity?,
+    -- Moves snapshot `name` of the mixer to `weight` (0 not heard, 1 all of it) over
+    -- `fade` seconds (the snapshot's own fade when none): whether the mixer has it.
+    blend: (name: string, weight: number, fade: number?) -> boolean,
 }
 
 -- The session the game plays in.

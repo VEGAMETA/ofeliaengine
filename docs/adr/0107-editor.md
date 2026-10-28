@@ -2254,6 +2254,33 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **E11-4 is done** but for View: Sound Ranges, the inspector's falloff curve with the
   camera's distance, and blockout's radius handles.
 
+## As built (E11-5a, 2026-10-28): snapshots in the file and the player
+
+- **ADR 0122** (the team's answer b): the mixer file's version 4 with `snapshots`, each a
+  name, a fade and values by path (`snapshot_target`, `MixerFile::value_at` and
+  `set_value`; `room` kept as a bus name); `problems` names paths that reach nothing,
+  values beyond their range and twice-used names.
+- **The player:** each snapshot's weight kept by name across layouts; every path the
+  snapshots set found with the mix's value under it when the layout is laid out; while a
+  weight moves, each value blended up the list (`v += (x − v) × w`) into a blended copy of
+  the layout and given where it changed (`give_blended`: faders under the game's
+  volumes, balances, sends, effects' parameters and bypass, the room's trim). Nothing is
+  made or moved, and a frame allocates nothing.
+- **The game:** `Mixer::blend(name, weight, seconds)`, `Mixer::weight`, `Mixer::snapshots`;
+  Luau `audio.blend(name, weight, fade?)`, typed.
+- **The editor's mixer functions** keep the snapshots' paths: a bus renamed (its values
+  and the sends into it follow), removed (they go), an effect moved or removed (its values
+  move or go, the others renumber), a filter's shape changed (parameters it lacks go), a
+  send removed; `/` refused in bus names.
+- **Tests:** the file (written, read back, every path read and set, a bypass from a half,
+  a parameter in its range, not-paths, what the layout lacks, two names, no name, `room`
+  kept, a version 3 file with none); the player (the mixer's list, a name refused, full
+  weight, half weight in dB and in hertz, the later layer winning, a 0.4 s fade halfway at
+  0.2 s, a new layout keeping weights by name, back to the mix); a script's blend without
+  a mixer; the editor's paths through moves, removals, a shape and a rename.
+- **Next (E11-5b):** the panel's snapshot list, edits into the chosen snapshot with its
+  values marked, and hearing it while chosen.
+
 ## As built (E11-2c, 2026-10-28): the room's reverb strip
 
 - **The strip** ("room (auto)", ADR 0121's version 3): the last of the mixer's strips,

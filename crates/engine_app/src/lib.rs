@@ -125,7 +125,7 @@ pub use sound::{
     AcousticSettings, AudioListener, AudioSettings, AudioSource, AudioSource3D, BusLayout,
     EffectLayout, Falloff, MIXER_FILE_EXTENSION, MasterLayout, Mixer, MixerFile, PlacedBus,
     PlayMode, PreviewState, ReverbZone, Room, RoomFrom, RoomHeard, RoomLayout, Routes, SendLayout,
-    SoundFiles, Waveform, waveform,
+    SnapshotLayout, SnapshotTarget, SoundFiles, Waveform, snapshot_target, waveform,
 };
 pub use text::TextSource;
 
