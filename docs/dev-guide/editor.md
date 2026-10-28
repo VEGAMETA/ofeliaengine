@@ -832,6 +832,16 @@ will do:
 A click opens the palette on the project's assets of the field's kind (`#model:`,
 `#material:`), and Enter puts the one picked in the field, on every selected entity. A
 file dropped on the field takes its place.
+- **A sound field** (a source's `sound`) shows the file it names with its waveform, and ▶
+  at its end: ▶ plays it as the dock's previews do (■ stops it). A click opens the palette
+  on the sounds (`#sound:`); with Auto Play on, each file the arrows reach plays, Enter
+  gives it to the field and Escape stops it. Only sounds are taken, from the sounds
+  folder.
+- **A bus field** (a source's `bus`) is a list of `master` and the mixer's buses, as its
+  strips stand. A name the mixer has no bus for is shown in red after ⚠: the sound plays
+  on the master.
+- Your own components' strings can be such fields too: `#[reflect(hint = "sound")]` or
+  `#[reflect(hint = "bus")]` on the field.
 - **Meshes of several materials** draw each primitive with its own: the drop gives the
   model the further primitives' materials in its `MaterialSlots` (ADR 0115). Slots are
   not editable in the inspector yet; the scene file holds them as a list.

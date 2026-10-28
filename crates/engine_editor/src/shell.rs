@@ -426,6 +426,9 @@ pub enum Widget<'a> {
         current: &'a str,
         /// Every one, while open.
         open: Option<&'a [&'a str]>,
+        /// The current one is none of them (a bus the mixer lacks, E11-3d): shown in the
+        /// error color, after ⚠.
+        missing: bool,
     },
     /// An asset, as Godot's pickers show one (ADR 0107 E4): its preview, or its kind's
     /// icon until there is one, and its name; a click picks another, a file dropped on it
@@ -437,6 +440,8 @@ pub enum Widget<'a> {
         icon: &'a str,
         /// Its name (the file and part), or `none`.
         name: &'a str,
+        /// A sound's ▶, ■ while it plays (E11-3d); none for other assets.
+        play: Option<bool>,
     },
 }
 
@@ -530,6 +535,8 @@ pub enum FieldAction {
     Open,
     /// An asset field was clicked: another is picked.
     Pick,
+    /// A sound field's ▶ was clicked: its sound is played, or stopped (E11-3d).
+    Play,
     /// Option `i` of the open list was picked.
     Choose(usize),
 }
@@ -2297,7 +2304,17 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
 
 /// An asset field's box: its preview (its kind's icon until there is one) beside its name.
 /// Whether it was clicked.
-fn asset_box(ui: &mut Ui, preview: Option<UiImage>, icon: &str, name: &str, p: &Palette) -> bool {
+/// An asset field's box: its preview and name, a sound's ▶ at its end. A click on the box
+/// picks another asset, one on ▶ plays the sound.
+fn asset_box(
+    ui: &mut Ui,
+    preview: Option<UiImage>,
+    icon: &str,
+    name: &str,
+    play: Option<bool>,
+    p: &Palette,
+) -> Option<FieldAction> {
+    let mut played = false;
     let id = ui.row(
         "asset",
         Style {
@@ -2326,9 +2343,33 @@ fn asset_box(ui: &mut Ui, preview: Option<UiImage>, icon: &str, name: &str, p: &
                 }
             });
             text(ui, "name", name, TEXT, p.text);
+            if let Some(playing) = play {
+                ui.spacer("fill");
+                let hovered = ui.is_hovered(ui.id("play"));
+                let button = ui.container(
+                    "play",
+                    Style {
+                        size: [Size::Fixed(22.0), Size::Fixed(22.0)],
+                        radius: 11.0,
+                        background: Some(if hovered { p.field_hover } else { p.field }),
+                        align_main: Align::Center,
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        let glyph = if playing { icons::STOP } else { icons::PLAY };
+                        text(ui, "icon", glyph, ICON, p.text);
+                    },
+                );
+                played = ui.sense(button, false).clicked;
+            }
         },
     );
-    ui.sense(id, false).clicked
+    if played {
+        Some(FieldAction::Play)
+    } else {
+        ui.sense(id, false).clicked.then_some(FieldAction::Pick)
+    }
 }
 
 /// The inspector's sound file (E11-3c): its waveform at the inspector's width, its silence
@@ -3551,6 +3592,7 @@ fn choice(
     ui: &mut Ui,
     current: &str,
     open: Option<&[&str]>,
+    missing: bool,
     p: &Palette,
     action: &mut Option<FieldAction>,
     popups: &mut Popups,
@@ -3568,7 +3610,21 @@ fn choice(
             ..Style::default()
         },
         |ui| {
-            text(ui, "value", current, TEXT, p.text);
+            if missing {
+                text(ui, "alert", icons::ALERT, ICON, p.error);
+                let gap = Style {
+                    size: [Size::Fixed(4.0), Size::Fixed(1.0)],
+                    ..Style::default()
+                };
+                ui.container("gap", gap, |_| {});
+            }
+            text(
+                ui,
+                "value",
+                current,
+                TEXT,
+                if missing { p.error } else { p.text },
+            );
             ui.spacer("fill");
             text(ui, "arrow", icons::MENU_DOWN, ICON, p.text_dim);
             if let Some(options) = open {
@@ -3791,9 +3847,11 @@ fn inspector_dock(
                                         preview,
                                         icon,
                                         name,
+                                        play,
                                     } => {
-                                        if asset_box(ui, preview, icon, name, p) {
-                                            action = Some(FieldAction::Pick);
+                                        if let Some(a) = asset_box(ui, preview, icon, name, play, p)
+                                        {
+                                            action = Some(a);
                                         }
                                     }
                                     Widget::Text(value) => {
@@ -3842,8 +3900,12 @@ fn inspector_dock(
                                         }
                                     }
                                     Widget::Check(on) => checkbox(ui, on, p, &mut action),
-                                    Widget::Choice { current, open } => {
-                                        choice(ui, current, open, p, &mut action, popups);
+                                    Widget::Choice {
+                                        current,
+                                        open,
+                                        missing,
+                                    } => {
+                                        choice(ui, current, open, missing, p, &mut action, popups);
                                     }
                                 }
                                 // Every row keeps the reset button's place, so fields line

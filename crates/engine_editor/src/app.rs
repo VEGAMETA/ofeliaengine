@@ -642,6 +642,8 @@ struct FrameLists {
     /// The picked bus's effects' and sends' values, and the open list's options (E11-2b).
     part_values: Vec<&'static str>,
     part_options: Vec<&'static str>,
+    /// A bus field's open list (E11-3d).
+    bus_options: Vec<&'static str>,
 }
 
 /// What the tree's rows are collected with, kept between frames.
@@ -2392,6 +2394,10 @@ struct Editor {
     part_choice: Option<(MixerPart, usize)>,
     part_options: Vec<String>,
     part_drag: Option<PartDrag>,
+    /// A bus field's list while it is open (E11-3d): `master` and the mixer's buses.
+    bus_choices: Vec<String>,
+    /// A sound field's file path, joined each frame without allocating (E11-3d).
+    joined: String,
     /// Each bus's effects' gain reduction as shown (dB, falling back at 24 dB/s), and
     /// each strip's effects text with it (E11-2b).
     reductions: Vec<(String, Vec<f32>)>,
@@ -3232,6 +3238,8 @@ impl Editor {
             part_choice: None,
             part_options: Vec::new(),
             part_drag: None,
+            bus_choices: Vec::new(),
+            joined: String::new(),
             reductions: Vec::new(),
             fx_texts: Vec::new(),
             meters: Vec::new(),
@@ -3886,6 +3894,16 @@ impl Editor {
             self.debug_text_frame(world);
         }
         self.script_files.refresh(world);
+        // A bus field marks a name the mixer lacks (E11-3d): the mixer's layout held.
+        if self.mixer.is_none()
+            && self
+                .inspector
+                .properties()
+                .iter()
+                .any(|p| p.attrs.hint == engine_reflect::Hint::Bus)
+        {
+            self.open_mixer();
+        }
         let properties = self.inspector.properties();
         let mut values: Vec<&str> = recycle(std::mem::take(&mut self.lists.values));
         let mut spans = std::mem::take(&mut self.lists.spans);
@@ -3934,6 +3952,13 @@ impl Editor {
         // A transform's scale shows its lock (the owner, 2026-10-22).
         let (transform, scale_lock) = (world.component_id::<Transform>(), self.scale_lock);
         let mut fields: Vec<Field<'_>> = recycle(std::mem::take(&mut self.lists.fields));
+        let mut bus_options: Vec<&str> = recycle(std::mem::take(&mut self.lists.bus_options));
+        bus_options.extend(self.bus_choices.iter().map(String::as_str));
+        // A sound field's file and ▶ (E11-3d): its path joined in a string kept across
+        // frames, and the sound the preview plays.
+        let mut joined = std::mem::take(&mut self.joined);
+        let previewing = self.preview.map(|v| v.id);
+        let bus_layout = self.mixer.as_ref().map(|d| &d.layout);
         fields.extend(self.shown.iter().map(|&i| {
             let p = &properties[i];
             let (a, b) = spans[i];
@@ -3958,7 +3983,60 @@ impl Editor {
                 Kind::Choice => Widget::Choice {
                     current: first,
                     open: (open == Some((p.component, p.offset))).then_some(options.as_slice()),
+                    missing: false,
                 },
+                // A sound field (E11-3d, the team's 4a): the file it names with its
+                // waveform, a drop target, a click for the `#sound:` list, and ▶.
+                Kind::Text
+                    if matches!(p.ty.kind, engine_reflect::TypeKind::String)
+                        && p.attrs.hint == engine_reflect::Hint::Sound =>
+                {
+                    // Its file under the sounds folder, the path joined without allocating.
+                    let entry = (!first.is_empty() && p.mixed == 0)
+                        .then(|| {
+                            joined.clear();
+                            joined.push_str(self.sounds_folder.trim_end_matches('/'));
+                            if !joined.is_empty() {
+                                joined.push('/');
+                            }
+                            joined.push_str(first);
+                            self.asset_db.find(&joined)
+                        })
+                        .flatten();
+                    let preview = entry.and_then(|e| {
+                        let key = thumbnails::Key {
+                            bytes: e.size,
+                            modified: e.modified,
+                        };
+                        self.thumbnails
+                            .image(Subject::File(e.id), &e.path, e.kind, key)
+                    });
+                    Widget::Asset {
+                        preview,
+                        icon: if first.is_empty() { "" } else { icons::SOUND },
+                        name: if first.is_empty() {
+                            "none"
+                        } else {
+                            first.rsplit('/').next().unwrap_or(first)
+                        },
+                        play: entry.map(|e| previewing == Some(e.id)),
+                    }
+                }
+                // A bus field: one of the mixer's buses.
+                Kind::Text
+                    if matches!(p.ty.kind, engine_reflect::TypeKind::String)
+                        && p.attrs.hint == engine_reflect::Hint::Bus =>
+                {
+                    Widget::Choice {
+                        current: first,
+                        open: (open == Some((p.component, p.offset)))
+                            .then_some(bus_options.as_slice()),
+                        // A name the mixer lacks plays on the master: marked.
+                        missing: p.mixed == 0
+                            && first != crate::mixer::MASTER
+                            && bus_layout.is_some_and(|l| !l.buses.contains_key(first)),
+                    }
+                }
                 Kind::Text if matches!(p.ty.kind, engine_reflect::TypeKind::String) => {
                     Widget::Edit(first)
                 }
@@ -3998,6 +4076,7 @@ impl Editor {
                         preview,
                         icon,
                         name: first.rsplit('/').next().unwrap_or(first),
+                        play: None,
                     }
                 }
                 Kind::Text => Widget::Text(first),
@@ -4057,6 +4136,7 @@ impl Editor {
                     BusRow::Output => Widget::Choice {
                         current: parent,
                         open: (self.mixer_choice == Some(k)).then_some(outputs.as_slice()),
+                        missing: false,
                     },
                     BusRow::Gain => number(0),
                     BusRow::Balance => number(1),
@@ -4092,6 +4172,7 @@ impl Editor {
                             Widget::Choice {
                                 current: info.map_or("", |i| i.label),
                                 open,
+                                missing: false,
                             },
                         ),
                         EffectRow::Bypass => ("bypass", Widget::Check(Some(e.bypass))),
@@ -4104,6 +4185,7 @@ impl Editor {
                                     e.sidechain.as_str()
                                 },
                                 open,
+                                missing: false,
                             },
                         ),
                         EffectRow::Param(_) => {
@@ -4167,6 +4249,7 @@ impl Editor {
                     widget: Widget::Choice {
                         current: "\u{2026}",
                         open: (self.part_choice == here).then_some(part_options.as_slice()),
+                        missing: false,
                     },
                     changed: false,
                 });
@@ -4220,6 +4303,7 @@ impl Editor {
                         current: asset.choice(s),
                         open: (asset.open == Some(s))
                             .then_some(crate::import::COMPRESSIONS.as_slice()),
+                        missing: false,
                     },
                 };
                 list.push(Field {
@@ -5268,6 +5352,8 @@ impl Editor {
         self.lists.outputs = recycle(outputs);
         self.lists.part_values = recycle(part_values);
         self.lists.part_options = recycle(part_options);
+        self.lists.bus_options = recycle(bus_options);
+        self.joined = joined;
         self.lists.scenes = recycle(scenes);
         self.listing = self
             .ui
@@ -6318,7 +6404,39 @@ impl Editor {
             }
             FieldAction::Open => {
                 let key = (p.component, p.offset);
+                if p.attrs.hint == engine_reflect::Hint::Bus && self.open_choice != Some(key) {
+                    self.fill_bus_choices();
+                }
                 self.open_choice = (self.open_choice != Some(key)).then_some(key);
+            }
+            FieldAction::Choose(i) if p.attrs.hint == engine_reflect::Hint::Bus => {
+                self.open_choice = None;
+                let Some(bus) = self.bus_choices.get(i).cloned() else {
+                    return;
+                };
+                let path = self.path_of(&p, component);
+                if let Err(reason) =
+                    self.set_on(world, &targets, &path, &engine_scene::text::quote(&bus))
+                {
+                    self.say(format!("{path}: {reason}"));
+                }
+            }
+            FieldAction::Play => {
+                // A sound field's ▶ (E11-3d): its file played on the preview bus, or
+                // stopped.
+                let Some(name) = self.inspector.values(&p).next().map(str::to_owned) else {
+                    return;
+                };
+                let folder = self.sounds_folder.trim_end_matches('/');
+                let path = if folder.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{folder}/{name}")
+                };
+                match self.asset_db.find(&path).map(|e| e.id) {
+                    Some(id) => self.toggle_preview(id),
+                    None => self.say(format!("{name} is not in `{folder}`")),
+                }
             }
             FieldAction::Pick => {
                 // The palette's assets of the field's kind; Enter gives the field the one
@@ -6326,6 +6444,7 @@ impl Editor {
                 let query = match self.path_of(&p, component).as_str() {
                     "Model.mesh" => "#model:",
                     "Model.material" => "#material:",
+                    _ if p.attrs.hint == engine_reflect::Hint::Sound => "#sound:",
                     _ => "#",
                 };
                 self.open_palette(world, query);
@@ -6727,6 +6846,7 @@ impl Editor {
                         cp.select(i as usize);
                     }
                 }
+                self.hear_palette_pick();
             }
             PaletteAction::Run(row) => {
                 let Some(cp) = self.command_palette.take() else {
@@ -6801,7 +6921,36 @@ impl Editor {
                     self.run(world, m.id);
                 }
             }
-            PaletteAction::Close => self.command_palette = None,
+            PaletteAction::Close => {
+                // Escape stops what a field's list was playing (E11-3d).
+                if self
+                    .command_palette
+                    .take()
+                    .is_some_and(|cp| cp.for_field.is_some())
+                {
+                    self.stop_preview();
+                }
+            }
+        }
+    }
+
+    /// The palette's highlighted sound heard, while it lists sounds for a sound field with
+    /// Auto Play on (E11-3d): each file the arrows reach plays from its start.
+    fn hear_palette_pick(&mut self) {
+        if !self.auto_play {
+            return;
+        }
+        let Some(id) = self
+            .command_palette
+            .as_ref()
+            .filter(|cp| cp.for_field.is_some() && cp.finds_assets())
+            .and_then(|cp| cp.assets.get(cp.selected))
+            .map(|found| found.id)
+        else {
+            return;
+        };
+        if self.is_sound(id) && self.preview.is_none_or(|p| p.id != id) {
+            self.play_preview(id, 0.0, false);
         }
     }
 
@@ -14701,7 +14850,7 @@ impl Editor {
                     "{name}: drop an image from the FileSystem dock onto it"
                 ));
             }
-            FieldAction::Text { .. } | FieldAction::Lock => {}
+            FieldAction::Text { .. } | FieldAction::Lock | FieldAction::Play => {}
         }
     }
 
@@ -15598,7 +15747,7 @@ impl Editor {
                     BusRow::Name => {}
                 }
             }
-            FieldAction::Lock | FieldAction::Pick => {}
+            FieldAction::Lock | FieldAction::Pick | FieldAction::Play => {}
         }
     }
 
@@ -17122,6 +17271,23 @@ impl Editor {
     }
 
     /// A dragged material file given to entity `e`'s model, as one undo step.
+    /// A bus field's list (E11-3d): `master`, then the mixer's buses as its strips stand.
+    fn fill_bus_choices(&mut self) {
+        self.open_mixer();
+        self.bus_choices.clear();
+        self.bus_choices.push(String::from(crate::mixer::MASTER));
+        let builtin;
+        let layout = match &self.mixer {
+            Some(doc) => &doc.layout,
+            None => {
+                builtin = engine_app::MixerFile::builtin();
+                &builtin
+            }
+        };
+        self.bus_choices
+            .extend(layout.order().iter().map(|b| b.name.to_owned()));
+    }
+
     /// The object a sound dropped in the view goes onto: the one under the pointer, none
     /// with Alt (a sound of its own there).
     fn sound_target(&self) -> Option<Entity> {
@@ -17279,6 +17445,27 @@ impl Editor {
             return;
         };
         let path = self.path_of(&p, component);
+        // A sound field takes a sound under the sounds folder (E11-3d), on every selected
+        // entity with the field's component, as one step.
+        if p.attrs.hint == engine_reflect::Hint::Sound {
+            if drag.kind != K::Sound {
+                self.say(format!("{path} takes a sound, not {}", drag.name));
+                return;
+            }
+            let sound = match self.sound_name(drag) {
+                Ok(s) => s,
+                Err(why) => {
+                    self.say(why);
+                    return;
+                }
+            };
+            let targets = self.targets(world, p.component);
+            match self.set_on(world, &targets, &path, &engine_scene::text::quote(&sound)) {
+                Ok(()) => self.say(format!("{} \u{2192} {path}", drag.name)),
+                Err(reason) => self.say(format!("{path}: {reason}")),
+            }
+            return;
+        }
         if !engine_scene::text::is_asset_ref(p.ty) {
             self.say(format!("{path} takes no asset"));
             return;
@@ -20754,12 +20941,14 @@ fn material_fields<'a>(
             Shown::Choice(names) => Widget::Choice {
                 current: first,
                 open: (choice == Some(k)).then_some(names),
+                missing: false,
             },
             Shown::Check => Widget::Check(Some(doc.file.double_sided)),
             Shown::Image => Widget::Asset {
                 preview: None,
                 icon: if first == "none" { "" } else { icons::TEXTURE },
                 name: first,
+                play: None,
             },
         };
         out.push(Field {
@@ -23404,6 +23593,135 @@ mod tests {
         assert!(!world.contains(hum));
         ed.history.undo(&mut world);
         assert!(world.get::<AudioSource3D>(boxed).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sound_field_takes_sounds_and_a_bus_field_lists_the_mixers_buses() {
+        let (dir, mut world, mut ed, boxed) = drop_project("sound-fields");
+        std::fs::create_dir_all(dir.join("sounds/steps")).unwrap();
+        std::fs::write(dir.join("sounds/hum.wav"), stereo_wav(4_800, |_| 0.0)).unwrap();
+        std::fs::write(
+            dir.join("sounds/steps/step.wav"),
+            stereo_wav(4_800, |_| 0.0),
+        )
+        .unwrap();
+        assert_eq!(ed.open_assets().files, 4);
+        world.insert(boxed, AudioSource3D::new("old.wav"));
+        ed.select_only(boxed);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let field = |ed: &Editor, path: &str| {
+            for s in 0..ed.shown_sections.len() {
+                let (start, end, _) = ed.shown_sections[s];
+                for f in 0..end - start {
+                    if let Some((p, c)) = ed.shown_property(s, f)
+                        && ed.path_of(&p, c) == path
+                    {
+                        return (s, f);
+                    }
+                }
+            }
+            panic!("no field {path}");
+        };
+        let sound = |world: &World| {
+            world
+                .get::<AudioSource3D>(boxed)
+                .unwrap()
+                .source
+                .sound
+                .clone()
+        };
+        // The sound shows as the file it names.
+        assert!(!texts(&ed, "old.wav").is_empty());
+        let (s, f) = field(&ed, "AudioSource3D.source.sound");
+        let at = |section, field, action| FieldEvent {
+            section,
+            field,
+            action,
+        };
+        // ▶ is only for a file there is.
+        ed.edit(&mut world, at(s, f, FieldAction::Play));
+        assert!(ed.preview.is_none());
+        // A sound given to it (a drop, or Enter in the palette): its path under the sounds
+        // folder, one step; a model refused.
+        let steps = ed.history.steps().count();
+        let hum = ed.asset_db.find("sounds/hum.wav").unwrap().id;
+        let step = ed.asset_db.find("sounds/steps/step.wav").unwrap().id;
+        ed.give_field_asset(&mut world, s, f, step);
+        assert_eq!(sound(&world), "steps/step.wav");
+        assert_eq!(ed.history.steps().count(), steps + 1);
+        let model = ed.asset_db.find("props/crate.gltf").unwrap().id;
+        ed.give_field_asset(&mut world, s, f, model);
+        assert_eq!(sound(&world), "steps/step.wav");
+        ed.update(&mut world);
+        assert!(!texts(&ed, "step.wav").is_empty());
+        // ▶ plays it on the preview bus, ▶ again stops it.
+        ed.edit(&mut world, at(s, f, FieldAction::Play));
+        assert_eq!(ed.preview.map(|p| p.id), Some(step));
+        ed.edit(&mut world, at(s, f, FieldAction::Play));
+        assert!(ed.preview.is_none());
+        // A click on it: the palette's sounds, for this field. With Auto Play on, the
+        // arrows play each file they reach; Escape stops it.
+        ed.edit(&mut world, at(s, f, FieldAction::Pick));
+        let cp = ed.command_palette.as_ref().expect("the palette open");
+        assert_eq!(cp.query, "#sound:");
+        assert!(cp.for_field.is_some());
+        assert_eq!(cp.assets.len(), 2, "the sounds only");
+        ed.palette_action(&mut world, PaletteAction::Move(1));
+        assert!(ed.preview.is_none(), "Auto Play off");
+        ed.auto_play = true;
+        ed.palette_action(&mut world, PaletteAction::Move(1));
+        assert_eq!(ed.preview.map(|p| p.id), Some(hum));
+        ed.palette_action(&mut world, PaletteAction::Move(1));
+        assert_eq!(ed.preview.map(|p| p.id), Some(step));
+        ed.palette_action(&mut world, PaletteAction::Move(1));
+        assert_eq!(ed.preview.map(|p| p.id), Some(hum));
+        // Enter gives the field the highlighted file, the preview playing on.
+        ed.palette_action(&mut world, PaletteAction::Run(0));
+        assert_eq!(sound(&world), "hum.wav");
+        assert_eq!(ed.preview.map(|p| p.id), Some(hum));
+        ed.edit(&mut world, at(s, f, FieldAction::Pick));
+        ed.palette_action(&mut world, PaletteAction::Close);
+        assert!(ed.preview.is_none(), "Escape stops it");
+        assert_eq!(sound(&world), "hum.wav");
+        // The bus: master and the mixer's buses, as its strips stand; one chosen, a step.
+        ed.update(&mut world);
+        let (bs, bf) = field(&ed, "AudioSource3D.source.bus");
+        let bus = |world: &World| {
+            world
+                .get::<AudioSource3D>(boxed)
+                .unwrap()
+                .source
+                .bus
+                .clone()
+        };
+        let before = bus(&world);
+        ed.edit(&mut world, at(bs, bf, FieldAction::Open));
+        assert_eq!(
+            ed.bus_choices,
+            ["master", "effects", "music", "ui", "voice"]
+        );
+        ed.update(&mut world);
+        assert!(!texts(&ed, "voice").is_empty(), "the list open");
+        let voice = ed.bus_choices.iter().position(|b| b == "voice").unwrap();
+        ed.edit(&mut world, at(bs, bf, FieldAction::Choose(voice)));
+        assert_eq!(bus(&world), "voice");
+        assert!(ed.open_choice.is_none());
+        ed.update(&mut world);
+        assert!(texts(&ed, icons::ALERT).is_empty());
+        // A name the mixer lacks is marked on its field (it plays on the master).
+        world.get_mut::<AudioSource3D>(boxed).unwrap().source.bus = String::from("voices");
+        ed.update(&mut world);
+        assert!(!texts(&ed, icons::ALERT).is_empty(), "marked");
+        world.get_mut::<AudioSource3D>(boxed).unwrap().source.bus = String::from("voice");
+        // Undo: the bus, then the sounds.
+        ed.history.undo(&mut world);
+        assert_eq!(bus(&world), before);
+        ed.history.undo(&mut world);
+        assert_eq!(sound(&world), "steps/step.wav");
+        ed.history.undo(&mut world);
+        assert_eq!(sound(&world), "old.wav");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
