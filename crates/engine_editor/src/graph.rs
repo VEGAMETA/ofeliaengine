@@ -286,7 +286,7 @@ pub(crate) fn layout(
 ) {
     out.clear();
     for (id, node) in &graph.nodes {
-        let kind = library::kind(&node.kind);
+        let kind = engine_material_graph::node_kind(node).ok();
         if kind.is_some_and(|k| k.name == REROUTE_KIND) {
             out.push(NodeBox {
                 id: id.clone(),
@@ -798,7 +798,15 @@ pub(crate) fn preview_material(
     module: AssetRef,
     module_path: &str,
 ) -> Result<(Generated, MaterialFile, AssetPaths), GraphError> {
-    let generated = engine_material_graph::generate(&doc.graph, GRAPH_TYPE, Build::Editing)?;
+    // The modules its calls name (E10-3g-3), from the paths its file gave them.
+    let modules = |m| {
+        doc.paths
+            .get(m)
+            .filter(|p| !p.is_empty())
+            .map(engine_assets::graph_module::include_path)
+    };
+    let generated =
+        engine_material_graph::generate_with(&doc.graph, GRAPH_TYPE, Build::Editing, &modules)?;
     let mut file = MaterialFile {
         shader: module,
         type_name: String::from(GRAPH_TYPE),
@@ -1451,7 +1459,7 @@ impl GraphDoc {
 
     /// The inspected node's kind.
     pub(crate) fn inspected_kind(&self) -> Option<&'static Kind> {
-        library::kind(&self.graph.nodes.get(self.inspected()?)?.kind)
+        engine_material_graph::node_kind(self.graph.nodes.get(self.inspected()?)?).ok()
     }
 
     /// The inspector's rows into `out` (its room kept): the inspected node's, or the
@@ -1467,7 +1475,7 @@ impl GraphDoc {
             return;
         };
         let node = &self.graph.nodes[id];
-        let Some(kind) = library::kind(&node.kind) else {
+        let Ok(kind) = engine_material_graph::node_kind(node) else {
             out.push(NodeRow::Comment);
             return;
         };
@@ -1506,7 +1514,8 @@ impl GraphDoc {
         match row {
             NodeRow::Value(_) => node.value,
             NodeRow::Input(name, _) => node.inputs.get(name).copied().unwrap_or_else(|| {
-                match library::kind(&node.kind)
+                match engine_material_graph::node_kind(node)
+                    .ok()
                     .and_then(|k| k.input(name))
                     .map(|i| i.fill)
                 {
@@ -1696,7 +1705,7 @@ impl GraphDoc {
 
     /// What port `port` of its node carries (an output's where `output`).
     fn port_type(&self, port: &PortRef, output: bool) -> Option<PortType> {
-        let kind = library::kind(&self.graph.nodes.get(&port.node)?.kind)?;
+        let kind = engine_material_graph::node_kind(self.graph.nodes.get(&port.node)?).ok()?;
         if output {
             kind.output(&port.port).map(|o| o.ty)
         } else {

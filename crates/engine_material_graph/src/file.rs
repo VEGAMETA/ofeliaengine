@@ -3,7 +3,7 @@
 //! sorted so a diff shows what changed.
 //!
 //! ```text
-//! [mgraph version=2 id=7d2e5c0b9a4f41e3b8c6d5a4f3e2d1c0]
+//! [mgraph version=3 id=7d2e5c0b9a4f41e3b8c6d5a4f3e2d1c0]
 //!
 //! model = "lit"
 //! nodes["a3f9"].kind = "texture"
@@ -28,7 +28,12 @@
 //! - **A link** by the input it feeds, `<node>.<port>`, to the output it comes from.
 //! - **A frame** (version 2, E10-3e-2b) by id: its place (`at`), its `size` and its
 //!   `title` (`frames["frame1"].title = "Moss"`). Version 1 files, which have none, read.
+//! - **A call** (version 3, E10-3g-3): a node of kind `call` names its `function`, the
+//!   Slang `module` that declares it (an asset) and its `signature` as Slang spells it
+//!   (`nodes["sw"].signature = "float3(MaterialContext ctx, float3 color)"`), so the module
+//!   is generated without reading the function. Older files read as they are.
 
+use crate::call::node_kind;
 use crate::graph::{Frame, Graph, Model, Node, PortRef};
 use crate::library::{self, Body};
 use engine_reflect::Reflect;
@@ -78,13 +83,20 @@ pub struct NodeFile {
     pub comment: String,
     /// An Expression node's Slang.
     pub code: String,
+    /// A call's function.
+    pub function: String,
+    /// The Slang module that declares it.
+    pub module: AssetRef,
+    /// Its signature, as Slang spells it.
+    pub signature: String,
 }
 
 impl GraphFile {
     /// The kind in the file's header.
     pub const KIND: &'static str = "mgraph";
-    /// The format's version: 2 adds frames (E10-3e-2b); 1 is read.
-    pub const VERSION: u32 = 2;
+    /// The format's version: 3 adds calls (E10-3g-3), 2 frames (E10-3e-2b); 1 and 2 are
+    /// read.
+    pub const VERSION: u32 = 3;
 
     /// The file of `graph`.
     pub fn of(graph: &Graph) -> Self {
@@ -93,7 +105,8 @@ impl GraphFile {
             .iter()
             .map(|(id, n)| {
                 // As many components as a constant is wide; none for the rest.
-                let width = match library::kind(&n.kind).map(|k| k.body) {
+                let kind = node_kind(n).ok();
+                let width = match kind.map(|k| k.body) {
                     Some(Body::Constant(w)) => usize::from(w),
                     _ => 0,
                 };
@@ -111,18 +124,19 @@ impl GraphFile {
                             // components are the same (it fills them on reading).
                             let same = v.iter().all(|x| x.to_bits() == v[0].to_bits());
                             let width =
-                                library::kind(&n.kind)
-                                    .and_then(|k| k.input(name))
-                                    .map_or(4, |i| match i.ty {
-                                        library::PortType::Float(w) => usize::from(w),
-                                        library::PortType::Dynamic if same => 1,
-                                        library::PortType::Dynamic => 4,
-                                    });
+                                kind.and_then(|k| k.input(name)).map_or(4, |i| match i.ty {
+                                    library::PortType::Float(w) => usize::from(w),
+                                    library::PortType::Dynamic if same => 1,
+                                    library::PortType::Dynamic => 4,
+                                });
                             (name.clone(), v[..width].to_vec())
                         })
                         .collect(),
                     comment: n.comment.clone(),
                     code: n.code.clone(),
+                    function: n.function.clone(),
+                    module: n.module,
+                    signature: n.signature.clone(),
                 };
                 (id.clone(), node)
             })
@@ -172,6 +186,9 @@ impl GraphFile {
             node.texture = n.texture;
             node.comment.clone_from(&n.comment);
             node.code.clone_from(&n.code);
+            node.function.clone_from(&n.function);
+            node.module = n.module;
+            node.signature.clone_from(&n.signature);
             for (name, v) in &n.inputs {
                 let mut value = [0.0; 4];
                 for (k, x) in v.iter().take(4).enumerate() {
@@ -293,7 +310,7 @@ mod tests {
         let (g, paths, id) = moss();
         let text = GraphFile::of(&g).to_text(id, Some(&paths));
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], format!("[mgraph version=2 id={id}]"));
+        assert_eq!(lines[0], format!("[mgraph version=3 id={id}]"));
         for line in [
             "model = \"lit\"",
             "nodes[\"a3f9\"].kind = \"texture\"",
@@ -366,9 +383,37 @@ mod tests {
         g.frames.clear();
         let old = GraphFile::of(&g)
             .to_text(id, Some(&paths))
-            .replace("[mgraph version=2", "[mgraph version=1");
+            .replace("[mgraph version=3", "[mgraph version=1");
         let (file, _) = GraphFile::parse(&old).unwrap();
         assert_eq!(file.graph().unwrap(), g);
+    }
+
+    /// E10-3g-3: a call's function, module and signature are written (its module an asset
+    /// with its path) and read back; a call no signature makes is the generator's to say.
+    #[test]
+    fn a_call_is_written_with_its_function_module_and_signature() {
+        let (mut g, mut paths, id) = moss();
+        let module = AssetRef::file(AssetId::new());
+        paths.insert(module, "shaders/mapping.slang");
+        let mut call = Node::new(crate::call::CALL_KIND, [300.0, 300.0])
+            .with_call("swirl", "float3(MaterialContext ctx, float3 color)");
+        call.module = module;
+        g.add("sw", call);
+        let text = GraphFile::of(&g).to_text(id, Some(&paths));
+        for line in [
+            "nodes[\"sw\"].kind = \"call\"",
+            "nodes[\"sw\"].function = \"swirl\"",
+            "nodes[\"sw\"].signature = \"float3(MaterialContext ctx, float3 color)\"",
+        ] {
+            assert!(text.contains(line), "{line}\n{text}");
+        }
+        assert!(
+            text.contains("nodes[\"sw\"].module = asset(\"shaders/mapping.slang\", "),
+            "{text}"
+        );
+        let (file, report) = GraphFile::parse(&text).unwrap();
+        assert_eq!(file.graph().unwrap(), g);
+        assert_eq!(report.assets.get(module), Some("shaders/mapping.slang"));
     }
 
     #[test]
@@ -384,9 +429,9 @@ mod tests {
             .insert(String::from("outbase"), String::from("a3f9.rgba"));
         assert!(file.graph().unwrap_err().contains("outbase"));
         // A newer file, another kind of file.
-        let newer = text.replace("[mgraph version=2", "[mgraph version=3");
+        let newer = text.replace("[mgraph version=3", "[mgraph version=4");
         assert!(GraphFile::parse(&newer).is_err());
-        let other = text.replace("[mgraph version=2", "[material version=2");
+        let other = text.replace("[mgraph version=3", "[material version=3");
         assert!(GraphFile::parse(&other).is_err());
         // The database knows the file, its id inside.
         let kind = engine_scene::AssetKind::of(std::path::Path::new("rocks/moss.mgraph"));

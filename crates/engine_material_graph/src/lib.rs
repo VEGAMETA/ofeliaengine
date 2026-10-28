@@ -22,12 +22,14 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod call;
 pub mod file;
 pub mod generate;
 pub mod graph;
 pub mod library;
 
+pub use call::{CALL_KIND, Signature, call_kind, node_kind};
 pub use file::GraphFile;
-pub use generate::{Build, Generated, GraphError, Param, ParamType, generate};
+pub use generate::{Build, Generated, GraphError, Param, ParamType, generate, generate_with};
 pub use graph::{Frame, Graph, Model, Node, PortRef};
 pub use library::{Kind, PortType, kind};

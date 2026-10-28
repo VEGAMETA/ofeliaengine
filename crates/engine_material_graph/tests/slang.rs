@@ -206,3 +206,108 @@ fn every_kind_and_model_compiles_inside_forward_slang() {
     println!("{} types checked in one module", types.len());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A project module with a function marked as a node (E10-3g-3), including the mark's
+/// declaration as the engine's `nodes.slang` asks.
+const MAPPING: &str = r#"#include "nodes.slang"
+
+// A swirl of the colour about the middle of the surface's coordinates, and how near.
+[Node("Swirl", "Mapping")]
+float3 swirl(MaterialContext ctx, float3 color, float amount, out float mask)
+{
+    float2 uv = ctx.uv - 0.5;
+    mask = saturate(1.0 - length(uv) * 2.0);
+    return color * (0.5 + 0.5 * cos(amount * length(uv)));
+}
+"#;
+
+/// The signature of a function as Slang's reflection reads it, in the graph's spelling.
+fn reflected_signature(f: &engine_shader::MarkedFunction) -> String {
+    use engine_shader::{Direction, FieldKind, ValueType};
+    let ty = |t: &ValueType| match t {
+        ValueType::Field(FieldKind::Float(1)) => String::from("float"),
+        ValueType::Field(FieldKind::Float(n)) => format!("float{n}"),
+        ValueType::Named(name) => name.clone(),
+        other => format!("{other:?}"),
+    };
+    let parameters: Vec<String> = f
+        .parameters
+        .iter()
+        .map(|p| {
+            let direction = match p.direction {
+                Direction::In => "",
+                Direction::Out => "out ",
+                Direction::InOut => "inout ",
+            };
+            format!("{direction}{} {}", ty(&p.ty), p.name)
+        })
+        .collect();
+    format!("{}({})", ty(&f.result), parameters.join(", "))
+}
+
+/// E10-3g-3: a call of a project module's `[Node]` function, its signature as the graph keeps
+/// it, compiles inside `forward.slang` (its out parameter linked to a term as an output);
+/// Slang's reflection of the function gives back that signature; the graph's module
+/// includes the mark's declaration before the module.
+#[test]
+fn a_call_of_a_node_function_compiles_and_its_signature_is_slangs() {
+    use engine_material_graph::{CALL_KIND, generate_with};
+    use engine_scene::{AssetId, AssetRef};
+    let Some(mut compiler) = compiler() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("material_graph_call_{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("shaders")).unwrap();
+    std::fs::create_dir_all(dir.join("cache")).unwrap();
+    std::fs::write(dir.join("shaders/mapping.slang"), MAPPING).unwrap();
+    let signature = "float3(MaterialContext ctx, float3 color, float amount, out float mask)";
+    let module = AssetRef::file(AssetId::from_u128(7));
+    let mut call = Node::new(CALL_KIND, [200.0, 0.0]).with_call("swirl", signature);
+    call.module = module;
+    let mut g = Graph::new(Model::Lit);
+    g.add(
+        "c",
+        Node::new("color", [0.0; 2]).with_value([0.8, 0.3, 0.1, 1.0]),
+    )
+    .add("sw", call)
+    .link(PortRef::new("c", "rgba"), PortRef::new("sw", "color"))
+    .link(PortRef::new("sw", "out"), PortRef::new(OUTPUT, "base"))
+    .link(
+        PortRef::new("sw", "mask"),
+        PortRef::new(OUTPUT, "roughness"),
+    );
+    let modules = |m: AssetRef| (m == module).then(|| String::from("../shaders/mapping.slang"));
+    let shaders = shader_dir();
+    for build in [Build::Editing, Build::Saved] {
+        let out = generate_with(&g, "Swirled", build, &modules).unwrap();
+        let first = out
+            .text
+            .lines()
+            .position(|l| l == "#include \"nodes.slang\"");
+        let then = out
+            .text
+            .lines()
+            .position(|l| l == "#include \"../shaders/mapping.slang\"");
+        assert!(first.is_some() && first < then, "{}", out.text);
+        assert_eq!(out.node_at(then.unwrap()), Some("sw"));
+        let file = dir.join("cache/swirled.slang");
+        std::fs::write(&file, &out.text).unwrap();
+        let options = material_type_options(&shaders, &file, "Swirled");
+        let found = compiler.check_file(&shaders.join("forward.slang"), &options);
+        let errors: Vec<_> = found.iter().filter(|f| f.error).collect();
+        assert!(errors.is_empty(), "{build:?}: {errors:#?}\n{}", out.text);
+        if build == Build::Saved {
+            let names = engine_shader::marked_names(MAPPING, "Node");
+            let functions = compiler
+                .marked_functions(&shaders.join("forward.slang"), &options, &names, "Node")
+                .unwrap();
+            assert_eq!(functions.len(), 1, "{functions:#?}");
+            assert_eq!(functions[0].arguments, ["Swirl", "Mapping"]);
+            assert_eq!(reflected_signature(&functions[0]), signature);
+        }
+    }
+    // A call whose module is not found is its node's error.
+    let error = generate_with(&g, "Swirled", Build::Saved, &|_| None).unwrap_err();
+    assert_eq!(error.node.as_deref(), Some("sw"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

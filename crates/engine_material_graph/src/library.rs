@@ -62,6 +62,9 @@ pub enum Body {
     /// Slang the node holds (`Node::code`, E10-3g-1): a function of the type taking the
     /// fragment and the node's inputs, returning its output.
     Expression,
+    /// A call of a project module's `[Node]` function (E10-3g-3, [`crate::call`]): its
+    /// `out` and `inout` parameters variables, its result one.
+    Call(&'static crate::call::Call),
     /// The surface: the graph's one output node.
     Output,
 }
@@ -679,6 +682,7 @@ mod tests {
                 Body::Constant(_) | Body::Texture | Body::Output => {}
                 // One output, the code's value.
                 Body::Expression => assert_eq!(k.outputs.len(), 1, "{}", k.name),
+                Body::Call(_) => panic!("{}: calls are made from signatures", k.name),
             }
             // Every `{input}` a body names is one of its inputs.
             let exprs: Vec<&str> = match k.body {

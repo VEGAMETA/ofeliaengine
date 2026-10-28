@@ -126,6 +126,12 @@ pub struct Node {
     /// An Expression node's Slang (E10-3g-1): an expression of its inputs `a` to `d` (and
     /// the fragment's `ctx`), or a body that returns (empty: `a`).
     pub code: String,
+    /// A call node's function (E10-3g-3, [`crate::call`]).
+    pub function: String,
+    /// The Slang module that declares it.
+    pub module: AssetRef,
+    /// Its signature as the graph keeps it (`float3(MaterialContext ctx, float3 c)`).
+    pub signature: String,
 }
 
 impl Node {
@@ -140,7 +146,17 @@ impl Node {
             texture: AssetRef::NONE,
             comment: String::new(),
             code: String::new(),
+            function: String::new(),
+            module: AssetRef::NONE,
+            signature: String::new(),
         }
+    }
+
+    /// A call node's function and signature (its module set apart).
+    pub fn with_call(mut self, function: &str, signature: &str) -> Self {
+        function.clone_into(&mut self.function);
+        signature.clone_into(&mut self.signature);
+        self
     }
 
     /// An Expression node's Slang.

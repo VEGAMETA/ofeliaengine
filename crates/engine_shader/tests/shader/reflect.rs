@@ -201,3 +201,97 @@ fn unsupported_fields_are_named() {
         .to_string();
     assert!(error.contains("no type `Missing`"), "{error}");
 }
+
+/// A module with functions marked `[Node]` (ADR 0123's E10-3g-3), one unmarked, one in a
+/// comment.
+const MARKED: &str = r#"
+[__AttributeUsage(_AttributeTargets.Function)]
+struct NodeAttribute { string title; string category; };
+
+struct TextureRef { uint packed; };
+struct MaterialContext { float2 uv; };
+
+// [Node("Gone", "Comments")] float4 commented(float4 a) { return a; }
+
+[Node("Triplanar", "Mapping")]
+float4 triplanar(MaterialContext ctx, float3 position, float sharpness, TextureRef image)
+{
+    return float4(position * sharpness, ctx.uv.x + float(image.packed));
+}
+
+[Node("Tint", "Color")]
+float3 tint(float3 color, out float luminance, inout uint2 counts)
+{
+    luminance = dot(color, float3(0.3, 0.6, 0.1));
+    counts += 1;
+    return color;
+}
+
+float helper(float x) { return x; }
+"#;
+
+/// The marked functions' names come from the source; Slang's reflection confirms the mark
+/// and gives the mark's arguments, each parameter's type and direction and the result; an
+/// unmarked name, a commented one and a missing one are passed over.
+#[test]
+fn marked_functions_are_read_with_their_signatures() {
+    use engine_shader::{Direction, ValueType, marked_names};
+    let Some(library) = slang() else { return };
+    let dir = temp_dir("marked");
+    let path = dir.join("nodes.slang");
+    std::fs::write(&path, MARKED).unwrap();
+    let mut compiler = Compiler::new(library).unwrap();
+    let mut names = marked_names(MARKED, "Node");
+    assert_eq!(names, ["triplanar", "tint"]);
+    names.extend(["helper", "commented", "missing"].map(String::from));
+    let started = std::time::Instant::now();
+    let found = compiler
+        .marked_functions(&path, &CompileOptions::default(), &names, "Node")
+        .unwrap();
+    println!(
+        "marked functions read in {:.1} ms",
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    assert_eq!(found.len(), 2, "{found:#?}");
+    let triplanar = &found[0];
+    assert_eq!(triplanar.name, "triplanar");
+    assert_eq!(triplanar.arguments, ["Triplanar", "Mapping"]);
+    assert_eq!(triplanar.result, ValueType::Field(FieldKind::Float(4)));
+    let shapes: Vec<(&str, &ValueType, Direction)> = triplanar
+        .parameters
+        .iter()
+        .map(|p| (p.name.as_str(), &p.ty, p.direction))
+        .collect();
+    let context = ValueType::Named(String::from("MaterialContext"));
+    assert_eq!(
+        shapes,
+        [
+            ("ctx", &context, Direction::In),
+            (
+                "position",
+                &ValueType::Field(FieldKind::Float(3)),
+                Direction::In
+            ),
+            (
+                "sharpness",
+                &ValueType::Field(FieldKind::Float(1)),
+                Direction::In
+            ),
+            (
+                "image",
+                &ValueType::Field(FieldKind::Texture),
+                Direction::In
+            ),
+        ]
+    );
+    let tint = &found[1];
+    assert_eq!(tint.arguments, ["Tint", "Color"]);
+    assert_eq!(tint.result, ValueType::Field(FieldKind::Float(3)));
+    let directions: Vec<Direction> = tint.parameters.iter().map(|p| p.direction).collect();
+    assert_eq!(
+        directions,
+        [Direction::In, Direction::Out, Direction::InOut]
+    );
+    assert_eq!(tint.parameters[2].ty, ValueType::Field(FieldKind::Uint(2)));
+    let _ = std::fs::remove_dir_all(&dir);
+}

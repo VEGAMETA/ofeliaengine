@@ -33588,7 +33588,7 @@ return Coin
         chord(&mut ed, &mut world, &[CTRL, Y]);
         chord(&mut ed, &mut world, &[CTRL, S]);
         let text = std::fs::read_to_string(dir.join("materials/glow.mgraph")).unwrap();
-        assert!(text.starts_with("[mgraph version=2"), "{text}");
+        assert!(text.starts_with("[mgraph version=3"), "{text}");
         assert!(
             text.contains("frames[\"frame1\"].title = \"Frame\""),
             "{text}"

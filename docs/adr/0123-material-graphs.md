@@ -642,6 +642,65 @@ What was built:
     0.91 s.
 - **Next:** functions (E10-3g-2), their file's extension to be chosen.
 
+## As built (E10-3g-3a, 2026-10-29): `[Node]` functions in the engine
+
+- **The mark** (`engine_render/shaders/nodes.slang`): `[Node("Swirl", "Mapping")]` before a
+  function of a project's Slang module.
+  - Slang wants both arguments, the struct's two fields: a mark without them does not
+    compile (checked with slangc 2026.18.3).
+  - A graph's module includes the file before the modules its calls name. A module also
+    used by a hand-written type includes it itself (`#pragma once`).
+- **Finding the functions** (`engine_shader::marked_names`, `Compiler::marked_functions`):
+  - Slang's flat API finds a function by name, but lists a module's declarations only
+    through `IModule::getModuleReflection`, a COM interface ADR 0008's binding does not
+    reach.
+  - So the names come from the source: the functions declared after a mark, with comments
+    skipped. The reflection then confirms the mark (`FindUserAttributeByName`) and reads
+    the signature: the parameters with their types and directions, the result, and the
+    mark's string arguments.
+  - It runs Slang's front end only: 14 ms for a small module.
+- **A call in the graph** (`engine_material_graph::call`): a node of kind `call`, with its
+  `function`, its `module` (an asset) and its `signature` as Slang spells it.
+  - The signature is kept in the file, as Unreal keeps a material function call's inputs
+    and outputs in the material. The cook and the player generate without reflecting, and
+    the editor writes it again when the function changes (E10-3g-3b). A stale signature
+    fails at the call's line.
+  - Ports: a first `MaterialContext` is the fragment's. `in` parameters are inputs (zero
+    when unlinked), `out` ones outputs, `inout` both, and the result is `out`. Every port
+    is float to float4, the graph's types; other types are refused with why.
+  - Its kind is made once per function and signature and kept for the process
+    (`call_kind`). It is `'static`, as the library's kinds are, so every reader of kinds
+    takes both alike; what is kept grows with the different signatures a process sees.
+    Owned kinds would change the 90 places that read `&'static Kind`, for no run-time gain.
+- **Generation** (`generate_with`):
+  - The modules the written calls name are included after `nodes.slang`. Each include line
+    is mapped to its first call, so a module that is not found is that node's error.
+  - A call's `out` and `inout` parameters and its result are variables; a `void` call is a
+    statement.
+  - `graph_module` (the cook and the player) and the editor's preview include a module by
+    its path in the graph's file, from the cache's folder (`../../../shaders/mapping.slang`),
+    so the text is the same on every machine.
+- **The file's version 3** adds the call's three fields. Versions 1 and 2 read.
+- **Tests:**
+  - the scan: marks with arguments, other attributes and line breaks between are found;
+    comments, structs, longer names and repeats are passed over;
+  - Slang's reflection of marked functions: the mark's arguments, the parameters' types
+    (`MaterialContext` and `TextureRef` included) and directions; unmarked, commented and
+    missing names passed over;
+  - signatures parsed and written back, refusals with why; a call's kind's ports, and its
+    being made once;
+  - the generator: `out` and `inout` variables, `void` statements, each module included
+    once at its first call's line, a missing module at its node; the file's round trip;
+    the include path;
+  - with Slang: a graph calling a project module's function compiles inside
+    `forward.slang` in both builds, and Slang's reflection gives back the signature the
+    graph keeps.
+- **Next:** E10-3g-3b, the editor's side.
+  - The project's `[Node]` functions are found off the frame and listed in the node search
+    under their groups, their nodes titled by the mark.
+  - A call's signature is written again when its module changes.
+  - Slang's errors in a module are shown at the calls.
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,
