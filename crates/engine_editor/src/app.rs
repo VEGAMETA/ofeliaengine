@@ -632,6 +632,8 @@ struct FrameLists {
     scenes: Vec<&'static str>,
     /// The material graphs' tabs (ADR 0123 E10-3d).
     graphs: Vec<&'static str>,
+    /// The shown graph's inspector values (E10-3f-1).
+    graph_values: Vec<&'static str>,
     /// The inspector's shown values, each property's range of them, its fields and
     /// sections (an asset's too).
     values: Vec<&'static str>,
@@ -1445,6 +1447,18 @@ struct Choice {
     label: String,
     detail: String,
     pick: Pick,
+}
+
+/// A number of a graph node's row dragged in the inspector (ADR 0123 E10-3f-1): the row,
+/// the number, the row's numbers at the press, the gesture its steps merge into, whether
+/// the pointer moved (a click types the number instead).
+#[derive(Debug, Clone, Copy)]
+struct NodeDrag {
+    row: usize,
+    part: usize,
+    start: [f32; 4],
+    merge: u64,
+    moved: bool,
 }
 
 /// Where the node search's pick goes (ADR 0123 E10-3e).
@@ -2280,6 +2294,19 @@ struct Editor {
     /// Where the node search's pick goes: the graph, the canvas point, and the port a link
     /// was drawn from (ADR 0123 E10-3e).
     graph_add: Option<GraphAdd>,
+    /// The inspector's rows for the shown graph (ADR 0123 E10-3f-1), their shown texts and
+    /// where each row's start (and how many), and its section's title: made every frame
+    /// into the same room.
+    graph_rows: Vec<crate::graph::NodeRow>,
+    graph_texts: Vec<String>,
+    graph_spans: Vec<(usize, usize)>,
+    graph_title: String,
+    /// The section they are in this frame, the row and number typed into, the row whose
+    /// list is open, the number dragged.
+    graph_section: Option<usize>,
+    node_typing: Option<(usize, u8)>,
+    node_choice: Option<usize>,
+    node_drag: Option<NodeDrag>,
     /// The graph bar's status, and a constant's value while the canvas draws it: written
     /// into the same room every frame.
     graph_status: String,
@@ -3300,6 +3327,14 @@ impl Editor {
             graph_area: None,
             graph_rect: None,
             graph_add: None,
+            graph_rows: Vec::new(),
+            graph_texts: Vec::new(),
+            graph_spans: Vec::new(),
+            graph_title: String::new(),
+            graph_section: None,
+            node_typing: None,
+            node_choice: None,
+            node_drag: None,
             graph_status: String::new(),
             graph_scratch: String::new(),
             code_focus: false,
@@ -4290,6 +4325,8 @@ impl Editor {
         let snapshot_value: [&str; 1];
         self.mixer_section = None;
         self.snapshot_section = None;
+        self.graph_section = None;
+        let mut graph_values: Vec<&str> = recycle(std::mem::take(&mut self.lists.graph_values));
         let mut outputs: Vec<&str> = recycle(std::mem::take(&mut self.lists.outputs));
         let mut part_values: Vec<&str> = recycle(std::mem::take(&mut self.lists.part_values));
         let mut part_options: Vec<&str> = recycle(std::mem::take(&mut self.lists.part_options));
@@ -4298,7 +4335,57 @@ impl Editor {
             let doc = self.mixer.as_ref()?;
             doc.strip(bus).map(|_| (doc, bus))
         });
-        if let Some((doc, bus)) = picked {
+        let graph_doc = self
+            .active_graph
+            .and_then(|g| self.graphs.get(g))
+            .filter(|_| !self.graph_rows.is_empty());
+        if let Some(doc) = graph_doc {
+            // A graph's tab (ADR 0123 E10-3f-1): the node selected alone, or the graph.
+            use crate::graph::NodeRow;
+            graph_values.extend(self.graph_texts.iter().map(String::as_str));
+            let colour = doc.inspected_kind().is_some_and(|k| k.name == "color");
+            for (k, &row) in self.graph_rows.iter().enumerate() {
+                let (at, n) = self.graph_spans[k];
+                let shown = &graph_values[at..at + n];
+                let first = shown.first().copied().unwrap_or("");
+                let widget = match row {
+                    NodeRow::Model => Widget::Choice {
+                        current: first,
+                        open: (self.node_choice == Some(k))
+                            .then_some(&crate::graph::MODEL_NAMES[..]),
+                        missing: false,
+                    },
+                    NodeRow::Param | NodeRow::Comment => Widget::Edit(first),
+                    NodeRow::Value(_) | NodeRow::Input(..) => Widget::Numbers {
+                        values: shown,
+                        labels: row.labels(colour),
+                        typing: self
+                            .node_typing
+                            .filter(|&(r, _)| r == k)
+                            .map(|(_, part)| part),
+                        lock: None,
+                    },
+                    NodeRow::Texture => Widget::Asset {
+                        preview: None,
+                        icon: if first == "none" { "" } else { icons::TEXTURE },
+                        name: first,
+                        play: None,
+                    },
+                };
+                asset_fields.push(Field {
+                    name: row.name(colour),
+                    widget,
+                    changed: doc.changed(row),
+                });
+            }
+            self.graph_section = Some(sections.len());
+            sections.push(Section {
+                title: self.graph_title.as_str(),
+                fields: &asset_fields[..],
+                script: "",
+                removable: false,
+            });
+        } else if let Some((doc, bus)) = picked {
             // The picked bus of the mixer (E11-1b): its name, output, fader, balance,
             // voices and reverb.
             use crate::mixer::BusRow;
@@ -5544,7 +5631,9 @@ impl Editor {
             selection: &self.selection_label,
             inspector: &sections,
             movable,
-            add_component: self.inspected.is_none() && !self.selection.is_empty(),
+            add_component: self.inspected.is_none()
+                && !self.selection.is_empty()
+                && self.active_graph.is_none(),
             path: &self.browser.label,
             folders: &folder_items,
             files: &file_items,
@@ -5652,6 +5741,7 @@ impl Editor {
         self.joined = joined;
         self.lists.scenes = recycle(scenes);
         self.lists.graphs = recycle(graph_tabs);
+        self.lists.graph_values = recycle(graph_values);
         self.listing = self
             .ui
             .rect_of(response.listing)
@@ -6225,7 +6315,9 @@ impl Editor {
             }
         }
         if let Some(event) = response.field {
-            if Some(event.section) == self.snapshot_section {
+            if Some(event.section) == self.graph_section {
+                self.edit_graph_node(world, event);
+            } else if Some(event.section) == self.snapshot_section {
                 self.edit_snapshot(world, event);
             } else if Some(event.section) == self.mixer_section {
                 self.edit_bus(world, event);
@@ -6259,7 +6351,9 @@ impl Editor {
                     field,
                     action,
                 };
-                if Some(section) == self.snapshot_section {
+                if Some(section) == self.graph_section {
+                    self.edit_graph_node(world, event);
+                } else if Some(section) == self.snapshot_section {
                     self.edit_snapshot(world, event);
                 } else if Some(section) == self.mixer_section {
                     self.edit_bus(world, event);
@@ -11488,6 +11582,148 @@ impl Editor {
         }
     }
 
+    /// An edit of graph `g` as a step called `name` (`merge`: one step for a gesture's moves):
+    /// its text before and after it in the history.
+    fn graph_edit(
+        &mut self,
+        world: &mut World,
+        g: usize,
+        name: &str,
+        merge: Option<u64>,
+        edit: Option<(String, String)>,
+    ) {
+        let Some((before, after)) = edit else {
+            return;
+        };
+        let id = self.graphs[g].id;
+        self.history.begin(name, merge);
+        self.history.change_file(id, &before, &after);
+        self.history.commit(world);
+    }
+
+    /// Applies an inspector field's action to the shown graph (ADR 0123 E10-3f-1): the node
+    /// selected alone's values, parameter, image and note, or the graph's shading model;
+    /// each a step (a drag's moves one), drawn by the next frame.
+    fn edit_graph_node(&mut self, world: &mut World, event: FieldEvent) {
+        use crate::graph::NodeRow;
+        let Some(g) = self.active_graph.filter(|&g| g < self.graphs.len()) else {
+            return;
+        };
+        let Some(&row) = self.graph_rows.get(event.field) else {
+            return;
+        };
+        let colour = self.graphs[g]
+            .inspected_kind()
+            .is_some_and(|k| k.name == "color");
+        let name = row.name(colour);
+        match event.action {
+            FieldAction::Drag {
+                part,
+                travel,
+                start,
+            } => {
+                if !matches!(row, NodeRow::Value(_) | NodeRow::Input(..)) {
+                    return;
+                }
+                if start || self.node_drag.is_none() {
+                    self.gestures += 1;
+                    self.node_drag = Some(NodeDrag {
+                        row: event.field,
+                        part: usize::from(part).min(3),
+                        start: self.graphs[g].numbers(row),
+                        merge: self.gestures,
+                        moved: false,
+                    });
+                    self.node_typing = None;
+                    return;
+                }
+                let Some(drag) = self.node_drag.as_mut() else {
+                    return;
+                };
+                if travel != 0.0 {
+                    drag.moved = true;
+                }
+                let drag = *drag;
+                let (shift, ctrl) = (self.input.shift(), self.input.ctrl());
+                let mut values = drag.start;
+                values[drag.part] = self.snapping.drag(
+                    Quantity::Number { step: None },
+                    f64::from(drag.start[drag.part]),
+                    travel,
+                    shift,
+                    ctrl,
+                ) as f32;
+                let edit = self.graphs[g].set_numbers(row, values);
+                self.graph_edit(world, g, &format!("Edit {name}"), Some(drag.merge), edit);
+            }
+            FieldAction::Release => {
+                if let Some(drag) = self.node_drag.take()
+                    && !drag.moved
+                {
+                    self.node_typing = Some((drag.row, drag.part as u8));
+                }
+            }
+            FieldAction::Typed { part, commit } => {
+                self.node_typing = None;
+                if !commit {
+                    return;
+                }
+                let text = self.ui.edited_text().trim().to_owned();
+                let part = usize::from(part).min(3);
+                let mut values = self.graphs[g].numbers(row);
+                match crate::expr::evaluate(&text, f64::from(values[part])) {
+                    Ok(value) => values[part] = value as f32,
+                    Err(reason) => {
+                        self.say(format!("{name}: {reason}"));
+                        return;
+                    }
+                }
+                let edit = self.graphs[g].set_numbers(row, values);
+                self.graph_edit(world, g, &format!("Set {name}"), None, edit);
+            }
+            FieldAction::Text { commit } => {
+                if !commit {
+                    return;
+                }
+                let text = self.ui.edited_text().trim().to_owned();
+                match row {
+                    NodeRow::Param => match self.graphs[g].set_param(&text) {
+                        Ok(edit) => self.graph_edit(world, g, "Rename Parameter", None, edit),
+                        Err(why) => self.say(why.to_owned()),
+                    },
+                    NodeRow::Comment => {
+                        let edit = self.graphs[g].set_comment(&text);
+                        self.graph_edit(world, g, "Edit Note", None, edit);
+                    }
+                    _ => {}
+                }
+            }
+            FieldAction::Open => {
+                self.node_choice = (self.node_choice != Some(event.field)).then_some(event.field);
+            }
+            FieldAction::Choose(i) => {
+                self.node_choice = None;
+                if row == NodeRow::Model {
+                    let edit = self.graphs[g].set_model(i);
+                    self.graph_edit(world, g, "Set Shading Model", None, edit);
+                }
+            }
+            FieldAction::Reset => {
+                let edit = self.graphs[g].reset(row);
+                self.graph_edit(world, g, &format!("Reset {name}"), None, edit);
+            }
+            FieldAction::Pick => {
+                if row == NodeRow::Texture {
+                    self.open_palette(world, "#texture:");
+                    if let Some(cp) = self.command_palette.as_mut() {
+                        cp.for_field = Some((event.section, event.field));
+                    }
+                }
+            }
+            FieldAction::Toggle | FieldAction::Lock | FieldAction::Play => {}
+        }
+    }
+
     /// "Graph: Add Node…" (Space or Shift+A on the canvas, a link dropped on its empty
     /// part; ADR 0123 E10-3e): the node kinds in the palette at the pointer, by group, the
     /// query narrowing them; the one picked goes to canvas point `at` (the pointer's, or
@@ -11605,9 +11841,27 @@ impl Editor {
             doc.refresh_tab();
         }
         self.graph_status.clear();
+        self.graph_rows.clear();
         let Some(doc) = self.active_graph.and_then(|g| self.graphs.get(g)) else {
             return;
         };
+        // The inspector's rows (E10-3f-1): the node selected alone's, or the graph's.
+        doc.rows(&mut self.graph_rows);
+        self.graph_spans.clear();
+        let mut at = 0;
+        for &row in &self.graph_rows {
+            let n = doc.row_texts(row, &mut self.graph_texts, at);
+            self.graph_spans.push((at, n));
+            at += n;
+        }
+        self.graph_title.clear();
+        match (doc.inspected(), doc.inspected_kind()) {
+            (Some(id), Some(kind)) => {
+                let _ = write!(self.graph_title, "{} · {id}", kind.title);
+            }
+            (Some(id), None) => self.graph_title.push_str(id),
+            (None, _) => self.graph_title.push_str("Graph"),
+        }
         let n = doc.graph.nodes.len();
         let s = if n == 1 { "" } else { "s" };
         let _ = write!(self.graph_status, "{n} node{s}");
@@ -18956,6 +19210,23 @@ impl Editor {
         drag: &mut AssetDrag,
     ) {
         use engine_scene::AssetKind as K;
+        // A graph's texture node's image row takes an image (ADR 0123 E10-3f-1).
+        if Some(section) == self.graph_section {
+            let row = self.graph_rows.get(field).copied();
+            let Some(g) = self
+                .active_graph
+                .filter(|_| row == Some(crate::graph::NodeRow::Texture))
+            else {
+                return;
+            };
+            if drag.kind != K::Texture {
+                self.say(format!("The image takes an image, not {}", drag.name));
+                return;
+            }
+            let edit = self.graphs[g].set_texture(AssetRef::file(drag.asset), &drag.path);
+            self.graph_edit(world, g, "Set Image", None, edit);
+            return;
+        }
         // A material's rows: its image parameters take images (E10-1c).
         if Some(section) == self.material_section {
             self.drop_on_material(world, field, drag);
@@ -32892,6 +33163,115 @@ return Coin
         // Each one step: Ctrl+Z takes the texture back.
         chord(&mut ed, &mut world, &[CTRL, Z]);
         assert!(!ed.graphs[0].graph.nodes.contains_key("texture1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0123 E10-3f-1: with a graph's tab shown the inspector shows the graph's shading
+    /// model, or the node selected alone: a colour's channels typed and dragged (a drag one
+    /// step), a texture node's image dropped from the dock onto its row; each a step.
+    #[test]
+    fn the_inspector_edits_the_graph_and_its_node_alone_selected() {
+        let dir = project("graph-values");
+        for sub in ["materials", "textures"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let png = engine_render::png::encode_png(
+            1,
+            1,
+            engine_render::png::PngFormat::Rgba,
+            &[200, 150, 100, 255],
+        )
+        .unwrap();
+        std::fs::write(dir.join("textures/wood.png"), &png).unwrap();
+        std::fs::write(
+            dir.join("materials/glow.mgraph"),
+            format!(
+                "[mgraph version=1 id={}]\n\nmodel = \"lit\"\n\
+                 nodes[\"c\"].kind = \"color\"\nnodes[\"c\"].value = [0.9, 0.1, 0.1, 1]\n\
+                 nodes[\"t\"].kind = \"texture\"\nnodes[\"t\"].at = [0, 160]\n\
+                 nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [300, 0]\n",
+                AssetId::new()
+            ),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        ed.open_folder("textures");
+        ed.update(&mut world);
+        ed.open_graph(&world, Path::new("materials/glow.mgraph"));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        // Nothing selected: the graph's shading model.
+        assert!(!texts(&ed, "Shading model").is_empty());
+        let section = ed.graph_section.unwrap();
+        let event = |field, action| FieldEvent {
+            section,
+            field,
+            action,
+        };
+        ed.edit_graph_node(&mut world, event(0, FieldAction::Choose(5)));
+        assert_eq!(ed.graphs[0].graph.model, engine_material_graph::Model::Toon);
+        assert_eq!(ed.history.steps().count(), 1);
+        // The colour clicked on the canvas: its rows, its channels.
+        let [x, y, ..] = ed.graph_area.unwrap();
+        let grab = ed.graphs[0].view.panel_point([10.0, 6.0], [x, y]);
+        click(&mut ed, &mut world, grab);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Color · c").is_empty(), "the node's section");
+        assert!(!texts(&ed, "Parameter").is_empty());
+        // Its red typed: one step.
+        let at = on_row(&ed, "Color", "0.9");
+        click(&mut ed, &mut world, at);
+        ed.update(&mut world);
+        assert!(ed.ui.editing().is_some(), "a click types the number");
+        chars(&mut ed, "0.25");
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, true);
+        ed.update(&mut world);
+        assert_eq!(ed.graphs[0].graph.nodes["c"].value[0], 0.25);
+        assert_eq!(ed.history.steps().count(), 2);
+        // Its green dragged: the gesture's moves one step.
+        let section = ed.graph_section.unwrap();
+        let color = ed
+            .graph_rows
+            .iter()
+            .position(|r| matches!(r, crate::graph::NodeRow::Value(_)))
+            .unwrap();
+        let drag = |travel, start| FieldEvent {
+            section,
+            field: color,
+            action: FieldAction::Drag {
+                part: 1,
+                travel,
+                start,
+            },
+        };
+        ed.edit_graph_node(&mut world, drag(0.0, true));
+        ed.edit_graph_node(&mut world, drag(20.0, false));
+        ed.edit_graph_node(&mut world, drag(40.0, false));
+        ed.edit_graph_node(&mut world, event(color, FieldAction::Release));
+        assert!(ed.graphs[0].graph.nodes["c"].value[1] > 0.1);
+        assert_eq!(ed.history.steps().count(), 3, "one step for the drag");
+        // The texture node: wood.png dropped from the dock onto its image's row.
+        ed.graphs[0].selected = [String::from("t")].into_iter().collect();
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Texture · t").is_empty());
+        drag_file(&mut ed, &mut world, "wood.png");
+        let at = on_row(&ed, "Image", "none");
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        mouse(&mut ed, at, Some(false));
+        ed.update(&mut world);
+        let wood = ed.asset_db.find("textures/wood.png").unwrap().id;
+        assert_eq!(ed.graphs[0].graph.nodes["t"].texture, AssetRef::file(wood));
+        assert_eq!(ed.history.steps().count(), 4);
+        // Undo takes the image back; the file reads back as the canvas holds it.
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        assert!(ed.graphs[0].graph.nodes["t"].texture.is_none());
+        chord(&mut ed, &mut world, &[CTRL, S]);
+        let again = crate::graph::GraphDoc::open(&dir, "materials/glow.mgraph").unwrap();
+        assert_eq!(again.graph, ed.graphs[0].graph);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

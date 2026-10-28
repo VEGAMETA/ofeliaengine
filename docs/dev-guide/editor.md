@@ -1240,6 +1240,18 @@ Until its shaders are made, the material draws its colour.
     refused, all of them kept);
   - **the middle or the right button** pans, **the wheel** zooms about the pointer (25 %
     to 300 %, by steps).
+- **The inspector** shows the node selected alone, or the graph with none:
+  - **the graph:** its shading model (lit, unlit, clearcoat, cloth, hair, toon, sheen,
+    sheen with clear coat), which picks the surface's inputs;
+  - **a node:**
+    - its parameter's name: the material's row by that name; empty, the value is compiled
+      in. A name is letters, digits and `_`, and no other node's;
+    - a constant's value (a colour by its channels);
+    - its unlinked inputs' own values (one number for an input as wide as what is linked);
+    - a texture's image: a click picks one, or drop an image from the dock onto it;
+    - its note.
+  - Numbers are dragged sideways or typed (a click; expressions as in other fields).
+    Backspace over a row, or its ↺, resets it. Each edit is one step, a drag's moves one.
 - **The keys:** Delete deletes the selected nodes (the surface stays), Ctrl+D copies them
   (each with an id and a parameter name of its own, 30 units down and right, with the
   links into them; the copies selected), F frames them (all of them, none selected),
@@ -1253,8 +1265,8 @@ Until its shaders are made, the material draws its colour.
 - **Saving** writes the file; the materials that name the graph draw it again (ADR 0123
   E10-3c). Unsaved graphs are autosaved as scenes are, and the session brings the tabs
   back, with their unsaved edits.
-- **Not yet:** reroutes and frames (E10-3e-2), editing a node's values, errors on nodes
-  (E10-3f).
+- **Not yet:** a preview of the material while its graph is shown (the scene's tab shows
+  it after Ctrl+S), reroutes and frames (E10-3e-2), errors on nodes (E10-3f).
 
 ## Autosave and the session
 

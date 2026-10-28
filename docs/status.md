@@ -868,6 +868,11 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3f-1, values in the inspector** (#PR, ADR 0123's as-built; taken before
+    reroutes and frames): with a graph's tab shown the inspector shows the node selected
+    alone (parameter name, a constant's value, unlinked inputs' own values, a texture's
+    image, a note) or the graph's shading model; numbers dragged or typed, names checked,
+    images picked or dropped from the dock, each a step (a drag one).
   - **E10-3e-1, the node search** (#426, ADR 0123's as-built): Space (Shift+A) over a graph's
     canvas opens the palette's list of node kinds at the pointer, its pick added there; a
     link dropped on the empty canvas opens it for the kinds that can take the link, the
@@ -923,9 +928,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3e-2 (reroutes and frames, the file's version 2), then E10-3f (live edits,
-       errors on nodes, Show Slang) and E10-3g (functions), ADR 0123's steps; then E10-4,
-       previews, stats and variants with a base.
+       2D): E10-3f-2 (errors on nodes, Show Slang), the preview the team picks, E10-3e-2
+       (reroutes and frames, the file's version 2), E10-3g (functions), ADR 0123's steps;
+       then E10-4, previews, stats and variants with a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
@@ -1094,7 +1099,10 @@ Last updated: 2026-10-28.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner:** none. Settled 2026-10-28 (team decision): ADR
+- **Questions open with the owner:** a material's preview while its graph is shown (the 3D
+  view is behind the canvas): (a) a preview sphere in the canvas's corner, its numbers live
+  (recommended), (b) the canvas and the viewport side by side, (c) as now, Ctrl+Tab to the
+  scene. Settled 2026-10-28 (team decision): ADR
   0123 accepted, its files `.mgraph`, graphs and shaders opened as files in tabs of
   their own (no panel under the viewport). Settled 2026-10-22 (team decision): E10's
   four on materials (one material file, variants with a base, numbers on graph nodes,

@@ -26,13 +26,16 @@
 //!   the pointer); a link dropped on the empty canvas asks for it, the node it adds linked
 //!   to the link's port by the port that fits best; an image dropped from the dock is a
 //!   texture node.
+//! - **Values** (E10-3f-1): the inspector shows the node selected alone ([`NodeRow`]s: its
+//!   parameter's name, a constant's value, its unlinked inputs' own values, a texture's
+//!   image, its note), or the graph's shading model with none.
 
 use crate::paint::UiText;
 use crate::shell::Palette;
 use engine_assets::OutlineMaps;
 use engine_core::math::{Vec2, Vec4};
 use engine_material_graph::graph::OUTPUT;
-use engine_material_graph::library::{self, Body, OUTPUT_KIND};
+use engine_material_graph::library::{self, Body, Fill, OUTPUT_KIND};
 use engine_material_graph::{Graph, GraphFile, Kind, Model, Node, PortRef, PortType};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad};
 use engine_scene::{AssetId, AssetPaths, AssetRef};
@@ -637,6 +640,82 @@ fn param_of(path: &str) -> String {
     out
 }
 
+/// A row of the inspector while a graph's tab is shown (ADR 0123 E10-3f-1): of the node
+/// selected alone, or of the graph with none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeRow {
+    /// The graph's shading model: which of the surface's terms it reads.
+    Model,
+    /// The node's parameter: a row of its materials by that name (none: compiled in).
+    Param,
+    /// A constant's components, as many as it is wide.
+    Value(u8),
+    /// An input's own value while nothing is linked to it (an input its kind fills with a
+    /// value): its name, and how many numbers it shows (one for a dynamic input, which
+    /// fills every component with it).
+    Input(&'static str, u8),
+    /// A texture node's own image.
+    Texture,
+    /// The node's note.
+    Comment,
+}
+
+impl NodeRow {
+    /// Its name in the inspector (`colour`: the node is a colour's).
+    pub(crate) fn name(self, colour: bool) -> &'static str {
+        match self {
+            Self::Model => "Shading model",
+            Self::Param => "Parameter",
+            Self::Value(_) if colour => "Color",
+            Self::Value(_) => "Value",
+            Self::Input(name, _) => name,
+            Self::Texture => "Image",
+            Self::Comment => "Note",
+        }
+    }
+
+    /// Its numbers' labels: a colour's channels, a vector's axes, none for one number.
+    pub(crate) fn labels(self, colour: bool) -> &'static [&'static str] {
+        match self {
+            Self::Value(_) | Self::Input(..) if colour => &["R", "G", "B", "A"],
+            Self::Value(w) | Self::Input(_, w) => match w {
+                2 => &["X", "Y"],
+                3 => &["X", "Y", "Z"],
+                4 => &["X", "Y", "Z", "W"],
+                _ => &[],
+            },
+            _ => &[],
+        }
+    }
+}
+
+/// The shading models' names in [`Model::ALL`]'s order: the model's choice.
+pub(crate) const MODEL_NAMES: [&str; 8] = [
+    "lit",
+    "unlit",
+    "clearcoat",
+    "cloth",
+    "hair",
+    "toon",
+    "sheen",
+    "sheen_clearcoat",
+];
+
+/// How many numbers an input of type `ty` shows.
+fn shown_width(ty: PortType) -> u8 {
+    match ty {
+        PortType::Float(w) => w,
+        PortType::Dynamic => 1,
+    }
+}
+
+/// Whether `name` can name a parameter: letters, digits and `_`, not a digit first (a
+/// Slang field's name).
+fn is_param_name(name: &str) -> bool {
+    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+}
+
 /// Nodes `ids` deleted with their links, the surface kept: how many went.
 pub(crate) fn delete(graph: &mut Graph, ids: &BTreeSet<String>) -> usize {
     let before = graph.nodes.len();
@@ -997,6 +1076,228 @@ impl GraphDoc {
             name,
             before,
             after,
+        })
+    }
+
+    /// The node the inspector shows: the one selected alone.
+    pub(crate) fn inspected(&self) -> Option<&str> {
+        let mut ids = self.selected.iter();
+        match (ids.next(), ids.next()) {
+            (Some(id), None) if self.graph.nodes.contains_key(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The inspected node's kind.
+    pub(crate) fn inspected_kind(&self) -> Option<&'static Kind> {
+        library::kind(&self.graph.nodes.get(self.inspected()?)?.kind)
+    }
+
+    /// The inspector's rows into `out` (its room kept): the inspected node's, or the
+    /// graph's own (its shading model) with none.
+    pub(crate) fn rows(&self, out: &mut Vec<NodeRow>) {
+        out.clear();
+        let Some(id) = self.inspected() else {
+            out.push(NodeRow::Model);
+            return;
+        };
+        let node = &self.graph.nodes[id];
+        let Some(kind) = library::kind(&node.kind) else {
+            out.push(NodeRow::Comment);
+            return;
+        };
+        match kind.body {
+            Body::Constant(w) => {
+                out.push(NodeRow::Param);
+                out.push(NodeRow::Value(w));
+            }
+            Body::Texture => {
+                out.push(NodeRow::Param);
+                out.push(NodeRow::Texture);
+            }
+            _ => {}
+        }
+        for input in kind.inputs {
+            let linked = self
+                .graph
+                .links
+                .keys()
+                .any(|to| to.node == id && to.port == input.name);
+            let shown = kind.name != OUTPUT_KIND || surface_reads(self.graph.model, input.name);
+            if !linked && shown && matches!(input.fill, Fill::Value(_)) {
+                out.push(NodeRow::Input(input.name, shown_width(input.ty)));
+            }
+        }
+        out.push(NodeRow::Comment);
+    }
+
+    /// Row `row`'s numbers for the inspected node: a constant's components, an input's
+    /// own value or its kind's.
+    pub(crate) fn numbers(&self, row: NodeRow) -> [f32; 4] {
+        let Some(node) = self.inspected().and_then(|id| self.graph.nodes.get(id)) else {
+            return [0.0; 4];
+        };
+        match row {
+            NodeRow::Value(_) => node.value,
+            NodeRow::Input(name, _) => node.inputs.get(name).copied().unwrap_or_else(|| {
+                match library::kind(&node.kind)
+                    .and_then(|k| k.input(name))
+                    .map(|i| i.fill)
+                {
+                    Some(Fill::Value(v)) => v,
+                    _ => [0.0; 4],
+                }
+            }),
+            _ => [0.0; 4],
+        }
+    }
+
+    /// Whether row `row` holds other than its default: its reset button.
+    pub(crate) fn changed(&self, row: NodeRow) -> bool {
+        if row == NodeRow::Model {
+            return self.graph.model != Model::Lit;
+        }
+        let Some(node) = self.inspected().and_then(|id| self.graph.nodes.get(id)) else {
+            return false;
+        };
+        match row {
+            NodeRow::Model => false,
+            NodeRow::Param => !node.param.is_empty(),
+            NodeRow::Value(w) => node.value[..usize::from(w)].iter().any(|v| *v != 0.0),
+            NodeRow::Input(name, _) => node.inputs.contains_key(name),
+            NodeRow::Texture => !node.texture.is_none(),
+            NodeRow::Comment => !node.comment.is_empty(),
+        }
+    }
+
+    /// Row `row`'s shown texts into `texts` from `at` on (each number's, a name, an image's
+    /// file), their rooms reused: how many.
+    pub(crate) fn row_texts(&self, row: NodeRow, texts: &mut Vec<String>, at: usize) -> usize {
+        let node = self.inspected().and_then(|id| self.graph.nodes.get(id));
+        let n = match row {
+            NodeRow::Value(w) | NodeRow::Input(_, w) => usize::from(w),
+            _ => 1,
+        };
+        while texts.len() < at + n {
+            texts.push(String::new());
+        }
+        let numbers = self.numbers(row);
+        for (k, text) in texts[at..at + n].iter_mut().enumerate() {
+            match row {
+                NodeRow::Value(_) | NodeRow::Input(..) => value_text(text, &numbers[k..=k]),
+                NodeRow::Model => {
+                    text.clear();
+                    text.push_str(self.graph.model.name());
+                }
+                NodeRow::Param => {
+                    text.clear();
+                    text.push_str(node.map_or("", |n| n.param.as_str()));
+                }
+                NodeRow::Comment => {
+                    text.clear();
+                    text.push_str(node.map_or("", |n| n.comment.as_str()));
+                }
+                NodeRow::Texture => {
+                    text.clear();
+                    let path = node.and_then(|n| self.paths.get(n.texture));
+                    text.push_str(path.map_or("none", |p| p.rsplit('/').next().unwrap_or(p)));
+                }
+            }
+        }
+        n
+    }
+
+    /// The inspected node changed by `edit`: its text before and after, when it changed.
+    fn edit_inspected(&mut self, edit: impl FnOnce(&mut Node)) -> Option<(String, String)> {
+        let id = self.inspected()?.to_owned();
+        self.edit(|g| {
+            if let Some(node) = g.nodes.get_mut(&id) {
+                edit(node);
+            }
+        })
+    }
+
+    /// Row `row` of the inspected node set to `values` (a dynamic input's first number
+    /// filling every component).
+    pub(crate) fn set_numbers(
+        &mut self,
+        row: NodeRow,
+        values: [f32; 4],
+    ) -> Option<(String, String)> {
+        let dynamic = match row {
+            NodeRow::Input(name, _) => self
+                .inspected_kind()
+                .and_then(|k| k.input(name))
+                .is_some_and(|i| i.ty == PortType::Dynamic),
+            _ => false,
+        };
+        let values = if dynamic { [values[0]; 4] } else { values };
+        self.edit_inspected(|node| match row {
+            NodeRow::Value(_) => node.value = values,
+            NodeRow::Input(name, _) => {
+                node.inputs.insert(name.to_owned(), values);
+            }
+            _ => {}
+        })
+    }
+
+    /// The inspected node's parameter named `name` (empty for none: compiled in).
+    ///
+    /// # Errors
+    ///
+    /// A name a Slang field cannot have, or one another node's parameter has.
+    pub(crate) fn set_param(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<(String, String)>, &'static str> {
+        if !is_param_name(name) {
+            return Err("A parameter's name is letters, digits and `_`, not a digit first");
+        }
+        let id = self.inspected().unwrap_or_default();
+        let taken = !name.is_empty()
+            && self
+                .graph
+                .nodes
+                .iter()
+                .any(|(other, n)| other != id && n.param == name);
+        if taken {
+            return Err("Another node's parameter has that name");
+        }
+        Ok(self.edit_inspected(|node| name.clone_into(&mut node.param)))
+    }
+
+    /// The inspected node's note.
+    pub(crate) fn set_comment(&mut self, text: &str) -> Option<(String, String)> {
+        self.edit_inspected(|node| text.clone_into(&mut node.comment))
+    }
+
+    /// The inspected texture node's own image: `image`, at `path` in the project.
+    pub(crate) fn set_texture(&mut self, image: AssetRef, path: &str) -> Option<(String, String)> {
+        self.paths.insert(image, path);
+        self.edit_inspected(|node| node.texture = image)
+    }
+
+    /// The graph's shading model: [`MODEL_NAMES`]'s `k`th.
+    pub(crate) fn set_model(&mut self, k: usize) -> Option<(String, String)> {
+        let model = *Model::ALL.get(k)?;
+        self.edit(|g| g.model = model)
+    }
+
+    /// Row `row` back to its default: no parameter, a zero value, the input's kind's
+    /// value, no image, no note, the lit model.
+    pub(crate) fn reset(&mut self, row: NodeRow) -> Option<(String, String)> {
+        if row == NodeRow::Model {
+            return self.edit(|g| g.model = Model::Lit);
+        }
+        self.edit_inspected(|node| match row {
+            NodeRow::Param => node.param.clear(),
+            NodeRow::Value(_) => node.value = [0.0; 4],
+            NodeRow::Input(name, _) => {
+                node.inputs.remove(name);
+            }
+            NodeRow::Texture => node.texture = AssetRef::NONE,
+            NodeRow::Comment => node.comment.clear(),
+            NodeRow::Model => {}
         })
     }
 
@@ -2428,6 +2729,102 @@ mod tests {
             .unwrap();
         assert_eq!(d.graph.nodes["texture2"].param, "wood_grain_2");
         assert_eq!(param_of("maps/2k-albedo.png"), "texture_2k_albedo");
+    }
+
+    #[test]
+    fn the_inspector_shows_the_node_alone_selected_or_the_graph_and_edits_its_values() {
+        let mut d = doc();
+        let mut rows = Vec::new();
+        // None selected: the graph's model.
+        d.rows(&mut rows);
+        assert_eq!(rows, [NodeRow::Model]);
+        let mut texts = Vec::new();
+        assert_eq!(d.row_texts(NodeRow::Model, &mut texts, 0), 1);
+        assert_eq!(texts[0], "lit");
+        assert_eq!(
+            MODEL_NAMES.map(String::from),
+            Model::ALL.map(|m| m.name().to_owned())
+        );
+        let (before, _) = d.set_model(1).unwrap();
+        assert_eq!(d.graph.model, Model::Unlit);
+        assert!(d.changed(NodeRow::Model));
+        d.put_text(&before).unwrap();
+        // The colour alone: its parameter, its value as a colour's channels, its note.
+        d.selected.insert(String::from("c"));
+        d.rows(&mut rows);
+        assert_eq!(rows, [NodeRow::Param, NodeRow::Value(4), NodeRow::Comment]);
+        assert_eq!(NodeRow::Value(4).name(true), "Color");
+        assert_eq!(NodeRow::Value(4).labels(true), ["R", "G", "B", "A"]);
+        assert_eq!(d.row_texts(NodeRow::Value(4), &mut texts, 0), 4);
+        assert_eq!(texts[..4], ["0.9", "0.1", "0.1", "1"]);
+        d.set_numbers(NodeRow::Value(4), [0.2, 0.4, 0.6, 1.0])
+            .unwrap();
+        assert_eq!(d.graph.nodes["c"].value, [0.2, 0.4, 0.6, 1.0]);
+        // Its parameter: a Slang field's name, no other node's.
+        assert!(d.set_param("tint").unwrap().is_some());
+        assert_eq!(d.graph.nodes["c"].param, "tint");
+        assert_eq!(
+            d.set_param("roughness"),
+            Err("Another node's parameter has that name")
+        );
+        assert!(d.set_param("2nd").is_err() && d.set_param("a b").is_err());
+        assert!(d.changed(NodeRow::Param));
+        d.reset(NodeRow::Param).unwrap();
+        assert!(d.graph.nodes["c"].param.is_empty());
+        // Several selected: the graph again.
+        d.selected.insert(String::from("r"));
+        d.rows(&mut rows);
+        assert_eq!(rows, [NodeRow::Model]);
+        // A Multiply: its unlinked inputs' own values (dynamic: one number filling all).
+        d.selected.clear();
+        d.graph.add("m", Node::new("multiply", [0.0, 300.0]));
+        d.graph
+            .link(PortRef::new("c", "rgba"), PortRef::new("m", "a"));
+        d.revision += 1;
+        d.selected.insert(String::from("m"));
+        d.rows(&mut rows);
+        assert_eq!(
+            rows,
+            [NodeRow::Input("b", 1), NodeRow::Comment],
+            "a is linked"
+        );
+        assert_eq!(
+            d.numbers(NodeRow::Input("b", 1))[0],
+            1.0,
+            "its kind's value"
+        );
+        assert!(!d.changed(NodeRow::Input("b", 1)));
+        d.set_numbers(NodeRow::Input("b", 1), [0.5, 0.0, 0.0, 0.0])
+            .unwrap();
+        assert_eq!(d.graph.nodes["m"].inputs["b"], [0.5; 4]);
+        d.reset(NodeRow::Input("b", 1)).unwrap();
+        assert!(d.graph.nodes["m"].inputs.is_empty());
+        // The surface: its model's inputs with values, the linked base and the normal (an
+        // expression of the fragment) left out.
+        d.selected = [OUTPUT.to_owned()].into_iter().collect();
+        d.rows(&mut rows);
+        assert!(rows.contains(&NodeRow::Input("roughness", 1)));
+        assert!(rows.contains(&NodeRow::Input("emission", 3)));
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r, NodeRow::Input("base" | "normal" | "clearcoat", _)))
+        );
+        // A texture: its parameter and its image, by its file's name.
+        let image = AssetRef::file(AssetId::new());
+        d.graph.add("t", Node::new("texture", [0.0, 500.0]));
+        d.revision += 1;
+        d.selected = [String::from("t")].into_iter().collect();
+        d.rows(&mut rows);
+        assert_eq!(rows, [NodeRow::Param, NodeRow::Texture, NodeRow::Comment]);
+        d.row_texts(NodeRow::Texture, &mut texts, 0);
+        assert_eq!(texts[0], "none");
+        d.set_texture(image, "textures/wood.png").unwrap();
+        d.row_texts(NodeRow::Texture, &mut texts, 0);
+        assert_eq!(texts[0], "wood.png");
+        assert!(d.text.contains("textures/wood.png"));
+        d.set_comment("the grain").unwrap();
+        assert_eq!(d.graph.nodes["t"].comment, "the grain");
     }
 
     #[test]
