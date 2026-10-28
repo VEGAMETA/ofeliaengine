@@ -22236,7 +22236,8 @@ fn file_kind(kind: engine_scene::AssetKind) -> FileKind {
         K::Texture => FileKind::Texture,
         K::Sound => FileKind::Audio,
         K::Script => FileKind::Script,
-        K::Shader => FileKind::Shader,
+        // A graph is a material type, as a module is (ADR 0123); its canvas comes in E10-3d.
+        K::Shader | K::Graph => FileKind::Shader,
         K::Material | K::Video | K::Font | K::Mixer => FileKind::Other,
     }
 }

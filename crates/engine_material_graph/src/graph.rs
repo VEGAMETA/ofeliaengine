@@ -1,6 +1,7 @@
 //! A material graph in memory (ADR 0123): its shading model, its nodes by id, its links by
 //! the input they feed.
 
+use engine_scene::AssetRef;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -117,6 +118,11 @@ pub struct Node {
     pub param: String,
     /// Its inputs' own values where nothing is linked to them, in place of the kind's.
     pub inputs: BTreeMap<String, [f32; 4]>,
+    /// A texture node's own image: what its material shows until a material file gives
+    /// the parameter one.
+    pub texture: AssetRef,
+    /// A note on the node.
+    pub comment: String,
 }
 
 impl Node {
@@ -128,7 +134,15 @@ impl Node {
             value: [0.0; 4],
             param: String::new(),
             inputs: BTreeMap::new(),
+            texture: AssetRef::NONE,
+            comment: String::new(),
         }
+    }
+
+    /// A texture node's own image.
+    pub fn with_texture(mut self, texture: AssetRef) -> Self {
+        self.texture = texture;
+        self
     }
 
     /// With a constant's components.

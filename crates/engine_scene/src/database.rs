@@ -210,10 +210,12 @@ pub enum AssetKind {
     Shader,
     /// A mixer layout (`.mixer`): the buses and their faders (ADR 0121).
     Mixer,
+    /// A material graph (`.graph`): a material type drawn as nodes (ADR 0123).
+    Graph,
 }
 
 /// Every kind with its name and extensions.
-const KINDS: [(AssetKind, &str, &[&str]); 10] = [
+const KINDS: [(AssetKind, &str, &[&str]); 11] = [
     (AssetKind::Scene, "scene", &["scene"]),
     (AssetKind::Material, "material", &["material"]),
     (AssetKind::Model, "model", &["glb", "gltf"]),
@@ -228,6 +230,7 @@ const KINDS: [(AssetKind, &str, &[&str]); 10] = [
     (AssetKind::Script, "script", &["luau"]),
     (AssetKind::Shader, "shader", &["slang"]),
     (AssetKind::Mixer, "mixer", &["mixer"]),
+    (AssetKind::Graph, "graph", &["graph"]),
 ];
 
 impl AssetKind {
@@ -246,7 +249,7 @@ impl AssetKind {
     }
 
     /// The kind's name: `scene`, `material`, `model`, `texture`, `sound`, `video`, `font`,
-    /// `script`, `shader`.
+    /// `script`, `shader`, `mixer`, `graph`.
     pub fn name(self) -> &'static str {
         KINDS
             .iter()
@@ -265,7 +268,10 @@ impl AssetKind {
     /// Whether files of the kind carry their id inside (ours), not in a `.meta` beside
     /// them.
     pub fn own_id(self) -> bool {
-        matches!(self, Self::Scene | Self::Material | Self::Mixer)
+        matches!(
+            self,
+            Self::Scene | Self::Material | Self::Mixer | Self::Graph
+        )
     }
 }
 

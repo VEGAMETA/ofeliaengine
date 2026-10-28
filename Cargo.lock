@@ -593,6 +593,8 @@ name = "engine_material_graph"
 version = "0.0.0"
 dependencies = [
  "engine_profiler",
+ "engine_reflect",
+ "engine_scene",
  "engine_shader",
  "engine_workspace_hack",
 ]

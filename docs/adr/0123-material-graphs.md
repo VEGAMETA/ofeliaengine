@@ -222,6 +222,32 @@ autosaved.
   cook (E10-3c), where the material inspector also skips fields starting with `_` (the
   editing build's numbers, `_unused`).
 
+## As built (E10-3b-2, 2026-10-28): the `.graph` file
+
+Written in the shape this ADR proposes (its recommendation; cheap to change while no game
+has graphs).
+
+- **`engine_material_graph::file`:** `GraphFile` (the model by name, `nodes` by id,
+  `links` by the input they feed) and `NodeFile` (`kind`, `at`, `value`, `param`,
+  `texture`, `inputs`, `comment`), reflected and written by the editor's grammar
+  (`engine_scene::write_value`, `read_value`) under the header `[graph version=1 id=…]`;
+  `GraphFile::of(&graph)` and `graph()` go between the file and the graph in memory.
+- **What is written:** a constant's components as wide as it is (`value = [0.6]`), an
+  input's as wide as the input (a dynamic input's once when its components are the same:
+  `inputs["a"] = [0.25]` fills them on reading); a field at its default (an empty
+  parameter, no texture, no inputs, no comment, no value) is not written. The grammar
+  writes maps sorted, so nodes come by id and links by their input.
+- **A texture node's own image** (`Node::texture`, an asset reference written with its
+  path): what the material shows until a material file gives the parameter one (the
+  player's part, E10-3c). Nodes have a `comment` too.
+- **The database** knows `.graph` files (`AssetKind::Graph`, their id inside, as
+  `.material` and `.mixer` files); the FileSystem dock shows them with the shader icon
+  until the canvas (E10-3d).
+- **Tests:** a graph reads back what it writes (with its id and its texture's path); the
+  text holds only what differs from the defaults, sorted, as the example above; a model
+  or a link that cannot be read is said, a newer file and another kind of file are
+  refused; the database's kind and id.
+
 ## Questions for the team
 
 1. **The graph file's name.** A material graph is a file of its own, as a Slang module is.

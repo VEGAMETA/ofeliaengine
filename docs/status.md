@@ -868,6 +868,10 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3b-2, the `.graph` file** (#421, ADR 0123's as-built; its proposed shape, the
+    recommendation): read and written in the editor's grammar, defaults left out, nodes
+    by id and links by input, sorted; a texture node's own image; `.graph` files known to
+    the asset database with their id inside.
   - **E10-3b-1, the material graph's node library and generator** (#420, ADR 0123's
     as-built): `engine_material_graph`: 40 node kinds as Slang snippets with typed ports,
     the graph in memory, the generator (one module a graph, each function its own nodes,
@@ -891,9 +895,10 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3b-2, the `.graph` file (ADR 0123's proposed shape, its recommendation;
-       cheap to change while no game has graphs), then E10-3c to E10-3g (ADR 0123's
-       steps); then E10-4, previews, stats and variants with a base.
+       2D): E10-3c, the player and the cook drawing a material file that names a graph
+       (generated into the cache, compiled, reloaded when the graph changes; a golden
+       shot on both GPUs), then E10-3d to E10-3g (ADR 0123's steps); then E10-4,
+       previews, stats and variants with a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

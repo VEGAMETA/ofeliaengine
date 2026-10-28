@@ -13,6 +13,10 @@ workspace = true
 [dependencies]
 # Tracy zones (CLAUDE.md §14).
 engine_profiler.workspace = true
+# The `.graph` file in the editor's grammar (ADR 0108): its fields reflected, written and
+# read by the scene crate, a texture node's image an asset reference.
+engine_reflect.workspace = true
+engine_scene.workspace = true
 # Feature unification of shared dependencies for build reuse (ADR 0077).
 engine_workspace_hack.workspace = true
 
