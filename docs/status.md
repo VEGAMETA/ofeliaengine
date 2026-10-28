@@ -820,9 +820,13 @@ Last updated: 2026-10-28.
     shape, a compressor's sidechain, ↑ ↓ ×), a section per send, Add Effect and Add Send
     offering only what would not loop; on the strip the effect's short name or count with
     the gain reduction now, and B. E11-2 is done but for the room's reverb strip.
+  - **E11-4b-1, handles on sounds and reverb zones** (#408, ADR 0107's as-built): a square on
+    each of a selected sound's rings (pointed at: "40 m · −16 dB, held"; dragged: its
+    distance, the inner ring pushing the outer), a zone's sides (the opposite side
+    staying) and its fade; one undo step a drag, Escape.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-4b, handles and hearing in place (rings with radius handles, zones' side and
-       fade handles, P, Listen to the Scene), then
+    1. E11-4b-2, hearing in place (P plays the selected sources where they are, heard
+       from the editor's camera with the zones; Sound: Listen to the Scene), then
        E11-3's last part: sounds dropped on the viewport, the tree or an entity, and the
        sound and bus fields; the room's reverb strip.
   - **Settled (2026-10-28, team decisions, every recommendation):**

@@ -353,6 +353,14 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   its box (violet), turned and scaled with its entity, and dashed, where its room fades
   out.
   **View: Overlays** in the palette hides icons and reach; the session keeps it.
+- **Their handles** (E11-4b): a square on each of a selected sound's rings, on the side
+  toward the camera's right. Point at one to read it ("6 m · full", "40 m · −16 dB,
+  held", "40 m · silent"); drag it to set the distance, by the snapping rules (G, Shift,
+  Ctrl). The inner ring pushes the outer one along, and the outer one stops at the inner.
+  A selected reverb zone has a square in the middle of each side that faces the camera
+  (drag it: the opposite side stays, as a brush's does; its label says the size) and one
+  on top of its fade (how far out its room fades). One undo step a drag; Escape takes it
+  back.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

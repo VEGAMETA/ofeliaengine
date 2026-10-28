@@ -85,6 +85,7 @@ use crate::shell::{
     TreeItem, Widget, build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
+use crate::sound_handles::{Shape, SoundChange, SoundDrag, SoundHandle, SoundHandles};
 use crate::thumbnails::{self, Subject, Thumbnails};
 use crate::transform::{self, KeyTransform};
 use crate::undo::{PlayChange, PlayMark, WorldSnapshot};
@@ -2516,6 +2517,12 @@ struct Editor {
     handles: Handles,
     hovered_side: Option<Side>,
     side_drag: Option<SideDrag>,
+    /// The active sound's or reverb zone's handles (E11-4b), the one under the pointer, a
+    /// handle being dragged, and its label.
+    sound_handles: SoundHandles,
+    hovered_sound: Option<SoundHandle>,
+    sound_drag: Option<SoundDrag>,
+    sound_label: String,
     /// The gizmo's handle under the pointer.
     hovered_handle: Option<Handle>,
     /// The gizmo along the active entity's axes (Space), else the world's.
@@ -3284,6 +3291,10 @@ impl Editor {
             handles: Handles::default(),
             hovered_side: None,
             side_drag: None,
+            sound_handles: SoundHandles::default(),
+            hovered_sound: None,
+            sound_drag: None,
+            sound_label: String::new(),
             hovered_handle: None,
             local_axes: false,
             key_preset: KeyPreset::default(),
@@ -6892,6 +6903,7 @@ impl Editor {
             && self.renaming.is_none()
             && self.gizmo_drag.is_none()
             && self.side_drag.is_none()
+            && self.sound_drag.is_none()
             && self.face_edit.as_ref().is_none_or(|f| !f.dragging())
             && self.key_transform.is_none()
             && self.draw.is_none()
@@ -6916,6 +6928,7 @@ impl Editor {
                 request.is_some()
                     && self.hovered_handle.is_none()
                     && self.hovered_side.is_none()
+                    && self.hovered_sound.is_none()
                     && !on_face
             });
         }
@@ -7734,12 +7747,14 @@ impl Editor {
             t.guides(&view, cursor, &mut self.guides);
             self.hovered_handle = None;
             self.handles.clear();
+            self.sound_handles.clear();
             self.hovered_side = None;
             return;
         }
         if self.draw.is_some() {
             self.hovered_handle = None;
             self.handles.clear();
+            self.sound_handles.clear();
             self.hovered_side = None;
             return;
         }
@@ -7748,12 +7763,18 @@ impl Editor {
             self.faces_frame(world, &view, cursor);
             self.hovered_handle = None;
             self.handles.clear();
+            self.sound_handles.clear();
             self.hovered_side = None;
             return;
         }
         // The active brush's side handles take the pointer before the gizmo's; the gizmo
         // hides while a side is dragged.
         if self.sides_frame(world, &view, cursor, scale) {
+            self.hovered_handle = None;
+            return;
+        }
+        // The active sound's rings and the active zone's sides likewise (E11-4b).
+        if self.sound_handles_frame(world, &view, cursor, scale) {
             self.hovered_handle = None;
             return;
         }
@@ -8227,6 +8248,154 @@ impl Editor {
             return true;
         }
         false
+    }
+
+    /// The active sound's or reverb zone's handles (E11-4b): laid out where the camera sees
+    /// them; a press on one starts its drag, which follows the pointer until the release
+    /// (Escape takes it back), one undo step. True while one is dragged.
+    fn sound_handles_frame(
+        &mut self,
+        world: &mut World,
+        view: &ViewProj,
+        cursor: Option<Vec2>,
+        scale: f32,
+    ) -> bool {
+        if let Some(mut drag) = self.sound_drag.take() {
+            if !self.input.held(Button::Left) {
+                self.layout_sound_handles(world, view);
+                return false;
+            }
+            if self.ui.input().keys.contains(&UiKey::Escape) && !drag.cancelled {
+                drag.cancelled = true;
+                self.history.revert(world, drag.merge);
+            } else if !drag.cancelled
+                && let Some(at) = cursor
+                && let Some(change) = drag.change(
+                    view,
+                    at,
+                    &self.snapping,
+                    self.input.shift(),
+                    self.input.ctrl(),
+                )
+            {
+                let name = match change {
+                    SoundChange::Ranges { .. } => "Sound Range",
+                    SoundChange::Zone { .. } => "Resize Reverb Zone",
+                    SoundChange::Fade(_) => "Reverb Zone Fade",
+                };
+                let e = drag.entity;
+                self.history.begin(name, Some(drag.merge));
+                self.history.touch(world, e);
+                match change {
+                    SoundChange::Ranges { near, far } => {
+                        if let Some(s) = world.get_mut::<AudioSource3D>(e) {
+                            s.min_distance = near;
+                            s.max_distance = far;
+                        }
+                    }
+                    SoundChange::Zone { half, translation } => {
+                        if let Some(z) = world.get_mut::<ReverbZone>(e) {
+                            z.half_extents = half;
+                        }
+                        if let Some(t) = world.get_mut::<Transform>(e) {
+                            t.translation = translation;
+                        }
+                    }
+                    SoundChange::Fade(fade) => {
+                        if let Some(z) = world.get_mut::<ReverbZone>(e) {
+                            z.fade = fade;
+                        }
+                    }
+                }
+                self.history.commit(world);
+            }
+            self.layout_sound_handles(world, view);
+            self.hovered_sound = Some(drag.handle);
+            self.sound_drag = Some(drag);
+            self.write_sound_label(world);
+            return true;
+        }
+        self.layout_sound_handles(world, view);
+        let free = !self.camera_drag
+            && self.command_palette.is_none()
+            && !self.add_open
+            && self.open_choice.is_none()
+            && self.renaming.is_none()
+            && self.gizmo_drag.is_none()
+            && self.box_drag.is_none()
+            && self.side_drag.is_none();
+        self.hovered_sound = match cursor {
+            Some(at) if free && view.contains(at) => self.sound_handles.hit(at, scale),
+            _ => None,
+        };
+        self.write_sound_label(world);
+        if let (Some(handle), Some(e)) = (self.hovered_sound, self.sound_handles.entity)
+            && self.input.pressed(Button::Left)
+            && let (Some(shape), Some(local)) = (sound_shape(world, e), world.get::<Transform>(e))
+        {
+            self.gestures += 1;
+            self.sound_drag = Some(SoundDrag::start(
+                view,
+                e,
+                handle,
+                shape,
+                *local,
+                self.gestures,
+            ));
+            return true;
+        }
+        false
+    }
+
+    /// The active entity's sound or zone handles; none for anything else.
+    fn layout_sound_handles(&mut self, world: &World, view: &ViewProj) {
+        match self
+            .active()
+            .and_then(|e| Some((e, sound_shape(world, e)?)))
+        {
+            Some((e, shape)) => self.sound_handles.layout(view, e, shape),
+            None => self.sound_handles.clear(),
+        }
+    }
+
+    /// What the handle under the pointer or dragged says: a ring's distance and level, a
+    /// zone's size along the side's axis, its fade.
+    fn write_sound_label(&mut self, world: &World) {
+        self.sound_label.clear();
+        let (Some(handle), Some(e)) = (self.hovered_sound, self.sound_handles.entity) else {
+            return;
+        };
+        match handle {
+            SoundHandle::Near | SoundHandle::Far => {
+                if let Some(s) = world.get::<AudioSource3D>(e) {
+                    let holds = s.falloff == engine_app::Falloff::Inverse;
+                    crate::sound_handles::ring_label(
+                        &mut self.sound_label,
+                        handle,
+                        s.min_distance,
+                        s.max_distance,
+                        holds,
+                    );
+                }
+            }
+            SoundHandle::Side(side) => {
+                if let Some(z) = world.get::<ReverbZone>(e) {
+                    let size = self
+                        .sound_drag
+                        .as_ref()
+                        .map_or(z.half_extents[side.axis].abs() * 2.0, |d| d.value);
+                    self.sound_label.push_str(&transform::short(size));
+                    self.sound_label.push_str(" m");
+                }
+            }
+            SoundHandle::Fade => {
+                if let Some(z) = world.get::<ReverbZone>(e) {
+                    self.sound_label.push_str("fade ");
+                    self.sound_label.push_str(&transform::short(z.fade));
+                    self.sound_label.push_str(" m");
+                }
+            }
+        }
     }
 
     /// The active brush's handles, alone in the selection or not; none for anything else.
@@ -8872,11 +9041,13 @@ impl Editor {
         self.drag = None;
         self.gizmo_drag = None;
         self.side_drag = None;
+        self.sound_drag = None;
         self.box_drag = None;
         self.camera_drag = false;
         self.gizmo_shown = false;
         self.outline_items.clear();
         self.handles.clear();
+        self.sound_handles.clear();
         if let Some(camera) = self.camera.take() {
             world.despawn(camera);
         }
@@ -9206,11 +9377,13 @@ impl Editor {
         self.drag = None;
         self.gizmo_drag = None;
         self.side_drag = None;
+        self.sound_drag = None;
         self.box_drag = None;
         self.camera_drag = false;
         self.gizmo_shown = false;
         self.outline_items.clear();
         self.handles.clear();
+        self.sound_handles.clear();
         self.selection.clear();
         self.anchor = None;
         self.reveal = None;
@@ -12986,6 +13159,7 @@ impl Editor {
             }
             self.drag = None;
             self.side_drag = None;
+            self.sound_drag = None;
             if let Some(f) = &mut self.face_edit {
                 f.drag = None;
                 f.corner_drag = None;
@@ -21071,6 +21245,76 @@ fn draw_playing_elsewhere(
     );
 }
 
+/// The shape entity `e`'s sound or reverb zone has handles on (E11-4b): an `AudioSource3D`'s
+/// rings at its place, a `ReverbZone`'s box placed with its entity.
+fn sound_shape(world: &World, e: Entity) -> Option<Shape> {
+    let placed = world.get::<GlobalTransform>(e)?.0;
+    if let Some(s) = world.get::<AudioSource3D>(e) {
+        return Some(Shape::Rings {
+            at: placed.translation.into(),
+            near: s.min_distance,
+            far: s.max_distance,
+        });
+    }
+    let zone = world.get::<ReverbZone>(e)?;
+    Some(Shape::Zone {
+        world: placed,
+        half: zone.half_extents,
+        fade: zone.fade,
+    })
+}
+
+/// The active sound's or zone's handles (E11-4b), drawn as the brush's sides are, with the
+/// label of the one under the pointer or dragged above it.
+fn draw_sound_handles(
+    editor: &mut Editor,
+    rect: [u32; 4],
+    glyphs: &GlyphTexture,
+    canvas: &mut Canvas,
+) {
+    if editor.sound_handles.at.is_empty() {
+        return;
+    }
+    let scale = editor.scale.max(0.5);
+    canvas.set_clip(Some(clip_of(rect)));
+    let order = Order::layer(-1);
+    for &(handle, at) in &editor.sound_handles.at {
+        let lit = editor.hovered_sound == Some(handle);
+        let color = if lit {
+            Vec4::new(1.0, 0.62, 0.18, 1.0)
+        } else {
+            Vec4::new(0.9, 0.95, 1.0, 1.0)
+        };
+        canvas.draw(
+            &Quad::solid(at, Vec2::splat(11.0 * scale))
+                .color(Vec4::new(0.08, 0.08, 0.1, 0.85))
+                .order(order),
+        );
+        canvas.draw(
+            &Quad::solid(at, Vec2::splat(7.0 * scale))
+                .color(color)
+                .order(order),
+        );
+    }
+    if let Some(handle) = editor.hovered_sound
+        && !editor.sound_label.is_empty()
+        && let Some(&(_, at)) = editor.sound_handles.at.iter().find(|(h, _)| *h == handle)
+    {
+        // Taken for the label's while and put back: no new string a frame.
+        let text = std::mem::take(&mut editor.sound_label);
+        label(
+            &mut editor.text,
+            glyphs,
+            canvas,
+            at - Vec2::new(0.0, 20.0 * scale),
+            &text,
+            scale,
+        );
+        editor.sound_label = text;
+    }
+    canvas.set_clip(None);
+}
+
 /// The active brush's side handles (ADR 0110 E2b-3c), under the panels: light squares on
 /// dark rims, the one under the pointer or dragged orange; while a side is dragged, its
 /// size on a label above it.
@@ -21525,6 +21769,7 @@ impl Overlay for EditorOverlay {
             if let Some(rect) = editor.view_rect.filter(|_| !editor.game_view()) {
                 draw_overlays(editor, rect, &self.glyphs, &mut self.canvas);
                 draw_sides(editor, rect, &self.glyphs, &mut self.canvas);
+                draw_sound_handles(editor, rect, &self.glyphs, &mut self.canvas);
                 draw_faces(editor, rect, &self.glyphs, &mut self.canvas);
                 if editor.draw.is_some() {
                     draw_drawing(editor, rect, &self.glyphs, &mut self.canvas);
@@ -25474,6 +25719,130 @@ mod tests {
         let brush = world.get::<Brush>(room).unwrap();
         assert_eq!(brush.hollow, ROOM_WALLS);
         assert!((brush.size - Vec3::new(4.0, 3.0, 3.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn a_sounds_rings_and_a_zones_sides_drag_as_one_step_each() {
+        use crate::sound_handles::SoundHandle;
+        let mut world = World::new();
+        let mut ed = draw_editor("sound-handles", &mut world);
+        // A 3D sound at the origin, full up to 1 m, its falloff ending at 3 m; selected.
+        let mut hum = AudioSource3D::new("hum.wav");
+        hum.min_distance = 1.0;
+        hum.max_distance = 3.0;
+        let e = world.spawn((
+            SceneId::new(),
+            Name::new("Hum"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            hum,
+        ));
+        ed.select_only(e);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let at = |ed: &Editor, h: SoundHandle| {
+            ed.sound_handles
+                .at
+                .iter()
+                .find(|(k, _)| *k == h)
+                .map(|&(_, at)| at)
+                .expect("the handle")
+        };
+        assert_eq!(ed.sound_handles.at.len(), 2, "a handle a ring");
+        // Pointed at: its label.
+        let grab = at(&ed, SoundHandle::Far);
+        mouse(&mut ed, grab.to_array(), None);
+        ed.update(&mut world);
+        assert_eq!(ed.hovered_sound, Some(SoundHandle::Far));
+        assert_eq!(ed.sound_label, "3 m \u{b7} \u{2212}10 dB, held");
+        // Dragged out to 4 m, in two moves: one step.
+        mouse(&mut ed, grab.to_array(), Some(true));
+        ed.update(&mut world);
+        assert!(ed.sound_drag.is_some());
+        let view = ViewProj::new(&ed.orbit, ed.view_rect.unwrap());
+        let facing = (Vec3::ZERO - view.eye).normalize();
+        let right = facing.cross(Vec3::Y).normalize();
+        let steps = ed.history.steps().count();
+        for r in [3.5, 4.0] {
+            let to = on_view(&ed, right * r);
+            mouse(&mut ed, to, None);
+            ed.update(&mut world);
+        }
+        let s = world.get::<AudioSource3D>(e).unwrap();
+        assert!((s.max_distance - 4.0).abs() < 0.11, "{}", s.max_distance);
+        assert_eq!(s.min_distance, 1.0);
+        let to = on_view(&ed, right * 4.0);
+        mouse(&mut ed, to, Some(false));
+        ed.update(&mut world);
+        assert!(ed.sound_drag.is_none());
+        assert_eq!(ed.history.steps().count(), steps + 1, "one step");
+        // The inner ring pushed past the outer: both at 5 m; Escape takes it back.
+        ed.update(&mut world);
+        assert_eq!(ed.active(), Some(e), "still selected");
+        assert_eq!(ed.sound_handles.at.len(), 2, "{:?}", ed.sound_handles.at);
+        let grab = at(&ed, SoundHandle::Near);
+        mouse(&mut ed, grab.to_array(), None);
+        ed.update(&mut world);
+        assert_eq!(ed.hovered_sound, Some(SoundHandle::Near));
+        assert!(ed.box_drag.is_none(), "a handle's drag draws no box");
+        mouse(&mut ed, grab.to_array(), Some(true));
+        ed.update(&mut world);
+        let to = on_view(&ed, right * 5.0);
+        mouse(&mut ed, to, None);
+        ed.update(&mut world);
+        let s = world.get::<AudioSource3D>(e).unwrap();
+        assert!(
+            (s.min_distance - 5.0).abs() < 0.11 && s.max_distance == s.min_distance,
+            "{} {}",
+            s.min_distance,
+            s.max_distance
+        );
+        key(&mut ed, 0x1B, 0x01, true);
+        ed.update(&mut world);
+        key(&mut ed, 0x1B, 0x01, false);
+        let to = on_view(&ed, right * 5.0);
+        mouse(&mut ed, to, Some(false));
+        ed.update(&mut world);
+        let s = world.get::<AudioSource3D>(e).unwrap();
+        assert_eq!(s.min_distance, 1.0, "taken back");
+        assert!((s.max_distance - 4.0).abs() < 0.11);
+        // A reverb zone: its sides and its fade's handle; a side dragged, the other stays.
+        let zone = world.spawn((
+            SceneId::new(),
+            Name::new("Hall"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            ReverbZone::new(Vec3::new(2.0, 1.5, 2.0), engine_app::Room::HALL),
+        ));
+        ed.select_only(zone);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(
+            ed.sound_handles
+                .at
+                .iter()
+                .any(|(h, _)| *h == SoundHandle::Fade)
+        );
+        let top = crate::handles::Side {
+            axis: 1,
+            positive: true,
+        };
+        let grab = at(&ed, SoundHandle::Side(top));
+        mouse(&mut ed, grab.to_array(), None);
+        ed.update(&mut world);
+        assert_eq!(ed.sound_label, "3 m", "its height");
+        mouse(&mut ed, grab.to_array(), Some(true));
+        ed.update(&mut world);
+        let to = on_view(&ed, Vec3::new(0.0, 2.5, 0.0));
+        mouse(&mut ed, to, None);
+        ed.update(&mut world);
+        let to = on_view(&ed, Vec3::new(0.0, 2.5, 0.0));
+        mouse(&mut ed, to, Some(false));
+        ed.update(&mut world);
+        let z = world.get::<ReverbZone>(zone).unwrap();
+        assert!((z.half_extents.y - 2.0).abs() < 0.06, "{}", z.half_extents);
+        let t = world.get::<Transform>(zone).unwrap().translation;
+        assert!((t.y - 0.5).abs() < 0.06, "the base stays at -1.5: {t}");
     }
 
     #[test]

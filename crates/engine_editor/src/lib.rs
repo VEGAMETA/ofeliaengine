@@ -41,6 +41,7 @@ mod slang_check;
 mod slang_highlight;
 mod slangd;
 mod snap;
+mod sound_handles;
 mod sound_view;
 mod text_highlight;
 mod thumbnails;
