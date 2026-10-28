@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3g-1, the Expression node and Slang's errors at their nodes** (#PR, ADR 0123's
+  - **E10-3g-1, the Expression node and Slang's errors at their nodes** (#432, ADR 0123's
     as-built): Slang written in a node (`a` to `d`, `ctx`), a function of the type; Slang's
     error in the preview's module framed at its node with the message, kept while the code
     is. On the way: a module the editor writes is due at once (no stale error), and a
