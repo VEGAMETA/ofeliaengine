@@ -832,7 +832,7 @@ Last updated: 2026-10-28.
   - **E11-3d-1, sounds dropped into the scene** (#410, ADR 0107's as-built): onto an object
     (viewport or row) it plays there in 3D; on the floor (or with Alt) a new entity named
     after the file on the surface; into the tree, heard as it is; one undo step each.
-  - **E11-3d-2a, sound and bus fields** (#PR, ADR 0107's as-built): a source's sound shows
+  - **E11-3d-2a, sound and bus fields** (#412, ADR 0107's as-built): a source's sound shows
     its file's waveform and ▶, takes a dropped sound, and opens `#sound:` (the arrows
     playing each file with Auto Play); its bus is a list of the mixer's buses, a name the
     mixer lacks marked. The marks: `Hint::Sound`, `Hint::Bus` (`#[reflect(hint = ...)]`).
