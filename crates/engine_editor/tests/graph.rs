@@ -380,10 +380,15 @@ fn an_expressions_slang_error_is_framed_at_its_node() {
         engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
     game.begin_session(&mut player).unwrap();
     player.set_frame_time(Some(1.0 / 60.0));
-    // The error's colour: the node's frame and the message under it.
+    // The error's colour on the canvas (left of the docks, under the bar): the node's
+    // frame and the message under it (the inspector's X labels are red too).
     let red = |rgba: &[u8]| {
         rgba.chunks_exact(4)
-            .filter(|p| p[0] > 190 && p[1] < 120 && p[2] < 120)
+            .enumerate()
+            .filter(|(i, p)| {
+                let (x, y) = (*i as u32 % width, *i as u32 / width);
+                x < 680 && (64..495).contains(&y) && p[0] > 190 && p[1] < 120 && p[2] < 120
+            })
             .count()
     };
     let green = |rgba: &[u8]| {
@@ -439,7 +444,7 @@ fn an_expressions_slang_error_is_framed_at_its_node() {
         .unwrap();
     key(&mut game, 0x0D, 0x1C, true);
     let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
-        red(shot) < 50 && green(shot) > 3_000
+        red(shot) < 10 && green(shot) > 3_000
     });
     key(&mut game, 0x0D, 0x1C, false);
     println!(

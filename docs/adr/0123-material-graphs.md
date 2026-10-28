@@ -637,8 +637,9 @@ What was built:
   - `MaterialTypes::changed`: nothing with hot reload off, the type of the file due, not
     the other, a compiling one compiled again after;
   - the editor on the GPU, end to end on both GPUs: the error framed at its node in
-    0.35 s, kept on every frame of a drag, the code typed right in the inspector, then the
-    frame gone and the sphere drawn.
+    0.38 s on the Radeon and 0.40 s on the RTX, kept on every frame of a drag; the code
+    typed right in the inspector, then the frame gone and the sphere drawn in 0.97 s and
+    0.91 s.
 - **Next:** functions (E10-3g-2), their file's extension to be chosen.
 
 ## The team's answers (2026-10-28)
