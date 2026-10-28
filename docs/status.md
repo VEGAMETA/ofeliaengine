@@ -682,6 +682,11 @@ Last updated: 2026-10-28.
        its frames ran faster than the FPS's update; on the Radeon they did not, on `main`
        too. The editor's FPS now follows a fixed frame time (`Player::frame_time`), so the
        test is the same on both GPUs.
+    4. The RTX's `forward` reads 3.1-3.7 % slower than its baseline in `sponza_fsr_quality`
+       and `sponza_smaa_t2x`, in two gates in a row (#379, #PR), on code those scenes do
+       not run (they render through the frame renderer, not the player; registers
+       unchanged), with every frame 0.3-2 % slower: measure `main` alone, and give the RTX
+       a new baseline if it holds.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

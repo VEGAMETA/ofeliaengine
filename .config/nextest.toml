@@ -28,3 +28,10 @@ gpu = { max-threads = 4 }
 [[profile.default.overrides]]
 filter = 'rdeps(engine_rhi)'
 test-group = 'gpu'
+
+[[profile.default.overrides]]
+# A real-time test of the stream thread's refills (50 ms of slack): under the gate's load a
+# 10 ms poll can wait past it. It passes alone; tried up to twice more, a failure that
+# holds still fails (found in two gates in a row, 2026-10-28).
+filter = 'package(engine_audio) & test(a_looping_stream_is_kept_filled_by_the_stream_thread)'
+retries = 2
