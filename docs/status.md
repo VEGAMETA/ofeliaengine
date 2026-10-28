@@ -870,7 +870,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-4a, material variants** (#PR, ADR 0120's addendum; the team's answer b): a
+  - **E10-4a, material variants** (#437, ADR 0120's addendum; the team's answer b): a
     material file may name its `base` and holds only the lines its base has not; every
     reader (player, cook, live files, inspector) reads it over its base, a held base as
     the editor holds it; cycles and pathless bases refused; the player makes a variant
