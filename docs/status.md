@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3e-2b, frames** (#PR, ADR 0123's as-built; the `.mgraph` file's version 2): C
+  - **E10-3e-2b, frames** (#431, ADR 0123's as-built; the `.mgraph` file's version 2): C
     puts the selection in a frame, Unreal's comment box; its title bar drags it with the
     nodes inside it (by place, no list in the file), its corner resizes it, its title is
     the inspector's, Delete leaves its nodes.
