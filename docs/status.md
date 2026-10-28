@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3c, graphs drawn by the player** (#PR, ADR 0123's as-built): a material file
+  - **E10-3c, graphs drawn by the player** (#422, ADR 0123's as-built): a material file
     naming a `.graph` resolves to the graph's module, generated into
     `.ofelia/cache/graphs/` (written when it changed), its type `GraphMaterial`, the
     graph's numbers and texture images under the file's values; the player reads the
