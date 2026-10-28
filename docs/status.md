@@ -30,9 +30,11 @@ Last updated: 2026-10-28.
     - E9, the script debugger (ADR 0119): logpoints, pause points and breakpoints from the
       gutter, steps, the Debugger panel, stops at errors, values at a stop, VS Code over
       DAP to the editor and to a development build started with `--debug`.
-    - E10-1, materials in the inspector (one `.material` file, ADR 0120), and E10-2, Slang
-      in the code editor (`slangd`, Material: New Type), are done; E10-3, the graph, and
-      E10-4 are ahead.
+    - E10-1, materials in the inspector (one `.material` file, ADR 0120), E10-2, Slang in
+      the code editor (`slangd`, Material: New Type), and E10-3, the material graph (ADR
+      0123: canvas, search, values, preview, errors, reroutes, frames, `[Node]` and
+      `.mfunc` functions), are done; E10-4 (previews in the dock, statistics, variants)
+      is ahead.
     - E11, sound, is done: the mixer file and panel (meters, effects, sends, the room's
       strip, snapshots, ADRs 0121 and 0122), previews and fields, the viewport's gizmos
       and hearing in place, the falloff curve.
@@ -868,6 +870,13 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3g-2b, the editor's functions** (#436, ADR 0123's as-built): `.mfunc` files in
+    graph tabs (ports named in the inspector, an input's value now written to the file),
+    previewed by their first output with unsaved edits; the project's functions in the
+    node search (ranked best first while typing); calls following their functions' names
+    and ports from the tabs or the files; Ctrl+G makes the selection a function beside
+    the graph, Tab enters a call's function and back, Ctrl+Alt+G takes a call apart. Tab
+    over a graph's canvas no longer toggles the viewport's face mode. **E10-3 is done.**
   - **E10-3g-2a, functions in the engine** (#435, ADR 0123's as-built; the team's `.mfunc`):
     a function's file is the graph's grammar, its input and output nodes its ports; a call
     keeps the function's file and ports; before writing, calls are made their functions'
@@ -968,9 +977,7 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3g-2b (the editor's functions: `.mfunc` tabs, Ctrl+G, Tab,
-       Ctrl+Alt+G, the node search), ADR 0123's last step; then E10-4, previews, stats
-       and variants with a base.
+       2D): E10-4, previews in the dock, a graph's statistics and variants with a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
@@ -1295,7 +1302,7 @@ Left in the core: recording on the job system.
 | **Sound in the player**: `AudioSource`, `AudioSource3D`, `AudioListener` and `ReverbZone` components, positions saved; walls muffling and the room's reverb from rays through the physics world; one mixer for sources and videos; sounds from a live folder while developing, a sound pack in a release | done | ADR 0105 |
 | Audio, text, 2D, basic UI | solid / basic | §11, ADR 0015 |
 | Tests: golden images (FLIP, per vendor), per-pass perf gate, determinism, zero-allocation tests | solid | ADR 0062 |
-| Editor | E1 to E9 done (E8, the code editor, but for rename across the project); E10-1 and E10-2 done, E10-3 (the graph) and E10-4 ahead; E11, sound, done; E12 to E14 ahead | ADR 0107 |
+| Editor | E1 to E9 done (E8, the code editor, but for rename across the project); E10-1 to E10-3 (the graph, ADR 0123) done, E10-4 ahead; E11, sound, done; E12 to E14 ahead | ADR 0107 |
 | Luau | scripting v1 done: components and hooks, queries and systems, physics, input, messages and timers, saves, networking, reload on save, types; the debugger begun | §10, ADRs 0114, 0119 |
 
 ## 4. In flight

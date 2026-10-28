@@ -56,6 +56,21 @@ pub fn read_functions(
     paths: &AssetPaths,
     root: &Path,
 ) -> Result<Functions, MaterialFileError> {
+    read_functions_with(graph, paths, root, &|_| None)
+}
+
+/// [`read_functions`], a function `open` holds (the editor's tab of it, unsaved edits and
+/// all, E10-3g-2b) taken from it in place of its file.
+///
+/// # Errors
+///
+/// A function's file that cannot be read.
+pub fn read_functions_with(
+    graph: &Graph,
+    paths: &AssetPaths,
+    root: &Path,
+    open: &dyn Fn(AssetRef) -> Option<(Graph, AssetPaths)>,
+) -> Result<Functions, MaterialFileError> {
     let mut out = Functions::default();
     out.paths.extend(paths);
     let calls = |g: &Graph, written: &AssetPaths| -> Vec<(AssetRef, String)> {
@@ -68,6 +83,12 @@ pub fn read_functions(
     let mut todo = calls(graph, paths);
     while let Some((asset, at)) = todo.pop() {
         if out.graphs.contains_key(&asset) || at.is_empty() {
+            continue;
+        }
+        if let Some((function, written)) = open(asset) {
+            out.paths.extend(&written);
+            todo.extend(calls(&function, &written));
+            out.graphs.insert(asset, function);
             continue;
         }
         let full = if Path::new(&at).is_absolute() {

@@ -805,6 +805,67 @@ What was built:
 - **Next:** E10-3g-2b, the editor's side: function files in tabs, Ctrl+G, Tab and
   Ctrl+Alt+G, functions in the node search, and calls following their functions' ports.
 
+## As built (E10-3g-2b, 2026-10-29): the editor's functions
+
+- **A function's tab:** a `.mfunc` file opens in a graph tab (`GraphDoc::function`), read
+  and written as a function's file. It has no shading model row and no surface. The node
+  search offers the Function group's input and output nodes only there.
+  - The inspector names a port (its Name row, the node's `param`, unique among the
+    function's nodes) and gives an input its Value (what a call gives where nothing is
+    linked to it).
+  - An input's value is now written in the file. It had been dropped, because only
+    constants' values were written.
+- **Its preview:** the unlit graph of a call of the function, its first output the surface
+  (`graph::function_preview`). The function is read from its tab, so the sphere shows an
+  unsaved edit. The preview and Show Slang share one generation (`graph::generated`): the
+  functions a graph calls come from their open tabs first (`read_functions_with`'s `open`),
+  then from their files.
+- **The node search:** the project's functions under Functions with their ports (a
+  function's own tab offers the others). While a query is typed the search ranks best
+  first (other palette lists keep their order): "tint" had listed Texture Coordinates
+  before the function.
+- **Calls following** (`calls_frame`): each function's ports are kept by file
+  (`function_ports`), read from its tab where one is open, else from its file, and read
+  again when the tab's revision or the file changes.
+  - The shown graph's calls take their functions' names (the file's) and ports, as a
+    `[Node]` call takes its function's. This is not a step of its own.
+  - The check runs only when the graph or what it calls changed (a stamp of the functions'
+    tabs and of files read again), so a steady frame does nothing. A graph's preview and
+    Show Slang are remade on the same stamp.
+- **Ctrl+G, Make Function** (`function_of_selection`, `call_made`), Blender's Make Group:
+  - the selection's links across its edge are the ports: one input per output outside
+    read inside, named after the port reading it and as wide as what it carries; one
+    output per output inside read outside, named after the port outside reading it;
+    `in`, `out` and `inout` are not names;
+  - the ports sit left and right of the nodes, in their readers' order;
+  - the file is written at once beside the graph (`New Function.mfunc`, as New Material
+    writes its file), and a call in the nodes' place, linked as they were, is the one
+    step. The surface and a function's own ports stay where they are. A selection that
+    nothing outside reads is refused: a function gives something back.
+- **Tab** over the canvas enters the selected call's function (a `[Node]` call's module
+  opens in a code tab). In a function's tab entered so, Tab with no call selected goes
+  back. Tab had been taken by the viewport's face mode whenever the stale viewport rect
+  lay under the pointer; over a graph's canvas it is now the graph's.
+- **Ctrl+Alt+G, Ungroup** (`function::inline`, one level of what `expand` does): the
+  selected calls become their functions' nodes, each under its id in the function where
+  that id is free here, else its kind's next. They are placed from the call's place, the
+  call's links read through them, and the paths of their references taken in, as one
+  step. A call inside the function stays a call. `expand` itself is now built on the same
+  inlining.
+- **Tests:**
+  - a call's id from its function's name, and the call following a name and ports;
+  - Make Function's ports, the call's links and the inlined graph drawing what the nodes
+    drew; Ungroup bringing the nodes back as they were; the refusals;
+  - `inline` one level, a nested call kept;
+  - in the editor: the search's function first and added, the preview reading the file's
+    input value, Tab in and out, an unsaved edit in the function's tab followed by the
+    call (no step) and by the preview's value, then Ctrl+G and Ctrl+Alt+G each one step;
+  - on the GPU: a function's tab drawing the session's unsaved edit, not the file's value
+    (0.81 s on the Radeon).
+- **Left:** a function's ports are `float` to `float4` only, as `[Node]` functions'
+  are. A function calling a function that calls it is refused only when the preview is
+  made, not in the search.
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,

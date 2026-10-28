@@ -817,6 +817,11 @@ struct CommandIds {
     frame_nodes: CommandId,
     /// The node search on a graph's canvas (ADR 0123 E10-3e).
     add_node: CommandId,
+    /// Functions on a graph's canvas (E10-3g-2b, Blender's Ctrl+G, Tab and Ctrl+Alt+G):
+    /// the selection made one, a call's function entered (and left), a call taken apart.
+    make_function: CommandId,
+    enter_function: CommandId,
+    ungroup_function: CommandId,
     make_variant: CommandId,
     apply_material: CommandId,
     break_next: CommandId,
@@ -1003,6 +1008,13 @@ fn commands() -> (Commands, CommandIds) {
             "Put the Selection in a Frame",
         ),
         add_node: c.register("graph.add_node", "Graph", "Add Node…"),
+        make_function: c.register("graph.make_function", "Graph", "Make Function"),
+        enter_function: c.register(
+            "graph.enter_function",
+            "Graph",
+            "Open the Call's Function (or Go Back)",
+        ),
+        ungroup_function: c.register("graph.ungroup_function", "Graph", "Ungroup Function"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
         break_next: c.register("debug.break_next", "Debug", "Break at the Next Script Line"),
@@ -1235,6 +1247,9 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Space", ids.add_node),
         ("Shift+A", ids.add_node),
         ("C", ids.frame_nodes),
+        ("Ctrl+G", ids.make_function),
+        ("Tab", ids.enter_function),
+        ("Ctrl+Alt+G", ids.ungroup_function),
     ]
     .map(|(chord, id)| (chord, id, GRAPH_KEYS));
     for (chord, id, context) in global.chain(tree).chain(dock).chain(code).chain(graph) {
@@ -1462,6 +1477,9 @@ struct Choices {
     /// The items matching the query, in their order: an item and its matched letters (a
     /// range of the palette's `highlights`).
     shown: Vec<(usize, (u32, u32))>,
+    /// A search's list (the node search's): best first while a query is typed, in its
+    /// order among equals.
+    ranked: bool,
 }
 
 /// One item of a palette's list.
@@ -1538,6 +1556,17 @@ struct GraphAdd {
     from: Option<(engine_material_graph::PortRef, bool)>,
 }
 
+/// A function file's ports as the editor last read them (E10-3g-2b).
+#[derive(Debug, Clone)]
+struct FunctionPorts {
+    /// Its tab's revision where read from its tab (an unsaved edit and all), `None` where
+    /// read from its file.
+    tab: Option<u64>,
+    /// Its signature as its calls keep it (`void(float3 color, out float3 tinted)`), or
+    /// why it has none.
+    signature: Result<String, String>,
+}
+
 /// What picking a palette list's item does.
 #[derive(Debug, Clone)]
 enum Pick {
@@ -1569,6 +1598,8 @@ enum Pick {
     Node(&'static str),
     /// Adds a call of this module's function (its `[Node]` mark, E10-3g-3b).
     Call(AssetId, String),
+    /// Adds a call of this function file (E10-3g-2b).
+    Function(AssetId),
 }
 
 impl Pick {
@@ -1578,7 +1609,7 @@ impl Pick {
             Self::Component { script: true, .. } | Self::OpenScript(_) => icons::SCRIPT,
             Self::Component { script: false, .. } => icons::ADD_COMPONENT,
             Self::NewScript => icons::SCRIPT_MARK,
-            Self::Node(_) | Self::Call(..) => icons::SHADER,
+            Self::Node(_) | Self::Call(..) | Self::Function(_) => icons::SHADER,
             _ => icons::SCENE,
         }
     }
@@ -2533,6 +2564,14 @@ struct Editor {
     node_scanner: Option<crate::node_functions::NodeScanner>,
     node_functions: BTreeMap<AssetId, Vec<crate::node_functions::NodeFunction>>,
     node_scans: Vec<crate::node_functions::Scanned>,
+    /// The project's functions' ports as last read (E10-3g-2b), by file: the node search's,
+    /// and what their calls follow.
+    function_ports: BTreeMap<AssetId, FunctionPorts>,
+    /// Counts what graphs call changing outside their tabs (a function's file or tab, a
+    /// module's `[Node]` functions, E10-3g-2b); the shown graph's calls were last made
+    /// their functions' at this graph, revision and [`Self::callees_stamp`].
+    callees_changed: u64,
+    calls_seen: Option<(AssetId, u64, u64)>,
     /// The asset browser (the FileSystem dock, E4-2).
     browser: Browser,
     /// A file dragged out of the browser (E4-3).
@@ -3493,6 +3532,9 @@ impl Editor {
             node_scanner: None,
             node_functions: BTreeMap::new(),
             node_scans: Vec::new(),
+            function_ports: BTreeMap::new(),
+            callees_changed: 0,
+            calls_seen: None,
             browser: Browser::default(),
             asset_drag: None,
             row_drag: None,
@@ -4028,7 +4070,21 @@ impl Editor {
                 cx >= x as f32 && cy >= y as f32 && cx < (x + w) as f32 && cy < (y + h) as f32
             })
         });
-        if over_view
+        // A graph's canvas covers the viewport (ADR 0123): over it Tab enters the selected
+        // call's function, or leaves one (E10-3g-2b).
+        let scale = self.scale.max(0.5);
+        let over_graph = self.graph_area.is_some_and(|[x, y, w, h]| {
+            self.input.cursor().is_some_and(|[cx, cy]| {
+                let (cx, cy) = (cx / scale, cy / scale);
+                cx >= x && cy >= y && cx < x + w && cy < y + h
+            })
+        });
+        let tab = if self.active_graph.is_some() {
+            over_graph.then_some(self.ids.enter_function)
+        } else {
+            over_view.then_some(self.ids.edit_faces)
+        };
+        if let Some(id) = tab
             && !game_view
             && self.active_script.is_none()
             && self.ui.editing().is_none()
@@ -4040,7 +4096,6 @@ impl Editor {
                 .any(|c| c.key == Key::Tab && !c.ctrl && !c.shift && !c.alt)
         {
             self.input.consume_keys();
-            let id = self.ids.edit_faces;
             self.run(world, id);
         }
 
@@ -4437,9 +4492,11 @@ impl Editor {
                             .then_some(&crate::graph::MODEL_NAMES[..]),
                         missing: false,
                     },
-                    NodeRow::Param | NodeRow::Comment | NodeRow::Title | NodeRow::Code => {
-                        Widget::Edit(first)
-                    }
+                    NodeRow::Param
+                    | NodeRow::Name
+                    | NodeRow::Comment
+                    | NodeRow::Title
+                    | NodeRow::Code => Widget::Edit(first),
                     NodeRow::Value(_) | NodeRow::Input(..) => Widget::Numbers {
                         values: shown,
                         labels: row.labels(colour),
@@ -6001,7 +6058,10 @@ impl Editor {
                         )) if double => {
                             self.open_script(world, &path, None);
                         }
-                        Some((engine_scene::AssetKind::Graph, path)) if double => {
+                        Some((
+                            engine_scene::AssetKind::Graph | engine_scene::AssetKind::Function,
+                            path,
+                        )) if double => {
                             self.open_graph(world, &path);
                         }
                         _ => {}
@@ -6608,6 +6668,7 @@ impl Editor {
             self.graph_frame(world, &response, scale);
             // Its preview after this frame's edits (the inspector's and the canvas's).
             self.node_functions_frame();
+            self.calls_frame();
             self.graph_preview_frame();
             if response.show_slang {
                 self.show_graph_slang(world);
@@ -7235,7 +7296,8 @@ impl Editor {
         cp.highlights.clear();
         let query = cp.query.trim_start();
         if let Some(choices) = &mut cp.choices {
-            // A list keeps its own order; the query narrows it.
+            // A list keeps its own order, the query narrowing it; a search's is best first
+            // (its order among equals).
             choices.shown.clear();
             cp.fuzzy.set_query(query);
             for (i, item) in choices.items.iter().enumerate() {
@@ -7244,6 +7306,16 @@ impl Editor {
                     cp.highlights.extend_from_slice(cp.fuzzy.positions());
                     choices.shown.push((i, (start, cp.highlights.len() as u32)));
                 }
+            }
+            if choices.ranked && !query.is_empty() {
+                let (items, fuzzy) = (&choices.items, &mut cp.fuzzy);
+                choices.shown.sort_by(|a, b| {
+                    let (sa, sb) = (
+                        fuzzy.score(&items[a.0].label),
+                        fuzzy.score(&items[b.0].label),
+                    );
+                    sb.cmp(&sa)
+                });
             }
         } else if let Some(name) = query.strip_prefix('@') {
             cp.commands.clear();
@@ -7402,6 +7474,7 @@ impl Editor {
                             Pick::Call(module, function) => {
                                 self.add_graph_call(world, module, &function);
                             }
+                            Pick::Function(function) => self.add_graph_function(world, function),
                         }
                     }
                 } else if cp.finds_objects() {
@@ -11626,6 +11699,10 @@ impl Editor {
             return;
         }
         let doc = self.graphs.remove(g);
+        if doc.function {
+            self.function_ports.remove(&doc.id);
+            self.callees_changed += 1;
+        }
         if doc.autosaved.is_some()
             && let Some(session) = &self.session
         {
@@ -11789,7 +11866,7 @@ impl Editor {
                 }
                 let text = self.ui.edited_text().trim().to_owned();
                 match row {
-                    NodeRow::Param => match self.graphs[g].set_param(&text) {
+                    NodeRow::Param | NodeRow::Name => match self.graphs[g].set_param(&text) {
                         Ok(edit) => self.graph_edit(world, g, "Rename Parameter", None, edit),
                         Err(why) => self.say(why.to_owned()),
                     },
@@ -11849,6 +11926,17 @@ impl Editor {
         let scale = self.scale.max(0.5);
         let pointer = self.input.cursor().map(|[x, y]| [x / scale, y / scale]);
         let area = self.graph_area;
+        // The project's functions' ports as their tabs or files have them now.
+        let functions: Vec<AssetId> = self
+            .asset_db
+            .entries()
+            .iter()
+            .filter(|e| e.kind == engine_scene::AssetKind::Function)
+            .map(|e| e.id)
+            .collect();
+        for &f in &functions {
+            let _ = self.function_ports(f);
+        }
         let Some(doc) = self.graphs.get(g) else {
             return;
         };
@@ -11866,7 +11954,7 @@ impl Editor {
             return;
         };
         let direction = from.as_ref().map(|(_, output)| *output);
-        let mut items: Vec<Choice> = crate::graph::addable(direction)
+        let mut items: Vec<Choice> = crate::graph::addable(direction, doc.function)
             .map(|k| Choice {
                 label: format!("{}: {}", k.category, k.title),
                 detail: crate::graph::ports_text(k),
@@ -11901,6 +11989,40 @@ impl Editor {
                 });
             }
         }
+        // The project's functions (E10-3g-2b), a function's own tab offering the others.
+        for f in functions.into_iter().filter(|&f| f != doc.id) {
+            let Some(path) = self.asset_db.get(f).map(|e| e.path.as_str()) else {
+                continue;
+            };
+            let name = crate::graph::function_name(path);
+            let detail = match self.function_ports.get(&f).map(|p| &p.signature) {
+                Some(Ok(signature)) => {
+                    let Ok(kind) = engine_material_graph::function_call_kind(name, signature)
+                    else {
+                        continue;
+                    };
+                    let fits = match direction {
+                        Some(true) => !kind.inputs.is_empty(),
+                        Some(false) => !kind.outputs.is_empty(),
+                        None => true,
+                    };
+                    if !fits {
+                        continue;
+                    }
+                    crate::graph::ports_text(kind)
+                }
+                Some(Err(why)) => why.clone(),
+                None => continue,
+            };
+            items.push(Choice {
+                label: format!(
+                    "{}: {name}",
+                    engine_material_graph::function::FUNCTION_CATEGORY
+                ),
+                detail,
+                pick: Pick::Function(f),
+            });
+        }
         self.graph_add = Some(GraphAdd {
             graph: doc.id,
             at,
@@ -11909,6 +12031,9 @@ impl Editor {
         self.open_list(world, "Add a node: its name or its group", items);
         if let Some(cp) = &mut self.command_palette {
             cp.at = pointer.filter(|&q| inside(q));
+            if let Some(choices) = &mut cp.choices {
+                choices.ranked = true;
+            }
         }
     }
 
@@ -11956,6 +12081,7 @@ impl Editor {
             return;
         };
         let outcome = self.graphs[g].add_call(
+            engine_material_graph::CALL_KIND,
             AssetRef::file(module),
             &path,
             function,
@@ -12022,11 +12148,240 @@ impl Editor {
             for doc in &mut self.graphs {
                 doc.set_call_titles(&titles);
             }
+            self.callees_changed += 1;
         }
-        // The shown graph's calls as their functions have them (an undo may bring back an
-        // older signature).
-        if let Some(doc) = self.active_graph.and_then(|g| self.graphs.get_mut(g)) {
-            doc.refresh_calls(&self.node_functions);
+    }
+
+    /// Function file `id`'s ports (E10-3g-2b): as its tab has them where one is open (an
+    /// unsaved edit and all), else as its file has them; read again where the tab or the
+    /// file changed since. `None` for a file the database does not know.
+    fn function_ports(&mut self, id: AssetId) -> Option<&Result<String, String>> {
+        let tab = self.graphs.iter().find(|d| d.function && d.id == id);
+        let fresh = self
+            .function_ports
+            .get(&id)
+            .is_some_and(|p| p.tab == tab.map(|d| d.revision));
+        if !fresh {
+            let ports = match tab {
+                Some(d) => FunctionPorts {
+                    tab: Some(d.revision),
+                    signature: engine_material_graph::signature_of(&d.graph).map(|s| s.to_string()),
+                },
+                None => {
+                    let path = self.root.join(&self.asset_db.get(id)?.path);
+                    FunctionPorts {
+                        tab: None,
+                        signature: crate::graph::read_signature(&path),
+                    }
+                }
+            };
+            self.function_ports.insert(id, ports);
+        }
+        self.function_ports.get(&id).map(|p| &p.signature)
+    }
+
+    /// A number that changes when what the graphs call may have (E10-3g-2b): a function's
+    /// tab edited, opened or closed, a function's file or a Slang module's `[Node]`
+    /// functions read again.
+    fn callees_stamp(&self) -> u64 {
+        self.graphs
+            .iter()
+            .filter(|d| d.function)
+            .fold(self.callees_changed, |s, d| {
+                (s ^ d.revision ^ (d.id.as_u128() as u64)).wrapping_mul(0x0100_0000_01b3)
+            })
+    }
+
+    /// The shown graph's calls as their functions now have them (E10-3g-3b, E10-3g-2b): a
+    /// `[Node]` function's signature, a function file's name (its file's) and ports (its
+    /// tab's or its file's); no step, as they are the functions'. Looked at again only
+    /// where the graph (an undo may bring back an older signature) or what it calls
+    /// changed.
+    fn calls_frame(&mut self) {
+        let Some(g) = self.active_graph.filter(|&g| g < self.graphs.len()) else {
+            return;
+        };
+        let stamp = self.callees_stamp();
+        let seen = (self.graphs[g].id, self.graphs[g].revision, stamp);
+        if self.calls_seen == Some(seen) {
+            return;
+        }
+        // The functions it calls read where their tabs or files changed.
+        let called: std::collections::BTreeSet<AssetId> = self.graphs[g]
+            .graph
+            .nodes
+            .values()
+            .filter(|n| n.kind == engine_material_graph::FUNCTION_KIND)
+            .map(|n| n.module.file)
+            .collect();
+        for f in called {
+            let _ = self.function_ports(f);
+        }
+        let (node_functions, ports, db) =
+            (&self.node_functions, &self.function_ports, &self.asset_db);
+        let current = |node: &engine_material_graph::Node| {
+            if node.kind == engine_material_graph::CALL_KIND {
+                return crate::graph::node_function_call(node_functions, node);
+            }
+            let name = crate::graph::function_name(&db.get(node.module.file)?.path);
+            let signature = ports.get(&node.module.file)?.signature.as_ref().ok()?;
+            Some((name, signature.as_str()))
+        };
+        self.graphs[g].refresh_calls(&current);
+        self.calls_seen = Some((self.graphs[g].id, self.graphs[g].revision, stamp));
+    }
+
+    /// The node search's pick of a function file (E10-3g-2b): a call of it added where the
+    /// search was opened, as a step; one whose ports are wrong said why.
+    fn add_graph_function(&mut self, world: &mut World, function: AssetId) {
+        let Some(add) = self.graph_add.take() else {
+            return;
+        };
+        let Some(g) = self.graphs.iter().position(|d| d.id == add.graph) else {
+            return;
+        };
+        let Some(path) = self.asset_db.get(function).map(|e| e.path.clone()) else {
+            return;
+        };
+        let name = crate::graph::function_name(&path).to_owned();
+        let signature = match self.function_ports(function) {
+            Some(Ok(signature)) => signature.clone(),
+            Some(Err(why)) => {
+                let message = format!("{name} cannot be called: {why}");
+                self.say(message);
+                return;
+            }
+            None => return,
+        };
+        let outcome = self.graphs[g].add_call(
+            engine_material_graph::FUNCTION_KIND,
+            AssetRef::file(function),
+            &path,
+            &name,
+            &signature,
+            add.at,
+            add.from.as_ref(),
+        );
+        self.graph_outcome(world, g, outcome);
+        if self.active_graph != Some(g) {
+            self.show_graph(world, g);
+        }
+    }
+
+    /// Ctrl+G on graph `g`'s canvas (E10-3g-2b, Blender's Make Group): its selection made a
+    /// function, written at once beside the graph (`New Function.mfunc`, as New Material
+    /// writes its file), and a call of it in the selection's place as one step (Ctrl+Z
+    /// takes the call back; the file stays).
+    fn make_function(&mut self, world: &mut World, g: usize) {
+        use engine_material_graph::GraphFile;
+        let made = match self.graphs[g].function_of_selection() {
+            Ok(made) => made,
+            Err(why) => {
+                self.say(why);
+                return;
+            }
+        };
+        let folder = self.graphs[g]
+            .path
+            .rsplit_once('/')
+            .map_or("", |(folder, _)| folder)
+            .to_owned();
+        let path = unique_file(&self.root, &folder, "New Function", "mfunc");
+        let id = AssetId::new();
+        let text = GraphFile::of(&made.function).to_function_text(id, Some(&made.paths));
+        if let Err(e) = self.write_material_file(&path, id, &text) {
+            self.say(format!("{path} could not be written: {e}"));
+            return;
+        }
+        let name = crate::graph::function_name(&path).to_owned();
+        self.function_ports.insert(
+            id,
+            FunctionPorts {
+                tab: None,
+                signature: Ok(made.signature.clone()),
+            },
+        );
+        let outcome = self.graphs[g].call_made(&made, AssetRef::file(id), &path, &name);
+        self.graph_outcome(world, g, outcome);
+        self.say(format!(
+            "Made {path} of {} node{}: Tab opens it, Ctrl+Alt+G takes the call apart",
+            made.nodes.len(),
+            if made.nodes.len() == 1 { "" } else { "s" }
+        ));
+    }
+
+    /// Tab on graph `g`'s canvas (E10-3g-2b, Blender's): the selected call's function in
+    /// its tab (a `[Node]` function's module in a code tab), else back to the graph a
+    /// function's tab was entered from.
+    fn enter_function(&mut self, world: &mut World, g: usize) {
+        let doc = &self.graphs[g];
+        let call = doc
+            .inspected()
+            .and_then(|id| doc.graph.nodes.get(id))
+            .filter(|n| {
+                n.kind == engine_material_graph::FUNCTION_KIND
+                    || n.kind == engine_material_graph::CALL_KIND
+            })
+            .map(|n| (n.kind == engine_material_graph::FUNCTION_KIND, n.module));
+        let Some((function, module)) = call else {
+            let back = doc
+                .entered_from
+                .and_then(|from| self.graphs.iter().position(|d| d.id == from));
+            match back {
+                Some(b) => self.show_graph(world, b),
+                None => self.say(String::from(
+                    "Tab opens the selected call's function (Ctrl+G makes one)",
+                )),
+            }
+            return;
+        };
+        let from = doc.id;
+        let path = self
+            .asset_db
+            .get(module.file)
+            .map(|e| e.path.clone())
+            .or_else(|| doc.paths.get(module).map(str::to_owned));
+        let Some(path) = path else {
+            self.say(String::from("Its function's file is not found"));
+            return;
+        };
+        if !function {
+            self.open_script(world, Path::new(&path), None);
+            return;
+        }
+        self.open_graph(world, Path::new(&path));
+        if let Some(d) = self.active_graph.and_then(|a| self.graphs.get_mut(a))
+            && d.id != from
+        {
+            d.entered_from = Some(from);
+        }
+    }
+
+    /// Ctrl+Alt+G on graph `g`'s canvas (E10-3g-2b, Blender's Ungroup): its selected calls
+    /// of functions made their functions' nodes, one level, as one step; the functions as
+    /// their tabs or files have them.
+    fn ungroup_functions(&mut self, world: &mut World, g: usize) {
+        let graphs = &self.graphs;
+        let open = |r: AssetRef| {
+            graphs
+                .iter()
+                .find(|d| d.function && AssetRef::file(d.id) == r)
+                .map(|d| (d.graph.clone(), d.paths.clone()))
+        };
+        let doc = &self.graphs[g];
+        let functions = match engine_assets::graph_module::read_functions_with(
+            &doc.graph, &doc.paths, &self.root, &open,
+        ) {
+            Ok(functions) => functions,
+            Err(e) => {
+                let message = format!("Not taken apart: {e}");
+                self.say(message);
+                return;
+            }
+        };
+        match self.graphs[g].ungroup(&functions.graphs, &functions.paths) {
+            Ok(outcome) => self.graph_outcome(world, g, outcome),
+            Err(why) => self.say(format!("Not taken apart: {why}")),
         }
     }
 
@@ -12072,6 +12427,9 @@ impl Editor {
                 ids.add_node,
                 ids.show_slang,
                 ids.frame_nodes,
+                ids.make_function,
+                ids.enter_function,
+                ids.ungroup_function,
             ]
             .contains(&id)
     }
@@ -12079,18 +12437,27 @@ impl Editor {
     /// Show Slang (ADR 0123 E10-3f-3): the shown graph's saved build, the module a game draws
     /// it with, in a code tab of its own, read only and following the graph.
     fn show_graph_slang(&mut self, world: &World) {
+        let stamp = self.callees_stamp();
         let Some(doc) = self.active_graph.and_then(|g| self.graphs.get(g)) else {
             self.say(String::from(
                 "Show Slang shows a graph's code: open a graph",
             ));
             return;
         };
-        let generated = match engine_material_graph::generate(
-            &doc.graph,
-            engine_assets::graph_module::GRAPH_TYPE,
+        let graphs = &self.graphs;
+        let open = |r: AssetRef| {
+            graphs
+                .iter()
+                .find(|d| d.function && AssetRef::file(d.id) == r)
+                .map(|d| (d.graph.clone(), d.paths.clone()))
+        };
+        let generated = match crate::graph::generated(
+            doc,
+            &self.root,
+            &open,
             engine_material_graph::Build::Saved,
         ) {
-            Ok(generated) => generated,
+            Ok((generated, _)) => generated,
             Err(e) => {
                 let message = format!("{}: no code: {e}", doc.path);
                 self.say(message);
@@ -12098,7 +12465,7 @@ impl Editor {
             }
         };
         let path = PathBuf::from(format!("{}.slang", doc.path));
-        let made = (doc.id, doc.revision);
+        let made = (doc.id, mixed(doc.revision, stamp));
         let k = match self.scripts.iter().position(|s| s.path == path) {
             Some(k) => {
                 self.scripts[k].doc.show_text(&generated.text);
@@ -12121,6 +12488,14 @@ impl Editor {
     /// nothing.
     fn generated_frame(&mut self) {
         let mut refused = None;
+        let stamp = self.callees_stamp();
+        let graphs = &self.graphs;
+        let open = |r: AssetRef| {
+            graphs
+                .iter()
+                .find(|d| d.function && AssetRef::file(d.id) == r)
+                .map(|d| (d.graph.clone(), d.paths.clone()))
+        };
         for s in &mut self.scripts {
             let Some((graph, revision)) = s.generated else {
                 continue;
@@ -12131,16 +12506,15 @@ impl Editor {
             let Some(doc) = self.graphs.iter().find(|d| d.id == graph) else {
                 continue;
             };
-            if doc.revision == revision {
+            let now = mixed(doc.revision, stamp);
+            if now == revision {
                 continue;
             }
-            s.generated = Some((graph, doc.revision));
+            s.generated = Some((graph, now));
             // A graph that cannot be generated keeps its last code shown (its tab says why).
-            if let Ok(generated) = engine_material_graph::generate(
-                &doc.graph,
-                engine_assets::graph_module::GRAPH_TYPE,
-                engine_material_graph::Build::Saved,
-            ) {
+            if let Ok((generated, _)) =
+                crate::graph::generated(doc, &self.root, &open, engine_material_graph::Build::Saved)
+            {
                 s.doc.show_text(&generated.text);
             }
         }
@@ -12163,6 +12537,7 @@ impl Editor {
         let Some(g) = self.active_graph.filter(|&g| g < self.graphs.len()) else {
             return;
         };
+        let stamp = self.callees_stamp();
         let doc = &self.graphs[g];
         if self
             .graph_preview
@@ -12189,12 +12564,26 @@ impl Editor {
         let Some(preview) = self.graph_preview.as_mut() else {
             return;
         };
-        if preview.revision == doc.revision {
+        // Made again where it or what it calls changed (E10-3g-2b).
+        let revision = mixed(doc.revision, stamp);
+        if preview.revision == revision {
             return;
         }
-        preview.revision = doc.revision;
-        match crate::graph::preview_material(doc, &self.root, preview.module, &preview.module_path)
-        {
+        preview.revision = revision;
+        let graphs = &self.graphs;
+        let open = |r: AssetRef| {
+            graphs
+                .iter()
+                .find(|d| d.function && AssetRef::file(d.id) == r)
+                .map(|d| (d.graph.clone(), d.paths.clone()))
+        };
+        match crate::graph::preview_material(
+            doc,
+            &self.root,
+            &open,
+            preview.module,
+            &preview.module_path,
+        ) {
             Ok((generated, file, paths)) => {
                 let text = generated.text;
                 preview.lines = generated.lines;
@@ -12263,6 +12652,7 @@ impl Editor {
                 Some(id) => {
                     let _ = write!(self.graph_title, "Frame · {id}");
                 }
+                None if doc.function => self.graph_title.push_str("Function"),
                 None => self.graph_title.push_str("Graph"),
             },
         }
@@ -14828,6 +15218,18 @@ impl Editor {
                 self.open_node_search(world, g, None, None);
                 return;
             }
+            if id == ids.make_function && canvas {
+                self.make_function(world, g);
+                return;
+            }
+            if id == ids.enter_function && canvas {
+                self.enter_function(world, g);
+                return;
+            }
+            if id == ids.ungroup_function && canvas {
+                self.ungroup_functions(world, g);
+                return;
+            }
         }
         // Ctrl+S on a script's tab saves the script, the game playing or not.
         if id == ids.save
@@ -15692,6 +16094,15 @@ impl Editor {
                 && e.kind == engine_scene::AssetKind::Shader
             {
                 scanner.scan(id, self.root.join(&e.path));
+            }
+            // A function's file: its ports read again, what calls it made again (E10-3g-2b).
+            if self
+                .asset_db
+                .get(id)
+                .is_some_and(|e| e.kind == engine_scene::AssetKind::Function)
+            {
+                self.function_ports.remove(&id);
+                self.callees_changed += 1;
             }
             if let Some(e) = self.asset_db.get(id)
                 && e.kind == engine_scene::AssetKind::Script
@@ -21573,6 +21984,7 @@ impl Editor {
                 hint,
                 items,
                 shown: Vec::new(),
+                ranked: false,
             });
         }
         self.search_palette(world);
@@ -23636,6 +24048,12 @@ fn unique_file(root: &Path, folder: &str, name: &str, ext: &str) -> String {
         k += 1;
     }
     path
+}
+
+/// A graph's revision with the stamp of what it calls ([`Editor::callees_stamp`]): what a
+/// graph's code was made at (its preview, its Show Slang).
+fn mixed(revision: u64, stamp: u64) -> u64 {
+    revision.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ stamp
 }
 
 /// What making file `path` and giving it to `given` objects says.
@@ -33737,6 +34155,151 @@ return Coin
             .map(|(m, _)| m.clone())
             .unwrap_or_default();
         assert!(said.contains("Count is not a node"), "{said}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E10-3g-2b: a function file is offered by the node search under Functions with its
+    /// ports, and called; the graph's preview reads the function (its input's value, the
+    /// call's input left unlinked); Tab on the call opens the function's tab, Tab there with
+    /// no call selected goes back; the function's ports and value edited in its tab, unsaved,
+    /// are followed by the call (no step of its own) and by the graph's preview; Ctrl+G makes
+    /// the selection a function written beside the graph and called in its place, one step;
+    /// Ctrl+Alt+G takes the call apart again, one step.
+    #[test]
+    fn functions_are_called_entered_followed_made_and_taken_apart() {
+        use engine_material_graph::function::{input_kind, output_kind};
+        use engine_material_graph::{Graph, GraphFile, Model, Node, PortRef};
+        const SPACE: (u16, u16) = (0x20, 0x39);
+        let dir = project("graph-functions");
+        std::fs::create_dir_all(dir.join("materials")).unwrap();
+        let mut f = Graph::new(Model::Lit);
+        f.nodes.clear();
+        f.add(
+            "c",
+            Node::new(input_kind(3), [0.0, 0.0])
+                .named("color")
+                .with_value([1.0, 0.0, 1.0, 1.0]),
+        )
+        .add("o", Node::new(output_kind(3), [300.0, 0.0]).named("tinted"))
+        .link(PortRef::new("c", "value"), PortRef::new("o", "value"));
+        let tint = AssetId::new();
+        std::fs::write(
+            dir.join("materials/tint.mfunc"),
+            GraphFile::of(&f).to_function_text(tint, None),
+        )
+        .unwrap();
+        let mut g = Graph::new(Model::Unlit);
+        g.add(
+            "c",
+            Node::new("color", [0.0, 0.0]).with_value([0.2, 0.3, 0.9, 1.0]),
+        );
+        std::fs::write(
+            dir.join("materials/glow.mgraph"),
+            GraphFile::of(&g).to_text(AssetId::new(), None),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        ed.open_graph(&world, Path::new("materials/glow.mgraph"));
+        ed.update(&mut world);
+        // Space over the canvas, "tint": under Functions, its ports; Enter calls it.
+        let [x, y, _, h] = ed.graph_area.unwrap();
+        mouse(&mut ed, [x + 30.0, y + h - 30.0], None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[SPACE]);
+        ed.update(&mut world);
+        chars(&mut ed, "tint");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let listed = |ed: &Editor, label: &str| {
+            ed.command_palette
+                .as_ref()
+                .and_then(|cp| cp.choices.as_ref())
+                .is_some_and(|c| c.shown.iter().any(|&(i, _)| c.items[i].label == label))
+        };
+        assert!(listed(&ed, "Functions: tint"), "under Functions");
+        let first = ed
+            .command_palette
+            .as_ref()
+            .and_then(|cp| cp.choices.as_ref())
+            .and_then(|c| c.shown.first().map(|&(i, _)| c.items[i].label.clone()));
+        assert_eq!(first.as_deref(), Some("Functions: tint"), "its name first");
+        assert!(!texts(&ed, "color → tinted").is_empty(), "its ports");
+        chord(&mut ed, &mut world, &[ENTER]);
+        let call = ed.graphs[0].selected.iter().next().cloned().unwrap();
+        assert_eq!(call, "tint1");
+        let node = &ed.graphs[0].graph.nodes[&call];
+        assert_eq!(node.kind, engine_material_graph::FUNCTION_KIND);
+        assert_eq!(node.module, AssetRef::file(tint));
+        assert_eq!(node.signature, "void(float3 color, out float3 tinted)");
+        assert!(
+            ed.graphs[0].text.contains("materials/tint.mfunc"),
+            "{}",
+            ed.graphs[0].text
+        );
+        assert_eq!(ed.history.steps().count(), 1);
+        // Its output into the surface: the preview reads the function's input's value.
+        ed.graphs[0].edit(|g| {
+            g.link(PortRef::new(&call, "tinted"), PortRef::new("out", "base"));
+        });
+        ed.update(&mut world);
+        let value = |ed: &Editor| {
+            ed.graph_preview
+                .as_ref()
+                .and_then(|p| p.give.as_ref())
+                .and_then(|(file, _)| file.vectors.get("_tint1__c").cloned())
+        };
+        assert_eq!(value(&ed), Some(vec![1.0, 0.0, 1.0]), "the file's value");
+        // Tab: the function's tab, entered from the graph.
+        chord(&mut ed, &mut world, &[TAB]);
+        assert_eq!(ed.graphs.len(), 2);
+        let fd = ed.active_graph.unwrap();
+        assert!(ed.graphs[fd].function);
+        assert_eq!(ed.graphs[fd].entered_from, Some(ed.graphs[0].id));
+        // Edited there, unsaved: an input more, the colour's value green.
+        ed.graphs[fd].edit(|g| {
+            g.add("a", Node::new(input_kind(1), [0.0, 100.0]).named("amount"));
+            g.nodes.get_mut("c").unwrap().value = [0.1, 0.8, 0.1, 1.0];
+        });
+        ed.graphs[fd].selected.clear();
+        ed.update(&mut world);
+        // Tab with no call selected: back to the graph, whose call and preview follow.
+        chord(&mut ed, &mut world, &[TAB]);
+        assert_eq!(ed.active_graph, Some(0));
+        ed.update(&mut world);
+        assert_eq!(
+            ed.graphs[0].graph.nodes[&call].signature,
+            "void(float3 color, float amount, out float3 tinted)"
+        );
+        assert_eq!(ed.history.steps().count(), 1, "followed with no step");
+        assert_eq!(value(&ed), Some(vec![0.1, 0.8, 0.1]), "the tab's value");
+        // Ctrl+G on the colour feeding the call: a function of it beside the graph, called.
+        ed.graphs[0].edit(|g| {
+            g.link(PortRef::new("c", "rgba"), PortRef::new(&call, "color"));
+        });
+        ed.update(&mut world);
+        ed.graphs[0].selected = [String::from("c")].into_iter().collect();
+        chord(&mut ed, &mut world, &[CTRL, G]);
+        assert_eq!(ed.history.steps().count(), 2);
+        let text = std::fs::read_to_string(dir.join("materials/New Function.mfunc")).unwrap();
+        let (file, _) = GraphFile::parse_function(&text).unwrap();
+        assert_eq!(file.function().unwrap().nodes.len(), 2, "{text}");
+        let made = ed.graphs[0].selected.iter().next().cloned().unwrap();
+        assert_eq!(made, "new_function1");
+        assert!(!ed.graphs[0].graph.nodes.contains_key("c"));
+        assert_eq!(
+            ed.graphs[0].graph.links[&PortRef::new(&call, "color")],
+            PortRef::new(&made, "color")
+        );
+        // Ctrl+Alt+G: the colour again, linked as it was.
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[CTRL, ALT, G]);
+        assert_eq!(ed.history.steps().count(), 3);
+        assert!(!ed.graphs[0].graph.nodes.contains_key(&made));
+        assert_eq!(
+            ed.graphs[0].graph.links[&PortRef::new(&call, "color")],
+            PortRef::new("c", "rgba")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

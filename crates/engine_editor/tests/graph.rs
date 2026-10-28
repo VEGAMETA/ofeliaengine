@@ -565,3 +565,94 @@ fn a_calls_signature_follows_its_function_and_the_preview_draws_it() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// E10-3g-2b: a function's tab previews the function, its first output on the sphere, as
+/// its tab holds it: the session's unsaved edit (its input green), not its file's value
+/// (magenta).
+#[test]
+fn a_functions_tab_previews_it_as_the_tab_holds_it() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-function-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["materials", ".ofelia/autosave"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    std::fs::write(dir.join("main.scene"), "[scene version=4]\n").unwrap();
+    let id = AssetId::new();
+    let tint = |value: &str| {
+        format!(
+            "[mfunc version=1 id={id}]\n\n\
+             nodes[\"c\"].kind = \"input_float3\"\nnodes[\"c\"].param = \"color\"\n\
+             nodes[\"c\"].value = [{value}]\n\
+             nodes[\"o\"].kind = \"output_float3\"\nnodes[\"o\"].at = [300, 0]\n\
+             nodes[\"o\"].param = \"tinted\"\n\
+             links[\"o.value\"] = \"c.value\"\n"
+        )
+    };
+    std::fs::write(dir.join("materials/tint.mfunc"), tint("1, 0, 1, 1")).unwrap();
+    std::fs::write(
+        dir.join(".ofelia/autosave/tint.mfunc"),
+        tint("0.1, 0.8, 0.1, 1"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".ofelia/session"),
+        "[session version=1]\n\n[editor]\ngraph = 0\n\n[graph]\npath = \
+         \"materials/tint.mfunc\"\nautosave = \"autosave/tint.mfunc\"\n",
+    )
+    .unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor function test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    let count = |rgba: &[u8], test: &dyn Fn(&[u8]) -> bool| {
+        rgba.chunks_exact(4).filter(|p| test(p)).count()
+    };
+    let green = |p: &[u8]| p[1] > 150 && p[0] < 90 && p[2] < 90;
+    let magenta = |p: &[u8]| p[0] > 180 && p[2] > 180 && p[1] < 90;
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        count(shot, &green) > 3_000
+    });
+    println!(
+        "the function's tab drew its unsaved edit after {took:.2} s, {frames} frames: {} \
+         green pixels, {} magenta",
+        count(&shot, &green),
+        count(&shot, &magenta)
+    );
+    assert!(
+        count(&shot, &magenta) < 500,
+        "the file's value drawn, not the tab's"
+    );
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_FUNCTION_PNG") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &shot,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
