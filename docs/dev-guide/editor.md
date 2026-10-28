@@ -690,6 +690,8 @@ A click on a folder opens it, a click on a file picks it.
   - a model is drawn by the engine with its own materials, seen from the front and a
     little above;
   - a material is drawn on a sphere;
+  - a sound is its waveform over its whole length, every channel together; a part that
+    reaches full scale (it may clip) shows in orange;
   - other kinds show their icon.
 - **Sizing:** Ctrl+wheel over the tiles makes them larger or smaller.
 - **Renaming:** F2 after a click in the tiles renames the picked file in place (its

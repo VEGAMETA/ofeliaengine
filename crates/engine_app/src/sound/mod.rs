@@ -26,10 +26,12 @@
 mod acoustics;
 mod components;
 mod loader;
+mod waveform;
 
 pub use components::{
     AudioListener, AudioSource, AudioSource3D, Falloff, PlayMode, ReverbZone, Room,
 };
+pub use waveform::{Waveform, waveform};
 
 use acoustics::{Acoustics, PROBE_RAYS_PER_FRAME};
 use engine_audio::dsp::Reverb;

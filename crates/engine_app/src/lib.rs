@@ -123,7 +123,7 @@ pub use saves::{Autosave, QUICK_SLOT, SaveSettings, Saves};
 pub use settings::{DebuggerSettings, FrameCap, PlayerSettings, Window};
 pub use sound::{
     AcousticSettings, AudioListener, AudioSettings, AudioSource, AudioSource3D, BusSettings,
-    Falloff, Mixer, PlayMode, ReverbZone, Room, SoundFiles,
+    Falloff, Mixer, PlayMode, ReverbZone, Room, SoundFiles, Waveform, waveform,
 };
 pub use text::TextSource;
 pub use videos::{MaterialSlot, VideoId, Videos};
