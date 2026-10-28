@@ -75,6 +75,12 @@ pub struct ExtraQueues {
     /// video: it costs the RTX 4060 Ti 2.5 ms of `vkCreateDevice` (50 against 47.5 ms) and
     /// the Radeon nothing.
     pub video_decode: bool,
+    /// The driver's statistics of compiled pipelines (`VK_KHR_pipeline_executable_properties`),
+    /// as `ENGINE_PIPELINE_STATS=1` asks for them, where the adapter has them: the editor's
+    /// material costs (E10-4c). Creating pipelines costs no more for it (cold material
+    /// pipelines 532 against 542 ms on the Radeon, 758 against 768 ms on the RTX 4060 Ti,
+    /// 2026-10-29; cached ones keep their statistics).
+    pub pipeline_statistics: bool,
 }
 
 /// Where a library's extra queues start: family and index, for graphics and compute.
@@ -426,9 +432,11 @@ impl Device {
             }
         }
 
-        // The driver's statistics of compiled pipelines, on request: measuring shaders.
+        // The driver's statistics of compiled pipelines, on request: measuring shaders, the
+        // editor's material costs.
         let pipeline_statistics = adapter.caps.pipeline_executable_info
-            && std::env::var("ENGINE_PIPELINE_STATS").is_ok_and(|v| v == "1");
+            && (queues.pipeline_statistics
+                || std::env::var("ENGINE_PIPELINE_STATS").is_ok_and(|v| v == "1"));
         let mut e_statistics = vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR::default()
             .pipeline_executable_info(true);
         if pipeline_statistics {

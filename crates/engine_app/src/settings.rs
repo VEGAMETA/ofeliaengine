@@ -145,6 +145,10 @@ pub struct PlayerSettings {
     /// (ADR 0100; 2.5 ms of device creation on the RTX 4060 Ti, nothing on the Radeon).
     /// Without it they decode on the CPU (rav1d).
     pub video_decode: bool,
+    /// The driver's statistics of the pipelines the player makes (registers, spills), as
+    /// `ENGINE_PIPELINE_STATS=1` asks: what [`crate::Player::material_cost`] reads. The
+    /// editor turns it on (E10-4c); it costs pipeline creation nothing measured.
+    pub pipeline_statistics: bool,
     /// The frame drawn into an image of its own and copied into the swapchain image
     /// (`Some(true)`), or straight into it (`Some(false)`); `None`: apart only when the
     /// swapchain presents across adapters (`engine_render::present`).
@@ -315,6 +319,7 @@ impl Default for PlayerSettings {
             global_illumination: None,
             texture_feedback: true,
             video_decode: false,
+            pipeline_statistics: false,
             present_apart: None,
             tick_hz: 64.0,
             pipeline_cache: None,

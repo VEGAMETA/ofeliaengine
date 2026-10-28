@@ -814,6 +814,13 @@ A click on a folder opens it, a click on a file picks it.
   - **Apply to Base** writes the variant's own values into its base, so every variant of
     that base gets them, and leaves the variant naming its base alone, in one undo step;
     Ctrl+S writes both files;
+  - **what a material type costs** your GPU: once its shading is made, its **cost** row
+    (after its type) gives the fragment shader's registers over the shading variants made
+    (plain, with local lights, with the environment, with both), the engine's own shading's
+    beside them, what spills to memory, and its parameters' bytes: `39 registers (the
+    engine's 47) · 48 B of parameters`. Registers come first: on an integrated GPU they
+    decide how many pixels shade at once. A graph's bar says the same of its preview (the
+    editing build, its numbers parameters until saved);
   - **Apply to Selection** gives the material picked in the dock to the selected objects;
   - **New Type** writes your own material type from a template, named after the active
     object (`Water`: `water.slang` declaring `WaterMaterial`; `Custom` with none), and a

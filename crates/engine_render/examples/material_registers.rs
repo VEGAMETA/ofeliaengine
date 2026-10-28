@@ -108,9 +108,13 @@ fn main() {
         renderer.wait_for_material_types(&device, Duration::from_secs(120)),
         "the types' pipelines took over 2 minutes"
     );
+    let made = engine_rhi::creation_stats();
     println!(
-        "types' pipelines made in {:.2} s",
-        start.elapsed().as_secs_f64()
+        "types' pipelines made in {:.2} s; the driver's creation calls {:.1} ms over {} pipelines ({} from the cache)",
+        start.elapsed().as_secs_f64(),
+        made.time.as_secs_f64() * 1e3,
+        made.created,
+        made.cache_hits
     );
     let vgprs = |stats: &[engine_rhi::PipelineStatistic]| {
         if stats.is_empty() {

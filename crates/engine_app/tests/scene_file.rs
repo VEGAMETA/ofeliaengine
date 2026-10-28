@@ -273,6 +273,7 @@ fn a_typed_material_file_draws_its_look_then_its_type() {
         process_setup: false,
         pipeline_cache: Some(None),
         warm_up: false,
+        pipeline_statistics: true,
         ..PlayerSettings::default()
     };
     let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
@@ -431,6 +432,28 @@ fn a_typed_material_file_draws_its_look_then_its_type() {
         "the held values' preview: {r} {g} {b}"
     );
     assert!(frames <= 3, "drawn once: answered after {frames} frames");
+
+    // What its type costs this GPU (E10-4c): its fragment registers in the variant drawn,
+    // beside the engine's own shading's.
+    let ty = player.material_type(&dir.join("materials/stripes.slang"), "StripesMaterial");
+    let started = Instant::now();
+    let cost = loop {
+        if let Some(cost) = player.material_cost(ty) {
+            break cost;
+        }
+        player.frame(&mut game).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(60), "no cost");
+    };
+    let plain = cost.variants[0].expect("its plain shading made");
+    assert!(plain.registers > 0, "{cost:?}");
+    assert!(plain.engine.is_some_and(|e| e > 0), "{cost:?}");
+    println!(
+        "the stripes' fragment registers {} (the engine's {:?}), {} B spilled, read after {:.2} s",
+        plain.registers,
+        plain.engine,
+        plain.spill,
+        started.elapsed().as_secs_f64()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -399,3 +399,37 @@ numbers["roughness"] = 0.2
   reset to the base's for a number and a texture); in the editor, the title, ↺ back to the
   base's value with the variant's line gone, Apply to Base as one step (the base takes the
   value, the variant names its base alone) and its undo.
+
+### As built (E10-4c, 2026-10-29): what a material costs
+
+The materials UX note's item 12 (cost from measurements, registers first). Options weighed
+for where the numbers come from:
+
+- **a. The driver's statistics of every pipeline the editor makes (chosen).** The device
+  captures them (`VK_KHR_pipeline_executable_properties`) when the editor asks
+  (`PlayerSettings::pipeline_statistics`, `ExtraQueues::pipeline_statistics`; games do
+  not). Measured on ref-1 (2026-10-29, `material_registers` over a salted copy of the six
+  shading models so the drivers' caches miss): cold material pipelines took 532 ms with
+  the capture against 542 ms without on the Radeon, 758 against 768 ms on the RTX 4060 Ti,
+  within the runs' spread; pipelines from the cache keep their statistics.
+- **b. A second pipeline of the inspected type, made with the capture on demand.** One more
+  compile per inspected type, and two code paths for one number: no gain over a.
+
+What the editor shows:
+
+- `ForwardRenderer::material_type_cost(device, ty)` (`Player::material_cost`) reads the
+  type's main shading per variant (plain, local lights, environment, both): its fragment
+  stage's registers (AMD's `numUsedVgprs`, NVIDIA's `Register Count`, the perf gate's
+  watched names) and scratch, beside the engine's own shading's where made. It asks for the
+  variants (made off the frame's thread) and answers once no material type is being made;
+  a wait reads nothing and allocates nothing.
+- The material inspector's **cost** row after the type: `35–40 registers (the engine's
+  47–56), 128 B spilled · 48 B of parameters` (the parameters' size from the layout), read
+  once per layout revision.
+- A graph's bar: the same of its preview's type once a drawing of new code comes back,
+  marked as the editing build's (its numbers parameters, ADR 0123's answer 3a).
+- Tests: the statistics' names of both vendors read (the vertex stage's and AMD's
+  available VGPRs not); the cost row's text; on the GPU, the stripes type's cost after it
+  draws (39 VGPRs against the engine's 47 on the Radeon, 40 registers against 56 on the
+  RTX; no spills).
+- Not yet: SPIR-V instructions and image samples, compile time, Draw as Fallback.
