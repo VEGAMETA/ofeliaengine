@@ -785,7 +785,7 @@ Last updated: 2026-10-28.
     a playhead with seeking, Escape; played as the file is on an editor bus of its own
     (`Player::preview_sound`), streamed from where it is asked; an Ogg file's length from
     its last page.
-  - **E11-3c, a sound's waveform in the inspector** (#PR, ADR 0107's as-built): a band per
+  - **E11-3c, a sound's waveform in the inspector** (#401, ADR 0107's as-built): a band per
     channel, read on a thread of its own and drawn at the size it is shown; ▶, ■ and the
     loop; a click or a drag along it plays from there; its length, rate and channels,
     peak in dBFS and silence at each end. E11-3 is done but for sounds dropped on the
