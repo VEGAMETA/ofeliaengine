@@ -103,3 +103,89 @@ stay across a new layout for the buses that stay.
 - **Not done here:** the mixer panel (E11-1b), effects and sends (E11-2), packing the
   file for a shipped game with no project folder (it is read from the game's folder, as
   scenes are).
+
+## Effects and sends: version 2 (E11-2a, 2026-10-28)
+
+The decision above left effects and sends "lines of the same buses, added then". They
+come in version 2; a version 1 file reads as one without them, and an engine of version
+1 refuses a version 2 file instead of dropping its effects.
+
+```text
+[mixer version=2 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
+
+master.effects.0.kind = "limiter"
+master.effects.0.params["ceiling_db"] = -1
+buses["effects"].sends["canyon"].gain = -12
+buses["effects"].sends["canyon"].pre_fader = false
+buses["music"].effects.0.kind = "compressor"
+buses["music"].effects.0.bypass = false
+buses["music"].effects.0.sidechain = "voice"
+buses["music"].effects.0.params["threshold_db"] = -24
+buses["music"].effects.1.kind = "low_pass"
+buses["music"].effects.1.params["frequency_hz"] = 2000
+```
+
+- **Effects are a list** (`effects.0`, `effects.1`, in the grammar's list lines): a chain
+  has an order, and an effect put in front renumbers those behind it, as a chain must
+  (Godot's `bus/1/effect/0`). The master has effects too (a limiter last, most often); it
+  has no sends.
+- **A kind by its name** (`engine_audio::dsp::EFFECTS`): `compressor`, `limiter`,
+  `delay`, `reverb`, and a filter's shape as its own kind (`low_pass`, `high_pass`,
+  `band_pass`, `notch`, `peak`, `low_shelf`, `high_shelf`, `all_pass`), as Godot's filters
+  are. Options: **a.** one `filter` kind with a shape parameter, written as a number (0 to
+  7: a person reading the file cannot tell a low-pass from a notch) or as a string field
+  only filters have; **b.** a kind per shape. Taken: **b**, so every parameter is a
+  number and the inspector shows the shape as a choice among the filter kinds.
+- **Parameters by name, their units in the names** (`attack_ms`, `gain_db`,
+  `frequency_hz`; Godot does the same with `release_ms`): the file says what a number
+  means, and a time is in milliseconds where people think of one so (a delay of 250 ms,
+  not 0.25 s). `ParamInfo::scale` takes a value in its unit to the effect's own. A
+  parameter the file does not name plays at its default; the editor writes them all, so a
+  default changed in a later engine does not change a mix. A value beyond its range plays
+  at the range's end, and the file's problems say so.
+- **`bypass`** leaves the effect out of the mix: it costs nothing, and coming back its
+  tails and envelopes start from silence (an echo of what it heard before the bypass
+  would be a surprise). **`sidechain`** names the bus whose sound keys it.
+- **Sends are keyed by the bus they feed** (`sends["canyon"]`), as buses are by name:
+  adding one moves no line. Each has a level in dB and its tap (`pre_fader`).
+- **Loops are left out in one order:** the sends of each bus in the buses' order, then
+  the sidechains (the master's first), each kept if it does not loop the sound back
+  through what is kept so far (`MixerFile::routes`). The engine refuses loops too; the
+  file decides which one goes, so the player and the problems the editor shows agree.
+- **Problems** add: kinds the engine does not have (the effect holds its place and plays
+  nothing), parameters a kind does not have, values beyond their range, sends and
+  sidechains naming buses the layout lacks or the player keeps.
+
+### The player follows them live
+
+- **Effects carry on** where the new layout keeps them, their state with them (a
+  reverb's tail rings on through a move): each effect of the new chain takes the one of
+  the old that the layout gives the same, else the one of its kind at its place, else the
+  first of its kind left. Those left over go, new ones are made at their defaults and
+  given the file's values, each is moved to its place (`Audio::move_effect`), and only the
+  parameters and bypass that changed are sent.
+- **Routes the layout no longer has go first**, before any bus moves, so no move loops
+  through them. A move that would loop through a route the layout keeps (possible only in
+  the middle of a change of many) takes every send and sidechain away, moves, and lays
+  them again.
+- **A new send fades in** over 20 ms, as faders do; a send whose tap changes is made
+  again.
+
+### In `engine_audio` (amends ADR 0024)
+
+- `Audio::move_effect` (its place in its bus's chain), `Audio::set_effect_bypass` (left
+  out of the schedule; its sidechain's edge stays, so putting it back never loops; reset
+  when it comes back).
+- `Effect::reduction_db`, read after each sub-block, published per effect slot as the
+  peaks are (atomics, the most since the last read): `Audio::take_reduction` for the
+  compressor's and the limiter's meters.
+- `dsp::EFFECTS`, `dsp::effect_info`: each built-in kind's name, label, parameters
+  (name, label, index, range, default, unit, scale), whether a sidechain keys it and
+  whether it reduces gain, and how to make one at its defaults.
+
+### Not done here
+
+- The editor's rows, menus and inspector for them (E11-2b).
+- Latency compensation across buses (the limiter's 1.5 ms is not made up elsewhere).
+- A game's own effects in the file (a registry of kinds), VST3 plugins (ADR 0107), and
+  effects on the room's reverb.

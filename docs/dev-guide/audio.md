@@ -63,24 +63,48 @@ world.spawn((
   - `mixer.error()` says why there is no sound, if there is none.
 - **The buses and their faders** are the project's `main.mixer` (`settings.audio.layout`,
   ADR 0121). Without the file, four buses play at 0 dB: music, effects, voice and ui, the
-  3D sounds of effects and voice reverberating. The editor's mixer panel will write the
+  3D sounds of effects and voice reverberating. The editor's mixer panel writes the
   file; by hand it reads:
   ```text
-  [mixer version=1 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
+  [mixer version=2 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
 
   master.gain = 0
+  master.effects.0.kind = "limiter"
   buses["music"].gain = -8
+  buses["music"].effects.0.kind = "compressor"
+  buses["music"].effects.0.sidechain = "voice"
+  buses["music"].effects.0.params["threshold_db"] = -24
   buses["effects"].reverb = true
+  buses["effects"].sends["canyon"].gain = -12
+  buses["canyon"].effects.0.kind = "delay"
   buses["steps"].parent = "effects"
   buses["steps"].voices = 16
   ```
   - each bus by its name: `parent` (the bus it feeds; none for the master), `gain` in dB,
     `balance` (−1 to 1), `voices` (the most mixed at once, 0 for no limit), `reverb`;
+  - its `effects`, in the order the sound goes through them: a `kind` (the table below),
+    `bypass` (left out, costing nothing), `sidechain` (the bus whose sound keys it: music
+    ducked under the voice) and `params` by name, in the units their names say (those not
+    named keep their defaults; the master has effects too);
+  - its `sends`, by the bus they feed: `gain` in dB and `pre_fader` (the bus's fader
+    does not move a send taken before it);
+  - a send or a sidechain that would loop the sound back is left out, and the log says
+    which;
   - a file names its buses and no others: the four above play only without one;
   - the player reads it again when it is written, while it plays: buses come and go,
     move and fade, and what plays goes on;
   - a parent the file lacks or a loop of parents puts a bus under the master, and the log
     says so.
+
+  | `kind` | `params` (range, default) |
+  |---|---|
+  | `low_pass`, `high_pass`, `band_pass`, `notch`, `all_pass` | `frequency_hz` (20 to 20,000: 2,000, 200, 1,000, 1,000, 1,000), `q` (0.1 to 20: 0.707, 1 for band-pass and notch) |
+  | `peak`, `low_shelf`, `high_shelf` | `frequency_hz` (1,000, 200, 4,000), `q` (1, 0.707, 0.707), `gain_db` (−24 to 24, 0) |
+  | `compressor` (a sidechain keys it) | `threshold_db` (−60 to 0, −18), `ratio` (1 to 20, 4), `attack_ms` (0.1 to 200, 5), `release_ms` (5 to 2,000, 120), `knee_db` (0 to 24, 6), `makeup_db` (−12 to 24, 0) |
+  | `limiter` | `ceiling_db` (−24 to 0, −1), `release_ms` (5 to 1,000, 60) |
+  | `delay` | `time_ms` (1 to 2,000, 250), `feedback` (0 to 0.98, 0.35), `mix` (0 to 1, 0.35) |
+  | `reverb` (for a bus sends feed: fully wet) | `decay_s` (0.1 to 30, 1.5), `size` (0 to 1, 0.5), `damping_hz` (500 to 20,000, 8,000), `pre_delay_ms` (0 to 500, 20), `early` (0 to 1, 0.5), `mix` (0 to 1, 1) |
+
 - **No sound needed?** `settings.audio.enabled = false`. A game that plays nothing never
   opens the audio device anyway: it opens, on another thread, with the first sound.
 - **Cost on ref-1:**
@@ -241,7 +265,14 @@ audio.add_effect(BusId::MASTER, Limiter::new(-1.0))?;              // no clippin
 - **Your own effect:** implement `dsp::Effect`. `process` must not allocate or lock; it
   runs on the audio thread.
 - **Parameters are set by index;** each effect lists its indices as constants
-  (`Biquad::FREQUENCY`, `Compressor::THRESHOLD_DB`, ...).
+  (`Biquad::FREQUENCY`, `Compressor::THRESHOLD_DB`, ...). `dsp::effect_info("compressor")`
+  describes a built-in kind as the mixer file names it: its parameters' names, ranges,
+  defaults and units, and `make()` gives one at its defaults.
+- **Order and bypass:** `audio.move_effect(effect, 0)` puts an effect first in its bus's
+  chain, its state with it; `audio.set_effect_bypass(effect, true)` leaves it out of the
+  mix (it costs nothing), and putting it back starts its tails from silence.
+- **Gain reduction:** `audio.take_reduction(effect)` gives the most a compressor or a
+  limiter took since the last call, in dB, for a meter.
 - **Pre- and post-fader sends:** a `PreFader` send ignores the bus's own volume. A
   `PostFader` send follows it (the usual choice for reverb and echo).
 

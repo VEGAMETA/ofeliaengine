@@ -222,3 +222,10 @@ configuration, 61 voices, 5 effects):
 - **Latency:** the output latency is the device buffer plus the Windows engine
   (≈1.3 ms). The ref-1 run reports the actual buffer and period per mode, and the §5
   budget (≤ 5 ms buffer) is checked there.
+
+## Later (2026-10-28, ADR 0121's effects and sends)
+
+Effects move within their chain (`Audio::move_effect`) and can be bypassed
+(`Audio::set_effect_bypass`: left out of the schedule, reset when they come back); dynamics
+publish their gain reduction (`Effect::reduction_db`, `Audio::take_reduction`); the
+built-in kinds are described for files and editors (`dsp::EFFECTS`).

@@ -9,11 +9,13 @@
 mod biquad;
 mod delay;
 mod dynamics;
+mod info;
 mod reverb;
 
 pub use biquad::{Biquad, FilterKind};
 pub use delay::Delay;
 pub use dynamics::{Compressor, Limiter};
+pub use info::{EFFECTS, EffectInfo, ParamInfo, Unit, effect_info};
 pub use reverb::Reverb;
 
 /// One sub-block of a bus's stereo signal, processed in place.
@@ -48,6 +50,13 @@ pub trait Effect: Send + 'static {
     /// Delay the effect adds, in frames (for delay compensation).
     fn latency(&self) -> u32 {
         0
+    }
+
+    /// How far it lowers the gain right now, in dB (0 or more): a compressor's or a
+    /// limiter's gain reduction, read after each sub-block for the meters
+    /// ([`crate::Audio::take_reduction`]). Must not allocate.
+    fn reduction_db(&self) -> f32 {
+        0.0
     }
 }
 

@@ -498,6 +498,193 @@ fn a_new_layout_moves_fades_and_drops_buses_while_its_sounds_play() {
     );
 }
 
+/// Bus `name` of the bed's mixer as made.
+fn live_bus<'a>(bed: &'a Bed, name: &str) -> &'a super::Bus {
+    bed.sound.buses.iter().find(|b| b.name == name).unwrap()
+}
+
+/// An effect of `kind` with parameters `params` (the rest at their defaults).
+fn effect(kind: &str, params: &[(&str, f32)]) -> EffectLayout {
+    let mut e = EffectLayout::new(kind);
+    for (name, value) in params {
+        e.params.insert((*name).to_owned(), *value);
+    }
+    e
+}
+
+#[test]
+fn effects_follow_the_layout_and_carry_on_where_it_keeps_them() {
+    let mut bed = Bed::new("effects", AudioSettings::default());
+    write_level_wav(&bed.folder.join("level.wav"), u64::from(RATE), 0.25);
+    let e = bed
+        .world
+        .spawn((AudioSource::new("level.wav").on_bus("music").looped(),));
+    bed.until(|b| b.voice(e).is_some());
+    // The energy of 20 ms once the ramps are over and a compressor carried on has let go
+    // of what it took before (its release is 120 ms).
+    let level = |bed: &mut Bed| {
+        bed.frame(600);
+        energy(bed.frame(20).into_iter())
+    };
+    let full = level(&mut bed);
+    // A low shelf 6 dB down: the level (a constant, all low) at a quarter of the power.
+    let shelf = effect("low_shelf", &[("gain_db", -6.0)]);
+    let mut layout = MixerFile::builtin();
+    layout.buses.get_mut("music").unwrap().effects = vec![shelf.clone()];
+    bed.sound.set_layout(&layout);
+    let quarter = level(&mut bed);
+    assert!((quarter / full - 0.251).abs() < 0.02, "{quarter} of {full}");
+    let shelf_id = live_bus(&bed, "music").effects[0].id.unwrap();
+    // Bypassed: as it came.
+    layout.buses.get_mut("music").unwrap().effects[0].bypass = true;
+    bed.sound.set_layout(&layout);
+    assert!((level(&mut bed) / full - 1.0).abs() < 0.02);
+    // Back, and a compressor before it (−15 dBFS in, −30 at 4:1): the shelf carries on.
+    let comp = effect("compressor", &[("threshold_db", -30.0)]);
+    layout.buses.get_mut("music").unwrap().effects = vec![comp.clone(), shelf.clone()];
+    bed.sound.set_layout(&layout);
+    let first = level(&mut bed);
+    assert_eq!(live_bus(&bed, "music").effects[1].id, Some(shelf_id));
+    // 11.2 dB taken by the compressor, then 6 by the shelf.
+    assert!(
+        (first / full - 0.0190).abs() < 0.004,
+        "compressor first: {}",
+        first / full
+    );
+    let reduction = bed.sound.take_reduction("music", 0).unwrap();
+    assert!((reduction - 11.2).abs() < 0.5, "{reduction} dB");
+    assert_eq!(bed.sound.take_reduction("music", 1), Some(0.0), "a shelf");
+    // The other way round: both carry on, moved; the compressor sees 6 dB less.
+    layout.buses.get_mut("music").unwrap().effects = vec![shelf.clone(), comp.clone()];
+    bed.sound.set_layout(&layout);
+    let second = level(&mut bed);
+    assert!(
+        (second / full - 0.0536).abs() < 0.008,
+        "shelf first: {}",
+        second / full
+    );
+    assert_eq!(live_bus(&bed, "music").effects[0].id, Some(shelf_id));
+    // A parameter changed in place; then the compressor gone and the shelf still there.
+    layout.buses.get_mut("music").unwrap().effects[1]
+        .params
+        .insert(String::from("threshold_db"), 0.0);
+    bed.sound.set_layout(&layout);
+    assert!(
+        (level(&mut bed) / full - 0.251).abs() < 0.02,
+        "nothing compressed"
+    );
+    layout.buses.get_mut("music").unwrap().effects = vec![shelf];
+    bed.sound.set_layout(&layout);
+    assert!((level(&mut bed) / full - 0.251).abs() < 0.02);
+    assert_eq!(live_bus(&bed, "music").effects.len(), 1);
+    assert_eq!(live_bus(&bed, "music").effects[0].id, Some(shelf_id));
+    // A kind the engine lacks holds its place and plays nothing; the master has effects.
+    layout
+        .buses
+        .get_mut("music")
+        .unwrap()
+        .effects
+        .insert(0, effect("chorus", &[]));
+    layout
+        .master
+        .effects
+        .push(effect("limiter", &[("ceiling_db", -24.0)]));
+    bed.sound.set_layout(&layout);
+    let limited = level(&mut bed);
+    assert!(live_bus(&bed, "music").effects[0].id.is_none());
+    assert_eq!(live_bus(&bed, "music").effects[1].id, Some(shelf_id));
+    // The shelf leaves −21 dBFS, and the limiter −24: 9 dB under the level alone.
+    assert!(
+        (limited / full - 0.127).abs() < 0.015,
+        "limited: {}",
+        limited / full
+    );
+    assert!(bed.sound.take_reduction("master", 0).unwrap() > 2.0);
+}
+
+#[test]
+fn sends_and_sidechains_follow_the_layout() {
+    let mut bed = Bed::new("sends", AudioSettings::default());
+    write_level_wav(&bed.folder.join("level.wav"), u64::from(RATE), 0.25);
+    let mut layout = MixerFile::builtin();
+    layout
+        .buses
+        .insert(String::from("canyon"), BusLayout::new());
+    bed.sound.set_layout(&layout);
+    let music = bed
+        .world
+        .spawn((AudioSource::new("level.wav").on_bus("music").looped(),));
+    bed.until(|b| b.voice(music).is_some());
+    // What a bus mixed over 20 ms, once the ramps are over.
+    let peak = |bed: &mut Bed, bus: &str| {
+        bed.frame(120);
+        let _ = bed.sound.take_peak(bus);
+        bed.frame(20);
+        bed.sound.take_peak(bus).unwrap()[0]
+    };
+    let side = 0.25 * core::f32::consts::FRAC_1_SQRT_2;
+    assert_eq!(peak(&mut bed, "canyon"), 0.0);
+    // Music sends into canyon after its fader: canyon has it; then 6 dB less.
+    let send = |gain: f32, pre_fader: bool| SendLayout { gain, pre_fader };
+    fn sends(layout: &mut MixerFile) -> &mut std::collections::BTreeMap<String, SendLayout> {
+        &mut layout.buses.get_mut("music").unwrap().sends
+    }
+    sends(&mut layout).insert(String::from("canyon"), send(0.0, false));
+    bed.sound.set_layout(&layout);
+    assert!((peak(&mut bed, "canyon") - side).abs() < 1e-3);
+    sends(&mut layout).insert(String::from("canyon"), send(-6.0, false));
+    bed.sound.set_layout(&layout);
+    assert!((peak(&mut bed, "canyon") - side * 0.501).abs() < 1e-3);
+    // Music's fader 20 dB down: an after-fader send follows it, a before-fader one does not.
+    layout.buses.get_mut("music").unwrap().gain = -20.0;
+    bed.sound.set_layout(&layout);
+    assert!((peak(&mut bed, "canyon") - side * 0.0501).abs() < 1e-3);
+    sends(&mut layout).insert(String::from("canyon"), send(-6.0, true));
+    bed.sound.set_layout(&layout);
+    assert!((peak(&mut bed, "canyon") - side * 0.501).abs() < 1e-3);
+    assert_eq!(live_bus(&bed, "music").sends.len(), 1);
+    sends(&mut layout).clear();
+    bed.sound.set_layout(&layout);
+    assert_eq!(peak(&mut bed, "canyon"), 0.0, "gone");
+    assert!(live_bus(&bed, "music").sends.is_empty());
+    // A compressor on music (−10 at 4:1) keyed by the voice (+12 dB): music alone
+    // (−15 dBFS) is not compressed; the voice's −3 dBFS is.
+    layout.buses.get_mut("music").unwrap().gain = 0.0;
+    layout.buses.get_mut("music").unwrap().effects =
+        vec![effect("compressor", &[("threshold_db", -10.0)])];
+    layout.buses.get_mut("voice").unwrap().gain = 12.0;
+    bed.sound.set_layout(&layout);
+    let voice = bed
+        .world
+        .spawn((AudioSource::new("level.wav").on_bus("voice").looped(),));
+    bed.until(|b| b.voice(voice).is_some());
+    let reduction = |bed: &mut Bed, ms: u32| {
+        bed.frame(ms);
+        let _ = bed.sound.take_reduction("music", 0);
+        bed.frame(20);
+        bed.sound.take_reduction("music", 0).unwrap()
+    };
+    assert!(reduction(&mut bed, 120) < 0.01, "music alone");
+    layout.buses.get_mut("music").unwrap().effects[0].sidechain = String::from("voice");
+    bed.sound.set_layout(&layout);
+    let ducked = reduction(&mut bed, 120);
+    assert!(
+        (ducked - 5.2).abs() < 0.6,
+        "keyed by the voice: {ducked} dB"
+    );
+    assert_eq!(
+        live_bus(&bed, "music").effects[0].keyed_by.as_deref(),
+        Some("voice")
+    );
+    // Music sending into the voice as well would loop the sound back: the send stays, the
+    // sidechain goes.
+    sends(&mut layout).insert(String::from("voice"), send(-60.0, false));
+    bed.sound.set_layout(&layout);
+    assert_eq!(live_bus(&bed, "music").sends.len(), 1);
+    assert!(live_bus(&bed, "music").effects[0].keyed_by.is_none());
+    assert!(reduction(&mut bed, 600) < 0.2, "released");
+}
+
 #[test]
 fn the_editors_solo_and_mute_listen_on_top_of_the_games_mutes() {
     let mut bed = Bed::new("listening", AudioSettings::default());

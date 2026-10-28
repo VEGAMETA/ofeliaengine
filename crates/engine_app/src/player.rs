@@ -1475,6 +1475,13 @@ impl Player {
         self.sound.take_peak(bus)
     }
 
+    /// How far effect `effect` (its place in the chain) of bus `bus` (`master` for the
+    /// master's) lowered the gain since the last call, in dB (`None` without sound, such a
+    /// bus or such an effect): a compressor's or a limiter's meter in the editor.
+    pub fn take_effect_reduction(&self, bus: &str, effect: usize) -> Option<f32> {
+        self.sound.take_reduction(bus, effect)
+    }
+
     /// The blockout brushes' meshes (ADR 0110).
     pub fn blockout(&self) -> &crate::Blockout {
         &self.blockout

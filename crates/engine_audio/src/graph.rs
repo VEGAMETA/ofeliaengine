@@ -62,6 +62,9 @@ pub(crate) struct SendNode {
 pub(crate) struct EffectNode {
     pub(crate) bus: u16,
     pub(crate) sidechain: u16,
+    /// Left out of the schedule (its sidechain's edge stays, so turning it back on never
+    /// makes a cycle).
+    pub(crate) bypassed: bool,
 }
 
 pub(crate) struct Graph {
@@ -140,11 +143,11 @@ impl Graph {
             let node = self.bus(bus)?;
             let effects_start = schedule.effects.len() as u32;
             for &slot in &node.effects {
-                let sidechain = self
-                    .effects
-                    .get(slot as usize)
-                    .and_then(Option::as_ref)
-                    .map_or(NO_BUS, |e| e.sidechain);
+                let effect = self.effects.get(slot as usize).and_then(Option::as_ref);
+                if effect.is_some_and(|e| e.bypassed) {
+                    continue;
+                }
+                let sidechain = effect.map_or(NO_BUS, |e| e.sidechain);
                 schedule.effects.push(EffectStep { slot, sidechain });
             }
             let sends_start = schedule.sends.len() as u32;
