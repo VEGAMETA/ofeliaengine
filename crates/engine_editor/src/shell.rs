@@ -593,6 +593,22 @@ pub struct SoundPanel<'a> {
     pub silence: [f32; 2],
 }
 
+/// The inspector's material preview (E10-4d): the material shown, drawn by the engine on a
+/// sphere or on the selected object's mesh, under its section's header; a drag on it turns
+/// what it shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MaterialPanel<'a> {
+    /// The section it shows under.
+    pub section: usize,
+    /// Its picture; none while it is drawn.
+    pub image: Option<UiImage>,
+    /// Shown instead of the picture while it is drawn.
+    pub note: &'a str,
+}
+
+/// The material preview's side, at scale 1 (the engine's preview size).
+pub(crate) const MATERIAL_PREVIEW: f32 = 128.0;
+
 /// The inspector's waveform pressed, held or let go this frame (E11-3c): its node, whose
 /// laid-out rectangle says where along it the pointer is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -900,6 +916,8 @@ pub struct ShellModel<'a> {
     pub movable: [usize; 2],
     /// A sound file's waveform and its controls, under one of them (E11-3c).
     pub sound: Option<SoundPanel<'a>>,
+    /// The shown material's preview, under its section's header (E10-4d).
+    pub material_preview: Option<MaterialPanel<'a>>,
     /// The active entity's 3D sound's level over distance, the camera's distance marked
     /// (E11-4c, Unity's red line).
     pub falloff: Option<FalloffView<'a>>,
@@ -1067,6 +1085,8 @@ pub struct ShellResponse {
     pub sound_loop: bool,
     /// Its waveform was pressed, dragged along or let go.
     pub sound_wave: Option<WaveUse>,
+    /// The material preview was pressed, dragged or let go (E10-4d): it turns.
+    pub material_turn: Option<WaveUse>,
     /// The mixer (E11-1): + Bus was clicked.
     pub mixer_add: bool,
     /// A strip was clicked: its bus is picked.
@@ -2595,6 +2615,49 @@ fn falloff_panel(ui: &mut Ui, view: &FalloffView<'_>, p: &Palette) {
 
 /// The inspector's sound file (E11-3c): its waveform at the inspector's width, its silence
 /// shaded and the playhead over it, then ▶ or ■, the loop and the time.
+/// The material preview's square (E10-4d), centred under its section's header; a drag on it
+/// turns what it shows.
+fn material_panel(ui: &mut Ui, panel: &MaterialPanel<'_>, p: &Palette, out: &mut ShellResponse) {
+    ui.row(
+        "material preview",
+        Style {
+            size: [Size::Grow(1.0), Size::Fit],
+            padding: [SOUND_PAD, 6.0, SOUND_PAD, 4.0],
+            align_main: Align::Center,
+            ..Style::default()
+        },
+        |ui| {
+            let id = ui.container(
+                "picture",
+                Style {
+                    size: [Size::Fixed(MATERIAL_PREVIEW), Size::Fixed(MATERIAL_PREVIEW)],
+                    radius: 3.0,
+                    clip: true,
+                    background: Some(p.field),
+                    image: panel.image,
+                    align_main: Align::Center,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    if panel.image.is_none() {
+                        text(ui, "note", panel.note, SMALL, p.text_dim);
+                    }
+                },
+            );
+            let used = ui.sense(id, false);
+            if used.pressed || used.active || used.released {
+                out.material_turn = Some(WaveUse {
+                    node: id,
+                    pressed: used.pressed,
+                    held: used.active,
+                    released: used.released,
+                });
+            }
+        },
+    );
+}
+
 fn sound_panel(ui: &mut Ui, panel: &SoundPanel<'_>, p: &Palette, out: &mut ShellResponse) {
     let bands = f32::from(panel.channels.clamp(1, 2));
     let height = SOUND_BAND * bands;
@@ -3991,6 +4054,10 @@ fn inspector_dock(
                     // A sound file's waveform and controls under its section's header.
                     if let Some(panel) = model.sound.filter(|panel| panel.section == s) {
                         sound_panel(ui, &panel, p, out);
+                    }
+                    // The material's preview under its section's header (E10-4d).
+                    if let Some(panel) = model.material_preview.filter(|panel| panel.section == s) {
+                        material_panel(ui, &panel, p, out);
                     }
                     // A script's component: its file, as Godot's Script property.
                     if !section.script.is_empty() {

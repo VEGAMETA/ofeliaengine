@@ -433,3 +433,22 @@ What the editor shows:
   draws (39 VGPRs against the engine's 47 on the Radeon, 40 registers against 56 on the
   RTX; no spills).
 - Not yet: SPIR-V instructions and image samples, compile time, Draw as Fallback.
+
+### As built (E10-4d, 2026-10-29): the material's preview at the top of its section
+
+The materials UX note's item 11: the engine's own preview (ADR 0112), orbited by dragging.
+
+- **What it shows:** the shown material on the selected object's model's mesh when the
+  material is that model's, else on a sphere, through the player's previews (its own key,
+  `PREVIEW_SIZE` square) into a texture of its own under the section's header, "Drawing…"
+  until the first picture comes back.
+- **When it draws:** when its material doc changes (its values alone, the same shader and
+  type: drawn once, `same_code`); while it is dragged, at most one drawing a frame, the
+  turn about the vertical (sideways) and the sideways axis (up and down, a quarter turn each
+  way at most). A steady frame asks nothing and allocates nothing.
+- **Tests:** the preview on the box's own mesh, asked again after an edit (values alone),
+  turned by a drag, gone with nothing shown; on the GPU, the red material drawn in the
+  inspector's column (7322 pixels, 0.04–0.05 s on both GPUs) while the box is far out of
+  view.
+- Not yet: a model dropped on the preview, its own light and turn kept per material, a
+  larger picture.

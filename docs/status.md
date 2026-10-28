@@ -870,6 +870,9 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-4d, the material's preview** (#440, ADR 0120's as-built): at the top of its
+    inspector section, drawn by the engine on the selected object's mesh (a sphere from the
+    dock), redrawn on edits (values alone drawn once), turned by dragging.
   - **E10-4c, what a material costs** (#439, ADR 0120's as-built): the editor's device
     captures the driver's pipeline statistics (measured free: cold material pipelines
     532 vs 542 ms Radeon, 758 vs 768 ms RTX); a typed material's **cost** row gives its
@@ -994,8 +997,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-4's rest: the orbiting preview, per-node previews, Draw as Fallback, the
-       preview while dragging (and the cost's samples and compile time).
+       2D): E10-4's rest: per-node previews on graphs, Draw as Fallback, a material
+       shown on an object while dragged over it (and the cost's samples and compile
+       time).
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

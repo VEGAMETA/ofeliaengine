@@ -263,6 +263,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         files: &files,
         auto_play: true,
         sound: None,
+        material_preview: None,
         falloff: None,
         tile: 64.0,
         columns: 4,
