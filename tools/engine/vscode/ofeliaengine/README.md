@@ -10,5 +10,13 @@ panel: one set of breakpoints for both.
    The stack, the variables (`self` with its props and its entity's components), hovers,
    watches and the debug console work at a stop; F10, F11 and Shift+F11 step.
 
-The editor listens on 127.0.0.1 only and writes its port and a token to
-`.ofelia/debug/editor.json`; this extension reads them. Nothing else connects.
+**A player of the game,** without the editor: start a development build with
+`cargo run -- --debug` (or `-- --wait-for-debugger`, which keeps the world still until VS
+Code has set its breakpoints, so the first hooks stop too), then press F5 with **Attach to
+the player**. With several players running, pick one from the list. Stopped, the player's
+window title says where and its mouse is freed. Release and shipping builds have no
+debugger.
+
+The editor and the players listen on 127.0.0.1 only and write their port and a token to
+`.ofelia/debug/` (`editor.json`, `player-<pid>.json`); this extension reads them. Nothing
+else connects.
