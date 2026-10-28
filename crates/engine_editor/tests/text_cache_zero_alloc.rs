@@ -12,22 +12,46 @@ use engine_editor::shell::{
 };
 use engine_ui::{TextMeasure, Theme, Ui, UiInput};
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::backtrace::Backtrace;
+use std::cell::{Cell, RefCell};
 
 struct CountingAllocator;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
 thread_local! {
-    // Count the measuring thread only: other tests run on their own threads.
+    // Each measuring thread counts its own: the tests run at once on their own threads.
     static COUNTING: Cell<bool> = const { Cell::new(false) };
+    static COUNTED: Cell<usize> = const { Cell::new(0) };
+    // The stack of the first allocation counted, which a failure prints; what capturing it
+    // allocates is not counted.
+    static FIRST: RefCell<Option<Backtrace>> = const { RefCell::new(None) };
+    static CAPTURING: Cell<bool> = const { Cell::new(false) };
 }
 
 fn count() {
-    if COUNTING.with(Cell::get) {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    let counting = COUNTING.try_with(Cell::get).unwrap_or(false);
+    if !counting || CAPTURING.try_with(Cell::get).unwrap_or(true) {
+        return;
     }
+    COUNTED.set(COUNTED.get() + 1);
+    if COUNTED.get() == 1 {
+        CAPTURING.set(true);
+        let stack = Backtrace::force_capture();
+        FIRST.with_borrow_mut(|first| *first = Some(stack));
+        CAPTURING.set(false);
+    }
+}
+
+/// Runs `f` counting this thread's allocations: how many, and the first one's stack.
+fn counted(f: impl FnOnce()) -> (usize, String) {
+    COUNTED.set(0);
+    COUNTING.set(true);
+    f();
+    COUNTING.set(false);
+    let first = FIRST.with_borrow_mut(Option::take);
+    (
+        COUNTED.get(),
+        first.map(|s| s.to_string()).unwrap_or_default(),
+    )
 }
 
 // SAFETY: forwards to the system allocator; only adds a counter.
@@ -89,14 +113,15 @@ fn a_changing_text_is_laid_out_into_layouts_long_out_of_use() {
         frame(&mut text, n);
     }
     let (made, kept) = (text.layouts_made(), text.cached_layouts());
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
-    COUNTING.with(|c| c.set(true));
-    for n in 400..1000 {
-        frame(&mut text, n);
-    }
-    COUNTING.with(|c| c.set(false));
-    let n = ALLOCATIONS.load(Ordering::Relaxed) - before;
-    assert_eq!(n, 0, "{n} allocations laying out 600 new texts");
+    let (n, first) = counted(|| {
+        for n in 400..1000 {
+            frame(&mut text, n);
+        }
+    });
+    assert_eq!(
+        n, 0,
+        "{n} allocations laying out 600 new texts, the first:\n{first}"
+    );
     assert_eq!(text.layouts_made(), made + 600, "each laid out once");
     assert!(
         text.cached_layouts() <= kept + 1,
@@ -295,14 +320,12 @@ fn a_steady_shell_frame_does_not_allocate() {
         frame(&mut ui, &mut text);
     }
     let made = text.layouts_made();
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
-    COUNTING.with(|c| c.set(true));
-    for _ in 0..100 {
-        frame(&mut ui, &mut text);
-    }
-    COUNTING.with(|c| c.set(false));
-    let n = ALLOCATIONS.load(Ordering::Relaxed) - before;
-    assert_eq!(n, 0, "{n} allocations in 100 frames");
+    let (n, first) = counted(|| {
+        for _ in 0..100 {
+            frame(&mut ui, &mut text);
+        }
+    });
+    assert_eq!(n, 0, "{n} allocations in 100 frames, the first:\n{first}");
     assert_eq!(
         text.layouts_made(),
         made,
