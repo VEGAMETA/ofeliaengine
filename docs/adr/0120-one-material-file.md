@@ -153,3 +153,43 @@ double_sided = false
 - **Not done:** the editor's inspector shows a typed file's maps as plain values (E10-1c);
   the player draws a typed material's look (E10-1b); `<scene>.materials.ron` stays RON until
   scenes name materials by slot only (ADR 0115).
+
+## As built (E10-1b, 2026-10-28): typed materials drawn by the player
+
+- **Their layout off the frame:** the forward renderer's material compiler thread also
+  reflects a type's parameters' layout (`ForwardRenderer::material_params`): asked for the
+  first time it returns nothing and sends the reflection with the next
+  `update_material_types`; then the layout, or why it failed, and a revision. A reload of
+  the type's module reflects it again with its entry points and moves the revision, the
+  previous layout kept until then (and when the new one fails). Reflections count as
+  pending material types.
+- **The player** (`engine_app::Assets`) draws a typed `.material` on a `Model` with its look
+  at once. `Assets::make_material_types`, once a frame where the forward renderer is at
+  hand:
+  - registers the type;
+  - lays the parameters out once the layout comes, and again when the revision moves;
+  - asks for its texture parameters' images (`loading::Job::Image`, decoded or loaded
+    compressed from the derived data cache as glTF textures are);
+  - gives the material its parameters as the images are made.
+
+  A type that fails draws the look, and the file is an asset problem.
+- **Read again** (E4-5): the previous version draws until the new one is laid out and has
+  its images. An image written anew reads the material files that use it again.
+- **Previews** (the editor's thumbnails): one with a material type is drawn once to ask for
+  its pipelines and not answered. It is drawn again, and answered, once no material type's
+  pipeline is on its way.
+- **The editor** turns the types' hot reload on (`Player::set_material_hot_reload`).
+- **Measured** (ref-1, dev build, 320 × 180 offscreen):
+  - from load to drawn with its type: 1.62 s on the RTX, 1.05 s on the Radeon;
+  - the longest frame meanwhile: 7.6 ms on the RTX, 5.7 ms on the Radeon (nothing compiles
+    on the frame's thread);
+  - a file written anew drawn in 4 ms (the layout reflected already).
+- **Tests:** a cube draws its typed file's look first (green), then its type (red) on both
+  GPUs. A fabric's texture parameter gets its image. The type's preview shows the type. The
+  file written anew (blue) replaces the red only once laid out.
+- **Not done:**
+  - the inspector's parameter rows, New Material, Make Variant and Apply to Selection
+    (E10-1c);
+  - an image written anew keeps its previous texture until it is written again;
+  - a material type's preview waits for every material type's pipelines, not only its own.
+

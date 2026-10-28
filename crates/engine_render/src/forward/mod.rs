@@ -1750,6 +1750,19 @@ impl ForwardRenderer {
         self.material_types.error(ty)
     }
 
+    /// The layout of material type `ty`'s parameters (`<type>.Params`) as its shaders read
+    /// them, reflected on the material compiler's thread, never the frame's (ADR 0120's
+    /// E10-1b): `None` while it is on its way (asked for the first time here, sent by the
+    /// next [`Self::update_material_types`]); then the layout, or why it could not be
+    /// reflected, and its revision. A reload of the type's module reflects it again and
+    /// moves the revision; the previous layout stands until then.
+    pub fn material_params(
+        &self,
+        ty: MaterialTypeId,
+    ) -> Option<(Result<&engine_shader::StructLayout, &str>, u32)> {
+        self.material_types.params(ty)
+    }
+
     /// Starts frame `frame` for material types: pipelines a hot reload replaced are
     /// destroyed once the frames up to `completed` are done. Before
     /// [`Self::update_material_types`] (the frame renderer calls both).

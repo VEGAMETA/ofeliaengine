@@ -21,6 +21,11 @@
 //! frames that may use them are done ([`MaterialTypes::collect`]). A module that does not
 //! compile keeps the previous version drawing; its error is kept for tools
 //! ([`MaterialTypes::error`]).
+//!
+//! A type's parameters' layout ([`MaterialTypes::params`], ADR 0120's E10-1b) is reflected
+//! on the same thread when first asked for, and again with every reload, so what lays a
+//! material's parameters out at run time (the player's material files) never compiles on
+//! the frame's thread.
 
 use crate::material::MaterialTypeId;
 use engine_platform::fs_watch::{FileEventKind, WatchSet};
@@ -130,6 +135,20 @@ struct TypeEntry {
     precompiled: bool,
     /// The entry points frames drew the type with (PSO records, ADR 0092).
     drawn: BTreeSet<CString>,
+    /// Its parameters' layout ([`MaterialTypes::params`]), its revision (moved by each
+    /// reflection that arrives), and the generation of the latest reflection sent.
+    params: Params,
+    params_revision: u32,
+    params_generation: u32,
+}
+
+/// Where a type's parameters' layout stands.
+enum Params {
+    NotAsked,
+    /// Sent to the compiler's thread; nothing reflected yet.
+    Asked,
+    Ready(StructLayout),
+    Failed(String),
 }
 
 /// An entry point's SPIR-V by name, and the files the compile read.
@@ -151,6 +170,13 @@ enum Job {
         module: PathBuf,
         type_name: String,
     },
+    /// A type's parameters' layout (`<type>.Params`).
+    Params {
+        ty: MaterialTypeId,
+        generation: u32,
+        module: PathBuf,
+        type_name: String,
+    },
 }
 
 enum Done {
@@ -163,6 +189,11 @@ enum Done {
         ty: MaterialTypeId,
         generation: u32,
         result: Result<Compiled, String>,
+    },
+    Params {
+        ty: MaterialTypeId,
+        generation: u32,
+        result: Result<StructLayout, String>,
     },
 }
 
@@ -254,6 +285,27 @@ impl CompilerThread {
                             ty,
                             generation,
                         },
+                        Job::Params {
+                            ty,
+                            generation,
+                            module,
+                            type_name,
+                        } => Done::Params {
+                            result: match compiler.as_mut() {
+                                Some(compiler) => {
+                                    engine_shader::material_types::reflect_material_params(
+                                        compiler,
+                                        &shader_dir,
+                                        &module,
+                                        &type_name,
+                                    )
+                                    .map_err(|e| e.to_string())
+                                }
+                                None => Err(String::from("no Slang compiler")),
+                            },
+                            ty,
+                            generation,
+                        },
                     };
                     if done_tx.send(done).is_err() {
                         break;
@@ -294,6 +346,9 @@ pub(crate) struct MaterialTypes {
     types: Vec<TypeEntry>,
     /// Roles frames drew types with and found no pipeline for: handled by [`Self::update`].
     requests: RefCell<Vec<(MaterialTypeId, LazyPipeline)>>,
+    /// Types whose parameters' layout was asked for ([`Self::params`]): sent by
+    /// [`Self::update`].
+    params_requests: RefCell<Vec<MaterialTypeId>>,
     compiler: Option<CompilerThread>,
     shader_dir: PathBuf,
     /// Pipelines waiting for SPIR-V, and compiles in flight.
@@ -325,6 +380,7 @@ impl MaterialTypes {
         Self {
             types: Vec::new(),
             requests: RefCell::new(Vec::new()),
+            params_requests: RefCell::new(Vec::new()),
             compiler: None,
             shader_dir: PathBuf::from(ENGINE_SHADER_DIR),
             waiting: 0,
@@ -392,6 +448,9 @@ impl MaterialTypes {
             error: None,
             precompiled: false,
             drawn: BTreeSet::new(),
+            params: Params::NotAsked,
+            params_revision: 0,
+            params_generation: 0,
         });
         MaterialTypeId(self.types.len() as u16)
     }
@@ -451,6 +510,50 @@ impl MaterialTypes {
         self.types.get(index)?.error.as_deref()
     }
 
+    /// `ty`'s parameters' layout, or why it could not be reflected, and its revision;
+    /// `None` while it is on its way (asked for the first time here, sent by the next
+    /// [`Self::update`]). A reload of the type reflects it again: the revision moves when
+    /// that arrives, the previous layout kept until then (and when the reflection fails).
+    pub(crate) fn params(&self, ty: MaterialTypeId) -> Option<(Result<&StructLayout, &str>, u32)> {
+        let index = usize::from(ty.0).checked_sub(1)?;
+        let entry = self.types.get(index)?;
+        match &entry.params {
+            Params::NotAsked => {
+                self.params_requests.borrow_mut().push(ty);
+                None
+            }
+            Params::Asked => None,
+            Params::Ready(layout) => Some((Ok(layout), entry.params_revision)),
+            Params::Failed(why) => Some((Err(why.as_str()), entry.params_revision)),
+        }
+    }
+
+    /// Sends a reflection of `ty`'s parameters to the compiler's thread (started if need
+    /// be). Whether it went.
+    fn send_params(&mut self, ty: MaterialTypeId) -> bool {
+        let Some(entry) = self.types.get_mut(usize::from(ty.0) - 1) else {
+            return false;
+        };
+        if self.compiler.is_none() {
+            self.compiler = CompilerThread::start(self.shader_dir.clone());
+        }
+        entry.params_generation = entry.params_generation.wrapping_add(1);
+        let sent = self.compiler.as_ref().is_some_and(|c| {
+            c.jobs
+                .send(Job::Params {
+                    ty,
+                    generation: entry.params_generation,
+                    module: entry.desc.module.clone(),
+                    type_name: entry.desc.type_name.clone(),
+                })
+                .is_ok()
+        });
+        if sent {
+            self.compiling += 1;
+        }
+        sent
+    }
+
     /// `ty`'s pipeline standing in for `role`, once created (or its previous version
     /// while a reload's is being made); otherwise `None` (the role's own pipeline draws,
     /// with the glTF fallback) and, the first time, a request.
@@ -481,6 +584,28 @@ impl MaterialTypes {
     /// Requests, compiled entry points, changed files and pipelines to describe; once per
     /// frame, before the frame's passes are declared.
     pub(crate) fn update(&mut self, device: &Device) {
+        if !self.params_requests.borrow().is_empty() {
+            let asked = core::mem::take(&mut *self.params_requests.borrow_mut());
+            for ty in asked {
+                let index = usize::from(ty.0) - 1;
+                if !matches!(
+                    self.types.get(index).map(|t| &t.params),
+                    Some(Params::NotAsked)
+                ) {
+                    continue;
+                }
+                let state = if self.send_params(ty) {
+                    Params::Asked
+                } else {
+                    Params::Failed(String::from("no Slang compiler"))
+                };
+                let entry = &mut self.types[index];
+                if matches!(state, Params::Failed(_)) {
+                    entry.params_revision = entry.params_revision.wrapping_add(1);
+                }
+                entry.params = state;
+            }
+        }
         let requests = core::mem::take(&mut *self.requests.borrow_mut());
         let mut changed = false;
         for (ty, role) in requests {
@@ -585,6 +710,7 @@ impl MaterialTypes {
             }
         }
         let int64 = device.adapter().caps.shader_int64;
+        let mut reflect = Vec::new();
         for (k, t) in self.types.iter_mut().enumerate() {
             let Reload::Changed(at) = t.reload else {
                 continue;
@@ -633,8 +759,21 @@ impl MaterialTypes {
                     again: false,
                 };
                 self.compiling += 1;
+                // Its parameters may have changed too: reflected again, if they were asked
+                // for (the previous layout stands until the new one arrives).
+                if !matches!(t.params, Params::NotAsked) {
+                    reflect.push(MaterialTypeId(k as u16 + 1));
+                }
             } else {
                 t.reload = Reload::Idle;
+            }
+        }
+        for ty in reflect {
+            if self.send_params(ty)
+                && let Some(t) = self.types.get_mut(usize::from(ty.0) - 1)
+                && matches!(t.params, Params::Failed(_))
+            {
+                t.params = Params::Asked;
             }
         }
     }
@@ -774,6 +913,30 @@ impl MaterialTypes {
                 }
                 self.add_dependencies(index, &dependencies);
             }
+            Done::Params {
+                ty,
+                generation,
+                result,
+            } => {
+                let Some(t) = self.types.get_mut(usize::from(ty.0) - 1) else {
+                    return;
+                };
+                if t.params_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(layout) => t.params = Params::Ready(layout),
+                    Err(e) => {
+                        log::error!("material type {}: its parameters: {e}", t.desc.name);
+                        // A reload's failure keeps the layout the type had.
+                        if matches!(t.params, Params::Ready(_)) {
+                            return;
+                        }
+                        t.params = Params::Failed(e);
+                    }
+                }
+                t.params_revision = t.params_revision.wrapping_add(1);
+            }
         }
     }
 
@@ -849,6 +1012,10 @@ impl MaterialTypes {
             .flat_map(|t| t.pipelines.values())
             .filter(|d| matches!(d, Derived::Ready { derived, .. } if !derived.is_settled()))
             .count();
-        self.waiting + not_created + self.compiling + self.requests.borrow().len()
+        self.waiting
+            + not_created
+            + self.compiling
+            + self.requests.borrow().len()
+            + self.params_requests.borrow().len()
     }
 }
