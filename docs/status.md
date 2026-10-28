@@ -738,7 +738,7 @@ Last updated: 2026-10-28.
   - **E9-4c, one set of breakpoints with VS Code** (#389, ADR 0119's as-built): the editor's
     breakpoints reach VS Code as `breakpoint` events, attaching joins the two sets, and VS
     Code's own list keeps the editor's options. The script debugger's plan (E9) is done.
-  - **Scripts in the profiler** (#PR, ADR 0114's as-built): a Tracy zone a hook
+  - **Scripts in the profiler** (#390, ADR 0114's as-built): a Tracy zone a hook
     (`script Door.on_tick`); the editor's profiler lists each script's time, calls and
     memory a frame while the game plays, measured only while the panel is open.
   - **Next, in this order:**
