@@ -790,8 +790,15 @@ Last updated: 2026-10-28.
     loop; a click or a drag along it plays from there; its length, rate and channels,
     peak in dBFS and silence at each end. E11-3 is done but for sounds dropped on the
     viewport, the tree or an entity, and the sound and bus fields.
+  - **E11-1a, the mixer file** (#402, ADR 0121): the buses and faders in the project's
+    `main.mixer` (buses keyed by name: parent, gain in dB, balance, voices, reverb; the
+    master's gain and balance), the built-in four without it; the player lays its mixer
+    out again live (`Player::set_mixer_layout`, and when the file is written), what plays
+    going on; the game's `Mixer` volumes multiply the faders; `AudioSettings::buses` is
+    gone.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-1, the mixer file (`main.mixer`) and panel. Then E11-2, effects and sends,
+    1. E11-1b, the mixer panel (the Audio tab's strips) on `main.mixer`. Then E11-2,
+       effects and sends,
        E11-4b, handles and hearing in place, and E11-3's last part: sounds dropped on the
        viewport, the tree or an entity, and the sound and bus fields.
   - **Settled (2026-10-28, team decisions, every recommendation):**

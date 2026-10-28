@@ -1023,9 +1023,10 @@ impl Player {
             save_folder.clone(),
             std::sync::Arc::clone(&save_status),
         ));
-        // Sound (ADR 0105): the mixer and its buses now, the device with the first sound;
-        // the game sets the buses' volumes through the world's `Mixer`.
-        let sound = Sound::new(&settings.audio);
+        // Sound (ADR 0105): the mixer and its buses now, as the project's layout lays them
+        // out (ADR 0121), the device with the first sound; the game sets the buses'
+        // volumes on top of the faders through the world's `Mixer`.
+        let sound = Sound::new(&settings.audio, &load_layout(&layout_path(settings)));
         world.insert_resource(sound.mixer());
         // Networking (ADR 0106): the session the game asks for through `Network`.
         let net = settings.network.as_ref().map(|config| {
@@ -1436,6 +1437,29 @@ impl Player {
     /// the glTF files that use it again.
     pub fn asset_changed(&mut self, file: engine_scene::AssetId, path: &str) {
         self.assets.changed(&mut self.runtime.world, file, path);
+        // The mixer's layout written anew: the mixer follows it, what plays goes on.
+        if Path::new(path) == self.settings.audio.layout {
+            self.reload_mixer_layout();
+        }
+    }
+
+    /// The mixer laid out as `layout` says (ADR 0121): what the editor's mixer panel
+    /// holds, unsaved. Buses it no longer has go (their voices on to the master), new ones
+    /// are made, the others change where they stand.
+    pub fn set_mixer_layout(&mut self, layout: &crate::MixerFile) {
+        self.sound.set_layout(layout);
+    }
+
+    /// The mixer laid out again from its file (`AudioSettings::layout` under the project),
+    /// or the built-in buses without one.
+    pub fn reload_mixer_layout(&mut self) {
+        let layout = load_layout(&self.mixer_layout_path());
+        self.sound.set_layout(&layout);
+    }
+
+    /// Where the mixer's layout file is (`AudioSettings::layout` under the project).
+    pub fn mixer_layout_path(&self) -> PathBuf {
+        layout_path(&self.settings)
     }
 
     /// The blockout brushes' meshes (ADR 0110).
@@ -4788,4 +4812,25 @@ fn say_once(last: &mut Option<String>, said: &str) {
         log::warn!(target: "engine_app::player", "the player's physics: {said}");
         *last = Some(said.to_owned());
     }
+}
+
+/// Where the mixer's layout file is: `AudioSettings::layout` under the project.
+fn layout_path(settings: &PlayerSettings) -> PathBuf {
+    settings
+        .project
+        .as_deref()
+        .unwrap_or(Path::new(""))
+        .join(&settings.audio.layout)
+}
+
+/// The mixer's layout from the file at `path` (ADR 0121): the built-in buses without one,
+/// and when it cannot be read (said in the log).
+pub(crate) fn load_layout(path: &Path) -> crate::MixerFile {
+    if !path.is_file() {
+        return crate::MixerFile::builtin();
+    }
+    crate::MixerFile::load(path).unwrap_or_else(|e| {
+        log::warn!(target: "engine_app::sound", "{e}: the built-in buses play");
+        crate::MixerFile::builtin()
+    })
 }

@@ -25,12 +25,15 @@
 
 mod acoustics;
 mod components;
+mod layout;
 mod loader;
 mod waveform;
 
 pub use components::{
     AudioListener, AudioSource, AudioSource3D, Falloff, PlayMode, ReverbZone, Room,
 };
+use layout::linear;
+pub use layout::{BusLayout, MIXER_FILE_EXTENSION, MasterLayout, MixerFile, PlacedBus};
 pub use waveform::{Waveform, waveform};
 
 use acoustics::{Acoustics, PROBE_RAYS_PER_FRAME};
@@ -89,8 +92,10 @@ pub struct AudioSettings {
     pub pack: PathBuf,
     /// Which of the two the sounds are read from.
     pub files: SoundFiles,
-    /// The buses under the master, in order: a bus's parent is named before it.
-    pub buses: Vec<BusSettings>,
+    /// The mixer's layout (ADR 0121): the `.mixer` file at this path under the project
+    /// (`main.mixer`), its buses and faders. Without the file, the built-in four
+    /// ([`MixerFile::builtin`]): music, effects, voice and ui.
+    pub layout: PathBuf,
     /// Sounds this long or longer (seconds) stream; shorter ones are decoded once and kept
     /// in memory (a 10 s stereo sound takes 3.8 MB). WAV files are always decoded whole.
     pub stream_from: f32,
@@ -107,48 +112,11 @@ impl Default for AudioSettings {
             folder: PathBuf::from("sounds"),
             pack: PathBuf::from("sounds.pack"),
             files: SoundFiles::ByBuild,
-            buses: vec![
-                BusSettings::new("music"),
-                BusSettings::new("effects").reverberant(),
-                BusSettings::new("voice").reverberant(),
-                BusSettings::new("ui"),
-            ],
+            layout: PathBuf::from("main.mixer"),
             stream_from: 10.0,
             mixer: AudioConfig::default(),
             acoustics: AcousticSettings::default(),
         }
-    }
-}
-
-/// A bus of the player's mixer.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BusSettings {
-    /// Its name: sources and the [`Mixer`] name it.
-    pub name: String,
-    /// Linear gain to start with.
-    pub volume: f32,
-    /// The bus it feeds, by name (named before it); empty: the master.
-    pub parent: String,
-    /// Its [`AudioSource3D`]s reverberate with the room around the listener (effects and
-    /// voices do; music and the UI do not). Its plain [`AudioSource`]s never do.
-    pub reverb: bool,
-}
-
-impl BusSettings {
-    /// A bus at full volume into the master, dry.
-    pub fn new(name: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            volume: 1.0,
-            parent: String::new(),
-            reverb: false,
-        }
-    }
-
-    /// Its 3D sounds reverberate.
-    pub fn reverberant(mut self) -> Self {
-        self.reverb = true;
-        self
     }
 }
 
@@ -213,12 +181,14 @@ impl Mixer {
         self.buses.iter().map(|b| b.name.as_str())
     }
 
-    /// A bus's volume (linear gain).
+    /// A bus's volume set by the game (a linear factor, 1 to start with), on top of the
+    /// layout's fader.
     pub fn volume(&self, bus: &str) -> Option<f32> {
         self.bus(bus).map(|b| b.volume)
     }
 
-    /// Sets a bus's volume (linear gain); `false` for a name no bus has.
+    /// Sets a bus's volume (a linear factor) on top of the layout's fader: an options
+    /// menu's 0.8 keeps the mix's −6 dB under it. `false` for a name no bus has.
     pub fn set_volume(&mut self, bus: &str, volume: f32) -> bool {
         self.bus_mut(bus)
             .map(|b| b.volume = volume.max(0.0))
@@ -268,12 +238,19 @@ impl Mixer {
     }
 }
 
-/// A bus of the mixer, and the child its reverberating 3D sounds play on.
+/// A bus of the mixer as the layout made it, and the child its reverberating 3D sounds
+/// play on.
 struct Bus {
     name: String,
     id: BusId,
     /// Feeds `id` and the reverb (a bus with `reverb`).
     world: Option<BusId>,
+    /// The bus it feeds as made (`None`: the master; the master's own: `None`).
+    parent: Option<String>,
+    /// Its fader as a linear factor, under the game's volume.
+    fader: f32,
+    /// What the layout gave it last.
+    layout: BusLayout,
 }
 
 /// What a sound of the cache is.
@@ -504,7 +481,10 @@ struct Queries {
 /// children.
 struct ReverbBus {
     effect: EffectId,
-    sends: Vec<SendId>,
+    /// Bus id: the reverbing world child each send comes from.
+    sends: Vec<(BusId, SendId)>,
+    /// The reverb's own bus.
+    bus: BusId,
     /// What the effect and the sends were last given.
     sent: Room,
 }
@@ -531,8 +511,10 @@ pub(crate) struct Sound {
     /// Tests render the mixer themselves.
     manual: bool,
     error: Option<String>,
-    /// The buses, the master first.
+    /// The buses, the master first, then as the layout orders them.
     buses: Vec<Bus>,
+    /// The layout changed since the world's [`Mixer`] last followed it.
+    layout_changed: bool,
     reverb: Option<ReverbBus>,
     /// Where the sounds come from, said once at the start.
     note: String,
@@ -594,6 +576,13 @@ pub struct PreviewState<'a> {
     pub failed: Option<&'a str>,
 }
 
+/// The reverb's send from bus `world` forgotten (the bus went, and its sends with it).
+fn drop_sends(reverb: &mut Option<ReverbBus>, world: BusId) {
+    if let Some(reverb) = reverb {
+        reverb.sends.retain(|&(from, _)| from != world);
+    }
+}
+
 /// Where the sounds come from: the store, whether to watch the folder, and a note.
 fn choose_store(settings: &AudioSettings) -> (Store, bool, String) {
     let folder = || {
@@ -650,19 +639,28 @@ fn choose_store(settings: &AudioSettings) -> (Store, bool, String) {
 
 impl Sound {
     /// The player's sound: the mixer and its buses; the device opens with the first sound.
-    pub(crate) fn new(settings: &AudioSettings) -> Self {
-        Self::build(settings, false)
+    pub(crate) fn new(settings: &AudioSettings, layout: &MixerFile) -> Self {
+        Self::build(settings, layout, false)
     }
 
-    /// Without a device: the caller renders the mixer (tests).
+    /// Without a device: the caller renders the mixer (tests), the built-in buses.
     #[cfg(test)]
     pub(crate) fn manual(settings: &AudioSettings) -> (Self, Option<Renderer>) {
-        let mut sound = Self::build(settings, true);
+        Self::manual_with(settings, &MixerFile::builtin())
+    }
+
+    /// Without a device, with `layout`'s buses.
+    #[cfg(test)]
+    pub(crate) fn manual_with(
+        settings: &AudioSettings,
+        layout: &MixerFile,
+    ) -> (Self, Option<Renderer>) {
+        let mut sound = Self::build(settings, layout, true);
         let renderer = sound.renderer.take();
         (sound, renderer)
     }
 
-    fn build(settings: &AudioSettings, manual: bool) -> Self {
+    fn build(settings: &AudioSettings, layout: &MixerFile, manual: bool) -> Self {
         let (store, watch, note) = if settings.enabled {
             choose_store(settings)
         } else {
@@ -695,6 +693,7 @@ impl Sound {
             error: (!settings.enabled)
                 .then(|| String::from("sound is off (AudioSettings::enabled)")),
             buses: Vec::new(),
+            layout_changed: false,
             reverb: None,
             note,
             live_folder,
@@ -722,52 +721,122 @@ impl Sound {
         if !settings.enabled {
             return sound;
         }
-        let (mut audio, renderer) = Audio::new(&settings.mixer);
+        let (audio, renderer) = Audio::new(&settings.mixer);
         sound.buses.push(Bus {
             name: String::from("master"),
             id: BusId::MASTER,
             world: None,
+            parent: None,
+            fader: 1.0,
+            layout: BusLayout::new(),
         });
-        for bus in &settings.buses {
-            let parent = sound
-                .buses
-                .iter()
-                .find(|b| !bus.parent.is_empty() && b.name == bus.parent)
-                .map_or(BusId::MASTER, |b| b.id);
-            let id = match audio.add_bus(&bus.name, parent) {
-                Ok(id) => id,
-                Err(e) => {
-                    log::warn!(target: "engine_app::sound", "bus {}: {e}", bus.name);
-                    continue;
-                }
-            };
-            audio.set_bus_gain(id, bus.volume, 0.0);
-            // Its reverberating 3D sounds play on a child: the parent's volume still
-            // applies, and its plain sounds stay dry.
-            let world = bus
-                .reverb
-                .then(|| audio.add_bus(&format!("{}.world", bus.name), id).ok())
-                .flatten();
-            sound.buses.push(Bus {
-                name: bus.name.clone(),
-                id,
-                world,
-            });
-        }
         sound.audio = Some(audio);
         sound.renderer = Some(renderer);
+        sound.set_layout(layout);
+        sound.layout_changed = false;
         sound
     }
 
-    /// The world's [`Mixer`] for these buses.
-    pub(crate) fn mixer(&self) -> Mixer {
-        let volume = |name: &str| {
-            self.settings
+    /// The mixer laid out as `layout` says (ADR 0121), at the start and again whenever it
+    /// changes: buses it no longer has go (their voices on to the master), new ones are
+    /// made, the others moved, faded, balanced and limited where they stand, so what plays
+    /// goes on. The world's [`Mixer`] follows with the next update, keeping the game's
+    /// volumes of the buses that stay.
+    pub(crate) fn set_layout(&mut self, layout: &MixerFile) {
+        for problem in layout.problems() {
+            log::warn!(target: "engine_app::sound", "mixer layout: {problem}");
+        }
+        let Some(audio) = self.audio.as_mut() else {
+            return;
+        };
+        let order = layout.order();
+        // The master's fader and balance.
+        self.buses[0].fader = linear(layout.master.gain);
+        audio.set_bus_gain(BusId::MASTER, self.buses[0].fader, FADE);
+        audio.set_bus_pan(BusId::MASTER, layout.master.balance, FADE);
+        // Buses the layout no longer has, children first (their voices go on).
+        let gone: Vec<usize> = (1..self.buses.len())
+            .rev()
+            .filter(|&k| order.iter().all(|b| b.name != self.buses[k].name))
+            .collect();
+        for k in gone {
+            let bus = self.buses.remove(k);
+            if let Some(world) = bus.world {
+                let _ = audio.remove_bus(world);
+                drop_sends(&mut self.reverb, world);
+            }
+            let _ = audio.remove_bus(bus.id);
+        }
+        // Then every bus of the layout, each after the bus it feeds.
+        let mut made: Vec<Bus> = Vec::with_capacity(order.len() + 1);
+        made.push(self.buses.remove(0));
+        for placed in &order {
+            let parent = placed
+                .parent
+                .and_then(|p| made.iter().find(|b| b.name == p))
+                .map_or(BusId::MASTER, |b| b.id);
+            let existing = self
                 .buses
                 .iter()
-                .find(|b| b.name == name)
-                .map_or(1.0, |b| b.volume)
-        };
+                .position(|b| b.name == placed.name)
+                .map(|k| self.buses.remove(k));
+            let mut bus = match existing {
+                Some(mut bus) => {
+                    if bus.parent.as_deref() != placed.parent {
+                        let _ = audio.set_bus_parent(bus.id, parent);
+                    }
+                    bus.parent = placed.parent.map(str::to_owned);
+                    bus
+                }
+                None => match audio.add_bus(placed.name, parent) {
+                    Ok(id) => Bus {
+                        name: placed.name.to_owned(),
+                        id,
+                        world: None,
+                        parent: placed.parent.map(str::to_owned),
+                        fader: 1.0,
+                        layout: BusLayout::new(),
+                    },
+                    Err(e) => {
+                        log::warn!(target: "engine_app::sound", "bus {}: {e}", placed.name);
+                        continue;
+                    }
+                },
+            };
+            bus.fader = linear(placed.layout.gain);
+            audio.set_bus_gain(bus.id, bus.fader, FADE);
+            audio.set_bus_pan(bus.id, placed.layout.balance, FADE);
+            let limit = placed.layout.voices;
+            audio.set_bus_voice_limit(bus.id, (limit > 0).then_some(limit));
+            // Its reverberating 3D sounds play on a child: the bus's fader still
+            // applies, and its plain sounds stay dry.
+            match (placed.layout.reverb, bus.world) {
+                (true, None) => {
+                    bus.world = audio.add_bus(&format!("{}.world", bus.name), bus.id).ok();
+                    if let (Some(world), Some(reverb)) = (bus.world, self.reverb.as_mut())
+                        && let Ok(send) =
+                            audio.add_send(world, reverb.bus, reverb.sent.level, SendTap::PostFader)
+                    {
+                        reverb.sends.push((world, send));
+                    }
+                }
+                (false, Some(world)) => {
+                    let _ = audio.remove_bus(world);
+                    drop_sends(&mut self.reverb, world);
+                    bus.world = None;
+                }
+                _ => {}
+            }
+            bus.layout = placed.layout.clone();
+            made.push(bus);
+        }
+        self.buses = made;
+        self.layout_changed = true;
+    }
+
+    /// The world's [`Mixer`] for these buses: the game's volumes at 1, on top of the
+    /// layout's faders.
+    pub(crate) fn mixer(&self) -> Mixer {
         Mixer {
             buses: self
                 .buses
@@ -775,7 +844,7 @@ impl Sound {
                 .map(|b| MixerBus {
                     name: b.name.clone(),
                     id: b.id,
-                    volume: volume(&b.name),
+                    volume: 1.0,
                     muted: false,
                     changed: false,
                 })
@@ -1039,9 +1108,33 @@ impl Sound {
         let Some(audio) = self.audio.as_mut() else {
             return;
         };
+        // A new layout: the buses that stay keep the game's volumes, new ones start at 1,
+        // and every bus's gain is its fader again under them.
+        if core::mem::take(&mut self.layout_changed) {
+            let old = core::mem::take(&mut mixer.buses);
+            mixer.buses = self
+                .buses
+                .iter()
+                .map(|b| {
+                    let kept = old.iter().find(|m| m.name == b.name);
+                    MixerBus {
+                        name: b.name.clone(),
+                        id: b.id,
+                        volume: kept.map_or(1.0, |m| m.volume),
+                        muted: kept.is_some_and(|m| m.muted),
+                        changed: true,
+                    }
+                })
+                .collect();
+        }
         for bus in &mut mixer.buses {
             if core::mem::take(&mut bus.changed) {
-                audio.set_bus_gain(bus.id, bus.volume, 0.05);
+                let fader = self
+                    .buses
+                    .iter()
+                    .find(|b| b.id == bus.id)
+                    .map_or(1.0, |b| b.fader);
+                audio.set_bus_gain(bus.id, fader * bus.volume, 0.05);
                 audio.set_bus_mute(bus.id, bus.muted);
             }
         }
@@ -1277,12 +1370,14 @@ impl Sound {
                 .iter()
                 .filter_map(|b| b.world)
                 .filter_map(|world| {
-                    audio
+                    let send = audio
                         .add_send(world, bus, room.level, SendTap::PostFader)
-                        .ok()
+                        .ok()?;
+                    Some((world, send))
                 })
                 .collect();
             self.reverb = Some(ReverbBus {
+                bus,
                 effect,
                 sends,
                 sent: room,
@@ -1312,7 +1407,7 @@ impl Sound {
             sent.pre_delay = room.pre_delay;
         }
         if (room.level - sent.level).abs() > 0.005 {
-            for &send in &reverb.sends {
+            for &(_, send) in &reverb.sends {
                 audio.set_send_gain(send, room.level, 0.1);
             }
             sent.level = room.level;

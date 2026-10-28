@@ -57,9 +57,30 @@ world.spawn((
   where it was. `restart_on_load: true` starts it from the beginning instead (a jingle).
 - **Your options menu** goes through `world.resource_mut::<Mixer>()`:
   - `set_volume("music", 0.5)`, `set_muted("effects", true)`, `buses()`;
-  - the buses come from `settings.audio.buses`: music, effects, voice and ui by default;
+  - a volume you set multiplies the bus's fader in the mix: 0.8 keeps the mix's −6 dB
+    under it, and every volume starts at 1;
   - `mixer.bus_id("music")` puts a video's sound on a bus (`VideoDesc::bus`);
   - `mixer.error()` says why there is no sound, if there is none.
+- **The buses and their faders** are the project's `main.mixer` (`settings.audio.layout`,
+  ADR 0121). Without the file, four buses play at 0 dB: music, effects, voice and ui, the
+  3D sounds of effects and voice reverberating. The editor's mixer panel will write the
+  file; by hand it reads:
+  ```text
+  [mixer version=1 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
+
+  master.gain = 0
+  buses["music"].gain = -8
+  buses["effects"].reverb = true
+  buses["steps"].parent = "effects"
+  buses["steps"].voices = 16
+  ```
+  - each bus by its name: `parent` (the bus it feeds; none for the master), `gain` in dB,
+    `balance` (−1 to 1), `voices` (the most mixed at once, 0 for no limit), `reverb`;
+  - a file names its buses and no others: the four above play only without one;
+  - the player reads it again when it is written, while it plays: buses come and go,
+    move and fade, and what plays goes on;
+  - a parent the file lacks or a loop of parents puts a bus under the master, and the log
+    says so.
 - **No sound needed?** `settings.audio.enabled = false`. A game that plays nothing never
   opens the audio device anyway: it opens, on another thread, with the first sound.
 - **Cost on ref-1:**
@@ -102,8 +123,8 @@ impl Game for MyGame {
   - 32 rays in every direction measure how large the room is, how open it is to the sky,
     and what its walls are made of;
   - a cave rings, a small room answers briefly, an open field stays dry;
-  - 3D sounds on the effects and voice buses reverberate (`BusSettings::reverb`);
-    plain `AudioSource`s never do, whatever their bus.
+  - 3D sounds on buses with `reverb` reverberate (effects and voice without a
+    `main.mixer`); plain `AudioSource`s never do, whatever their bus.
 - **What surfaces are made of:** `mixer.set_absorption(material, 0.4)` for cloth, where
   `material` is the glTF material index (what `physics.surface_of` returns). The default
   of 0.1 suits plaster and wood; stone is about 0.02.
