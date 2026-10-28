@@ -397,6 +397,39 @@ mod tests {
     }
 
     #[test]
+    fn the_new_material_types_template_compiles_inside_forward_slang() {
+        let dir = std::env::temp_dir().join(format!("slang_template_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let Some(mut analyzer) = SlangAnalyzer::new(&dir) else {
+            assert!(
+                std::env::var("ENGINE_REQUIRE_SLANG").is_err(),
+                "no Slang library"
+            );
+            return;
+        };
+        let text = crate::material::type_template("Water");
+        analyzer.set_source("water.slang", &text);
+        let found = analyzer.check("water.slang");
+        let errors: Vec<_> = found
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        // The check is real: a misspelt field is found at its line.
+        let typo = text.replacen("p.metallic;", "p.metalic;", 1);
+        analyzer.set_source("water.slang", &typo);
+        let line = typo.lines().position(|l| l.contains("p.metalic")).unwrap();
+        assert!(
+            analyzer
+                .check("water.slang")
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.start.0 as usize == line),
+            "the typo at line {line}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn findings_are_placed_in_the_module_or_on_its_first_line() {
         let dir = std::env::temp_dir().join(format!("slang_check_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -803,7 +803,16 @@ A click on a folder opens it, a click on a file picks it.
   - **Make Variant** copies the material shown beside its file (`Red 2.material`, with its
     unsaved edits and an id of its own) and gives the copy to the selected objects in one
     undo step; the original stays as it is;
-  - **Apply to Selection** gives the material picked in the dock to the selected objects.
+  - **Apply to Selection** gives the material picked in the dock to the selected objects;
+  - **New Type** writes your own material type from a template, named after the active
+    object (`Water`: `water.slang` declaring `WaterMaterial`; `Custom` with none), and a
+    material file of it beside it (`water.material`: a grey color, roughness 0.5, not
+    metallic), both in the dock's folder. The file goes to the selected objects in one undo
+    step, and the module opens in a code tab at its surface, the line to write in. Until
+    its shaders are made (1-2 s the first time) the objects draw the file's look.
+    Each Ctrl+S of the module compiles it again, the previous version drawing meanwhile and
+    on an error; a field added to its parameters becomes a row of the material once it has
+    compiled, the other values kept by name.
 
 **`#` in the command palette** finds assets by path: `#crate`, or with a kind first,
 `#model:crate`, `#texture:rock` (`scene`, `material`, `model` or `mesh`, `texture`, `sound`
