@@ -719,7 +719,7 @@ Last updated: 2026-10-28.
       continued, the scripts' log in the console);
     - the extension (`tools/engine/vscode/ofeliaengine`): Attach to the editor, Attach and
       Play; `ofeliaengine new` writes `launch.json` and installs its `.vsix`.
-  - **E9-3, the standalone player's debugger** (#PR, ADR 0119's as-built):
+  - **E9-3, the standalone player's debugger** (#386, ADR 0119's as-built):
     - `cargo run -- --debug` (`--wait-for-debugger` keeps the world still until VS Code is
       ready) in a development build; the endpoint moved to `engine_app::dap`, the requests
       about a stop answered alike for the editor and the player;
