@@ -829,7 +829,7 @@ Last updated: 2026-10-28.
     or another selection; Sound: Listen to the Scene plays every source set to play;
     nothing written back (`Player::audition`, copies of the components). E11-4 is done but
     for View: Sound Ranges and the falloff curve.
-  - **E11-3d-1, sounds dropped into the scene** (#PR, ADR 0107's as-built): onto an object
+  - **E11-3d-1, sounds dropped into the scene** (#410, ADR 0107's as-built): onto an object
     (viewport or row) it plays there in 3D; on the floor (or with Alt) a new entity named
     after the file on the surface; into the tree, heard as it is; one undo step each.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
