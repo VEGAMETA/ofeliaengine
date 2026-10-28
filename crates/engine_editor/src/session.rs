@@ -239,6 +239,15 @@ pub(crate) struct ScriptDoc {
     pub(crate) scroll: [f32; 2],
 }
 
+/// A material file the session had unsaved edits of (ADR 0120's E10-1c).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MaterialEntry {
+    /// Its file, relative to the project.
+    pub(crate) path: PathBuf,
+    /// Its unsaved text, relative to `.ofelia/`.
+    pub(crate) autosave: Option<PathBuf>,
+}
+
 /// The editor's own state, the same for every scene.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct EditorState {
@@ -288,6 +297,8 @@ pub(crate) struct SessionFile {
     /// The scripts' breakpoints (ADR 0119): a script's file (relative to the project) and
     /// one of its breakpoints, a `[breakpoint]` block each.
     pub(crate) breakpoints: Vec<(PathBuf, Mark)>,
+    /// Material files with unsaved edits, a `[material]` block each.
+    pub(crate) materials: Vec<MaterialEntry>,
 }
 
 /// The session file's version. Keys and sections it does not know are skipped, so a
@@ -438,6 +449,16 @@ impl SessionFile {
             let ((line, col), [x, y]) = (s.caret, s.scroll);
             let _ = writeln!(out, "caret = ({line}, {col})\nscroll = ({x}, {y})");
         }
+        for m in &self.materials {
+            out.push_str("\n[material]\npath = ");
+            quote_into(&mut out, &slashes(&m.path));
+            out.push('\n');
+            if let Some(path) = &m.autosave {
+                out.push_str("autosave = ");
+                quote_into(&mut out, &slashes(path));
+                out.push('\n');
+            }
+        }
         // Lines as people read them, from 1.
         for (path, m) in &self.breakpoints {
             out.push_str("\n[breakpoint]\npath = ");
@@ -487,6 +508,7 @@ impl SessionFile {
             Editor,
             Document,
             Script,
+            Material,
             Breakpoint,
             /// A section of a later editor: skipped.
             Other,
@@ -529,6 +551,13 @@ impl SessionFile {
                             scroll: [0.0; 2],
                         });
                         Section::Script
+                    }
+                    "[material]" => {
+                        file.materials.push(MaterialEntry {
+                            path: PathBuf::new(),
+                            autosave: None,
+                        });
+                        Section::Material
                     }
                     "[breakpoint]" => {
                         // No line until its `line` key: a block without one is dropped.
@@ -664,6 +693,18 @@ impl SessionFile {
                     };
                     read_script_key(s, key, value).map_err(at)?;
                 }
+                Section::Material => {
+                    let Some(m) = file.materials.last_mut() else {
+                        continue;
+                    };
+                    match key {
+                        "path" => m.path = PathBuf::from(unquote(value).map_err(at)?),
+                        "autosave" => {
+                            m.autosave = Some(PathBuf::from(unquote(value).map_err(at)?));
+                        }
+                        _ => {}
+                    }
+                }
                 Section::Breakpoint => {
                     let Some((path, m)) = file.breakpoints.last_mut() else {
                         continue;
@@ -675,6 +716,7 @@ impl SessionFile {
         // A block without its file or line names nothing.
         file.breakpoints
             .retain(|(path, m)| !path.as_os_str().is_empty() && m.line != usize::MAX);
+        file.materials.retain(|m| !m.path.as_os_str().is_empty());
         Ok(file)
     }
 }
@@ -861,6 +903,16 @@ pub(crate) fn autosave_name(scene: Option<&Path>, id: AssetId) -> PathBuf {
         |s| s.to_string_lossy().into_owned(),
     );
     PathBuf::from(format!("autosave/{stem}-{id}.scene"))
+}
+
+/// Where a material file's unsaved text goes, relative to `.ofelia/` (E10-1c): by its file's
+/// stem and a hash of its path, as a script's.
+pub(crate) fn material_autosave_name(material: &Path) -> PathBuf {
+    let stem = material
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let hash = engine_core::hash::state_hash64(slashes(material).as_bytes());
+    PathBuf::from(format!("autosave/{stem}-{hash:016x}.material"))
 }
 
 /// Where a script's unsaved text goes, relative to `.ofelia/`: by its file's stem and a
@@ -1201,6 +1253,10 @@ mod tests {
                 active: Some(1),
                 script: Some(0),
             },
+            materials: vec![MaterialEntry {
+                path: PathBuf::from("materials/red.material"),
+                autosave: Some(material_autosave_name(Path::new("materials/red.material"))),
+            }],
             breakpoints: vec![
                 (
                     PathBuf::from("scripts/door.luau"),

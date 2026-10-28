@@ -444,6 +444,9 @@ pub(crate) struct MaterialDoc {
     pub(crate) layout: Option<(u32, Result<StructLayout, String>)>,
     /// Given to the player since it last changed.
     pub(crate) given: bool,
+    /// The change count its unsaved text was autosaved at, and when an autosave is due.
+    pub(crate) autosaved: Option<u64>,
+    pub(crate) due: Option<std::time::Instant>,
     /// Its rows, their shown texts and each row's range of them.
     pub(crate) rows: Vec<Row>,
     pub(crate) texts: Vec<String>,
@@ -474,6 +477,8 @@ impl MaterialDoc {
             ty: None,
             layout: None,
             given: false,
+            autosaved: None,
+            due: None,
             rows: Vec::new(),
             texts: Vec::new(),
             spans: Vec::new(),

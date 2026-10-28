@@ -735,7 +735,18 @@ A click on a folder opens it, a click on a file picks it.
   An edit shows in the scene by the next frame, and nothing compiles: drag a number, type
   it, pick a choice, or ↺ to put a value back. Every edit is an undo step in the one
   history (a drag one step). The section reads "Material (unsaved: Ctrl+S)" until **Ctrl+S**
-  writes the file with the scene.
+  writes the file with the scene; unsaved edits are kept with the session, as a script's
+  are, and come back with the editor.
+- **From the object:** a selected object whose model has a material file shows that
+  material's rows after its components, with how many of the scene's objects use it
+  ("Material · used by 40 objects"): an edit there changes all of them.
+- **Material commands** (the palette):
+  - **New Material** makes `New Material.material` in the dock's folder and gives it to the
+    selected objects in one undo step (picked in the dock when none is selected);
+  - **Make Variant** copies the material shown beside its file (`Red 2.material`, with its
+    unsaved edits and an id of its own) and gives the copy to the selected objects in one
+    undo step; the original stays as it is;
+  - **Apply to Selection** gives the material picked in the dock to the selected objects.
 
 **`#` in the command palette** finds assets by path: `#crate`, or with a kind first,
 `#model:crate`, `#texture:rock` (`scene`, `material`, `model` or `mesh`, `texture`, `sound`

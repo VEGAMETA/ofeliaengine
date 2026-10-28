@@ -233,3 +233,35 @@ double_sided = false
   - edits made during Play stay, but their steps go with Play's;
   - image previews on image rows.
 
+## As built (E10-1c-2, 2026-10-28): from the object, the material commands, autosaves
+
+- **From the object:** the material shown is the file picked in the dock, else the selected
+  entity's `Model.material` when it is a material file. Its rows come after the entity's
+  components, and the section's title counts the scene's models that use it ("Material ·
+  used by 3 objects"). Edits there are the material's, as from the dock.
+- **The palette's Material commands:**
+  - **New Material:** `New Material.material` (a number after it when taken) in the dock's
+    folder, a standard material with an id of its own and its `.meta`. It is given to the
+    selected models in one step, else picked in the dock.
+  - **Make Variant:** the material shown copied beside its file (`Red 2.material`), its
+    unsaved edits with it, with an id of its own, given to the selected models in one step.
+    The original stays as it is (the UX note's "a copy first", variants by `base` in E10-4).
+  - **Apply to Selection:** the material picked in the dock given to the selected models.
+  - Giving is `Model.material` set on every selected model as one undo step; the files are
+    made on disk, not undone.
+- **Unsaved edits in the session,** as scripts' are: a dirty material's text goes to
+  `.ofelia/autosave/<stem>-<hash>.material` once the edits are quiet (and at once before
+  Play, a restart and the end). The session lists it in a `[material]` block, and a new
+  editor holds the file again with its edits, unsaved. Saving deletes the autosave.
+- **Tests:**
+  - New Material given to the selected box, its rows and its users under the box, an edit
+    there, Make Variant with the edit given to the box and the original kept, undo putting
+    the original back, Apply to Selection;
+  - a material's unsaved edit back in a new editor's session, the file untouched until
+    Ctrl+S, the autosave gone after it;
+  - the session's `[material]` block read back.
+- **Not done:**
+  - the material's thumbnail before its edits are saved (it is drawn from the file);
+  - material slots as asset fields (ADR 0115's last item);
+  - variants that follow their base (`base`, E10-4).
+
