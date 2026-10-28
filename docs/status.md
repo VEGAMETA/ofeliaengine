@@ -759,7 +759,7 @@ Last updated: 2026-10-28.
   - **E11-3a, sounds' waveforms in the dock** (#394, ADR 0107's as-built): a sound's tile is
     its waveform, read once on the thumbnail thread (`engine_app::waveform`) and cached;
     3 minutes of Ogg in 188 ms, off the frame.
-  - **E10-1a, one material file** (#PR, ADR 0120): `.material` version 2 holds a type's
+  - **E10-1a, one material file** (#395, ADR 0120): `.material` version 2 holds a type's
     instance (its shader and type, numbers, vectors and textures by field name, its look);
     the cook (`--project`) and the run time read it with the project's root; the six golden
     files converted; `.material.ron` retired.
