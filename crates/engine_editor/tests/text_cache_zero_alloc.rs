@@ -186,6 +186,7 @@ fn a_steady_shell_frame_does_not_allocate() {
             widget: Widget::Choice {
                 current: "Opaque",
                 open: Some(&["Opaque", "Mask", "Blend"]),
+                missing: false,
             },
             changed: false,
         },

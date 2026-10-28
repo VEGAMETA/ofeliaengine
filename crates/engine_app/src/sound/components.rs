@@ -49,9 +49,11 @@ pub enum Falloff {
 pub struct AudioSource {
     /// The sound: a file under the sounds folder ([`crate::AudioSettings::folder`]) by its
     /// path, with `/` (`music/theme.ogg`): WAV, Ogg Vorbis, Opus or FLAC.
+    #[reflect(hint = "sound")]
     pub sound: String,
-    /// The bus it plays on, by name ([`crate::AudioSettings::buses`]); a name no bus has
-    /// plays on the master. Read when it starts.
+    /// The bus it plays on, by name: one of the mixer's layout (`main.mixer`, ADR 0121),
+    /// or `master`; a name no bus has plays on the master. Read when it starts.
+    #[reflect(hint = "bus")]
     pub bus: String,
     /// Linear gain.
     pub volume: f32,

@@ -2254,6 +2254,35 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **E11-4 is done** but for View: Sound Ranges, the inspector's falloff curve with the
   camera's distance, and blockout's radius handles.
 
+## As built (E11-3d-2a, 2026-10-28): sound and bus fields
+
+- **The mark** (the team's 4a): `engine_reflect::Hint::Sound` and `Hint::Bus`, given by
+  `#[reflect(hint = "sound")]` and `#[reflect(hint = "bus")]`; `AudioSource::sound` and
+  `AudioSource::bus` carry them. The format and the scripting API stay: a sound is still
+  named by its path under the sounds folder, a bus by its name.
+- **A sound field** is an asset field (E4-6c's): the file's waveform tile from the
+  thumbnail cache (its path joined in a string the editor keeps, no allocation a frame),
+  its name, and ▶ (■ while the preview plays it) on the editor's preview bus (E11-3b).
+  - A click opens `#sound:` for the field; Enter gives it the sound (E4-3's field drop),
+    and with Auto Play on, each file the arrows reach plays from its start; Escape
+    closes the list and stops it.
+  - A drop takes only a sound under the sounds folder, on every selected entity with the
+    component, as one undo step; a model is refused with a message.
+- **A bus field** is a list of `master` and the mixer's buses in its strips' order, read
+  when it opens (the mixer's layout held for it, the built-in buses without a file). A
+  name the layout lacks (the source plays on the master, ADR 0121) is shown in the error
+  color after ⚠ (`Widget::Choice::missing`), the UX note's §12.
+- **Tests:** through the editor's frames: the field showing the file it names, ▶ only for
+  a file there is, a sound given (one step) and a model refused, ▶ playing and stopping,
+  the palette's sounds for the field with the arrows playing each one only with Auto Play
+  on, Enter keeping it playing and Escape stopping it, the bus list, a bus chosen, a
+  missing bus marked, and undo taking each step back.
+- **Next (E11-3d-2b):** renames follow the marks: a sound moved or renamed in the dock
+  rewrites the marked strings naming it (the open scene, what undo keeps, the other
+  scenes and prefabs on disk) and lists the scripts' literals; a bus renamed in the mixer
+  rewrites the open scene's bus fields in the same step and lists the other files; Find
+  References finds sounds' and buses' users.
+
 ## As built (E11-3d-1, 2026-10-28): sounds dropped into the scene
 
 - **Onto an object** (under the pointer in the viewport, or its row in the tree): it plays

@@ -145,6 +145,11 @@ pub enum Hint {
     Degrees,
     /// Multi-line text.
     Multiline,
+    /// A sound file under the sounds folder, by its path (`ambience/hum.wav`): the
+    /// editor's sound field (a file dropped on it, the `#sound:` list).
+    Sound,
+    /// A mixer bus, by name: the editor's list of the mixer's buses.
+    Bus,
 }
 
 /// Attributes of a field (or type), shared by the four users of reflection.

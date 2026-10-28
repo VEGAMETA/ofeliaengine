@@ -279,6 +279,7 @@ fn main() {
             widget: Widget::Choice {
                 current: "World",
                 open: None,
+                missing: false,
             },
             changed: false,
         },
