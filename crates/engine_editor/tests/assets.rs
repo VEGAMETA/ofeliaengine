@@ -620,3 +620,110 @@ fn a_model_dragged_from_the_browser_rests_on_the_floor_and_draws() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// E10-4d: the selected object's material shows its preview at the top of its inspector
+/// section: the material drawn on the object's mesh by the engine, red in the inspector's
+/// column while the object itself is far out of view.
+#[test]
+fn a_materials_preview_draws_in_its_inspector_section() {
+    let dir = std::env::temp_dir().join(format!(
+        "ofelia-editor-material-preview-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("props")).unwrap();
+    let red_id = AssetId::new();
+    let red = engine_app::MaterialFile {
+        base_color: [0.85, 0.08, 0.06, 1.0],
+        roughness: 0.4,
+        ..engine_app::MaterialFile::default()
+    };
+    std::fs::write(dir.join("props/red.material"), red.to_text(red_id)).unwrap();
+    AssetMeta::default()
+        .write(&dir.join("props/red.material"), red_id)
+        .unwrap();
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Far box"),
+        Transform::from_xyz(0.0, 0.0, -5000.0),
+        Model::new(builtin::CUBE, AssetRef::file(red_id)),
+    ));
+    let mut paths = engine_scene::AssetPaths::new();
+    paths.insert(AssetRef::file(red_id), "props/red.material");
+    let options = engine_scene::SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    engine_scene::save_with(
+        &mut world,
+        &engine_scene::SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor material preview test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let far = engine_scene::find_named(player.world_mut(), "Far box").expect("the box");
+    game.select(Some(far));
+    // Red in the inspector's column: the preview, the box being far out of view.
+    let red_in_inspector = |rgba: &[u8]| {
+        rgba.chunks_exact(4)
+            .enumerate()
+            .filter(|(i, p)| {
+                (*i as u32 % width) >= width - 360 && p[0] > 120 && p[1] < 60 && p[2] < 60
+            })
+            .count()
+    };
+    let started = Instant::now();
+    let mut count = 0;
+    while started.elapsed() < Duration::from_secs(30) {
+        frame(&mut player, &mut game, &mut overlay);
+        let shot = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        count = red_in_inspector(&shot);
+        if count > 2_000 {
+            break;
+        }
+    }
+    println!(
+        "the material's preview drawn in the inspector after {:.2} s: {count} red pixels",
+        started.elapsed().as_secs_f64()
+    );
+    assert!(
+        count > 2_000,
+        "no preview in the inspector: {count} red pixels"
+    );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -498,6 +498,7 @@ fn main() {
         files: &files,
         auto_play: false,
         sound: None,
+        material_preview: None,
         falloff: None,
         tile: 64.0,
         columns: 6,

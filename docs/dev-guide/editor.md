@@ -814,6 +814,9 @@ A click on a folder opens it, a click on a file picks it.
   - **Apply to Base** writes the variant's own values into its base, so every variant of
     that base gets them, and leaves the variant naming its base alone, in one undo step;
     Ctrl+S writes both files;
+  - **its preview** at the top of its section: the material drawn by the engine on the
+    selected object's own mesh (a sphere when it is picked in the dock), redrawn as you edit
+    it; drag the picture to turn it;
   - **what a material type costs** your GPU: once its shading is made, its **cost** row
     (after its type) gives the fragment shader's registers over the shading variants made
     (plain, with local lights, with the environment, with both), the engine's own shading's

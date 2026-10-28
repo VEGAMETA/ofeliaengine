@@ -582,6 +582,16 @@ pub fn editor<G: Game>(
         engine_app::PREVIEW_SIZE,
     )?;
     editor.preview_texture = Some(preview.sampled_index());
+    // The shown material's preview (E10-4d): one picture at a time.
+    let material = engine_render::texture::GpuTexture::new(
+        setup.device,
+        setup.allocator,
+        setup.bindless,
+        engine_rhi::ash::vk::Format::R8G8B8A8_SRGB,
+        engine_app::PREVIEW_SIZE,
+        engine_app::PREVIEW_SIZE,
+    )?;
+    editor.material_texture = Some(material.sampled_index());
     editor.mixer_path = settings.audio.layout.to_string_lossy().replace('\\', "/");
     editor.sounds_folder = settings.audio.folder.to_string_lossy().replace('\\', "/");
     let shared = Rc::new(RefCell::new(editor));
@@ -629,6 +639,7 @@ pub fn editor<G: Game>(
             atlas,
             wave,
             preview,
+            material,
         },
     ))
 }
@@ -1497,6 +1508,33 @@ struct Choice {
 
 /// The preview's key among the player's previews (the dock's thumbnails have the others).
 const GRAPH_PREVIEW_KEY: u64 = 0x6772_6170_685f_7076;
+
+/// The shown material's preview's key (E10-4d), apart from the thumbnails' and the graph's.
+const MATERIAL_PREVIEW_KEY: u64 = 0x6d61_7465_7269_616c;
+
+/// The shown material's preview at the top of its inspector section (E10-4d): what it is
+/// drawn on and how it is turned, and its drawing's way through the player.
+#[derive(Debug)]
+struct MaterialPreview {
+    /// The material it is of, and the mesh it is drawn on: the selected object's model's
+    /// when the material is the model's, else a sphere.
+    material: AssetId,
+    mesh: AssetRef,
+    /// Its turn: about the vertical, then the sideways axis, in radians.
+    turn: [f32; 2],
+    /// The material doc's revision drawn (none yet: `u64::MAX`), and its code then (its
+    /// shader and type: values alone changing draw once).
+    revision: u64,
+    code: (AssetRef, String),
+    /// A drawing to ask for, and whether only values or the turn changed since the last.
+    ask: bool,
+    same_code: bool,
+    /// A drawing come back, to upload, and whether one is in the texture.
+    upload: Option<Vec<u8>>,
+    shown: bool,
+    /// The pointer where a drag of it was last frame.
+    grab: Option<[f32; 2]>,
+}
 
 /// The shown graph's preview (ADR 0123 E10-3f-2): a sphere the player draws with the graph's
 /// editing build, shown in the canvas's corner.
@@ -2610,6 +2648,9 @@ struct Editor {
     /// overlay's bindless index; none without an overlay).
     sound_view: Option<crate::sound_view::SoundView>,
     wave_texture: Option<u32>,
+    /// The shown material's preview (E10-4d) and its texture's bindless index.
+    material_preview: Option<MaterialPreview>,
+    material_texture: Option<u32>,
     /// The mixer (E11-1): its layout file's path (`AudioSettings::layout` under the
     /// project), held once the Audio tab opens (or why it could not be read), the bus
     /// picked (the inspector shows it), a fader or number being dragged, the number being
@@ -3559,6 +3600,8 @@ impl Editor {
             browser_columns: 4,
             sound_view: None,
             wave_texture: None,
+            material_preview: None,
+            material_texture: None,
             mixer_path: String::from("main.mixer"),
             sounds_folder: String::from("sounds"),
             mixer: None,
@@ -4133,6 +4176,7 @@ impl Editor {
         }
         follow_material_bases(&mut self.material_docs);
         self.update_shown_material(world);
+        self.material_preview_frame(world);
         match self.active() {
             Some(e) => {
                 // An entity a prefab instance placed: its fields against the prefab's.
@@ -5814,6 +5858,24 @@ impl Editor {
                     section,
                 )
             }),
+            material_preview: self.material_section.and_then(|section| {
+                let p = self
+                    .material_preview
+                    .as_ref()
+                    .filter(|p| Some(p.material) == self.shown_material)?;
+                Some(crate::shell::MaterialPanel {
+                    section,
+                    image: p
+                        .shown
+                        .then_some(())
+                        .and(self.material_texture)
+                        .map(|texture| engine_ui::UiImage {
+                            texture,
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                        }),
+                    note: "Drawing…",
+                })
+            }),
             tile: self.tile,
             columns,
             bottom_tabs: &[
@@ -6013,6 +6075,10 @@ impl Editor {
         }
         if let Some(wave) = response.sound_wave {
             self.use_wave(wave);
+        }
+        if let Some(turn) = response.material_turn {
+            let pointer = self.input.cursor();
+            self.turn_material_preview(turn, pointer);
         }
         // Sound previews (E11-3b): ▶ on a tile, a click along a playing one, Auto Play.
         if let Some(i) = response.file_play
@@ -16796,6 +16862,84 @@ impl Editor {
         self.say(objects_given(&path, given));
     }
 
+    /// The shown material's preview (E10-4d): on the selected object's mesh when the material
+    /// is its model's, else on a sphere; asked for again when its doc changed (its values
+    /// alone: drawn once). A steady frame asks nothing and allocates nothing.
+    fn material_preview_frame(&mut self, world: &World) {
+        let Some(id) = self.shown_material else {
+            self.material_preview = None;
+            return;
+        };
+        let Some(doc) = self.material_docs.iter().find(|d| d.id == id) else {
+            return;
+        };
+        let mesh = self
+            .active()
+            .and_then(|e| world.get::<Model>(e))
+            .filter(|m| m.material == AssetRef::file(id))
+            .map_or(builtin::SPHERE, |m| m.mesh);
+        if self
+            .material_preview
+            .as_ref()
+            .is_none_or(|p| p.material != id || p.mesh != mesh)
+        {
+            self.material_preview = Some(MaterialPreview {
+                material: id,
+                mesh,
+                turn: [0.0; 2],
+                revision: u64::MAX,
+                code: (AssetRef::NONE, String::new()),
+                ask: false,
+                same_code: false,
+                upload: None,
+                shown: false,
+                grab: None,
+            });
+        }
+        let Some(p) = self.material_preview.as_mut() else {
+            return;
+        };
+        if p.revision != doc.revision {
+            let same = p.revision != u64::MAX
+                && p.code.0 == doc.file.shader
+                && p.code.1 == doc.file.type_name;
+            if !same {
+                p.code = (doc.file.shader, doc.file.type_name.clone());
+            }
+            p.same_code = same && (!p.ask || p.same_code);
+            p.revision = doc.revision;
+            p.ask = true;
+        }
+    }
+
+    /// A drag on the material preview (E10-4d): sideways turns it about the vertical,
+    /// up and down about the sideways axis (a quarter turn each way at most), one drawing a
+    /// frame at most.
+    fn turn_material_preview(&mut self, turn: crate::shell::WaveUse, pointer: Option<[f32; 2]>) {
+        let Some(p) = self.material_preview.as_mut() else {
+            return;
+        };
+        if turn.released {
+            p.grab = None;
+            return;
+        }
+        let Some([x, y]) = pointer else {
+            return;
+        };
+        if let Some([gx, gy]) = p.grab
+            && (x != gx || y != gy)
+        {
+            p.turn[0] += (x - gx) * 0.01;
+            p.turn[1] = (p.turn[1] + (y - gy) * 0.01).clamp(-1.5, 1.5);
+            // Only the turn: drawn once, if what it draws is made already.
+            if !p.ask {
+                p.same_code = p.shown;
+            }
+            p.ask = true;
+        }
+        p.grab = Some([x, y]);
+    }
+
     /// "Apply to Base" (E10-4b, as a prefab instance's Apply Overrides): the shown variant's
     /// own values written into its base (held for the inspector, its unsaved edits kept),
     /// the variant left naming its base alone, as one step that changes both files.
@@ -22639,6 +22783,14 @@ impl<G> EditorGame<G> {
         let mut previews = Vec::new();
         player.take_previews(&mut previews);
         for preview in previews {
+            if preview.key == MATERIAL_PREVIEW_KEY {
+                if let Some(p) = shared.material_preview.as_mut()
+                    && !preview.pixels.is_empty()
+                {
+                    p.upload = Some(preview.pixels);
+                }
+                continue;
+            }
             if preview.key == GRAPH_PREVIEW_KEY {
                 if let Some(p) = shared.graph_preview.as_mut() {
                     if preview.pixels.is_empty() {
@@ -22948,6 +23100,26 @@ impl<G> EditorGame<G> {
             {
                 doc.set_cost(revision, cost);
             }
+        }
+        // The shown material's preview (E10-4d), after its file was given: one drawing a
+        // frame at most.
+        if let Some(p) = shared.material_preview.as_mut().filter(|p| p.ask) {
+            p.ask = false;
+            let [yaw, pitch] = p.turn;
+            player.request_preview(engine_app::PreviewRequest {
+                key: MATERIAL_PREVIEW_KEY,
+                parts: vec![(
+                    p.mesh,
+                    AssetRef::file(p.material),
+                    Affine3A::from_quat(engine_core::math::Quat::from_euler(
+                        engine_core::math::EulerRot::YXZ,
+                        yaw,
+                        pitch,
+                        0.0,
+                    )),
+                )],
+                same_code: p.same_code,
+            });
         }
         // Groups baked (E2b-6): their files written and read, their models in place.
         if !shared.bake_groups.is_empty() {
@@ -25139,6 +25311,8 @@ pub struct EditorOverlay {
     wave: engine_render::texture::GpuTexture,
     /// The shown graph's preview (ADR 0123 E10-3f-2).
     preview: engine_render::texture::GpuTexture,
+    /// The shown material's preview (E10-4d).
+    material: engine_render::texture::GpuTexture,
 }
 
 impl EditorOverlay {
@@ -25161,6 +25335,8 @@ impl EditorOverlay {
             self.wave
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
             self.preview
+                .destroy(setup.device, setup.allocator, setup.bindless, 0);
+            self.material
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
             self.picker.destroy(setup.allocator);
         }
@@ -25609,6 +25785,19 @@ impl Overlay for EditorOverlay {
                     .upload(pass.fg, pass.ring, &pixels)
                     .map_err(AppError::at("the graph's preview"))?;
                 if let Some(p) = editor.graph_preview.as_mut() {
+                    p.shown = true;
+                }
+            }
+            // The shown material's preview, once drawn (E10-4d).
+            if let Some(pixels) = editor
+                .material_preview
+                .as_mut()
+                .and_then(|p| p.upload.take())
+            {
+                self.material
+                    .upload(pass.fg, pass.ring, &pixels)
+                    .map_err(AppError::at("the material's preview"))?;
+                if let Some(p) = editor.material_preview.as_mut() {
                     p.shown = true;
                 }
             }
@@ -27743,6 +27932,76 @@ mod tests {
         assert_eq!(ed.material_docs[at(&ed, made)].file.roughness, 0.3);
         assert_eq!(ed.material_docs[at(&ed, variant)].file.roughness, 0.7);
         assert!(changed(&ed));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E10-4d: the shown material's preview is drawn on the selected object's mesh, asked
+    /// for again when the material changes (its values alone: drawn once), and turned by a
+    /// drag; with nothing shown there is none.
+    #[test]
+    fn the_shown_materials_preview_follows_its_object_its_edits_and_a_drag() {
+        let (dir, mut world, mut ed, boxed) = drop_project("material-preview");
+        ed.select_only(boxed);
+        ed.update(&mut world);
+        ed.run(&mut world, ed.ids.new_material);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let made = ed.shown_material.unwrap();
+        let mesh = world.get::<Model>(boxed).unwrap().mesh;
+        let p = ed.material_preview.as_ref().unwrap();
+        assert_eq!((p.material, p.mesh), (made, mesh), "on the box's own mesh");
+        assert!(
+            p.ask && !p.same_code,
+            "the first drawing asks for its pipelines"
+        );
+        // Drawn (as the player answers it): an edit asks again, drawn once.
+        if let Some(p) = ed.material_preview.as_mut() {
+            p.ask = false;
+            p.shown = true;
+        }
+        let d = ed.material_docs.iter().position(|d| d.id == made).unwrap();
+        ed.material_step(&mut world, d, "Set roughness", None, |f, _| {
+            f.roughness = 0.9;
+        });
+        ed.update(&mut world);
+        let p = ed.material_preview.as_ref().unwrap();
+        assert!(p.ask && p.same_code, "values alone");
+        // A drag turns it: sideways about the vertical, up and down about the sideways.
+        if let Some(p) = ed.material_preview.as_mut() {
+            p.ask = false;
+        }
+        let held = crate::shell::WaveUse {
+            node: 0,
+            pressed: true,
+            held: true,
+            released: false,
+        };
+        ed.turn_material_preview(held, Some([100.0, 100.0]));
+        assert!(
+            !ed.material_preview.as_ref().unwrap().ask,
+            "grabbed, not turned"
+        );
+        ed.turn_material_preview(held, Some([150.0, 80.0]));
+        let p = ed.material_preview.as_ref().unwrap();
+        assert!(
+            (p.turn[0] - 0.5).abs() < 1e-5 && (p.turn[1] + 0.2).abs() < 1e-5,
+            "{:?}",
+            p.turn
+        );
+        assert!(p.ask && p.same_code);
+        ed.turn_material_preview(
+            crate::shell::WaveUse {
+                released: true,
+                ..held
+            },
+            None,
+        );
+        assert!(ed.material_preview.as_ref().unwrap().grab.is_none());
+        // Nothing shown: no preview.
+        ed.selection.clear();
+        ed.update(&mut world);
+        assert!(ed.shown_material.is_none());
+        assert!(ed.material_preview.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
