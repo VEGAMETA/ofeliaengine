@@ -4162,6 +4162,9 @@ pub struct StripView<'a> {
     pub effects: &'a str,
     /// Every one of them bypassed: B lit.
     pub bypassed: bool,
+    /// The room's reverb, made by the engine (E11-2c): `effects` says what it follows,
+    /// without B.
+    pub room: bool,
 }
 
 /// A strip's fader pressed, dragged or let go this frame (E11-1b): the strip and the
@@ -4326,9 +4329,13 @@ fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &
                     ..Style::default()
                 },
                 |ui| {
-                    let color = if strip.bypassed { p.text_dim } else { p.text };
+                    let color = if strip.bypassed || strip.room {
+                        p.text_dim
+                    } else {
+                        p.text
+                    };
                     text(ui, "effects", strip.effects, SMALL, color);
-                    if !strip.effects.is_empty() {
+                    if !strip.effects.is_empty() && !strip.room {
                         ui.spacer("fill");
                         if listen_button(ui, "bypass", "B", strip.bypassed, p.warning, p) {
                             out.mixer_bypass = Some(i);

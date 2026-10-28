@@ -2254,6 +2254,30 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **E11-4 is done** but for View: Sound Ranges, the inspector's falloff curve with the
   camera's distance, and blockout's radius handles.
 
+## As built (E11-2c, 2026-10-28): the room's reverb strip
+
+- **The strip** ("room (auto)", ADR 0121's version 3): the last of the mixer's strips,
+  for the player's own `reverb` bus (`mixer::ROOM`). It goes through the strips' machinery
+  as a bus does: its meter (`take_peak("reverb")`), its fader (`room.gain`, the same drag
+  and one step), "changed in Play", taking Play's changes back. It has no M, S, B, ×,
+  output list or effects to add; its effects row says what the room follows, from
+  `Player::room_heard` taken with the meters ("Hall 62 %" by the zone's `Name`, "the
+  walls", "nothing near").
+- **Picked:** a "Room (auto)" section with its trim, then "Heard now", read-only: what it
+  follows (the zone's weight, the walls under it), decay, size, damping, pre-delay and
+  level; dashes before any room was heard. Texts are written into strings kept across
+  frames.
+- **Solo safe:** the listening aids never silence it (a desk's reverb returns), so a
+  soloed bus keeps its room.
+- **Tests:** the room's fader in the file (written, read back, a version 2 file at 0);
+  the player's room heard in a zone (its entity, weight, no walls), the bus metered, the
+  trim from a layout, nothing heard away from the zone; the strip at the right end with
+  what it follows, picked (its sections, the decay, nothing to add), its fader as one
+  step in `room.gain` and undone, solo safe, "nothing near"; the shell drawn by
+  `shell_png --mixer`.
+- **E11-2 is done.** Left in E11: snapshots (E11-5), View: Sound Ranges and the falloff
+  curve.
+
 ## As built (E11-3d-2b, 2026-10-28): renames follow the marks
 
 - **The marks** (`marked.rs`): every scene type's strings marked as sounds or buses, found

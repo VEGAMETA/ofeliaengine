@@ -34,8 +34,8 @@ pub use components::{
 };
 use layout::linear;
 pub use layout::{
-    BusLayout, EffectLayout, MIXER_FILE_EXTENSION, MasterLayout, MixerFile, PlacedBus, Routes,
-    SendLayout,
+    BusLayout, EffectLayout, MIXER_FILE_EXTENSION, MasterLayout, MixerFile, PlacedBus, RoomLayout,
+    Routes, SendLayout,
 };
 pub use waveform::{Waveform, waveform};
 
@@ -606,7 +606,39 @@ struct Queries {
     plain: PlainQuery,
     placed: WorldQuery,
     listeners: QueryState<(&'static AudioListener, &'static GlobalTransform)>,
-    zones: QueryState<(&'static ReverbZone, &'static GlobalTransform)>,
+    zones: QueryState<(Entity, &'static ReverbZone, &'static GlobalTransform)>,
+}
+
+/// The room the listener hears now (ADR 0105's acoustics, E11-2c): the room's reverb as it
+/// plays, and what it follows; what the editor's mixer shows of its room strip.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoomHeard {
+    /// The reverb's room now: it follows what it hears smoothly.
+    pub room: Room,
+    /// What it follows.
+    pub from: RoomFrom,
+    /// The reverb is made: some room was heard since the sound started.
+    pub made: bool,
+}
+
+/// What the room's reverb follows ([`RoomHeard`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RoomFrom {
+    /// Nothing around the listener: no reverb zone, no walls heard (the reverb holds the
+    /// last room it had).
+    Nothing,
+    /// The walls around the listener (rays through the physics world).
+    Walls,
+    /// A reverb zone: its entity and its weight where the listener is (0..1), over the
+    /// walls when they are heard too.
+    Zone {
+        /// The zone's entity.
+        entity: Entity,
+        /// Its weight there.
+        weight: f32,
+        /// The walls are heard under it.
+        walls: bool,
+    },
 }
 
 /// The room's reverb: a bus with the reverb effect, fed by the reverberant buses' world
@@ -653,6 +685,10 @@ pub(crate) struct Sound {
     listen_soloed: Vec<String>,
     listening_changed: bool,
     reverb: Option<ReverbBus>,
+    /// The room reverb's fader from the layout (linear), and what the room follows now
+    /// (E11-2c).
+    room_trim: f32,
+    room_from: RoomFrom,
     /// Where the sounds come from, said once at the start.
     note: String,
     live_folder: Option<LiveFolder>,
@@ -875,6 +911,8 @@ impl Sound {
             listen_soloed: Vec::new(),
             listening_changed: false,
             reverb: None,
+            room_trim: 1.0,
+            room_from: RoomFrom::Nothing,
             note,
             live_folder,
             loader: Loader::start(store),
@@ -954,8 +992,21 @@ impl Sound {
     /// Bus `bus`'s peak level per channel since the last call (linear, after its fader):
     /// the editor's meters.
     pub(crate) fn take_peak(&self, bus: &str) -> Option<[f32; 2]> {
-        let id = self.buses.iter().find(|b| b.name == bus)?.id;
+        let id = if bus == "reverb" {
+            self.reverb.as_ref()?.bus
+        } else {
+            self.buses.iter().find(|b| b.name == bus)?.id
+        };
         Some(self.audio.as_ref()?.take_peak(id))
+    }
+
+    /// The room the listener hears now, and what it follows (E11-2c).
+    pub(crate) fn room_heard(&self) -> RoomHeard {
+        RoomHeard {
+            room: self.room,
+            from: self.room_from,
+            made: self.reverb.is_some(),
+        }
     }
 
     /// How far effect `effect` (its place in the layout's chain) of bus `bus` (`master` for
@@ -1206,6 +1257,11 @@ impl Sound {
                     }
                 }
             }
+        }
+        // The room's reverb's fader (version 3).
+        self.room_trim = linear(layout.room.gain);
+        if let Some(reverb) = &self.reverb {
+            audio.set_bus_gain(reverb.bus, self.room_trim, 0.05);
         }
         self.layout_changed = true;
     }
@@ -1802,6 +1858,15 @@ impl Sound {
             None
         };
         let zone = listener.and_then(|at| self.zone(world, at));
+        self.room_from = match (zone, geometry.is_some()) {
+            (Some((_, weight, entity)), walls) => RoomFrom::Zone {
+                entity,
+                weight,
+                walls,
+            },
+            (None, true) => RoomFrom::Walls,
+            (None, false) => RoomFrom::Nothing,
+        };
         if geometry.is_none() && zone.is_none() && self.reverb.is_none() {
             return;
         }
@@ -1810,7 +1875,7 @@ impl Sound {
             ..self.room
         });
         let target = match zone {
-            Some((room, weight)) => base.lerp(&room, weight),
+            Some((room, weight, _)) => base.lerp(&room, weight),
             None => base,
         };
         let follow = (1.0 - (-dt / ROOM_FOLLOW).exp()) as f32;
@@ -1820,30 +1885,32 @@ impl Sound {
 
     /// The zone the listener at `at` is in: its room and weight (the highest priority,
     /// then the strongest).
-    fn zone(&mut self, world: &World, at: Vec3) -> Option<(Room, f32)> {
+    fn zone(&mut self, world: &World, at: Vec3) -> Option<(Room, f32, Entity)> {
         let queries = self.queries.as_mut()?;
-        let mut best: Option<(i32, f32, Room)> = None;
-        queries.zones.for_each_readonly(world, |(zone, global)| {
-            let (scale, _, _) = global.0.to_scale_rotation_translation();
-            let local = global.0.inverse().transform_point3(at);
-            let scale = ((scale.x.abs() + scale.y.abs() + scale.z.abs()) / 3.0).max(1e-6);
-            let weight = engine_audio::spatial::ReverbZone {
-                center: Vec3::ZERO,
-                half_extents: zone.half_extents,
-                fade: zone.fade / scale,
-            }
-            .weight(local);
-            if weight <= 0.0 {
-                return;
-            }
-            let better = best.as_ref().is_none_or(|&(priority, w, _)| {
-                zone.priority > priority || (zone.priority == priority && weight > w)
+        let mut best: Option<(i32, f32, Room, Entity)> = None;
+        queries
+            .zones
+            .for_each_readonly(world, |(entity, zone, global)| {
+                let (scale, _, _) = global.0.to_scale_rotation_translation();
+                let local = global.0.inverse().transform_point3(at);
+                let scale = ((scale.x.abs() + scale.y.abs() + scale.z.abs()) / 3.0).max(1e-6);
+                let weight = engine_audio::spatial::ReverbZone {
+                    center: Vec3::ZERO,
+                    half_extents: zone.half_extents,
+                    fade: zone.fade / scale,
+                }
+                .weight(local);
+                if weight <= 0.0 {
+                    return;
+                }
+                let better = best.as_ref().is_none_or(|&(priority, w, _, _)| {
+                    zone.priority > priority || (zone.priority == priority && weight > w)
+                });
+                if better {
+                    best = Some((zone.priority, weight, zone.room, entity));
+                }
             });
-            if better {
-                best = Some((zone.priority, weight, zone.room));
-            }
-        });
-        best.map(|(_, weight, room)| (room, weight))
+        best.map(|(_, weight, room, entity)| (room, weight, entity))
     }
 
     /// Gives the reverb the room heard now (made with the first room).
@@ -1856,6 +1923,7 @@ impl Sound {
             let Ok(bus) = audio.add_bus("reverb", BusId::MASTER) else {
                 return;
             };
+            audio.set_bus_gain(bus, self.room_trim, 0.0);
             let mut effect = Reverb::new(room.decay, room.size);
             engine_audio::dsp::Effect::set_param(&mut effect, Reverb::DAMPING, room.damping);
             engine_audio::dsp::Effect::set_param(&mut effect, Reverb::PRE_DELAY, room.pre_delay);

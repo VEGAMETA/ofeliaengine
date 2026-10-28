@@ -4,10 +4,11 @@
 //! ([`MixerFile::builtin`]).
 //!
 //! ```text
-//! [mixer version=2 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
+//! [mixer version=3 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
 //!
 //! master.gain = 0
 //! master.balance = 0
+//! room.gain = -3
 //! buses["effects"].parent = ""
 //! buses["effects"].gain = -3
 //! buses["effects"].balance = 0
@@ -43,6 +44,9 @@
 //! - **Sends** (version 2), by the bus they feed: a level in dB, before or after the bus's
 //!   fader. A send or a sidechain that would loop the sound back is left out
 //!   ([`MixerFile::routes`]).
+//! - **The room's reverb** (version 3): the player makes it and its parameters follow the
+//!   room around the listener (the walls, a reverb zone); `room.gain` is its fader, a trim
+//!   in dB on what it returns.
 //! - **The game's volumes** (`Mixer::set_volume`) multiply the faders: an options menu at
 //!   80 % keeps the mix's −6 dB.
 
@@ -68,6 +72,14 @@ pub struct MasterLayout {
     pub balance: f32,
     /// Its effects, in the order the sound goes through them (a limiter last, often).
     pub effects: Vec<EffectLayout>,
+}
+
+/// The room's reverb (version 3): made by the player, its parameters following the room
+/// around the listener; only its fader is the file's.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Reflect)]
+pub struct RoomLayout {
+    /// Its fader in dB: a trim on what the reverb returns (0 as the room gives it).
+    pub gain: f32,
 }
 
 /// An effect of a bus.
@@ -193,6 +205,8 @@ impl BusLayout {
 pub struct MixerFile {
     /// The master's fader and balance.
     pub master: MasterLayout,
+    /// The room's reverb's fader (version 3).
+    pub room: RoomLayout,
     /// The buses, by name.
     pub buses: BTreeMap<String, BusLayout>,
 }
@@ -213,9 +227,9 @@ pub struct PlacedBus<'a> {
 impl MixerFile {
     /// The kind in the file's header.
     pub const KIND: &'static str = "mixer";
-    /// The format's version: 2 adds effects and sends (a version 1 file reads as one
-    /// without them).
-    pub const VERSION: u32 = 2;
+    /// The format's version: 2 adds effects and sends, 3 the room's fader (an older file
+    /// reads as one without them).
+    pub const VERSION: u32 = 3;
 
     /// What plays without a file: music, effects, voice and ui into the master at 0 dB,
     /// the 3D sounds of effects and voice reverberating.
@@ -227,6 +241,7 @@ impl MixerFile {
         buses.insert(String::from("ui"), BusLayout::new());
         Self {
             master: MasterLayout::default(),
+            room: RoomLayout::default(),
             buses,
         }
     }
@@ -509,6 +524,21 @@ mod tests {
     }
 
     #[test]
+    fn the_rooms_fader_is_kept_in_the_file() {
+        let mut file = MixerFile::builtin();
+        file.room.gain = -4.5;
+        let id = AssetId::new();
+        let text = file.to_text(id);
+        assert!(text.contains("room.gain = -4.5"), "{text}");
+        let (back, _) = MixerFile::parse(&text).unwrap();
+        assert_eq!(back, file);
+        // A version 2 file reads with the room as the player gives it.
+        let (old, _) = MixerFile::parse("[mixer version=2]\nmaster.gain = -1\n").unwrap();
+        assert_eq!(old.room.gain, 0.0);
+        assert_eq!(old.master.gain, -1.0);
+    }
+
+    #[test]
     fn a_layout_reads_back_as_it_was_written() {
         let mut file = MixerFile::builtin();
         file.master.gain = -1.5;
@@ -520,7 +550,7 @@ mod tests {
         let id = AssetId::new();
         let text = file.to_text(id);
         assert!(
-            text.starts_with(&format!("[mixer version=2 id={id}]")),
+            text.starts_with(&format!("[mixer version=3 id={id}]")),
             "{text}"
         );
         assert!(
@@ -656,6 +686,11 @@ mod tests {
     fn a_file_names_its_buses_and_no_others() {
         // The built-in four are what plays without a file, not defaults a file adds to.
         let (file, _) = MixerFile::parse("[mixer version=1]\nbuses[\"sfx\"].gain = -3\n").unwrap();
+        assert_eq!(
+            file.room,
+            RoomLayout::default(),
+            "no room's fader before version 3"
+        );
         assert_eq!(file.buses.keys().collect::<Vec<_>>(), ["sfx"]);
         assert_eq!(file.buses["sfx"].gain, -3.0);
         assert!(MixerFile::parse("[material version=2]\n").is_err());

@@ -66,10 +66,11 @@ world.spawn((
   3D sounds of effects and voice reverberating. The editor's mixer panel writes the
   file; by hand it reads:
   ```text
-  [mixer version=2 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
+  [mixer version=3 id=6b1f0c2e9d8a47b3a5c4e3f2d1c0b9a8]
 
   master.gain = 0
   master.effects.0.kind = "limiter"
+  room.gain = -3
   buses["music"].gain = -8
   buses["music"].effects.0.kind = "compressor"
   buses["music"].effects.0.sidechain = "voice"
@@ -88,6 +89,8 @@ world.spawn((
     named keep their defaults; the master has effects too);
   - its `sends`, by the bus they feed: `gain` in dB and `pre_fader` (the bus's fader
     does not move a send taken before it);
+  - `room.gain`: the room's reverb's fader in dB, a trim on what it returns (its
+    parameters follow the room; see below);
   - a send or a sidechain that would loop the sound back is left out, and the log says
     which;
   - a file names its buses and no others: the four above play only without one;

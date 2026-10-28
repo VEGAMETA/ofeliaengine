@@ -448,12 +448,13 @@ fn main() {
         soloed: false,
         silenced: name == "music",
         changed: name == "steps",
-        effects: if name == "music" {
-            "Comp \u{2212}3.1"
-        } else {
-            ""
+        effects: match name {
+            "music" => "Comp \u{2212}3.1",
+            "room (auto)" => "Hall 62 %",
+            _ => "",
         },
         bypassed: false,
+        room: name == "room (auto)",
     };
     let strips = [
         strip("master", 0, 0.0, "0.0", "\u{2192} speakers", false),
@@ -462,6 +463,14 @@ fn main() {
         strip("music", 1, -8.0, "\u{2212}8.0", "\u{2192} master", false),
         strip("ui", 1, 0.0, "0.0", "\u{2192} master", false),
         strip("voice", 1, 2.0, "2.0", "\u{2192} master", false),
+        strip(
+            "room (auto)",
+            0,
+            -3.0,
+            "\u{2212}3.0",
+            "\u{2192} master",
+            false,
+        ),
     ];
     let model = ShellModel {
         scenes: &["main.scene", "level_01.scene*", "меню.scene"],
