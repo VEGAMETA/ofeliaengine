@@ -174,12 +174,7 @@ impl Previews {
         for _ in 0..self.asked.len() {
             let request = self.asked.pop_front()?;
             match resolve(&request, assets, geometry, materials) {
-                Resolved::Ready(draws, (lo, hi)) => {
-                    let typed = draws.iter().any(|d| {
-                        materials
-                            .material_type(d.material)
-                            .is_some_and(|t| t != MaterialTypeId::GLTF)
-                    });
+                Resolved::Ready((lo, hi), typed) => {
                     let key = request.key;
                     let warmed = self.warmed.iter().position(|&k| k == key);
                     // Its pipelines asked for, or its code unchanged, while some are on
@@ -188,6 +183,7 @@ impl Previews {
                         self.asked.push_back(request);
                         continue;
                     }
+                    let draws = draws(&request, assets, geometry, materials);
                     let mut check = false;
                     let again = match (typed, warmed) {
                         (false, _) => None,
@@ -448,22 +444,24 @@ fn halve(drawn: &[u8], side: u32) -> Vec<u8> {
 }
 
 enum Resolved {
-    /// Every part made: the draws and their box.
-    Ready(Vec<DrawItem>, (Vec3, Vec3)),
+    /// Every part made: their box, and whether a material of a type of its own is among
+    /// them.
+    Ready((Vec3, Vec3), bool),
     Waiting,
     Failed,
 }
 
-/// `request`'s parts as draws, once each is made.
+/// Whether `request`'s parts are made, each made now where it was not: with nothing kept,
+/// a request waiting from frame to frame allocates nothing ([`draws`] once it is drawn).
 fn resolve(
     request: &PreviewRequest,
     assets: &mut Assets,
     geometry: &mut GeometryPool,
     materials: &mut MaterialTable,
 ) -> Resolved {
-    let mut draws = Vec::with_capacity(request.parts.len());
     let mut bounds: Option<(Vec3, Vec3)> = None;
     let mut waiting = false;
+    let mut typed = false;
     for &(mesh_asset, material_asset, at) in &request.parts {
         let mesh = assets.mesh(mesh_asset, geometry);
         let material = assets.material(material_asset, materials);
@@ -478,6 +476,9 @@ fn resolve(
             waiting = true;
             continue;
         }
+        typed |= materials
+            .material_type(material)
+            .is_some_and(|t| t != MaterialTypeId::GLTF);
         if let Some(info) = geometry.mesh(mesh) {
             for corner in 0..8 {
                 let pick = |bit: usize, axis: usize| {
@@ -491,17 +492,32 @@ fn resolve(
                 bounds = Some(bounds.map_or((p, p), |(a, b)| (a.min(p), b.max(p))));
             }
         }
-        draws.push(DrawItem {
-            mesh,
-            material,
-            world_from_object: Mat4::from(at),
-        });
     }
     match (waiting, bounds) {
         (true, _) => Resolved::Waiting,
-        (false, Some(b)) => Resolved::Ready(draws, b),
+        (false, Some(b)) => Resolved::Ready(b, typed),
         (false, None) => Resolved::Failed,
     }
+}
+
+/// `request`'s parts as draws, once [`resolve`] found each made.
+fn draws(
+    request: &PreviewRequest,
+    assets: &mut Assets,
+    geometry: &mut GeometryPool,
+    materials: &mut MaterialTable,
+) -> Vec<DrawItem> {
+    request
+        .parts
+        .iter()
+        .filter_map(|&(mesh_asset, material_asset, at)| {
+            Some(DrawItem {
+                mesh: assets.mesh(mesh_asset, geometry)?,
+                material: assets.material(material_asset, materials)?,
+                world_from_object: Mat4::from(at),
+            })
+        })
+        .collect()
 }
 
 /// The camera that frames the box `lo`–`hi`: looking at its middle from the front, turned

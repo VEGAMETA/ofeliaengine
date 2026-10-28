@@ -150,8 +150,21 @@ fn a_graph_tabs_frames_do_not_allocate() {
             .unwrap();
         player.set_view_rect(game.view_rect());
         game.sync_assets(&mut player);
+        player.renderer().forward().material_types_pending()
     };
-    for n in 0..240 {
+    // The steady state: the graph's preview made (its module's type compiled, the sphere
+    // drawn and read back), then frames as they come.
+    let started = std::time::Instant::now();
+    let (mut n, mut pending) = (0, 1);
+    while n < 240 || pending > 0 {
+        pending = frame(n);
+        n += 1;
+        assert!(
+            started.elapsed().as_secs() < 90,
+            "material types still on their way"
+        );
+    }
+    for n in 0..120 {
         frame(n);
     }
     COUNTING.with(|c| c.set(true));

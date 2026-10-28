@@ -870,9 +870,10 @@ Last updated: 2026-10-28.
     revision (now tested in the frame's hot reload test). E10-2 is done.
   - **E10-3f-2, the graph's preview** (#PR, ADR 0123's as-built; the team's «а»): a
     sphere in the canvas's corner draws the graph as it is through its editing build; a
-    number typed reaches it in 5 frames (34–59 ms), a link that changes the code in
-    0.56–0.60 s. On the way: a type's reload due counts as on its way, and a preview whose
-    code is unchanged is drawn once (`PreviewRequest::same_code`, ADR 0112's addendum).
+    number typed reaches it in 5 frames (34–60 ms), a link that changes the code in
+    0.56–0.77 s. On the way: a type's reload due counts as on its way, a preview whose
+    code is unchanged is drawn once (`PreviewRequest::same_code`, ADR 0112's addendum),
+    and a preview waiting allocates nothing.
   - **E10-3f-1, values in the inspector** (#427, ADR 0123's as-built; taken before
     reroutes and frames): with a graph's tab shown the inspector shows the node selected
     alone (parameter name, a constant's value, unlinked inputs' own values, a texture's
@@ -2121,7 +2122,7 @@ grown, divide and conquer); the old labels stay in parentheses.
 ## 6. Known gaps and leftovers (candidates for the queue)
 
 - **A material type's reload compiles twice** (E10-3f-2, 2026-10-28): a graph's link
-  that brings a new parameter reaches the preview's sphere in 0.56–0.60 s. On the
+  that brings a new parameter reaches the preview's sphere in 0.56–0.77 s. On the
   Radeon about 340 ms go to compiling the type's entry points again and about 180 ms to
   reflecting its parameters in a second compile of the same module; reflecting them from
   the reload's own compile would take the second away. The editor's own writes also wait

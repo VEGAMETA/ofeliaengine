@@ -457,14 +457,19 @@ The team's «а» (answer 4 below).
   - the pipelines on their way were counted after the view's prepare, which takes layouts
     that arrived after this frame's materials were laid out: counted before it now;
   - a drawing whose code is unchanged is answered only when its frame asked for no
-    pipeline; otherwise it is drawn again once they are made.
-- **Measured** (the editor's GPU test, 1280 × 720 offscreen; Radeon / RTX):
-  - the first sphere after the tab: 0.70 s / 0.66 s (the module compiled);
-  - a number typed: 59 ms / 34 ms, 5 frames (with two frames in flight, the least);
-  - a link bringing a new parameter: 0.60 s / 0.56 s. On the Radeon about 340 ms go to
-    compiling the type's entry points again, then about 180 ms to reflecting its
-    parameters in a second compile (status §6);
-  - the editor's and the graph tab's frames still allocate nothing.
+    pipeline; otherwise it is drawn again once they are made;
+  - a request waiting (its parts not made, or types on their way) allocated its draws
+    every frame: they are made only for the drawing now, so waiting allocates nothing.
+- **Measured** (the editor's GPU test, 1280 × 720 offscreen; Radeon / RTX, the spread of
+  runs with the desktop in use):
+  - the first sphere after the tab: 0.70–0.88 s / 0.66–0.81 s (the module compiled);
+  - a number typed: 58–60 ms / 34–36 ms, 5 frames (with two frames in flight, the
+    least);
+  - a link bringing a new parameter: 0.60–0.77 s / 0.56–0.69 s. On the Radeon about
+    340 ms go to compiling the type's entry points again, then about 180 ms to
+    reflecting its parameters in a second compile (status §6);
+  - the editor's and the graph tab's frames still allocate nothing (the graph's test
+    now measures once its types are made).
 - **Tests:**
   - a value's edit changes no code (unit);
   - a request whose code is unchanged answered after one drawing (the player's typed

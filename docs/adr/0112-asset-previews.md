@@ -200,4 +200,5 @@ materials' values changed since its key's last one (`PreviewRequest::same_code`)
 waits until no material type is on its way and is drawn once, answered when that frame
 asked for no pipeline (drawn again once they are made otherwise). A number typed reaches
 the sphere in 5 frames instead of 8. The pipelines on their way are counted before the
-view's prepare, and a type's reload due (a file changed, its quiet not over) counts.
+view's prepare, and a type's reload due (a file changed, its quiet not over) counts. A
+request waiting no longer allocates its draws each frame: they are made for the drawing.
