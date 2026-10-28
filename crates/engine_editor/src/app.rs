@@ -814,6 +814,7 @@ struct CommandIds {
     /// A material graph drawing the object's own look (ADR 0123 E10-3d-2).
     new_graph: CommandId,
     show_slang: CommandId,
+    frame_nodes: CommandId,
     /// The node search on a graph's canvas (ADR 0123 E10-3e).
     add_node: CommandId,
     make_variant: CommandId,
@@ -996,6 +997,11 @@ fn commands() -> (Commands, CommandIds) {
         new_type: c.register("material.new_type", "Material", "New Type"),
         new_graph: c.register("material.new_graph", "Material", "New Graph"),
         show_slang: c.register("graph.show_slang", "Graph", "Show Slang"),
+        frame_nodes: c.register(
+            "graph.frame_selection",
+            "Graph",
+            "Put the Selection in a Frame",
+        ),
         add_node: c.register("graph.add_node", "Graph", "Add Node…"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
@@ -1225,8 +1231,12 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+Shift+F9", ids.remove_breakpoints),
     ]
     .map(|(chord, id)| (chord, id, CODE_KEYS));
-    let graph = [("Space", ids.add_node), ("Shift+A", ids.add_node)]
-        .map(|(chord, id)| (chord, id, GRAPH_KEYS));
+    let graph = [
+        ("Space", ids.add_node),
+        ("Shift+A", ids.add_node),
+        ("C", ids.frame_nodes),
+    ]
+    .map(|(chord, id)| (chord, id, GRAPH_KEYS));
     for (chord, id, context) in global.chain(tree).chain(dock).chain(code).chain(graph) {
         if let Some(chord) = Chord::parse(chord) {
             let _ = keymap.bind(chord, context, id);
@@ -4408,7 +4418,7 @@ impl Editor {
                             .then_some(&crate::graph::MODEL_NAMES[..]),
                         missing: false,
                     },
-                    NodeRow::Param | NodeRow::Comment => Widget::Edit(first),
+                    NodeRow::Param | NodeRow::Comment | NodeRow::Title => Widget::Edit(first),
                     NodeRow::Value(_) | NodeRow::Input(..) => Widget::Numbers {
                         values: shown,
                         labels: row.labels(colour),
@@ -11762,6 +11772,10 @@ impl Editor {
                         let edit = self.graphs[g].set_comment(&text);
                         self.graph_edit(world, g, "Edit Note", None, edit);
                     }
+                    NodeRow::Title => {
+                        let edit = self.graphs[g].set_title(&text);
+                        self.graph_edit(world, g, "Rename Frame", None, edit);
+                    }
                     _ => {}
                 }
             }
@@ -11897,6 +11911,7 @@ impl Editor {
                 ids.duplicate,
                 ids.add_node,
                 ids.show_slang,
+                ids.frame_nodes,
             ]
             .contains(&id)
     }
@@ -12068,7 +12083,12 @@ impl Editor {
                 let _ = write!(self.graph_title, "{} · {id}", kind.title);
             }
             (Some(id), None) => self.graph_title.push_str(id),
-            (None, _) => self.graph_title.push_str("Graph"),
+            (None, _) => match doc.inspected_frame() {
+                Some(id) => {
+                    let _ = write!(self.graph_title, "Frame · {id}");
+                }
+                None => self.graph_title.push_str("Graph"),
+            },
         }
         let n = doc.graph.nodes.len();
         let s = if n == 1 { "" } else { "s" };
@@ -14620,6 +14640,11 @@ impl Editor {
             }
             if id == ids.duplicate && canvas {
                 let outcome = self.graphs[g].duplicate_selected();
+                self.graph_outcome(world, g, outcome);
+                return;
+            }
+            if id == ids.frame_nodes && canvas {
+                let outcome = self.graphs[g].frame_selection();
                 self.graph_outcome(world, g, outcome);
                 return;
             }
@@ -33466,6 +33491,48 @@ return Coin
         // Each one step: Ctrl+Z takes the texture back.
         chord(&mut ed, &mut world, &[CTRL, Z]);
         assert!(!ed.graphs[0].graph.nodes.contains_key("texture1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0123 E10-3e-2b: C over a graph puts the selected nodes in a frame, a step that
+    /// Ctrl+Z takes back; the file keeps it, as its version 2.
+    #[test]
+    fn c_puts_the_selection_in_a_frame_the_file_keeps() {
+        let dir = project("graph-frame");
+        std::fs::create_dir_all(dir.join("materials")).unwrap();
+        std::fs::write(
+            dir.join("materials/glow.mgraph"),
+            format!(
+                "[mgraph version=1 id={}]\n\nmodel = \"unlit\"\n\
+                 nodes[\"c\"].kind = \"color\"\nnodes[\"c\"].value = [0.9, 0.1, 0.1, 1]\n\
+                 nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [300, 0]\n\
+                 links[\"out.base\"] = \"c.rgba\"\n",
+                AssetId::new()
+            ),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_graph(&world, Path::new("materials/glow.mgraph"));
+        ed.update(&mut world);
+        ed.graphs[0].selected = [String::from("c")].into_iter().collect();
+        chord(&mut ed, &mut world, &[C]);
+        assert!(ed.graphs[0].graph.frames.contains_key("frame1"));
+        assert_eq!(ed.history.steps().count(), 1);
+        ed.update(&mut world);
+        assert!(
+            !texts(&ed, "Frame · frame1").is_empty(),
+            "its title in the inspector"
+        );
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        assert!(ed.graphs[0].graph.frames.is_empty());
+        chord(&mut ed, &mut world, &[CTRL, Y]);
+        chord(&mut ed, &mut world, &[CTRL, S]);
+        let text = std::fs::read_to_string(dir.join("materials/glow.mgraph")).unwrap();
+        assert!(text.starts_with("[mgraph version=2"), "{text}");
+        assert!(
+            text.contains("frames[\"frame1\"].title = \"Frame\""),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

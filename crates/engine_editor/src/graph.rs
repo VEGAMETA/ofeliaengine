@@ -44,7 +44,7 @@ use engine_core::math::{Vec2, Vec4};
 use engine_material_graph::graph::OUTPUT;
 use engine_material_graph::library::{self, Body, Fill, OUTPUT_KIND, REROUTE_KIND};
 use engine_material_graph::{Build, GraphError, ParamType};
-use engine_material_graph::{Graph, GraphFile, Kind, Model, Node, PortRef, PortType};
+use engine_material_graph::{Frame, Graph, GraphFile, Kind, Model, Node, PortRef, PortType};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad};
 use engine_scene::{AssetId, AssetPaths, AssetRef};
 use engine_ui::TextMeasure;
@@ -85,6 +85,15 @@ const GRID_MAJOR: f32 = 100.0;
 const LINK_SEGMENTS: usize = 24;
 /// A reroute's capsule (E10-3e-2a): its pins at its ends, its middle grabbed to move it.
 const REROUTE: [f32; 2] = [28.0, 14.0];
+/// A frame's title bar, the room left round what C frames, its least size and its corner's
+/// grip (E10-3e-2b), in canvas units.
+const FRAME_TITLE: f32 = 26.0;
+const FRAME_ROOM: f32 = 20.0;
+const FRAME_MIN: [f32; 2] = [80.0, 50.0];
+const FRAME_GRIP: f32 = 12.0;
+/// A frame's area and title bar (linear), the grid showing through.
+const FRAME_FILL: Vec4 = Vec4::new(0.03, 0.035, 0.045, 0.55);
+const FRAME_BAR: Vec4 = Vec4::new(0.05, 0.055, 0.07, 0.9);
 /// Two presses this close in time (and in place, [`CLICK_SLOP`]) are a double-click.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 /// Under this many panel pixels a box's drag is a click.
@@ -348,6 +357,10 @@ pub(crate) enum Hit {
     Input(usize, usize),
     /// Box `k`'s output `o`.
     Output(usize, usize),
+    /// Frame `k`'s title bar (frames in their ids' order, E10-3e-2b).
+    Frame(usize),
+    /// Frame `k`'s corner grip.
+    FrameCorner(usize),
 }
 
 /// Point `t` (0 to 1) along the link from output point `a` to input point `b`: a cubic
@@ -702,6 +715,8 @@ pub(crate) enum NodeRow {
     Texture,
     /// The node's note.
     Comment,
+    /// A frame's title (E10-3e-2b).
+    Title,
 }
 
 impl NodeRow {
@@ -715,6 +730,7 @@ impl NodeRow {
             Self::Input(name, _) => name,
             Self::Texture => "Image",
             Self::Comment => "Note",
+            Self::Title => "Title",
         }
     }
 
@@ -857,6 +873,14 @@ pub(crate) struct Pointer {
 pub(crate) enum Drag {
     /// The view moved by the middle or the right button.
     Pan,
+    /// A frame's corner dragged: the frame, the canvas point pressed, its size then, and
+    /// whether the pointer has left the press's spot (E10-3e-2b).
+    Size {
+        frame: String,
+        from: [f32; 2],
+        start: [f32; 2],
+        moved: bool,
+    },
     /// The selected nodes moved: the canvas point pressed, each node's place then, and
     /// whether the pointer has left the press's spot.
     Move {
@@ -864,6 +888,8 @@ pub(crate) enum Drag {
         from: [f32; 2],
         /// Each node's place then.
         starts: Vec<(String, [f32; 2])>,
+        /// The frames moved with them, each's place then (E10-3e-2b).
+        frames: Vec<(String, [f32; 2])>,
         /// The pointer has moved past [`CLICK_SLOP`].
         moved: bool,
     },
@@ -962,6 +988,9 @@ pub(crate) struct GraphDoc {
     pub(crate) error: Option<GraphError>,
     /// The canvas's last press: when and where (a double-click on a link, E10-3e-2a).
     last_press: Option<(std::time::Instant, [f32; 2])>,
+    /// The selected frames, by id (E10-3e-2b): apart from the nodes, as a file's ids for
+    /// both could meet.
+    pub(crate) selected_frames: BTreeSet<String>,
 }
 
 impl GraphDoc {
@@ -1007,6 +1036,7 @@ impl GraphDoc {
             due: None,
             error: None,
             last_press: None,
+            selected_frames: BTreeSet::new(),
         }
     }
 
@@ -1117,7 +1147,85 @@ impl GraphDoc {
                 return Hit::Node(k);
             }
         }
+        // Under the boxes, the frames (the last on top): a title bar and a corner grip; their
+        // insides are the canvas's (a box selection or a pan starts there).
+        for (k, f) in self.graph.frames.values().enumerate().rev() {
+            let hi = [f.at[0] + f.size[0], f.at[1] + f.size[1]];
+            if p[0] < f.at[0] || p[1] < f.at[1] || p[0] > hi[0] || p[1] > hi[1] {
+                continue;
+            }
+            if p[0] >= hi[0] - FRAME_GRIP && p[1] >= hi[1] - FRAME_GRIP {
+                return Hit::FrameCorner(k);
+            }
+            if p[1] <= f.at[1] + FRAME_TITLE {
+                return Hit::Frame(k);
+            }
+        }
         Hit::Canvas
+    }
+
+    /// A frame round the selected nodes' boxes (C, Unreal's comment box): room round them
+    /// and a title bar, titled "Frame", and it selected alone; a step.
+    pub(crate) fn frame_selection(&mut self) -> Option<Outcome> {
+        let mut area: Option<[[f32; 2]; 2]> = None;
+        for b in self.boxes.iter().filter(|b| self.selected.contains(&b.id)) {
+            let (lo, hi) = (b.at, [b.at[0] + b.size[0], b.at[1] + b.size[1]]);
+            area = Some(area.map_or([lo, hi], |[a, z]| {
+                [
+                    [a[0].min(lo[0]), a[1].min(lo[1])],
+                    [z[0].max(hi[0]), z[1].max(hi[1])],
+                ]
+            }));
+        }
+        let Some([lo, hi]) = area else {
+            return Some(Outcome::Refused("Select the nodes to put in a frame"));
+        };
+        let id = (1..)
+            .map(|n| format!("frame{n}"))
+            .find(|id| !self.graph.frames.contains_key(id))?;
+        let frame = Frame {
+            at: [
+                (lo[0] - FRAME_ROOM).round(),
+                (lo[1] - FRAME_ROOM - FRAME_TITLE).round(),
+            ],
+            size: [
+                (hi[0] - lo[0] + 2.0 * FRAME_ROOM).round(),
+                (hi[1] - lo[1] + 2.0 * FRAME_ROOM + FRAME_TITLE).round(),
+            ],
+            title: String::from("Frame"),
+        };
+        let (before, after) = self.edit(|g| {
+            g.frames.insert(id.clone(), frame);
+        })?;
+        self.selected.clear();
+        self.selected_frames = [id].into_iter().collect();
+        Some(Outcome::Edited {
+            name: "Frame Selection",
+            before,
+            after,
+        })
+    }
+
+    /// The frame the inspector shows: the one selected alone, with no node.
+    pub(crate) fn inspected_frame(&self) -> Option<&str> {
+        if !self.selected.is_empty() {
+            return None;
+        }
+        let mut ids = self.selected_frames.iter();
+        match (ids.next(), ids.next()) {
+            (Some(id), None) if self.graph.frames.contains_key(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The inspected frame's title: `text`.
+    pub(crate) fn set_title(&mut self, text: &str) -> Option<(String, String)> {
+        let id = self.inspected_frame()?.to_owned();
+        self.edit(|g| {
+            if let Some(f) = g.frames.get_mut(&id) {
+                text.clone_into(&mut f.title);
+            }
+        })
     }
 
     /// The link under canvas point `p` (within `reach` of its curve), by the input it
@@ -1228,22 +1336,28 @@ impl GraphDoc {
 
     /// The selected nodes deleted, the surface kept, as a step.
     pub(crate) fn delete_selected(&mut self) -> Option<Outcome> {
-        if self.selected.is_empty() {
+        if self.selected.is_empty() && self.selected_frames.is_empty() {
             return None;
         }
-        if self.selected.iter().all(|id| id == OUTPUT) {
+        if self.selected_frames.is_empty() && self.selected.iter().all(|id| id == OUTPUT) {
             return Some(Outcome::Refused("The surface stays: every graph has one"));
         }
         let selected = core::mem::take(&mut self.selected);
+        // Frames go alone: the nodes inside them stay.
+        let frames = core::mem::take(&mut self.selected_frames);
         let mut gone = 0;
-        let (before, after) = self.edit(|g| gone = delete(g, &selected))?;
+        let (before, after) = self.edit(|g| {
+            gone = delete(g, &selected);
+            g.frames.retain(|id, _| !frames.contains(id));
+        })?;
         if selected.contains(OUTPUT) {
             self.selected.insert(OUTPUT.to_owned());
         }
-        let name = if gone == 1 {
-            "Delete Node"
-        } else {
-            "Delete Nodes"
+        let name = match (gone, frames.len()) {
+            (0, 1) => "Delete Frame",
+            (0, _) => "Delete Frames",
+            (1, 0) => "Delete Node",
+            _ => "Delete Nodes",
         };
         Some(Outcome::Edited {
             name,
@@ -1271,7 +1385,11 @@ impl GraphDoc {
     pub(crate) fn rows(&self, out: &mut Vec<NodeRow>) {
         out.clear();
         let Some(id) = self.inspected() else {
-            out.push(NodeRow::Model);
+            out.push(if self.inspected_frame().is_some() {
+                NodeRow::Title
+            } else {
+                NodeRow::Model
+            });
             return;
         };
         let node = &self.graph.nodes[id];
@@ -1330,11 +1448,17 @@ impl GraphDoc {
         if row == NodeRow::Model {
             return self.graph.model != Model::Lit;
         }
+        if row == NodeRow::Title {
+            return self
+                .inspected_frame()
+                .and_then(|id| self.graph.frames.get(id))
+                .is_some_and(|f| f.title != "Frame");
+        }
         let Some(node) = self.inspected().and_then(|id| self.graph.nodes.get(id)) else {
             return false;
         };
         match row {
-            NodeRow::Model => false,
+            NodeRow::Model | NodeRow::Title => false,
             NodeRow::Param => !node.param.is_empty(),
             NodeRow::Value(w) => node.value[..usize::from(w)].iter().any(|v| *v != 0.0),
             NodeRow::Input(name, _) => node.inputs.contains_key(name),
@@ -1369,6 +1493,13 @@ impl GraphDoc {
                 NodeRow::Comment => {
                     text.clear();
                     text.push_str(node.map_or("", |n| n.comment.as_str()));
+                }
+                NodeRow::Title => {
+                    text.clear();
+                    let frame = self
+                        .inspected_frame()
+                        .and_then(|id| self.graph.frames.get(id));
+                    text.push_str(frame.map_or("", |f| f.title.as_str()));
                 }
                 NodeRow::Texture => {
                     text.clear();
@@ -1462,6 +1593,9 @@ impl GraphDoc {
         if row == NodeRow::Model {
             return self.edit(|g| g.model = Model::Lit);
         }
+        if row == NodeRow::Title {
+            return self.set_title("Frame");
+        }
         self.edit_inspected(|node| match row {
             NodeRow::Param => node.param.clear(),
             NodeRow::Value(_) => node.value = [0.0; 4],
@@ -1470,7 +1604,7 @@ impl GraphDoc {
             }
             NodeRow::Texture => node.texture = AssetRef::NONE,
             NodeRow::Comment => node.comment.clear(),
-            NodeRow::Model => {}
+            NodeRow::Model | NodeRow::Title => {}
         })
     }
 
@@ -1630,11 +1764,22 @@ impl GraphDoc {
         // Escape: the drag under way taken back, or else the selection let go.
         if p.escape {
             match drag.take() {
-                Some(Drag::Move { starts, .. }) => {
+                Some(Drag::Move { starts, frames, .. }) => {
                     for (id, at) in starts {
                         if let Some(n) = self.graph.nodes.get_mut(&id) {
                             n.at = at;
                         }
+                    }
+                    for (id, at) in frames {
+                        if let Some(f) = self.graph.frames.get_mut(&id) {
+                            f.at = at;
+                        }
+                    }
+                    self.revision += 1;
+                }
+                Some(Drag::Size { frame, start, .. }) => {
+                    if let Some(f) = self.graph.frames.get_mut(&frame) {
+                        f.size = start;
                     }
                     self.revision += 1;
                 }
@@ -1690,6 +1835,7 @@ impl GraphDoc {
             Drag::Move {
                 from,
                 starts,
+                frames,
                 moved,
             } => {
                 if let Some(c) = at {
@@ -1703,13 +1849,24 @@ impl GraphDoc {
                                 n.at = [s[0] + d[0], s[1] + d[1]];
                             }
                         }
+                        for (id, s) in frames.iter() {
+                            if let Some(f) = self.graph.frames.get_mut(id) {
+                                f.at = [s[0] + d[0], s[1] + d[1]];
+                            }
+                        }
                         self.revision += 1;
                     }
                 }
                 if !ended {
                     return None;
                 }
-                let Some(Drag::Move { starts, moved, .. }) = drag.take() else {
+                let Some(Drag::Move {
+                    starts,
+                    frames,
+                    moved,
+                    ..
+                }) = drag.take()
+                else {
                     return None;
                 };
                 if !moved {
@@ -1721,13 +1878,55 @@ impl GraphDoc {
                         n.at = n.at.map(f32::round);
                     }
                 }
-                let name = if starts.len() == 1 {
-                    "Move Node"
-                } else {
-                    "Move Nodes"
+                for (id, _) in &frames {
+                    if let Some(f) = self.graph.frames.get_mut(id) {
+                        f.at = f.at.map(f32::round);
+                    }
+                }
+                let name = match (frames.len(), starts.len()) {
+                    (1, _) => "Move Frame",
+                    (0, 1) => "Move Node",
+                    _ => "Move Nodes",
                 };
                 self.settle().map(|(before, after)| Outcome::Edited {
                     name,
+                    before,
+                    after,
+                })
+            }
+            Drag::Size {
+                frame,
+                from,
+                start,
+                moved,
+            } => {
+                if let Some(c) = at {
+                    let d = [c[0] - from[0], c[1] - from[1]];
+                    if !*moved && (d[0].hypot(d[1]) * self.view.zoom()) > CLICK_SLOP {
+                        *moved = true;
+                    }
+                    if *moved && let Some(f) = self.graph.frames.get_mut(frame.as_str()) {
+                        f.size = [
+                            (start[0] + d[0]).max(FRAME_MIN[0]),
+                            (start[1] + d[1]).max(FRAME_MIN[1]),
+                        ];
+                        self.revision += 1;
+                    }
+                }
+                if !ended {
+                    return None;
+                }
+                let Some(Drag::Size { frame, moved, .. }) = drag.take() else {
+                    return None;
+                };
+                if !moved {
+                    return None;
+                }
+                if let Some(f) = self.graph.frames.get_mut(&frame) {
+                    f.size = f.size.map(f32::round);
+                }
+                self.settle().map(|(before, after)| Outcome::Edited {
+                    name: "Resize Frame",
                     before,
                     after,
                 })
@@ -1764,6 +1963,7 @@ impl GraphDoc {
                 let to = at.unwrap_or(from);
                 if !add {
                     self.selected.clear();
+                    self.selected_frames.clear();
                 }
                 let size = [(to[0] - from[0]).abs(), (to[1] - from[1]).abs()];
                 if size[0].max(size[1]) * self.view.zoom() > CLICK_SLOP {
@@ -1837,6 +2037,7 @@ impl GraphDoc {
                     }
                 } else if !self.selected.contains(&id) {
                     self.selected.clear();
+                    self.selected_frames.clear();
                     self.selected.insert(id);
                 }
                 let starts = self
@@ -1847,9 +2048,55 @@ impl GraphDoc {
                 Drag::Move {
                     from: c,
                     starts,
+                    frames: Vec::new(),
                     moved: false,
                 }
             }
+            // A frame's title bar: it, and the nodes whose boxes it holds whole, moved.
+            Hit::Frame(k) => {
+                let Some((id, f)) = self.graph.frames.iter().nth(k) else {
+                    return Drag::Select {
+                        from: c,
+                        add: shift,
+                    };
+                };
+                let (id, at) = (id.clone(), f.at);
+                let hi = [f.at[0] + f.size[0], f.at[1] + f.size[1]];
+                let starts = self
+                    .boxes
+                    .iter()
+                    .filter(|b| {
+                        b.at[0] >= at[0]
+                            && b.at[1] >= at[1]
+                            && b.at[0] + b.size[0] <= hi[0]
+                            && b.at[1] + b.size[1] <= hi[1]
+                    })
+                    .filter_map(|b| Some((b.id.clone(), self.graph.nodes.get(&b.id)?.at)))
+                    .collect();
+                if !shift {
+                    self.selected.clear();
+                    self.selected_frames.clear();
+                }
+                self.selected_frames.insert(id.clone());
+                Drag::Move {
+                    from: c,
+                    starts,
+                    frames: vec![(id, at)],
+                    moved: false,
+                }
+            }
+            Hit::FrameCorner(k) => match self.graph.frames.iter().nth(k) {
+                Some((id, f)) => Drag::Size {
+                    frame: id.clone(),
+                    from: c,
+                    start: f.size,
+                    moved: false,
+                },
+                None => Drag::Select {
+                    from: c,
+                    add: shift,
+                },
+            },
             Hit::Canvas => Drag::Select {
                 from: c,
                 add: shift,
@@ -2133,6 +2380,73 @@ pub(crate) fn draw(
         Some(Drag::Yank { inputs, .. }) => inputs.as_slice(),
         _ => &[],
     };
+    // The frames (E10-3e-2b), under the links and the boxes: an area the grid shows
+    // through, its title bar and title, a grip at its corner; selected, framed in orange,
+    // under the pointer, faintly.
+    for (k, (id, f)) in doc.graph.frames.iter().enumerate() {
+        let (lo, hi) = (to(f.at), to([f.at[0] + f.size[0], f.at[1] + f.size[1]]));
+        if hi.x < rx || hi.y < ry || lo.x > rx + rw || lo.y > ry + rh {
+            continue;
+        }
+        let radius = RADIUS * z;
+        canvas.draw(
+            &Quad::rounded_rect((lo + hi) * 0.5, hi - lo, radius)
+                .color(FRAME_FILL)
+                .order(order),
+        );
+        let bar_hi = Vec2::new(hi.x, lo.y + FRAME_TITLE * z);
+        canvas.draw(
+            &Quad::rounded_rect((lo + bar_hi) * 0.5, bar_hi - lo, radius)
+                .color(FRAME_BAR)
+                .order(order),
+        );
+        solid(
+            canvas,
+            Vec2::new(lo.x, bar_hi.y - radius),
+            bar_hi,
+            FRAME_BAR,
+        );
+        let size = TITLE_TEXT * z;
+        if size >= 5.0 {
+            text.draw_left(
+                canvas,
+                look.glyphs,
+                &f.title,
+                size,
+                Vec2::new(lo.x + PAD * z, lo.y + FRAME_TITLE * 0.5 * z),
+                Vec4::from_array(p.text_dim),
+                order,
+            );
+        }
+        // The grip: two strokes across the corner.
+        let grip = FRAME_GRIP * z;
+        for s in [0.4, 0.75] {
+            canvas.draw(
+                &Quad::line(
+                    Vec2::new(hi.x - grip * s, hi.y - 3.0 * z),
+                    Vec2::new(hi.x - 3.0 * z, hi.y - grip * s),
+                    look.scale,
+                )
+                .color(Vec4::new(1.0, 1.0, 1.0, 0.35))
+                .order(order),
+            );
+        }
+        let frame = if doc.selected_frames.contains(id) {
+            Some(Vec4::new(1.0, 0.62, 0.18, 1.0))
+        } else if matches!(doc.hover, Hit::Frame(h) | Hit::FrameCorner(h) if h == k) {
+            Some(Vec4::new(1.0, 1.0, 1.0, 0.3))
+        } else {
+            None
+        };
+        if let Some(color) = frame {
+            canvas.draw(
+                &Quad::rounded_rect((lo + hi) * 0.5, hi - lo, radius)
+                    .outline(1.5 * look.scale)
+                    .color(color)
+                    .order(order),
+            );
+        }
+    }
     // The links, those of the selected nodes brighter.
     for (into, from) in &doc.graph.links {
         if Some(into) == lifted || yanked.contains(into) {
@@ -2476,6 +2790,114 @@ mod tests {
         // What it carries: the colour's four floats, through it (and a chain of them).
         assert_eq!(d.carried_by("reroute1", "out"), PortType::Float(4));
         assert_eq!(d.carried_by("c", "rgba"), PortType::Float(4));
+    }
+
+    /// E10-3e-2b: C puts the selected nodes in a frame (room round them, a title bar); its
+    /// title bar drags it with the nodes it holds whole (not the others), its corner resizes
+    /// it, its inside is the canvas's; its title is the inspector's; Delete takes it away
+    /// and leaves its nodes.
+    #[test]
+    fn a_frame_moves_with_what_it_holds_and_goes_alone() {
+        let mut d = doc();
+        assert_eq!(
+            d.frame_selection(),
+            Some(Outcome::Refused("Select the nodes to put in a frame"))
+        );
+        d.selected = [String::from("c")].into_iter().collect();
+        let Some(Outcome::Edited { name, .. }) = d.frame_selection() else {
+            panic!("framed")
+        };
+        assert_eq!(name, "Frame Selection");
+        let c = d.boxes[d.box_of("c").unwrap()].clone();
+        let f = d.graph.frames["frame1"].clone();
+        assert_eq!(
+            f.at,
+            [c.at[0] - FRAME_ROOM, c.at[1] - FRAME_ROOM - FRAME_TITLE]
+        );
+        assert_eq!(
+            f.size,
+            [
+                (c.size[0] + 2.0 * FRAME_ROOM).round(),
+                (c.size[1] + 2.0 * FRAME_ROOM + FRAME_TITLE).round()
+            ]
+        );
+        assert!(d.selected.is_empty() && d.selected_frames.contains("frame1"));
+        assert!(
+            d.text.contains("frames[\"frame1\"].title = \"Frame\""),
+            "{}",
+            d.text
+        );
+        // Its title bar dragged: it and c move; r, outside it, stays.
+        d.relayout(&mut measure);
+        let mut drag = None;
+        let p = |at: [f32; 2], press, held| Pointer {
+            at: Some(at),
+            over: true,
+            press,
+            held,
+            ..Pointer::default()
+        };
+        let title = [f.at[0] + 30.0, f.at[1] + 10.0];
+        assert_eq!(d.hit(title, PORT_REACH), Hit::Frame(0));
+        let to = [title[0] + 50.0, title[1] + 20.0];
+        d.pointer(&p(title, true, true), [0.0; 2], &mut drag);
+        d.pointer(&p(to, false, true), [0.0; 2], &mut drag);
+        let Some(Outcome::Edited { name, .. }) =
+            d.pointer(&p(to, false, false), [0.0; 2], &mut drag)
+        else {
+            panic!("moved")
+        };
+        assert_eq!(name, "Move Frame");
+        assert_eq!(
+            d.graph.frames["frame1"].at,
+            [f.at[0] + 50.0, f.at[1] + 20.0]
+        );
+        assert_eq!(d.graph.nodes["c"].at, [c.at[0] + 50.0, c.at[1] + 20.0]);
+        assert_eq!(d.graph.nodes["r"].at, [0.0, 120.0]);
+        // Its corner: bigger by the drag.
+        d.relayout(&mut measure);
+        let f = d.graph.frames["frame1"].clone();
+        let corner = [f.at[0] + f.size[0] - 4.0, f.at[1] + f.size[1] - 4.0];
+        assert_eq!(d.hit(corner, PORT_REACH), Hit::FrameCorner(0));
+        let far = [corner[0] + 100.0, corner[1] + 60.0];
+        d.pointer(&p(corner, true, true), [0.0; 2], &mut drag);
+        d.pointer(&p(far, false, true), [0.0; 2], &mut drag);
+        let Some(Outcome::Edited { name, .. }) =
+            d.pointer(&p(far, false, false), [0.0; 2], &mut drag)
+        else {
+            panic!("resized")
+        };
+        assert_eq!(name, "Resize Frame");
+        assert_eq!(
+            d.graph.frames["frame1"].size,
+            [f.size[0] + 100.0, f.size[1] + 60.0]
+        );
+        // Its inside, off its boxes: the canvas.
+        d.relayout(&mut measure);
+        let f = d.graph.frames["frame1"].clone();
+        assert_eq!(
+            d.hit(
+                [f.at[0] + f.size[0] - 30.0, f.at[1] + FRAME_TITLE + 4.0],
+                PORT_REACH
+            ),
+            Hit::Canvas
+        );
+        // Selected alone: its title in the inspector.
+        d.selected.clear();
+        d.selected_frames = [String::from("frame1")].into_iter().collect();
+        let mut rows = Vec::new();
+        d.rows(&mut rows);
+        assert_eq!(rows, [NodeRow::Title]);
+        assert!(!d.changed(NodeRow::Title));
+        d.set_title("Moss on top").unwrap();
+        assert_eq!(d.graph.frames["frame1"].title, "Moss on top");
+        assert!(d.changed(NodeRow::Title));
+        // Deleted: the frame goes, c stays.
+        let Some(Outcome::Edited { name, .. }) = d.delete_selected() else {
+            panic!("deleted")
+        };
+        assert_eq!(name, "Delete Frame");
+        assert!(d.graph.frames.is_empty() && d.graph.nodes.contains_key("c"));
     }
 
     #[test]

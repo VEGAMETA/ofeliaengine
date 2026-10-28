@@ -29,5 +29,5 @@ pub mod library;
 
 pub use file::GraphFile;
 pub use generate::{Build, Generated, GraphError, Param, ParamType, generate};
-pub use graph::{Graph, Model, Node, PortRef};
+pub use graph::{Frame, Graph, Model, Node, PortRef};
 pub use library::{Kind, PortType, kind};

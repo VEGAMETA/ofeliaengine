@@ -3,7 +3,7 @@
 //! sorted so a diff shows what changed.
 //!
 //! ```text
-//! [mgraph version=1 id=7d2e5c0b9a4f41e3b8c6d5a4f3e2d1c0]
+//! [mgraph version=2 id=7d2e5c0b9a4f41e3b8c6d5a4f3e2d1c0]
 //!
 //! model = "lit"
 //! nodes["a3f9"].kind = "texture"
@@ -26,8 +26,10 @@
 //!   inputs' own values (`inputs["strength"] = [0.7]`) and a `comment`. Fields at their
 //!   defaults are not written.
 //! - **A link** by the input it feeds, `<node>.<port>`, to the output it comes from.
+//! - **A frame** (version 2, E10-3e-2b) by id: its place (`at`), its `size` and its
+//!   `title` (`frames["frame1"].title = "Moss"`). Version 1 files, which have none, read.
 
-use crate::graph::{Graph, Model, Node, PortRef};
+use crate::graph::{Frame, Graph, Model, Node, PortRef};
 use crate::library::{self, Body};
 use engine_reflect::Reflect;
 use engine_scene::{AssetId, AssetPaths, AssetRef, LoadError, ValueReport};
@@ -42,6 +44,19 @@ pub struct GraphFile {
     pub nodes: BTreeMap<String, NodeFile>,
     /// The links, by the input they feed (`out.base`): the output they come from.
     pub links: BTreeMap<String, String>,
+    /// The frames, by id.
+    pub frames: BTreeMap<String, FrameFile>,
+}
+
+/// A frame's lines.
+#[derive(Debug, Clone, PartialEq, Default, Reflect)]
+pub struct FrameFile {
+    /// Its top left on the canvas.
+    pub at: [f32; 2],
+    /// Its width and height.
+    pub size: [f32; 2],
+    /// Its title.
+    pub title: String,
 }
 
 /// A node's lines.
@@ -66,8 +81,8 @@ pub struct NodeFile {
 impl GraphFile {
     /// The kind in the file's header.
     pub const KIND: &'static str = "mgraph";
-    /// The format's version.
-    pub const VERSION: u32 = 1;
+    /// The format's version: 2 adds frames (E10-3e-2b); 1 is read.
+    pub const VERSION: u32 = 2;
 
     /// The file of `graph`.
     pub fn of(graph: &Graph) -> Self {
@@ -114,10 +129,23 @@ impl GraphFile {
             .iter()
             .map(|(to, from)| (to.to_string(), from.to_string()))
             .collect();
+        let frames = graph
+            .frames
+            .iter()
+            .map(|(id, f)| {
+                let frame = FrameFile {
+                    at: f.at,
+                    size: f.size,
+                    title: f.title.clone(),
+                };
+                (id.clone(), frame)
+            })
+            .collect();
         Self {
             model: graph.model.name().to_owned(),
             nodes,
             links,
+            frames,
         }
     }
 
@@ -159,6 +187,14 @@ impl GraphFile {
             let from_ref =
                 PortRef::parse(from).ok_or_else(|| format!("`{from}` is not `<node>.<port>`"))?;
             graph.links.insert(to_ref, from_ref);
+        }
+        for (id, f) in &self.frames {
+            let frame = Frame {
+                at: f.at,
+                size: f.size,
+                title: f.title.clone(),
+            };
+            graph.frames.insert(id.clone(), frame);
         }
         Ok(graph)
     }
@@ -253,7 +289,7 @@ mod tests {
         let (g, paths, id) = moss();
         let text = GraphFile::of(&g).to_text(id, Some(&paths));
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], format!("[mgraph version=1 id={id}]"));
+        assert_eq!(lines[0], format!("[mgraph version=2 id={id}]"));
         for line in [
             "model = \"lit\"",
             "nodes[\"a3f9\"].kind = \"texture\"",
@@ -290,6 +326,47 @@ mod tests {
         assert!(at("nodes[\"out\"]") < at("links["));
     }
 
+    /// E10-3e-2b: frames are the file's version 2, written by id after the links and read
+    /// back; a version 1 file, which has none, still reads; they are nothing of the code.
+    #[test]
+    fn frames_read_back_and_a_version_1_file_still_reads() {
+        let (mut g, paths, id) = moss();
+        let plain = crate::generate(&g, "Moss", crate::Build::Saved)
+            .unwrap()
+            .text;
+        g.frames.insert(
+            String::from("frame1"),
+            Frame {
+                at: [60.0, 0.0],
+                size: [300.0, 200.0],
+                title: String::from("Moss on top"),
+            },
+        );
+        let text = GraphFile::of(&g).to_text(id, Some(&paths));
+        for line in [
+            "frames[\"frame1\"].at = [60, 0]",
+            "frames[\"frame1\"].size = [300, 200]",
+            "frames[\"frame1\"].title = \"Moss on top\"",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line}\n{text}");
+        }
+        let (file, _) = GraphFile::parse(&text).unwrap();
+        assert_eq!(file.graph().unwrap(), g);
+        assert_eq!(
+            crate::generate(&g, "Moss", crate::Build::Saved)
+                .unwrap()
+                .text,
+            plain
+        );
+        // The same graph written as version 1 was (no frames): read, framed by nothing.
+        g.frames.clear();
+        let old = GraphFile::of(&g)
+            .to_text(id, Some(&paths))
+            .replace("[mgraph version=2", "[mgraph version=1");
+        let (file, _) = GraphFile::parse(&old).unwrap();
+        assert_eq!(file.graph().unwrap(), g);
+    }
+
     #[test]
     fn what_cannot_be_read_is_said() {
         let (g, paths, id) = moss();
@@ -303,9 +380,9 @@ mod tests {
             .insert(String::from("outbase"), String::from("a3f9.rgba"));
         assert!(file.graph().unwrap_err().contains("outbase"));
         // A newer file, another kind of file.
-        let newer = text.replace("[mgraph version=1", "[mgraph version=2");
+        let newer = text.replace("[mgraph version=2", "[mgraph version=3");
         assert!(GraphFile::parse(&newer).is_err());
-        let other = text.replace("[mgraph version=1", "[material version=1");
+        let other = text.replace("[mgraph version=2", "[material version=2");
         assert!(GraphFile::parse(&other).is_err());
         // The database knows the file, its id inside.
         let kind = engine_scene::AssetKind::of(std::path::Path::new("rocks/moss.mgraph"));

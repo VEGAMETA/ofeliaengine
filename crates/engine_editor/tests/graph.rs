@@ -107,11 +107,11 @@ fn hues(rgba: &[u8]) -> [usize; 3] {
     ]
 }
 
-/// A lit graph: a colour multiplied by a number (through a reroute) into the base, a number
-/// into the roughness, a magenta colour linked to nothing.
+/// A lit graph: a colour multiplied by a number (through a reroute) into the base, the two
+/// in a frame, a number into the roughness, a magenta colour linked to nothing.
 fn moss(id: AssetId) -> String {
     format!(
-        "[mgraph version=1 id={id}]\n\nmodel = \"lit\"\n\
+        "[mgraph version=2 id={id}]\n\nmodel = \"lit\"\n\
          nodes[\"c\"].kind = \"color\"\nnodes[\"c\"].at = [0, 0]\n\
          nodes[\"c\"].value = [0.25, 0.55, 0.2, 1]\nnodes[\"c\"].param = \"tint\"\n\
          nodes[\"k\"].kind = \"number\"\nnodes[\"k\"].at = [0, 110]\n\
@@ -122,6 +122,8 @@ fn moss(id: AssetId) -> String {
          nodes[\"e\"].kind = \"color\"\nnodes[\"e\"].at = [0, 185]\n\
          nodes[\"e\"].value = [1, 0, 1, 1]\n\
          nodes[\"rr\"].kind = \"reroute\"\nnodes[\"rr\"].at = [160, 150]\n\
+         frames[\"frame1\"].at = [-16, -40]\nframes[\"frame1\"].size = [200, 210]\n\
+         frames[\"frame1\"].title = \"Tint\"\n\
          nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [460, 0]\n\
          links[\"m.a\"] = \"c.rgba\"\nlinks[\"rr.in\"] = \"k.value\"\nlinks[\"m.b\"] = \"rr.out\"\n\
          links[\"out.base\"] = \"m.out\"\nlinks[\"out.roughness\"] = \"r.value\"\n"
