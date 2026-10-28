@@ -820,7 +820,7 @@ Last updated: 2026-10-28.
     shape, a compressor's sidechain, ↑ ↓ ×), a section per send, Add Effect and Add Send
     offering only what would not loop; on the strip the effect's short name or count with
     the gain reduction now, and B. E11-2 is done but for the room's reverb strip.
-  - **E11-4b-1, handles on sounds and reverb zones** (#PR, ADR 0107's as-built): a square on
+  - **E11-4b-1, handles on sounds and reverb zones** (#408, ADR 0107's as-built): a square on
     each of a selected sound's rings (pointed at: "40 m · −16 dB, held"; dragged: its
     distance, the inner ring pushing the outer), a zone's sides (the opposite side
     staying) and its fade; one undo step a drag, Escape.
