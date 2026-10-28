@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3f-1, values in the inspector** (#PR, ADR 0123's as-built; taken before
+  - **E10-3f-1, values in the inspector** (#427, ADR 0123's as-built; taken before
     reroutes and frames): with a graph's tab shown the inspector shows the node selected
     alone (parameter name, a constant's value, unlinked inputs' own values, a texture's
     image, a note) or the graph's shading model; numbers dragged or typed, names checked,
