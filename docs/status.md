@@ -771,7 +771,7 @@ Last updated: 2026-10-28.
     renderer's material compiler thread has reflected its layout and compiled its entry
     points (1.6 s on the RTX, 1.1 s on the Radeon, no frame over 7.6 ms meanwhile); its
     images load in the background; thumbnails wait for the type's shaders.
-  - **E10-1c-1, a material file edited in the inspector** (#PR, ADR 0120's as-built): a
+  - **E10-1c-1, a material file edited in the inspector** (#398, ADR 0120's as-built): a
     `.material` picked in the dock shows its rows (a material type's from its reflected
     `Params`); edits draw by the next frame with nothing compiled, are steps of the one
     history (file steps: its text before and after) and Ctrl+S writes them.
