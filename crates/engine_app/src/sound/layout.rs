@@ -437,6 +437,52 @@ impl MixerFile {
         }
     }
 
+    /// Every value a snapshot can set, by path (ADR 0122): the master's fader and balance,
+    /// the room's trim and the master's effects, then each bus's fader, balance, sends and
+    /// effects (bypass, then each parameter).
+    pub fn paths(&self) -> Vec<String> {
+        let mut out = vec![
+            String::from("master/gain"),
+            String::from("master/balance"),
+            String::from("room/gain"),
+        ];
+        let chain = |out: &mut Vec<String>, bus: &str, effects: &[EffectLayout]| {
+            for (k, e) in effects.iter().enumerate() {
+                out.push(format!("{bus}/effects/{k}/bypass"));
+                for p in effect_info(&e.kind).map_or(&[][..], |i| i.params) {
+                    out.push(format!("{bus}/effects/{k}/{}", p.name));
+                }
+            }
+        };
+        chain(&mut out, "master", &self.master.effects);
+        for (name, bus) in &self.buses {
+            if kept(name) || name.contains('/') {
+                continue;
+            }
+            out.push(format!("{name}/gain"));
+            out.push(format!("{name}/balance"));
+            for to in bus.sends.keys() {
+                out.push(format!("{name}/sends/{to}"));
+            }
+            chain(&mut out, name, &bus.effects);
+        }
+        out
+    }
+
+    /// The layout as heard with snapshot `name` alone at full weight over the mix (the
+    /// editor's view while it is chosen); the layout itself for a name it lacks.
+    pub fn with_snapshot(&self, name: &str) -> Self {
+        let mut view = self.clone();
+        if let Some(s) = self.snapshot(name) {
+            for (path, &value) in &s.values {
+                if let Some(t) = snapshot_target(path) {
+                    view.set_value(t, value);
+                }
+            }
+        }
+        view
+    }
+
     /// The file's text, with its id.
     pub fn to_text(&self, id: AssetId) -> String {
         let mut out = String::new();
@@ -860,6 +906,25 @@ mod tests {
         // A version 3 file reads with none.
         let (old, _) = MixerFile::parse("[mixer version=3]\nroom.gain = -2\n").unwrap();
         assert!(old.snapshots.is_empty());
+        // Every path the layout has, each reachable; the view with a snapshot alone.
+        let paths = file.paths();
+        assert!(
+            paths
+                .iter()
+                .all(|p| snapshot_target(p).and_then(|t| file.value_at(t)).is_some())
+        );
+        for path in [
+            "master/gain",
+            "room/gain",
+            "music/effects/0/bypass",
+            "effects/sends/music",
+        ] {
+            assert!(paths.iter().any(|p| p == path), "{path}");
+        }
+        let view = file.with_snapshot("underwater");
+        assert_eq!(view.buses["music"].gain, -14.0);
+        assert!(view.buses["music"].effects[0].bypass);
+        assert_eq!(file.with_snapshot("nope"), file);
     }
 
     #[test]

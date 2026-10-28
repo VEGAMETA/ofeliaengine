@@ -638,6 +638,8 @@ struct FrameLists {
     sections: Vec<Section<'static>>,
     /// The mixer's strips, and the picked bus's outputs (E11-1).
     strips: Vec<crate::shell::StripView<'static>>,
+    /// The mixer's snapshot list while open (E11-5b).
+    snapshot_items: Vec<&'static str>,
     outputs: Vec<&'static str>,
     /// The picked bus's effects' and sends' values, and the open list's options (E11-2b).
     part_values: Vec<&'static str>,
@@ -715,6 +717,9 @@ struct CommandIds {
     mixer: CommandId,
     add_bus: CommandId,
     take_back_mixer: CommandId,
+    /// The mixer's snapshots (E11-5b): a new one, chosen; the chosen one taken away.
+    new_snapshot: CommandId,
+    delete_snapshot: CommandId,
     /// Hearing in place (E11-4b): the selection's sources (P), every playing one.
     hear: CommandId,
     listen_scene: CommandId,
@@ -879,6 +884,8 @@ fn commands() -> (Commands, CommandIds) {
         profiler: c.register("view.profiler", "View", "Profiler"),
         mixer: c.register("view.mixer", "View", "Audio Mixer"),
         add_bus: c.register("audio.add_bus", "Audio", "Add Bus"),
+        new_snapshot: c.register("audio.new_snapshot", "Audio", "New Snapshot"),
+        delete_snapshot: c.register("audio.delete_snapshot", "Audio", "Delete Snapshot"),
         take_back_mixer: c.register(
             "audio.take_back_play",
             "Audio",
@@ -2400,6 +2407,16 @@ struct Editor {
     /// inspector: what it follows, decay, size, damping, pre-delay, level.
     room_heard: Option<engine_app::RoomHeard>,
     room_texts: [String; 6],
+    /// The mixer's snapshot list (E11-5b): open, its items (Mix, each snapshot,
+    /// "+ Snapshot"), the snapshot the player was last told to hear, the chosen
+    /// snapshot's section in the inspector, its fade typed, its texts (fade, how many
+    /// values it sets).
+    snapshot_menu: bool,
+    snapshot_items: Vec<String>,
+    snapshot_heard: Option<String>,
+    snapshot_section: Option<usize>,
+    snapshot_typing: bool,
+    snapshot_texts: [String; 2],
     /// A sound field's file path, joined each frame without allocating (E11-3d).
     joined: String,
     /// Each bus's effects' gain reduction as shown (dB, falling back at 24 dB/s), and
@@ -3254,6 +3271,12 @@ impl Editor {
             bus_choices: Vec::new(),
             room_heard: None,
             room_texts: Default::default(),
+            snapshot_menu: false,
+            snapshot_items: Vec::new(),
+            snapshot_heard: None,
+            snapshot_section: None,
+            snapshot_typing: false,
+            snapshot_texts: Default::default(),
             joined: String::new(),
             reductions: Vec::new(),
             fx_texts: Vec::new(),
@@ -4113,7 +4136,9 @@ impl Editor {
         let mut sound_section = None;
         let scale_value: [&str; 1];
         let bus_values: [&str; 3];
+        let snapshot_value: [&str; 1];
         self.mixer_section = None;
+        self.snapshot_section = None;
         let mut outputs: Vec<&str> = recycle(std::mem::take(&mut self.lists.outputs));
         let mut part_values: Vec<&str> = recycle(std::mem::take(&mut self.lists.part_values));
         let mut part_options: Vec<&str> = recycle(std::mem::take(&mut self.lists.part_options));
@@ -4131,7 +4156,7 @@ impl Editor {
                 self.bus_texts[1].as_str(),
                 self.bus_texts[2].as_str(),
             ];
-            let layout = doc.layout.buses.get(bus);
+            let layout = doc.view.buses.get(bus);
             let parent = layout
                 .map(|l| l.parent.as_str())
                 .filter(|p| !p.is_empty())
@@ -4158,10 +4183,16 @@ impl Editor {
                     BusRow::Voices => number(2),
                     BusRow::Reverb => Widget::Check(Some(layout.is_some_and(|l| l.reverb))),
                 };
+                // What the chosen snapshot sets is marked, ↺ taking it out.
+                let changed = match row {
+                    BusRow::Gain => doc.sets_at(bus, &["gain"]),
+                    BusRow::Balance => doc.sets_at(bus, &["balance"]),
+                    _ => false,
+                };
                 asset_fields.push(Field {
                     name: row.name(),
                     widget,
-                    changed: false,
+                    changed,
                 });
             }
             let bus_end = asset_fields.len();
@@ -4171,7 +4202,7 @@ impl Editor {
             part_values.extend(t.values[..t.used].iter().map(String::as_str));
             part_values.extend(t.send_values[..t.sends].iter().map(String::as_str));
             part_options.extend(self.part_options.iter().map(String::as_str));
-            let chain = crate::mixer::chain(&doc.layout, bus);
+            let chain = crate::mixer::chain(&doc.view, bus);
             self.mixer_parts.clear();
             self.part_spans.clear();
             let mut value = 0;
@@ -4191,6 +4222,7 @@ impl Editor {
                             },
                         ),
                         EffectRow::Bypass => ("bypass", Widget::Check(Some(e.bypass))),
+                        // (Its mark below, with the parameters'.)
                         EffectRow::Sidechain => (
                             "sidechain",
                             Widget::Choice {
@@ -4218,17 +4250,22 @@ impl Editor {
                         }
                         EffectRow::Unknown => ("kind (unknown)", Widget::Text(e.kind.as_str())),
                     };
+                    let changed = match row {
+                        EffectRow::Bypass => doc.sets_effect(bus, k, "bypass"),
+                        EffectRow::Param(p) => doc.sets_effect(bus, k, p.name),
+                        _ => false,
+                    };
                     asset_fields.push(Field {
                         name,
                         widget,
-                        changed: false,
+                        changed,
                     });
                 }
                 self.part_spans.push((from, asset_fields.len()));
                 self.mixer_parts.push(MixerPart::Effect(k));
             }
-            if let Some(b) = doc.layout.buses.get(bus) {
-                for (i, send) in b.sends.values().enumerate() {
+            if let Some(b) = doc.view.buses.get(bus) {
+                for (i, (to, send)) in b.sends.iter().enumerate() {
                     let from = asset_fields.len();
                     let here = Some((MixerPart::Send(i), 0));
                     let at = t.used + i;
@@ -4240,7 +4277,7 @@ impl Editor {
                             typing: (self.part_typing == here).then_some(0),
                             lock: None,
                         },
-                        changed: false,
+                        changed: doc.sets_at(bus, &["sends", to]),
                     });
                     asset_fields.push(Field {
                         name: "before fader",
@@ -4252,6 +4289,33 @@ impl Editor {
                 }
             }
             let room = bus == crate::mixer::ROOM;
+            // The chosen snapshot (E11-5b): its name and fade, and how many values it sets.
+            let snapshot_from = asset_fields.len();
+            if doc.chosen.is_some() {
+                let t = &self.snapshot_texts;
+                snapshot_value = [t[0].as_str()];
+                asset_fields.push(Field {
+                    name: "name",
+                    widget: Widget::Edit(doc.chosen.as_deref().unwrap_or("")),
+                    changed: false,
+                });
+                asset_fields.push(Field {
+                    name: "fade s",
+                    widget: Widget::Numbers {
+                        values: &snapshot_value,
+                        labels: &[],
+                        typing: self.snapshot_typing.then_some(0),
+                        lock: None,
+                    },
+                    changed: false,
+                });
+                asset_fields.push(Field {
+                    name: "sets",
+                    widget: Widget::Text(&t[1]),
+                    changed: false,
+                });
+            }
+            let snapshot_end = asset_fields.len();
             let from = asset_fields.len();
             let adds: &[&str] = if bus == crate::mixer::MASTER {
                 &["add effect"]
@@ -4286,6 +4350,15 @@ impl Editor {
                         changed: false,
                     });
                 }
+            }
+            if snapshot_end > snapshot_from {
+                self.snapshot_section = Some(sections.len());
+                sections.push(Section {
+                    title: "Snapshot",
+                    fields: &asset_fields[snapshot_from..snapshot_end],
+                    script: "",
+                    removable: false,
+                });
             }
             self.mixer_section = Some(sections.len());
             sections.push(Section {
@@ -5275,13 +5348,25 @@ impl Editor {
                     effects: self.fx_texts.get(i).map_or("", String::as_str),
                     bypassed: s.bypassed,
                     room,
+                    marked: s.marked,
                 }
             }));
         }
+        let mut snapshot_items: Vec<&str> = recycle(std::mem::take(&mut self.lists.snapshot_items));
+        if self.snapshot_menu {
+            snapshot_items.extend(self.snapshot_items.iter().map(String::as_str));
+        }
+        let snapshot = self
+            .mixer
+            .as_ref()
+            .and_then(|d| d.chosen.as_deref())
+            .unwrap_or("Mix");
         let mixer_view = (self.bottom == Some(AUDIO_TAB)).then(|| crate::shell::MixerView {
             header: &self.mixer_header,
             strips: &strips,
             monitor: self.monitor,
+            snapshot,
+            snapshots: self.snapshot_menu.then_some(snapshot_items.as_slice()),
         });
         let model = ShellModel {
             scenes: &scenes,
@@ -5390,6 +5475,7 @@ impl Editor {
         self.lists.folders = recycle(folder_items);
         self.lists.files = recycle(file_items);
         self.lists.strips = recycle(strips);
+        self.lists.snapshot_items = recycle(snapshot_items);
         self.lists.outputs = recycle(outputs);
         self.lists.part_values = recycle(part_values);
         self.lists.part_options = recycle(part_options);
@@ -5415,6 +5501,21 @@ impl Editor {
             && let Some(name) = self.strip_name(i)
         {
             self.pick_bus(&name);
+        }
+        // The snapshot list (E11-5b).
+        if response.mixer_snapshots {
+            self.snapshot_menu = !self.snapshot_menu;
+            self.snapshot_items.clear();
+            if let Some(doc) = &self.mixer {
+                self.snapshot_items.push(String::from("Mix"));
+                self.snapshot_items
+                    .extend(doc.layout.snapshots.iter().map(|s| s.name.clone()));
+                self.snapshot_items.push(String::from("+ Snapshot"));
+            }
+        }
+        if let Some(i) = response.mixer_snapshot {
+            self.snapshot_menu = false;
+            self.choose_snapshot(world, i);
         }
         if let Some(fader) = response.mixer_fader {
             self.use_fader(world, fader);
@@ -5946,7 +6047,9 @@ impl Editor {
             }
         }
         if let Some(event) = response.field {
-            if Some(event.section) == self.mixer_section {
+            if Some(event.section) == self.snapshot_section {
+                self.edit_snapshot(world, event);
+            } else if Some(event.section) == self.mixer_section {
                 self.edit_bus(world, event);
             } else if let Some(part) = self.mixer_part(event.section) {
                 self.edit_part(world, part, event);
@@ -5978,7 +6081,9 @@ impl Editor {
                     field,
                     action,
                 };
-                if Some(section) == self.mixer_section {
+                if Some(section) == self.snapshot_section {
+                    self.edit_snapshot(world, event);
+                } else if Some(section) == self.mixer_section {
                     self.edit_bus(world, event);
                 } else if let Some(part) = self.mixer_part(section) {
                     self.edit_part(world, part, event);
@@ -13439,6 +13544,10 @@ impl Editor {
             };
         } else if id == ids.add_bus {
             self.add_bus(world);
+        } else if id == ids.new_snapshot {
+            self.new_snapshot(world);
+        } else if id == ids.delete_snapshot {
+            self.delete_snapshot(world);
         } else if id == ids.take_back_mixer {
             self.take_back_mixer(world);
         } else if id == ids.hear {
@@ -15056,9 +15165,17 @@ impl Editor {
         let Some(bus) = self.mixer_picked.as_deref() else {
             return;
         };
+        // The chosen snapshot's section (E11-5b): its fade, how many values it sets.
+        if let Some(s) = doc.chosen.as_deref().and_then(|c| doc.layout.snapshot(c)) {
+            let t = &mut self.snapshot_texts;
+            t[0].clear();
+            let _ = write!(t[0], "{:.2}", s.fade);
+            t[1].clear();
+            t[1].push_str(&counted(s.values.len(), "value", "values"));
+        }
         // The picked bus's effects' and sends' sections (E11-2b): titles, names, values.
         let t = &mut self.part_texts;
-        let chain = crate::mixer::chain(&doc.layout, bus);
+        let chain = crate::mixer::chain(&doc.view, bus);
         let reductions = self
             .reductions
             .iter()
@@ -15095,7 +15212,7 @@ impl Editor {
             }
         }
         t.sends = 0;
-        if let Some(b) = doc.layout.buses.get(bus) {
+        if let Some(b) = doc.view.buses.get(bus) {
             fit(&mut t.send_titles, b.sends.len());
             fit(&mut t.send_values, b.sends.len());
             for (i, (to, send)) in b.sends.iter().enumerate() {
@@ -15112,10 +15229,10 @@ impl Editor {
             t.sends = b.sends.len();
         }
         let (gain, balance, voices) = if bus == crate::mixer::MASTER {
-            (doc.layout.master.gain, doc.layout.master.balance, 0)
+            (doc.view.master.gain, doc.view.master.balance, 0)
         } else if bus == crate::mixer::ROOM {
-            (doc.layout.room.gain, 0.0, 0)
-        } else if let Some(b) = doc.layout.buses.get(bus) {
+            (doc.view.room.gain, 0.0, 0)
+        } else if let Some(b) = doc.view.buses.get(bus) {
             (b.gain, b.balance, b.voices)
         } else {
             return;
@@ -15164,9 +15281,32 @@ impl Editor {
         };
         let field = event.field;
         let here = Some((part, field));
+        // A snapshot chosen (E11-5b): ↺ takes the value out of it.
+        if doc.chosen.is_some() && event.action == FieldAction::Reset {
+            let path = match part {
+                MixerPart::Effect(k) => m::chain(&doc.view, &bus).get(k).and_then(|e| {
+                    match EffectRow::at(&e.kind, field) {
+                        Some(EffectRow::Param(p)) => Some(format!("{bus}/effects/{k}/{}", p.name)),
+                        Some(EffectRow::Bypass) => Some(format!("{bus}/effects/{k}/bypass")),
+                        _ => None,
+                    }
+                }),
+                MixerPart::Send(i) => doc
+                    .view
+                    .buses
+                    .get(&bus)
+                    .and_then(|b| b.sends.keys().nth(i))
+                    .map(|to| format!("{bus}/sends/{to}")),
+                MixerPart::Add => None,
+            };
+            if let Some(path) = path {
+                self.mixer_forget(world, &path);
+            }
+            return;
+        }
         match part {
             MixerPart::Effect(k) => {
-                let Some(effect) = m::chain(&doc.layout, &bus).get(k).cloned() else {
+                let Some(effect) = m::chain(&doc.view, &bus).get(k).cloned() else {
                     return;
                 };
                 let Some(row) = EffectRow::at(&effect.kind, field) else {
@@ -15262,7 +15402,7 @@ impl Editor {
             }
             MixerPart::Send(i) => {
                 let Some((to, send)) = doc
-                    .layout
+                    .view
                     .buses
                     .get(&bus)
                     .and_then(|b| b.sends.iter().nth(i))
@@ -15510,6 +15650,9 @@ impl Editor {
             return false;
         };
         let Some((before, after)) = doc.edit(edit) else {
+            if let Some(why) = doc.refused.take() {
+                self.say(why);
+            }
             return false;
         };
         let id = doc.id;
@@ -15518,6 +15661,157 @@ impl Editor {
         also(world, &mut self.history);
         self.history.commit(world);
         true
+    }
+
+    /// An edit of the mix itself whatever snapshot is chosen (the snapshots' list, names
+    /// and fades, E11-5b), one step.
+    fn mixer_step_mix(
+        &mut self,
+        world: &mut World,
+        name: &str,
+        edit: impl FnOnce(&mut engine_app::MixerFile),
+    ) -> bool {
+        let Some(doc) = self.mixer.as_mut() else {
+            return false;
+        };
+        let Some((before, after)) = doc.edit_mix(edit) else {
+            return false;
+        };
+        let id = doc.id;
+        self.history.begin(name, None);
+        self.history.change_file(id, &before, &after);
+        self.history.commit(world);
+        true
+    }
+
+    /// Value `path` taken out of the chosen snapshot (its ↺, E11-5b), one step.
+    fn mixer_forget(&mut self, world: &mut World, path: &str) {
+        let Some(doc) = self.mixer.as_mut() else {
+            return;
+        };
+        let snapshot = doc.chosen.clone().unwrap_or_default();
+        let Some((before, after)) = doc.forget(path) else {
+            return;
+        };
+        let id = doc.id;
+        self.history
+            .begin(&format!("Mixer: {path} out of {snapshot}"), None);
+        self.history.change_file(id, &before, &after);
+        self.history.commit(world);
+    }
+
+    /// Item `i` of the mixer's snapshot list (E11-5b): 0 the mix itself, then each
+    /// snapshot, then a new one.
+    fn choose_snapshot(&mut self, world: &mut World, i: usize) {
+        self.open_mixer();
+        let Some(doc) = self.mixer.as_mut() else {
+            return;
+        };
+        let n = doc.layout.snapshots.len();
+        if i == 0 {
+            doc.choose(None);
+            self.say(String::from(
+                "Mixer: the mix itself, the game's snapshots heard",
+            ));
+        } else if i <= n {
+            let name = doc.layout.snapshots[i - 1].name.clone();
+            doc.choose(Some(&name));
+            self.say(format!(
+                "Mixer: snapshot `{name}`, heard alone: the panel's values go into it"
+            ));
+        } else {
+            self.new_snapshot(world);
+            return;
+        }
+        if self.mixer_picked.is_none() {
+            self.pick_bus(crate::mixer::MASTER);
+        }
+    }
+
+    /// "Audio: New Snapshot" (E11-5b): one at the end of the list, chosen.
+    fn new_snapshot(&mut self, world: &mut World) {
+        self.open_mixer();
+        let mut name = String::new();
+        if self.mixer_step_mix(world, "Mixer: new snapshot", |l| {
+            name = crate::mixer::add_snapshot(l);
+        }) && let Some(doc) = self.mixer.as_mut()
+        {
+            doc.choose(Some(&name));
+            if self.mixer_picked.is_none() {
+                self.pick_bus(crate::mixer::MASTER);
+            }
+            self.say(format!(
+                "Snapshot `{name}` made: name it in the inspector; the panel's values go into it"
+            ));
+        }
+    }
+
+    /// "Audio: Delete Snapshot" (E11-5b): the chosen one taken away, the mix chosen again.
+    fn delete_snapshot(&mut self, world: &mut World) {
+        let Some(name) = self.mixer.as_ref().and_then(|d| d.chosen.clone()) else {
+            self.say(String::from("No snapshot is chosen in the mixer"));
+            return;
+        };
+        if self.mixer_step_mix(world, &format!("Mixer: delete snapshot {name}"), |l| {
+            crate::mixer::remove_snapshot(l, &name);
+        }) {
+            self.say(format!("Snapshot `{name}` deleted"));
+        }
+    }
+
+    /// A field of the chosen snapshot's section (E11-5b): its name (renamed), its fade
+    /// (typed after a click; ↺ to half a second).
+    fn edit_snapshot(&mut self, world: &mut World, event: FieldEvent) {
+        let Some(name) = self.mixer.as_ref().and_then(|d| d.chosen.clone()) else {
+            return;
+        };
+        match (event.field, event.action) {
+            (0, FieldAction::Text { commit: true }) => {
+                let to = self.ui.edited_text().trim().to_owned();
+                let mut refused = None;
+                let renamed = self.mixer_step_mix(world, &format!("Mixer: rename {name}"), |l| {
+                    if let Err(e) = crate::mixer::rename_snapshot(l, &name, &to) {
+                        refused = Some(e);
+                    }
+                });
+                match refused {
+                    Some(e) => self.say(format!("Not renamed: {e}")),
+                    None if renamed => {
+                        if let Some(doc) = self.mixer.as_mut() {
+                            doc.choose(Some(&to));
+                        }
+                    }
+                    None => {}
+                }
+            }
+            (1, FieldAction::Release) => self.snapshot_typing = true,
+            (1, FieldAction::Typed { commit, .. }) => {
+                self.snapshot_typing = false;
+                if !commit {
+                    return;
+                }
+                let current = self
+                    .mixer
+                    .as_ref()
+                    .and_then(|d| d.layout.snapshot(&name))
+                    .map_or(0.5, |s| s.fade);
+                let text = self.ui.edited_text().trim().to_owned();
+                match crate::expr::evaluate(&text, f64::from(current)) {
+                    Ok(v) => {
+                        self.mixer_step_mix(world, &format!("Mixer: {name} fade"), |l| {
+                            crate::mixer::set_snapshot_fade(l, &name, v as f32);
+                        });
+                    }
+                    Err(reason) => self.say(format!("fade: {reason}")),
+                }
+            }
+            (1, FieldAction::Reset) => {
+                self.mixer_step_mix(world, &format!("Mixer: {name} fade"), |l| {
+                    crate::mixer::set_snapshot_fade(l, &name, 0.5);
+                });
+            }
+            _ => {}
+        }
     }
 
     /// Bus `bus` of the mixer renamed `to` (its name field, E11-1b): the buses it feeds,
@@ -15761,11 +16055,24 @@ impl Editor {
         let Some(doc) = self.mixer.as_ref() else {
             return;
         };
+        // A snapshot chosen (E11-5b): ↺ takes the value out of it.
+        if doc.chosen.is_some() && event.action == FieldAction::Reset {
+            let path = match (row, bus.as_str()) {
+                (BusRow::Gain, m::ROOM) => Some(String::from("room/gain")),
+                (BusRow::Gain, _) => Some(format!("{bus}/gain")),
+                (BusRow::Balance, _) => Some(format!("{bus}/balance")),
+                _ => None,
+            };
+            if let Some(path) = path {
+                self.mixer_forget(world, &path);
+            }
+            return;
+        }
         let value = |doc: &m::MixerDoc| -> f32 {
-            let b = doc.layout.buses.get(&bus);
+            let b = doc.view.buses.get(&bus);
             match row {
                 BusRow::Gain => doc.gain(&bus).unwrap_or(0.0),
-                BusRow::Balance if bus == m::MASTER => doc.layout.master.balance,
+                BusRow::Balance if bus == m::MASTER => doc.view.master.balance,
                 BusRow::Balance => b.map_or(0.0, |b| b.balance),
                 BusRow::Voices => b.map_or(0.0, |b| b.voices as f32),
                 _ => 0.0,
@@ -20055,6 +20362,12 @@ impl<G> EditorGame<G> {
                     }
                 }
                 _ => shared.meters_at = None,
+            }
+            // The chosen snapshot heard alone (E11-5b).
+            let chosen = shared.mixer.as_ref().and_then(|d| d.chosen.as_deref());
+            if shared.snapshot_heard.as_deref() != chosen {
+                player.hear_snapshot(chosen);
+                shared.snapshot_heard = chosen.map(str::to_owned);
             }
             if !shared.listening_given {
                 if shared.monitor {
@@ -25763,6 +26076,122 @@ mod tests {
         click(&mut ed, &mut world, at);
         ed.update(&mut world);
         assert!(ed.sound_view.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chosen_snapshot_takes_the_panels_edits_and_shows_what_it_sets() {
+        let dir = folder("panel-snapshots");
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        let mixer = ed.ids.mixer;
+        ed.run(&mut world, mixer);
+        ed.update(&mut world);
+        // The header's list: the mix itself, and + Snapshot.
+        assert!(!texts(&ed, "Mix").is_empty(), "the list shows the mix");
+        ed.snapshot_menu = false;
+        ed.choose_snapshot(&mut world, 1);
+        let doc = ed.mixer.as_ref().unwrap();
+        assert_eq!(doc.chosen.as_deref(), Some("snapshot"), "made and chosen");
+        assert_eq!(ed.mixer_picked.as_deref(), Some(crate::mixer::MASTER));
+        // Music's fader set while it is chosen: the snapshot's value, the mix kept.
+        let steps = ed.history.steps().count();
+        ed.mixer_step(&mut world, "Mixer: music -12 dB", None, |l| {
+            crate::mixer::set_gain(l, "music", -12.0);
+        });
+        let doc = ed.mixer.as_ref().unwrap();
+        assert_eq!(doc.layout.buses["music"].gain, 0.0);
+        assert_eq!(
+            doc.layout
+                .snapshot("snapshot")
+                .unwrap()
+                .values
+                .get("music/gain"),
+            Some(&-12.0)
+        );
+        assert_eq!(ed.history.steps().count(), steps + 1);
+        let music = doc.strips.iter().find(|s| s.name == "music").unwrap();
+        assert!(music.marked);
+        // Picked, the inspector shows the snapshot and marks the gain (↺ there).
+        ed.pick_bus("music");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Snapshot").is_empty());
+        assert!(!texts(&ed, "1 value").is_empty(), "how many it sets");
+        let section = ed.mixer_section.expect("the bus's section");
+        let gain = crate::mixer::BusRow::of("music")
+            .iter()
+            .position(|r| *r == crate::mixer::BusRow::Gain)
+            .unwrap();
+        // Buses are the mix's: refused while a snapshot is chosen.
+        let add = ed.ids.add_bus;
+        ed.run(&mut world, add);
+        assert!(
+            message(&ed).contains("holds values only"),
+            "{}",
+            message(&ed)
+        );
+        // ↺ takes the value out of the snapshot; undo puts it back.
+        ed.edit_bus(
+            &mut world,
+            FieldEvent {
+                section,
+                field: gain,
+                action: FieldAction::Reset,
+            },
+        );
+        let values = |ed: &Editor| {
+            ed.mixer
+                .as_ref()
+                .unwrap()
+                .layout
+                .snapshot("snapshot")
+                .map_or(0, |s| s.values.len())
+        };
+        assert_eq!(values(&ed), 0);
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(values(&ed), 1);
+        // Its name in its section: click, Ctrl+A, type, Enter (the inspector's field is
+        // the topmost "snapshot" drawn; the mixer's list is at the bottom).
+        assert!(ed.snapshot_section.is_some());
+        ed.update(&mut world);
+        let field = texts(&ed, "snapshot")
+            .into_iter()
+            .min_by(|a, b| a.pos[1].total_cmp(&b.pos[1]))
+            .expect("the name's field");
+        click(&mut ed, &mut world, middle(field));
+        key(&mut ed, 0x11, 0x1D, true);
+        key(&mut ed, 0x41, 0x1E, true); // Ctrl+A
+        key(&mut ed, 0x11, 0x1D, false);
+        ed.update(&mut world);
+        chars(&mut ed, "dive");
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, true);
+        ed.update(&mut world);
+        let doc = ed.mixer.as_ref().unwrap();
+        assert_eq!(doc.chosen.as_deref(), Some("dive"), "renamed, still chosen");
+        // The mix chosen again: edits go to it, nothing is marked.
+        ed.choose_snapshot(&mut world, 0);
+        ed.mixer_step(&mut world, "Mixer: ui -3 dB", None, |l| {
+            crate::mixer::set_gain(l, "ui", -3.0);
+        });
+        let doc = ed.mixer.as_ref().unwrap();
+        assert_eq!(doc.layout.buses["ui"].gain, -3.0);
+        assert!(doc.strips.iter().all(|s| !s.marked));
+        // Deleted: the mix chosen.
+        ed.choose_snapshot(&mut world, 1);
+        let delete = ed.ids.delete_snapshot;
+        ed.run(&mut world, delete);
+        let doc = ed.mixer.as_ref().unwrap();
+        assert!(doc.layout.snapshots.is_empty() && doc.chosen.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

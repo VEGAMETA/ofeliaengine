@@ -834,6 +834,9 @@ pub(crate) struct Sound {
     base: MixerFile,
     blended: MixerFile,
     snaps_moved: bool,
+    /// The snapshot the editor hears alone at full weight while it is chosen (E11-5b),
+    /// over whatever the game blended.
+    heard_alone: Option<String>,
     /// A fader changed under the game's volumes: every bus's gain is given again.
     refader: bool,
     /// Where the sounds come from, said once at the start.
@@ -1065,6 +1068,7 @@ impl Sound {
             base: MixerFile::default(),
             blended: MixerFile::default(),
             snaps_moved: false,
+            heard_alone: None,
             refader: false,
             note,
             live_folder,
@@ -1495,13 +1499,20 @@ impl Sound {
         if !core::mem::take(&mut self.snaps_moved) {
             return;
         }
+        // The editor's chosen snapshot is heard alone, at full weight (E11-5b).
+        let alone = self.heard_alone.as_deref();
+        let weight = |s: &Snap| match alone {
+            Some(name) if s.name == name => 1.0,
+            Some(_) => 0.0,
+            None => s.current,
+        };
         for p in &self.snap_paths {
             let Some(target) = snapshot_target(&p.path) else {
                 continue;
             };
             let mut v = p.base;
             for &(k, x) in &p.sets {
-                let w = self.snaps.get(k).map_or(0.0, |s| s.current);
+                let w = self.snaps.get(k).map_or(0.0, weight);
                 if w > 0.0 {
                     v += (x - v) * w;
                 }
@@ -1518,7 +1529,16 @@ impl Sound {
             );
         }
         for (shown, s) in mixer.snapshots.iter_mut().zip(&self.snaps) {
-            shown.weight = s.current;
+            shown.weight = weight(s);
+        }
+    }
+
+    /// The editor's chosen snapshot heard alone at full weight over the mix (E11-5b); none:
+    /// the game's weights again.
+    pub(crate) fn hear_snapshot(&mut self, name: Option<&str>) {
+        if self.heard_alone.as_deref() != name {
+            self.heard_alone = name.map(str::to_owned);
+            self.snaps_moved = true;
         }
     }
 

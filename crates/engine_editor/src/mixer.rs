@@ -195,6 +195,8 @@ pub(crate) struct Strip {
     pub(crate) effects: String,
     /// Every one of them bypassed (B lit).
     pub(crate) bypassed: bool,
+    /// The chosen snapshot sets its fader (E11-5b).
+    pub(crate) marked: bool,
 }
 
 /// A bus's rows in the inspector (E11-1b).
@@ -267,6 +269,13 @@ pub(crate) struct MixerDoc {
     pub(crate) due: Option<std::time::Instant>,
     /// The panel's strips.
     pub(crate) strips: Vec<Strip>,
+    /// The snapshot the panel edits (E11-5b, ADR 0122): none for the mix itself; and the
+    /// layout as heard with it alone at full weight (the mix itself without one), which the
+    /// panel shows.
+    pub(crate) chosen: Option<String>,
+    pub(crate) view: MixerFile,
+    /// Why the last edit was refused (a snapshot holds values only).
+    pub(crate) refused: Option<String>,
 }
 
 impl MixerDoc {
@@ -307,6 +316,9 @@ impl MixerDoc {
             autosaved: None,
             due: None,
             strips: Vec::new(),
+            chosen: None,
+            view: MixerFile::default(),
+            refused: None,
         };
         doc.refresh();
         doc
@@ -319,7 +331,113 @@ impl MixerDoc {
 
     /// `edit` applied to the layout: its text before and after, when it changed.
     pub(crate) fn edit(&mut self, edit: impl FnOnce(&mut MixerFile)) -> Option<(String, String)> {
+        match self.chosen.clone() {
+            None => edit(&mut self.layout),
+            Some(name) => {
+                // A snapshot chosen: the edit is made to what the panel shows, and what it
+                // changes becomes the snapshot's values; the mix stays as it is.
+                let mut edited = self.view.clone();
+                edit(&mut edited);
+                if values_aside(&edited) != values_aside(&self.view) {
+                    self.refused = Some(format!(
+                        "`{name}` holds values only: choose Mix to change the buses, effects \
+                         and sends themselves"
+                    ));
+                    return None;
+                }
+                let k = self.layout.snapshots.iter().position(|s| s.name == name)?;
+                for path in self.view.paths() {
+                    let Some(t) = engine_app::snapshot_target(&path) else {
+                        continue;
+                    };
+                    if let Some(v) = edited.value_at(t)
+                        && self.view.value_at(t) != Some(v)
+                    {
+                        self.layout.snapshots[k].values.insert(path, v);
+                    }
+                }
+            }
+        }
+        self.settle()
+    }
+
+    /// `edit` made to the mix itself, whatever snapshot is chosen: the snapshots' own list,
+    /// names and fades.
+    pub(crate) fn edit_mix(
+        &mut self,
+        edit: impl FnOnce(&mut MixerFile),
+    ) -> Option<(String, String)> {
         edit(&mut self.layout);
+        if self
+            .chosen
+            .as_ref()
+            .is_some_and(|c| self.layout.snapshot(c).is_none())
+        {
+            self.chosen = None;
+        }
+        self.settle()
+    }
+
+    /// Value `path` taken out of the chosen snapshot (its ↺): the mix's value again.
+    pub(crate) fn forget(&mut self, path: &str) -> Option<(String, String)> {
+        let name = self.chosen.clone()?;
+        let k = self.layout.snapshots.iter().position(|s| s.name == name)?;
+        self.layout.snapshots[k].values.remove(path)?;
+        self.settle()
+    }
+
+    /// Whether the chosen snapshot sets `<bus>/<rest…>` (each of `rest` a step), with
+    /// nothing allocated: the inspector's marks a frame.
+    pub(crate) fn sets_at(&self, bus: &str, rest: &[&str]) -> bool {
+        let bus = if bus == ROOM { "room" } else { bus };
+        self.chosen
+            .as_deref()
+            .and_then(|c| self.layout.snapshot(c))
+            .is_some_and(|s| {
+                s.values.keys().any(|key| {
+                    let mut steps = key.split('/');
+                    steps.next() == Some(bus) && steps.eq(rest.iter().copied())
+                })
+            })
+    }
+
+    /// Whether the chosen snapshot sets effect `k` of bus `bus`'s `what` (a parameter, or
+    /// `bypass`), with nothing allocated.
+    pub(crate) fn sets_effect(&self, bus: &str, k: usize, what: &str) -> bool {
+        self.chosen
+            .as_deref()
+            .and_then(|c| self.layout.snapshot(c))
+            .is_some_and(|s| {
+                s.values.keys().any(|key| {
+                    let mut steps = key.split('/');
+                    steps.next() == Some(bus)
+                        && steps.next() == Some("effects")
+                        && steps.next().and_then(|i| i.parse::<usize>().ok()) == Some(k)
+                        && steps.next() == Some(what)
+                        && steps.next().is_none()
+                })
+            })
+    }
+
+    /// Whether the chosen snapshot sets `path`.
+    pub(crate) fn sets(&self, path: &str) -> bool {
+        self.chosen
+            .as_deref()
+            .and_then(|c| self.layout.snapshot(c))
+            .is_some_and(|s| s.values.contains_key(path))
+    }
+
+    /// Snapshot `name` chosen for the panel's edits (none: the mix itself): what it shows
+    /// is then heard with it alone.
+    pub(crate) fn choose(&mut self, name: Option<&str>) {
+        self.chosen = name
+            .filter(|n| self.layout.snapshot(n).is_some())
+            .map(str::to_owned);
+        self.refresh();
+    }
+
+    /// After an edit: the text again, and whether it changed (its text before and after).
+    fn settle(&mut self) -> Option<(String, String)> {
         let after = self.layout.to_text(self.id);
         if after == self.text {
             return None;
@@ -342,6 +460,13 @@ impl MixerDoc {
         self.text = text.to_owned();
         self.given = false;
         self.revision += 1;
+        if self
+            .chosen
+            .as_ref()
+            .is_some_and(|c| self.layout.snapshot(c).is_none())
+        {
+            self.chosen = None;
+        }
         self.refresh();
         Ok(())
     }
@@ -352,22 +477,27 @@ impl MixerDoc {
         self.exists = true;
     }
 
-    /// The strips again from the layout.
+    /// The view and the strips again from the layout.
     fn refresh(&mut self) {
+        self.view = match &self.chosen {
+            Some(name) => self.layout.with_snapshot(name),
+            None => self.layout.clone(),
+        };
         self.strips.clear();
         let mut master = Strip {
             name: String::from(MASTER),
             depth: 0,
-            gain: self.layout.master.gain,
+            gain: self.view.master.gain,
             gain_text: String::new(),
             output: String::from("\u{2192} speakers"),
             effects: String::new(),
             bypassed: false,
+            marked: false,
         };
         gain_text(&mut master.gain_text, master.gain);
-        master.bypassed = effects_text(&mut master.effects, &self.layout.master.effects);
+        master.bypassed = effects_text(&mut master.effects, &self.view.master.effects);
         self.strips.push(master);
-        let order = self.layout.order();
+        let order = self.view.order();
         let mut depths: Vec<(&str, u8)> = Vec::with_capacity(order.len());
         for placed in &order {
             let depth = placed
@@ -387,6 +517,7 @@ impl MixerDoc {
                 output,
                 effects: String::new(),
                 bypassed: false,
+                marked: false,
             };
             gain_text(&mut strip.gain_text, strip.gain);
             strip.bypassed = effects_text(&mut strip.effects, &placed.layout.effects);
@@ -396,14 +527,28 @@ impl MixerDoc {
         let mut room = Strip {
             name: String::from(ROOM),
             depth: 0,
-            gain: self.layout.room.gain,
+            gain: self.view.room.gain,
             gain_text: String::new(),
             output: format!("\u{2192} {MASTER}"),
             effects: String::new(),
             bypassed: false,
+            marked: false,
         };
         gain_text(&mut room.gain_text, room.gain);
         self.strips.push(room);
+        // What the chosen snapshot sets of each fader.
+        let mut marks: Vec<bool> = Vec::with_capacity(self.strips.len());
+        for s in &self.strips {
+            let path = if s.name == ROOM {
+                String::from("room/gain")
+            } else {
+                format!("{}/gain", s.name)
+            };
+            marks.push(self.sets(&path));
+        }
+        for (s, marked) in self.strips.iter_mut().zip(marks) {
+            s.marked = marked;
+        }
     }
 
     /// The strip of bus `bus`.
@@ -411,13 +556,77 @@ impl MixerDoc {
         self.strips.iter().position(|s| s.name == bus)
     }
 
-    /// Bus `bus`'s gain in dB (the master's for [`MASTER`]).
+    /// Bus `bus`'s gain in dB as the panel shows it (the master's for [`MASTER`]; the
+    /// chosen snapshot's where it sets it).
     pub(crate) fn gain(&self, bus: &str) -> Option<f32> {
         match bus {
-            MASTER => Some(self.layout.master.gain),
-            ROOM => Some(self.layout.room.gain),
-            _ => self.layout.buses.get(bus).map(|b| b.gain),
+            MASTER => Some(self.view.master.gain),
+            ROOM => Some(self.view.room.gain),
+            _ => self.view.buses.get(bus).map(|b| b.gain),
         }
+    }
+}
+
+/// `layout` with every value a snapshot can set put at zero: what is left is what only the
+/// mix itself holds (buses, effects, sends, parents, voices, the snapshots' list).
+fn values_aside(layout: &MixerFile) -> MixerFile {
+    let mut aside = layout.clone();
+    for path in layout.paths() {
+        if let Some(t) = engine_app::snapshot_target(&path) {
+            aside.set_value(t, 0.0);
+        }
+    }
+    aside
+}
+
+/// A new snapshot at the end of the list, named `snapshot` (`snapshot 2`, ...): its name.
+pub(crate) fn add_snapshot(layout: &mut MixerFile) -> String {
+    let mut name = String::from("snapshot");
+    let mut n = 1;
+    while layout.snapshot(&name).is_some() {
+        n += 1;
+        name = format!("snapshot {n}");
+    }
+    layout
+        .snapshots
+        .push(engine_app::SnapshotLayout::new(&name));
+    name
+}
+
+/// Snapshot `name` taken away.
+pub(crate) fn remove_snapshot(layout: &mut MixerFile, name: &str) {
+    layout.snapshots.retain(|s| s.name != name);
+}
+
+/// Snapshot `from` called `to`.
+///
+/// # Errors
+///
+/// An empty name, or one another snapshot has.
+pub(crate) fn rename_snapshot(layout: &mut MixerFile, from: &str, to: &str) -> Result<(), String> {
+    let to = to.trim();
+    if to == from {
+        return Ok(());
+    }
+    if to.is_empty() {
+        return Err(String::from("a snapshot needs a name"));
+    }
+    if layout.snapshot(to).is_some() {
+        return Err(format!("there is a snapshot `{to}` already"));
+    }
+    let s = layout
+        .snapshots
+        .iter_mut()
+        .find(|s| s.name == from)
+        .ok_or_else(|| format!("there is no snapshot `{from}`"))?;
+    to.clone_into(&mut s.name);
+    Ok(())
+}
+
+/// Snapshot `name`'s fade set to `seconds` (0 to 60, to the hundredth).
+pub(crate) fn set_snapshot_fade(layout: &mut MixerFile, name: &str, seconds: f32) {
+    if let Some(s) = layout.snapshots.iter_mut().find(|s| s.name == name) {
+        s.fade = (100.0 * seconds.clamp(0.0, 60.0)).round() / 100.0;
     }
 }
 
@@ -1006,6 +1215,69 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn a_chosen_snapshot_takes_the_panels_value_edits_and_refuses_the_rest() {
+        let mut layout = MixerFile::builtin();
+        add_effect(&mut layout, "music", "low_pass");
+        let mut doc = MixerDoc::new(AssetId::new(), "main.mixer", layout);
+        let (_, _) = doc
+            .edit_mix(|l| {
+                add_snapshot(l);
+            })
+            .unwrap();
+        doc.choose(Some("snapshot"));
+        assert_eq!(doc.chosen.as_deref(), Some("snapshot"));
+        // A fader and a parameter edited: the snapshot's values, the mix kept.
+        doc.edit(|l| set_gain(l, "music", -12.0)).unwrap();
+        doc.edit(|l| set_param(l, "music", 0, "frequency_hz", 800.0))
+            .unwrap();
+        let s = doc.layout.snapshot("snapshot").unwrap();
+        assert_eq!(s.values.get("music/gain"), Some(&-12.0));
+        assert_eq!(s.values.get("music/effects/0/frequency_hz"), Some(&800.0));
+        assert_eq!(s.values.len(), 2, "only what changed: {:?}", s.values);
+        assert_eq!(doc.layout.buses["music"].gain, 0.0, "the mix as it was");
+        // What the panel shows is the snapshot over the mix: the strip marked.
+        assert_eq!(doc.gain("music"), Some(-12.0));
+        let music = doc.strips.iter().find(|s| s.name == "music").unwrap();
+        assert!(music.marked && music.gain_text == "\u{2212}12.0");
+        assert!(doc.sets("music/gain") && !doc.sets("ui/gain"));
+        // Buses and effects are the mix's: refused while a snapshot is chosen.
+        assert!(
+            doc.edit(|l| {
+                add_bus(l);
+            })
+            .is_none()
+        );
+        assert!(doc.refused.take().unwrap().contains("choose Mix"));
+        assert!(
+            doc.edit(|l| {
+                add_effect(l, "ui", "delay");
+            })
+            .is_none()
+        );
+        // ↺ takes a value out.
+        doc.forget("music/gain").unwrap();
+        assert_eq!(doc.gain("music"), Some(0.0));
+        assert!(!doc.sets("music/gain"));
+        // The mix chosen again: edits go to it.
+        doc.choose(None);
+        doc.edit(|l| set_gain(l, "ui", -3.0)).unwrap();
+        assert_eq!(doc.layout.buses["ui"].gain, -3.0);
+        assert_eq!(doc.layout.snapshots[0].values.len(), 1);
+        // Its list: renamed, its fade, taken away (the choice with it).
+        doc.choose(Some("snapshot"));
+        doc.edit_mix(|l| rename_snapshot(l, "snapshot", "dive").unwrap())
+            .unwrap();
+        assert!(doc.chosen.is_none(), "the old name is gone");
+        doc.choose(Some("dive"));
+        doc.edit_mix(|l| set_snapshot_fade(l, "dive", 1.234))
+            .unwrap();
+        assert_eq!(doc.layout.snapshot("dive").unwrap().fade, 1.23);
+        assert!(rename_snapshot(&mut doc.layout.clone(), "dive", " ").is_err());
+        doc.edit_mix(|l| remove_snapshot(l, "dive")).unwrap();
+        assert!(doc.chosen.is_none() && doc.layout.snapshots.is_empty());
+    }
 
     #[test]
     fn snapshots_values_follow_renames_moves_and_removals() {

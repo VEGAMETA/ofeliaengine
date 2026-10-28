@@ -852,14 +852,18 @@ Last updated: 2026-10-28.
     `audio.blend(name, weight, fade?)`; fades on the game's thread, nothing allocated a
     frame; the editor's mixer functions keep the paths through renames, moves and
     removals.
+  - **E11-5b, the panel's snapshots** (#PR, ADR 0107's as-built): the header's list (Mix,
+    each snapshot, + Snapshot); a chosen snapshot shows over the mix and is heard alone,
+    and the panel's value edits go into it (one step each, ↺ takes one out, buses and
+    effects refused); its section names it and sets its fade. E11-5 is done.
   - **Test runs keep their windows out of sight** (#411; the owner's request, 2026-10-28):
     `tools/check.ps1` sets `ENGINE_HIDDEN_WINDOWS=1`, and every window `engine_platform`
     makes is then cloaked (composed, its swapchain presenting, never on the screen), with
     no taskbar button, shown without being activated; uncloaking and bringing it to the
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-5b, the panel's snapshots (the list, edits into the chosen one, its values
-       marked, heard while chosen), then View: Sound Ranges and the falloff curve.
+    1. E11's last two: View: Sound Ranges and the inspector's falloff curve with the
+       camera's distance.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
     the later in the file's list winning where they meet; scripts blend one in and out
