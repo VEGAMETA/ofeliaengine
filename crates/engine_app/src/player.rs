@@ -735,6 +735,7 @@ impl Player {
         let preference = AdapterPreference::from_env().unwrap_or(settings.adapter.clone());
         let app_name = settings.title.clone();
         let video_decode = settings.video_decode;
+        let pipeline_statistics = settings.pipeline_statistics;
 
         // The Vulkan instance and device (the drivers' own start-up) beside the window.
         let gpu = std::thread::Builder::new()
@@ -743,7 +744,7 @@ impl Player {
                 start_gpu(
                     &app_name,
                     dlss_wanted,
-                    video_decode,
+                    (video_decode, pipeline_statistics),
                     warm_up,
                     cache_dir.as_deref(),
                     &preference,
@@ -1760,6 +1761,19 @@ impl Player {
                 type_name: type_name.to_owned(),
             },
         )
+    }
+
+    /// What material type `ty`'s shading costs this GPU (E10-4c): its fragment stage's
+    /// registers and spill per shading variant, beside the engine's own shading's. `None`
+    /// until its pipelines are made (asking makes them, off the frame's thread), or without
+    /// [`crate::PlayerSettings::pipeline_statistics`].
+    pub fn material_cost(
+        &self,
+        ty: engine_render::material::MaterialTypeId,
+    ) -> Option<engine_render::forward::MaterialCost> {
+        self.renderer
+            .forward()
+            .material_type_cost(self.device(), ty)
     }
 
     /// Material type `ty`'s parameters' layout, reflected off the frame's thread (ADR 0120's
@@ -4467,7 +4481,7 @@ struct GpuStart {
 fn start_gpu(
     app_name: &str,
     dlss_wanted: bool,
-    video_decode: bool,
+    (video_decode, pipeline_statistics): (bool, bool),
     warm_up: bool,
     cache_dir: Option<&std::path::Path>,
     preference: &AdapterPreference,
@@ -4533,6 +4547,7 @@ fn start_gpu(
             .unwrap_or_default(),
         ExtraQueues {
             video_decode,
+            pipeline_statistics,
             ..streamline
                 .as_ref()
                 .map(Streamline::extra_queues)

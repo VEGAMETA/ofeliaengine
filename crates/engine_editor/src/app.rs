@@ -291,6 +291,8 @@ fn run_inner<G: Game>(
     // The editor keeps Windows' power throttling (the team's decision, CLAUDE.md §5): it
     // saves power while its window is in the background.
     settings.process_setup = false;
+    // Materials' costs (E10-4c): the driver's statistics of the pipelines made.
+    settings.pipeline_statistics = true;
     if !matches!(
         settings.window,
         Window::Windowed { .. } | Window::Offscreen { .. }
@@ -1533,6 +1535,12 @@ struct GraphPreview {
     marked: bool,
     /// The module just written, for the player to be told.
     written: Option<PathBuf>,
+    /// Its type's cost to read once a drawing of new code came back (E10-4c), and what the
+    /// bar says of it: the editing build's (its numbers parameters).
+    cost_due: bool,
+    cost: String,
+    /// Its material type, as the player registered it (asked once).
+    ty: Option<engine_render::material::MaterialTypeId>,
 }
 
 /// A number of a graph node's row dragged in the inspector (ADR 0123 E10-3f-1): the row,
@@ -12592,6 +12600,10 @@ impl Editor {
                 let text = generated.text;
                 preview.lines = generated.lines;
                 preview.same_code = text == preview.text;
+                // New code: its cost read again once it draws (E10-4c).
+                if !preview.same_code {
+                    preview.cost.clear();
+                }
                 if text != preview.text {
                     let full = self.root.join(&preview.module_path);
                     let written = full
@@ -12669,6 +12681,14 @@ impl Editor {
         let _ = write!(self.graph_status, " · {:.0} %", doc.view.zoom() * 100.0);
         // Why its preview cannot be drawn (E10-3f-2): the graph's code (at its node,
         // E10-3f-3), or its material.
+        // What its code costs this GPU (E10-4c), once drawn.
+        if let Some(p) = self
+            .graph_preview
+            .as_ref()
+            .filter(|p| p.graph == doc.id && !p.cost.is_empty())
+        {
+            let _ = write!(self.graph_status, " · {}", p.cost);
+        }
         if let Some(e) = &doc.error {
             let _ = write!(self.graph_status, " · not drawn: {e}");
         } else if let Some(p) = self
@@ -22591,6 +22611,31 @@ impl<G> EditorGame<G> {
                 });
             }
         }
+        // The shown graph's cost once a drawing of its code came back (E10-4c); a wait
+        // reads nothing and allocates nothing.
+        {
+            let s = &mut *shared;
+            if let Some(p) = s.graph_preview.as_mut().filter(|p| p.cost_due) {
+                let ty = match p.ty {
+                    Some(ty) => ty,
+                    None => {
+                        let ty = player.material_type(
+                            &s.root.join(&p.module_path),
+                            engine_assets::graph_module::GRAPH_TYPE,
+                        );
+                        p.ty = Some(ty);
+                        ty
+                    }
+                };
+                if let Some(cost) = player.material_cost(ty) {
+                    p.cost = format!(
+                        "{} (the editing build)",
+                        crate::material::cost_text(&cost, None)
+                    );
+                    p.cost_due = false;
+                }
+            }
+        }
         let mut previews = Vec::new();
         player.take_previews(&mut previews);
         for preview in previews {
@@ -22601,6 +22646,7 @@ impl<G> EditorGame<G> {
                         p.unmade = false;
                     } else {
                         p.upload = Some(preview.pixels);
+                        p.cost_due = true;
                     }
                 }
                 continue;
@@ -22890,9 +22936,17 @@ impl<G> EditorGame<G> {
                 }
                 None if ty.is_none() && doc.layout.is_some() => {
                     doc.layout = None;
+                    doc.cost = None;
                     doc.refresh();
                 }
                 _ => {}
+            }
+            // Its type's cost (E10-4c), read once per layout its shading is made for.
+            if let (Some(ty), Some(revision)) = (ty, doc.layout.as_ref().map(|(r, _)| *r))
+                && doc.cost.as_ref().map(|(r, _)| *r) != Some(revision)
+                && let Some(cost) = player.material_cost(ty)
+            {
+                doc.set_cost(revision, cost);
             }
         }
         // Groups baked (E2b-6): their files written and read, their models in place.

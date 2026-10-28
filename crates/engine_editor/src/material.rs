@@ -26,6 +26,8 @@ pub(crate) enum Row {
     Base,
     /// The type and its module.
     Type,
+    /// What the type's shading costs this GPU (E10-4c): its registers beside the engine's.
+    Cost,
     /// A field of the type's `Params`: its path, what it holds, its elements.
     Param {
         name: String,
@@ -85,6 +87,7 @@ impl Row {
     pub(crate) fn name(&self) -> &str {
         match self {
             Self::Base => "base",
+            Self::Cost => "cost",
             Self::Type => "type",
             Self::Param { name, .. } => name,
             Self::Encoding { .. } => "  encoding",
@@ -108,6 +111,7 @@ impl Row {
         };
         match self {
             Self::Base => Shown::Image,
+            Self::Cost => Shown::Text,
             Self::Type => Shown::Text,
             Self::Param { count, .. } if *count != 1 => Shown::Text,
             Self::Param { name, kind, .. } => match *kind {
@@ -401,7 +405,7 @@ pub(crate) fn changed(file: &MaterialFile, row: &Row, base: Option<&MaterialFile
     let plain = MaterialFile::default();
     let d = base.unwrap_or(&plain);
     match row {
-        Row::Base | Row::Type => false,
+        Row::Base | Row::Type | Row::Cost => false,
         Row::Param { name, .. } => match base {
             Some(b) => {
                 file.numbers.get(name) != b.numbers.get(name)
@@ -439,7 +443,7 @@ pub(crate) fn reset(file: &mut MaterialFile, row: &Row, base: Option<&MaterialFi
     let plain = MaterialFile::default();
     let d = base.unwrap_or(&plain);
     match row {
-        Row::Base | Row::Type => {}
+        Row::Base | Row::Type | Row::Cost => {}
         Row::Param { name, .. } => {
             let key = name.clone();
             match d.numbers.get(name) {
@@ -498,6 +502,40 @@ pub(crate) fn set_image(
         .insert(name.to_owned(), MaterialTexture { image, encoding });
 }
 
+/// A material type's cost as its row says it (E10-4c): the fragment stage's registers over
+/// its shading variants made (`35–40 registers`), the engine's own beside them, what spills,
+/// and its parameters' bytes (`params`).
+pub(crate) fn cost_text(
+    cost: &engine_render::forward::MaterialCost,
+    params: Option<u32>,
+) -> String {
+    use std::fmt::Write;
+    let range = |values: &mut dyn Iterator<Item = u32>| {
+        let (lo, hi) = values.fold((u32::MAX, 0), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        match (lo, hi) {
+            (u32::MAX, _) => None,
+            (lo, hi) if lo == hi => Some(format!("{lo}")),
+            (lo, hi) => Some(format!("{lo}–{hi}")),
+        }
+    };
+    let made = || cost.variants.iter().flatten();
+    let mut text = String::new();
+    if let Some(r) = range(&mut made().map(|v| v.registers)) {
+        let _ = write!(text, "{r} registers");
+    }
+    if let Some(e) = range(&mut made().filter_map(|v| v.engine)) {
+        let _ = write!(text, " (the engine's {e})");
+    }
+    let spill = made().map(|v| v.spill).max().unwrap_or(0);
+    if spill > 0 {
+        let _ = write!(text, ", {spill} B spilled");
+    }
+    if let Some(bytes) = params {
+        let _ = write!(text, " · {bytes} B of parameters");
+    }
+    text
+}
+
 /// The file name of the path `written` gives `asset` (`none` for none).
 fn file_name(written: &AssetPaths, asset: AssetRef) -> &str {
     if asset.is_none() {
@@ -512,6 +550,7 @@ fn file_name(written: &AssetPaths, asset: AssetRef) -> &str {
 fn texts(
     file: &MaterialFile,
     written: &AssetPaths,
+    cost: &str,
     rows: &[Row],
     texts: &mut Vec<String>,
     spans: &mut Vec<(usize, usize)>,
@@ -563,6 +602,7 @@ fn texts(
                         use std::fmt::Write;
                         let _ = write!(texts[k], "{count} values (an array)");
                     }
+                    Row::Cost => texts[k].push_str(cost),
                     _ => {}
                 }
             }
@@ -603,6 +643,10 @@ pub(crate) struct MaterialDoc {
     /// (E10-4a): `file` is it under the variant's own values, and the text the variant's
     /// own lines.
     pub(crate) base: Option<(MaterialFile, AssetPaths)>,
+    /// What its type's shading costs this GPU (E10-4c), as read at its layout's revision,
+    /// and its row's text.
+    pub(crate) cost: Option<(u32, engine_render::forward::MaterialCost)>,
+    pub(crate) cost_text: String,
 }
 
 impl MaterialDoc {
@@ -643,6 +687,8 @@ impl MaterialDoc {
             file,
             written,
             base,
+            cost: None,
+            cost_text: String::new(),
             saved: text.clone(),
             text,
             revision: 0,
@@ -753,13 +799,33 @@ impl MaterialDoc {
             .and_then(|(_, l)| l.as_ref().ok())
             .cloned();
         rows(&self.file, layout.as_ref(), &mut self.rows);
+        // Its cost after its type, once the type's shading has been made (E10-4c).
+        if self.cost.is_some()
+            && let Some(k) = self.rows.iter().position(|r| *r == Row::Type)
+        {
+            self.rows.insert(k + 1, Row::Cost);
+        }
         texts(
             &self.file,
             &self.written,
+            &self.cost_text,
             &self.rows,
             &mut self.texts,
             &mut self.spans,
         );
+    }
+
+    /// What its type's shading costs, as the player read it at layout revision `revision`:
+    /// its cost row's text with its parameters' bytes.
+    pub(crate) fn set_cost(&mut self, revision: u32, cost: engine_render::forward::MaterialCost) {
+        let params = self
+            .layout
+            .as_ref()
+            .and_then(|(_, l)| l.as_ref().ok())
+            .map(|l| l.size);
+        self.cost_text = cost_text(&cost, params);
+        self.cost = Some((revision, cost));
+        self.refresh();
     }
 
     /// Row `row`'s shown texts.
@@ -1029,5 +1095,30 @@ mod tests {
         doc.put_text(&text).unwrap();
         assert_eq!(doc.file.roughness, 0.25);
         assert_eq!(doc.file.base_color, [0.0, 1.0, 0.0, 1.0]);
+    }
+
+    /// E10-4c: a type's cost says its registers over the variants made, the engine's beside
+    /// them, what spills and its parameters' bytes.
+    #[test]
+    fn a_types_cost_says_its_registers_beside_the_engines() {
+        use engine_render::forward::{MaterialCost, VariantCost};
+        let v = |registers, spill, engine| {
+            Some(VariantCost {
+                registers,
+                spill,
+                engine,
+            })
+        };
+        let cost = MaterialCost {
+            variants: [v(35, 0, Some(47)), None, v(40, 0, Some(56)), None],
+        };
+        assert_eq!(
+            cost_text(&cost, Some(48)),
+            "35–40 registers (the engine's 47–56) · 48 B of parameters"
+        );
+        let one = MaterialCost {
+            variants: [v(64, 256, None), None, None, None],
+        };
+        assert_eq!(cost_text(&one, None), "64 registers, 256 B spilled");
     }
 }

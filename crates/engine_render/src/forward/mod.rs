@@ -1857,6 +1857,37 @@ impl ForwardRenderer {
         })
     }
 
+    /// What material type `ty`'s shading costs this GPU (E10-4c, the materials UX note's
+    /// item 12): for each shading variant (plain, local lights, environment, both), its
+    /// fragment stage's registers and spill, beside the engine's own shading's where that is
+    /// made. Asks for the type's variants (made off the frame's thread); `None` while any
+    /// material type is still being made, when none of its variants is, or on a device that
+    /// does not capture statistics. Reads; a steady wait reads nothing and allocates nothing.
+    pub fn material_type_cost(&self, device: &Device, ty: MaterialTypeId) -> Option<MaterialCost> {
+        if !device.pipeline_statistics_enabled() || self.material_types.pending() > 0 {
+            return None;
+        }
+        let mut cost = MaterialCost::default();
+        for (k, variant) in cost.variants.iter_mut().enumerate() {
+            let Some(pipeline) = self.material_types.resolve(ty, &self.shading[k].main[0]) else {
+                continue;
+            };
+            let stats = pipeline.statistics(device);
+            let Some(registers) = fragment_registers(&stats) else {
+                continue;
+            };
+            let engine = self.shading[k].main[0]
+                .get()
+                .and_then(|p| fragment_registers(&p.statistics(device)));
+            *variant = Some(VariantCost {
+                registers,
+                spill: fragment_spill(&stats),
+                engine,
+            });
+        }
+        cost.variants.iter().any(Option::is_some).then_some(cost)
+    }
+
     /// Each typed range's pipelines for a pass whose engine pipelines are `roles`
     /// (`[opaque, masked]`), among the states `mask` draws.
     pub(crate) fn typed_pipelines<'a>(
@@ -3742,10 +3773,90 @@ pub(crate) unsafe fn set_draw_area(
     }
 }
 
+/// What a material type's shading costs a GPU (E10-4c), per shading variant: plain, with
+/// local lights, with the environment, with both; `None` for a variant not made.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MaterialCost {
+    /// The variants' costs.
+    pub variants: [Option<VariantCost>; 4],
+}
+
+/// A shading variant's cost ([`MaterialCost`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VariantCost {
+    /// The fragment stage's vector registers (AMD's VGPRs, NVIDIA's registers): on the
+    /// integrated GPU they decide how many waves a core keeps in flight (CLAUDE.md §5).
+    pub registers: u32,
+    /// What its registers spill to memory, in bytes (AMD's scratch; NVIDIA tells none).
+    pub spill: u32,
+    /// The engine's own shading's registers in the same variant, where made.
+    pub engine: Option<u32>,
+}
+
+/// Whether a driver statistic's executable is a fragment stage (AMD's `….ps`, NVIDIA's
+/// `FS`).
+fn fragment_stage(stage: &str) -> bool {
+    let stage = stage.to_ascii_lowercase();
+    stage.ends_with(".ps")
+        || stage.starts_with("fs")
+        || stage.contains("fragment")
+        || stage.contains("pixel")
+}
+
+/// The fragment stage's vector registers among a pipeline's statistics (the perf gate's
+/// watched names, `tests/golden/src/registers.rs`).
+pub fn fragment_registers(stats: &[engine_rhi::PipelineStatistic]) -> Option<u32> {
+    stats
+        .iter()
+        .filter(|s| fragment_stage(&s.stage))
+        .find(|s| {
+            let name = s.name.to_ascii_lowercase();
+            (name.contains("vgpr") && !name.contains("avail")) || name == "register count"
+        })
+        .map(|s| s.value as u32)
+}
+
+/// What the fragment stage spills, in bytes (AMD's scratch), among a pipeline's statistics.
+fn fragment_spill(stats: &[engine_rhi::PipelineStatistic]) -> u32 {
+    stats
+        .iter()
+        .filter(|s| fragment_stage(&s.stage) && s.name.to_ascii_lowercase().contains("scratch"))
+        .map(|s| s.value as u32)
+        .max()
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use engine_core::math::{look_at, vulkan_orthographic, vulkan_perspective};
+
+    /// E10-4c: a fragment stage's registers and spill read under both vendors' names (AMD's
+    /// `ShaderProperties.ps numUsedVgprs`, NVIDIA's `FS Register Count`), not the vertex
+    /// stage's, nor AMD's available VGPRs.
+    #[test]
+    fn a_fragment_stages_registers_are_read_under_both_vendors_names() {
+        let stat = |stage: &str, name: &str, value: f64| engine_rhi::PipelineStatistic {
+            stage: stage.to_owned(),
+            name: name.to_owned(),
+            value,
+        };
+        let amd = [
+            stat("ShaderProperties.gs", "numUsedVgprs", 49.0),
+            stat("ShaderProperties.ps", "numAvailableVgprs", 256.0),
+            stat("ShaderProperties.ps", "numUsedVgprs", 35.0),
+            stat("ShaderProperties.ps", "scratchMemUsageInBytes", 128.0),
+        ];
+        assert_eq!(fragment_registers(&amd), Some(35));
+        assert_eq!(fragment_spill(&amd), 128);
+        let nvidia = [
+            stat("VS", "Register Count", 45.0),
+            stat("FS", "Register Count", 40.0),
+        ];
+        assert_eq!(fragment_registers(&nvidia), Some(40));
+        assert_eq!(fragment_spill(&nvidia), 0);
+        assert_eq!(fragment_registers(&[]), None);
+    }
 
     #[test]
     fn the_view_and_projection_come_back_from_clip_from_world() {
