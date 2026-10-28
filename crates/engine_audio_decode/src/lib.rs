@@ -65,6 +65,51 @@ pub fn sniff(head: &[u8]) -> Option<Format> {
     }
 }
 
+/// An Ogg file's last granule position, read from its last page without decoding: its
+/// length in frames at its own rate for Vorbis, at 48 kHz with the pre-skip in it for Opus
+/// (a few milliseconds over). What a length is shown from where the decoders do not say
+/// one (an Ogg stream gives none until it ends). `None` for a file that is not Ogg or ends
+/// without a page.
+pub fn ogg_last_granule(path: impl AsRef<Path>) -> Option<u64> {
+    use std::io::SeekFrom;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    // A page is at most 65,307 bytes: the last one starts within this much of the end.
+    let tail = len.min(65_536 + 27);
+    file.seek(SeekFrom::End(-i64::try_from(tail).ok()?)).ok()?;
+    let mut buf = vec![0u8; usize::try_from(tail).ok()?];
+    file.read_exact(&mut buf).ok()?;
+    last_granule(&buf)
+}
+
+/// The granule position of the last whole Ogg page in `buf` (the end of a file).
+fn last_granule(buf: &[u8]) -> Option<u64> {
+    let mut end = buf.len();
+    while let Some(at) = buf[..end].windows(4).rposition(|w| w == b"OggS") {
+        end = at;
+        // A page: version 0, its segment table and body within the buffer.
+        let Some(header) = buf.get(at..at + 27) else {
+            continue;
+        };
+        if header[4] != 0 {
+            continue;
+        }
+        let segments = usize::from(header[26]);
+        let Some(table) = buf.get(at + 27..at + 27 + segments) else {
+            continue;
+        };
+        let body: usize = table.iter().map(|&s| usize::from(s)).sum();
+        if at + 27 + segments + body > buf.len() {
+            continue;
+        }
+        let granule = i64::from_le_bytes(header[6..14].try_into().ok()?);
+        if granule > 0 {
+            return Some(granule as u64);
+        }
+    }
+    None
+}
+
 /// A decoder for `source`, whatever its format.
 pub fn open<S: Source>(mut source: S) -> Result<Box<dyn Decoder>, DecodeError> {
     let mut head = [0u8; 128];

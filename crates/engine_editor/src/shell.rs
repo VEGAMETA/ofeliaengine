@@ -595,6 +595,11 @@ pub struct FileItem<'a> {
     pub thumbnail: Option<UiImage>,
     /// Its name is being edited in place (F2).
     pub renaming: bool,
+    /// A sound previewed now (E11-3b).
+    pub playing: bool,
+    /// How far the sound has played, 0 to 1, when its length is known: a playhead crosses
+    /// its tile.
+    pub progress: Option<f32>,
 }
 
 /// Code's text size (logical pixels).
@@ -830,6 +835,8 @@ pub struct ShellModel<'a> {
     pub folders: &'a [TreeItem<'a>],
     /// Files in the current folder, shown as tiles.
     pub files: &'a [FileItem<'a>],
+    /// Picking a sound plays it (the listing's Auto Play, E11-3b).
+    pub auto_play: bool,
     /// The side of a tile's picture (logical pixels).
     pub tile: f32,
     /// The tiles a row holds ([`tile_columns`] of the listing's width).
@@ -968,6 +975,13 @@ pub struct ShellResponse {
     pub file: Option<usize>,
     /// A file is dragged out of the listing: held and moved past [`DRAG_START`].
     pub file_drag: Option<usize>,
+    /// A sound tile's ▶ (or ■) was clicked (E11-3b).
+    pub file_play: Option<usize>,
+    /// A playing sound's tile was clicked (a seek): the file, and its tile's node, whose
+    /// laid-out rectangle says where along it the click was ([`tile_along`]).
+    pub file_seek: Option<(usize, u64)>,
+    /// The listing's Auto Play was clicked.
+    pub auto_play: bool,
     /// The listing's scroll area: its rectangle and scroll after the frame say which tiles
     /// show.
     pub listing: u64,
@@ -2122,7 +2136,37 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
             });
         });
         dock_column(ui, "listing", Size::Grow(1.0), p, |ui| {
-            dock_title(ui, model.path, p);
+            ui.row(
+                "heading",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fit],
+                    align_cross: Align::Center,
+                    padding: [0.0, 0.0, 8.0, 0.0],
+                    ..Style::default()
+                },
+                |ui| {
+                    dock_title(ui, model.path, p);
+                    // Picking a sound plays it (E11-3b), kept in the session.
+                    let id = ui.container(
+                        "auto-play",
+                        Style {
+                            size: [Size::Fit, Size::Fixed(18.0)],
+                            padding: [6.0, 0.0, 6.0, 0.0],
+                            radius: 3.0,
+                            align_cross: Align::Center,
+                            background: model.auto_play.then_some(p.selection),
+                            ..Style::default()
+                        },
+                        |ui| {
+                            let color = if model.auto_play { p.text } else { p.text_dim };
+                            text(ui, "label", "Auto Play", SMALL, color);
+                        },
+                    );
+                    if ui.sense(id, false).clicked {
+                        out.auto_play = true;
+                    }
+                },
+            );
             out.listing = ui.scroll_column("list", |ui| {
                 let columns = model.columns.max(1);
                 for (r, row) in model.files.chunks(columns).enumerate() {
@@ -2137,13 +2181,21 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
                         for (k, file) in row.iter().enumerate() {
                             let i = r * columns + k;
                             ui.push_id(k as u64);
-                            let id = file_tile(ui, file, model.tile, p, &mut out.file_rename);
+                            let mut play = false;
+                            let id =
+                                file_tile(ui, file, model.tile, p, &mut out.file_rename, &mut play);
                             ui.mark_region(id);
                             if ui.in_region(id) {
                                 out.listing_under = Some(i);
                             }
-                            if ui.sense(id, false).clicked {
+                            if play {
+                                out.file_play = Some(i);
+                            } else if ui.sense(id, false).clicked {
                                 out.file = Some(i);
+                                // A playing sound's tile: the click's place along it seeks.
+                                if file.playing {
+                                    out.file_seek = Some((i, id));
+                                }
                             }
                             if ui
                                 .drag_delta(id)
@@ -2199,15 +2251,27 @@ fn asset_box(ui: &mut Ui, preview: Option<UiImage>, icon: &str, name: &str, p: &
     ui.sense(id, false).clicked
 }
 
+/// Where `x` lies along the picture of a file's tile laid out at `tile_rect` (tiles
+/// `tile` wide), 0 to 1: a playing sound's tile clicked to seek (E11-3b).
+pub fn tile_along(tile_rect: engine_ui::Rect, tile: f32, x: f32) -> f32 {
+    ((x - tile_rect.pos[0] - TILE_PAD) / tile.max(1.0)).clamp(0.0, 1.0)
+}
+
 /// A file's tile: its thumbnail (its kind's icon until there is one) over its name, the
-/// name a text field while it is renamed (`rename` says how that ended).
+/// name a text field while it is renamed (`rename` says how that ended). A sound's has ▶
+/// (■ while it plays) under the pointer, `play` set when it is clicked, and a playhead
+/// while it plays (E11-3b).
 fn file_tile(
     ui: &mut Ui,
     file: &FileItem<'_>,
     tile: f32,
     p: &Palette,
     rename: &mut Option<bool>,
+    play: &mut bool,
 ) -> u64 {
+    // The tile is a hover region (the listing marks it): its ▶ under the pointer does not
+    // take the hover from it.
+    let hovered = ui.in_region(ui.id("tile"));
     ui.column(
         "tile",
         Style {
@@ -2227,10 +2291,62 @@ fn file_tile(
                 image: file.thumbnail,
                 ..Style::default()
             };
+            let sound = file.kind == FileKind::Audio;
+            let button = sound && (hovered || file.playing);
             ui.row("picture", picture, |ui| {
-                if file.thumbnail.is_none() {
+                if file.thumbnail.is_none() && !button {
                     let (glyph, color) = file_icon(file.kind, p);
                     text(ui, "icon", glyph, (tile * 0.45).max(ICON), color);
+                }
+                // The part played, tinted over the waveform, and the playhead at its end:
+                // out of the flow, so the button stays in the middle.
+                if let Some(done) = file.progress.filter(|_| file.playing) {
+                    let x = (done.clamp(0.0, 1.0) * tile).round();
+                    let [r, g, b, _] = p.accent;
+                    ui.container(
+                        "played",
+                        Style {
+                            size: [Size::Fixed(x), Size::Fixed(tile)],
+                            background: Some([r, g, b, 0.3]),
+                            placed: Some([0.0, 0.0]),
+                            ..Style::default()
+                        },
+                        |_| {},
+                    );
+                    ui.container(
+                        "playhead",
+                        Style {
+                            size: [Size::Fixed(2.0), Size::Fixed(tile)],
+                            background: Some(p.accent),
+                            placed: Some([(x - 1.0).clamp(0.0, tile - 2.0), 0.0]),
+                            ..Style::default()
+                        },
+                        |_| {},
+                    );
+                }
+                if button {
+                    let id = ui.container(
+                        "play",
+                        Style {
+                            size: [Size::Fixed(22.0), Size::Fixed(22.0)],
+                            radius: 11.0,
+                            background: Some(p.header),
+                            align_main: Align::Center,
+                            align_cross: Align::Center,
+                            ..Style::default()
+                        },
+                        |ui| {
+                            let glyph = if file.playing {
+                                icons::STOP
+                            } else {
+                                icons::PLAY
+                            };
+                            text(ui, "icon", glyph, ICON, p.text);
+                        },
+                    );
+                    if ui.sense(id, false).clicked {
+                        *play = true;
+                    }
                 }
             });
             if file.renaming {

@@ -46,9 +46,9 @@ use engine_ecs::{Entity, GlobalTransform, QueryState, World};
 use engine_frame::ViewCamera;
 use engine_physics::{PhysicsBackend, QueryFilter, RayHit};
 use engine_platform::fs_watch::{DirectoryWatcher, FileEventKind};
-use loader::{Done, Loaded, Loader, Request, Store};
+use loader::{Done, Loaded, Loader, PreviewSound, Request, Store};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -556,6 +556,42 @@ pub(crate) struct Sound {
     /// The next 3D track an occlusion ray goes to.
     next_occluded: usize,
     despawn: Vec<Entity>,
+    /// The editor's preview of a file (E11-3b), its bus (made with the first), and the
+    /// last preview's ticket.
+    preview: Option<Preview>,
+    preview_bus: Option<BusId>,
+    previews: u64,
+}
+
+/// A file the editor plays as it is (E11-3b).
+struct Preview {
+    file: PathBuf,
+    ticket: u64,
+    /// Where it starts, in seconds, and whether it loops.
+    from: f64,
+    looping: bool,
+    /// Its voice once loaded, its rate, its length in frames when known, and why it did
+    /// not play.
+    voice: Option<VoiceHandle>,
+    rate: u32,
+    frames: Option<u64>,
+    failed: Option<String>,
+}
+
+/// The editor's preview of a sound file as it plays (E11-3b; `Player::sound_preview`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreviewState<'a> {
+    /// The file.
+    pub file: &'a Path,
+    /// Where it plays now, in seconds from the sound's start (where it starts, while it
+    /// loads).
+    pub position: f64,
+    /// Its length in seconds, when known.
+    pub length: Option<f64>,
+    /// It is heard now: not loading, ended or failed.
+    pub playing: bool,
+    /// Why it could not play.
+    pub failed: Option<&'a str>,
 }
 
 /// Where the sounds come from: the store, whether to watch the folder, and a note.
@@ -679,6 +715,9 @@ impl Sound {
             absorption: Vec::new(),
             next_occluded: 0,
             despawn: Vec::new(),
+            preview: None,
+            preview_bus: None,
+            previews: 0,
         };
         if !settings.enabled {
             return sound;
@@ -903,6 +942,7 @@ impl Sound {
                         }
                     }
                 }
+                Done::Preview { ticket, result } => self.start_preview(ticket, result),
                 Done::Prepared { ticket, result } => match result {
                     Ok(stream) => {
                         let waited = |t: &Track| t.preparing == Some(ticket);
@@ -1281,6 +1321,118 @@ impl Sound {
 
     /// A save was loaded: every voice stops, and each playing source starts again where the
     /// save had it (from the start when it asks to).
+    /// Plays `file` (an absolute path) as it is, from `from` seconds, looping or not: the
+    /// editor's preview (E11-3b). On a bus of its own straight into the master, dry; heard
+    /// while the world stands still; one at a time, a new one stopping the last with the
+    /// usual fade. The file is read and decoded on the loading thread (a long one opened as
+    /// a stream where it starts), so the frame never waits.
+    pub(crate) fn preview(&mut self, file: &Path, from: f64, looping: bool) {
+        self.stop_preview();
+        if self.audio.is_none() {
+            return;
+        }
+        self.previews += 1;
+        let ticket = self.previews;
+        let buffer_ms = self.audio.as_ref().map_or(0, Audio::stream_buffer_ms);
+        let sent = self.loader.send(Request::Preview {
+            ticket,
+            path: file.to_owned(),
+            stream_from: self.settings.stream_from,
+            from,
+            looping,
+            buffer_ms,
+        });
+        self.want_output();
+        self.preview = Some(Preview {
+            file: file.to_owned(),
+            ticket,
+            from,
+            looping,
+            voice: None,
+            rate: 0,
+            frames: None,
+            failed: (!sent).then(|| String::from("the sounds' loading thread is not running")),
+        });
+    }
+
+    /// The preview stopped, faded out.
+    pub(crate) fn stop_preview(&mut self) {
+        if let Some(p) = self.preview.take()
+            && let (Some(voice), Some(audio)) = (p.voice, self.audio.as_mut())
+        {
+            audio.stop(voice, FADE);
+        }
+    }
+
+    /// The preview as it plays, if there is one.
+    pub(crate) fn preview_state(&self) -> Option<PreviewState<'_>> {
+        let p = self.preview.as_ref()?;
+        let rate = f64::from(p.rate.max(1));
+        let at = p
+            .voice
+            .and_then(|voice| self.audio.as_ref()?.position(voice));
+        Some(PreviewState {
+            file: &p.file,
+            position: at.map_or(p.from, |frames| frames as f64 / rate),
+            length: p.frames.map(|frames| frames as f64 / rate),
+            playing: at.is_some(),
+            failed: p.failed.as_deref(),
+        })
+    }
+
+    /// The loader's answer for preview `ticket` (a later preview's tickets win): its voice
+    /// started on the preview bus.
+    fn start_preview(&mut self, ticket: u64, result: Result<PreviewSound, String>) {
+        let Some(p) = self.preview.as_mut().filter(|p| p.ticket == ticket) else {
+            return;
+        };
+        let Some(audio) = self.audio.as_mut() else {
+            return;
+        };
+        let bus = match self.preview_bus {
+            Some(bus) => bus,
+            None => match audio.add_bus("editor preview", BusId::MASTER) {
+                Ok(bus) => *self.preview_bus.insert(bus),
+                Err(e) => {
+                    p.failed = Some(e.to_string());
+                    return;
+                }
+            },
+        };
+        let params = |offset: u64| PlayParams {
+            bus,
+            looping: p.looping,
+            offset,
+            ..PlayParams::default()
+        };
+        let started = match result {
+            Ok(PreviewSound::Clip(clip)) => {
+                p.rate = clip.sample_rate();
+                p.frames = Some(clip.frames() as u64);
+                let offset = (p.from.max(0.0) * f64::from(p.rate)) as u64;
+                audio.play_with(&clip, &params(offset))
+            }
+            Ok(PreviewSound::Stream {
+                stream,
+                rate,
+                frames,
+            }) => {
+                p.rate = rate;
+                p.frames = frames;
+                audio.play_prepared(stream, &params(0))
+            }
+            Err(why) => {
+                log::warn!(target: "engine_app::sound", "preview: {why}");
+                p.failed = Some(why);
+                return;
+            }
+        };
+        match started {
+            Ok(voice) => p.voice = Some(voice),
+            Err(e) => p.failed = Some(e.to_string()),
+        }
+    }
+
     pub(crate) fn after_load(&mut self, world: &mut World) {
         let Some(audio) = self.audio.as_mut() else {
             return;

@@ -178,6 +178,8 @@ editor = ["dep:engine_editor"]
 | Find an asset (the palette with `#`) | Ctrl+Shift+P, then `#` |
 | Rename the picked file (after a click in the FileSystem dock) | F2 |
 | Where the picked asset is used | Shift+F12 |
+| Play or stop the picked sound; pick the next file (after a click in the FileSystem dock) | Space; the arrows |
+| Stop the sound playing | Escape |
 | Move, scale, rotate the selection at once ([keyboard transforms](#keyboard-transforms)) | Q, E, R |
 | The gizmo's handles: move, scale, rotate (the same again: all of them) | Shift+Q, Shift+E, Shift+R |
 | The gizmo along the active entity's axes, or the world's | Space |
@@ -695,6 +697,20 @@ A click on a folder opens it, a click on a file picks it.
     reaches full scale (it may clip) shows in orange;
   - other kinds show their icon.
 - **Sizing:** Ctrl+wheel over the tiles makes them larger or smaller.
+- **Listening to sounds:** ▶ over a sound's tile plays it, ■ stops it.
+  - After a click in the tiles, Space plays or stops the picked sound, and the arrows move
+    the pick: Up and Down a row, Left and Right one file.
+  - **Auto Play**, at the right of the tiles' header, plays each sound as it is picked (a
+    file that is not a sound stops it). It is kept with the session.
+  - While a sound plays, its tile is tinted up to where it is, with a line at that point;
+    a click along the tile plays from there. Escape stops it.
+  - A sound plays as the file is, on a bus of the editor's own straight to the speakers:
+    never through your game's buses, their effects or a bus you muted, and heard while
+    nothing plays. One at a time: a new one stops the last.
+  - A long file streams from where you ask, read in the background, so the editor never
+    waits for it.
+  - The palette has both: "Assets: Play or Stop the Picked Sound" and "Assets: Auto Play
+    Sounds".
 - **Renaming:** F2 after a click in the tiles renames the picked file in place (its
   extension is kept when you leave it out). A file dropped on a folder, a tile or a row
   of the folder tree, moves into it.

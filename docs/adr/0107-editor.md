@@ -1984,3 +1984,53 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **Tests:** a WAV's columns (silence flat, a tone's swing, more columns than frames, not
   a sound refused); a decoder that does not say its length joined from blocks; the tile
   (silence a line, half scale shorter than full scale, full scale marked).
+
+## As built (E11-3b, 2026-10-28): sound previews in the FileSystem dock
+
+- **The player plays a file as it is** (`Player::preview_sound(file, from, looping)`,
+  `stop_sound_preview`, `sound_preview`).
+  - The file is read and decoded on the sounds' loading thread: a file of
+    `stream_from` seconds or longer is opened as a stream where it starts, a shorter one
+    (and any WAV) is decoded whole and started at its offset.
+  - It plays on a bus of its own, "editor preview", made with the first preview straight
+    into the master. No game bus, effect, reverb or mute lies between, and it is heard
+    while the world stands still (`set_simulating(false)` holds only the world's voices).
+  - One at a time: a new one or a stop fades the last out in 20 ms.
+  - Its state says the file, where it plays (the voice's frame over the sound's own
+    rate), its length when known, whether it is heard, and why it failed.
+- **An Ogg file's length** comes from its last page's granule position, read from the
+  file's end without decoding (`engine_audio_decode::ogg_last_granule`), since the
+  decoders give none until the end. It is at the file's own rate for Vorbis, and at
+  48 kHz with the pre-skip in it for Opus (a few milliseconds over).
+- **The dock** (`docs/research/ux/sound.md`, previews):
+  - ▶ over a sound's tile, ■ while it plays. The tile is a hover region, so the button
+    under the pointer does not take the hover from it (as a hovered widget it would
+    blink every other frame).
+  - Space ("Assets: Play or Stop the Picked Sound") and the arrows are in a key context
+    of the dock's own after a click in its tiles (`DOCK_KEYS`, ahead of the global keys,
+    as the tree's are). Up and Down move the pick a row of tiles, Left and Right one file.
+    Space is the gizmo's axes everywhere else.
+  - Auto Play ("Assets: Auto Play Sounds", the header's toggle, kept in the session): a
+    sound picked plays, and any other file picked stops it.
+  - Escape stops it, unless a field, the palette or a drag takes the key.
+  - While it plays, the tile is tinted up to where it is, with a playhead line. Both are
+    out of the layout's flow, so the button stays in the middle. A click along the tile
+    plays from there: the tile's laid-out rectangle is read after the frame
+    (`shell::tile_along`), since a node's rectangle is not known while it is built.
+- **The editor asks, the player answers in its frame:** the editor keeps what to ask and
+  the file it shows. `sync_assets` sends the ask and reads the state back each frame. It
+  ends the preview at the file's end and says why a file was not played ("Not played:
+  …", or no sound output).
+- **Not done:**
+  - the inspector's waveform per channel with seeking, and the file's facts (E11-3c);
+  - looping in the dock (the player takes `looping`; the inspector's ▶ will use it);
+  - a tooltip on the tile.
+- **Tests:**
+  - the player: a preview heard while the world stands still, then stopped silent; a
+    long file streamed from where it is asked (its position and length);
+  - the Ogg length from the last page against a full decode;
+  - the editor: Space, ■, ▶ under the pointer (a click there plays without picking),
+    Auto Play with the arrows (a file that is not a sound stops it), a seek three
+    quarters along, Escape, Auto Play off;
+  - on the player (GPU): a silent WAV picked and Space, heard on the preview bus with its
+    length, then Escape.

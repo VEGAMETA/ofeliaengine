@@ -142,6 +142,109 @@ fn the_editor_knows_the_projects_assets_and_follows_the_folder() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A key pressed and let go (window events).
+fn tap(game: &mut EditorGame<NoGame>, virtual_key: u16, scancode: u16) {
+    for pressed in [true, false] {
+        game.event(&WindowEvent {
+            window: WindowId(0),
+            time: Instant::now(),
+            kind: WindowEventKind::Key {
+                virtual_key,
+                scancode,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        });
+    }
+}
+
+/// A mono 16-bit WAV file of `frames` frames of silence at 48 kHz (heard as nothing, so
+/// a test that plays it is quiet on a machine people work at).
+fn silent_wav(frames: u32) -> Vec<u8> {
+    let data = frames * 2;
+    let mut out = Vec::with_capacity(44 + data as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&48_000u32.to_le_bytes());
+    out.extend_from_slice(&96_000u32.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data.to_le_bytes());
+    out.resize(44 + data as usize, 0);
+    out
+}
+
+#[test]
+fn a_sound_picked_in_the_dock_plays_on_the_editors_own_bus() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("main.scene"),
+        format!("[scene version=3 id={}]\n", AssetId::new()),
+    )
+    .unwrap();
+    std::fs::write(dir.join("hush.wav"), silent_wav(48_000 * 3)).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("editor preview test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    // Its tile picked, then Space: played as it is, while the world stands still.
+    let tile = game.text_at("hush.wav").expect("the sound listed");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, tile, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    tap(&mut game, 0x20, 0x39); // Space
+    let started = Instant::now();
+    while !player.sound_preview().is_some_and(|p| p.playing)
+        && started.elapsed() < Duration::from_secs(5)
+    {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let state = player.sound_preview().expect("a preview asked");
+    assert!(state.playing, "{state:?}");
+    assert!(state.failed.is_none(), "{state:?}");
+    assert_eq!(state.file, dir.join("hush.wav"));
+    assert_eq!(state.length, Some(3.0));
+    // Escape stops it.
+    tap(&mut game, 0x1B, 0x01);
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(player.sound_preview().is_none());
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A box of one meter standing on its origin, in one tint: what a bake makes a model of.
 fn box_brush() -> BakedBrush {
     let mut b = BakedBrush {

@@ -346,6 +346,8 @@ fn main() {
         selected: false,
         thumbnail: None,
         renaming: false,
+        playing: false,
+        progress: None,
     };
     let files = [
         file("main.scene", FileKind::Scene),
@@ -357,7 +359,12 @@ fn main() {
         file("crate.gltf", FileKind::Mesh),
         file("tower.gltf", FileKind::Mesh),
         file("stone.ktx2", FileKind::Texture),
-        file("wind.ogg", FileKind::Audio),
+        // A sound previewed, two fifths through (E11-3b).
+        FileItem {
+            playing: true,
+            progress: Some(0.4),
+            ..file("wind.ogg", FileKind::Audio)
+        },
     ];
     let tools = [
         (icons::TOOL_SELECT, "Select"),
@@ -434,6 +441,7 @@ fn main() {
         path: "res://levels",
         folders: &folders,
         files: &files,
+        auto_play: false,
         tile: 64.0,
         columns: 6,
         bottom_tabs: &[
