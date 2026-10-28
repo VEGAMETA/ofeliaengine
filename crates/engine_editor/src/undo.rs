@@ -317,6 +317,11 @@ impl WorldSnapshot {
         transaction_bytes(&self.states, &[])
     }
 
+    /// [`History::rewrite_lines`] for what the snapshot holds.
+    pub fn rewrite_lines(&mut self, rewrite: &mut Rewrite<'_>) -> usize {
+        rewrite_changes(&mut self.states, rewrite)
+    }
+
     /// The name scene entity `id` had then.
     pub fn name_of(&self, id: SceneId) -> Option<&str> {
         self.names.get(&id).map(String::as_str)
@@ -381,6 +386,50 @@ impl PlayMark {
             relayout_changes(&mut t.changes, r);
         }
     }
+
+    /// [`History::rewrite_lines`] for the steps to redo it gives back.
+    pub fn rewrite_lines(&mut self, rewrite: &mut Rewrite<'_>) -> usize {
+        let mut n = 0;
+        for t in &mut self.redo {
+            let changed = rewrite_changes(&mut t.changes, rewrite);
+            if changed > 0 {
+                t.bytes = transaction_bytes(&t.changes, &t.files);
+                n += changed;
+            }
+        }
+        n
+    }
+}
+
+/// What rewrites a record kept as lines: given its component and lines, the new lines, or
+/// none to keep them ([`History::rewrite_lines`]).
+pub type Rewrite<'a> = dyn FnMut(ComponentId, &str) -> Option<String> + 'a;
+
+/// The records kept as lines in `changes` that `rewrite` rewrites: how many.
+fn rewrite_changes(changes: &mut [Change], rewrite: &mut Rewrite<'_>) -> usize {
+    let mut n = 0;
+    for change in changes {
+        for state in [&mut change.before, &mut change.after]
+            .into_iter()
+            .flatten()
+        {
+            n += rewrite_state(state, rewrite);
+        }
+    }
+    n
+}
+
+fn rewrite_state(state: &mut EntityState, rewrite: &mut Rewrite<'_>) -> usize {
+    let mut n = 0;
+    for record in &mut state.components {
+        if let Value::Lines(text) = &mut record.value
+            && let Some(new) = rewrite(record.id, text)
+        {
+            *text = new.into_boxed_str();
+            n += 1;
+        }
+    }
+    n
 }
 
 /// The records of component `r.old` in `changes` rewritten as `r.new`'s.
@@ -952,6 +1001,37 @@ impl History {
                 relayout_state(state, r);
             }
         }
+    }
+
+    /// Every record kept as lines (a component that is not plain data) rewritten by
+    /// `rewrite`: the steps done and undone, and the one open. A rename of what marked
+    /// strings name (a sound file, a bus: ADR 0107's E11-3d) goes through it, so undo never
+    /// puts back a name that is gone. How many records changed.
+    pub fn rewrite_lines(&mut self, rewrite: &mut Rewrite<'_>) -> usize {
+        let mut n = 0;
+        for t in &mut self.undo {
+            let changed = rewrite_changes(&mut t.changes, rewrite);
+            if changed > 0 {
+                let bytes = transaction_bytes(&t.changes, &t.files);
+                self.bytes = self.bytes - t.bytes + bytes;
+                t.bytes = bytes;
+                n += changed;
+            }
+        }
+        // The steps to redo are not in the budget's count.
+        for t in &mut self.redo {
+            let changed = rewrite_changes(&mut t.changes, rewrite);
+            if changed > 0 {
+                t.bytes = transaction_bytes(&t.changes, &t.files);
+                n += changed;
+            }
+        }
+        if let Some(open) = &mut self.open {
+            for state in open.touched.iter_mut().filter_map(|(_, s)| s.as_mut()) {
+                n += rewrite_state(state, rewrite);
+            }
+        }
+        n
     }
 
     /// Play begins (ADR 0107 E3): the steps made while playing are the play world's, so

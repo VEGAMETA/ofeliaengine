@@ -2254,6 +2254,47 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **E11-4 is done** but for View: Sound Ranges, the inspector's falloff curve with the
   camera's distance, and blockout's radius handles.
 
+## As built (E11-3d-2b, 2026-10-28): renames follow the marks
+
+- **The marks** (`marked.rs`): every scene type's strings marked as sounds or buses, found
+  from the program's scene registry with their offsets and their paths as scenes write
+  them (`AudioSource3D.source.sound`; a newtype adds no step, a skipped field none). A
+  type is matched by its name. The lines are rewritten in place: a line is changed only
+  when its path is a mark's and its string the old name, every other byte kept (line
+  ends too).
+- **A sound moved or renamed in the dock** (E4-7's `move_asset`), from one path under the
+  sounds folder to another:
+  - the world's scene entities: their marked strings set, no undo step (the move is
+    none);
+  - what undo keeps (`History::rewrite_lines`: the steps done, undone and open; their
+    budget's bytes recounted) and Play's snapshot and steps to redo, so neither puts back
+    a name that is gone;
+  - the scenes in other tabs and the closed ones (their texts);
+  - the project's scene files, prefabs too, written in place, with the bases of the tabs
+    that hold them, so none takes the write for a change made outside. The asset index
+    is scanned again, so prefab instances' bases are built from the new files.
+  - Scripts are not changed: those whose text names the old path as a string are listed
+    in the palette (`%`, find in files).
+  - Out of the sounds folder, nothing can name it: the message counts the sources left.
+- **A bus renamed in the mixer** (its name field): the layout's change and the open
+  scene's sources on the bus are one undo step (`mixer_step_and`); while playing, Play's
+  snapshot names the new bus too. The other scenes are named in the message (the sound
+  UX note's §12), not rewritten: a rename is an undo step, and files on disk are not part
+  of one.
+- **Find References** for a sound counts the marked lines naming it besides those naming
+  its id, and lists the scripts whose text names it.
+- **Tests:** the marks of the sources; a scene's text renamed only on the marked line
+  with the old name (a bus or a `Name` reading the same kept, a CRLF line end kept);
+  undo's lines; the world renamed in one step and undone. Through the editor: a sound
+  moved into a folder (the box, its undo step, another scene on disk, the script listed
+  and kept), Find References before it (the box, the scene, the script), the sound moved
+  out of the folder (counted); a moved sound followed in the main scene parked in a tab
+  (its text and file, no unsaved change, no change on disk seen); a bus renamed with its
+  source in one step, the other scene named, undo taking both back.
+- **Left:** autosaves of scenes with unsaved changes keep the old names until they are
+  written again; strings inside lists or maps are not marked yet (no marked type has
+  them).
+
 ## As built (E11-3d-2a, 2026-10-28): sound and bus fields
 
 - **The mark** (the team's 4a): `engine_reflect::Hint::Sound` and `Hint::Bus`, given by
@@ -2277,11 +2318,7 @@ for the first answer. This step is the part of E11-4 that needs none.
   the palette's sounds for the field with the arrows playing each one only with Auto Play
   on, Enter keeping it playing and Escape stopping it, the bus list, a bus chosen, a
   missing bus marked, and undo taking each step back.
-- **Next (E11-3d-2b):** renames follow the marks: a sound moved or renamed in the dock
-  rewrites the marked strings naming it (the open scene, what undo keeps, the other
-  scenes and prefabs on disk) and lists the scripts' literals; a bus renamed in the mixer
-  rewrites the open scene's bus fields in the same step and lists the other files; Find
-  References finds sounds' and buses' users.
+- **Next (E11-3d-2b, done below):** renames follow the marks.
 
 ## As built (E11-3d-1, 2026-10-28): sounds dropped into the scene
 

@@ -836,16 +836,19 @@ Last updated: 2026-10-28.
     its file's waveform and ▶, takes a dropped sound, and opens `#sound:` (the arrows
     playing each file with Auto Play); its bus is a list of the mixer's buses, a name the
     mixer lacks marked. The marks: `Hint::Sound`, `Hint::Bus` (`#[reflect(hint = ...)]`).
+  - **E11-3d-2b, renames follow the marks** (#413, ADR 0107's as-built): a sound moved in
+    the dock renames the marked strings naming it in the world, in undo's and Play's
+    records, in other tabs and in scenes and prefabs on disk (scripts listed, not
+    changed); a bus renamed in the mixer takes the open scene's sources along in the same
+    undo step and names the other scenes; Find References finds a sound's users. E11-3 is
+    done.
   - **Test runs keep their windows out of sight** (#411; the owner's request, 2026-10-28):
     `tools/check.ps1` sets `ENGINE_HIDDEN_WINDOWS=1`, and every window `engine_platform`
     makes is then cloaked (composed, its swapchain presenting, never on the screen), with
     no taskbar button, shown without being activated; uncloaking and bringing it to the
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-3d-2b, renames following the marks (a sound moved in the dock: the marked
-       strings in the open scene, undo's records, scenes and prefabs on disk, scripts'
-       literals listed; a bus renamed: the open scene's bus fields in the same step), then
-       the room's reverb strip, then E11-5's layered snapshots.
+    1. The room's reverb strip, then E11-5's layered snapshots.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
     the later in the file's list winning where they meet; scripts blend one in and out

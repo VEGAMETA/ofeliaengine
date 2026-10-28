@@ -2830,6 +2830,15 @@ struct Doc {
     view: View,
 }
 
+/// `n` and the words for one or for several, for messages ("1 source", "2 sources").
+fn counted(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
 /// How long ago a time in nanoseconds since 1970 was, for messages.
 fn ago(nanos: u64) -> String {
     let then = std::time::UNIX_EPOCH + Duration::from_nanos(nanos);
@@ -5760,7 +5769,7 @@ impl Editor {
         if let Some(commit) = response.file_rename {
             if commit && let Some(id) = self.renaming_file {
                 let name = self.ui.edited_text().trim().to_owned();
-                self.rename_file(id, &name);
+                self.rename_file(world, id, &name);
             }
             self.renaming_file = None;
         }
@@ -15395,6 +15404,19 @@ impl Editor {
         merge: Option<u64>,
         edit: impl FnOnce(&mut engine_app::MixerFile),
     ) -> bool {
+        self.mixer_step_and(world, name, merge, edit, |_, _| {})
+    }
+
+    /// [`Self::mixer_step`], with `also` changing the world in the same step (its entities
+    /// touched in the history it is given).
+    fn mixer_step_and(
+        &mut self,
+        world: &mut World,
+        name: &str,
+        merge: Option<u64>,
+        edit: impl FnOnce(&mut engine_app::MixerFile),
+        also: impl FnOnce(&mut World, &mut History),
+    ) -> bool {
         let Some(doc) = self.mixer.as_mut() else {
             return false;
         };
@@ -15404,8 +15426,68 @@ impl Editor {
         let id = doc.id;
         self.history.begin(name, merge);
         self.history.change_file(id, &before, &after);
+        also(world, &mut self.history);
         self.history.commit(world);
         true
+    }
+
+    /// Bus `bus` of the mixer renamed `to` (its name field, E11-1b): the buses it feeds,
+    /// its sends and sidechains follow in the layout, and the open scene's sources on it
+    /// in the same step (E11-3d, the sound UX note's §12); the other scenes that name it
+    /// are told (they play on the master until changed).
+    fn rename_mixer_bus(&mut self, world: &mut World, bus: &str, to: &str) {
+        let marked = crate::marked::Marked::of(engine_reflect::Hint::Bus);
+        let mut refused = None;
+        let mut here = 0;
+        let renamed = self.mixer_step_and(
+            world,
+            &format!("Mixer: rename {bus}"),
+            None,
+            |l| {
+                if let Err(e) = crate::mixer::rename_bus(l, bus, to) {
+                    refused = Some(e);
+                }
+            },
+            |world, history| here = marked.rename_in_world(world, Some(history), bus, to),
+        );
+        if let Some(e) = refused {
+            self.say(format!("Not renamed: {e}"));
+            return;
+        }
+        if !renamed {
+            return;
+        }
+        self.mixer_picked = Some(to.to_owned());
+        // While playing, the scene Stop puts back names it too.
+        if let Some(play) = &mut self.play {
+            let reg = world.components();
+            let mut rewrite = |id: ComponentId, text: &str| {
+                reg.type_info(id)
+                    .and_then(|info| marked.rename_in_lines(info, text, bus, to))
+            };
+            play.snapshot.rewrite_lines(&mut rewrite);
+            play.mark.rewrite_lines(&mut rewrite);
+        }
+        let mut message = format!("Mixer: {bus} \u{2192} {to}");
+        if here > 0 {
+            let _ = write!(
+                message,
+                "; {}",
+                counted(here, "source here follows", "sources here follow")
+            );
+        }
+        let others = self.other_scenes_naming(&marked, bus);
+        if let Some((first, _)) = others.first() {
+            let _ = write!(message, "; {first}");
+            if others.len() > 1 {
+                let _ = write!(message, " and {} more", others.len() - 1);
+            }
+            let _ = write!(
+                message,
+                " name {bus}: their sources play on the master until changed"
+            );
+        }
+        self.say(message);
     }
 
     /// P (E11-4b): the selected sources heard where they are, looping, from the editor's
@@ -15688,17 +15770,7 @@ impl Editor {
                     return;
                 }
                 let to = self.ui.edited_text().trim().to_owned();
-                let mut refused = None;
-                let renamed = self.mixer_step(world, &format!("Mixer: rename {bus}"), None, |l| {
-                    if let Err(e) = m::rename_bus(l, &bus, &to) {
-                        refused = Some(e);
-                    }
-                });
-                match refused {
-                    Some(e) => self.say(format!("Not renamed: {e}")),
-                    None if renamed => self.mixer_picked = Some(to),
-                    None => {}
-                }
+                self.rename_mixer_bus(world, &bus, &to);
             }
             FieldAction::Toggle => {
                 self.mixer_step(world, &format!("Mixer: {bus} reverb"), None, |l| {
@@ -16399,12 +16471,12 @@ impl Editor {
             }
             (DropTarget::FolderTile(i), _) => {
                 if let Some(folder) = self.browser.listing.get(i).map(|l| l.path.clone()) {
-                    self.move_into(drag.asset, &folder);
+                    self.move_into(world, drag.asset, &folder);
                 }
             }
             (DropTarget::FolderRow(i), _) => {
                 if let Some((folder, _)) = self.browser.folders.get(i).cloned() {
-                    self.move_into(drag.asset, &folder);
+                    self.move_into(world, drag.asset, &folder);
                 }
             }
             (DropTarget::View | DropTarget::Row(_) | DropTarget::Tree, _) => self.say(format!(
@@ -17527,7 +17599,7 @@ impl Editor {
 
     /// Asset `id`'s file renamed in its folder to `name` (its extension kept when left
     /// out): F2 in the listing.
-    fn rename_file(&mut self, id: AssetId, name: &str) {
+    fn rename_file(&mut self, world: &mut World, id: AssetId, name: &str) {
         let Some(entry) = self.asset_db.get(id) else {
             return;
         };
@@ -17550,12 +17622,12 @@ impl Editor {
         } else {
             format!("{folder}/{name}")
         };
-        self.move_asset(id, &path);
+        self.move_asset(world, id, &path);
     }
 
     /// Asset `id`'s file moved into folder `folder` (under the project, `""` its top),
     /// keeping its name: a file dropped on a folder.
-    fn move_into(&mut self, id: AssetId, folder: &str) {
+    fn move_into(&mut self, world: &mut World, id: AssetId, folder: &str) {
         let Some(entry) = self.asset_db.get(id) else {
             return;
         };
@@ -17565,13 +17637,13 @@ impl Editor {
         } else {
             format!("{folder}/{name}")
         };
-        self.move_asset(id, &path);
+        self.move_asset(world, id, &path);
     }
 
     /// Asset `id`'s file moved to `path` (under the project) with its `.meta`: it keeps
     /// its id, so scenes keep their references; the paths of its parts follow, and a
     /// scene saved from now on writes the new one. Not an undo step: a file on disk.
-    fn move_asset(&mut self, id: AssetId, path: &str) {
+    fn move_asset(&mut self, world: &mut World, id: AssetId, path: &str) {
         let Some(entry) = self.asset_db.get(id).cloned() else {
             return;
         };
@@ -17619,7 +17691,212 @@ impl Editor {
         let folder = path.rsplit_once('/').map_or("", |(f, _)| f).to_owned();
         self.open_folder(&folder);
         self.browser.selected = Some(id);
-        self.say(format!("{} → {path}", entry.path));
+        let mut message = format!("{} → {path}", entry.path);
+        // What names a sound by its path follows it (E11-3d).
+        let mut listed = None;
+        if entry.kind == engine_scene::AssetKind::Sound {
+            listed = self.follow_sound(world, &entry.path, path, &mut message);
+        }
+        self.say(message);
+        if let Some(name) = listed {
+            self.open_palette(world, &format!("%{name}"));
+        }
+    }
+
+    /// A sound moved or renamed in the dock (E11-3d, the team's 4a): the strings marked as
+    /// sounds that named it name it again, in the world, in what undo and Play keep, in
+    /// the scenes in other tabs or closed, and in the project's scenes and prefabs on disk;
+    /// `message` says what followed. The scripts whose text names it are listed, not
+    /// changed: the name to find in them (`%`), if any does.
+    fn follow_sound(
+        &mut self,
+        world: &mut World,
+        from_path: &str,
+        to_path: &str,
+        message: &mut String,
+    ) -> Option<String> {
+        let folder = format!("{}/", self.sounds_folder.trim_end_matches('/'));
+        let from = from_path.strip_prefix(&folder)?.to_owned();
+        let marked = crate::marked::Marked::of(engine_reflect::Hint::Sound);
+        let Some(to) = to_path.strip_prefix(&folder) else {
+            // Out of the sounds folder: what names it cannot follow.
+            let uses = marked.count_in_world(world, &from)
+                + self
+                    .other_scenes_naming(&marked, &from)
+                    .iter()
+                    .map(|(_, n)| n)
+                    .sum::<usize>();
+            if uses > 0 {
+                let _ = write!(
+                    message,
+                    "; {} {from}, which is not under `{folder}` now: nothing plays until a \
+                     sound is given",
+                    counted(uses, "source names", "sources name")
+                );
+            }
+            return None;
+        };
+        let (here, written) = self.rename_marked(world, &marked, &from, to);
+        if here > 0 {
+            let _ = write!(
+                message,
+                "; {}",
+                counted(here, "source here follows", "sources here follow")
+            );
+        }
+        if !written.is_empty() {
+            let _ = write!(
+                message,
+                "; {} on disk rewritten",
+                counted(written.len(), "scene", "scenes")
+            );
+        }
+        if self.literal_uses(&from).is_empty() {
+            return None;
+        }
+        let _ = write!(
+            message,
+            "; the scripts naming {from} in their text are listed: change them by hand"
+        );
+        Some(from)
+    }
+
+    /// Every string `marked` holds that names `from` set to `to`: in the world (no undo
+    /// step: a move on disk is none), in the history's records and Play's, in the scenes
+    /// in other tabs or closed, and in the project's scene files (prefabs too), whose
+    /// bases follow so none is seen as changed on disk. How many strings in the world, and
+    /// the files written.
+    fn rename_marked(
+        &mut self,
+        world: &mut World,
+        marked: &crate::marked::Marked,
+        from: &str,
+        to: &str,
+    ) -> (usize, Vec<String>) {
+        let here = marked.rename_in_world(world, None, from, to);
+        {
+            let reg = world.components();
+            let mut rewrite = |id: ComponentId, text: &str| {
+                reg.type_info(id)
+                    .and_then(|info| marked.rename_in_lines(info, text, from, to))
+            };
+            self.history.rewrite_lines(&mut rewrite);
+            if let Some(play) = &mut self.play {
+                play.snapshot.rewrite_lines(&mut rewrite);
+                play.mark.rewrite_lines(&mut rewrite);
+            }
+        }
+        for doc in self.tabs.iter_mut().flatten().chain(self.closed.iter_mut()) {
+            if let Some((text, _)) = marked.rename_in_scene(&doc.text, from, to) {
+                doc.text = text;
+            }
+        }
+        let scenes: Vec<String> = self
+            .asset_db
+            .entries()
+            .iter()
+            .filter(|e| e.kind == engine_scene::AssetKind::Scene)
+            .map(|e| e.path.clone())
+            .collect();
+        let mut written = Vec::new();
+        for path in scenes {
+            let file = self.root.join(&path);
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            let Some((text, _)) = marked.rename_in_scene(&text, from, to) else {
+                continue;
+            };
+            if let Err(e) = session::write_whole(&file, text.as_bytes(), 0, Duration::ZERO) {
+                log::warn!(target: "engine_editor", "{path}: {e}");
+                continue;
+            }
+            // The editor wrote it: no tab takes it for a change made outside.
+            let base = Base::of(&file);
+            let at = Path::new(&path);
+            if self.scene_path.as_deref() == Some(at)
+                && let Some(s) = self.session.as_mut()
+            {
+                s.base = base;
+            }
+            for doc in self.tabs.iter_mut().flatten().chain(self.closed.iter_mut()) {
+                if doc.path.as_deref() == Some(at) {
+                    doc.base = base;
+                }
+            }
+            written.push(path);
+        }
+        if !written.is_empty() {
+            // The prefabs' new files and times, so their instances' bases are built again.
+            self.asset_db.scan();
+        }
+        (here, written)
+    }
+
+    /// The scenes besides the one in the world whose strings `marked` holds name `name`:
+    /// those in other tabs or closed (as they are there), then the project's scene files
+    /// not open; each with how many.
+    fn other_scenes_naming(
+        &self,
+        marked: &crate::marked::Marked,
+        name: &str,
+    ) -> Vec<(String, usize)> {
+        let mut found = Vec::new();
+        let mut open: Vec<&Path> = self.scene_path.as_deref().into_iter().collect();
+        for doc in self.tabs.iter().flatten().chain(self.closed.iter()) {
+            if let Some(p) = doc.path.as_deref() {
+                open.push(p);
+            }
+            let n = marked.uses_in_scene(&doc.text, name);
+            if n > 0 {
+                let label = doc.path.as_deref().map_or_else(
+                    || String::from("untitled"),
+                    |p| p.to_string_lossy().replace('\\', "/"),
+                );
+                found.push((label, n));
+            }
+        }
+        for e in self.asset_db.entries() {
+            if e.kind != engine_scene::AssetKind::Scene
+                || open.iter().any(|p| *p == Path::new(&e.path))
+            {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(self.root.join(&e.path)) else {
+                continue;
+            };
+            let n = marked.uses_in_scene(&text, name);
+            if n > 0 {
+                found.push((e.path.clone(), n));
+            }
+        }
+        found
+    }
+
+    /// The scripts whose text names `name` as a string (`"hum.wav"`, `'hum.wav'`), each
+    /// with how many lines: open tabs as they are, the others from disk.
+    fn literal_uses(&self, name: &str) -> Vec<(PathBuf, usize)> {
+        let (double, single) = (format!("\"{name}\""), format!("'{name}'"));
+        let mut found = Vec::new();
+        for e in self.asset_db.entries() {
+            if e.kind != engine_scene::AssetKind::Script {
+                continue;
+            }
+            let path = PathBuf::from(&e.path);
+            let text = match self.scripts.iter().find(|s| s.path == path) {
+                Some(s) => s.doc.text(),
+                None => std::fs::read_to_string(self.root.join(&path)).unwrap_or_default(),
+            };
+            let n = text
+                .lines()
+                .filter(|l| l.contains(&double) || l.contains(&single))
+                .count();
+            if n > 0 {
+                found.push((path, n));
+            }
+        }
+        found.sort();
+        found
     }
 
     /// "Find References" (Shift+F12): where the dock's picked asset is used, in the palette:
@@ -17633,6 +17910,22 @@ impl Editor {
             return;
         };
         let needle = id.to_string();
+        // A sound is named by its path under the sounds folder, in strings marked as
+        // sounds (E11-3d): their lines name it too, and so do scripts' strings.
+        let folder = format!("{}/", self.sounds_folder.trim_end_matches('/'));
+        let sound = self
+            .asset_db
+            .get(id)
+            .filter(|e| e.kind == engine_scene::AssetKind::Sound)
+            .and_then(|e| e.path.strip_prefix(&folder))
+            .map(str::to_owned);
+        let marked = sound
+            .as_ref()
+            .map(|_| crate::marked::Marked::of(engine_reflect::Hint::Sound));
+        let names = |line: &str| match (&sound, &marked) {
+            (Some(s), Some(m)) => m.names(line, s),
+            _ => false,
+        };
         let mut items = Vec::new();
         // The open scene as it is: its entities whose lines name the asset.
         let prefabs = self.prefabs();
@@ -17661,7 +17954,7 @@ impl Editor {
                     current = SceneId::parse_path(rest.trim_end_matches(']').trim())
                         .map(|path| SceneId::of_path(&path))
                         .and_then(|s| index.get(&s).copied());
-                } else if line.contains(&needle)
+                } else if (line.contains(&needle) || names(line))
                     && let Some(e) = current
                 {
                     let field = line.split(" = ").next().unwrap_or(line).trim().to_owned();
@@ -17692,12 +17985,21 @@ impl Editor {
             let Ok(text) = std::fs::read_to_string(self.root.join(&path)) else {
                 continue;
             };
-            let count = text.matches(&needle).count();
+            let count = text.matches(&needle).count() + text.lines().filter(|l| names(l)).count();
             if count > 0 {
                 items.push(Choice {
                     label: path,
                     detail: format!("{count} on disk"),
                     pick: Pick::Reveal(file),
+                });
+            }
+        }
+        if let Some(s) = &sound {
+            for (path, n) in self.literal_uses(s) {
+                items.push(Choice {
+                    label: path.to_string_lossy().replace('\\', "/"),
+                    detail: format!("{n} in its text"),
+                    pick: Pick::OpenScript(path),
                 });
             }
         }
@@ -25697,6 +25999,146 @@ mod tests {
     }
 
     #[test]
+    fn a_moved_sound_is_followed_by_the_strings_that_name_it() {
+        let (dir, mut world, mut ed, boxed) = drop_project("sound-renames");
+        std::fs::create_dir_all(dir.join("sounds/ambience")).unwrap();
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("sounds/hum.wav"), stereo_wav(4_800, |_| 0.0)).unwrap();
+        // Another scene on disk whose source plays it, beside a name that only reads the
+        // same; a script that names it in its text.
+        let level = format!(
+            "[scene version=4 id={}]\n\n[entity {}]\nAudioSource.sound = \"hum.wav\"\n\
+             Name = \"hum.wav\"\n",
+            AssetId::new(),
+            SceneId::new()
+        );
+        std::fs::write(dir.join("level.scene"), &level).unwrap();
+        let script = "local M = {}\nfunction M.on_start(self)\n    audio.play(\"hum.wav\")\n\
+                      end\nreturn M\n";
+        std::fs::write(dir.join("scripts/door.luau"), script).unwrap();
+        ed.open_assets();
+        let hum = ed.asset_db.find("sounds/hum.wav").unwrap().id;
+        // A step that gave the box the sound: undo keeps the name.
+        world.insert(boxed, AudioSource3D::new("old.wav"));
+        ed.history.begin("Give Box hum.wav", None);
+        ed.history.touch(&mut world, boxed);
+        world.get_mut::<AudioSource3D>(boxed).unwrap().source.sound = String::from("hum.wav");
+        ed.history.commit(&mut world);
+        let sound = |world: &World| {
+            world
+                .get::<AudioSource3D>(boxed)
+                .unwrap()
+                .source
+                .sound
+                .clone()
+        };
+        // Find References: the box, the other scene, the script.
+        ed.browser.selected = Some(hum);
+        ed.run(&mut world, ed.ids.find_references);
+        let cp = ed.command_palette.as_ref().expect("the list");
+        let labels: Vec<(&str, &str)> = cp
+            .choices
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|c| (c.label.as_str(), c.detail.as_str()))
+            .collect();
+        assert_eq!(labels.len(), 3, "{labels:?}");
+        assert_eq!(labels[0].0, "Box");
+        assert!(
+            labels[0].1.contains("AudioSource3D.source.sound"),
+            "{labels:?}"
+        );
+        assert_eq!(labels[1], ("level.scene", "1 on disk"));
+        assert_eq!(labels[2], ("scripts/door.luau", "1 in its text"));
+        ed.command_palette = None;
+        // Moved into a folder: what named it names it there.
+        ed.move_asset(&mut world, hum, "sounds/ambience/hum.wav");
+        assert_eq!(sound(&world), "ambience/hum.wav");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("level.scene")).unwrap(),
+            level.replace(
+                "AudioSource.sound = \"hum.wav\"",
+                "AudioSource.sound = \"ambience/hum.wav\""
+            ),
+            "the name kept"
+        );
+        let message = ed.message.clone().unwrap().0;
+        assert!(message.contains("1 source here follows"), "{message}");
+        assert!(message.contains("1 scene on disk rewritten"), "{message}");
+        // The script is listed, not changed.
+        let cp = ed.command_palette.as_ref().expect("the scripts listed");
+        assert_eq!(cp.query, "%hum.wav");
+        assert_eq!(cp.texts.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("scripts/door.luau")).unwrap(),
+            script
+        );
+        ed.command_palette = None;
+        // Undo and redo put back names that are there.
+        ed.history.undo(&mut world);
+        assert_eq!(sound(&world), "old.wav");
+        ed.history.redo(&mut world);
+        assert_eq!(sound(&world), "ambience/hum.wav");
+        // Out of the sounds folder: nothing can follow it, and the message says so.
+        ed.move_asset(&mut world, hum, "hum.wav");
+        assert_eq!(sound(&world), "ambience/hum.wav");
+        let message = ed.message.clone().unwrap().0;
+        assert!(
+            message.contains("2 sources name ambience/hum.wav"),
+            "{message}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_renamed_bus_takes_the_scenes_sources_along_in_one_step() {
+        let (dir, mut world, mut ed, boxed) = drop_project("bus-renames");
+        let mut source = AudioSource3D::new("hum.wav");
+        source.source.bus = String::from("voice");
+        world.insert(boxed, source);
+        let music = world.spawn((SceneId::new(), AudioSource::new("theme.ogg")));
+        // A scene on disk on the bus: told, not changed.
+        let level = format!(
+            "[scene version=4 id={}]\n\n[entity {}]\nAudioSource.bus = \"voice\"\n",
+            AssetId::new(),
+            SceneId::new()
+        );
+        std::fs::write(dir.join("level.scene"), &level).unwrap();
+        ed.open_assets();
+        ed.open_mixer();
+        let steps = ed.history.steps().count();
+        ed.rename_mixer_bus(&mut world, "voice", "dialogue");
+        let bus = |world: &World| {
+            world
+                .get::<AudioSource3D>(boxed)
+                .unwrap()
+                .source
+                .bus
+                .clone()
+        };
+        assert_eq!(bus(&world), "dialogue");
+        assert_eq!(world.get::<AudioSource>(music).unwrap().bus, "music");
+        let layout = &ed.mixer.as_ref().unwrap().layout;
+        assert!(layout.buses.contains_key("dialogue") && !layout.buses.contains_key("voice"));
+        assert_eq!(ed.history.steps().count(), steps + 1, "one step");
+        let message = ed.message.clone().unwrap().0;
+        assert!(message.contains("1 source here follows"), "{message}");
+        assert!(message.contains("level.scene name voice"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("level.scene")).unwrap(),
+            level
+        );
+        // Undo takes both back.
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(bus(&world), "voice");
+        let layout = &ed.mixer.as_ref().unwrap().layout;
+        assert!(layout.buses.contains_key("voice") && !layout.buses.contains_key("dialogue"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn find_references_lists_the_scene_and_the_files_that_use_an_asset() {
         let (dir, mut world, mut ed, boxed) = drop_project("references");
         let red = ed.asset_db.find("props/red.material").unwrap().id;
@@ -27662,6 +28104,64 @@ return Coin
         assert_eq!(cube_x(&mut world), 3.0);
         ed.update(&mut world);
         assert!(ed.scene_label.ends_with('*'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_moved_sound_is_followed_in_the_scenes_open_in_other_tabs() {
+        let dir = project("sound-tabs");
+        // The main scene's cube plays the sound.
+        let mut main = World::new();
+        main.spawn((
+            SceneId::new(),
+            Name::new("Cube"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            AudioSource::new("hum.wav"),
+        ));
+        let mut text = String::new();
+        let options = SaveOptions {
+            id: Some(AssetId::new()),
+            assets: None,
+            prefabs: None,
+        };
+        engine_scene::save_with(
+            &mut main,
+            &SceneRegistry::from_program(),
+            &options,
+            &mut text,
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.scene"), &text).unwrap();
+        write_hall(&dir);
+        std::fs::create_dir_all(dir.join("sounds/ambience")).unwrap();
+        std::fs::write(dir.join("sounds/hum.wav"), stereo_wav(4_800, |_| 0.0)).unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        // The hall in front: the main scene waits in its tab as text.
+        ed.open_scene(&mut world, Path::new("hall.scene"));
+        let hum = ed.asset_db.find("sounds/hum.wav").unwrap().id;
+        ed.move_asset(&mut world, hum, "sounds/ambience/hum.wav");
+        let on_disk = std::fs::read_to_string(dir.join("main.scene")).unwrap();
+        assert!(
+            on_disk.contains("AudioSource.sound = \"ambience/hum.wav\""),
+            "{on_disk}"
+        );
+        // Back to the main scene: its cube plays the sound where it is now, nothing
+        // unsaved and no change on disk seen.
+        ed.run(&mut world, ed.ids.previous_tab);
+        let cube = engine_scene::find_named(&mut world, "Cube").unwrap();
+        assert_eq!(
+            world.get::<AudioSource>(cube).unwrap().sound,
+            "ambience/hum.wav"
+        );
+        ed.update(&mut world);
+        assert!(!ed.scene_label.ends_with('*'), "{}", ed.scene_label);
+        assert!(
+            !message(&ed).contains("changed on disk"),
+            "{}",
+            message(&ed)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

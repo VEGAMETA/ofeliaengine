@@ -732,11 +732,18 @@ A click on a folder opens it, a click on a file picks it.
   - The `.meta` goes with the file, so it keeps its id and every scene keeps its
     references.
   - A scene saved after it writes the new path.
+  - **A sound** is named by its path under the sounds folder, so what names it is
+    rewritten: the sources in the open scene, in the other tabs' scenes, and in the
+    project's scenes and prefabs on disk, and the names undo would put back. Scripts are
+    not changed (a string there can be anything): when one names the old path, the
+    palette lists its lines (`%`) for you to change by hand. A sound moved out of the
+    sounds folder cannot be followed: the message counts the sources left naming it.
   - Neither is an undo step: they are files on disk.
 - **Find References** (Shift+F12) lists where the picked asset is used, in the palette:
   - the open scene's entities, as the scene is now (Enter selects one);
   - then the project's scenes and materials on disk, with how many times (Enter shows the
-    file).
+    file);
+  - for a sound, the scripts that name it in their text too (Enter opens one).
 - **Cache:** thumbnails are made in the background and kept in `.ofelia/thumbnails/`, and
   made again when their file is written anew.
 - **Textures are compressed in the background:** the first time a model's textures are
@@ -950,7 +957,9 @@ change something.
   marks at 0, −6, −12, −24 and −48. Hold Ctrl for whole dB. The game hears it at once,
   playing or not. A drag is one undo step, and Escape takes it back.
 - **A click on a strip** shows its bus in the inspector: its **name** (a rename carries the
-  buses it feeds along), its **output** (the list leaves out the buses that would make the
+  buses it feeds along, and the open scene's sources on the bus in the same undo step;
+  the message names the other scenes still on the old name, which play on the master
+  until changed), its **output** (the list leaves out the buses that would make the
   sound go round), its **gain**, **balance** and **voices** (the most mixed at once, 0 for
   no limit), dragged or typed as every number is, and **reverb** (its 3D sounds take on
   the room).
