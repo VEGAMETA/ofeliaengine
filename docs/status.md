@@ -763,7 +763,7 @@ Last updated: 2026-10-28.
     instance (its shader and type, numbers, vectors and textures by field name, its look);
     the cook (`--project`) and the run time read it with the project's root; the six golden
     files converted; `.material.ron` retired.
-  - **Full script debugging** (#PR, ADR 0119's as-built): the Debugger's switch runs the
+  - **Full script debugging** (#396, ADR 0119's as-built): the Debugger's switch runs the
     scripts interpreted from the next Play, so a stop shows every frame's locals; off by
     default (native code, as the game runs them); kept in the session.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
