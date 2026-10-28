@@ -780,7 +780,7 @@ Last updated: 2026-10-28.
     with how many objects use it; New Material, Make Variant (a copy with its own id) and
     Apply to Selection, each one undo step; unsaved material edits kept with the session.
     E10-1 is done.
-  - **E11-3b, sound previews in the dock** (#PR, ADR 0107's as-built): ▶ on a sound's
+  - **E11-3b, sound previews in the dock** (#400, ADR 0107's as-built): ▶ on a sound's
     tile, Space and the arrows after a click in the tiles, Auto Play kept in the session,
     a playhead with seeking, Escape; played as the file is on an editor bus of its own
     (`Player::preview_sound`), streamed from where it is asked; an Ogg file's length from
