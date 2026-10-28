@@ -801,7 +801,7 @@ Last updated: 2026-10-28.
     bus in the inspector (name, output without loops, gain, balance, voices, reverb);
     + Bus and ×; each change a file step of the one history, heard by the player the next
     frame; Ctrl+S writes `main.mixer`.
-  - **E11-1b-2, the mixer's meters and listening aids** (#PR, ADR 0107's as-built): a bar a
+  - **E11-1b-2, the mixer's meters and listening aids** (#404, ADR 0107's as-built): a bar a
     channel (−60 to +6 dBFS) read only while the Audio tab is open, held peaks and clip
     lights cleared by a click; M, S and Monitor kept in the session, on top of the game's
     mutes (a solo keeps its way to the master and what feeds it); the unsaved layout
