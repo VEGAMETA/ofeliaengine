@@ -31,8 +31,8 @@ Last updated: 2026-10-28.
     definitions from `slangd`. E9, the script debugger (ADR 0119, accepted), is under way:
     logpoints and pause points work from the code editor's gutter (E9-1a), a breakpoint
     stops a script at its line in Play, F5 going on (E9-1b-1), F10, F11 and Shift+F11 step
-    from a stop (E9-1b-2), and the Debugger panel shows the stop, its call stack, the
-    frame's values and every breakpoint (E9-1b-3). E10-1 waits for the answer on the material
+    from a stop (E9-1b-2), the Debugger panel shows the stop, its call stack, the frame's
+    values and every breakpoint (E9-1b-3), and errors stop scripts at their lines (E9-1b-4). E10-1 waits for the answer on the material
     file. The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
@@ -688,11 +688,23 @@ Last updated: 2026-10-28.
       its hits (its mark toggles it, its row goes to its line);
     - its texts made again only when the stop, the frame, the breakpoints or their states
       change.
+  - **E9-1b-4, stops at errors** (#PR, ADR 0119's as-built):
+    - an error a script does not catch stops it at its line in Play, before its frames
+      unwind (the hook's message handler, or the frames a failed resume leaves), once a
+      line a Play; one a `pcall` catches when asked (Luau's protected-error callback);
+      the time budget's error inside its loop;
+    - the editor: the line and the viewport's edge in red, the message after the line,
+      `Error · on_tick · …` in the Debugger, which errors stop as its list's first rows
+      (kept in the session), "Break at the Next Script Line" in the palette;
+    - measured: the handled call 14 ns a hook more at most; interpreted scripts 8-33 %
+      slower (the question below);
+    - fixed: Continue after a step inside native code entered it halfway through a block
+      (an access violation); the stepping loop now runs the rest of the hook.
   - **Next, in this order:**
-    1. E9-1b-4 on: pause on errors (on by default, once per line per Play), the Pause
-       command stopping at the next line, values on the lines above the stopped one,
-       tables and entities opened in the Variables, Watch and Evaluate; then E9-2 (DAP,
-       VS Code) and E9-3 (the player). E10-1 waits for the answer on the material file.
+    1. E9-1b-5 on: values on the lines above the stopped one, tables and entities opened
+       in the Variables, Watch and Evaluate; then E9-2 (DAP, VS Code) and E9-3 (the
+       player). Asked (2026-10-28): native code in the editor's Play, whose frames' locals
+       Luau does not read at a stop. E10-1 waits for the answer on the material file.
     2. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
        per hook (`script Door.on_tick`) and each script's time and allocations in the
        editor's profiler; Tracy has only the stages' zones (`scripts::tick`).

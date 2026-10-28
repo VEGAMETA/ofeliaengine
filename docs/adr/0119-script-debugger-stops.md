@@ -479,3 +479,48 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
 - **Tests:** the editor on the player: at the stop the panel shows the header, the frame, its
   locals and both breakpoints with their code; its Over button steps.
 
+## As built (E9-1b-4, 2026-10-28): stops at errors, and a break at the next line
+
+- **Which errors stop:** `ErrorStops { uncaught, caught }` (`ScriptDebugger::set_error_stops`),
+  the editor's Breakpoints list's first two rows, "Errors the script does not catch" (on) and
+  "Errors caught by pcall" (off), kept in the session (`error_stops = (true, false)`).
+- **An error the script does not catch** stops at the innermost script line (`error` and the
+  host's functions are C frames, skipped), before the frames unwind:
+  - **called the plain way,** a hook runs under the debugger's message handler, which Luau
+    calls where the error was raised (`lua_pcall`'s handler sits above the frames that
+    raised it). The handled call replaces mlua's `Function::call` while errors stop: 14 ns a
+    call more at most (an empty `on_tick` 0.146 -> 0.160 µs; 1,000 doors 0.604 -> 0.621 ms).
+    The hook thread is not needed for it: its 0.12 µs a hook is paid only for stops and
+    steps, as before;
+  - **on the hook thread,** from the frames a failed `lua_resume` leaves until the thread is
+    reset; the message is read on the main thread (a dead thread runs no `__tostring`).
+- **An error a `pcall` catches** stops in Luau's protected-error callback, the frames still
+  there. Luau calls it only where the thread could yield, so hooks go through the hook
+  thread while this is on. Ended there, the call ends at its next interrupt (the callback
+  may not raise).
+- **Once a line until the states are reset** (a new Play); where the host cannot wait, a
+  pause after the tick. Continue lets the error take its course (the instance stops, ADR
+  0114 §9); Abort ends the call as at a breakpoint; there are no steps from an error.
+- **The message:** a string without its place (`attempt to index nil with 'x'`), the host's
+  errors (mlua's) as they format themselves, anything else by its type. The time budget's
+  error stops inside the loop where the time ran out.
+- **Native frames' locals:** Luau's `lua_getlocal` refuses a native frame. A stop at an
+  error in native code (every function but a module's top level without loops, Luau's rule)
+  shows its line, its message, the stack and the upvalues, but not the frame's locals;
+  `Frame::native` marks it (a function with parameters showing no locals), and the panel
+  says that a breakpoint in the function shows them. Measured to decide on it: interpreted
+  scripts cost 8-33 % more on ADR 0114's scenes (1,000 doors 0.604 -> 0.719 ms; a
+  component field's read and write 75 -> 100 ns); the question is the team's.
+- **Break at the next line** (`ScriptDebugger::break_next`, the palette's "Break at the
+  Next Script Line"): the hook thread single-steps, and the first line a hook runs stops.
+- **Fixed: Continue no longer breaks out of the stepping loop.** Breaking out resumed the
+  frame where it was, and a native frame's code was entered halfway through a block: an
+  access violation (seen with the break above, at a native hook's second line). Continue
+  now turns single-stepping off and the stepping loop runs the rest of that hook; Luau's
+  native code is entered only where it can resume (a function's start, after a call).
+- **Tests:** the core (an error stops once a line on either way hooks are called, ended
+  there or let go; the message of `error`; caught errors only when asked; the budget's
+  error inside its loop; native frames marked; a break at the next line and a step from
+  it); the editor on the player (two instances' error stops once; F5; the break; the row
+  turning errors off; the session).
+

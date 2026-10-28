@@ -197,6 +197,7 @@ editor = ["dep:engine_editor"]
 | In a script's tab: the line's breakpoint off or on; its options; remove them all | Ctrl+F9; Alt+F9; Ctrl+Shift+F9 |
 | At a script's stop: step over, into, out | F10; F11; Shift+F11 |
 | The Debugger panel (the stop, its call stack and values, every breakpoint) | Ctrl+Shift+D |
+| Stop at errors the script does not catch, at errors a `pcall` catches; break at the next script line | the palette's Debug commands |
 
 These are our keys, the default (team decision, 2026-10-21): the left hand stays beside
 W, A, S, D, which fly the camera. **Editor: Key Map…** (Ctrl+Shift+P) takes another set,
@@ -946,7 +947,9 @@ sets one, Shift+click or Shift+F9 a logpoint, a right click or Alt+F9 opens its 
 At a stop the script's tab comes to the front with the arrow on the line and the frame's
 values after it, the viewport's edge turns amber, and the editor works as while paused;
 F10, F11 and Shift+F11 step (over, into, out). The Debugger panel opens with it: the call
-stack, the shown frame's values and every breakpoint.
+stack, the shown frame's values and every breakpoint. An error a script does not catch
+stops it the same way, at the failing line, in red with its message (once a line a Play;
+the Breakpoints list's first rows choose which errors stop).
 
 **Slang modules** (`.slang`) open in code tabs too, with Slang's colors:
 
