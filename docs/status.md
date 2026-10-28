@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3e-1, the node search** (#PR, ADR 0123's as-built): Space (Shift+A) over a graph's
+  - **E10-3e-1, the node search** (#426, ADR 0123's as-built): Space (Shift+A) over a graph's
     canvas opens the palette's list of node kinds at the pointer, its pick added there; a
     link dropped on the empty canvas opens it for the kinds that can take the link, the
     pick linked by the port that fits best; an image dragged from the dock onto the canvas
