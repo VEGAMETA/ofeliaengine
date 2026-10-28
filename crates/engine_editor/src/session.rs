@@ -280,6 +280,9 @@ pub(crate) struct EditorState {
     pub(crate) auto_play: Option<bool>,
     /// The Debugger's watches (E9-1b-5c), Luau expressions in their order.
     pub(crate) watches: Vec<String>,
+    /// The mixer's listening aids (E11-1b-2): buses muted and soloed, never in its file.
+    pub(crate) mixer_muted: Vec<String>,
+    pub(crate) mixer_soloed: Vec<String>,
     /// Where the editor's window was.
     pub(crate) window: Option<WindowPlacement>,
     /// Where the game's own window was when Play last ended (Play in a window).
@@ -301,6 +304,8 @@ pub(crate) struct SessionFile {
     pub(crate) breakpoints: Vec<(PathBuf, Mark)>,
     /// Material files with unsaved edits, a `[material]` block each.
     pub(crate) materials: Vec<MaterialEntry>,
+    /// The mixer's layout with unsaved edits (E11-1b-2), a `[mixer]` block.
+    pub(crate) mixer: Option<MaterialEntry>,
 }
 
 /// The session file's version. Keys and sections it does not know are skipped, so a
@@ -364,9 +369,17 @@ impl SessionFile {
         if let Some(on) = self.editor.auto_play {
             let _ = writeln!(out, "auto_play = {on}");
         }
-        if !self.editor.watches.is_empty() {
-            out.push_str("watches = [");
-            for (i, w) in self.editor.watches.iter().enumerate() {
+        for (key, list) in [
+            ("watches", &self.editor.watches),
+            ("mixer_muted", &self.editor.mixer_muted),
+            ("mixer_soloed", &self.editor.mixer_soloed),
+        ] {
+            if list.is_empty() {
+                continue;
+            }
+            out.push_str(key);
+            out.push_str(" = [");
+            for (i, w) in list.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
@@ -454,6 +467,16 @@ impl SessionFile {
             let ((line, col), [x, y]) = (s.caret, s.scroll);
             let _ = writeln!(out, "caret = ({line}, {col})\nscroll = ({x}, {y})");
         }
+        if let Some(m) = &self.mixer {
+            out.push_str("\n[mixer]\npath = ");
+            quote_into(&mut out, &slashes(&m.path));
+            out.push('\n');
+            if let Some(path) = &m.autosave {
+                out.push_str("autosave = ");
+                quote_into(&mut out, &slashes(path));
+                out.push('\n');
+            }
+        }
         for m in &self.materials {
             out.push_str("\n[material]\npath = ");
             quote_into(&mut out, &slashes(&m.path));
@@ -514,6 +537,7 @@ impl SessionFile {
             Document,
             Script,
             Material,
+            Mixer,
             Breakpoint,
             /// A section of a later editor: skipped.
             Other,
@@ -564,6 +588,13 @@ impl SessionFile {
                         });
                         Section::Material
                     }
+                    "[mixer]" => {
+                        file.mixer = Some(MaterialEntry {
+                            path: PathBuf::new(),
+                            autosave: None,
+                        });
+                        Section::Mixer
+                    }
                     "[breakpoint]" => {
                         // No line until its `line` key: a block without one is dropped.
                         file.breakpoints
@@ -604,10 +635,15 @@ impl SessionFile {
                             .and_then(|names| names.into_iter().map(unquote).collect())
                             .map_err(at)?;
                     }
-                    "watches" => {
-                        file.editor.watches = items(value, '[', ']')
+                    "watches" | "mixer_muted" | "mixer_soloed" => {
+                        let list = items(value, '[', ']')
                             .and_then(|list| list.into_iter().map(unquote).collect())
                             .map_err(at)?;
+                        match key {
+                            "watches" => file.editor.watches = list,
+                            "mixer_muted" => file.editor.mixer_muted = list,
+                            _ => file.editor.mixer_soloed = list,
+                        }
                     }
                     "restart" => file.editor.restart = Some(unquote(value).map_err(at)?),
                     "keys" => file.editor.keys = Some(unquote(value).map_err(at)?),
@@ -705,8 +741,13 @@ impl SessionFile {
                     };
                     read_script_key(s, key, value).map_err(at)?;
                 }
-                Section::Material => {
-                    let Some(m) = file.materials.last_mut() else {
+                Section::Material | Section::Mixer => {
+                    let m = if matches!(section, Section::Mixer) {
+                        file.mixer.as_mut()
+                    } else {
+                        file.materials.last_mut()
+                    };
+                    let Some(m) = m else {
                         continue;
                     };
                     match key {
@@ -915,6 +956,16 @@ pub(crate) fn autosave_name(scene: Option<&Path>, id: AssetId) -> PathBuf {
         |s| s.to_string_lossy().into_owned(),
     );
     PathBuf::from(format!("autosave/{stem}-{id}.scene"))
+}
+
+/// Where the mixer's unsaved layout goes, relative to `.ofelia/` (E11-1b-2): by its file's
+/// stem and a hash of its path, as a material file's.
+pub(crate) fn mixer_autosave_name(layout: &Path) -> PathBuf {
+    let stem = layout
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let hash = engine_core::hash::state_hash64(slashes(layout).as_bytes());
+    PathBuf::from(format!("autosave/{stem}-{hash:016x}.mixer"))
 }
 
 /// Where a material file's unsaved text goes, relative to `.ofelia/` (E10-1c): by its file's
@@ -1249,6 +1300,8 @@ mod tests {
                 full_debugging: Some(true),
                 auto_play: Some(true),
                 watches: vec![String::from("self.speed"), String::from("#\"a, b\"")],
+                mixer_muted: vec![String::from("music")],
+                mixer_soloed: vec![String::from("voice"), String::from("ui")],
                 window: Some(WindowPlacement {
                     left: -7,
                     top: 0,
@@ -1270,6 +1323,10 @@ mod tests {
                 path: PathBuf::from("materials/red.material"),
                 autosave: Some(material_autosave_name(Path::new("materials/red.material"))),
             }],
+            mixer: Some(MaterialEntry {
+                path: PathBuf::from("main.mixer"),
+                autosave: Some(mixer_autosave_name(Path::new("main.mixer"))),
+            }),
             breakpoints: vec![
                 (
                     PathBuf::from("scripts/door.luau"),

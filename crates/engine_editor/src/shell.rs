@@ -1026,6 +1026,14 @@ pub struct ShellResponse {
     pub mixer_fader: Option<FaderUse>,
     /// A picked strip's × was clicked: its bus is taken away.
     pub mixer_remove: Option<usize>,
+    /// A strip's M was clicked (E11-1b-2): its bus muted, or not.
+    pub mixer_mute: Option<usize>,
+    /// A strip's S was clicked: its bus soloed, or not.
+    pub mixer_solo: Option<usize>,
+    /// A strip's held peak or clip light was clicked: cleared (with Ctrl, every one).
+    pub mixer_held: Option<usize>,
+    /// Monitor was clicked: the solos and mutes left aside, or back.
+    pub mixer_monitor: bool,
     /// The inspector field under the mouse (section, field): Backspace resets it, Ctrl+C
     /// and Ctrl+V copy and paste its value.
     pub hovered_field: Option<(usize, usize)>,
@@ -4003,7 +4011,9 @@ fn output_panel(ui: &mut Ui, view: &OutputView<'_>, p: &Palette, out: &mut Shell
 }
 
 /// A strip's fader: its height, its thumb's, and the strips' width.
-const FADER_HEIGHT: f32 = 128.0;
+const FADER_HEIGHT: f32 = 104.0;
+/// The held peak's row above it.
+const HELD_ROW: f32 = 14.0;
 const THUMB: f32 = 8.0;
 const STRIP_WIDTH: f32 = 84.0;
 
@@ -4015,6 +4025,8 @@ pub struct MixerView<'a> {
     pub header: &'a str,
     /// The strips, the master first, then the tree depth first.
     pub strips: &'a [StripView<'a>],
+    /// Monitor: the solos and mutes left aside (E11-1b-2).
+    pub monitor: bool,
 }
 
 /// A strip of the mixer.
@@ -4032,6 +4044,18 @@ pub struct StripView<'a> {
     pub output: &'a str,
     /// Picked: the inspector shows its bus.
     pub selected: bool,
+    /// Its meter: each channel's level, 0 to 1 (−60 to +6 dBFS).
+    pub meter: [f32; 2],
+    /// The loudest peak since it was cleared ("−3.2"; empty for none).
+    pub held: &'a str,
+    /// It went over full scale (it may clip): a light until cleared.
+    pub clip: bool,
+    /// The listening aids: its bus muted.
+    pub muted: bool,
+    /// Its bus soloed.
+    pub soloed: bool,
+    /// Its bus silenced by another bus's solo, or by its own mute.
+    pub silenced: bool,
 }
 
 /// A strip's fader pressed, dragged or let go this frame (E11-1b): the strip and the
@@ -4081,6 +4105,10 @@ fn mixer_panel(ui: &mut Ui, view: &MixerView<'_>, p: &Palette, out: &mut ShellRe
             |ui| {
                 text(ui, "file", view.header, SMALL, p.text_dim);
                 ui.spacer("fill");
+                // Monitor: every solo and mute aside, and back (FMOD's).
+                if listen_button(ui, "monitor", "Monitor", view.monitor, p.selection, p) {
+                    out.mixer_monitor = true;
+                }
                 let hovered = ui.is_hovered(ui.id("add"));
                 let id = ui.container(
                     "add",
@@ -4155,7 +4183,8 @@ fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &
                     if !indent.is_empty() {
                         text(ui, "depth", indent, SMALL, p.text_dim);
                     }
-                    text(ui, "text", strip.name, TEXT, p.text);
+                    let color = if strip.silenced { p.text_dim } else { p.text };
+                    text(ui, "text", strip.name, TEXT, color);
                     if strip.selected && strip.depth > 0 {
                         ui.spacer("fill");
                         let id = ui.container(
@@ -4178,6 +4207,41 @@ fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &
                 },
             );
             text(ui, "output", strip.output, SMALL, p.text_dim);
+            // The loudest peak since it was cleared, and the clip light with its sign: a
+            // click clears them (Ctrl: every strip's).
+            let held = ui.row(
+                "held",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(HELD_ROW)],
+                    gap: 4.0,
+                    align_main: Align::Center,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    let color = if strip.clip { p.error } else { p.text_dim };
+                    text(ui, "peak", strip.held, SMALL, color);
+                    if strip.clip {
+                        ui.container(
+                            "clip",
+                            Style {
+                                size: [Size::Fixed(12.0), Size::Fixed(12.0)],
+                                radius: 2.0,
+                                background: Some(p.error),
+                                align_main: Align::Center,
+                                align_cross: Align::Center,
+                                ..Style::default()
+                            },
+                            |ui| {
+                                text(ui, "sign", "!", 10.0, p.text);
+                            },
+                        );
+                    }
+                },
+            );
+            if ui.sense(held, false).clicked {
+                out.mixer_held = Some(i);
+            }
             ui.row(
                 "fader row",
                 Style {
@@ -4244,6 +4308,51 @@ fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &
                             );
                         },
                     );
+                    // The meter: a bar a channel, warm near and over full scale.
+                    ui.row(
+                        "meter",
+                        Style {
+                            size: [Size::Fixed(10.0), Size::Fixed(FADER_HEIGHT)],
+                            gap: 2.0,
+                            ..Style::default()
+                        },
+                        |ui| {
+                            for (k, &level) in strip.meter.iter().enumerate() {
+                                ui.push_id(k as u64);
+                                let color = if level >= crate::mixer::meter_position(0.0) {
+                                    p.error
+                                } else if level >= crate::mixer::meter_position(-6.0) {
+                                    p.warning
+                                } else {
+                                    p.playing
+                                };
+                                let h = (level.clamp(0.0, 1.0) * FADER_HEIGHT).round();
+                                ui.container(
+                                    "bar",
+                                    Style {
+                                        size: [Size::Fixed(4.0), Size::Fixed(FADER_HEIGHT)],
+                                        background: Some(p.field),
+                                        ..Style::default()
+                                    },
+                                    |ui| {
+                                        if h >= 1.0 {
+                                            ui.container(
+                                                "level",
+                                                Style {
+                                                    size: [Size::Fixed(4.0), Size::Fixed(h)],
+                                                    background: Some(color),
+                                                    placed: Some([0.0, FADER_HEIGHT - h]),
+                                                    ..Style::default()
+                                                },
+                                                |_| {},
+                                            );
+                                        }
+                                    },
+                                );
+                                ui.pop_id();
+                            }
+                        },
+                    );
                     let used = ui.sense(fader, false);
                     if used.pressed || used.active || used.released {
                         out.mixer_fader = Some(FaderUse {
@@ -4256,12 +4365,61 @@ fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &
                     }
                 },
             );
-            text(ui, "gain", strip.gain, SMALL, p.text);
+            ui.row(
+                "bottom",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(20.0)],
+                    gap: 3.0,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    text(ui, "gain", strip.gain, SMALL, p.text);
+                    ui.spacer("fill");
+                    if strip.depth > 0 {
+                        if listen_button(ui, "mute", "M", strip.muted, p.warning, p) {
+                            out.mixer_mute = Some(i);
+                        }
+                        if listen_button(ui, "solo", "S", strip.soloed, p.accent, p) {
+                            out.mixer_solo = Some(i);
+                        }
+                    }
+                },
+            );
         },
     );
     if ui.sense(id, false).clicked {
         out.mixer_strip = Some(i);
     }
+}
+
+/// A small button of the mixer's listening aids (M, S, Monitor), lit in `lit` while `on`:
+/// clicked this frame.
+fn listen_button(ui: &mut Ui, key: &str, label: &str, on: bool, lit: Color, p: &Palette) -> bool {
+    let hovered = ui.is_hovered(ui.id(key));
+    let background = if on {
+        Some(lit)
+    } else {
+        Some(if hovered { p.field_hover } else { p.field })
+    };
+    let id = ui.container(
+        key,
+        Style {
+            size: [Size::Fit, Size::Fixed(16.0)],
+            min: [16.0, 0.0],
+            padding: [4.0, 0.0, 4.0, 0.0],
+            radius: 3.0,
+            background,
+            align_main: Align::Center,
+            align_cross: Align::Center,
+            ..Style::default()
+        },
+        |ui| {
+            let color = if on { p.window } else { p.text_dim };
+            text(ui, "label", label, SMALL, color);
+        },
+    );
+    ui.sense(id, false).clicked
 }
 
 /// The profiler's panel (ADR 0107 E6-5): the latest frame's times, a bar per frame kept

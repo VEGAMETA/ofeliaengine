@@ -436,6 +436,16 @@ fn main() {
         gain,
         output,
         selected,
+        // A meter a little under the fader, its held peak and clip light.
+        meter: [
+            (0.75 + db / 40.0).clamp(0.0, 1.0),
+            (0.7 + db / 40.0).clamp(0.0, 1.0),
+        ],
+        held: gain,
+        clip: db > 1.0,
+        muted: name == "music",
+        soloed: false,
+        silenced: name == "music",
     };
     let strips = [
         strip("master", 0, 0.0, "0.0", "\u{2192} speakers", false),
@@ -483,6 +493,7 @@ fn main() {
         mixer: show_mixer.then_some(engine_editor::shell::MixerView {
             header: "main.mixer \u{b7} unsaved (Ctrl+S writes it)",
             strips: &strips,
+            monitor: false,
         }),
         debugger: None,
         history: None,

@@ -1204,6 +1204,16 @@ impl engine_scene::text::ReadRefs for IndexRefs<'_> {
     }
 }
 
+/// `name` added to `list`, or taken out when it is there.
+fn toggle_name(list: &mut Vec<String>, name: &str) {
+    match list.iter().position(|n| n == name) {
+        Some(k) => {
+            list.remove(k);
+        }
+        None => list.push(name.to_owned()),
+    }
+}
+
 /// A bus's fader or number being dragged (E11-1b): its bus and row, the value at the
 /// press, where a fader was pressed (its position and the pointer's height), the step's
 /// merge key, whether it moved.
@@ -2296,6 +2306,15 @@ struct Editor {
     mixer_section: Option<usize>,
     mixer_header: String,
     bus_texts: [String; 3],
+    /// The mixer's meters (E11-1b-2), when they were last fed, and its listening aids:
+    /// buses muted and soloed (in the session, never the file), Monitor (all of them aside)
+    /// and whether the player has them.
+    meters: Vec<crate::mixer::Meter>,
+    meters_at: Option<Instant>,
+    mixer_muted: Vec<String>,
+    mixer_soloed: Vec<String>,
+    monitor: bool,
+    listening_given: bool,
     /// The material whose rows the inspector shows (the one picked in the dock, else the
     /// selected object's), its section's title, the models query that counts its users, and
     /// the material files that could not be read (not tried again until written anew).
@@ -3102,6 +3121,12 @@ impl Editor {
             mixer_section: None,
             mixer_header: String::new(),
             bus_texts: Default::default(),
+            meters: Vec::new(),
+            meters_at: None,
+            mixer_muted: Vec::new(),
+            mixer_soloed: Vec::new(),
+            monitor: false,
+            listening_given: true,
             shown_material: None,
             material_title: String::new(),
             material_models: None,
@@ -3525,6 +3550,7 @@ impl Editor {
         self.tick_checker(world);
         self.keep_script_autosaves(world, false);
         self.keep_material_autosaves(world, false);
+        self.keep_mixer_autosave(world, false);
         if !playing {
             self.ensure_prefab_bases(world);
         }
@@ -4856,18 +4882,32 @@ impl Editor {
         if self.bottom == Some(AUDIO_TAB)
             && let Some(doc) = &self.mixer
         {
-            strips.extend(doc.strips.iter().map(|s| crate::shell::StripView {
-                name: &s.name,
-                depth: s.depth,
-                fader: crate::mixer::fader_position(s.gain),
-                gain: &s.gain_text,
-                output: &s.output,
-                selected: self.mixer_picked.as_deref() == Some(s.name.as_str()),
+            let (muted, soloed) = (&self.mixer_muted, &self.mixer_soloed);
+            strips.extend(doc.strips.iter().map(|s| {
+                let meter = self.meters.iter().find(|m| m.name == s.name);
+                let level =
+                    |k: usize| meter.map_or(0.0, |m| crate::mixer::meter_position(m.level[k]));
+                crate::shell::StripView {
+                    name: &s.name,
+                    depth: s.depth,
+                    fader: crate::mixer::fader_position(s.gain),
+                    gain: &s.gain_text,
+                    output: &s.output,
+                    selected: self.mixer_picked.as_deref() == Some(s.name.as_str()),
+                    meter: [level(0), level(1)],
+                    held: meter.map_or("", |m| m.text.as_str()),
+                    clip: meter.is_some_and(|m| m.clip),
+                    muted: muted.contains(&s.name),
+                    soloed: soloed.contains(&s.name),
+                    silenced: !self.monitor
+                        && crate::mixer::silenced(&doc.layout, muted, soloed, &s.name),
+                }
             }));
         }
         let mixer_view = (self.bottom == Some(AUDIO_TAB)).then(|| crate::shell::MixerView {
             header: &self.mixer_header,
             strips: &strips,
+            monitor: self.monitor,
         });
         let model = ShellModel {
             scenes: &scenes,
@@ -4999,6 +5039,40 @@ impl Editor {
         }
         if let Some(fader) = response.mixer_fader {
             self.use_fader(world, fader);
+        }
+        // The listening aids (E11-1b-2): kept in the session, given to the player.
+        if let Some(i) = response.mixer_mute
+            && let Some(name) = self.strip_name(i)
+        {
+            toggle_name(&mut self.mixer_muted, &name);
+            self.listening_given = false;
+            self.write_session(world);
+        }
+        if let Some(i) = response.mixer_solo
+            && let Some(name) = self.strip_name(i)
+        {
+            toggle_name(&mut self.mixer_soloed, &name);
+            self.listening_given = false;
+            self.write_session(world);
+        }
+        if response.mixer_monitor {
+            self.monitor = !self.monitor;
+            self.listening_given = false;
+            self.say(String::from(if self.monitor {
+                "Monitor: every solo and mute aside"
+            } else {
+                "Monitor off: the solos and mutes back"
+            }));
+        }
+        if let Some(i) = response.mixer_held
+            && let Some(name) = self.strip_name(i)
+        {
+            let all = self.input.ctrl();
+            for m in &mut self.meters {
+                if all || m.name == name {
+                    m.clear();
+                }
+            }
         }
         if let Some(i) = response.mixer_remove
             && let Some(name) = self.strip_name(i)
@@ -13958,6 +14032,64 @@ impl Editor {
         }
     }
 
+    /// The mixer's unsaved layout kept in `.ofelia/` (E11-1b-2), as material files' are:
+    /// written once the edits are quiet (at once with `now`), deleted once it is saved.
+    fn keep_mixer_autosave(&mut self, world: &World, now: bool) {
+        let gesture = self.gesture();
+        let (Some(s), Some(doc)) = (&mut self.session, self.mixer.as_mut()) else {
+            return;
+        };
+        let file = s
+            .dir
+            .join(session::mixer_autosave_name(Path::new(&doc.path)));
+        let at = Instant::now();
+        let mut changed = false;
+        if !doc.dirty() {
+            doc.due = None;
+            if doc.autosaved.take().is_some() {
+                s.writer.remove(vec![file]);
+                changed = true;
+            }
+        } else if doc.autosaved == Some(doc.revision) {
+            doc.due = None;
+        } else {
+            let due = *doc.due.get_or_insert(at + session::AUTOSAVE_AFTER);
+            if now || session::autosave_now(at, due, s.last_input, gesture) {
+                s.writer.write(file, doc.text.clone(), 0, Duration::ZERO);
+                doc.autosaved = Some(doc.revision);
+                doc.due = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.write_session(world);
+        }
+    }
+
+    /// The mixer's layout the session had unsaved edits of (E11-1b-2): held again with them,
+    /// and given to the player.
+    fn restore_mixer(&mut self, m: session::MaterialEntry) {
+        let Some(dir) = self.session.as_ref().map(|s| s.dir.clone()) else {
+            return;
+        };
+        let Some(text) = m
+            .autosave
+            .and_then(|a| std::fs::read_to_string(dir.join(a)).ok())
+        else {
+            return;
+        };
+        match crate::mixer::MixerDoc::open(&self.root, &self.mixer_path) {
+            Ok(mut doc) => match doc.put_text(&text) {
+                Ok(()) => {
+                    doc.autosaved = Some(doc.revision);
+                    self.mixer = Some(doc);
+                }
+                Err(e) => log::warn!(target: "engine_editor", "{e}"),
+            },
+            Err(e) => log::warn!(target: "engine_editor", "{e}"),
+        }
+    }
+
     /// A material file the session had unsaved edits of (E10-1c): held again with them.
     fn restore_material(&mut self, m: session::MaterialEntry) {
         let Some(dir) = self.session.as_ref().map(|s| s.dir.clone()) else {
@@ -16393,6 +16525,7 @@ impl Editor {
         let mut others = Vec::new();
         let mut script_docs = Vec::new();
         let mut material_entries = Vec::new();
+        let mut mixer_entry = None;
         let mut break_docs = Vec::new();
         let mut at = 0;
         let doc = match std::fs::read_to_string(&previous) {
@@ -16403,6 +16536,7 @@ impl Editor {
                     others = f.documents;
                     script_docs = f.scripts;
                     material_entries = f.materials;
+                    mixer_entry = f.mixer;
                     break_docs = f.breakpoints;
                     let found = others.iter().position(|d| d.path == self.scene_path);
                     at = found.unwrap_or(0);
@@ -16526,6 +16660,10 @@ impl Editor {
         for m in material_entries {
             self.restore_material(m);
         }
+        // The mixer's (E11-1b-2).
+        if let Some(m) = mixer_entry {
+            self.restore_mixer(m);
+        }
         // Their breakpoints (ADR 0119), on the lines of the text as the session left it.
         for (file, mark) in break_docs {
             self.breakpoints.put(&file, mark);
@@ -16579,6 +16717,10 @@ impl Editor {
         if let Some(on) = state.auto_play {
             self.auto_play = on;
         }
+        // The mixer's listening aids (E11-1b-2).
+        self.mixer_muted.clone_from(&state.mixer_muted);
+        self.mixer_soloed.clone_from(&state.mixer_soloed);
+        self.listening_given = false;
         self.watches.clone_from(&state.watches);
         if let Some(on) = state.scale_lock {
             self.scale_lock = on;
@@ -16731,6 +16873,8 @@ impl Editor {
             error_stops: Some((self.error_stops.uncaught, self.error_stops.caught)),
             full_debugging: Some(self.full_debugging),
             auto_play: Some(self.auto_play),
+            mixer_muted: self.mixer_muted.clone(),
+            mixer_soloed: self.mixer_soloed.clone(),
             watches: self.watches.clone(),
             window: self.window,
             game_window: self.game_window,
@@ -16792,12 +16936,21 @@ impl Editor {
                 },
             });
         }
+        let mixer = self
+            .mixer
+            .as_ref()
+            .filter(|d| d.autosaved.is_some())
+            .map(|d| session::MaterialEntry {
+                path: PathBuf::from(&d.path),
+                autosave: Some(session::mixer_autosave_name(Path::new(&d.path))),
+            });
         let file = SessionFile {
             editor,
             documents,
             scripts,
             breakpoints,
             materials,
+            mixer,
         };
         let text = file.to_text();
         if text != s.last_text {
@@ -16928,6 +17081,7 @@ impl Editor {
         self.keep_autosave(world, true);
         self.keep_script_autosaves(world, true);
         self.keep_material_autosaves(world, true);
+        self.keep_mixer_autosave(world, true);
         if let Some(s) = &self.session {
             s.writer.flush();
         }
@@ -16943,6 +17097,7 @@ impl Editor {
         self.keep_autosave(world, true);
         self.keep_script_autosaves(world, true);
         self.keep_material_autosaves(world, true);
+        self.keep_mixer_autosave(world, true);
         self.write_session(world);
         if let Some(mut s) = self.session.take() {
             s.writer.flush();
@@ -18130,6 +18285,41 @@ impl<G> EditorGame<G> {
         {
             player.set_mixer_layout(&doc.layout);
             doc.given = true;
+        }
+        // Its meters while the Audio tab shows them, and the listening aids (E11-1b-2).
+        {
+            let shared = &mut *shared;
+            match (shared.bottom == Some(AUDIO_TAB), &shared.mixer) {
+                (true, Some(doc)) => {
+                    let now = Instant::now();
+                    let dt = shared
+                        .meters_at
+                        .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+                    shared.meters_at = Some(now);
+                    shared.meters.retain(|m| doc.strip(&m.name).is_some());
+                    for strip in &doc.strips {
+                        let k = match shared.meters.iter().position(|m| m.name == strip.name) {
+                            Some(k) => k,
+                            None => {
+                                shared.meters.push(crate::mixer::Meter::new(&strip.name));
+                                shared.meters.len() - 1
+                            }
+                        };
+                        if let Some(peak) = player.take_bus_peak(&strip.name) {
+                            shared.meters[k].feed(peak, dt);
+                        }
+                    }
+                }
+                _ => shared.meters_at = None,
+            }
+            if !shared.listening_given {
+                if shared.monitor {
+                    player.set_mixer_listening(&[], &[]);
+                } else {
+                    player.set_mixer_listening(&shared.mixer_muted, &shared.mixer_soloed);
+                }
+                shared.listening_given = true;
+            }
         }
         // Sound previews (E11-3b): what the editor asked, then the preview as it plays.
         match shared.preview_ask.take() {
@@ -22343,6 +22533,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn the_mixers_unsaved_layout_and_its_listening_aids_come_back_with_the_session() {
+        let dir = project("mixer-session");
+        let begin = |dir: &Path| {
+            let mut world = World::new();
+            let text = std::fs::read_to_string(dir.join("main.scene")).unwrap();
+            engine_scene::load(&mut world, &SceneRegistry::from_program(), &text).unwrap();
+            let (_, scene) = engine_scene::scene_header(&text).unwrap();
+            let mut ed = Editor::new(
+                [1280, 720],
+                dir.to_path_buf(),
+                Some(PathBuf::from("main.scene")),
+                scene.unwrap(),
+                AssetPaths::new(),
+            )
+            .unwrap();
+            ed.open_assets();
+            ed.begin_session(&mut world).unwrap();
+            (world, ed)
+        };
+        let (mut world, mut ed) = begin(&dir);
+        ed.update(&mut world);
+        // A bus added, unsaved; music muted, voice soloed.
+        let add = ed.ids.add_bus;
+        ed.run(&mut world, add);
+        ed.mixer_muted.push(String::from("music"));
+        ed.mixer_soloed.push(String::from("voice"));
+        ed.write_session(&world);
+        ed.end_session(&mut world);
+        let autosave = dir
+            .join(session::DIR)
+            .join(session::mixer_autosave_name(Path::new("main.mixer")));
+        assert!(autosave.is_file(), "autosaved at the end");
+        assert!(!dir.join("main.mixer").exists(), "the file untouched");
+        // A new editor: the bus back, unsaved; the aids back, the player to be told.
+        let (mut world, mut ed) = begin(&dir);
+        ed.update(&mut world);
+        let doc = ed.mixer.as_ref().expect("held with its edits");
+        assert!(doc.dirty() && doc.layout.buses.contains_key("bus"));
+        assert_eq!(ed.mixer_muted, ["music"]);
+        assert_eq!(ed.mixer_soloed, ["voice"]);
+        assert!(!ed.listening_given);
+        // Saved: written, its autosave gone.
+        ed.run(&mut world, ed.ids.save);
+        ed.update(&mut world);
+        flush(&ed);
+        assert!(!autosave.exists());
+        let written = engine_app::MixerFile::load(&dir.join("main.mixer")).unwrap();
+        assert!(written.buses.contains_key("bus"));
+        ed.end_session(&mut world);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The scene entity with scene id `id`.
     fn by_scene_id(world: &mut World, id: SceneId) -> Option<Entity> {
         let mut q = QueryState::<(Entity, &SceneId)>::new(world);
@@ -23431,7 +23674,9 @@ mod tests {
             .into_iter()
             .find(|r| (r.pos[0] - left).abs() < 40.0)
             .expect("music's output");
-        let thumb = [left + 55.0, output.pos[1] + output.size[1] + 3.0 + 28.0];
+        // Under the output: the held peak's row, then the fader (its thumb 19 px down at
+        // 0 dB), the marks left of it.
+        let thumb = [left + 48.0, output.pos[1] + output.size[1] + 20.0 + 23.0];
         mouse(&mut ed, thumb, None);
         ed.update(&mut world);
         mouse(&mut ed, thumb, Some(true));
@@ -23445,14 +23690,59 @@ mod tests {
         ed.update(&mut world);
         mouse(&mut ed, [thumb[0], thumb[1] + 40.0], Some(false));
         ed.update(&mut world);
-        assert!((gain(&ed) + 19.3).abs() < 0.2, "{}", gain(&ed));
+        assert!((gain(&ed) + 26.0).abs() < 0.2, "{}", gain(&ed));
         assert!(ed.mixer.as_ref().unwrap().dirty());
         // One step for the drag: undone, 0 dB; redone, the drag's end.
         let (undo, redo) = (ed.ids.undo, ed.ids.redo);
         ed.run(&mut world, undo);
         assert_eq!(gain(&ed), 0.0);
         ed.run(&mut world, redo);
-        assert!((gain(&ed) + 19.3).abs() < 0.2);
+        assert!((gain(&ed) + 26.0).abs() < 0.2);
+        // The listening aids: music's M, effects' S, Monitor; the session keeps the first
+        // two, the player is told.
+        let on_strip = |ed: &Editor, label: &str, strip: &str| {
+            // The strip's name in the bottom panel (the inspector shows it too).
+            let at = texts(ed, strip)
+                .into_iter()
+                .find(|r| r.pos[1] > 400.0)
+                .unwrap_or_else(|| panic!("{strip}'s strip"));
+            let left = at.pos[0] - 6.0;
+            texts(ed, label)
+                .into_iter()
+                .find(|r| r.pos[1] > 400.0 && r.pos[0] > left && r.pos[0] < left + 84.0)
+                .unwrap_or_else(|| panic!("{label} on {strip}"))
+        };
+        let m = middle(on_strip(&ed, "M", "music"));
+        click(&mut ed, &mut world, m);
+        assert_eq!(ed.mixer_muted, ["music"]);
+        assert!(!ed.listening_given, "to the player");
+        let s = middle(on_strip(&ed, "S", "effects"));
+        click(&mut ed, &mut world, s);
+        assert_eq!(ed.mixer_soloed, ["effects"]);
+        let doc = ed.mixer.as_ref().unwrap();
+        assert!(crate::mixer::silenced(
+            &doc.layout,
+            &ed.mixer_muted,
+            &ed.mixer_soloed,
+            "ui"
+        ));
+        let monitor = texts(&ed, "Monitor")[0];
+        click(&mut ed, &mut world, middle(monitor));
+        assert!(ed.monitor);
+        click(&mut ed, &mut world, middle(monitor));
+        click(&mut ed, &mut world, s);
+        click(&mut ed, &mut world, m);
+        assert!(ed.mixer_muted.is_empty() && ed.mixer_soloed.is_empty());
+        // A meter that went over full scale: its held peak and light, cleared by a click.
+        let mut meter = crate::mixer::Meter::new("music");
+        meter.feed([1.5, 0.5], 0.0);
+        ed.meters.push(meter);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let light = on_strip(&ed, "!", "music");
+        assert!(!texts(&ed, "+3.5").is_empty(), "the held peak");
+        click(&mut ed, &mut world, middle(light));
+        assert!(!ed.meters[0].clip && ed.meters[0].text.is_empty());
         // The inspector shows the picked bus: its rows.
         ed.update(&mut world);
         ed.update(&mut world);

@@ -515,6 +515,11 @@ pub(crate) struct Sound {
     buses: Vec<Bus>,
     /// The layout changed since the world's [`Mixer`] last followed it.
     layout_changed: bool,
+    /// The editor's listening aids (E11-1b): buses it mutes and solos, on top of the
+    /// game's mutes, and whether they changed since the mixer was told.
+    listen_muted: Vec<String>,
+    listen_soloed: Vec<String>,
+    listening_changed: bool,
     reverb: Option<ReverbBus>,
     /// Where the sounds come from, said once at the start.
     note: String,
@@ -574,6 +579,40 @@ pub struct PreviewState<'a> {
     pub playing: bool,
     /// Why it could not play.
     pub failed: Option<&'a str>,
+}
+
+/// Whether the editor's listening aids silence bus `name`: muted, or while a bus is soloed,
+/// neither soloed, nor fed by a soloed bus (on its way to the master), nor feeding one.
+/// The master never.
+fn silenced(buses: &[Bus], muted: &[String], soloed: &[String], name: &str) -> bool {
+    if name == "master" {
+        return false;
+    }
+    if muted.iter().any(|m| m == name) {
+        return true;
+    }
+    if soloed.is_empty() {
+        return false;
+    }
+    // Whether `bus` feeds `into`, through its parents.
+    let feeds = |bus: &str, into: &str| {
+        let mut at = bus;
+        for _ in 0..buses.len() {
+            match buses
+                .iter()
+                .find(|b| b.name == at)
+                .and_then(|b| b.parent.as_deref())
+            {
+                Some(p) if p == into => return true,
+                Some(p) => at = p,
+                None => return false,
+            }
+        }
+        false
+    };
+    !soloed
+        .iter()
+        .any(|s| s == name || feeds(s, name) || feeds(name, s))
 }
 
 /// The reverb's send from bus `world` forgotten (the bus went, and its sends with it).
@@ -694,6 +733,9 @@ impl Sound {
                 .then(|| String::from("sound is off (AudioSettings::enabled)")),
             buses: Vec::new(),
             layout_changed: false,
+            listen_muted: Vec::new(),
+            listen_soloed: Vec::new(),
+            listening_changed: false,
             reverb: None,
             note,
             live_folder,
@@ -735,6 +777,24 @@ impl Sound {
         sound.set_layout(layout);
         sound.layout_changed = false;
         sound
+    }
+
+    /// The editor's listening aids (E11-1b): `muted` buses silent, and while any bus is in
+    /// `soloed`, only those, the buses they feed (on to the master) and the buses that feed
+    /// them heard. On top of the game's own mutes, which they leave as they are.
+    pub(crate) fn set_listening(&mut self, muted: &[String], soloed: &[String]) {
+        if self.listen_muted != muted || self.listen_soloed != soloed {
+            self.listen_muted = muted.to_vec();
+            self.listen_soloed = soloed.to_vec();
+            self.listening_changed = true;
+        }
+    }
+
+    /// Bus `bus`'s peak level per channel since the last call (linear, after its fader):
+    /// the editor's meters.
+    pub(crate) fn take_peak(&self, bus: &str) -> Option<[f32; 2]> {
+        let id = self.buses.iter().find(|b| b.name == bus)?.id;
+        Some(self.audio.as_ref()?.take_peak(id))
     }
 
     /// The mixer laid out as `layout` says (ADR 0121), at the start and again whenever it
@@ -1110,6 +1170,8 @@ impl Sound {
         };
         // A new layout: the buses that stay keep the game's volumes, new ones start at 1,
         // and every bus's gain is its fader again under them.
+        // The editor's listening aids changed: every bus's mute again.
+        let listening = core::mem::take(&mut self.listening_changed);
         if core::mem::take(&mut self.layout_changed) {
             let old = core::mem::take(&mut mixer.buses);
             mixer.buses = self
@@ -1128,14 +1190,20 @@ impl Sound {
                 .collect();
         }
         for bus in &mut mixer.buses {
-            if core::mem::take(&mut bus.changed) {
+            if core::mem::take(&mut bus.changed) || listening {
                 let fader = self
                     .buses
                     .iter()
                     .find(|b| b.id == bus.id)
                     .map_or(1.0, |b| b.fader);
                 audio.set_bus_gain(bus.id, fader * bus.volume, 0.05);
-                audio.set_bus_mute(bus.id, bus.muted);
+                let aids = silenced(
+                    &self.buses,
+                    &self.listen_muted,
+                    &self.listen_soloed,
+                    &bus.name,
+                );
+                audio.set_bus_mute(bus.id, bus.muted || aids);
             }
         }
     }

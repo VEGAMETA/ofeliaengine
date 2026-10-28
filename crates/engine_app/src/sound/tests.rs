@@ -499,6 +499,67 @@ fn a_new_layout_moves_fades_and_drops_buses_while_its_sounds_play() {
 }
 
 #[test]
+fn the_editors_solo_and_mute_listen_on_top_of_the_games_mutes() {
+    let mut bed = Bed::new("listening", AudioSettings::default());
+    write_level_wav(&bed.folder.join("level.wav"), u64::from(RATE), 0.25);
+    // Steps under effects; a sound on steps, one on music.
+    let mut layout = MixerFile::builtin();
+    layout
+        .buses
+        .insert(String::from("steps"), BusLayout::new().under("effects"));
+    bed.sound.set_layout(&layout);
+    let steps = bed
+        .world
+        .spawn((AudioSource::new("level.wav").on_bus("steps").looped(),));
+    let music = bed
+        .world
+        .spawn((AudioSource::new("level.wav").on_bus("music").looped(),));
+    bed.until(|b| b.voice(steps).is_some() && b.voice(music).is_some());
+    let level = |bed: &mut Bed| {
+        bed.frame(120);
+        energy(bed.frame(20).into_iter())
+    };
+    // The two play the same level in step: together four times the power of one.
+    let both = level(&mut bed);
+    // The meters: what each bus mixed since the last look.
+    let peak = |bed: &Bed, bus: &str| bed.sound.take_peak(bus).unwrap()[0];
+    let _ = peak(&bed, "music");
+    bed.frame(20);
+    // A mono sound in the middle: each side at -3 dB (equal power).
+    let p = peak(&bed, "music");
+    assert!(
+        (p - 0.25 * core::f32::consts::FRAC_1_SQRT_2).abs() < 0.01,
+        "music's peak {p}"
+    );
+    assert!(peak(&bed, "voice") == 0.0, "nothing on voice");
+    assert!(bed.sound.take_peak("no such bus").is_none());
+    // Effects soloed: steps feeds it (heard), music does not (silent).
+    let s = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+    bed.sound.set_listening(&[], &s(&["effects"]));
+    let solo = level(&mut bed);
+    assert!((solo / both - 0.25).abs() < 0.03, "{solo} of {both}");
+    // Steps soloed: effects, which it feeds, stays; music is silent.
+    bed.sound.set_listening(&[], &s(&["steps"]));
+    assert!((level(&mut bed) / both - 0.25).abs() < 0.03);
+    // Music muted, no solo: steps alone; then nothing, the game unmuted underneath.
+    bed.sound.set_listening(&s(&["music"]), &[]);
+    assert!((level(&mut bed) / both - 0.25).abs() < 0.03);
+    bed.sound.set_listening(&s(&["music", "effects"]), &[]);
+    assert_eq!(level(&mut bed), 0.0);
+    bed.sound.set_listening(&[], &[]);
+    assert!((level(&mut bed) / both - 1.0).abs() < 0.05);
+    // The game's own mute stays when the aids go.
+    let mixer = bed.world.resource_mut::<Mixer>().unwrap();
+    assert!(mixer.set_muted("music", true));
+    bed.sound.set_listening(&s(&["effects"]), &[]);
+    bed.sound.set_listening(&[], &[]);
+    assert!(
+        (level(&mut bed) / both - 0.25).abs() < 0.03,
+        "music still muted by the game"
+    );
+}
+
+#[test]
 fn the_players_layout_comes_from_its_file_or_is_the_built_in_one() {
     let dir = std::env::temp_dir().join(format!("ofelia-layout-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
