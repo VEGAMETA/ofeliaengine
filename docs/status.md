@@ -711,7 +711,7 @@ Last updated: 2026-10-28.
     - Evaluate in the shown frame (its own thread and budget, the world opened to it) and
       watches, evaluated at every stop, kept in the session;
     - F5, F8 and the steps work while a field is typed in.
-  - **E9-2, VS Code over DAP** (#PR, ADR 0119's as-built):
+  - **E9-2, VS Code over DAP** (#385, ADR 0119's as-built):
     - the editor's endpoint on 127.0.0.1 with a token in `.ofelia/debug/editor.json`, its
       own threads, requests answered in the editor's frame (breakpoints, error filters, the
       stack, scopes, variables, evaluate, the steps, pause) and its events (stopped,
