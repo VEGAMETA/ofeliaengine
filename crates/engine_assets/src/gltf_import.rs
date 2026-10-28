@@ -462,7 +462,7 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 /// Decodes `%XX` escapes of a URI (glTF URIs are RFC 3986: a space is `%20`). Invalid
 /// escapes stay as they are.
-fn percent_decode(uri: &str) -> String {
+pub(crate) fn percent_decode(uri: &str) -> String {
     let bytes = uri.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

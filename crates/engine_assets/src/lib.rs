@@ -52,7 +52,7 @@ pub use gltf_import::{
     SheenData, SkinData, TextureData, TextureSource, TextureWrap, TypedMaterialData, import_gltf,
     read_texture, spawn_scene,
 };
-pub use gltf_outline::{GltfOutline, OutlineMesh, OutlineNode, OutlinePrimitive};
+pub use gltf_outline::{GltfOutline, OutlineMaps, OutlineMesh, OutlineNode, OutlinePrimitive};
 pub use lod::{Lod, LodSettings, generate_lods};
 pub use texture_compress::{ENCODER, EncodedTexture, TextureFormat, compress, compressed_format};
 pub use texture_import::{Image, ImageError, TextureImage, TextureUsage, build_mips, decode_image};

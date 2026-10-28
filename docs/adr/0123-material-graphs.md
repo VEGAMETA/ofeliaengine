@@ -328,6 +328,48 @@ has graphs).
   textures), duplicates (Ctrl+D), Ctrl+drag yanking a port's links; then the node search
   (E10-3e).
 
+## As built (E10-3d-2, 2026-10-28): New Graph, copies, carried links
+
+- **`GltfOutline::maps`** (`engine_assets`): each glTF material's own look from the JSON
+  alone. It holds the factors (base colour, metal, roughness, emission with its strength)
+  and the maps' images where they are files beside the glTF (percent-decoded; one inside
+  the file, a data URI or a bad index is none). The indices are checked, because the
+  document is not validated.
+- **`graph::starter`:** a lit graph drawing that look. The colour map is multiplied by its
+  tint where the factor is not 1. The metal/rough map's blue and green channels are
+  multiplied by their factors. The normal map goes through a Normal Map node, then come
+  emission and occlusion. Factors stand alone where there is no map. Without a look, the
+  graph is the standard material's (grey 0.8, roughness 0.5, no metal).
+- **Material: New Graph** (`material.new_graph`): `<name>.mgraph` and `<name>.material`
+  are named after the active object (numbered when taken) in the dock's folder.
+  - The look is the object's model's glTF material, found by its part's name as a dropped
+    model names it.
+  - The material file names the graph (`GraphMaterial`), marks its metal/rough and
+    occlusion maps as data (the graph's inference would take them for colours), and takes
+    the look's factors as its look.
+  - It is given to the selection in one step, and the graph opens in its tab.
+- **Copies (Ctrl+D on the canvas):**
+  - each copy gets an id of its own (`multiply1`), a parameter name of its own
+    (`tint_2`) and sits 30 units down and right;
+  - links among the copied nodes are copied between their copies, and links into them
+    from the other nodes are kept (Blender's);
+  - the surface is not copied, and the copies are selected.
+- **Carried links (Ctrl+drag from an output, egui-snarl's yank):** every link of the
+  output, dropped on another output, moves there; if one would loop, all are refused and
+  stay. Dropped elsewhere, they are taken out. While carried, they are drawn from the
+  pointer.
+- **Tests:**
+  - the outline's maps (factors, a file, an embedded image, a bad index, glTF's defaults);
+  - the starter with and without a look (its links, a factor of 1 linking the channel
+    itself, a missing file left out), its module generated and compiled by Slang inside
+    `forward.slang` with every map and with none;
+  - copies with their links and names, and a carried output moved, refused and taken
+    out;
+  - in the editor, New Graph on a box drawing a glTF material with two maps (the graph,
+    the material file, one step, its tab, Ctrl+D there, the scene's box not copied), and
+    again on the box, whose material is a file now (the standard look, numbered).
+- **Next:** the node search (E10-3e).
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,
