@@ -832,7 +832,7 @@ Last updated: 2026-10-28.
   - **E11-3d-1, sounds dropped into the scene** (#410, ADR 0107's as-built): onto an object
     (viewport or row) it plays there in 3D; on the floor (or with Alt) a new entity named
     after the file on the surface; into the tree, heard as it is; one undo step each.
-  - **Test runs keep their windows out of sight** (#PR; the owner's request, 2026-10-28):
+  - **Test runs keep their windows out of sight** (#411; the owner's request, 2026-10-28):
     `tools/check.ps1` sets `ENGINE_HIDDEN_WINDOWS=1`, and every window `engine_platform`
     makes is then cloaked (composed, its swapchain presenting, never on the screen), with
     no taskbar button, shown without being activated; uncloaking and bringing it to the
