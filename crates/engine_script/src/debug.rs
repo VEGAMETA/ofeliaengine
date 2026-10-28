@@ -180,6 +180,32 @@ pub enum Hits {
 }
 
 impl Hits {
+    /// A hit rule as typed (the UX note's §8, VS Code's hit count): empty for every hit,
+    /// `10` the tenth, `>= 10` the tenth and those after, `% 64` every 64th.
+    ///
+    /// # Errors
+    ///
+    /// Anything else, or a count that is not a whole number from 1.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(Self::Every);
+        }
+        let (rule, count): (fn(u64) -> Self, &str) = if let Some(n) = text.strip_prefix(">=") {
+            (Self::From, n)
+        } else if let Some(n) = text.strip_prefix('%') {
+            (Self::EveryNth, n)
+        } else {
+            (Self::Nth, text)
+        };
+        match count.trim().parse::<u64>() {
+            Ok(n) if n >= 1 => Ok(rule(n)),
+            _ => Err(format!(
+                "`{text}` is not a hit rule: a count (`10`), `>= 10` or `% 64`"
+            )),
+        }
+    }
+
     /// Whether hit `n` (from 1) is acted on.
     fn admits(self, n: u64) -> bool {
         match self {
@@ -2100,6 +2126,18 @@ return M
             .iter()
             .map(|v| (v.name.as_str(), v.value.as_str()))
             .collect()
+    }
+
+    #[test]
+    fn hit_rules_read_as_typed() {
+        assert_eq!(Hits::parse(""), Ok(Hits::Every));
+        assert_eq!(Hits::parse(" 10 "), Ok(Hits::Nth(10)));
+        assert_eq!(Hits::parse(">= 10"), Ok(Hits::From(10)));
+        assert_eq!(Hits::parse(">=3"), Ok(Hits::From(3)));
+        assert_eq!(Hits::parse("% 64"), Ok(Hits::EveryNth(64)));
+        for wrong in ["0", "-2", "ten", "> 3", "% 0", "1.5"] {
+            assert!(Hits::parse(wrong).is_err(), "{wrong}");
+        }
     }
 
     #[test]

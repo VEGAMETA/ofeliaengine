@@ -11,13 +11,32 @@ pub type Start<G> = fn(&mut Player) -> Result<G, Box<dyn std::error::Error>>;
 /// scene loaded, then the game made by `start`. What [`main!`](crate::main) runs without the
 /// game's `editor` feature.
 ///
+/// - **The log** (ADR 0061): the engine's logger is installed unless the game installed
+///   one, writing to stderr, a debugger's output window and
+///   `%LOCALAPPDATA%\ofeliaengine\logs\<executable>.log`.
+/// - **The command line's `--debug` and `--wait-for-debugger`** ask for VS Code's script
+///   debugger ([`PlayerSettings::debugger`], ADR 0119 E9-3) where the game's settings did
+///   not.
+///
 /// # Errors
 ///
 /// When the player cannot start, `start` fails, or a frame fails.
 pub fn run<G: Game>(
-    settings: PlayerSettings,
+    mut settings: PlayerSettings,
     start: Start<G>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let name = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| String::from("game"));
+    // A logger the game installed stays.
+    let _log = engine_log::init(&engine_log::LogConfig {
+        file: Some(engine_log::report::log_file(&name)),
+        ..engine_log::LogConfig::default()
+    });
+    if settings.debugger.is_none() {
+        settings.debugger = crate::DebuggerSettings::from_args(std::env::args_os().skip(1));
+    }
     let mut player = Player::new(&settings)?;
     let mut game = start(&mut player)?;
     player.run(&mut game)?;

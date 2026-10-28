@@ -62,6 +62,7 @@
 mod assets;
 pub mod bake;
 mod blockout;
+pub mod dap;
 mod entry;
 mod game;
 mod loading;
@@ -119,7 +120,7 @@ pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Set
 pub use previews::{PREVIEW_SIZE, Preview, PreviewRequest};
 pub use report::{FrameReport, Startup, StartupPipelines};
 pub use saves::{Autosave, QUICK_SLOT, SaveSettings, Saves};
-pub use settings::{FrameCap, PlayerSettings, Window};
+pub use settings::{DebuggerSettings, FrameCap, PlayerSettings, Window};
 pub use sound::{
     AcousticSettings, AudioListener, AudioSettings, AudioSource, AudioSource3D, BusSettings,
     Falloff, Mixer, PlayMode, ReverbZone, Room, SoundFiles,

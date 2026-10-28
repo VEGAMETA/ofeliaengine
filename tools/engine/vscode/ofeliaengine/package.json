@@ -1,8 +1,8 @@
 {
     "name": "ofeliaengine",
     "displayName": "ofeliaengine",
-    "description": "Debug an ofeliaengine game's Luau scripts: attach to the editor's Play, with breakpoints, steps, the stack, variables and evaluation.",
-    "version": "0.1.0",
+    "description": "Debug an ofeliaengine game's Luau scripts: attach to the editor's Play or to a player started with --debug, with breakpoints, steps, the stack, variables and evaluation.",
+    "version": "0.2.0",
     "publisher": "ofeliaengine",
     "license": "MIT",
     "engines": {
@@ -36,6 +36,19 @@
                 "configurationAttributes": {
                     "attach": {
                         "properties": {
+                            "target": {
+                                "type": "string",
+                                "enum": [
+                                    "editor",
+                                    "player"
+                                ],
+                                "enumDescriptions": [
+                                    "The editor that has the game open: the scripts it plays.",
+                                    "A player of the game started with --debug (a development build): the newest, or one picked from a list."
+                                ],
+                                "description": "What to attach to.",
+                                "default": "editor"
+                            },
                             "play": {
                                 "type": "boolean",
                                 "description": "Play the open scene in the editor when attached, and stop it when the session ends.",
@@ -43,8 +56,7 @@
                             },
                             "endpoint": {
                                 "type": "string",
-                                "description": "The file the editor writes its port and token to.",
-                                "default": "${workspaceFolder}/.ofelia/debug/editor.json"
+                                "description": "The file the editor or a player writes its port and token to (.ofelia/debug/editor.json, player-<pid>.json); without it, found by the target."
                             }
                         }
                     }
@@ -60,6 +72,12 @@
                         "request": "attach",
                         "name": "Attach and Play",
                         "play": true
+                    },
+                    {
+                        "type": "ofeliaengine",
+                        "request": "attach",
+                        "name": "Attach to the player",
+                        "target": "player"
                     }
                 ],
                 "configurationSnippets": [
@@ -80,6 +98,16 @@
                             "request": "attach",
                             "name": "Attach and Play",
                             "play": true
+                        }
+                    },
+                    {
+                        "label": "ofeliaengine: Attach to the player",
+                        "description": "Debug the scripts of a player started with --debug",
+                        "body": {
+                            "type": "ofeliaengine",
+                            "request": "attach",
+                            "name": "Attach to the player",
+                            "target": "player"
                         }
                     }
                 ]

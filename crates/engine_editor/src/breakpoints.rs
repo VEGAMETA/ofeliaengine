@@ -62,7 +62,7 @@ impl Mark {
     ///
     /// # Errors
     ///
-    /// Its hit rule does not read ([`parse_hits`]).
+    /// Its hit rule does not read ([`Hits::parse`]).
     pub(crate) fn to_host(&self, line: u32) -> Result<Breakpoint, String> {
         let condition = self.condition.trim();
         Ok(Breakpoint {
@@ -73,35 +73,9 @@ impl Mark {
                 Act::Pause => BreakAction::Pause,
             },
             condition: (!condition.is_empty()).then(|| condition.to_owned()),
-            hits: parse_hits(&self.hits)?,
+            hits: Hits::parse(&self.hits)?,
             enabled: self.enabled,
         })
-    }
-}
-
-/// A hit rule as typed (§8): empty for every hit, `10` the tenth, `>= 10` the tenth and
-/// those after, `% 64` every 64th.
-///
-/// # Errors
-///
-/// Anything else, or a count that is not a whole number from 1.
-pub(crate) fn parse_hits(text: &str) -> Result<Hits, String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(Hits::Every);
-    }
-    let (rule, count): (fn(u64) -> Hits, &str) = if let Some(n) = text.strip_prefix(">=") {
-        (Hits::From, n)
-    } else if let Some(n) = text.strip_prefix('%') {
-        (Hits::EveryNth, n)
-    } else {
-        (Hits::Nth, text)
-    };
-    match count.trim().parse::<u64>() {
-        Ok(n) if n >= 1 => Ok(rule(n)),
-        _ => Err(format!(
-            "`{text}` is not a hit rule: a count (`10`), `>= 10` or `% 64`"
-        )),
     }
 }
 
@@ -335,7 +309,7 @@ impl BreakEdit {
     ///
     /// The hit rule does not read.
     pub(crate) fn mark(&self) -> Result<Mark, String> {
-        parse_hits(&self.hits)?;
+        Hits::parse(&self.hits)?;
         Ok(Mark {
             line: self.line,
             act: self.act,
@@ -485,18 +459,6 @@ mod tests {
         Mark {
             log: text.to_owned(),
             ..Mark::new(line, Act::Log)
-        }
-    }
-
-    #[test]
-    fn hit_rules_read_as_typed() {
-        assert_eq!(parse_hits(""), Ok(Hits::Every));
-        assert_eq!(parse_hits(" 10 "), Ok(Hits::Nth(10)));
-        assert_eq!(parse_hits(">= 10"), Ok(Hits::From(10)));
-        assert_eq!(parse_hits(">=3"), Ok(Hits::From(3)));
-        assert_eq!(parse_hits("% 64"), Ok(Hits::EveryNth(64)));
-        for wrong in ["0", "-2", "ten", "> 3", "% 0", "1.5"] {
-            assert!(parse_hits(wrong).is_err(), "{wrong}");
         }
     }
 

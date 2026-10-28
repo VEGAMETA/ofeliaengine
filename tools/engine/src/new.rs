@@ -49,10 +49,10 @@ const EXTENSION: [(&str, &str); 3] = [
 ];
 
 /// The extension's version (its `package.json`'s).
-const EXTENSION_VERSION: &str = "0.1.0";
+const EXTENSION_VERSION: &str = "0.2.0";
 
-/// The game's debug configurations: attaching to the editor, and attaching while the editor
-/// plays the open scene.
+/// The game's debug configurations: attaching to the editor, attaching while the editor
+/// plays the open scene, and attaching to a player started with `--debug`.
 const VSCODE_LAUNCH: &str = r#"{
     "version": "0.2.0",
     "configurations": [
@@ -66,6 +66,12 @@ const VSCODE_LAUNCH: &str = r#"{
             "request": "attach",
             "name": "Attach and Play",
             "play": true
+        },
+        {
+            "type": "ofeliaengine",
+            "request": "attach",
+            "name": "Attach to the player",
+            "target": "player"
         }
     ]
 }
@@ -288,7 +294,7 @@ fn extension_vsix() -> Vec<u8> {
   <Metadata>
     <Identity Language="en-US" Id="ofeliaengine" Version="{EXTENSION_VERSION}" Publisher="ofeliaengine"/>
     <DisplayName>ofeliaengine</DisplayName>
-    <Description xml:space="preserve">Debug an ofeliaengine game's Luau scripts: attach to the editor's Play.</Description>
+    <Description xml:space="preserve">Debug an ofeliaengine game's Luau scripts: attach to the editor's Play or to a player started with --debug.</Description>
     <Categories>Debuggers</Categories>
     <Properties>
       <Property Id="Microsoft.VisualStudio.Code.Engine" Value="^1.80.0"/>
@@ -455,12 +461,13 @@ opt-level = 3
 debug = false
 incremental = false
 
-# What players get: `cargo build --profile shipping`.
+# What players get: `cargo build --profile shipping`. It unwinds as every other profile
+# (ADR 0118): Luau's errors are C++ exceptions, and under `abort` one raised through the
+# engine's callbacks would end the game where it stops one script instance.
 [profile.shipping]
 inherits = "release"
 lto = "fat"
 codegen-units = 1
-panic = "abort"
 "#,
         engine = toml_path(engine),
     )
@@ -591,6 +598,8 @@ mod tests {
         ] {
             assert!(manifest.lines().any(|l| l == line), "{line}");
         }
+        // A shipped game unwinds (ADR 0118): a script's error stops its instance.
+        assert!(manifest.contains("[profile.shipping]") && !manifest.contains("panic = \"abort\""));
         assert!(!manifest.contains('\\'));
         let main = read("src/main.rs");
         assert!(
@@ -606,7 +615,8 @@ mod tests {
         // recommended and its package beside them.
         assert!(read(".vscode/launch.json").contains("\"type\": \"ofeliaengine\""));
         assert!(read(".vscode/extensions.json").contains("\"ofeliaengine.ofeliaengine\""));
-        let vsix = std::fs::read(game.join(".vscode/ofeliaengine-0.1.0.vsix")).unwrap();
+        assert!(read(".vscode/launch.json").contains("\"target\": \"player\""));
+        let vsix = std::fs::read(game.join(".vscode/ofeliaengine-0.2.0.vsix")).unwrap();
         assert_eq!(&vsix[..4], b"PK\x03\x04");
         // The engine's build, shared, and its dependencies' versions.
         let config = read(".cargo/config.toml");

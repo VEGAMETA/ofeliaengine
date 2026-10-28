@@ -1,17 +1,81 @@
-// The ofeliaengine debugger for VS Code (ADR 0119 E9-2): it names the debug type and
-// attaches to the editor's script debugger over DAP. The editor listens on 127.0.0.1 and
-// writes its port and a token to `.ofelia/debug/editor.json` in the project; this reads
-// them, gives the token in the attach request, and connects. Nothing else runs here: the
-// editor is the debug adapter.
+// The ofeliaengine debugger for VS Code (ADR 0119 E9-2, E9-3): it names the debug type and
+// attaches to a script debugger over DAP, the editor's or a standalone player's (a
+// development build started with `--debug`). Each listens on 127.0.0.1 and writes its port
+// and a token to the project's `.ofelia/debug/` (`editor.json`, `player-<pid>.json`); this
+// reads them, gives the token in the attach request, and connects. Nothing else runs here:
+// the editor or the player is the debug adapter.
 
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 
-/** The editor's endpoint for the project in `folder`: its port and its token. */
-function endpoint(config, folder) {
-    const file = config.endpoint || path.join(folder, '.ofelia', 'debug', 'editor.json');
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
+/** Whether process `pid` runs: a player's file outlives a player that crashed. */
+function running(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (e) {
+        return e.code === 'EPERM';
+    }
+}
+
+/** The players of the project in `folder` that listen, newest first. */
+function players(folder) {
+    const dir = path.join(folder, '.ofelia', 'debug');
+    let names = [];
+    try {
+        names = fs.readdirSync(dir).filter((n) => /^player-\d+\.json$/.test(n));
+    } catch (e) {
+        return [];
+    }
+    const found = [];
+    for (const name of names) {
+        const file = path.join(dir, name);
+        try {
+            const endpoint = JSON.parse(fs.readFileSync(file, 'utf8'));
+            if (running(endpoint.pid)) {
+                found.push({ endpoint, time: fs.statSync(file).mtimeMs });
+            }
+        } catch (e) {
+            // Being written, or not ours.
+        }
+    }
+    return found.sort((a, b) => b.time - a.time).map((f) => f.endpoint);
+}
+
+/** The endpoint `config` attaches to in the project in `folder`, or why there is none. */
+async function endpoint(config, folder) {
+    if (config.endpoint) {
+        return JSON.parse(fs.readFileSync(config.endpoint, 'utf8'));
+    }
+    if (config.target !== 'player') {
+        const file = path.join(folder, '.ofelia', 'debug', 'editor.json');
+        try {
+            return JSON.parse(fs.readFileSync(file, 'utf8'));
+        } catch (e) {
+            throw new Error(
+                'no editor has this game open (start it with `cargo run --features editor`, then attach)'
+            );
+        }
+    }
+    const found = players(folder);
+    if (found.length === 0) {
+        throw new Error(
+            'no player of this game listens (start it with `cargo run -- --debug`, or `-- --wait-for-debugger` to stop in its first hooks)'
+        );
+    }
+    if (found.length === 1) {
+        return found[0];
+    }
+    // Several: the newest first in the list.
+    const picked = await vscode.window.showQuickPick(
+        found.map((e) => ({ label: e.title || 'player', description: `process ${e.pid}`, endpoint: e })),
+        { placeHolder: 'Which player to attach to' }
+    );
+    if (!picked) {
+        return undefined;
+    }
+    return picked.endpoint;
 }
 
 class Configurations {
@@ -25,7 +89,7 @@ class Configurations {
         return config;
     }
 
-    resolveDebugConfigurationWithSubstitutedVariables(folder, config) {
+    async resolveDebugConfigurationWithSubstitutedVariables(folder, config) {
         const root = folder
             ? folder.uri.fsPath
             : vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0]
@@ -35,16 +99,18 @@ class Configurations {
             vscode.window.showErrorMessage('ofeliaengine: open the game\'s folder first.');
             return undefined;
         }
+        let found;
         try {
-            const found = endpoint(config, root);
-            config.token = found.token;
-            config.__port = found.port;
+            found = await endpoint(config, root);
         } catch (e) {
-            vscode.window.showErrorMessage(
-                'ofeliaengine: no editor has this game open (start it with `cargo run --features editor`, then attach).'
-            );
+            vscode.window.showErrorMessage(`ofeliaengine: ${e.message}.`);
             return undefined;
         }
+        if (!found) {
+            return undefined;
+        }
+        config.token = found.token;
+        config.__port = found.port;
         return config;
     }
 }
