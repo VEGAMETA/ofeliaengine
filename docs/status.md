@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3a, the material graph's design** (#PR, ADR 0123 proposed; research
+  - **E10-3a, the material graph's design** (#419, ADR 0123 proposed; research
     `docs/research/material-graph.md`): a graph is a material type in a `.graph` file of
     the editor's grammar, generated into one Slang module by one crate for the editor, the
     player and the cook. Question 3 measured: numbers read as parameters cost up to +12
