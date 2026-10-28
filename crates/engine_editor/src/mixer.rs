@@ -382,6 +382,28 @@ impl MixerDoc {
     }
 }
 
+/// Whether bus `bus` (the master for [`MASTER`]) differs between layouts `before` and
+/// `after`: its fader, balance, voices, reverb or output, or it came or went.
+pub(crate) fn bus_changed(before: &MixerFile, after: &MixerFile, bus: &str) -> bool {
+    if bus == MASTER {
+        return before.master != after.master;
+    }
+    before.buses.get(bus) != after.buses.get(bus)
+}
+
+/// How many buses (the master among them) differ between `before` and `after`, those that
+/// came and went too.
+pub(crate) fn changes(before: &MixerFile, after: &MixerFile) -> usize {
+    let master = usize::from(before.master != after.master);
+    let names = before.buses.keys().chain(
+        after
+            .buses
+            .keys()
+            .filter(|n| !before.buses.contains_key(*n)),
+    );
+    master + names.filter(|n| bus_changed(before, after, n)).count()
+}
+
 /// Bus `bus`'s gain set to `db` (the master's for [`MASTER`]), within the fader's travel.
 pub(crate) fn set_gain(layout: &mut MixerFile, bus: &str, db: f32) {
     let db = (10.0 * db.clamp(FLOOR, CEILING)).round() / 10.0;
@@ -628,6 +650,21 @@ mod tests {
         assert!(on(&[], &["steps"], "effects"), "what it feeds");
         assert!(on(&["master"], &["music"], MASTER), "the master never");
         assert!(!on(&["voice"], &[], "voice"));
+    }
+
+    #[test]
+    fn changes_between_layouts_are_counted_bus_by_bus() {
+        let before = MixerFile::builtin();
+        let mut after = before.clone();
+        assert_eq!(changes(&before, &after), 0);
+        set_gain(&mut after, "music", -6.0);
+        add_bus(&mut after);
+        remove_bus(&mut after, "ui");
+        set_gain(&mut after, MASTER, -1.0);
+        assert!(bus_changed(&before, &after, "music") && bus_changed(&before, &after, "bus"));
+        assert!(!bus_changed(&before, &after, "effects"));
+        assert!(bus_changed(&before, &after, MASTER));
+        assert_eq!(changes(&before, &after), 4, "music, bus, ui and the master");
     }
 
     #[test]

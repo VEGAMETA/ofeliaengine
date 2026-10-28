@@ -4056,6 +4056,8 @@ pub struct StripView<'a> {
     pub soloed: bool,
     /// Its bus silenced by another bus's solo, or by its own mute.
     pub silenced: bool,
+    /// Changed since Play began (E11-1b-3): a dot before its name while the game plays.
+    pub changed: bool,
 }
 
 /// A strip's fader pressed, dragged or let go this frame (E11-1b): the strip and the
@@ -4182,6 +4184,9 @@ fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &
                     let indent = dots[usize::from(strip.depth).min(dots.len() - 1)];
                     if !indent.is_empty() {
                         text(ui, "depth", indent, SMALL, p.text_dim);
+                    }
+                    if strip.changed {
+                        text(ui, "changed", "\u{2022}", TEXT, p.playing);
                     }
                     let color = if strip.silenced { p.text_dim } else { p.text };
                     text(ui, "text", strip.name, TEXT, color);

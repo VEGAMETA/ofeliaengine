@@ -806,9 +806,12 @@ Last updated: 2026-10-28.
     lights cleared by a click; M, S and Monitor kept in the session, on top of the game's
     mutes (a solo keeps its way to the master and what feeds it); the unsaved layout
     autosaved with the session.
+  - **E11-1b-3, the mixer's changes in Play** (#405, ADR 0107's as-built): heard at once and
+    kept after Stop, a dot on each strip changed since Play, one step "Mixer: changes in
+    Play" after Stop, and a command taking them back. E11-1 is done.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-1b-3, the mixer's edits in Play marked and one command taking them back (the
-       team's 3a). Then E11-2, effects and sends,
+    1. E11-2, effects and sends on the mixer's buses (built-in DSP, their parameters in
+       the inspector, the room reverb's strip). Then
        E11-4b, handles and hearing in place, and E11-3's last part: sounds dropped on the
        viewport, the tree or an entity, and the sound and bus fields.
   - **Settled (2026-10-28, team decisions, every recommendation):**

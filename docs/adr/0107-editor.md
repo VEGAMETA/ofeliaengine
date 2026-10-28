@@ -2140,3 +2140,26 @@ for the first answer. This step is the part of E11-4 that needs none.
   peak, clip light and clearing; the editor's silencing rule; the panel's M, S, Monitor and
   a clip light cleared by a click; the unsaved layout and the aids back in a new editor's
   session, the autosave gone once saved.
+
+## As built (E11-1b-3, 2026-10-28): the mixer's changes in Play
+
+- **They apply at once and stay** (the team's answer 3a; the sound UX note's §11): a fader
+  moved, a bus added or removed while the game plays is heard the next frame, and is still
+  there after Stop.
+- **The layout as Play began** is kept (`mixer_at_play`; the mixer's file is held from
+  Play's start for it). While playing, a dot (in Play's colour) marks each strip that
+  differs from it, and the header counts them ("2 changed in Play"), the master and buses
+  that came or went among them (`mixer::changes`).
+- **One step after Stop:** Play's end drops the steps made while playing with the world's
+  (`History::end_play`), so the mixer's changes become a step of their own, "Mixer:
+  changes in Play" (the layout's text at Play's start and now). Undo takes them all back;
+  redo brings them again.
+- **"Audio: Take Back Play's Mixer Changes"** gives the layout as the last Play began, as
+  one step, in Play or after it until the next Play.
+- **Tests:** in the editor, Play's start keeping the layout, a strip's dot and the header's
+  count while playing, the change kept after Stop as one step that undo takes back; on the
+  player (GPU), a bus added in Play heard at once and kept after Stop, undone and redone as
+  one step, then taken back by the command.
+- **E11-1 is done** but for the items listed under E11-1b-1 and E11-1b-2: bypass, the
+  header's output numbers, RMS and loudness, the panel's own keys, strips dragged into a new
+  order, and bus renames following into the scene's sources.
