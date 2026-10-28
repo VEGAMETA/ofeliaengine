@@ -732,7 +732,7 @@ Last updated: 2026-10-28.
     the stopped tick and pauses; "Only Front door" limits a breakpoint to an entity (kept by
     scene id in the session). Fixed on the way: the player counted the steps a still world
     skips as ticks.
-  - **E9-4b, changing a value at a stop** (#PR, ADR 0119's as-built): F2 or a second click
+  - **E9-4b, changing a value at a stop** (#388, ADR 0119's as-built): F2 or a second click
     on a Variables row gives it Luau; `self`'s props and components are an undo step; VS
     Code's Set Value in the editor and the standalone player.
   - **Next, in this order:**
