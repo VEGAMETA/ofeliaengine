@@ -870,7 +870,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-4b, a variant in the inspector** (#PR, ADR 0120's addendum): ↺ on a variant's
+  - **E10-4b, a variant in the inspector** (#438, ADR 0120's addendum): ↺ on a variant's
     own values (against its base, putting the base's back), a Base row and "variant of …"
     in the title, Material: Apply to Base (one step writing the variant's values into its
     base, the variant left naming its base alone); variants follow their held bases in the
