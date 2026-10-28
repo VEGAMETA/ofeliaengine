@@ -466,3 +466,102 @@ fn an_expressions_slang_error_is_framed_at_its_node() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A project module's `[Node]` function: the colour it is given toward magenta as `amount`
+/// falls (magenta where nothing is linked to it).
+const TINT: &str = "#include \"nodes.slang\"\n\n\
+[Node(\"Tint\", \"Color\")]\n\
+float3 tint(MaterialContext ctx, float3 color, float amount)\n\
+{\n    return lerp(float3(1.0, 0.0, 1.0), color, amount);\n}\n";
+
+/// E10-3g-3b: a call whose kept signature is behind its function (the module changed since
+/// the graph was written) is made the function's again once the editor has scanned the
+/// module; the preview's module includes it and the sphere draws what the function gives,
+/// magenta, which the stale signature could not compile.
+#[test]
+fn a_calls_signature_follows_its_function_and_the_preview_draws_it() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-call-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["materials", "shaders", ".ofelia"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    std::fs::write(dir.join("main.scene"), "[scene version=4]\n").unwrap();
+    let module = AssetId::new();
+    std::fs::write(dir.join("shaders/tint.slang"), TINT).unwrap();
+    std::fs::write(
+        dir.join("shaders/tint.slang.meta"),
+        format!("[asset version=1 id={module}]\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("materials/tinted.mgraph"),
+        format!(
+            "[mgraph version=3 id={}]\n\nmodel = \"unlit\"\n\
+             nodes[\"c\"].kind = \"color\"\nnodes[\"c\"].value = [0.1, 0.8, 0.1, 1]\n\
+             nodes[\"t\"].kind = \"call\"\nnodes[\"t\"].at = [200, 0]\n\
+             nodes[\"t\"].function = \"tint\"\n\
+             nodes[\"t\"].module = asset(\"shaders/tint.slang\", {module})\n\
+             nodes[\"t\"].signature = \"float3(MaterialContext ctx, float3 color)\"\n\
+             nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [460, 0]\n\
+             links[\"t.color\"] = \"c.rgba\"\nlinks[\"out.base\"] = \"t.out\"\n",
+            AssetId::new()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".ofelia/session"),
+        "[session version=1]\n\n[editor]\ngraph = 0\n\n[graph]\npath = \
+         \"materials/tinted.mgraph\"\n",
+    )
+    .unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor call test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    let magenta = |rgba: &[u8]| {
+        rgba.chunks_exact(4)
+            .filter(|p| p[0] > 180 && p[2] > 180 && p[1] < 90)
+            .count()
+    };
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        magenta(shot) > 3_000
+    });
+    println!(
+        "the call made its function's and drawn after {took:.2} s, {frames} frames: {} \
+         magenta pixels",
+        magenta(&shot)
+    );
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_CALL_PNG") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &shot,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

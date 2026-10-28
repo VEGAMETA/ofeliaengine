@@ -30,6 +30,7 @@ pub mod inspector;
 mod marked;
 mod material;
 mod mixer;
+mod node_functions;
 mod outline;
 mod output;
 pub mod paint;

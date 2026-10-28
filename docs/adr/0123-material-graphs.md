@@ -701,6 +701,55 @@ What was built:
   - A call's signature is written again when its module changes.
   - Slang's errors in a module are shown at the calls.
 
+## As built (E10-3g-3b, 2026-10-29): the editor's `[Node]` functions
+
+- **Scanning** (`node_functions`): a thread of its own with its own compiler. The code
+  tabs' checker would do, but it starts Slang's language server too.
+  - It starts with the first graph shown. Every Slang module of the asset database is given
+    to it then, again when the database is opened anew, and a module again when it is
+    written anew.
+  - A module without `[Node` marks costs a read. One with marks is checked inside
+    `forward.slang` through a wrapper in `.ofelia/check/` (the mark's declaration, the
+    module, an empty graph's type), and its functions are read by
+    `Compiler::marked_functions`: 0.32 s for the first module, Slang's session made, the
+    front end only.
+  - Each function found has its mark's title and group (its name and "Functions" without
+    them) and its signature in a call's spelling, or why it cannot be a node: a port that
+    is not float to float4, a returned int, nothing given back.
+- **The node search** lists them after the library's kinds, as "Group: Title" with their
+  ports (`color, amount → out`), filtered as kinds are for a link drawn out of a port.
+  - One a node cannot call is listed with why, and its pick says so.
+  - A pick adds a call where the search was opened, linked as any node is, its module's
+    path written into the file as an asset, as one step ("Add Call").
+- **Titles** are the marks' (`GraphDoc::set_call_titles`), laid out again without changing
+  any code; the function's name until the mark is known.
+- **Signatures follow their functions** (`GraphDoc::refresh_calls`). When a scan finds a
+  function whose signature differs from a call's, the call's is made the function's.
+  - There is no step for it: the signature is the function's, and Unreal's calls follow
+    their functions on load the same way.
+  - The shown graph is checked every frame (an undo may bring back an older signature),
+    with nothing allocated.
+- **Errors in a called module** go to its first call (`slang_error`'s calls: the module's
+  file name and the node).
+- **Tests:**
+  - a marked function's node, and its refusals (an int, a texture, a returned int, nothing
+    given back, a context not first);
+  - a call added as a step with its module's path, titled by its name and then its mark,
+    its signature following its function without a step, and a function no node can call
+    leaving it as it is;
+  - Slang's error in a called module at the call;
+  - in the editor, with Slang: the module's functions found in 0.32 s, listed under their
+    group with their ports, a pick adding a call titled by its mark, and the one a node
+    cannot call refused with why;
+  - on both GPUs: a call whose kept signature is behind its function made the function's
+    after the scan, the preview drawing what the function gives (1.18 s on the Radeon and
+    1.63 s on the RTX after the tab).
+- **Not done:**
+  - a deleted module's functions stay in the search until the editor restarts (a pick of
+    one then fails at its node);
+  - parameter types other than float to float4.
+- **Next:** functions (E10-3g-2), their file's extension asked.
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,

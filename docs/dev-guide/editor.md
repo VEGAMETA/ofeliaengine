@@ -1307,6 +1307,31 @@ Until its shaders are made, the material draws its colour.
   drawn until the code is fixed.
   - The frame stays while the code does: moving a node or typing a value keeps it.
   - Typing the code right takes it away and draws the preview.
+- **Slang functions as nodes:** mark a function of one of the project's Slang modules
+  with `[Node("Title", "Group")]`, the module including the mark's declaration:
+
+  ```slang
+  #include "nodes.slang"
+
+  [Node("Swirl", "Mapping")]
+  float3 swirl(MaterialContext ctx, float3 color, float amount, out float mask)
+  {
+      ...
+  }
+  ```
+
+  - The node search lists it under its group ("Mapping: Swirl") with its ports. The editor
+    reads the project's modules a moment after a graph is first shown, and reads a module
+    again whenever its file is saved.
+  - Its inputs are its parameters; its outputs are what it returns (`out`) and its `out`
+    parameters. An `inout` parameter is both. A first `MaterialContext` is the fragment,
+    not an input.
+  - Every port is `float` to `float4`. A function with other types is listed with why, and
+    cannot be added.
+  - The node is titled by the mark. The graph keeps the function's signature, so the cook
+    and the game need no Slang to read it. Change the function and its calls follow (the
+    graph's tab is marked changed); a call whose function is gone is an error at its node.
+  - Slang's errors in the module are shown at its first call.
 - **Not yet:** functions (E10-3g-2), a group of nodes made one node of its own.
 
 ## Autosave and the session
