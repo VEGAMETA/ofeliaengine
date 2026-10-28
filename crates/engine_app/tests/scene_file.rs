@@ -567,6 +567,142 @@ fn a_material_naming_a_graph_draws_the_graph_and_follows_its_edits() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A material file naming a graph that calls a function (ADR 0123's E10-3g-2): the cube
+/// draws the function's colour (red) once the graph's module is made with the function's
+/// nodes; the function written anew (blue) makes the module again, as the graph's own edit
+/// does.
+#[test]
+fn a_graph_calling_a_function_follows_the_functions_edits() {
+    let dir = std::env::temp_dir().join(format!("ofelia-function-material-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["materials", "scenes"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    let (function_id, graph_id, material_id) = (AssetId::new(), AssetId::new(), AssetId::new());
+    let tint = |color: &str| {
+        format!(
+            "[mfunc version=1 id={function_id}]\n\n\
+             nodes[\"c\"].kind = \"vector3\"\nnodes[\"c\"].value = [{color}]\n\
+             nodes[\"o\"].kind = \"output_float3\"\nnodes[\"o\"].param = \"color\"\n\
+             links[\"o.value\"] = \"c.value\"\n"
+        )
+    };
+    std::fs::write(dir.join("materials/tint.mfunc"), tint("0.9, 0.05, 0.05")).unwrap();
+    std::fs::write(
+        dir.join("materials/tinted.mgraph"),
+        format!(
+            "[mgraph version=3 id={graph_id}]\n\nmodel = \"unlit\"\n\
+             nodes[\"f\"].kind = \"function\"\nnodes[\"f\"].function = \"tint\"\n\
+             nodes[\"f\"].module = asset(\"materials/tint.mfunc\", {function_id})\n\
+             nodes[\"f\"].signature = \"void(out float3 color)\"\n\
+             nodes[\"out\"].kind = \"output\"\nlinks[\"out.base\"] = \"f.color\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("materials/tinted.material"),
+        format!(
+            "[material version=2 id={material_id}]\n\nshader = asset(\"materials/tinted.mgraph\", \
+             {graph_id})\ntype = \"GraphMaterial\"\nlook = Own\n\
+             base_color = [0.05, 0.8, 0.05, 1]\n"
+        ),
+    )
+    .unwrap();
+    let tinted = AssetRef::file(material_id);
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Tinted"),
+        Transform::IDENTITY,
+        Model::new(builtin::CUBE, tinted),
+    ));
+    let eye = Vec3::new(2.0, 1.2, 3.0);
+    world.spawn((
+        SceneId::new(),
+        Name::new("Camera"),
+        Transform::from_translation(eye).with_rotation(look_rotation(eye, Vec3::ZERO, Vec3::Y)),
+        Camera::perspective(1.0, 0.05, 200.0),
+    ));
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(tinted, "materials/tinted.material");
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("scenes/main.scene"), &text).unwrap();
+    let (width, height) = (320u32, 180u32);
+    let settings = PlayerSettings {
+        title: String::from("function material test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("scenes/main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    player.set_material_hot_reload(true);
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let middle = |rgba: &[u8]| {
+        let i = (((height / 2) * width + width / 2) * 4) as usize;
+        [rgba[i], rgba[i + 1], rgba[i + 2]].map(f32::from)
+    };
+    let until = |player: &mut Player, game: &mut Still, channel: usize| {
+        let started = Instant::now();
+        loop {
+            player.frame(game).unwrap();
+            let pending = player.renderer().forward().material_types_pending();
+            if pending == 0 {
+                let c = middle(&player.capture(game).unwrap().unwrap());
+                let others = (0..3).filter(|&k| k != channel).map(|k| c[k]);
+                if others.clone().all(|o| c[channel] > 1.5 * o) {
+                    return started.elapsed();
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(90),
+                "never channel {channel}: {pending} pipelines pending, {:?}",
+                player.assets().problem(tinted)
+            );
+        }
+    };
+    let took = until(&mut player, &mut game, 0);
+    assert_eq!(player.assets().problem(tinted), None);
+    println!(
+        "the function's colour drawn after {:.2} s",
+        took.as_secs_f64()
+    );
+    // The function written anew: the graph's module made again with its new nodes.
+    std::fs::write(dir.join("materials/tint.mfunc"), tint("0.05, 0.05, 0.9")).unwrap();
+    player.asset_changed(function_id, "materials/tint.mfunc");
+    let took = until(&mut player, &mut game, 2);
+    println!(
+        "the function's edit drawn after {:.2} s",
+        took.as_secs_f64()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A box from `lo` to `hi` of tint `tint` as a bake gives it: its faces' texture
 /// coordinates in metres.
 fn cuboid(tint: [f32; 4], lo: Vec3, hi: Vec3) -> BakedBrush {

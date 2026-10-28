@@ -28,6 +28,10 @@
 //! - **A link** by the input it feeds, `<node>.<port>`, to the output it comes from.
 //! - **A frame** (version 2, E10-3e-2b) by id: its place (`at`), its `size` and its
 //!   `title` (`frames["frame1"].title = "Moss"`). Version 1 files, which have none, read.
+//! - **A function's file** (`.mfunc`, E10-3g-2) is written in the same grammar, its header
+//!   `[mfunc version=1 id=…]`, without a `model`: its input and output nodes are its ports
+//!   ([`crate::function`]). A call of one is a node of kind `function` naming its
+//!   `function`, its file as its `module` and its ports as its `signature`.
 //! - **A call** (version 3, E10-3g-3): a node of kind `call` names its `function`, the
 //!   Slang `module` that declares it (an asset) and its `signature` as Slang spells it
 //!   (`nodes["sw"].signature = "float3(MaterialContext ctx, float3 color)"`), so the module
@@ -97,6 +101,10 @@ impl GraphFile {
     /// The format's version: 3 adds calls (E10-3g-3), 2 frames (E10-3e-2b); 1 and 2 are
     /// read.
     pub const VERSION: u32 = 3;
+    /// The kind in a function's file's header (E10-3g-2).
+    pub const FUNCTION_KIND: &'static str = "mfunc";
+    /// A function's file's version.
+    pub const FUNCTION_VERSION: u32 = 1;
 
     /// The file of `graph`.
     pub fn of(graph: &Graph) -> Self {
@@ -222,8 +230,53 @@ impl GraphFile {
 
     /// The file's text with its id, its references written with their paths from `assets`.
     pub fn to_text(&self, id: AssetId, assets: Option<&AssetPaths>) -> String {
+        self.text_as(Self::KIND, Self::VERSION, id, assets)
+    }
+
+    /// A function's file's text ([`Self::to_text`] under its own header, no `model`).
+    pub fn to_function_text(&self, id: AssetId, assets: Option<&AssetPaths>) -> String {
+        let text = self.text_as(Self::FUNCTION_KIND, Self::FUNCTION_VERSION, id, assets);
+        let mut out = String::with_capacity(text.len());
+        for line in text.lines().filter(|l| !l.starts_with("model = ")) {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+
+    /// A function's graph ([`Self::graph`] without a shading model or a surface).
+    ///
+    /// # Errors
+    ///
+    /// A link that cannot be read.
+    pub fn function(&self) -> Result<Graph, String> {
+        let mut file = self.clone();
+        Model::Lit.name().clone_into(&mut file.model);
+        file.graph()
+    }
+
+    /// A function's file from its text ([`Self::parse`] of its own header).
+    ///
+    /// # Errors
+    ///
+    /// Not a function's file, a newer one, or a bad line (with its number).
+    pub fn parse_function(text: &str) -> Result<(Self, ValueReport), LoadError> {
+        let mut file = Self::default();
+        let report =
+            engine_scene::read_value(Self::FUNCTION_KIND, Self::FUNCTION_VERSION, text, &mut file)?;
+        Ok((file, report))
+    }
+
+    /// The file's text under header `kind` `version`.
+    fn text_as(
+        &self,
+        kind: &str,
+        version: u32,
+        id: AssetId,
+        assets: Option<&AssetPaths>,
+    ) -> String {
         let mut all = String::new();
-        engine_scene::write_value(Self::KIND, Self::VERSION, Some(id), self, assets, &mut all);
+        engine_scene::write_value(kind, version, Some(id), self, assets, &mut all);
         // Fields at their defaults are left out: a reader takes them so.
         let mut out = String::with_capacity(all.len());
         for line in all.lines() {
@@ -414,6 +467,36 @@ mod tests {
         let (file, report) = GraphFile::parse(&text).unwrap();
         assert_eq!(file.graph().unwrap(), g);
         assert_eq!(report.assets.get(module), Some("shaders/mapping.slang"));
+    }
+
+    /// E10-3g-2: a function's file is the graph's grammar under its own header, without a
+    /// model or a surface: its nodes (its inputs and outputs among them) written and read
+    /// back; a graph's file is not one, nor the other way round.
+    #[test]
+    fn a_function_is_written_in_the_graphs_grammar() {
+        use crate::function::{input_kind, output_kind};
+        let mut f = Graph::new(Model::Lit);
+        f.nodes.clear();
+        f.add("i", Node::new(input_kind(3), [0.0, 0.0]).named("color"))
+            .add("o", Node::new(output_kind(3), [200.0, 0.0]).named("tinted"))
+            .link(PortRef::new("i", "value"), PortRef::new("o", "value"));
+        let id = AssetId::new();
+        let text = GraphFile::of(&f).to_function_text(id, None);
+        assert!(
+            text.starts_with(&format!("[mfunc version=1 id={id}]")),
+            "{text}"
+        );
+        assert!(!text.contains("model"), "{text}");
+        assert!(text.contains("nodes[\"i\"].param = \"color\""), "{text}");
+        let (file, report) = GraphFile::parse_function(&text).unwrap();
+        assert_eq!(report.id, Some(id));
+        assert_eq!(file.function().unwrap(), f);
+        assert!(GraphFile::parse(&text).is_err());
+        let (g, paths, gid) = moss();
+        assert!(GraphFile::parse_function(&GraphFile::of(&g).to_text(gid, Some(&paths))).is_err());
+        let kind = engine_scene::AssetKind::of(std::path::Path::new("lib/tint.mfunc"));
+        assert_eq!(kind, Some(engine_scene::AssetKind::Function));
+        assert!(engine_scene::AssetKind::Function.own_id());
     }
 
     #[test]

@@ -5,8 +5,10 @@
 //! the material file's.
 
 use crate::material_file::{MaterialFileError, ParamValue, TextureEncoding};
-use engine_material_graph::{Build, Graph, GraphFile, ParamType, generate_with};
-use engine_scene::AssetRef;
+use engine_material_graph::{
+    Build, FUNCTION_KIND, Graph, GraphFile, ParamType, Sources, generate_with,
+};
+use engine_scene::{AssetPaths, AssetRef};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -27,6 +29,65 @@ pub struct GraphModule {
     pub defaults: BTreeMap<String, ParamValue>,
     /// Its texture nodes' images by parameter, as assets.
     pub textures: BTreeMap<String, AssetRef>,
+    /// The function files its calls read (E10-3g-2): a change to one makes it again.
+    pub functions: Vec<PathBuf>,
+}
+
+/// The functions a graph's calls name, and those theirs name (ADR 0123's E10-3g-2), read
+/// from their files: their graphs by file, every path their files and the graph's wrote (so
+/// a function's own `[Node]` calls' modules and images are found), and the files read.
+#[derive(Debug, Default)]
+pub struct Functions {
+    /// The functions' graphs, by file.
+    pub graphs: BTreeMap<AssetRef, Graph>,
+    /// The paths the graph's file and the functions' files wrote.
+    pub paths: AssetPaths,
+    /// The functions' files read, as found.
+    pub files: Vec<PathBuf>,
+}
+
+/// The [`Functions`] of `graph`, whose file wrote `paths`, under `root`.
+///
+/// # Errors
+///
+/// A function's file that cannot be read.
+pub fn read_functions(
+    graph: &Graph,
+    paths: &AssetPaths,
+    root: &Path,
+) -> Result<Functions, MaterialFileError> {
+    let mut out = Functions::default();
+    out.paths.extend(paths);
+    let calls = |g: &Graph, written: &AssetPaths| -> Vec<(AssetRef, String)> {
+        g.nodes
+            .values()
+            .filter(|n| n.kind == FUNCTION_KIND)
+            .filter_map(|n| Some((n.module, written.get(n.module)?.to_owned())))
+            .collect()
+    };
+    let mut todo = calls(graph, paths);
+    while let Some((asset, at)) = todo.pop() {
+        if out.graphs.contains_key(&asset) || at.is_empty() {
+            continue;
+        }
+        let full = if Path::new(&at).is_absolute() {
+            PathBuf::from(&at)
+        } else {
+            root.join(&at)
+        };
+        let error = |message: String| MaterialFileError {
+            path: Some(full.clone()),
+            message,
+        };
+        let text = std::fs::read_to_string(&full).map_err(|e| error(e.to_string()))?;
+        let (file, report) = GraphFile::parse_function(&text).map_err(|e| error(e.to_string()))?;
+        let function = file.function().map_err(error)?;
+        out.paths.extend(&report.assets);
+        todo.extend(calls(&function, &report.assets));
+        out.files.push(full);
+        out.graphs.insert(asset, function);
+    }
+    Ok(out)
 }
 
 /// How a graph's module includes a Slang module its calls name (ADR 0123's E10-3g-3): from
@@ -63,14 +124,20 @@ pub fn graph_module(path: &Path, root: &Path) -> Result<GraphModule, MaterialFil
     let text = std::fs::read_to_string(path).map_err(|e| error(e.to_string()))?;
     let (file, report) = GraphFile::parse(&text).map_err(|e| error(e.to_string()))?;
     let graph = file.graph().map_err(error)?;
+    let functions = read_functions(&graph, &report.assets, root)?;
     let modules = |m| {
-        report
-            .assets
+        functions
+            .paths
             .get(m)
             .filter(|p| !p.is_empty())
             .map(include_path)
     };
-    let generated = generate_with(&graph, GRAPH_TYPE, Build::Saved, &modules)
+    let found = |f| functions.graphs.get(&f).cloned();
+    let sources = Sources {
+        modules: &modules,
+        functions: &found,
+    };
+    let generated = generate_with(&graph, GRAPH_TYPE, Build::Saved, &sources)
         .map_err(|e| error(e.to_string()))?;
     let id = report
         .id
@@ -85,13 +152,16 @@ pub fn graph_module(path: &Path, root: &Path) -> Result<GraphModule, MaterialFil
     }
     let mut defaults = BTreeMap::new();
     let mut textures = BTreeMap::new();
+    // The graph written: a function's nodes among its own (E10-3g-2), their images in the
+    // functions' files.
+    let written = &generated.expanded;
     for p in &generated.params {
-        let Some(node) = graph.nodes.get(&p.node) else {
+        let Some(node) = written.nodes.get(&p.node) else {
             continue;
         };
         match p.ty {
             ParamType::Texture => {
-                let Some(at) = report.assets.get(node.texture).filter(|a| !a.is_empty()) else {
+                let Some(at) = functions.paths.get(node.texture).filter(|a| !a.is_empty()) else {
                     continue;
                 };
                 let image = if Path::new(at).is_absolute() {
@@ -101,7 +171,7 @@ pub fn graph_module(path: &Path, root: &Path) -> Result<GraphModule, MaterialFil
                 };
                 defaults.insert(
                     p.name.clone(),
-                    ParamValue::Texture(image, encoding(&graph, &p.node)),
+                    ParamValue::Texture(image, encoding(written, &p.node)),
                 );
                 textures.insert(p.name.clone(), node.texture);
             }
@@ -121,6 +191,7 @@ pub fn graph_module(path: &Path, root: &Path) -> Result<GraphModule, MaterialFil
         module,
         defaults,
         textures,
+        functions: functions.files,
     })
 }
 
@@ -158,6 +229,68 @@ mod tests {
     use super::*;
     use crate::material_file::MaterialFile;
     use engine_scene::AssetId;
+
+    /// E10-3g-2: a graph calling a function: its module made with the function's nodes,
+    /// the function's file among those read (a change to it makes the module again); a
+    /// function's file that cannot be read fails the module with its path.
+    #[test]
+    fn a_graph_calling_a_function_is_made_with_its_nodes() {
+        use engine_material_graph::function::{FUNCTION_KIND, input_kind, output_kind};
+        use engine_material_graph::{Model, Node, PortRef, signature_of};
+        let dir =
+            std::env::temp_dir().join(format!("graph_module_function_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        let mut f = Graph::new(Model::Lit);
+        f.nodes.clear();
+        f.add("i", Node::new(input_kind(3), [0.0, 0.0]).named("color"))
+            .add("n", Node::new("one_minus", [150.0, 0.0]))
+            .add(
+                "o",
+                Node::new(output_kind(3), [300.0, 0.0]).named("inverted"),
+            )
+            .link(PortRef::new("i", "value"), PortRef::new("n", "in"))
+            .link(PortRef::new("n", "out"), PortRef::new("o", "value"));
+        let fid = AssetId::new();
+        std::fs::write(
+            dir.join("lib/invert.mfunc"),
+            GraphFile::of(&f).to_function_text(fid, None),
+        )
+        .unwrap();
+        let mut g = Graph::new(Model::Lit);
+        let mut call = Node::new(FUNCTION_KIND, [200.0, 0.0])
+            .with_call("invert", &signature_of(&f).unwrap().to_string());
+        call.module = AssetRef::file(fid);
+        g.add(
+            "c",
+            Node::new("color", [0.0; 2]).with_value([0.2, 0.4, 0.6, 1.0]),
+        )
+        .add("inv", call)
+        .link(PortRef::new("c", "rgba"), PortRef::new("inv", "color"))
+        .link(PortRef::new("inv", "inverted"), PortRef::new("out", "base"));
+        let mut paths = AssetPaths::new();
+        paths.insert(AssetRef::file(fid), "lib/invert.mfunc");
+        let graph_path = dir.join("tinted.mgraph");
+        std::fs::write(
+            &graph_path,
+            GraphFile::of(&g).to_text(AssetId::new(), Some(&paths)),
+        )
+        .unwrap();
+        let module = graph_module(&graph_path, &dir).unwrap();
+        assert_eq!(module.functions, [dir.join("lib/invert.mfunc")]);
+        let text = std::fs::read_to_string(&module.module).unwrap();
+        assert!(
+            text.contains("1.0 - "),
+            "the function's node written: {text}"
+        );
+        std::fs::write(dir.join("lib/invert.mfunc"), "not a function").unwrap();
+        let e = graph_module(&graph_path, &dir).unwrap_err();
+        assert_eq!(
+            e.path.as_deref(),
+            Some(dir.join("lib/invert.mfunc").as_path())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// E10-3g-3: a call's module is included from the cache's folder, the same on every
     /// machine for a path in the project; an absolute path as it is.

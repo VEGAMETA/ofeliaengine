@@ -60,8 +60,12 @@ pub struct Generated {
     pub type_name: String,
     /// The parameters, textures first, then by name.
     pub params: Vec<Param>,
-    /// Each line's node, where Slang's errors go.
+    /// Each line's node, where Slang's errors go: a node of the graph given (a call's
+    /// for what its function's nodes wrote, E10-3g-2).
     pub lines: Vec<Option<String>>,
+    /// The graph written: the one given, its function calls made their functions' nodes
+    /// (`<call>__<node>`, which the parameters' `node` may name).
+    pub expanded: Graph,
 }
 
 impl Generated {
@@ -81,7 +85,7 @@ pub struct GraphError {
 }
 
 impl GraphError {
-    fn at(node: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn at(node: &str, message: impl Into<String>) -> Self {
         Self {
             node: Some(node.to_owned()),
             message: message.into(),
@@ -124,21 +128,74 @@ const RETURNS: [(&str, &str, &str, bool); 5] = [
     ("thickness", "float", "thickness", true),
 ];
 
-/// The module `graph` makes, its type named `type_name`. A graph with calls (E10-3g-3)
-/// needs [`generate_with`]: here their modules are not found.
-pub fn generate(graph: &Graph, type_name: &str, build: Build) -> Result<Generated, GraphError> {
-    generate_with(graph, type_name, build, &|_| None)
+/// Where a graph's calls find what they call.
+pub struct Sources<'a> {
+    /// The Slang module a `[Node]` call names (E10-3g-3), as its include spells it from the
+    /// generated module's folder.
+    pub modules: &'a dyn Fn(AssetRef) -> Option<String>,
+    /// The function a function call names (E10-3g-2).
+    pub functions: &'a dyn Fn(AssetRef) -> Option<Graph>,
 }
 
-/// [`generate`], the Slang modules calls name included as `modules` spells them (a path
-/// from the generated module's folder): `None`, the call's module is not found.
+impl Sources<'static> {
+    /// Nothing found: a graph with calls cannot be written.
+    pub fn none() -> Self {
+        Self {
+            modules: &|_| None,
+            functions: &|_| None,
+        }
+    }
+}
+
+/// The module `graph` makes, its type named `type_name`. A graph with calls (E10-3g-2,
+/// E10-3g-3) needs [`generate_with`]: here what they call is not found.
+pub fn generate(graph: &Graph, type_name: &str, build: Build) -> Result<Generated, GraphError> {
+    generate_with(graph, type_name, build, &Sources::none())
+}
+
+/// [`generate`], what calls name found in `sources`: a function call made its function's
+/// nodes first ([`crate::function::expand`]), so what they write, and what is wrong with
+/// them, is the call's.
 pub fn generate_with(
+    graph: &Graph,
+    type_name: &str,
+    build: Build,
+    sources: &Sources<'_>,
+) -> Result<Generated, GraphError> {
+    engine_profiler::zone!("material_graph::generate");
+    let (expanded, origin) = crate::function::expand(graph, sources.functions)?;
+    match write_module(&expanded, type_name, build, sources.modules) {
+        Ok(mut generated) => {
+            for line in generated.lines.iter_mut().flatten() {
+                if let Some(top) = origin.get(line.as_str()) {
+                    top.clone_into(line);
+                }
+            }
+            generated.expanded = expanded;
+            Ok(generated)
+        }
+        Err(mut e) => {
+            if let Some(node) = &e.node
+                && let Some(top) = origin.get(node)
+                && top != node
+            {
+                let function = graph.nodes.get(top).map_or("", |n| n.function.as_str());
+                e.message = format!("in {function}: {}", e.message);
+                e.node = Some(top.clone());
+            }
+            Err(e)
+        }
+    }
+}
+
+/// The module of `graph` (its calls of functions made their nodes), its `[Node]` calls'
+/// modules from `modules`.
+fn write_module(
     graph: &Graph,
     type_name: &str,
     build: Build,
     modules: &dyn Fn(AssetRef) -> Option<String>,
 ) -> Result<Generated, GraphError> {
-    engine_profiler::zone!("material_graph::generate");
     if !identifier(type_name) {
         return Err(GraphError::graph(format!(
             "`{type_name}` cannot name a Slang type"
@@ -334,6 +391,7 @@ pub fn generate_with(
         type_name: type_name.to_owned(),
         params,
         lines: out.lines,
+        expanded: Graph::new(graph.model),
     })
 }
 
@@ -345,6 +403,12 @@ fn check(graph: &Graph) -> Result<HashMap<&str, &'static Kind>, GraphError> {
             return Err(GraphError::at(id, "a node's id is letters, digits and `_`"));
         }
         let kind = node_kind(node).map_err(|why| GraphError::at(id, why))?;
+        if matches!(kind.body, Body::FunctionInput(_) | Body::FunctionOutput(_)) {
+            return Err(GraphError::at(
+                id,
+                "a function's input or output: it belongs in a function's file",
+            ));
+        }
         if kind.name == OUTPUT_KIND && id != OUTPUT {
             return Err(GraphError::at(id, "a graph has one surface"));
         }
@@ -516,6 +580,11 @@ fn params(
             .get(&key)
             .or_else(|| by_name.get(&(!key.0, name.clone())))
         {
+            // Copies of a function's named parameter, one a call: the one parameter, as
+            // Unreal's functions' parameters are (E10-3g-2).
+            if id.contains("__") && taken.node.contains("__") && taken.ty == ty {
+                continue;
+            }
             return Err(GraphError::at(
                 id,
                 format!("the parameter `{name}` is node {}'s already", taken.node),
@@ -670,6 +739,9 @@ impl Context<'_, '_> {
                         None => out.line(&format!("        {text};"), Some(id)),
                     }
                 }
+                Body::FunctionCall(_) | Body::FunctionInput(_) | Body::FunctionOutput(_) => {
+                    return Err(GraphError::at(id, "a call not made its function's nodes"));
+                }
                 Body::Output => {}
             }
         }
@@ -822,7 +894,11 @@ mod tests {
         g.link(port("w", "uv"), port("v", "uv"))
             .link(port("v", "mask"), port(OUTPUT, "roughness"));
         let modules = |m: AssetRef| (m == module).then(|| String::from("../shaders/warp.slang"));
-        let out = generate_with(&g, "Warp", Build::Saved, &modules).unwrap();
+        let sources = Sources {
+            modules: &modules,
+            functions: &|_| None,
+        };
+        let out = generate_with(&g, "Warp", Build::Saved, &sources).unwrap();
         let lines: Vec<&str> = out.text.lines().collect();
         let include = lines
             .iter()
@@ -846,10 +922,10 @@ mod tests {
             assert!(lines.contains(&line), "{line}\n{}", out.text);
         }
         assert!(out.text.contains("s.roughness = n_v_mask"), "{}", out.text);
-        let missing = generate_with(&g, "Warp", Build::Saved, &|_| None).unwrap_err();
+        let missing = generate_with(&g, "Warp", Build::Saved, &Sources::none()).unwrap_err();
         assert_eq!(missing.node.as_deref(), Some("w"));
         g.nodes.get_mut("w").unwrap().module = AssetRef::NONE;
-        let none = generate_with(&g, "Warp", Build::Saved, &modules).unwrap_err();
+        let none = generate_with(&g, "Warp", Build::Saved, &sources).unwrap_err();
         assert_eq!(none.node.as_deref(), Some("w"));
     }
 

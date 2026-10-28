@@ -190,8 +190,11 @@ pub struct CallParameter {
     pub direction: Direction,
 }
 
-/// The kinds made for calls, by function and signature text.
-static CALLS: Mutex<Vec<(&'static str, &'static str, &'static Kind)>> = Mutex::new(Vec::new());
+/// The kinds made for calls, by their kind's name ([`CALL_KIND`] or
+/// [`crate::function::FUNCTION_KIND`]), function and signature text.
+#[allow(clippy::type_complexity)]
+static CALLS: Mutex<Vec<(&'static str, &'static str, &'static str, &'static Kind)>> =
+    Mutex::new(Vec::new());
 
 /// The kind of a call to `function` of `signature` (its file text, [`Signature::parse`]):
 /// its inputs the `in` and `inout` parameters (zero where unlinked), its outputs `out` (the
@@ -201,14 +204,24 @@ static CALLS: Mutex<Vec<(&'static str, &'static str, &'static Kind)>> = Mutex::n
 ///
 /// The function's name or the signature is not one a call can have.
 pub fn call_kind(function: &str, signature: &str) -> Result<&'static Kind, String> {
+    made_kind(CALL_KIND, function, signature)
+}
+
+/// [`call_kind`] for a call of kind `name`: a Slang function's ([`Body::Call`]) or a
+/// function file's ([`Body::FunctionCall`], E10-3g-2, its function the file's name).
+pub(crate) fn made_kind(
+    name: &'static str,
+    function: &str,
+    signature: &str,
+) -> Result<&'static Kind, String> {
     let mut calls = CALLS.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(&(_, _, kind)) = calls
+    if let Some(&(.., kind)) = calls
         .iter()
-        .find(|(f, s, _)| *f == function && *s == signature)
+        .find(|(n, f, s, _)| *n == name && *f == function && *s == signature)
     {
         return Ok(kind);
     }
-    if !crate::generate::identifier(function) {
+    if name == CALL_KIND && !crate::generate::identifier(function) {
         return Err(format!("`{function}` cannot name a Slang function"));
     }
     let parsed = Signature::parse(signature)?;
@@ -258,16 +271,21 @@ pub fn call_kind(function: &str, signature: &str) -> Result<&'static Kind, Strin
         context: parsed.context,
         result: parsed.result,
     }));
+    let (category, body) = if name == CALL_KIND {
+        (CALL_CATEGORY, Body::Call(call))
+    } else {
+        (crate::function::FUNCTION_CATEGORY, Body::FunctionCall(call))
+    };
     let kind: &'static Kind = Box::leak(Box::new(Kind {
-        name: CALL_KIND,
+        name,
         title: function,
-        category: CALL_CATEGORY,
+        category,
         inputs: Box::leak(inputs.into_boxed_slice()),
         outputs: Box::leak(outputs.into_boxed_slice()),
-        body: Body::Call(call),
+        body,
         context: parsed.context,
     }));
-    calls.push((function, leak(signature), kind));
+    calls.push((name, function, leak(signature), kind));
     Ok(kind)
 }
 
@@ -279,6 +297,13 @@ pub fn call_kind(function: &str, signature: &str) -> Result<&'static Kind, Strin
 pub fn node_kind(node: &Node) -> Result<&'static Kind, String> {
     if node.kind == CALL_KIND {
         return call_kind(&node.function, &node.signature);
+    }
+    if node.kind == crate::function::FUNCTION_KIND {
+        return made_kind(
+            crate::function::FUNCTION_KIND,
+            &node.function,
+            &node.signature,
+        );
     }
     library::kind(&node.kind).ok_or_else(|| format!("no node kind `{}`", node.kind))
 }
