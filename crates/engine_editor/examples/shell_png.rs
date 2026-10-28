@@ -446,6 +446,7 @@ fn main() {
         muted: name == "music",
         soloed: false,
         silenced: name == "music",
+        changed: name == "steps",
     };
     let strips = [
         strip("master", 0, 0.0, "0.0", "\u{2192} speakers", false),

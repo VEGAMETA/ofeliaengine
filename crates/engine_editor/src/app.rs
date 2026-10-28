@@ -704,9 +704,10 @@ struct CommandIds {
     history: CommandId,
     /// The profiler's panel (E6-5) opened or closed.
     profiler: CommandId,
-    /// The mixer (E11-1): the Audio tab, and a bus added to it.
+    /// The mixer (E11-1): the Audio tab, a bus added to it, Play's changes taken back.
     mixer: CommandId,
     add_bus: CommandId,
+    take_back_mixer: CommandId,
     /// The script debugger's panel (ADR 0119 E9-1b-3) opened or closed.
     debugger: CommandId,
     find: CommandId,
@@ -868,6 +869,11 @@ fn commands() -> (Commands, CommandIds) {
         profiler: c.register("view.profiler", "View", "Profiler"),
         mixer: c.register("view.mixer", "View", "Audio Mixer"),
         add_bus: c.register("audio.add_bus", "Audio", "Add Bus"),
+        take_back_mixer: c.register(
+            "audio.take_back_play",
+            "Audio",
+            "Take Back Play's Mixer Changes",
+        ),
         debugger: c.register("view.debugger", "View", "Debugger"),
         find: c.register("scene.find", "Scene", "Go to Object"),
         select_next: c.register("scene.select_next", "Scene", "Select Next Row"),
@@ -2311,6 +2317,9 @@ struct Editor {
     /// and whether the player has them.
     meters: Vec<crate::mixer::Meter>,
     meters_at: Option<Instant>,
+    /// The mixer's layout as the last Play began (E11-1b-3, the team's 3a): its changes in
+    /// Play stay, marked while playing, and one command takes them back until the next Play.
+    mixer_at_play: Option<engine_app::MixerFile>,
     mixer_muted: Vec<String>,
     mixer_soloed: Vec<String>,
     monitor: bool,
@@ -3123,6 +3132,7 @@ impl Editor {
             bus_texts: Default::default(),
             meters: Vec::new(),
             meters_at: None,
+            mixer_at_play: None,
             mixer_muted: Vec::new(),
             mixer_soloed: Vec::new(),
             monitor: false,
@@ -4901,6 +4911,11 @@ impl Editor {
                     soloed: soloed.contains(&s.name),
                     silenced: !self.monitor
                         && crate::mixer::silenced(&doc.layout, muted, soloed, &s.name),
+                    changed: self.play.is_some()
+                        && self
+                            .mixer_at_play
+                            .as_ref()
+                            .is_some_and(|at| crate::mixer::bus_changed(at, &doc.layout, &s.name)),
                 }
             }));
         }
@@ -8623,6 +8638,9 @@ impl Editor {
     /// entities, its resources, the history's place and the selection.
     fn prepare_play(&mut self, world: &mut World, from_here: bool) -> Playing {
         let started = Instant::now();
+        // The mixer as Play begins (E11-1b-3): what its changes in Play are measured from.
+        self.open_mixer();
+        self.mixer_at_play = self.mixer.as_ref().map(|d| d.layout.clone());
         if let Some(mut drag) = self.asset_drag.take() {
             self.take_back_placed(world, &mut drag);
         }
@@ -12075,6 +12093,18 @@ impl Editor {
         };
         self.history.restore_world(world, &playing.snapshot);
         self.history.end_play(playing.mark);
+        // The mixer's changes in Play stay (E11-1b-3, the team's 3a): the steps made while
+        // playing are gone with the others, so they become one step of their own, which
+        // undo (or "Take Back Play's Mixer Changes") takes back.
+        if let (Some(at), Some(doc)) = (&self.mixer_at_play, &self.mixer) {
+            let before = at.to_text(doc.id);
+            if before != doc.text {
+                let after = doc.text.clone();
+                self.history.begin("Mixer: changes in Play", None);
+                self.history.change_file(doc.id, &before, &after);
+                self.history.commit(world);
+            }
+        }
         let kept = kept.filter(|k| !k.is_empty()).map_or(0, |kept| {
             self.history.begin("Keep Changes", None);
             self.history.keep(world, &kept);
@@ -12785,6 +12815,8 @@ impl Editor {
             };
         } else if id == ids.add_bus {
             self.add_bus(world);
+        } else if id == ids.take_back_mixer {
+            self.take_back_mixer(world);
         } else if id == ids.debugger {
             self.bottom = if self.bottom == Some(DEBUGGER_TAB) {
                 None
@@ -14302,6 +14334,19 @@ impl Editor {
             return;
         };
         self.mixer_header.push_str(&doc.path);
+        // Play's changes (E11-1b-3), while the game plays.
+        let in_play = self
+            .mixer_at_play
+            .as_ref()
+            .filter(|_| self.play.is_some())
+            .map_or(0, |at| crate::mixer::changes(at, &doc.layout));
+        if in_play > 0 {
+            let _ = write!(
+                self.mixer_header,
+                " \u{b7} {in_play} changed in Play (they stay; Audio: Take Back Play's Mixer \
+                 Changes)"
+            );
+        }
         if doc.dirty() {
             self.mixer_header
                 .push_str(" \u{b7} unsaved (Ctrl+S writes it)");
@@ -14360,6 +14405,23 @@ impl Editor {
         self.history.change_file(id, &before, &after);
         self.history.commit(world);
         true
+    }
+
+    /// The mixer's changes since the last Play began taken back, as one step (E11-1b-3).
+    fn take_back_mixer(&mut self, world: &mut World) {
+        let Some(at) = self.mixer_at_play.clone() else {
+            self.say(String::from("No Play to take the mixer's changes back to"));
+            return;
+        };
+        let n = self
+            .mixer
+            .as_ref()
+            .map_or(0, |d| crate::mixer::changes(&at, &d.layout));
+        if self.mixer_step(world, "Mixer: take back Play's changes", None, |l| *l = at) {
+            self.say(format!("The mixer as Play began: {n} buses back"));
+        } else {
+            self.say(String::from("No mixer changes since Play began"));
+        }
     }
 
     /// A bus added to the mixer (E11-1b), picked.
@@ -22529,6 +22591,56 @@ mod tests {
             std::fs::read_to_string(&file)
                 .unwrap()
                 .contains("alpha = Mask")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_mixers_changes_in_play_are_marked_and_kept_as_one_step() {
+        let dir = folder("mixer-play-marks");
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        let mixer = ed.ids.mixer;
+        ed.run(&mut world, mixer);
+        ed.update(&mut world);
+        // Play begins (the editor's side of it): the mixer as it is now is kept.
+        let playing = ed.prepare_play(&mut world, false);
+        ed.play = Some(playing);
+        assert_eq!(ed.mixer_at_play, Some(engine_app::MixerFile::builtin()));
+        // Music turned down in Play: its strip marked, the header counts it.
+        ed.mixer_step(&mut world, "Mixer: music -6.0 dB", None, |l| {
+            crate::mixer::set_gain(l, "music", -6.0);
+        });
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(
+            !texts(&ed, "\u{2022}").is_empty(),
+            "the dot on music's strip"
+        );
+        let header = ed.mixer_header.clone();
+        assert!(header.contains("1 changed in Play"), "{header}");
+        // Stop: the change stays as one step of its own, the dots gone.
+        let playing = ed.play.take().unwrap();
+        ed.finish_play(&mut world, playing, None);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(ed.mixer.as_ref().unwrap().gain("music"), Some(-6.0));
+        assert!(texts(&ed, "\u{2022}").is_empty());
+        assert!(!ed.mixer_header.contains("changed in Play"));
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert_eq!(
+            ed.mixer.as_ref().unwrap().gain("music"),
+            Some(0.0),
+            "one step"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

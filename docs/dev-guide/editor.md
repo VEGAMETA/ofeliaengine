@@ -940,6 +940,10 @@ change something.
   with the scene. The header says when it is unsaved, or not written yet. Unsaved changes
   are kept in `.ofelia/` with the session, as a scene's are, and come back at the next
   start.
+- **While the game plays,** mix it: every change is heard at once, and a dot marks each
+  strip changed since Play (the header counts them). The changes stay after Stop, as one
+  undo step, "Mixer: changes in Play"; undo it, or run "Audio: Take Back Play's Mixer
+  Changes", to have the mixer as Play found it.
 - A `main.mixer` changed outside the editor is read again, unless you have changes of
   your own in it.
 

@@ -270,6 +270,56 @@ fn play_runs_the_game_on_the_scene_and_stop_puts_it_back() {
 }
 
 #[test]
+fn the_mixers_changes_in_play_stay_as_one_step_that_takes_them_back() {
+    let dir = temp_dir("play-mixer");
+    write_scene(&dir);
+    let Some((mut player, settings)) = player(&dir, "editor play mixer test") else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let has_bus = |player: &mut Player| {
+        let mixer = player.world_mut().resource::<engine_app::Mixer>().unwrap();
+        mixer.buses().any(|b| b == "bus")
+    };
+    // Play, and a bus added while it plays: the game has it at once.
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.playing());
+    assert!(game.run_command(player.world_mut(), "audio.add_bus"));
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(has_bus(&mut player), "heard in Play");
+    // Stop: it stays, the world put back around it.
+    assert!(game.run_command(player.world_mut(), "play.stop"));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(!game.playing());
+    assert!(has_bus(&mut player), "kept after Stop");
+    // One step for Play's changes: undone, the mixer as Play began; redone, the bus again.
+    assert!(game.run_command(player.world_mut(), "edit.undo"));
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(!has_bus(&mut player), "undone");
+    assert!(game.run_command(player.world_mut(), "edit.redo"));
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(has_bus(&mut player), "redone");
+    // The command takes them back too.
+    assert!(game.run_command(player.world_mut(), "audio.take_back_play"));
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(!has_bus(&mut player), "taken back");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_panic_in_the_games_tick_stops_play_and_says_where() {
     let dir = temp_dir("play-panic");
     write_scene(&dir);
