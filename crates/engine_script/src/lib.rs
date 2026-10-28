@@ -53,7 +53,7 @@ pub use mlua;
 pub mod debug;
 pub use debug::{
     BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Frame, Hits, Logged, Place, Resume,
-    ScriptDebugger, StopHandler, Stopped, Variable, with_instance,
+    ScriptDebugger, StopHandler, Stopped, Variable, waited, with_instance,
 };
 
 use mlua::chunk::Compiler;
@@ -286,6 +286,10 @@ pub struct ScriptVm {
     in_hook: Cell<bool>,
     /// The debugger's message handler ([`debug::error_handler`]), as a registry reference.
     error_handler: c_int,
+    /// The VM's main thread, and the thread hooks run on while debugging (null: none): what
+    /// memory categories are set on ([`Self::set_memory_category`]).
+    main: *mut mlua::ffi::lua_State,
+    hook_state: Cell<*mut mlua::ffi::lua_State>,
 }
 
 impl ScriptVm {
@@ -311,9 +315,11 @@ impl ScriptVm {
         lua.enable_jit(settings.native);
         lua.set_memory_limit(settings.memory_limit)
             .map_err(|_| ScriptError::OutOfMemory)?;
+        let mut main = core::ptr::null_mut();
         // SAFETY: the VM's state; the interrupt is a C function of this crate.
         unsafe {
             lua.exec_raw::<()>((), |state| {
+                main = mlua::ffi::lua_mainthread(state);
                 let callbacks = mlua::ffi::lua_callbacks(state);
                 (*callbacks).interrupt = Some(interrupt);
                 // Called only at a patched instruction: nothing without breakpoints.
@@ -357,6 +363,8 @@ impl ScriptVm {
             hook_thread: Cell::new(None),
             in_hook: Cell::new(false),
             error_handler,
+            main,
+            hook_state: Cell::new(core::ptr::null_mut()),
         })
     }
 
@@ -500,6 +508,30 @@ impl ScriptVm {
         r.map_err(|e| self.map(module, e))
     }
 
+    /// The memory category the VM's allocations count against from now on (ADR 0114 §11: a
+    /// script's own while the editor's profiler watches; 0, none), on its main thread and
+    /// on the thread hooks run on while debugging. Luau keeps each object's category, so its
+    /// bytes leave the category when it is freed.
+    pub fn set_memory_category(&self, category: u8) {
+        let hook = self.hook_state.get();
+        // SAFETY: the VM's main thread and its hook thread (kept in the registry while
+        // set), between two of its instructions (Luau reads the category when it
+        // allocates).
+        unsafe {
+            mlua::ffi::lua_setmemcat(self.main, c_int::from(category));
+            if !hook.is_null() {
+                mlua::ffi::lua_setmemcat(hook, c_int::from(category));
+            }
+        }
+    }
+
+    /// The bytes allocated in memory category `category` and not freed yet
+    /// ([`Self::set_memory_category`]).
+    pub fn memory_of(&self, category: u8) -> usize {
+        // SAFETY: the VM's main thread; the counts are its global state's.
+        unsafe { mlua::ffi::lua_totalbytes(self.main, c_int::from(category)) }
+    }
+
     /// Debugging (ADR 0119 E9-1b-2): hooks run on a thread of their own from now on,
     /// resumed rather than called, so a stop in one can be stepped from; off, they are
     /// called the plain way again.
@@ -514,6 +546,7 @@ impl ScriptVm {
                         if let Some(mut d) = self.lua.app_data_mut::<debug::Debugger>() {
                             d.set_hook_thread(core::ptr::NonNull::new(thread));
                         }
+                        self.hook_state.set(thread);
                         let id = mlua::ffi::lua_ref(state, -1);
                         mlua::ffi::lua_settop(state, 0);
                         mlua::ffi::lua_pushinteger(state, id as _);
@@ -527,6 +560,7 @@ impl ScriptVm {
                 if let Some(mut d) = self.lua.app_data_mut::<debug::Debugger>() {
                     d.set_hook_thread(None);
                 }
+                self.hook_state.set(core::ptr::null_mut());
                 // SAFETY: the reference `set_debugging` made; nothing else holds it.
                 let _ = unsafe {
                     self.lua.exec_raw::<()>((), |state| {

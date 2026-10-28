@@ -835,7 +835,11 @@ The bottom bar's **Profiler** tab ("View: Profiler") shows how long the frames t
 - a bar a frame for the last 120, those longer than a 60 Hz frame (16.7 ms) in yellow;
 - the costliest CPU stages (simulate, extract, record, submit, …) and GPU passes (shadows,
   forward, bloom, …) of the latest frame, a pass that runs several times summed with its
-  count.
+  count;
+- while the game plays, its costliest scripts: each script component and system with its
+  hooks' time and calls a frame and the memory it holds, over the last half second
+  ([scripting.md](scripting.md#measuring-your-scripts)). They are measured only while the
+  panel is open.
 
 For a whole timeline, run under Tracy with the profiling build ([profiling.md](profiling.md)).
 

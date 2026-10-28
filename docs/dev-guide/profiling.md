@@ -28,6 +28,9 @@ and Tracy enabled. Normal `dev`, `release` and `shipping` builds contain no prof
 3. For context switches and CPU sampling, run the game **as administrator**. Without it,
    those views stay empty. Everything else works.
 
+Scripts' hooks have a zone each, named after the component and the hook:
+`script Door.on_tick` ([scripting.md](scripting.md#measuring-your-scripts)).
+
 ## 4. Instrument your own code
 
 ```rust

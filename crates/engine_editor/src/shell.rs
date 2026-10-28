@@ -267,6 +267,9 @@ pub struct ProfilerView<'a> {
     pub stages: &'a [(&'a str, &'a str)],
     /// The GPU passes.
     pub passes: &'a [(&'a str, &'a str)],
+    /// The game's scripts, the costliest first (ADR 0114 §11): a component or a system,
+    /// and its costs a frame (`120 µs · 40 calls · 12.0 KB`). Empty while no game plays.
+    pub scripts: &'a [(&'a str, &'a str)],
 }
 
 /// A row of the Tasks panel (ADR 0107 E6-3): background work under way.
@@ -3666,7 +3669,8 @@ fn output_panel(ui: &mut Ui, view: &OutputView<'_>, p: &Palette, out: &mut Shell
 }
 
 /// The profiler's panel (ADR 0107 E6-5): the latest frame's times, a bar per frame kept
-/// (CPU, and the GPU behind it), then the longest CPU stages and GPU passes side by side.
+/// (CPU, and the GPU behind it), then the longest CPU stages, GPU passes and scripts side
+/// by side.
 fn profiler_panel(ui: &mut Ui, view: &ProfilerView<'_>, p: &Palette) {
     const GRAPH: f32 = 56.0;
     let panel = Style {
@@ -3713,17 +3717,25 @@ fn profiler_panel(ui: &mut Ui, view: &ProfilerView<'_>, p: &Palette) {
                 ..Style::default()
             },
             |ui| {
-                for (key, title, rows) in [("cpu", "CPU", view.stages), ("gpu", "GPU", view.passes)]
-                {
+                let tables = [
+                    ("cpu", "CPU", view.stages, 300.0),
+                    ("gpu", "GPU", view.passes, 300.0),
+                    ("scripts", "Scripts per frame", view.scripts, 380.0),
+                ];
+                for (key, title, rows, width) in tables {
                     ui.container(
                         key,
                         Style {
-                            size: [Size::Fixed(300.0), Size::Grow(1.0)],
+                            size: [Size::Fixed(width), Size::Grow(1.0)],
                             direction: Direction::Column,
                             ..Style::default()
                         },
                         |ui| {
                             text(ui, "title", title, SMALL, p.text_dim);
+                            if key == "scripts" && rows.is_empty() {
+                                let hint = "Measured while the game plays";
+                                text(ui, "hint", hint, SMALL, p.text_dim);
+                            }
                             for (i, (name, time)) in rows.iter().enumerate() {
                                 ui.push_id(i as u64);
                                 ui.row(

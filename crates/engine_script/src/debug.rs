@@ -85,6 +85,14 @@ thread_local! {
     static INSTANCE: Cell<Option<u64>> = const { Cell::new(None) };
     /// Stops pass ([`ScriptDebugger::skip_stops`]): the host finishes a stopped tick.
     static SKIP_STOPS: Cell<bool> = const { Cell::new(false) };
+    /// The nanoseconds stops have waited on this thread ([`waited`]).
+    static WAITED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The nanoseconds stops have waited on this thread so far: what a host takes out of a
+/// hook's time (ADR 0114 §11's profile), a stop being the developer's, not the script's.
+pub fn waited() -> u64 {
+    WAITED.get()
 }
 
 /// Runs `f`, a call of instance `instance`'s hook (the host's id for it: an entity), with
@@ -1262,7 +1270,10 @@ fn wait(
         if let Some(mut d) = lua.app_data_mut::<Debugger>() {
             d.waiting = core::ptr::NonNull::new(state).map(|s| (s, level));
         }
+        let since = std::time::Instant::now();
         let resume = handler(&stopped);
+        let waited = u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        WAITED.set(WAITED.get().saturating_add(waited));
         if let Some(mut d) = lua.app_data_mut::<Debugger>() {
             d.waiting = None;
         }
@@ -2591,6 +2602,42 @@ function M.mixed(n)
 end
 return M
 ";
+
+    #[test]
+    fn the_time_a_stop_waits_is_counted_for_the_profiler() {
+        let mut vm = ScriptVm::new(ScriptSettings::default()).unwrap();
+        vm.load_module("steps", STEPS).unwrap();
+        vm.set_debugging(true);
+        vm.set_stop_handler(Some(Box::new(answer_in_turn)));
+        vm.set_breakpoints("steps", vec![stop(8)]);
+        let fiber = Fiber::new(1 << 20).unwrap();
+        let tick: mlua::Function = vm.exports("steps").unwrap().get("tick").unwrap();
+        let mut c = Call {
+            vm: &raw const vm,
+            module: "steps",
+            f: tick,
+            arg: 1.0,
+            result: None,
+        };
+        ANSWERS.set(VecDeque::new());
+        let before = crate::waited();
+        // SAFETY: `c` and its VM outlive the job, only read meanwhile.
+        let mut ran = unsafe { fiber.run(call, core::ptr::from_mut(&mut c).cast()) };
+        let mut stops = 0;
+        while ran == Ran::Suspended {
+            // The developer looking at the stop for 20 ms.
+            let since = std::time::Instant::now();
+            while since.elapsed() < std::time::Duration::from_millis(20) {
+                std::hint::spin_loop();
+            }
+            stops += 1;
+            ran = fiber.resume();
+        }
+        assert_eq!(c.result.take().unwrap(), Ok(5.0));
+        assert_eq!(stops, 1);
+        let waited = crate::waited() - before;
+        assert!(waited >= 20_000_000, "{waited} ns");
+    }
 
     #[test]
     fn a_stop_names_its_instance_and_a_limited_breakpoint_passes_the_others() {

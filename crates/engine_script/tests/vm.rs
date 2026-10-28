@@ -150,3 +150,29 @@ fn native_and_interpreted_agree() {
     let b: f64 = interp.call("m", "f", 10_000).unwrap();
     assert_eq!(a.to_bits(), b.to_bits());
 }
+
+#[test]
+fn allocations_count_against_the_memory_category_set_until_freed() {
+    let mut vm = vm();
+    vm.load_module(
+        "keep",
+        "local kept = {} return { \
+         add = function(n) for i = 1, n do kept[#kept + 1] = { i } end end, \
+         clear = function() table.clear(kept) end }",
+    )
+    .unwrap();
+    assert_eq!(vm.memory_of(7), 0);
+    vm.set_memory_category(7);
+    vm.call::<_, ()>("keep", "add", 100).unwrap();
+    vm.set_memory_category(0);
+    let kept = vm.memory_of(7);
+    assert!(kept >= 100 * 16, "{kept} bytes");
+    // Made under another category: not counted.
+    vm.call::<_, ()>("keep", "add", 100).unwrap();
+    assert_eq!(vm.memory_of(7), kept);
+    // Freed: its bytes leave the category.
+    vm.call::<_, ()>("keep", "clear", ()).unwrap();
+    vm.lua().gc_collect().unwrap();
+    let left = vm.memory_of(7);
+    assert!(left * 10 < kept, "{left} of {kept} bytes left");
+}

@@ -738,17 +738,17 @@ Last updated: 2026-10-28.
   - **E9-4c, one set of breakpoints with VS Code** (#389, ADR 0119's as-built): the editor's
     breakpoints reach VS Code as `breakpoint` events, attaching joins the two sets, and VS
     Code's own list keeps the editor's options. The script debugger's plan (E9) is done.
+  - **Scripts in the profiler** (#390, ADR 0114's as-built): a Tracy zone a hook
+    (`script Door.on_tick`); the editor's profiler lists each script's time, calls and
+    memory a frame while the game plays, measured only while the panel is open.
   - **Next, in this order:**
-    1. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
-       per hook (`script Door.on_tick`) and each script's time and allocations in the
-       editor's profiler; Tracy has only the stages' zones (`scripts::tick`).
-    2. The editor's text layouts allocate when a text changes (found 2026-10-28): the
+    1. The editor's text layouts allocate when a text changes (found 2026-10-28): the
        status line's FPS every half second makes a new layout (its string and glyphs).
        Reuse the layouts that go out of use. The zero-allocation test missed it because
        its frames ran faster than the FPS's update; on the Radeon they did not, on `main`
        too. The editor's FPS now follows a fixed frame time (`Player::frame_time`), so the
        test is the same on both GPUs.
-    3. The RTX's `forward` reads 3.1-3.7 % slower than its baseline in `sponza_fsr_quality`
+    2. The RTX's `forward` reads 3.1-3.7 % slower than its baseline in `sponza_fsr_quality`
        and `sponza_smaa_t2x`, in two gates in a row (#379, #380), on code those scenes do
        not run (they render through the frame renderer, not the player; registers
        unchanged), with every frame 0.3-2 % slower: measure `main` alone, and give the RTX

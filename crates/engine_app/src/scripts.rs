@@ -128,6 +128,8 @@ struct Declared {
     texts: &'static [engine_ecs::TextField],
     /// Its table, where its module put its functions: a message or a timer names one.
     table: Table,
+    /// What the profiler keeps of its hooks.
+    profiled: Profiled,
 }
 
 #[derive(Default)]
@@ -410,6 +412,8 @@ struct System {
     frame: Option<Function>,
     /// An error stopped it: it is called no more, until its script runs again.
     stopped: bool,
+    /// What the profiler keeps of its hooks.
+    profiled: Profiled,
 }
 
 thread_local! {
@@ -420,6 +424,130 @@ thread_local! {
     static OPEN_WORLD: core::cell::Cell<*mut World> = const { core::cell::Cell::new(core::ptr::null_mut()) };
     /// The physics world scripts query in this stage (null: none).
     static OPEN_PHYSICS: core::cell::Cell<*const crate::ScenePhysics> = const { core::cell::Cell::new(core::ptr::null()) };
+    /// The editor's profiler watches the scripts ([`Scripts::set_profiling`]): their hooks
+    /// are timed, and what they allocate counted.
+    static PROFILING: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// The memory category of the hook running now (0: none), put back when a hook a hook
+    /// called returns.
+    static CATEGORY: core::cell::Cell<u8> = const { core::cell::Cell::new(0) };
+}
+
+/// The hooks the profiler names (ADR 0114 §11: `script Door.on_tick`).
+#[derive(Clone, Copy)]
+enum Hook<'a> {
+    Start,
+    Tick,
+    Frame,
+    Stop,
+    Touch,
+    Untouch,
+    Load,
+    /// A message's or a timer's hook, by its name.
+    Message(&'a mlua::LuaString),
+}
+
+/// The hooks a place is kept for, by [`Hook::slot`].
+const HOOKS: usize = 7;
+
+impl Hook<'_> {
+    /// Its place among a script's kept places; none for a message's.
+    fn slot(self) -> Option<usize> {
+        Some(match self {
+            Hook::Start => 0,
+            Hook::Tick => 1,
+            Hook::Frame => 2,
+            Hook::Stop => 3,
+            Hook::Touch => 4,
+            Hook::Untouch => 5,
+            Hook::Load => 6,
+            Hook::Message(_) => return None,
+        })
+    }
+
+    /// Its name, as the script names it.
+    fn name(self) -> String {
+        match self {
+            Hook::Start => String::from("on_start"),
+            Hook::Tick => String::from("on_tick"),
+            Hook::Frame => String::from("on_frame"),
+            Hook::Stop => String::from("on_stop"),
+            Hook::Touch => String::from("on_touch"),
+            Hook::Untouch => String::from("on_untouch"),
+            Hook::Load => String::from("on_load"),
+            Hook::Message(name) => name.to_string_lossy(),
+        }
+    }
+}
+
+/// What the profiler keeps of a component's or a system's hooks (ADR 0114 §11): each hook's
+/// place in Tracy, made the first time it runs while Tracy does; its memory category; and,
+/// while the editor's profiler watches, its calls and time.
+#[derive(Default)]
+struct Profiled {
+    places: core::cell::Cell<[Option<engine_profiler::Place>; HOOKS]>,
+    /// Message's and timers' hooks' places, by their function (its address: the
+    /// component's table holds it until a reload, which forgets these). A name would be
+    /// read through mlua's `as_bytes`, which clones a reference: an allocation a call.
+    messages: RefCell<Vec<(usize, engine_profiler::Place)>>,
+    /// Its memory category: 1 to 255, the last shared by those past it.
+    category: u8,
+    /// Its hooks' calls and nanoseconds since the profile was last taken.
+    spent: core::cell::Cell<(u64, u64)>,
+}
+
+impl Profiled {
+    /// A profile with memory category `category`.
+    fn new(category: u8) -> Self {
+        Self {
+            category,
+            ..Self::default()
+        }
+    }
+
+    /// Hook `hook`'s place in Tracy (`script Door.on_tick`, in its module's file), made the
+    /// first time; `f`, its function.
+    fn place(
+        &self,
+        owner: &str,
+        module: &str,
+        hook: Hook<'_>,
+        f: &Function,
+    ) -> engine_profiler::Place {
+        let made = || {
+            let name = format!("script {owner}.{}", hook.name());
+            engine_profiler::Place::new(&name, &module_file(module), 0)
+        };
+        if let Some(k) = hook.slot() {
+            let mut places = self.places.get();
+            let place = *places[k].get_or_insert_with(made);
+            self.places.set(places);
+            return place;
+        }
+        let key = f.to_pointer() as usize;
+        let mut messages = self.messages.borrow_mut();
+        if let Some(&(_, place)) = messages.iter().find(|(k, _)| *k == key) {
+            return place;
+        }
+        let place = made();
+        messages.push((key, place));
+        place
+    }
+}
+
+/// A script's hooks as the editor's profiler shows them (ADR 0114 §11).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScriptProfile {
+    /// The component or the system.
+    pub name: String,
+    /// Its script's file, relative to the project (`scripts/door.luau`).
+    pub file: String,
+    /// Its hooks' calls since the profile was last taken, while the profiler watched.
+    pub calls: u64,
+    /// Their time, a stop's wait aside, in nanoseconds.
+    pub nanos: u64,
+    /// What they allocated while the profiler watched and is not freed yet, in bytes
+    /// (shared by the scripts past the 254th).
+    pub bytes: usize,
 }
 
 /// The components scripts may name, by their stable names: the program's reflected ones
@@ -497,6 +625,8 @@ pub struct Scripts {
     /// A step's contacts, copied out of the physics world before any is heard (scratch):
     /// no hook runs while the stage holds the physics world.
     contacts: Vec<Contact>,
+    /// The memory categories given to components and systems so far (ADR 0114 §11).
+    categories: u16,
 }
 
 /// A contact between two bodies, by their entities, as the instances hear it.
@@ -627,6 +757,7 @@ impl Scripts {
             heard: (0, 0),
             contacts: Vec::new(),
             versions: HashMap::new(),
+            categories: 0,
         };
         let mut main = 0;
         // SAFETY: the VM's state; only its main state's address is read.
@@ -831,13 +962,17 @@ impl Scripts {
                     s.frame = frame;
                     s.stopped = false;
                 }
-                None => self.systems.push(System {
-                    name: name.clone(),
-                    module: module.into(),
-                    tick,
-                    frame,
-                    stopped: false,
-                }),
+                None => {
+                    let category = self.next_category();
+                    self.systems.push(System {
+                        name: name.clone(),
+                        module: module.into(),
+                        tick,
+                        frame,
+                        stopped: false,
+                        profiled: Profiled::new(category),
+                    });
+                }
             }
             kept.push(name);
         }
@@ -1061,6 +1196,8 @@ impl Scripts {
         self.own(id, table);
         let c = &mut self.components[k];
         c.hooks = hooks_of(table);
+        // Its functions are new: the places by function go (ADR 0114 §11).
+        c.profiled.messages.get_mut().clear();
         c.info = info;
         c.id = id;
         c.defaults = defaults;
@@ -1140,6 +1277,7 @@ impl Scripts {
         self.tables.name(name, id, info);
         self.own(id, table);
         self.by_name.insert(name.to_owned(), self.components.len());
+        let category = self.next_category();
         self.components.push(Declared {
             name: name.to_owned(),
             module: module.into(),
@@ -1149,8 +1287,57 @@ impl Scripts {
             defaults,
             texts,
             table: table.clone(),
+            profiled: Profiled::new(category),
         });
         Ok(())
+    }
+
+    /// The memory category of the next component or system declared: 1 to 255, the last
+    /// shared by those past the 254th (Luau keeps 256; 0, the VM's own, is none).
+    fn next_category(&mut self) -> u8 {
+        self.categories = (self.categories + 1).min(255);
+        u8::try_from(self.categories).unwrap_or(u8::MAX)
+    }
+
+    /// Whether the editor's profiler watches the scripts run on this thread (ADR 0114 §11):
+    /// while it does, each component's and system's hooks are counted with their time, a
+    /// stop's wait aside, and what they allocate is counted against its memory category
+    /// ([`Self::take_profile`]). Off, a hook pays one thread-local read for it; its Tracy
+    /// zone needs only Tracy running.
+    pub fn set_profiling(&mut self, on: bool) {
+        PROFILING.set(on);
+    }
+
+    /// Each component's and system's profile since the last taken, components first, in
+    /// `into` (its rows' texts reused: nothing allocated in steady state). Their counts
+    /// start again.
+    pub fn take_profile(&mut self, into: &mut Vec<ScriptProfile>) {
+        let rows = self
+            .components
+            .iter()
+            .map(|c| (&c.name, &c.module, &c.profiled));
+        let rows = rows.chain(
+            self.systems
+                .iter()
+                .map(|s| (&s.name, &s.module, &s.profiled)),
+        );
+        let mut n = 0;
+        for (name, module, profiled) in rows {
+            if n == into.len() {
+                into.push(ScriptProfile::default());
+            }
+            let row = &mut into[n];
+            row.name.clear();
+            row.name.push_str(name);
+            row.file.clear();
+            row.file.push_str("scripts/");
+            row.file.push_str(module);
+            row.file.push_str(".luau");
+            (row.calls, row.nanos) = profiled.spent.replace((0, 0));
+            row.bytes = self.vm.memory_of(profiled.category);
+            n += 1;
+        }
+        into.truncate(n);
     }
 
     /// The script components declared, by name.
@@ -1388,9 +1575,8 @@ impl Scripts {
             inst.stopped = true;
             let this = inst.this.clone();
             let c = &self.components[key.1 as usize];
-            let (module, stop) = (c.module.clone(), c.hooks.stop.clone());
-            if let Some(stop) = stop
-                && let Err(err) = call_for(&self.vm, e, &module, &stop, this)
+            if let Some(stop) = c.hooks.stop.clone()
+                && let Err(err) = call_for(&self.vm, e, c, Hook::Stop, &stop, this)
             {
                 self.report(key.1 as usize, "on_stop", e, &err);
             }
@@ -1436,10 +1622,10 @@ impl Scripts {
             let (Some(hook), false) = (hook.clone(), s.stopped) else {
                 continue;
             };
-            let module = s.module.clone();
+            let (vm, owner) = (&self.vm, (s.name.as_str(), &*s.module, &s.profiled));
             let result = match stage {
-                Stage::Tick => self.vm.call_function::<_, ()>(&module, &hook, dt),
-                Stage::Frame => self.vm.call_function::<_, ()>(&module, &hook, (dt, alpha)),
+                Stage::Tick => call_hook(vm, None, owner, Hook::Tick, &hook, dt),
+                Stage::Frame => call_hook(vm, None, owner, Hook::Frame, &hook, (dt, alpha)),
             };
             self.deliver();
             if let Err(err) = result
@@ -1599,8 +1785,8 @@ impl Scripts {
                 && !inst.stopped
                 && let Some(stop) = self.components[key.1 as usize].hooks.stop.clone()
             {
-                let module = self.components[key.1 as usize].module.clone();
-                if let Err(err) = call_for(&self.vm, e, &module, &stop, inst.this.clone()) {
+                let c = &self.components[key.1 as usize];
+                if let Err(err) = call_for(&self.vm, e, c, Hook::Stop, &stop, inst.this.clone()) {
                     self.report(key.1 as usize, "on_stop", e, &err);
                 }
             }
@@ -1652,11 +1838,10 @@ impl Scripts {
         }
         let (e, this) = (*e, inst.this.clone());
         let c = &self.components[k];
-        let module = c.module.clone();
         if !inst.started && stage == Stage::Tick {
             inst.started = true;
             if let Some(start) = c.hooks.start.clone()
-                && let Err(err) = call_for(&self.vm, e, &module, &start, this.clone())
+                && let Err(err) = call_for(&self.vm, e, c, Hook::Start, &start, this.clone())
             {
                 self.stop(key, "on_start", e, &err);
                 return;
@@ -1671,8 +1856,8 @@ impl Scripts {
             return;
         };
         let result = match stage {
-            Stage::Tick => call_for(&self.vm, e, &module, &hook, (this, dt)),
-            Stage::Frame => call_for(&self.vm, e, &module, &hook, (this, dt, alpha)),
+            Stage::Tick => call_for(&self.vm, e, c, Hook::Tick, &hook, (this, dt)),
+            Stage::Frame => call_for(&self.vm, e, c, Hook::Frame, &hook, (this, dt, alpha)),
         };
         if let Err(err) = result {
             self.stop(key, name, e, &err);
@@ -1753,20 +1938,19 @@ impl Scripts {
         let this = inst.this.clone();
         let started = core::mem::replace(&mut inst.started, true);
         let c = &self.components[k];
-        let module = c.module.clone();
         // Its `on_start` first, the first time.
         if !started
             && let Some(start) = c.hooks.start.clone()
-            && let Err(err) = call_for(&self.vm, me, &module, &start, this.clone())
+            && let Err(err) = call_for(&self.vm, me, c, Hook::Start, &start, this.clone())
         {
             self.stop(key, "on_start", me, &err);
             return;
         }
         let c = &self.components[k];
-        let (hook, name) = if begin {
-            (c.hooks.touch.clone(), "on_touch")
+        let (hook, name, which) = if begin {
+            (c.hooks.touch.clone(), "on_touch", Hook::Touch)
         } else {
-            (c.hooks.untouch.clone(), "on_untouch")
+            (c.hooks.untouch.clone(), "on_untouch", Hook::Untouch)
         };
         let Some(hook) = hook else {
             return;
@@ -1775,9 +1959,9 @@ impl Scripts {
         let vector = |v: Vec3| Value::Vector(Vector::new(v.x, v.y, v.z));
         let result = if begin {
             let args = (this, other, vector(point), vector(normal));
-            call_for(&self.vm, me, &module, &hook, args)
+            call_for(&self.vm, me, c, which, &hook, args)
         } else {
-            call_for(&self.vm, me, &module, &hook, (this, other))
+            call_for(&self.vm, me, c, which, &hook, (this, other))
         };
         if let Err(err) = result {
             self.stop(key, name, me, &err);
@@ -1897,17 +2081,17 @@ impl Scripts {
             let (e, this) = (*e, inst.this.clone());
             let started = core::mem::replace(&mut inst.started, true);
             let c = &self.components[k];
-            let module = c.module.clone();
             let (start, load) = (c.hooks.start.clone(), c.hooks.load.clone());
             if !started
                 && let Some(start) = start
-                && let Err(err) = call_for(&self.vm, e, &module, &start, this.clone())
+                && let Err(err) = call_for(&self.vm, e, c, Hook::Start, &start, this.clone())
             {
                 self.stop(key, "on_start", e, &err);
                 continue;
             }
+            let c = &self.components[k];
             if let Some(load) = load
-                && let Err(err) = call_for(&self.vm, e, &module, &load, this)
+                && let Err(err) = call_for(&self.vm, e, c, Hook::Load, &load, this)
             {
                 self.stop(key, "on_load", e, &err);
             }
@@ -2022,23 +2206,24 @@ impl Scripts {
             heard = true;
             let this = inst.this.clone();
             let started = core::mem::replace(&mut inst.started, true);
-            let c = &self.components[k];
-            let module = c.module.clone();
+            let owner = &self.components[k];
             if !started
-                && let Some(start) = c.hooks.start.clone()
-                && let Err(err) = call_for(&self.vm, target, &module, &start, this.clone())
+                && let Some(start) = owner.hooks.start.clone()
+                && let Err(err) =
+                    call_for(&self.vm, target, owner, Hook::Start, &start, this.clone())
             {
                 self.stop(key, "on_start", target, &err);
                 continue;
             }
+            let owner = &self.components[k];
             let [a, b, c, d] = &call.values;
-            let vm = &self.vm;
+            let (vm, which) = (&self.vm, Hook::Message(&call.hook));
             let result = match call.count {
-                0 => call_for(vm, target, &module, &hook, this),
-                1 => call_for(vm, target, &module, &hook, (this, a)),
-                2 => call_for(vm, target, &module, &hook, (this, a, b)),
-                3 => call_for(vm, target, &module, &hook, (this, a, b, c)),
-                _ => call_for(vm, target, &module, &hook, (this, a, b, c, d)),
+                0 => call_for(vm, target, owner, which, &hook, this),
+                1 => call_for(vm, target, owner, which, &hook, (this, a)),
+                2 => call_for(vm, target, owner, which, &hook, (this, a, b)),
+                3 => call_for(vm, target, owner, which, &hook, (this, a, b, c)),
+                _ => call_for(vm, target, owner, which, &hook, (this, a, b, c, d)),
             };
             if let Err(err) = result {
                 let name = call.hook.to_string_lossy();
@@ -2138,11 +2323,61 @@ enum Stage {
 fn call_for(
     vm: &ScriptVm,
     e: Entity,
-    module: &str,
+    c: &Declared,
+    hook: Hook<'_>,
     f: &Function,
     args: impl IntoLuaMulti,
 ) -> Result<(), ScriptError> {
-    engine_script::with_instance(e.to_bits(), || vm.call_function::<_, ()>(module, f, args))
+    call_hook(
+        vm,
+        Some(e),
+        (&c.name, &c.module, &c.profiled),
+        hook,
+        f,
+        args,
+    )
+}
+
+/// Calls `f` with `args`, the hook `hook` of `owner` (its name, its module, its profile),
+/// for entity `e`'s instance or a system (`None`): the debugger told whose hook runs (ADR
+/// 0119 E9-4a), and the profiler (ADR 0114 §11) given a Tracy zone while Tracy runs, and
+/// the hook's time and memory while the editor's profiler watches. Nothing more is paid
+/// while neither does.
+fn call_hook(
+    vm: &ScriptVm,
+    e: Option<Entity>,
+    (name, module, profiled): (&str, &str, &Profiled),
+    hook: Hook<'_>,
+    f: &Function,
+    args: impl IntoLuaMulti,
+) -> Result<(), ScriptError> {
+    let _zone = engine_profiler::running().then(|| profiled.place(name, module, hook, f).zone());
+    let watched = PROFILING.get().then(|| {
+        (
+            CATEGORY.replace(profiled.category),
+            Instant::now(),
+            engine_script::waited(),
+        )
+    });
+    if watched.is_some() {
+        vm.set_memory_category(profiled.category);
+    }
+    let result = match e {
+        Some(e) => {
+            engine_script::with_instance(e.to_bits(), || vm.call_function::<_, ()>(module, f, args))
+        }
+        None => vm.call_function::<_, ()>(module, f, args),
+    };
+    if let Some((before, since, waited)) = watched {
+        CATEGORY.set(before);
+        vm.set_memory_category(before);
+        let spent = u64::try_from(since.elapsed().as_nanos())
+            .unwrap_or(u64::MAX)
+            .saturating_sub(engine_script::waited() - waited);
+        let (calls, nanos) = profiled.spent.get();
+        profiled.spent.set((calls + 1, nanos.saturating_add(spent)));
+    }
+    result
 }
 
 /// The module a project's script file is loaded as, from its path relative to the
@@ -3791,6 +4026,91 @@ return Door
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn each_scripts_hooks_are_timed_and_its_memory_counted_while_the_profiler_watches() {
+        const KEEPER: &str = r#"--!strict
+local Keeper = component("Keeper", { turns = 0 })
+local kept = {}
+function Keeper.on_tick(self, dt: number)
+    self.turns += 1
+    table.insert(kept, { self.turns })
+end
+system("Counter", {
+    on_tick = function(dt: number) end,
+})
+return Keeper
+"#;
+        let dir = project("profile", &[("door.luau", DOOR), ("keeper.luau", KEEPER)]);
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let door = world.spawn((Name::new("Front door"), Transform::from_xyz(4.0, 0.0, 0.0)));
+        assert!(scripts.add(&mut world, door, "Door"));
+        let keeper = world.spawn((Name::new("Keeper"), Transform::IDENTITY));
+        assert!(scripts.add(&mut world, keeper, "Keeper"));
+        // Not watched: nothing counted.
+        for _ in 0..4 {
+            scripts.tick(&mut world, 0.125);
+        }
+        let mut profile = Vec::new();
+        scripts.take_profile(&mut profile);
+        let names: Vec<&str> = profile.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Door", "Keeper", "Counter"],
+            "components, then systems"
+        );
+        assert!(
+            profile
+                .iter()
+                .all(|p| p.calls == 0 && p.nanos == 0 && p.bytes == 0),
+            "{profile:?}"
+        );
+        // Watched: each hook with its time, and what each keeps against its own.
+        scripts.set_profiling(true);
+        for _ in 0..8 {
+            scripts.tick(&mut world, 0.125);
+        }
+        scripts.set_profiling(false);
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        scripts.take_profile(&mut profile);
+        let [door, keeper, counter] = [0, 1, 2].map(|k| profile[k].clone());
+        assert_eq!((door.calls, keeper.calls, counter.calls), (8, 8, 8));
+        assert!(door.nanos > 0 && keeper.nanos > 0 && counter.nanos > 0);
+        assert_eq!(keeper.file, "scripts/keeper.luau");
+        assert!(keeper.bytes >= 8 * 16, "{keeper:?}");
+        assert_eq!(counter.bytes, 0, "{counter:?}");
+        // Taken: the counts start again, what is kept stays counted; and nothing is
+        // counted while the profiler does not watch.
+        scripts.tick(&mut world, 0.125);
+        scripts.take_profile(&mut profile);
+        assert_eq!((profile[1].calls, profile[1].nanos), (0, 0));
+        assert_eq!(profile[1].bytes, keeper.bytes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hooks_place_in_tracy_is_made_once() {
+        let profiled = Profiled::new(3);
+        let lua = Lua::new();
+        let tick = lua.create_function(|_, ()| Ok(())).unwrap();
+        for _ in 0..3 {
+            let _ = profiled.place("Door", "door", Hook::Tick, &tick);
+        }
+        let places = profiled.places.get();
+        assert!(places[1].is_some() && places.iter().filter(|p| p.is_some()).count() == 1);
+        // A message's, by its function.
+        let (open, shut) = (
+            lua.create_string("open").unwrap(),
+            lua.create_string("shut").unwrap(),
+        );
+        let on_open = lua.create_function(|_, ()| Ok(())).unwrap();
+        let on_shut = lua.create_function(|_, ()| Ok(())).unwrap();
+        for (name, f) in [(&open, &on_open), (&shut, &on_shut), (&open, &on_open)] {
+            let _ = profiled.place("Door", "door", Hook::Message(name), f);
+        }
+        assert_eq!(profiled.messages.borrow().len(), 2);
+    }
+
     /// ADR 0114 §13's measurements (`--release -- --ignored --nocapture`): an empty
     /// `on_tick` per instance, a prop's and a component field's read and write, and 1,000
     /// doors in one tick; medians of 51 ticks.
@@ -3861,8 +4181,9 @@ return SpinHook
         // ADR 0119's debuggable compilation: `ENGINE_SCRIPTS_MEASURE=o1` measures level 1,
         // `o1-debug` level 1 while debugging, `o1-stop` with a breakpoint that stops set,
         // `o1-errors` with errors not caught stopping; `-interp` after any of them without
-        // native code.
+        // native code. `ENGINE_SCRIPTS_PROFILE=1`: while the editor's profiler watches.
         let how = std::env::var("ENGINE_SCRIPTS_MEASURE").unwrap_or_default();
+        let profiled = std::env::var("ENGINE_SCRIPTS_PROFILE").is_ok_and(|v| v == "1");
         let settings = ScriptSettings {
             optimization_level: if how.starts_with("o1") { 1 } else { 2 },
             native: !how.ends_with("-interp"),
@@ -3873,6 +4194,7 @@ return SpinHook
             let mut scripts =
                 Scripts::load_with(&mut world, &dir, &dir.join("scripts"), settings).unwrap();
             scripts.set_debugging(how.starts_with("o1-"));
+            scripts.set_profiling(profiled);
             if how.starts_with("o1-errors") {
                 scripts
                     .debugger()
