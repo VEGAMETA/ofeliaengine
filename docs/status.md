@@ -846,7 +846,7 @@ Last updated: 2026-10-28.
     "room (auto)" at the mixer's right end: the reverb's meter, what the room follows
     ("Hall 62 %", "the walls"), its fader a trim kept as `room.gain`; picked, the room
     heard now, read-only. E11-2 is done.
-  - **E11-5a, snapshots in the file and the player** (#PR, ADR 0122): named sets of
+  - **E11-5a, snapshots in the file and the player** (#415, ADR 0122): named sets of
     values by path in `main.mixer` (version 4), layered by weight in the file's order,
     the later winning; `Mixer::blend(name, weight, seconds)` and Luau
     `audio.blend(name, weight, fade?)`; fades on the game's thread, nothing allocated a
