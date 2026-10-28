@@ -702,7 +702,7 @@ Last updated: 2026-10-28.
       slower (the question below);
     - fixed: Continue after a step inside native code entered it halfway through a block
       (an access violation); the stepping loop now runs the rest of the hook.
-  - **E9-1b-5, values at a stop** (#PR, ADR 0119's as-built):
+  - **E9-1b-5, values at a stop** (#384, ADR 0119's as-built):
     - the lines above the stopped one show what they assigned (`t = Transform`,
       `self.speed = 2`), the function's line its parameters; changed values lit;
     - the Variables open: tables (raw, the first hundred), `self` (props, components,
