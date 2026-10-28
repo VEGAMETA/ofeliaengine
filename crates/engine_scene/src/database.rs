@@ -210,7 +210,7 @@ pub enum AssetKind {
     Shader,
     /// A mixer layout (`.mixer`): the buses and their faders (ADR 0121).
     Mixer,
-    /// A material graph (`.graph`): a material type drawn as nodes (ADR 0123).
+    /// A material graph (`.mgraph`): a material type drawn as nodes (ADR 0123).
     Graph,
 }
 
@@ -230,7 +230,7 @@ const KINDS: [(AssetKind, &str, &[&str]); 11] = [
     (AssetKind::Script, "script", &["luau"]),
     (AssetKind::Shader, "shader", &["slang"]),
     (AssetKind::Mixer, "mixer", &["mixer"]),
-    (AssetKind::Graph, "graph", &["graph"]),
+    (AssetKind::Graph, "graph", &["mgraph"]),
 ];
 
 impl AssetKind {

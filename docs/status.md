@@ -868,15 +868,19 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **ADR 0123 accepted** (#PR; the owner's answers, 2026-10-28): graph files are `.mgraph`
+    (header `[mgraph version=1 id=…]`); graphs and shaders open as files in tabs of their
+    own, as code does, not in a panel under the viewport; the bottom bar's Shader
+    placeholder is gone.
   - **E10-3c, graphs drawn by the player** (#422, ADR 0123's as-built): a material file
-    naming a `.graph` resolves to the graph's module, generated into
+    naming a `.mgraph` resolves to the graph's module, generated into
     `.ofelia/cache/graphs/` (written when it changed), its type `GraphMaterial`, the
     graph's numbers and texture images under the file's values; the player reads the
     material again when the graph changes and hot reload compiles it (on screen in
     0.6 s on the RTX, 0.5 s on the Radeon); the inspector hides `_` fields.
-  - **E10-3b-2, the `.graph` file** (#421, ADR 0123's as-built; its proposed shape, the
+  - **E10-3b-2, the `.mgraph` file** (#421, ADR 0123's as-built; its proposed shape, the
     recommendation): read and written in the editor's grammar, defaults left out, nodes
-    by id and links by input, sorted; a texture node's own image; `.graph` files known to
+    by id and links by input, sorted; a texture node's own image; `.mgraph` files known to
     the asset database with their id inside.
   - **E10-3b-1, the material graph's node library and generator** (#420, ADR 0123's
     as-built): `engine_material_graph`: 40 node kinds as Slang snippets with typed ports,
@@ -885,7 +889,7 @@ Last updated: 2026-10-28.
     parameters while open, each line's node); every kind and model checked by Slang inside
     `forward.slang`, 73 types in one module.
   - **E10-3a, the material graph's design** (#419, ADR 0123 proposed; research
-    `docs/research/material-graph.md`): a graph is a material type in a `.graph` file of
+    `docs/research/material-graph.md`): a graph is a material type in a `.mgraph` file of
     the editor's grammar, generated into one Slang module by one crate for the editor, the
     player and the cook. Question 3 measured: numbers read as parameters cost up to +12
     registers on the RTX and +10 VGPRs on the Radeon (a toon's lit variant 63 → 72), so
@@ -901,7 +905,7 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3d, the canvas (a `.graph` opened in the Shader panel, nodes, ports,
+       2D): E10-3d, the canvas (a `.mgraph` opened in the Shader panel, nodes, ports,
        links, pan, zoom, selection, moves, deletes, undo; Material: New Graph), then
        E10-3e to E10-3g (ADR 0123's steps); then E10-4, previews, stats and variants with
        a base.
@@ -1073,10 +1077,11 @@ Last updated: 2026-10-28.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner:** ADR 0123's two (the graph file's name: `.graph`
-  recommended; the design as a whole). Settled 2026-10-22 (team decision): E10's four on
-  materials (one material file, variants with a base, numbers on graph nodes, where
-  generated Slang lives). Settled 2026-10-23 (team decision): ADR 0119's four, every recommendation.
+- **Questions open with the owner:** none. Settled 2026-10-28 (team decision): ADR
+  0123 accepted, its files `.mgraph`, graphs and shaders opened as files in tabs of
+  their own (no panel under the viewport). Settled 2026-10-22 (team decision): E10's
+  four on materials (one material file, variants with a base, numbers on graph nodes,
+  where generated Slang lives). Settled 2026-10-23 (team decision): ADR 0119's four, every recommendation.
   Settled 2026-10-22 (team decisions): ADR 0114's seven, every recommendation; Luau (E7)
   comes in the queue's order (E5-5, material slots, E6, then E7), its public API drafted
   meanwhile for the owner to sign off; meshes of several materials get material slots on

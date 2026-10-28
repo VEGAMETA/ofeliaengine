@@ -186,7 +186,7 @@ const MIXED: &str = "—";
 const MESSAGE_SECONDS: f32 = 4.0;
 
 /// The bottom bar's Profiler tab (E6-5).
-const PROFILER_TAB: usize = 6;
+const PROFILER_TAB: usize = 5;
 /// The bottom tab of the script debugger's panel (ADR 0119 E9-1b-3).
 const DEBUGGER_TAB: usize = 2;
 /// The bottom bar's Audio tab: the mixer (E11-1).
@@ -5500,7 +5500,6 @@ impl Editor {
                 "Debugger",
                 "Audio",
                 "Animation",
-                "Shader",
                 "Profiler",
             ],
             active_bottom: self.bottom,

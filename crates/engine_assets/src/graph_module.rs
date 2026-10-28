@@ -1,5 +1,5 @@
 //! A material graph made a Slang module (ADR 0123's E10-3c): where a material file names a
-//! `.graph` as its shader, the graph's module is generated into the project's cache and
+//! `.mgraph` as its shader, the graph's module is generated into the project's cache and
 //! compiled as a module is, by the player, the cook and the editor alike. The graph's own
 //! values (its texture nodes' images, its named numbers) are its material's defaults, under
 //! the material file's.
@@ -32,7 +32,7 @@ pub struct GraphModule {
 /// Whether `path` is a material graph's file.
 pub fn is_graph(path: &Path) -> bool {
     path.extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("graph"))
+        .is_some_and(|e| e.eq_ignore_ascii_case("mgraph"))
 }
 
 /// The module of the graph at `path` (as the material file resolves it), generated into
@@ -141,7 +141,7 @@ mod tests {
 
     fn moss(graph: AssetId, image: AssetId, extra: &str) -> String {
         format!(
-            "[graph version=1 id={graph}]\n\nmodel = \"lit\"\n\
+            "[mgraph version=1 id={graph}]\n\nmodel = \"lit\"\n\
              nodes[\"t\"].kind = \"texture\"\nnodes[\"t\"].param = \"bumps\"\n\
              nodes[\"t\"].texture = asset(\"textures/bumps.png\", {image})\n\
              nodes[\"nm\"].kind = \"normal_map\"\n\
@@ -161,9 +161,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("materials")).unwrap();
         let (graph, image) = (AssetId::new(), AssetId::new());
-        std::fs::write(dir.join("materials/moss.graph"), moss(graph, image, "")).unwrap();
+        std::fs::write(dir.join("materials/moss.mgraph"), moss(graph, image, "")).unwrap();
         let text = format!(
-            "[material version=2 id={}]\n\nshader = asset(\"materials/moss.graph\", {graph})\n\
+            "[material version=2 id={}]\n\nshader = asset(\"materials/moss.mgraph\", {graph})\n\
              type = \"GraphMaterial\"\nnumbers[\"roughness\"] = 0.3\nlook = Own\n",
             AssetId::new()
         );
@@ -202,7 +202,7 @@ mod tests {
         );
         // A graph that cannot be generated: said with its node.
         std::fs::write(
-            dir.join("materials/moss.graph"),
+            dir.join("materials/moss.mgraph"),
             moss(graph, image, "links[\"out.metallic\"] = \"gone.value\"\n"),
         )
         .unwrap();

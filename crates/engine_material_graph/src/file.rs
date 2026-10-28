@@ -1,9 +1,9 @@
-//! The `.graph` file (ADR 0123): a graph in the editor's grammar (ADR 0108), its id in its
+//! The `.mgraph` file (ADR 0123): a graph in the editor's grammar (ADR 0108), its id in its
 //! header, nodes keyed by short random ids, links keyed by the input they feed, written
 //! sorted so a diff shows what changed.
 //!
 //! ```text
-//! [graph version=1 id=7d2e5c0b9a4f41e3b8c6d5a4f3e2d1c0]
+//! [mgraph version=1 id=7d2e5c0b9a4f41e3b8c6d5a4f3e2d1c0]
 //!
 //! model = "lit"
 //! nodes["a3f9"].kind = "texture"
@@ -65,7 +65,7 @@ pub struct NodeFile {
 
 impl GraphFile {
     /// The kind in the file's header.
-    pub const KIND: &'static str = "graph";
+    pub const KIND: &'static str = "mgraph";
     /// The format's version.
     pub const VERSION: u32 = 1;
 
@@ -253,7 +253,7 @@ mod tests {
         let (g, paths, id) = moss();
         let text = GraphFile::of(&g).to_text(id, Some(&paths));
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], format!("[graph version=1 id={id}]"));
+        assert_eq!(lines[0], format!("[mgraph version=1 id={id}]"));
         for line in [
             "model = \"lit\"",
             "nodes[\"a3f9\"].kind = \"texture\"",
@@ -303,12 +303,12 @@ mod tests {
             .insert(String::from("outbase"), String::from("a3f9.rgba"));
         assert!(file.graph().unwrap_err().contains("outbase"));
         // A newer file, another kind of file.
-        let newer = text.replace("[graph version=1", "[graph version=2");
+        let newer = text.replace("[mgraph version=1", "[mgraph version=2");
         assert!(GraphFile::parse(&newer).is_err());
-        let other = text.replace("[graph version=1", "[material version=1");
+        let other = text.replace("[mgraph version=1", "[material version=1");
         assert!(GraphFile::parse(&other).is_err());
         // The database knows the file, its id inside.
-        let kind = engine_scene::AssetKind::of(std::path::Path::new("rocks/moss.graph"));
+        let kind = engine_scene::AssetKind::of(std::path::Path::new("rocks/moss.mgraph"));
         assert_eq!(kind, Some(engine_scene::AssetKind::Graph));
         assert!(engine_scene::AssetKind::Graph.own_id());
     }

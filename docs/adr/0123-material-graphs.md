@@ -1,11 +1,13 @@
 # 0123. Material graphs
 
-- Status: **Proposed (2026-10-28).** Follows the team's answers to the materials UX note's
+- Status: **Accepted (team decision, 2026-10-28):** the design as proposed (answer 2a);
+  the file's extension `.mgraph` (the owner's own choice over `.graph` and
+  `.materialgraph`); graphs open as files in tabs of their own, as code does, not in a
+  panel under the viewport (the owner: "шейдеры лучше без нижней панели просто
+  отдельными файлами"). It follows the team's answers to the materials UX note's
   questions (2026-10-22: one grammar for graph and function files, 1a; numbers
   parameters while a graph is open and compiled in at save, 3a, measured below; the
-  generated Slang only in the cache and packs, 4a). What it adds (the file's shape, the
-  node library's first set, the steps) is proposed; the questions at the end are the
-  team's.
+  generated Slang only in the cache and packs, 4a).
 - Date: 2026-10-28
 - Research: [`docs/research/material-graph.md`](../research/material-graph.md); UX:
   [`docs/research/ux/materials.md`](../research/ux/materials.md).
@@ -30,7 +32,7 @@ texture dropped from the dock becomes a node; each edit on the rock in about 0.2
 ### Where a graph lives
 
 - **a. Its own file,** named by material files where they name a module
-  (`shader = asset("moss.graph", …)`), so many material files share one graph as many
+  (`shader = asset("moss.mgraph", …)`), so many material files share one graph as many
   share one module. **Chosen:** a graph is a material type, not a material.
 - b. Inside the material file. Every instance would copy the graph, or one material would
   be the graph's and the rest its variants (E10-4's question, not this one's).
@@ -83,10 +85,10 @@ texture dropped from the dock becomes a node; each edit on the rock in about 0.2
 
 ## Decision
 
-### The file: `.graph`
+### The file: `.mgraph`
 
 ```text
-[graph version=1 id=7d2e5c0b9a4f41e3b8c6d5a4f3e2d1c0]
+[mgraph version=1 id=7d2e5c0b9a4f41e3b8c6d5a4f3e2d1c0]
 
 # Moss on the tops of rocks.
 model = "lit"
@@ -145,8 +147,9 @@ ports (Material Maker's way), so a new node is a few lines.
 
 ### The canvas
 
-The editor's own, its data apart from its view (reused by E12's state machines): in the
-Shader panel under the viewport (the UX note's layout); pan with the middle or right
+The editor's own, its data apart from its view (reused by E12's state machines): a graph
+opens in a tab of its own, as a code file does (the team's decision, 2026-10-28, over the
+UX note's panel under the viewport); pan with the middle or right
 button, zoom with the wheel, F to frame; nodes dragged, boxed, deleted, duplicated; a link
 dragged from a port to a port of a kind it can feed, Ctrl+drag yanking a port's links
 (egui-snarl's); Space at the pointer opens the node search (the palette's matcher), a link
@@ -163,9 +166,9 @@ autosaved.
 - **E10-3c:** the player and the cook: a material file naming a graph draws it (generated
   into the cache, compiled, reloaded when the graph changes); a golden shot of a graph's
   material on both GPUs.
-- **E10-3d:** the canvas: opening a `.graph` in the Shader panel, nodes, ports, links, pan,
-  zoom, selection, moves, deletes, undo; "Material: New Graph" (wired with the selected
-  object's own textures).
+- **E10-3d:** the canvas: opening a `.mgraph` in a tab of its own, nodes, ports, links,
+  pan, zoom, selection, moves, deletes, undo; "Material: New Graph" (wired with the
+  selected object's own textures).
 - **E10-3e:** the node search (Space, a link dropped in empty space), textures dropped from
   the dock, reroutes and frames (version 2).
 - **E10-3f:** live edits: the editing build while open, compiled in at save; errors on
@@ -219,11 +222,11 @@ autosaved.
   build, generated into one module and checked inside `forward.slang`; a misspelt
   function in a kind fails it at its line; the editing build's parameters as Slang lays
   them out (`albedo`, `_m`, `roughness`).
-- **Next:** the `.graph` file (E10-3b-2, the shape proposed above); the player and the
+- **Next:** the `.mgraph` file (E10-3b-2, the shape proposed above); the player and the
   cook (E10-3c), where the material inspector also skips fields starting with `_` (the
   editing build's numbers, `_unused`).
 
-## As built (E10-3b-2, 2026-10-28): the `.graph` file
+## As built (E10-3b-2, 2026-10-28): the `.mgraph` file
 
 Written in the shape this ADR proposes (its recommendation; cheap to change while no game
 has graphs).
@@ -231,7 +234,7 @@ has graphs).
 - **`engine_material_graph::file`:** `GraphFile` (the model by name, `nodes` by id,
   `links` by the input they feed) and `NodeFile` (`kind`, `at`, `value`, `param`,
   `texture`, `inputs`, `comment`), reflected and written by the editor's grammar
-  (`engine_scene::write_value`, `read_value`) under the header `[graph version=1 id=…]`;
+  (`engine_scene::write_value`, `read_value`) under the header `[mgraph version=1 id=…]`;
   `GraphFile::of(&graph)` and `graph()` go between the file and the graph in memory.
 - **What is written:** a constant's components as wide as it is (`value = [0.6]`), an
   input's as wide as the input (a dynamic input's once when its components are the same:
@@ -241,7 +244,7 @@ has graphs).
 - **A texture node's own image** (`Node::texture`, an asset reference written with its
   path): what the material shows until a material file gives the parameter one (the
   player's part, E10-3c). Nodes have a `comment` too.
-- **The database** knows `.graph` files (`AssetKind::Graph`, their id inside, as
+- **The database** knows `.mgraph` files (`AssetKind::Graph`, their id inside, as
   `.material` and `.mixer` files); the FileSystem dock shows them with the shader icon
   until the canvas (E10-3d).
 - **Tests:** a graph reads back what it writes (with its id and its texture's path); the
@@ -251,7 +254,7 @@ has graphs).
 
 ## As built (E10-3c, 2026-10-28): graphs drawn by the player
 
-- **`engine_assets::graph_module`:** where a material file's `shader` is a `.graph`,
+- **`engine_assets::graph_module`:** where a material file's `shader` is a `.mgraph`,
   `MaterialFile::typed` makes it a module: the graph read, generated in the saved build
   with the type `GraphMaterial`, written to `<project>/.ofelia/cache/graphs/<graph id>.slang`
   only when the text changed (an unchanged graph compiles nothing again; the folder is the
@@ -280,16 +283,12 @@ has graphs).
 - **Not yet:** a cook test of a graph's material (the cook takes the same path); the
   canvas (E10-3d).
 
-## Questions for the team
+## The team's answers (2026-10-28)
 
-1. **The graph file's name.** A material graph is a file of its own, as a Slang module is.
-   - a. `moss.graph`: short; E12's animation state machines take a name of their own.
-   - b. `moss.materialgraph`: says what it is, at a length.
-   - Recommendation: a.
-2. **This design as a whole** (the file's shape: nodes by short random ids, links keyed by
-   the input they feed; Slang's own type rules between ports; one crate generating the code
-   for the editor, the player and the cook; the first nodes; the steps).
-   - a. Accepted: E10-3b starts on it.
-   - b. Changes first (say which).
-   - Recommendation: a. Meanwhile E10-3b's code generator and node library, which do not
-     depend on the file's shape, can start.
+1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,
+   `.graph` and `.materialgraph`), its header `[mgraph version=1 id=…]`.
+2. **The design as a whole:** accepted (a).
+3. **Where a graph opens** (the owner's note with the answers): as a file, in a tab of its
+   own, as code does; no panel under the viewport for shaders or graphs. The bottom bar's
+   Shader placeholder goes. This replaces the materials UX note's sixth point (shader
+   code and graphs in a panel under the viewport).

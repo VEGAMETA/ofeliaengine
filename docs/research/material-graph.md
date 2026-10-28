@@ -70,7 +70,7 @@ ToonLiterals,ToonNumbers,WaterLiterals,WaterNumbers` (2026-10-28, `main` at 13e2
 1. **A graph is a material type,** as a module is: the player generates one Slang module
    from it (a type implementing `IMaterial`) and compiles it as it compiles a module, with
    the same reload, errors, PSO records and cook. A material file names the graph where it
-   names a module (`shader = asset("water.graph", …)`), its parameters by name as for a
+   names a module (`shader = asset("water.mgraph", …)`), its parameters by name as for a
    module's type.
 2. **The file** is in the editor's grammar (1a): nodes by short random ids (two people's new
    nodes never collide), each with its kind, place and values; links keyed by the input they
