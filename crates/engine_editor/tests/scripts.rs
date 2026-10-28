@@ -417,6 +417,11 @@ fn a_logpoint_logs_in_play_and_f9_stops_the_script_at_its_line() {
     }
     let values = game.breakpoint_note(5).unwrap_or_default();
     assert!(values.contains("t = "), "a local made since: {values}");
+    // The lines above it show what they assigned: the parameters on the function's line,
+    // `t` after line 3 (beside its breakpoint's hits).
+    for drawn in ["self = Self", "dt = 0.015625", "t = View"] {
+        assert!(game.text_at(drawn).is_some(), "`{drawn}` on the lines above the stop");
+    }
     tap(&mut game, 0x74, 0x3F);
     for _ in 0..3 {
         frame(&mut player, &mut game, &mut overlay);

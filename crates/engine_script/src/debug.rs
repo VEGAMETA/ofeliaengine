@@ -302,6 +302,10 @@ pub struct Frame {
     /// (ADR 0119; one with a breakpoint runs interpreted): told by a function with
     /// parameters showing no locals.
     pub native: bool,
+    /// The line its function begins on; none in a C function.
+    pub defined: Option<u32>,
+    /// Its function's parameters: its first locals.
+    pub params: u8,
 }
 
 /// How a stopped script goes on.
@@ -1352,6 +1356,8 @@ unsafe fn describe(
                 locals,
                 upvalues,
                 native,
+                defined: line.and(u32::try_from(ar.linedefined).ok().filter(|&l| l > 0)),
+                params: shape.nparams,
             });
         }
         if let Some(frame) = stopped.stack.first() {
@@ -2305,6 +2311,14 @@ return M
         );
         assert_eq!(named(&at.stack[1].locals), [("n", "1"), ("t", "table")]);
         assert!(at.stack.iter().all(|f| !f.native));
+        assert_eq!(
+            at.stack
+                .iter()
+                .map(|f| (f.defined, f.params))
+                .collect::<Vec<_>>(),
+            [(Some(3), 1), (Some(7), 1)],
+            "where their functions begin, and their parameters"
+        );
         // Once a line: the next error there takes its course without a stop.
         assert!(run_through(&fiber, &mut c, &[]).is_err());
         assert!(STOPS.take().is_empty());

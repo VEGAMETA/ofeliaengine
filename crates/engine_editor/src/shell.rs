@@ -147,6 +147,10 @@ pub enum NoteKind {
     Problem,
     /// The error a script stopped at (E9-1b-4).
     Error,
+    /// A value a line above the stopped one assigned (E9-1b-5a), dimmer than the code.
+    Value,
+    /// One that changed since the last stop: lit.
+    Changed,
 }
 
 /// What the Debugger panel's header buttons ask (ADR 0119 E9-1b-3).
@@ -183,8 +187,9 @@ pub struct DebuggerView<'a> {
     pub frames: &'a [(&'a str, &'a str)],
     /// The frame whose variables are shown.
     pub frame: usize,
-    /// Its variables: a section's title (`LOCALS`, no value) or a name and its value.
-    pub variables: &'a [(&'a str, &'a str)],
+    /// Its variables: a section's title (`LOCALS`, no value) or a name and its value, and
+    /// whether it changed since the last stop (lit).
+    pub variables: &'a [(&'a str, &'a str, bool)],
     /// Every breakpoint.
     pub breakpoints: &'a [BreakpointRow<'a>],
 }
@@ -1607,6 +1612,8 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
                 NoteKind::Said => p.logged,
                 NoteKind::Problem => p.warning,
                 NoteKind::Error => p.error,
+                NoteKind::Value => p.text_dim,
+                NoteKind::Changed => p.warning,
             };
             ui.mono_text_node("break note", style, said, CODE_TEXT, color);
             ui.pop_id();
@@ -3803,14 +3810,15 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
             ui.container("variables", column(Size::Grow(1.0)), |ui| {
                 text(ui, "title", "VARIABLES", SMALL, p.text_dim);
                 ui.scroll_column("values", |ui| {
-                    for (i, &(name, value)) in view.variables.iter().enumerate() {
+                    for (i, &(name, value, changed)) in view.variables.iter().enumerate() {
                         ui.push_id(i as u64);
                         ui.container("variable", row, |ui| {
                             if value.is_empty() {
                                 text(ui, "section", name, SMALL, p.text_dim);
                             } else {
                                 text(ui, "name", name, SMALL, p.text);
-                                text(ui, "value", value, SMALL, p.logged);
+                                let color = if changed { p.warning } else { p.logged };
+                                text(ui, "value", value, SMALL, color);
                             }
                         });
                         ui.pop_id();

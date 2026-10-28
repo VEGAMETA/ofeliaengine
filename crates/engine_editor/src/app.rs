@@ -1962,6 +1962,9 @@ struct Editor {
     debug_text: DebugText,
     /// Which errors stop a script in Play (E9-1b-4), kept in the session.
     error_stops: ErrorStops,
+    /// The last stop's module, its function's first line and its locals, for what changed
+    /// at the next (E9-1b-5a).
+    last_values: Option<(String, Option<u32>, Vec<engine_app::scripts::Variable>)>,
     /// A break at the next script line waits for a hook to run.
     break_pending: bool,
     /// When the open scripts' files were last compared with what was read.
@@ -2730,6 +2733,7 @@ impl Editor {
                 uncaught: true,
                 caught: false,
             },
+            last_values: None,
             break_pending: false,
             scripts_checked: Instant::now(),
             checkers: Checkers::default(),
@@ -4019,11 +4023,11 @@ impl Editor {
             .iter()
             .map(|(f, p)| (f.as_str(), p.as_str()))
             .collect();
-        let debug_variables: Vec<(&str, &str)> = self
+        let debug_variables: Vec<(&str, &str, bool)> = self
             .debug_text
             .variables
             .iter()
-            .map(|(n, v)| (n.as_str(), v.as_str()))
+            .map(|(n, v, c)| (n.as_str(), v.as_str(), *c))
             .collect();
         let debug_breakpoints: Vec<crate::shell::BreakpointRow<'_>> = self
             .debug_text
@@ -8796,6 +8800,67 @@ impl Editor {
                 };
                 shown.break_notes.push((line, column, start, end, kind));
             }
+            // The lines above the shown frame's, in its function (E9-1b-5a): what each
+            // assigns after it, dimmer than the code, lit where it changed since the last
+            // stop; its function's line has its parameters.
+            if let Some(stop) = self.stop.as_ref()
+                && let Some(f) = stop.stopped.stack.get(self.debug_frame)
+                && stop.files.get(self.debug_frame) == Some(file)
+                && let (Some(at), Some(defined)) = (f.line, f.defined)
+            {
+                let changed = |name: &str| {
+                    self.debug_frame == 0 && stop.changed.iter().any(|c| c == name)
+                };
+                for line in shown.first..shown.last {
+                    let Some(saved) = doc.saved_line(line).and_then(|l| u32::try_from(l + 1).ok())
+                    else {
+                        continue;
+                    };
+                    if saved < defined || saved >= at {
+                        continue;
+                    }
+                    // After the line's text, the checker's message and its breakpoint's.
+                    let text = doc.line(line);
+                    let mut column = shown.notes.iter().find(|n| n.0 == line).map_or_else(
+                        || char_column(text, text.len()) + 4,
+                        |n| n.1 + shown.messages[n.2..n.3].chars().count() + 3,
+                    );
+                    for n in shown.break_notes.iter().filter(|n| n.0 == line) {
+                        column = column.max(n.1 + shown.break_text[n.2..n.3].chars().count() + 3);
+                    }
+                    let mut put = |name: &str, value: &str| {
+                        let start = shown.break_text.len();
+                        shown.break_text.push_str(name);
+                        shown.break_text.push_str(" = ");
+                        shown.break_text.push_str(value);
+                        let end = shown.break_text.len();
+                        let kind = if changed(name) {
+                            crate::shell::NoteKind::Changed
+                        } else {
+                            crate::shell::NoteKind::Value
+                        };
+                        shown.break_notes.push((line, column, start, end, kind));
+                        column += shown.break_text[start..end].chars().count() + 3;
+                    };
+                    if saved == defined {
+                        for v in f.locals.iter().take(usize::from(f.params)) {
+                            put(&v.name, &v.value);
+                        }
+                    } else {
+                        assigned_names(text, |name| {
+                            let v = f
+                                .locals
+                                .iter()
+                                .rev()
+                                .find(|v| v.name == name)
+                                .or_else(|| f.upvalues.iter().find(|v| v.name == name));
+                            if let Some(v) = v {
+                                put(&v.name, &v.value);
+                            }
+                        });
+                    }
+                }
+            }
             // A new breakpoint being made shows where it goes.
             if let Some(e) = self
                 .break_edit
@@ -9638,15 +9703,20 @@ impl Editor {
                                  (a breakpoint in it shows them)",
                             ),
                             String::new(),
+                            false,
                         ));
                     }
                     for (title, vars) in [("LOCALS", &f.locals), ("UPVALUES", &f.upvalues)] {
                         if vars.is_empty() {
                             continue;
                         }
-                        text.variables.push((String::from(title), String::new()));
+                        text.variables.push((String::from(title), String::new(), false));
                         for v in vars {
-                            text.variables.push((v.name.clone(), v.value.clone()));
+                            // Lit where it changed since the last stop (the stopped frame).
+                            let changed = self.debug_frame == 0
+                                && title == "LOCALS"
+                                && stop.changed.iter().any(|c| *c == v.name);
+                            text.variables.push((v.name.clone(), v.value.clone(), changed));
                         }
                     }
                 }
@@ -9768,6 +9838,34 @@ impl Editor {
             Some(stop) => stop.mouse,
             None => self.play.as_ref().is_some_and(|p| p.mouse),
         };
+        // What changed since the last stop in the same function.
+        let top = stopped.stack.first();
+        let changed = match (&self.last_values, top) {
+            (Some((module, defined, old)), Some(f))
+                if *module == stopped.module && *defined == f.defined =>
+            {
+                f.locals
+                    .iter()
+                    .filter(|v| {
+                        old.iter()
+                            .rev()
+                            .find(|o| o.name == v.name)
+                            .is_some_and(|o| o.value != v.value)
+                    })
+                    .map(|v| v.name.clone())
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        self.last_values = top.map(|f| (stopped.module.clone(), f.defined, f.locals.clone()));
+        let files = stopped
+            .stack
+            .iter()
+            .map(|f| match f.line {
+                Some(_) => PathBuf::from(engine_app::scripts::module_file(&f.source)),
+                None => PathBuf::new(),
+            })
+            .collect();
         self.set_game_mouse(false);
         let line = stopped.line.saturating_sub(1) as usize;
         let shown = file.to_string_lossy().replace('\\', "/");
@@ -9786,6 +9884,8 @@ impl Editor {
             line,
             values,
             mouse,
+            files,
+            changed,
         });
         self.open_script(world, &file, Some((line + 1, 1)));
         if let Some(e) = &stopped.error {
@@ -15240,6 +15340,7 @@ impl<G> EditorGame<G> {
         // A stage stopped at a breakpoint ends first, its stopped call failing, before the
         // game goes and the world is put back (ADR 0119).
         player.end_script_stop();
+        self.shared.borrow_mut().last_values = None;
         self.game = None;
         self.failed = None;
         self.stepping = false;
@@ -16656,6 +16757,11 @@ struct StopShown {
     values: String,
     /// The game had the mouse: it gets it back when the script goes on.
     mouse: bool,
+    /// Each frame's script file, relative to the project (empty for the engine's).
+    files: Vec<PathBuf>,
+    /// The stopped frame's locals whose values changed since the last stop in its
+    /// function (E9-1b-5a): lit.
+    changed: Vec<String>,
 }
 
 /// The Debugger panel's texts (ADR 0119 E9-1b-3), kept between frames.
@@ -16666,7 +16772,7 @@ struct DebugText {
     key: Option<(u64, usize, u64, Option<u64>, bool)>,
     header: String,
     frames: Vec<(String, String)>,
-    variables: Vec<(String, String)>,
+    variables: Vec<(String, String, bool)>,
     breakpoints: Vec<DebugBreakpoint>,
 }
 
@@ -16691,6 +16797,101 @@ fn cut(text: &str, chars: usize) -> String {
         out.push('\u{2026}');
     }
     out
+}
+
+/// The names line `line` of Luau assigns, given to `found` in order (E9-1b-5a): `local a,
+/// b = …` and `local a`, `a = …` and `a, b = …` (compound ones too: `a += …`), `for i = …`
+/// and `for k, v in …`. A string's and a comment's text is not code, and an `=` inside
+/// brackets is a table's field.
+fn assigned_names<'a>(line: &'a str, mut found: impl FnMut(&'a str)) {
+    let b = line.as_bytes();
+    let (mut depth, mut quote, mut eq, mut end) = (0i32, None, None, b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 1;
+            } else if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' | b'\'' | b'`' => quote = Some(c),
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                end = i;
+                break;
+            }
+            // A long string: the rest is not read.
+            b'[' if matches!(b.get(i + 1), Some(b'[' | b'=')) => {
+                end = i;
+                break;
+            }
+            b'(' | b'{' | b'[' => depth += 1,
+            b')' | b'}' | b']' => depth -= 1,
+            b'=' if depth == 0 => {
+                if b.get(i + 1) == Some(&b'=') {
+                    i += 2;
+                    continue;
+                }
+                if i == 0 || !matches!(b[i - 1], b'~' | b'<' | b'>' | b'=') {
+                    eq = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let code = line[..end].trim_start();
+    let left = match eq {
+        Some(at) => line[..at]
+            .trim_end_matches(|c| matches!(c, '+' | '-' | '*' | '/' | '%' | '^' | '.'))
+            .trim_start(),
+        None => {
+            if let Some(rest) = code.strip_prefix("for ")
+                && let Some(k) = rest.find(" in ")
+            {
+                names(&rest[..k], &mut found);
+            } else if code.starts_with("local ") {
+                names_after_local(code, &mut found);
+            }
+            return;
+        }
+    };
+    if let Some(rest) = left.strip_prefix("for ") {
+        names(rest, &mut found);
+    } else if left.starts_with("local ") {
+        names_after_local(left, &mut found);
+    } else {
+        names(left, &mut found);
+    }
+}
+
+/// [`assigned_names`]'s names after `local` (none for `local function`).
+fn names_after_local<'a>(code: &'a str, found: &mut impl FnMut(&'a str)) {
+    let rest = code["local ".len()..].trim_start();
+    if !rest.starts_with("function") {
+        names(rest, found);
+    }
+}
+
+/// The names of a list (`a, b: number`), their types left out; anything else in it is not
+/// a name.
+fn names<'a>(list: &'a str, found: &mut impl FnMut(&'a str)) {
+    for part in list.split(',') {
+        let name = part.split(':').next().unwrap_or_default().trim();
+        let is_name = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if is_name && !matches!(name, "local" | "function" | "return" | "then" | "do" | "end") {
+            found(name);
+        }
+    }
 }
 
 /// A file's name, the last part of its path (`scripts/npc/guard.luau` is `guard.luau`).
@@ -17495,6 +17696,39 @@ mod tests {
     }
 
     reflect_component!(Mover);
+
+    /// The names a line assigns (E9-1b-5a's values in the code).
+    fn assigned(line: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        assigned_names(line, |n| out.push(n));
+        out
+    }
+
+    #[test]
+    fn a_lines_assigned_names_are_read_past_strings_comments_and_fields() {
+        assert_eq!(assigned("    local t = self.Transform"), ["t"]);
+        assert_eq!(assigned("local a, b: number = 1, 2"), ["a", "b"]);
+        assert_eq!(assigned("local declared"), ["declared"]);
+        assert_eq!(assigned("x += 1  -- y = 2"), ["x"]);
+        assert_eq!(assigned("name ..= \"=\""), ["name"]);
+        assert_eq!(assigned("a, b = b, a"), ["a", "b"]);
+        assert_eq!(assigned("for i = 1, 10 do"), ["i"]);
+        assert_eq!(assigned("for key, value in pairs(t) do"), ["key", "value"]);
+        // Not assignments, or not to a name.
+        for line in [
+            "if a == b then",
+            "while a <= 10 do",
+            "return a ~= b",
+            "f({ speed = 2 })",
+            "t.x = 1",
+            "self.speed = 3",
+            "local function helper(x)",
+            "print(\"a = b\")",
+            "-- c = 4",
+        ] {
+            assert!(assigned(line).is_empty(), "{line}");
+        }
+    }
 
     fn folder(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ofelia-editor-{name}-{}", std::process::id()));
