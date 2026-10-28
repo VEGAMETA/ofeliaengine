@@ -27,6 +27,7 @@ mod import;
 pub mod input;
 pub mod inspector;
 mod material;
+mod mixer;
 mod outline;
 mod output;
 pub mod paint;

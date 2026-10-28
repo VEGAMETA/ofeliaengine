@@ -298,6 +298,73 @@ fn a_sound_picked_in_the_dock_plays_on_the_editors_own_bus() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn a_bus_added_in_the_mixer_panel_is_the_players_at_once_and_its_file_once_saved() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-mixer-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("main.scene"),
+        format!("[scene version=3 id={}]\n", AssetId::new()),
+    )
+    .unwrap();
+    let settings = PlayerSettings {
+        title: String::from("editor mixer test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    frame(&mut player, &mut game, &mut overlay);
+    let buses = |player: &mut Player| -> Vec<String> {
+        let mixer = player.world_mut().resource::<engine_app::Mixer>().unwrap();
+        mixer.buses().map(str::to_owned).collect()
+    };
+    assert_eq!(
+        buses(&mut player),
+        ["master", "effects", "music", "ui", "voice"]
+    );
+    // Alt+A's command, then Add Bus: the player's mixer has it by the next frame.
+    assert!(game.run_command(player.world_mut(), "view.mixer"));
+    assert!(game.run_command(player.world_mut(), "audio.add_bus"));
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(
+        buses(&mut player).contains(&String::from("bus")),
+        "{:?}",
+        buses(&mut player)
+    );
+    assert!(!dir.join("main.mixer").exists(), "unsaved: no file yet");
+    // Ctrl+S writes it with the scene; undone, the player's mixer loses the bus again.
+    assert!(game.run_command(player.world_mut(), "file.save"));
+    let written = engine_app::MixerFile::load(&dir.join("main.mixer")).unwrap();
+    assert!(written.buses.contains_key("bus"));
+    assert!(game.run_command(player.world_mut(), "edit.undo"));
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(!buses(&mut player).contains(&String::from("bus")));
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A box of one meter standing on its origin, in one tint: what a bake makes a model of.
 fn box_brush() -> BakedBrush {
     let mut b = BakedBrush {

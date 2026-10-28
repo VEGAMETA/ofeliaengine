@@ -230,6 +230,12 @@ impl MixerFile {
         feeds
     }
 
+    /// Whether `name` is one the player keeps for a bus of its own (`master`, `reverb`,
+    /// `editor preview`, names ending `.world`), or empty: no bus of a layout is called so.
+    pub fn is_kept(name: &str) -> bool {
+        kept(name.trim())
+    }
+
     /// What is wrong with the layout, for the editor and the log: names the player keeps,
     /// parents the file lacks or the player keeps, parents that loop.
     pub fn problems(&self) -> Vec<String> {

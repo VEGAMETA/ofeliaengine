@@ -265,7 +265,7 @@ impl AssetKind {
     /// Whether files of the kind carry their id inside (ours), not in a `.meta` beside
     /// them.
     pub fn own_id(self) -> bool {
-        matches!(self, Self::Scene | Self::Material)
+        matches!(self, Self::Scene | Self::Material | Self::Mixer)
     }
 }
 

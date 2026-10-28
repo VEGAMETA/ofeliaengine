@@ -796,9 +796,15 @@ Last updated: 2026-10-28.
     out again live (`Player::set_mixer_layout`, and when the file is written), what plays
     going on; the game's `Mixer` volumes multiply the faders; `AudioSettings::buses` is
     gone.
+  - **E11-1b-1, the mixer's strips** (#PR, ADR 0107's as-built): the Audio tab (Alt+A), a
+    strip per bus with its fader (room near 0 dB, one undo step a drag) and the picked
+    bus in the inspector (name, output without loops, gain, balance, voices, reverb);
+    + Bus and ×; each change a file step of the one history, heard by the player the next
+    frame; Ctrl+S writes `main.mixer`.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-1b, the mixer panel (the Audio tab's strips) on `main.mixer`. Then E11-2,
-       effects and sends,
+    1. E11-1b-2, the mixer's meters (peaks held, clip lights), solo, mute and Monitor, and
+       the layout's autosave; then E11-1b-3, edits in Play marked and taken back. Then
+       E11-2, effects and sends,
        E11-4b, handles and hearing in place, and E11-3's last part: sounds dropped on the
        viewport, the tree or an entity, and the sound and bus fields.
   - **Settled (2026-10-28, team decisions, every recommendation):**
