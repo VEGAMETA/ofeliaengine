@@ -279,6 +279,76 @@ pub fn set_thread_name(name: &str) {
     let _ = name;
 }
 
+/// A zone's place made while the program runs, where [`zone!`] takes a literal: a script's
+/// hook (`script Door.on_tick`, ADR 0114 §11). Made once a place and kept for the
+/// process's life, then free to open ([`Place::zone`]). Nothing without the `tracy`
+/// feature.
+#[derive(Clone, Copy)]
+pub struct Place {
+    #[cfg(feature = "tracy-base")]
+    loc: &'static tracy_client::SpanLocation,
+}
+
+impl Place {
+    /// The place named `name`, in file `file` at `line`. Its texts are kept for the
+    /// process's life: make one a place, not one a call. Interior NUL characters are
+    /// removed.
+    #[must_use]
+    pub fn new(name: &str, file: &str, line: u32) -> Self {
+        #[cfg(feature = "tracy-base")]
+        {
+            let text = |s: &str| {
+                std::ffi::CString::new(s.replace('\0', ""))
+                    .unwrap_or_default()
+                    .into_raw()
+                    .cast_const()
+                    .cast::<u8>()
+            };
+            let loc = tracy_client::internal::make_span_location(
+                "script::f",
+                text(name),
+                text(file),
+                line,
+            );
+            Self {
+                loc: Box::leak(Box::new(loc)),
+            }
+        }
+        #[cfg(not(feature = "tracy-base"))]
+        {
+            let _ = (name, file, line);
+            Self {}
+        }
+    }
+
+    /// Opens a zone here until the value returned is dropped; nothing while no profiler
+    /// runs.
+    #[inline]
+    pub fn zone(self) -> PlaceZone {
+        PlaceZone {
+            #[cfg(feature = "tracy-base")]
+            _zone: __private::Zone::new(self.loc),
+        }
+    }
+}
+
+/// A zone [`Place::zone`] opened, ended when dropped.
+#[must_use]
+pub struct PlaceZone {
+    #[cfg(feature = "tracy-base")]
+    _zone: __private::Zone,
+}
+
+/// Whether the profiler runs (Tracy's client started): what [`Place`]s are made for.
+/// Always `false` without the `tracy` feature.
+#[inline]
+pub fn running() -> bool {
+    #[cfg(feature = "tracy-base")]
+    return tracy_client::Client::running().is_some();
+    #[cfg(not(feature = "tracy-base"))]
+    return false;
+}
+
 /// Whether a profiler is connected right now. Always `false` without the `tracy`
 /// feature.
 pub fn is_connected() -> bool {

@@ -249,6 +249,28 @@ fn new_script_is_loaded_by_the_host_and_attached_and_attached_scripts_run_in_pla
     assert!(game.playing());
     let turned = rotation(&mut player).angle_between(Quat::IDENTITY);
     assert!(turned > 0.2, "the door turned {turned} rad");
+    // The profiler's panel: each script's costs a frame (ADR 0114 §11), taken every half
+    // second while it is open in Play.
+    assert!(game.run_command(player.world_mut(), "view.profiler"));
+    let since = std::time::Instant::now();
+    let row = loop {
+        frame(&mut player, &mut game, &mut overlay);
+        let rows = game.profiler_scripts();
+        if let Some((_, costs)) = rows.into_iter().find(|(name, _)| name == "EditorSpin") {
+            break costs;
+        }
+        assert!(since.elapsed().as_secs() < 10, "no row for EditorSpin");
+    };
+    // 64 ticks a second over frames of 1/60 s: about 1.07 calls of its on_tick a frame.
+    let calls: f64 = row
+        .split(" · ")
+        .nth(1)
+        .and_then(|c| c.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap();
+    assert!((0.8..1.4).contains(&calls), "{row}");
+    assert!(row.contains(" µs · ") && row.ends_with('B'), "{row}");
+    assert!(game.run_command(player.world_mut(), "view.profiler"));
     assert!(game.run_command(player.world_mut(), "play.stop"));
     frame(&mut player, &mut game, &mut overlay);
     frame(&mut player, &mut game, &mut overlay);

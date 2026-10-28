@@ -3374,6 +3374,7 @@ impl Editor {
                 bars,
                 stages,
                 passes,
+                scripts,
             } = &mut self.profiler_text;
             header.clear();
             if let Some((cpu, gpu)) = self.profile.latest() {
@@ -3407,6 +3408,40 @@ impl Editor {
                 };
                 (name, time)
             }));
+            // The scripts' costs a frame, over the half second before.
+            scripts.clear();
+            let frames = f64::from(self.profile.script_frames);
+            if frames > 0.0 {
+                scripts.extend(
+                    self.profile
+                        .scripts
+                        .iter()
+                        .take(crate::profile::LISTED)
+                        .map(|s| {
+                            let us = s.nanos as f64 / 1e3 / frames;
+                            let calls = s.calls as f64 / frames;
+                            let bytes = s.bytes as f64;
+                            let memory = if bytes < 1024.0 {
+                                format!("{bytes:.0} B")
+                            } else if bytes < 1024.0 * 1024.0 {
+                                format!("{:.1} KB", bytes / 1024.0)
+                            } else {
+                                format!("{:.1} MB", bytes / (1024.0 * 1024.0))
+                            };
+                            let time = if us < 10.0 {
+                                format!("{us:.1} µs")
+                            } else {
+                                format!("{us:.0} µs")
+                            };
+                            let calls = match calls {
+                                c if (c - 1.0).abs() < 0.05 => String::from("1 call"),
+                                c if (c - c.round()).abs() < 0.05 => format!("{c:.0} calls"),
+                                c => format!("{c:.1} calls"),
+                            };
+                            (s.name.clone(), format!("{time} · {calls} · {memory}"))
+                        }),
+                );
+            }
         }
         // The History (E6-4), while the scene dock shows it.
         if self.history_shown {
@@ -4077,12 +4112,19 @@ impl Editor {
             .iter()
             .map(|(n, t)| (*n, t.as_str()))
             .collect();
+        let script_rows: Vec<(&str, &str)> = self
+            .profiler_text
+            .scripts
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.as_str()))
+            .collect();
         let profiler_view =
             (self.bottom == Some(PROFILER_TAB)).then(|| crate::shell::ProfilerView {
                 header: &self.profiler_text.header,
                 bars: &self.profiler_text.bars,
                 stages: &stage_rows,
                 passes: &pass_rows,
+                scripts: &script_rows,
             });
         let debug_frames: Vec<(&str, &str)> = self
             .debug_text
@@ -15958,6 +16000,15 @@ impl<G> EditorGame<G> {
     fn play_frame(&mut self, player: &mut Player) {
         self.evaluate_frame(player);
         self.shared.borrow_mut().dap_frame(player);
+        // The game's scripts, timed while the profiler's panel shows them in Play (ADR 0114
+        // §11). At a stop the stage holds them, and their rows stay as they were.
+        if player.script_stop().is_none() {
+            let mut shared = self.shared.borrow_mut();
+            let watched = shared.bottom == Some(PROFILER_TAB) && shared.play.is_some();
+            shared
+                .profile
+                .watch_scripts(player.scripts_mut(), watched, Instant::now());
+        }
         // The game's window: closed by its button, Stop; ejected or not, the view there
         // or in the viewport.
         if player.view_window_close_requested() {
@@ -16525,6 +16576,12 @@ impl<G> EditorGame<G> {
             .filter(|n| n.0 + 1 == line)
             .map(|n| shown.break_text[n.2..n.3].to_owned())
             .collect()
+    }
+
+    /// The profiler panel's scripts as their rows read (the component or system, and its
+    /// costs a frame); for tests.
+    pub fn profiler_scripts(&self) -> Vec<(String, String)> {
+        self.shared.borrow().profiler_text.scripts.clone()
     }
 
     /// The Debugger panel's header as it reads (what stopped, where, the entity and the

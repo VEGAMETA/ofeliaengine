@@ -586,6 +586,25 @@ A few things allocate by their nature:
 - a `physics.overlap_sphere` loop (its iterator);
 - an enum field written by its name.
 
+### Measuring your scripts
+
+**The editor's profiler** (the bottom bar's Profiler tab, "View: Profiler") lists the
+game's scripts while it plays, the costliest first, under **Scripts per frame**: each
+component and system with its hooks' time a frame, their calls a frame and the memory it
+holds, averaged over the last half second (`Door  12.5 µs · 40 calls · 3.2 KB`).
+- **The time** is the hooks' whole time, the engine's calls they make included. The time
+  a breakpoint held one stopped is left out.
+- **The memory** is what its hooks allocated since the panel opened that the collector has
+  not freed yet. Garbage counts until it is collected, so a script that makes a table or a
+  `quat` every tick shows a saw. What its module made when it loaded is not counted.
+- Up to 254 scripts are told apart; those past them share the last count.
+- Nothing is measured while the panel is closed; a hook then pays one check for it. While
+  it is open, each hook costs about 0.07 µs more.
+
+**Tracy** (the profiling build, [profiling.md](profiling.md)) has a zone for every call of
+a hook, named after its component and hook: `script Door.on_tick`, `script Door.open` for a
+message's hook, `script SpinSystem.on_tick` for a system's.
+
 ## Types: in the editor and in VS Code
 
 The editor knows the engine's API and your components: it underlines a wrong field or a

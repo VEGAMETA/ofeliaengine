@@ -1608,3 +1608,54 @@ there, and see the script's file in the inspector.
   `load_scene` and the script host all read the project's folder. They move to packs
   together, with the one-button build (ADR 0107 §7's E14).
 - **Scripting v1 is complete** with this step.
+
+## As built (2026-10-28): scripts in the profiler
+
+§11 promised a Tracy zone per hook and each script's time and allocations in the editor's
+profiler. Tracy had only the stages' zones (`scripts::tick`), and the editor nothing.
+
+- **Every hook goes through one call** (`call_hook` in `engine_app::scripts`): an
+  instance's hooks (start, tick, frame, stop, touch, untouch, load, a message's or a
+  timer's) and the systems'. It also tells the debugger whose hook runs (ADR 0119 E9-4a).
+- **A zone a hook in Tracy:** `script Door.on_tick`, in its script's file.
+  - Tracy's macros take literal names, so `engine_profiler::Place` makes a place at run
+    time: its texts and Tracy's source location are made once a hook and kept for the
+    process's life. Each component and system keeps its hooks' places; a message's hooks
+    are kept by name.
+  - Opened only while Tracy runs (`engine_profiler::running()`); without the `tracy`
+    feature the check is a constant.
+- **The editor's profiler watches the scripts while its panel is open in Play**
+  (`Scripts::set_profiling`, a thread-local):
+  - **Time:** each hook's, counted with its calls per component or system. The time a stop
+    waited is taken out: `engine_script::waited()` counts the nanoseconds the stop handler
+    held the thread.
+  - **Memory:** Luau's memory categories. Each component and system has one (1 to 255,
+    those past the 254th sharing the last), set on the VM's main thread and on the
+    debugger's hook thread around each of its hooks and put back after, so a hook a hook
+    runs counts its own. Luau keeps an object's category, so its bytes leave the count
+    when it is freed: the panel shows what the script's hooks made and still hold,
+    garbage until collected included. What a module made when it loaded is not counted.
+  - The editor takes the counts every half second (`Scripts::take_profile`, its rows'
+    texts reused) and shows them a frame under "Scripts per frame", the costliest first.
+- **What it costs** (`measure_hooks_and_views`, ref-1, release, medians of 51 ticks;
+  `docs/perf/history.md`):
+  - not watched, against `main` (four alternating runs each): an empty `on_tick` 0.150 →
+    0.155 µs (a thread-local read, a larger call); the scenes no slower (1,000 doors 0.68
+    → 0.62 ms, 10,000 spinners a hook each 3.04-3.13 → 3.01-3.04 ms: code layout);
+  - watched: 0.04 µs a hook (an empty `on_tick` 0.157 → 0.197 µs; 10,000 spinners a hook
+    each 3.0 → 3.38 ms a tick). The first version took 0.07 µs: it looked up the
+    debugger's hook thread in mlua's app data around every hook; the VM now keeps its
+    pointer.
+- **Not done:**
+  - the time is a hook's whole time, the hooks it runs included (rare: a hook's
+    `world.instantiate` starts the new instance's at the next tick);
+  - allocations are counted as bytes held, not as allocations made;
+  - a row does not open its script yet.
+- **Tests:**
+  - engine_script: a category counts what was made under it until it is freed; the time
+    a stop waits is counted;
+  - the host: hooks counted with their time and each script's memory while watched,
+    nothing while not, the counts starting again when taken; a hook's place made once,
+    a message's kept by name;
+  - the editor: Play with a spinning door and the panel open shows its row (about 1.07
+    calls a frame: 64 ticks a second over frames of 1/60 s).

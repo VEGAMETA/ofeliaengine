@@ -1,15 +1,20 @@
 //! The profiler's first panel (ADR 0107 E6-5; CLAUDE.md §14): the last frames' CPU and GPU
-//! times, the latest frame's CPU stages (`engine_app::FrameReport`) and its GPU passes
-//! (the frame graph's timestamps, `RenderGraph::gpu_pass_times`).
+//! times, the latest frame's CPU stages (`engine_app::FrameReport`), its GPU passes (the
+//! frame graph's timestamps, `RenderGraph::gpu_pass_times`) and the game's scripts (ADR
+//! 0114 §11: each component's and system's hooks, their time and memory).
 
 use engine_app::FrameReport;
+use engine_app::scripts::{ScriptProfile, Scripts};
 use engine_render::graph::PassTime;
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 /// The frames kept for the graph.
 pub(crate) const FRAMES: usize = 120;
 /// The stages and passes listed, the longest first (what the panel's height holds).
 pub(crate) const LISTED: usize = 9;
+/// How often the scripts' costs are taken: a script's are averaged over that time.
+const SCRIPTS_EVERY: Duration = Duration::from_millis(500);
 
 /// The panel's text, made with the frame while it is open: the header, the bars (each
 /// frame's CPU and GPU shares of the graph's height, and whether it was over a 60 Hz
@@ -20,6 +25,8 @@ pub(crate) struct ProfilerText {
     pub(crate) bars: Vec<(f32, f32, bool)>,
     pub(crate) stages: Vec<(&'static str, String)>,
     pub(crate) passes: Vec<(&'static str, String)>,
+    /// The scripts' rows: the component or system, and its costs a frame.
+    pub(crate) scripts: Vec<(String, String)>,
 }
 
 /// The frames as the panel shows them.
@@ -32,6 +39,14 @@ pub(crate) struct Profile {
     /// The latest measured GPU frame's passes: name, microseconds and how many of that
     /// name (a bloom's levels are one pass each), the longest first.
     pub(crate) passes: Vec<(&'static str, f32, u32)>,
+    /// The scripts' costs taken last, the longest first, and the frames they were over
+    /// (0: none yet).
+    pub(crate) scripts: Vec<ScriptProfile>,
+    pub(crate) script_frames: u32,
+    /// The frames watched since the scripts' costs were taken, and when they were (`None`
+    /// while they are not watched).
+    counting: u32,
+    taken: Option<Instant>,
 }
 
 impl Profile {
@@ -85,6 +100,37 @@ impl Profile {
                 b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal)
             });
             self.passes.truncate(LISTED);
+        }
+    }
+
+    /// The game's scripts after a frame, timed while `watched` (the panel open while the
+    /// game plays; ADR 0114 §11): their costs taken every half second, over the frames
+    /// since.
+    pub(crate) fn watch_scripts(
+        &mut self,
+        mut scripts: Option<&mut Scripts>,
+        watched: bool,
+        now: Instant,
+    ) {
+        if let Some(scripts) = scripts.as_deref_mut() {
+            scripts.set_profiling(watched);
+        }
+        let (Some(scripts), true) = (scripts, watched) else {
+            self.scripts.clear();
+            self.taken = None;
+            return;
+        };
+        self.counting += 1;
+        match self.taken {
+            Some(t) if now.duration_since(t) < SCRIPTS_EVERY => {}
+            taken => {
+                scripts.take_profile(&mut self.scripts);
+                self.scripts.sort_by(|a, b| b.nanos.cmp(&a.nanos));
+                // The first frames watched were not timed.
+                let frames = core::mem::take(&mut self.counting);
+                self.script_frames = if taken.is_some() { frames } else { 0 };
+                self.taken = Some(now);
+            }
         }
     }
 
