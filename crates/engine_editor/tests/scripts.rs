@@ -122,6 +122,7 @@ fn player(dir: &Path) -> Option<(Player, PlayerSettings)> {
         },
         scene: Some("main.scene".into()),
         project: Some(dir.to_path_buf()),
+        debuggable_scripts: true,
         process_setup: false,
         pipeline_cache: Some(None),
         warm_up: false,
@@ -353,6 +354,27 @@ fn a_logpoint_logs_in_play_and_f9_stops_the_script_at_its_line() {
         values.starts_with("self = ") && values.contains("dt = "),
         "{values}"
     );
+    // F10 steps to the next line (the logpoint's), then to the hook's end; F5 goes on, and
+    // the next tick stops at the breakpoint again.
+    for line in [4, 5] {
+        tap(&mut game, 0x79, 0x44);
+        for _ in 0..3 {
+            frame(&mut player, &mut game, &mut overlay);
+        }
+        let said = game.message().unwrap_or_default();
+        assert!(
+            said.starts_with(&format!("Stopped at scripts/spin.luau:{line} in on_tick")),
+            "{said}"
+        );
+        assert_eq!(game.stopped_line(), Some(line));
+    }
+    let values = game.breakpoint_note(5).unwrap_or_default();
+    assert!(values.contains("t = "), "a local made since: {values}");
+    tap(&mut game, 0x74, 0x3F);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(game.stopped_line(), Some(3), "the next tick");
     if let Ok(path) = std::env::var("ENGINE_EDITOR_STOP_PNG") {
         let extent = player.extent();
         let rgba = player

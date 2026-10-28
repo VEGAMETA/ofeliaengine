@@ -63,7 +63,7 @@ use engine_script::mlua::{
 };
 /// The debugger's breakpoints as the host takes them (ADR 0119): the editor's.
 pub use engine_script::{
-    BreakAction, BreakState, Breakpoint, Hits, ScriptDebugger, Stopped, Variable,
+    BreakAction, BreakState, Breakpoint, Hits, Resume, ScriptDebugger, Stopped, Variable,
 };
 use engine_script::{ScriptError, ScriptSettings, ScriptVm};
 use std::cell::RefCell;
@@ -550,10 +550,24 @@ impl Scripts {
     ///
     /// When the VM cannot be made.
     pub fn load(world: &mut World, root: &Path, folder: &Path) -> Result<Self, ScriptError> {
+        Self::load_with(world, root, folder, ScriptSettings::default())
+    }
+
+    /// [`Self::load`] into a VM made with `settings` (a debuggable compilation, ADR 0119).
+    ///
+    /// # Errors
+    ///
+    /// When the VM cannot be made.
+    pub fn load_with(
+        world: &mut World,
+        root: &Path,
+        folder: &Path,
+        settings: ScriptSettings,
+    ) -> Result<Self, ScriptError> {
         engine_profiler::zone!("scripts::load");
         // `require` between the project's scripts, over the modules found below.
         let modules = Rc::new(RefCell::new(script_require::Modules::default()));
-        let vm = ScriptVm::new_with(ScriptSettings::default(), |lua| {
+        let vm = ScriptVm::new_with(settings, |lua| {
             install(lua)?;
             let require = script_require::require_function(lua, modules.clone())?;
             lua.globals().set("require", require)
@@ -1519,6 +1533,12 @@ impl Scripts {
     /// while a stage is stopped halfway and holds the host.
     pub fn debugger(&self) -> engine_script::ScriptDebugger {
         self.vm.debugger()
+    }
+
+    /// Debugging (ADR 0119 E9-1b-2): the hooks run on a thread of their own from now on,
+    /// so a stop in one can be stepped from; off, they are called the plain way again.
+    pub fn set_debugging(&self, on: bool) {
+        self.vm.set_debugging(on);
     }
 
     /// The module of script file `file` (relative to the project, as the editor names it),
@@ -3825,9 +3845,32 @@ return SpinHook
             v.sort_by(f64::total_cmp);
             v[v.len() / 2]
         };
+        // ADR 0119's debuggable compilation: `ENGINE_SCRIPTS_MEASURE=o1` measures level 1,
+        // `o1-debug` level 1 while debugging, `o1-stop` with a breakpoint that stops set.
+        let how = std::env::var("ENGINE_SCRIPTS_MEASURE").unwrap_or_default();
+        let settings = ScriptSettings {
+            optimization_level: if how.starts_with("o1") { 1 } else { 2 },
+            ..ScriptSettings::default()
+        };
         let run = |name: &str, count: usize| {
             let mut world = World::new();
-            let mut scripts = load(&dir, &mut world);
+            let mut scripts =
+                Scripts::load_with(&mut world, &dir, &dir.join("scripts"), settings).unwrap();
+            scripts.set_debugging(how.starts_with("o1-"));
+            // `o1-stop`: a breakpoint that stops is set (on a line no tick runs), so the hooks
+            // go through the debugger's thread.
+            if how == "o1-stop" {
+                scripts.set_breakpoints(
+                    "door",
+                    vec![engine_script::Breakpoint {
+                        line: 1,
+                        action: engine_script::BreakAction::Stop,
+                        condition: None,
+                        hits: engine_script::Hits::Every,
+                        enabled: true,
+                    }],
+                );
+            }
             world.spawn((Name::new("Player"), Transform::from_xyz(1.0, 0.0, 0.0)));
             for i in 0..count {
                 let e = world.spawn((Transform::from_xyz(i as f32, 0.0, 0.0),));

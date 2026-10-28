@@ -85,6 +85,8 @@ pub(crate) struct ScriptDebug {
     job: Box<Job>,
     debugger: ScriptDebugger,
     pub(crate) held: Option<Held>,
+    /// Stops so far: a step's next stop is a new one, at the same line or not.
+    pub(crate) stops: u64,
 }
 
 impl ScriptDebug {
@@ -116,6 +118,7 @@ impl ScriptDebug {
             }),
             debugger,
             held: None,
+            stops: 0,
         })
     }
 
@@ -219,12 +222,14 @@ impl ScriptDebug {
                     locals: Vec::new(),
                     upvalues: Vec::new(),
                     stack: Vec::new(),
+                    steppable: false,
                 });
             self.held = Some(Held {
                 kind,
                 at,
                 answer: None,
             });
+            self.stops += 1;
             return true;
         }
         self.held = None;
@@ -344,6 +349,66 @@ return Count
         scripts.set_breakpoints("count", Vec::new());
         scripts.tick(&mut world, 0.25);
         assert_eq!((x(&world, a), x(&world, b)), (2.0, 2.0), "both run on");
+        drop(debug);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const OPENER: &str = "local Opener = component(\"Opener\", {})
+function Opener.open(self)
+    self.Transform.translation += vector.create(10, 0, 0)
+    return 1
+end
+function Opener.on_tick(self, dt)
+    local got = self:open()
+    self.Transform.translation += vector.create(got, 0, 0)
+end
+return Opener
+";
+
+    #[test]
+    fn a_stop_in_selfs_method_can_be_stepped_out_of() {
+        let dir = std::env::temp_dir().join(format!("ofelia-steps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/opener.luau"), OPENER).unwrap();
+        let mut world = World::new();
+        let settings = engine_script::ScriptSettings {
+            optimization_level: 1,
+            ..engine_script::ScriptSettings::default()
+        };
+        let folder = dir.join("scripts");
+        let mut scripts =
+            Box::new(Scripts::load_with(&mut world, &dir, &folder, settings).unwrap());
+        let a = world.spawn((Transform::default(),));
+        assert!(scripts.add(&mut world, a, "Opener"));
+        let mut debug = ScriptDebug::new(&scripts).unwrap();
+        scripts.set_debugging(true);
+        let mut at_open = stop(Hits::Every);
+        at_open.line = 3;
+        scripts.set_breakpoints("opener", vec![at_open]);
+        let host: *mut Scripts = &mut *scripts;
+        let tick = StageKind::Tick { dt: 0.25 };
+        // SAFETY: the host and the world outlive the stage; the test leaves the host alone
+        // while it is held.
+        assert!(unsafe { debug.run(host, &mut world, core::ptr::null(), tick) });
+        // In `self:open()`: under `self`'s `__namecall`, which has a continuation.
+        let at = &debug.held.as_ref().unwrap().at;
+        assert_eq!((at.line, at.steppable), (3, true));
+        assert_eq!(at.stack[0].function.as_deref(), Some("open"));
+        // Out of the method: back in the hook, at the line after the call.
+        debug.held.as_mut().unwrap().answer = Some(Resume::StepOut);
+        // SAFETY: as above.
+        let again = unsafe { debug.go_on(&mut world, core::ptr::null()) };
+        assert!(again.is_none(), "stopped again");
+        let at = &debug.held.as_ref().unwrap().at;
+        assert_eq!((at.line, at.steppable), (8, true));
+        assert_eq!(at.stack[0].function.as_deref(), Some("on_tick"));
+        assert_eq!(x(&world, a), 10.0, "the method ran to its end");
+        debug.held.as_mut().unwrap().answer = Some(Resume::Continue);
+        // SAFETY: as above.
+        let ended = unsafe { debug.go_on(&mut world, core::ptr::null()) }.unwrap();
+        assert!(!ended.aborted);
+        assert_eq!(x(&world, a), 11.0, "and the hook, with the method's result");
         drop(debug);
         let _ = std::fs::remove_dir_all(&dir);
     }

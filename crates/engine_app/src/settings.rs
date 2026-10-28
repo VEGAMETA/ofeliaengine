@@ -53,6 +53,10 @@ pub struct PlayerSettings {
     pub scene: Option<PathBuf>,
     /// The game's folder: scene and asset paths start from it. `None`: the working folder.
     pub project: Option<PathBuf>,
+    /// Compile the game's scripts to be debugged (ADR 0119): Luau's optimization level 1,
+    /// which inlines nothing, so a step goes into a function as its text reads. The
+    /// editor's player has it; it costs nothing measurable on ADR 0114's scenes.
+    pub debuggable_scripts: bool,
     /// The derived data cache's folder (ADR 0041, ADR 0108's E4-8): the textures of glTF
     /// files the player makes are compressed into it in the background (BC7, BC5 for
     /// normal maps, as the cooker does) and swapped in once compressed; a later run loads
@@ -221,6 +225,17 @@ impl FrameCap {
     }
 }
 
+impl PlayerSettings {
+    /// The scripts' VM settings: debuggable (Luau's optimization level 1) when asked
+    /// ([`Self::debuggable_scripts`]).
+    pub(crate) fn script_settings(&self) -> engine_script::ScriptSettings {
+        engine_script::ScriptSettings {
+            optimization_level: if self.debuggable_scripts { 1 } else { 2 },
+            ..engine_script::ScriptSettings::default()
+        }
+    }
+}
+
 impl Default for PlayerSettings {
     fn default() -> Self {
         Self {
@@ -228,6 +243,7 @@ impl Default for PlayerSettings {
             pack: None,
             scene: None,
             project: None,
+            debuggable_scripts: false,
             derived_data: None,
             window: Window::FullScreen,
             monitor: None,
