@@ -1293,8 +1293,21 @@ Until its shaders are made, the material draws its colour.
     frame and leaves its nodes.
   - A frame is layout only: it changes no code. Files with frames are the format's
     version 2; older files read as they are.
-- **Not yet:** functions (E10-3g); Slang's own errors marked at their nodes come with
-  E10-3g's nodes whose code you write.
+- **The Expression node** (the node search's "Expression", under Code): Slang written in
+  the node, as Godot's Expression node.
+  - Its code is the inspector's Code row. It is either an expression of the inputs `a` to
+    `d` and of the fragment's `ctx` (`ctx.uv`, `ctx.world_position`, `ctx.normal`), such
+    as `a * 0.5 + sin(b) * 0.25`, or lines that return one, such as
+    `float4 x = a; return x * 2.0;`. Empty, it is `a`.
+  - Each input is four numbers; what is linked to one is widened or narrowed as anywhere
+    else. Its output is four numbers.
+  - Its title shows the code's first line.
+- **Slang's errors at their nodes:** code that Slang does not take frames its node in red
+  with Slang's message under it. The bar says "not drawn: node …", and the preview is not
+  drawn until the code is fixed.
+  - The frame stays while the code does: moving a node or typing a value keeps it.
+  - Typing the code right takes it away and draws the preview.
+- **Not yet:** functions (E10-3g-2), a group of nodes made one node of its own.
 
 ## Autosave and the session
 

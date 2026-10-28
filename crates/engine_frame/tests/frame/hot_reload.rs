@@ -2,8 +2,9 @@
 //! new version is on screen without a restart, the one before drawing until it is made (and
 //! destroyed under the validation layer only once the GPU is done with it); a module that
 //! does not compile keeps the previous version and says why; a parameter added is in the
-//! reflected layout, its revision moved (the editor's inspector follows it, E10-2c). And a
-//! material file edited: its parameters replaced in place
+//! reflected layout, its revision moved (the editor's inspector follows it, E10-2c); a type
+//! whose module never compiled, so never drawn, reflected again once fixed (E10-3g-1). And
+//! a material file edited: its parameters replaced in place
 //! (`engine_streaming::material_files`).
 
 use crate::common::{Bed, camera};
@@ -202,6 +203,79 @@ fn a_material_type_reloads_when_its_module_changes() {
     println!("fix to screen: {:.0} ms", took.as_secs_f64() * 1e3);
     assert!(bed.frame.forward_mut().material_type_error(ty).is_none());
 
+    bed.finish(&mut [&mut view]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// E10-3g-1: a type whose module does not compile from the start (its parameters'
+/// reflection failed, so no material of it is made and it is never drawn) is reflected
+/// again when its module is fixed, its revision moved: the editor's graph preview, an
+/// Expression node's code typed wrong, then right.
+#[test]
+fn a_type_broken_from_the_start_is_reflected_again_when_fixed() {
+    let Some(mut bed) = Bed::new((64, 64), true) else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("engine_frame_broken_type_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let module = dir.join("glow.slang");
+    save(
+        &module,
+        "struct GlowMaterial : IMaterial { this does not compile",
+    );
+    let forward = bed.frame.forward_mut();
+    forward.set_material_hot_reload(true);
+    let ty = forward.register_material_type(MaterialTypeDesc {
+        name: String::from("glow"),
+        module: module.clone(),
+        type_name: String::from("GlowMaterial"),
+    });
+    let settings = ViewSettings {
+        antialiasing: Antialiasing::OFF,
+        bloom: false,
+        ..ViewSettings::default()
+    };
+    let eye = camera(Vec3::new(0.0, 0.0, 2.0), Vec3::new(0.0, 0.0, -3.0), false);
+    let mut view = View::new(&bed.device, 16);
+    // Frames that draw nothing of the type until its reflection is `ok` (or not) at a
+    // revision other than `after`, at most 20 s: why, if it failed, and the revision.
+    let reflected = |bed: &mut Bed, view: &mut View, ok: bool, after: Option<u32>| {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(20) {
+            if let Some((result, revision)) = bed.frame.forward().material_params(ty)
+                && result.is_ok() == ok
+                && Some(revision) != after
+            {
+                return Some((result.err().map(str::to_owned), revision));
+            }
+            let _ = bed.render(view, &settings, &[], &eye, false, |_| {});
+        }
+        None
+    };
+    let (why, revision) =
+        reflected(&mut bed, &mut view, false, None).expect("the broken module's reflection");
+    let why = why.unwrap_or_default();
+    if why.contains("no Slang compiler")
+        && !std::env::var("ENGINE_REQUIRE_SLANG").is_ok_and(|v| v == "1")
+    {
+        println!("skipping: no Slang library");
+        bed.finish(&mut [&mut view]);
+        return;
+    }
+    assert!(
+        why.contains("glow.slang"),
+        "the error names the module: {why}"
+    );
+    // Fixed, the type not drawn: its layout reflected, the revision moved.
+    let start = Instant::now();
+    save(&module, &glow([0.05, 0.9, 0.05], ""));
+    let (_, fixed) = reflected(&mut bed, &mut view, true, Some(revision))
+        .expect("the fixed module reflected again");
+    println!(
+        "fixed: reflected again after {:.0} ms",
+        start.elapsed().as_secs_f64() * 1e3
+    );
+    assert_ne!(fixed, revision);
     bed.finish(&mut [&mut view]);
     let _ = std::fs::remove_dir_all(&dir);
 }

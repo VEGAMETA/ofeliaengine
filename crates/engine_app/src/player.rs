@@ -1739,6 +1739,13 @@ impl Player {
         self.assets.set_material(file, held, &mut self.materials);
     }
 
+    /// A material type's module at `path` written anew by the caller (the editor's graph
+    /// modules, ADR 0123 E10-3g-1): its reload due at once rather than when hot reload's
+    /// watcher sees the file, so what waits for the material types sees it on its way.
+    pub fn material_source_written(&mut self, path: &Path) {
+        self.renderer.forward_mut().material_source_changed(path);
+    }
+
     /// Material type `type_name` of module `module` (an absolute path), registered with the
     /// forward renderer if it was not (ADR 0092): what [`Self::material_params`] asks of.
     pub fn material_type(

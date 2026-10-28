@@ -123,6 +123,9 @@ pub struct Node {
     pub texture: AssetRef,
     /// A note on the node.
     pub comment: String,
+    /// An Expression node's Slang (E10-3g-1): an expression of its inputs `a` to `d` (and
+    /// the fragment's `ctx`), or a body that returns (empty: `a`).
+    pub code: String,
 }
 
 impl Node {
@@ -136,7 +139,14 @@ impl Node {
             inputs: BTreeMap::new(),
             texture: AssetRef::NONE,
             comment: String::new(),
+            code: String::new(),
         }
+    }
+
+    /// An Expression node's Slang.
+    pub fn with_code(mut self, code: &str) -> Self {
+        code.clone_into(&mut self.code);
+        self
     }
 
     /// A texture node's own image.

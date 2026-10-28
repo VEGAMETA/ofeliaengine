@@ -324,3 +324,140 @@ fn a_graphs_tab_draws_its_canvas_where_the_viewport_is() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// E10-3g-1: Slang's error in an Expression node's code framed at the node, what it says
+/// in the bar, the sphere not drawn; kept while the node is dragged (the code the same, no
+/// frame without it); the code typed right in the inspector, the frame gone and the sphere
+/// drawn.
+#[test]
+fn an_expressions_slang_error_is_framed_at_its_node() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-expression-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("materials")).unwrap();
+    std::fs::create_dir_all(dir.join(".ofelia")).unwrap();
+    std::fs::write(dir.join("main.scene"), "[scene version=4]\n").unwrap();
+    std::fs::write(
+        dir.join("materials/glow.mgraph"),
+        format!(
+            "[mgraph version=2 id={}]\n\nmodel = \"lit\"\n\
+             nodes[\"c\"].kind = \"color\"\nnodes[\"c\"].value = [0.2, 0.6, 0.2, 1]\n\
+             nodes[\"x\"].kind = \"expression\"\nnodes[\"x\"].at = [200, 0]\n\
+             nodes[\"x\"].code = \"a * oops\"\n\
+             nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [460, 0]\n\
+             links[\"x.a\"] = \"c.rgba\"\nlinks[\"out.base\"] = \"x.out\"\n",
+            AssetId::new()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".ofelia/session"),
+        "[session version=1]\n\n[editor]\ngraph = 0\n\n[graph]\npath = \
+         \"materials/glow.mgraph\"\n",
+    )
+    .unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor expression test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    // The error's colour: the node's frame and the message under it.
+    let red = |rgba: &[u8]| {
+        rgba.chunks_exact(4)
+            .filter(|p| p[0] > 190 && p[1] < 120 && p[2] < 120)
+            .count()
+    };
+    let green = |rgba: &[u8]| {
+        rgba.chunks_exact(4)
+            .filter(|p| {
+                let (r, g, b) = (f32::from(p[0]), f32::from(p[1]), f32::from(p[2]));
+                g > 1.3 * r && g > 1.3 * b && g > 60.0
+            })
+            .count()
+    };
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        red(shot) > 150
+    });
+    println!(
+        "Slang's error at its node after {took:.2} s, {frames} frames: {} red pixels",
+        red(&shot)
+    );
+    let said = game.message().unwrap_or_default();
+    assert!(!said.contains("could not"), "{said}");
+    assert!(green(&shot) < 3_000, "no sphere: {}", green(&shot));
+    // The node dragged by its title bar: the same code, the frame on every frame.
+    pointer(&mut game, 330, 180);
+    button(&mut game, true);
+    for (x, y) in [(334, 182), (340, 186), (346, 190)] {
+        pointer(&mut game, x, y);
+        game.sync_assets(&mut player);
+        let shot = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        assert!(red(&shot) > 150, "framed while dragged: {}", red(&shot));
+    }
+    button(&mut game, false);
+    player
+        .frame_overlaid(&mut game, Some(&mut overlay))
+        .unwrap();
+    // The code typed right in the inspector's Code row (the node selected by its drag):
+    // compiled, the frame gone, the sphere drawn.
+    pointer(&mut game, 1160, 129);
+    click(&mut player, &mut game, &mut overlay);
+    key(&mut game, 0x11, 0x1D, true);
+    key(&mut game, 0x41, 0x1E, true);
+    player
+        .frame_overlaid(&mut game, Some(&mut overlay))
+        .unwrap();
+    key(&mut game, 0x41, 0x1E, false);
+    key(&mut game, 0x11, 0x1D, false);
+    for c in "a * 0.9".chars() {
+        send(&mut game, WindowEventKind::Char(c));
+    }
+    player
+        .frame_overlaid(&mut game, Some(&mut overlay))
+        .unwrap();
+    key(&mut game, 0x0D, 0x1C, true);
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        red(shot) < 50 && green(shot) > 3_000
+    });
+    key(&mut game, 0x0D, 0x1C, false);
+    println!(
+        "the code typed right: drawn after {took:.2} s, {frames} frames ({} red, {} green \
+         pixels)",
+        red(&shot),
+        green(&shot)
+    );
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_EXPRESSION_PNG") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &shot,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

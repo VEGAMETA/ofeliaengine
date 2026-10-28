@@ -586,6 +586,61 @@ What was built:
     draws one.
 - **Next:** functions (E10-3g), with Slang's errors at their nodes.
 
+## As built (E10-3g-1, 2026-10-28): the Expression node, Slang's errors at their nodes
+
+- **The node** (`EXPRESSION_KIND`, `Body::Expression`, in the Code group): Godot's
+  Expression node.
+  - Inputs `a` to `d` (four floats, unlinked zero) and an output `out` (four floats), the
+    code in `Node::code` (the file's `nodes["e"].code`).
+  - The generator writes it as a static member of the type,
+    `expression_<id>(MaterialContext ctx, float4 a, float4 b, float4 c, float4 d)`:
+    - code with `return` is written as it is;
+    - code without it is an expression, its lines joined and returned;
+    - empty code is `a`.
+  - A use calls the function with its inputs. A use read more than once in a function is
+    a variable, as every node's value is.
+  - Every line of the function is mapped to the node in the generator's line map (E10-3f-3),
+    so Slang's errors there are the node's.
+- **Slang's errors at their nodes** (`graph::slang_error`):
+  - The preview's refusal carries the material's problem: Slang's diagnostics as the
+    pinned Slang (2026.18) writes them, `error[E30015]: title`, then `--> path:line:col`,
+    the source line and carets with the detail.
+  - The first error placed in the preview's module is read: the node its line maps to, and
+    the detail (or the title without one). Warnings, and errors placed in other files, are
+    passed over.
+  - It becomes the graph's error, so the canvas frames that node in red with the message
+    under it (E10-3f-3's drawing) and the bar says "not drawn: node …". An error at a line
+    of no node goes to the bar alone.
+  - It is read once per refusal. It stays while the code does, through a node dragged or a
+    value typed (the preview, refused again, would otherwise make it flicker). It goes when
+    the code changes, or when a sphere is drawn.
+- **Two fixes on the way** (found by the GPU test):
+  - **A module written by the editor is due at once.** The editor wrote the module and the
+    player's watcher saw it a moment later. Until then nothing was pending, so a refusal
+    read the previous module's error. Now `Player::material_source_written` makes the
+    reload due when the editor writes (`MaterialTypes::changed`, as a watcher's event
+    does). The watcher's own event within the 30 ms quiet merges with it.
+  - **A type broken from the start is reflected again once fixed.** A type whose module
+    never compiled has no materials made, so it is never drawn and has no entry points. A
+    reload with no entry points went idle without reflecting the parameters again, so a
+    fixed module stayed unmade until a restart. This hit hand-written types (E10-2) as
+    well. The reload now reflects the parameters all the same. A frame test (the type
+    never drawn, fixed, reflected again in 0.3 s) fails without the fix.
+- **Tests:**
+  - the generator: the function's header, the expression returned, the body kept, its
+    lines the node's, one call when read twice;
+  - Slang: an error in an Expression's code is at a line the map gives the node;
+  - the parser: Slang 2026.18's diagnostics with a warning in the module and an error in
+    `forward.slang` before the module's error (the node and the detail); another file;
+    a line of no node with the title;
+  - the inspector's Code row, `set_code`, the title's first line shortened;
+  - `MaterialTypes::changed`: nothing with hot reload off, the type of the file due, not
+    the other, a compiling one compiled again after;
+  - the editor on the GPU, end to end on both GPUs: the error framed at its node in
+    0.35 s, kept on every frame of a drag, the code typed right in the inspector, then the
+    frame gone and the sphere drawn.
+- **Next:** functions (E10-3g-2), their file's extension to be chosen.
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,

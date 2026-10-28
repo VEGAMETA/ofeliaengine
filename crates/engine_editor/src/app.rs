@@ -1504,6 +1504,14 @@ struct GraphPreview {
     unmade: bool,
     quiet: u8,
     problem: String,
+    /// The node that made each line of the module (Slang's errors at their nodes,
+    /// E10-3g-1), whether the last refusal's diagnostics were looked through, and whether
+    /// the graph's error is Slang's (kept while the code stays the same).
+    lines: Vec<Option<String>>,
+    looked: bool,
+    marked: bool,
+    /// The module just written, for the player to be told.
+    written: Option<PathBuf>,
 }
 
 /// A number of a graph node's row dragged in the inspector (ADR 0123 E10-3f-1): the row,
@@ -4418,7 +4426,9 @@ impl Editor {
                             .then_some(&crate::graph::MODEL_NAMES[..]),
                         missing: false,
                     },
-                    NodeRow::Param | NodeRow::Comment | NodeRow::Title => Widget::Edit(first),
+                    NodeRow::Param | NodeRow::Comment | NodeRow::Title | NodeRow::Code => {
+                        Widget::Edit(first)
+                    }
                     NodeRow::Value(_) | NodeRow::Input(..) => Widget::Numbers {
                         values: shown,
                         labels: row.labels(colour),
@@ -11776,6 +11786,10 @@ impl Editor {
                         let edit = self.graphs[g].set_title(&text);
                         self.graph_edit(world, g, "Rename Frame", None, edit);
                     }
+                    NodeRow::Code => {
+                        let edit = self.graphs[g].set_code(&text);
+                        self.graph_edit(world, g, "Edit Code", None, edit);
+                    }
                     _ => {}
                 }
             }
@@ -12034,7 +12048,9 @@ impl Editor {
         }
         preview.revision = doc.revision;
         match crate::graph::preview_material(doc, preview.module, &preview.module_path) {
-            Ok((text, file, paths)) => {
+            Ok((generated, file, paths)) => {
+                let text = generated.text;
+                preview.lines = generated.lines;
                 preview.same_code = text == preview.text;
                 if text != preview.text {
                     let full = self.root.join(&preview.module_path);
@@ -12042,17 +12058,30 @@ impl Editor {
                         .parent()
                         .map_or(Ok(()), std::fs::create_dir_all)
                         .and_then(|()| std::fs::write(&full, &text));
-                    if let Err(e) = written {
-                        log::warn!(target: "engine_editor", "{}: {e}", full.display());
+                    match written {
+                        // The player told (E10-3g-1): the type's reload counted from now,
+                        // so no refusal is read with the previous module's error.
+                        Ok(()) => preview.written = Some(full),
+                        Err(e) => {
+                            log::warn!(target: "engine_editor", "{}: {e}", full.display());
+                        }
                     }
                     preview.text = text;
                 }
                 preview.give = Some((file, paths));
                 preview.ask = true;
-                self.graphs[g].error = None;
+                // Slang's error (E10-3g-1) stays while the code does (a node moved, a value
+                // typed): the preview is refused again for it.
+                if !(preview.same_code && preview.marked) {
+                    preview.marked = false;
+                    self.graphs[g].error = None;
+                }
             }
             // At its node, marked on the canvas (E10-3f-3).
-            Err(e) => self.graphs[g].error = Some(e),
+            Err(e) => {
+                preview.marked = false;
+                self.graphs[g].error = Some(e);
+            }
         }
     }
 
@@ -21870,12 +21899,16 @@ impl<G> EditorGame<G> {
         // The shown graph's preview (ADR 0123 E10-3f-2): its material held by the player,
         // a sphere of it asked for.
         if let Some(preview) = shared.graph_preview.as_mut() {
+            if let Some(path) = preview.written.take() {
+                player.material_source_written(&path);
+            }
             if let Some(held) = preview.give.take() {
                 player.set_material_file(preview.material, Some(held));
             }
             if preview.ask {
                 preview.ask = false;
                 preview.refused = false;
+                preview.looked = false;
                 player.request_preview(engine_app::PreviewRequest {
                     key: GRAPH_PREVIEW_KEY,
                     parts: vec![(
@@ -21907,8 +21940,16 @@ impl<G> EditorGame<G> {
         // the module just written, a parameter it does not have yet): asked for again once
         // it is made. Why, in the graph's bar, once it stays so with no type on its way (a
         // layout arrives a frame before the material is laid out with it).
-        if let Some(p) = shared.graph_preview.as_mut() {
+        let editor = &mut *shared;
+        if let Some(p) = editor.graph_preview.as_mut() {
             p.problem.clear();
+            // A sphere drawn: its material made, no Slang error left to show (E10-3g-1).
+            if p.marked && p.upload.is_some() {
+                p.marked = false;
+                if let Some(doc) = editor.graphs.iter_mut().find(|d| d.id == p.graph) {
+                    doc.error = None;
+                }
+            }
             if p.refused {
                 match player.assets().problem(AssetRef::file(p.material)) {
                     Some(why) => {
@@ -21917,6 +21958,25 @@ impl<G> EditorGame<G> {
                         p.quiet = if quiet { p.quiet.saturating_add(1) } else { 0 };
                         if p.quiet > 1 {
                             p.problem.push_str(why);
+                            // Slang's first error in the module (E10-3g-1): framed at the
+                            // node whose line it is, what it says in the bar; looked for
+                            // once a refusal, kept while the code stays the same.
+                            if !p.looked {
+                                p.looked = true;
+                                let file = p.module_path.rsplit('/').next().unwrap_or("");
+                                if let Some((node, message)) =
+                                    crate::graph::slang_error(why, file, &p.lines)
+                                    && let Some(doc) =
+                                        editor.graphs.iter_mut().find(|d| d.id == p.graph)
+                                    && doc.error.is_none()
+                                {
+                                    doc.error = Some(engine_material_graph::GraphError {
+                                        node: node.map(str::to_owned),
+                                        message: message.to_owned(),
+                                    });
+                                    p.marked = true;
+                                }
+                            }
                         }
                     }
                     // A refusal with no such cause is not asked again.

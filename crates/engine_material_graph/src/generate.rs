@@ -196,6 +196,29 @@ pub fn generate(graph: &Graph, type_name: &str, build: Build) -> Result<Generate
         }
         out.line("", None);
     }
+    // Each Expression node's Slang (E10-3g-1), a function of the type whose lines are the
+    // node's: Slang's errors in it go to the node.
+    for &n in every.iter().filter(|n| kinds[*n].body == Body::Expression) {
+        let code = graph.nodes[n].code.trim();
+        let code = if code.is_empty() { "a" } else { code };
+        out.line(
+            &format!(
+                "    static float4 expression_{n}(MaterialContext ctx, float4 a, float4 b, float4 c, float4 d)"
+            ),
+            Some(n),
+        );
+        out.line("    {", Some(n));
+        if code.contains("return") {
+            for l in code.lines() {
+                out.line(&format!("        {l}"), Some(n));
+            }
+        } else {
+            let one: Vec<&str> = code.lines().map(str::trim).collect();
+            out.line(&format!("        return {};", one.join(" ")), Some(n));
+        }
+        out.line("    }", Some(n));
+        out.line("", None);
+    }
     out.line(
         &format!("    static uint model() {{ return {}; }}", model.constant()),
         None,
@@ -560,6 +583,22 @@ impl Context<'_, '_> {
                         }
                     }
                 }
+                Body::Expression => {
+                    let mut call = format!("expression_{id}(ctx");
+                    for input in kind.inputs {
+                        call.push_str(", ");
+                        call.push_str(&self.input(kind, id, input.name, &values)?);
+                    }
+                    call.push(')');
+                    let port = PortRef::new(id, "out");
+                    if reads.get(&port).copied().unwrap_or(0) > 1 {
+                        let var = format!("n_{id}_out");
+                        out.line(&format!("        float4 {var} = {call};"), Some(id));
+                        values.insert(port, var);
+                    } else {
+                        values.insert(port, call);
+                    }
+                }
                 Body::Output => {}
             }
         }
@@ -692,6 +731,55 @@ mod tests {
 
     fn port(node: &str, port: &str) -> PortRef {
         PortRef::new(node, port)
+    }
+
+    /// E10-3g-1: an Expression node's Slang is a function of the type, its lines the node's;
+    /// an expression is returned, a body that returns kept as written.
+    #[test]
+    fn an_expression_is_a_function_of_the_type_its_lines_the_nodes() {
+        let mut g = Graph::new(Model::Lit);
+        g.add(
+            "c",
+            Node::new("color", [0.0; 2]).with_value([0.9, 0.1, 0.1, 1.0]),
+        );
+        g.add(
+            "e",
+            Node::new("expression", [100.0, 0.0]).with_code("a * 0.5 + b"),
+        );
+        g.link(port("c", "rgba"), port("e", "a"))
+            .link(port("e", "out"), port(OUTPUT, "base"));
+        let out = generate(&g, "Glow", Build::Saved).unwrap();
+        let header = "    static float4 expression_e(MaterialContext ctx, float4 a, float4 b, float4 c, float4 d)";
+        assert!(out.text.contains(header), "{}", out.text);
+        let line = out
+            .text
+            .lines()
+            .position(|l| l == "        return a * 0.5 + b;")
+            .unwrap();
+        assert_eq!(out.node_at(line), Some("e"));
+        assert!(
+            out.text.contains("s.base = expression_e(ctx, "),
+            "{}",
+            out.text
+        );
+        // A body that returns, as written.
+        g.nodes.get_mut("e").unwrap().code = String::from("float4 x = a;\nreturn x * 2.0;");
+        let out = generate(&g, "Glow", Build::Saved).unwrap();
+        assert!(
+            out.text
+                .contains("        float4 x = a;\n        return x * 2.0;"),
+            "{}",
+            out.text
+        );
+        // Read twice in one function: one call, kept in a variable.
+        g.link(port("e", "out"), port(OUTPUT, "metallic"));
+        let out = generate(&g, "Glow", Build::Saved).unwrap();
+        assert_eq!(
+            out.text.matches("expression_e(ctx, ").count(),
+            1,
+            "{}",
+            out.text
+        );
     }
 
     /// A reroute (E10-3e-2a) writes nothing of its own: a graph through one generates the
