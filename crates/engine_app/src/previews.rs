@@ -6,6 +6,9 @@
 //! - **A material type's** (ADR 0120's E10-1b) is drawn once to ask for its pipelines and
 //!   not answered; it is drawn again, and answered, once no material type's pipeline is on
 //!   its way, so that a thumbnail shows the type, not its look.
+//! - **One whose code is unchanged** (`same_code`: only its materials' values changed since
+//!   its key's last request, ADR 0123's E10-3f-2) waits until no type is on its way and is
+//!   drawn once: answered when its frame asked for no pipeline, drawn again otherwise.
 //! - **A view of the frame renderer** of its own: its draw list, a key light and an
 //!   ambient term, no sky, nothing of the scene's; drawn at twice the side and averaged
 //!   down (four samples a pixel, edges and shading alike), its alpha kept.
@@ -45,6 +48,10 @@ pub struct PreviewRequest {
     pub key: u64,
     /// The parts.
     pub parts: Vec<(AssetRef, AssetRef, Affine3A)>,
+    /// Only its materials' values changed since its key's last request, none of the code
+    /// their types compile from (a material graph's numbers, ADR 0123's E10-3f-2): drawn
+    /// once, without the drawing that asks for a type's pipelines first.
+    pub same_code: bool,
 }
 
 /// A preview drawn: its key, and its pixels ([`PREVIEW_SIZE`]², RGBA8 sRGB, rows top to
@@ -83,6 +90,9 @@ pub(crate) struct Previews {
     frames_in_flight: u64,
     /// Previews of material types drawn once already (their pipelines asked for), by key.
     warmed: Vec<u64>,
+    /// The read back of this frame's drawing of a request whose code was unchanged: answered
+    /// if the frame asks for no pipeline ([`Self::recorded`]).
+    checking: Option<usize>,
 }
 
 impl Previews {
@@ -94,6 +104,7 @@ impl Previews {
             done: Vec::new(),
             frames_in_flight: frames_in_flight.max(1) as u64,
             warmed: Vec::new(),
+            checking: None,
         }
     }
 
@@ -144,8 +155,9 @@ impl Previews {
     /// mesh, and its material with its textures): made now where it was not, its read
     /// back's slot taken. A request with a part that cannot be made is answered with no
     /// pixels. One with a material type waits while `types_pending` (the forward
-    /// renderer's material type pipelines on their way) is not zero, after a first drawing
-    /// that asks for its pipelines.
+    /// renderer's material type pipelines on their way, counted before this frame's
+    /// materials took a layout that arrived) is not zero, after a first drawing that asks
+    /// for its pipelines; one whose code is unchanged waits without that first drawing.
     pub(crate) fn pick(
         &mut self,
         assets: &mut Assets,
@@ -162,24 +174,27 @@ impl Previews {
         for _ in 0..self.asked.len() {
             let request = self.asked.pop_front()?;
             match resolve(&request, assets, geometry, materials) {
-                Resolved::Ready(draws, (lo, hi)) => {
-                    let typed = draws.iter().any(|d| {
-                        materials
-                            .material_type(d.material)
-                            .is_some_and(|t| t != MaterialTypeId::GLTF)
-                    });
+                Resolved::Ready((lo, hi), typed) => {
                     let key = request.key;
                     let warmed = self.warmed.iter().position(|&k| k == key);
+                    // Its pipelines asked for, or its code unchanged, while some are on
+                    // their way: later.
+                    if typed && (warmed.is_some() || request.same_code) && types_pending > 0 {
+                        self.asked.push_back(request);
+                        continue;
+                    }
+                    let draws = draws(&request, assets, geometry, materials);
+                    let mut check = false;
                     let again = match (typed, warmed) {
                         (false, _) => None,
+                        // Answered if its frame asks for no pipeline (`recorded`).
+                        (true, None) if request.same_code => {
+                            check = true;
+                            Some(request)
+                        }
                         (true, None) => {
                             self.warmed.push(key);
                             Some(request)
-                        }
-                        // Its pipelines asked for, some still on their way: later.
-                        (true, Some(_)) if types_pending > 0 => {
-                            self.asked.push_back(request);
-                            continue;
                         }
                         (true, Some(k)) => {
                             self.warmed.swap_remove(k);
@@ -189,6 +204,7 @@ impl Previews {
                     let readback = &mut self.readbacks[slot];
                     readback.written = Some((frame, key));
                     readback.again = again;
+                    self.checking = check.then_some(slot);
                     return Some(Drawing {
                         draws,
                         camera: framing(lo, hi),
@@ -203,6 +219,23 @@ impl Previews {
             }
         }
         None
+    }
+
+    /// This frame recorded, with `types_pending` material type pipelines then on their way:
+    /// a drawing whose code was unchanged is answered when it asked for none (it drew its
+    /// types' own pipelines), and drawn again once they are made when it did.
+    pub(crate) fn recorded(&mut self, types_pending: usize) {
+        let Some(slot) = self.checking.take() else {
+            return;
+        };
+        let readback = &mut self.readbacks[slot];
+        if types_pending == 0 {
+            readback.again = None;
+        } else if let Some((_, key)) = readback.written
+            && !self.warmed.contains(&key)
+        {
+            self.warmed.push(key);
+        }
     }
 
     /// A read back not in flight, made the first time (one more than the frames in
@@ -411,22 +444,24 @@ fn halve(drawn: &[u8], side: u32) -> Vec<u8> {
 }
 
 enum Resolved {
-    /// Every part made: the draws and their box.
-    Ready(Vec<DrawItem>, (Vec3, Vec3)),
+    /// Every part made: their box, and whether a material of a type of its own is among
+    /// them.
+    Ready((Vec3, Vec3), bool),
     Waiting,
     Failed,
 }
 
-/// `request`'s parts as draws, once each is made.
+/// Whether `request`'s parts are made, each made now where it was not: with nothing kept,
+/// a request waiting from frame to frame allocates nothing ([`draws`] once it is drawn).
 fn resolve(
     request: &PreviewRequest,
     assets: &mut Assets,
     geometry: &mut GeometryPool,
     materials: &mut MaterialTable,
 ) -> Resolved {
-    let mut draws = Vec::with_capacity(request.parts.len());
     let mut bounds: Option<(Vec3, Vec3)> = None;
     let mut waiting = false;
+    let mut typed = false;
     for &(mesh_asset, material_asset, at) in &request.parts {
         let mesh = assets.mesh(mesh_asset, geometry);
         let material = assets.material(material_asset, materials);
@@ -441,6 +476,9 @@ fn resolve(
             waiting = true;
             continue;
         }
+        typed |= materials
+            .material_type(material)
+            .is_some_and(|t| t != MaterialTypeId::GLTF);
         if let Some(info) = geometry.mesh(mesh) {
             for corner in 0..8 {
                 let pick = |bit: usize, axis: usize| {
@@ -454,17 +492,32 @@ fn resolve(
                 bounds = Some(bounds.map_or((p, p), |(a, b)| (a.min(p), b.max(p))));
             }
         }
-        draws.push(DrawItem {
-            mesh,
-            material,
-            world_from_object: Mat4::from(at),
-        });
     }
     match (waiting, bounds) {
         (true, _) => Resolved::Waiting,
-        (false, Some(b)) => Resolved::Ready(draws, b),
+        (false, Some(b)) => Resolved::Ready(b, typed),
         (false, None) => Resolved::Failed,
     }
+}
+
+/// `request`'s parts as draws, once [`resolve`] found each made.
+fn draws(
+    request: &PreviewRequest,
+    assets: &mut Assets,
+    geometry: &mut GeometryPool,
+    materials: &mut MaterialTable,
+) -> Vec<DrawItem> {
+    request
+        .parts
+        .iter()
+        .filter_map(|&(mesh_asset, material_asset, at)| {
+            Some(DrawItem {
+                mesh: assets.mesh(mesh_asset, geometry)?,
+                material: assets.material(material_asset, materials)?,
+                world_from_object: Mat4::from(at),
+            })
+        })
+        .collect()
 }
 
 /// The camera that frames the box `lo`–`hi`: looking at its middle from the front, turned

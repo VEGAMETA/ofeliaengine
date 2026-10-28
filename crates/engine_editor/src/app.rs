@@ -570,6 +570,16 @@ pub fn editor<G: Game>(
         crate::sound_view::TEXTURE[1],
     )?;
     editor.wave_texture = Some(wave.sampled_index());
+    // The shown graph's preview (ADR 0123 E10-3f-2): one picture at a time.
+    let preview = engine_render::texture::GpuTexture::new(
+        setup.device,
+        setup.allocator,
+        setup.bindless,
+        engine_rhi::ash::vk::Format::R8G8B8A8_SRGB,
+        engine_app::PREVIEW_SIZE,
+        engine_app::PREVIEW_SIZE,
+    )?;
+    editor.preview_texture = Some(preview.sampled_index());
     editor.mixer_path = settings.audio.layout.to_string_lossy().replace('\\', "/");
     editor.sounds_folder = settings.audio.folder.to_string_lossy().replace('\\', "/");
     let shared = Rc::new(RefCell::new(editor));
@@ -616,6 +626,7 @@ pub fn editor<G: Game>(
             unlit,
             atlas,
             wave,
+            preview,
         },
     ))
 }
@@ -1447,6 +1458,42 @@ struct Choice {
     label: String,
     detail: String,
     pick: Pick,
+}
+
+/// The preview's key among the player's previews (the dock's thumbnails have the others).
+const GRAPH_PREVIEW_KEY: u64 = 0x6772_6170_685f_7076;
+
+/// The shown graph's preview (ADR 0123 E10-3f-2): a sphere the player draws with the graph's
+/// editing build, shown in the canvas's corner.
+#[derive(Debug, Default)]
+struct GraphPreview {
+    /// The graph it is of, and the graph's revision it was made at.
+    graph: AssetId,
+    revision: u64,
+    /// The material file the player holds for it (an id of its own), its module as an
+    /// asset and its path in the project, and the module's text as last written.
+    material: AssetId,
+    module: AssetRef,
+    module_path: String,
+    text: String,
+    /// The material file to give the player, and whether a preview is to be asked for:
+    /// with the module's text as the last one asked for was (only values changed: drawn
+    /// once, `PreviewRequest::same_code`).
+    give: Option<(MaterialFile, AssetPaths)>,
+    ask: bool,
+    same_code: bool,
+    /// A preview drawn, to upload; and whether one is in the texture.
+    upload: Option<Vec<u8>>,
+    shown: bool,
+    /// The last one asked for was refused; its material seen unmade since (asked for again
+    /// once it is made), the checks in a row that saw it so with no material type on its
+    /// way, and why (in the same room every frame).
+    refused: bool,
+    unmade: bool,
+    quiet: u8,
+    problem: String,
+    /// Why the graph cannot be drawn.
+    failed: Option<String>,
 }
 
 /// A number of a graph node's row dragged in the inspector (ADR 0123 E10-3f-1): the row,
@@ -2294,6 +2341,9 @@ struct Editor {
     /// Where the node search's pick goes: the graph, the canvas point, and the port a link
     /// was drawn from (ADR 0123 E10-3e).
     graph_add: Option<GraphAdd>,
+    /// The shown graph's preview (ADR 0123 E10-3f-2), and its texture's bindless index.
+    graph_preview: Option<GraphPreview>,
+    preview_texture: Option<u32>,
     /// The inspector's rows for the shown graph (ADR 0123 E10-3f-1), their shown texts and
     /// where each row's start (and how many), and its section's title: made every frame
     /// into the same room.
@@ -3327,6 +3377,8 @@ impl Editor {
             graph_area: None,
             graph_rect: None,
             graph_add: None,
+            graph_preview: None,
+            preview_texture: None,
             graph_rows: Vec::new(),
             graph_texts: Vec::new(),
             graph_spans: Vec::new(),
@@ -5357,6 +5409,15 @@ impl Editor {
                 .map(|d| crate::shell::GraphBar {
                     path: &d.path,
                     status: &self.graph_status,
+                    preview: self
+                        .graph_preview
+                        .as_ref()
+                        .filter(|p| p.graph == d.id && p.shown)
+                        .and(self.preview_texture)
+                        .map(|texture| engine_ui::UiImage {
+                            texture,
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                        }),
                 });
         // The shown script's lines in view, their numbers, its selections and carets.
         let shown = &self.code_shown;
@@ -6512,7 +6573,9 @@ impl Editor {
         // A graph's canvas covers the viewport (ADR 0123): its pointer, none of the
         // viewport's tools.
         if self.active_graph.is_some() {
-            self.graph_frame(world, response.graph_canvas, scale);
+            self.graph_frame(world, &response, scale);
+            // Its preview after this frame's edits (the inspector's and the canvas's).
+            self.graph_preview_frame();
             self.input.next_frame();
             return;
         }
@@ -11833,6 +11896,65 @@ impl Editor {
             .contains(&id)
     }
 
+    /// The shown graph's preview made again where the graph changed (ADR 0123 E10-3f-2): its
+    /// editing build's module written where its code changed (the player's hot reload
+    /// compiles it), the material file drawing it to give the player, a preview to ask for.
+    /// A value's change rewrites no code: only the material's values change.
+    fn graph_preview_frame(&mut self) {
+        let Some(doc) = self.active_graph.and_then(|g| self.graphs.get(g)) else {
+            return;
+        };
+        if self
+            .graph_preview
+            .as_ref()
+            .is_none_or(|p| p.graph != doc.id)
+        {
+            // Ids of its own, from the graph's: the same ones every time it is shown.
+            let id = doc.id.as_u128();
+            self.graph_preview = Some(GraphPreview {
+                graph: doc.id,
+                revision: u64::MAX,
+                material: AssetId::from_u128(id ^ 0x7072_6576_6965_775f_6d61_7465_7269_616c),
+                module: AssetRef::file(AssetId::from_u128(
+                    id ^ 0x7072_6576_6965_775f_6d6f_6475_6c65_5f5f,
+                )),
+                module_path: format!(
+                    "{}/{}-editing.slang",
+                    engine_assets::graph_module::GRAPH_CACHE,
+                    doc.id
+                ),
+                ..GraphPreview::default()
+            });
+        }
+        let Some(preview) = self.graph_preview.as_mut() else {
+            return;
+        };
+        if preview.revision == doc.revision {
+            return;
+        }
+        preview.revision = doc.revision;
+        match crate::graph::preview_material(doc, preview.module, &preview.module_path) {
+            Ok((text, file, paths)) => {
+                preview.same_code = text == preview.text;
+                if text != preview.text {
+                    let full = self.root.join(&preview.module_path);
+                    let written = full
+                        .parent()
+                        .map_or(Ok(()), std::fs::create_dir_all)
+                        .and_then(|()| std::fs::write(&full, &text));
+                    if let Err(e) = written {
+                        log::warn!(target: "engine_editor", "{}: {e}", full.display());
+                    }
+                    preview.text = text;
+                }
+                preview.give = Some((file, paths));
+                preview.ask = true;
+                preview.failed = None;
+            }
+            Err(e) => preview.failed = Some(e.to_string()),
+        }
+    }
+
     /// The shown graph's bar: its nodes, its selection and the zoom, in the same room
     /// every frame.
     fn graph_status_frame(&mut self) {
@@ -11869,13 +11991,27 @@ impl Editor {
             let _ = write!(self.graph_status, " · {} selected", doc.selected.len());
         }
         let _ = write!(self.graph_status, " · {:.0} %", doc.view.zoom() * 100.0);
+        // Why its preview cannot be drawn (E10-3f-2): the graph's code, or its material.
+        if let Some(why) = self
+            .graph_preview
+            .as_ref()
+            .filter(|p| p.graph == doc.id)
+            .and_then(|p| {
+                p.failed
+                    .as_deref()
+                    .or((!p.problem.is_empty()).then_some(&*p.problem))
+            })
+        {
+            let _ = write!(self.graph_status, " · not drawn: {why}");
+        }
     }
 
     /// The shown graph's frame, after the UI's (ADR 0123 E10-3d): the canvas's place, its
     /// boxes laid out where the graph changed, then the pointer's presses, drags and wheel
     /// on it, an edit a step.
-    fn graph_frame(&mut self, world: &mut World, canvas: u64, scale: f32) {
+    fn graph_frame(&mut self, world: &mut World, response: &ShellResponse, scale: f32) {
         use engine_ui::TextMeasure as _;
+        let canvas = response.graph_canvas;
         let Some(g) = self.active_graph.filter(|&g| g < self.graphs.len()) else {
             self.active_graph = None;
             return;
@@ -11908,8 +12044,9 @@ impl Editor {
             && self.renaming.is_none()
             && self.renaming_file.is_none()
             && self.ui.editing().is_none();
-        let over =
-            free && cursor.is_some_and(|[cx, cy]| cx >= x && cy >= y && cx < x + w && cy < y + h);
+        let over = free
+            && (response.graph_preview == 0 || !self.ui.hovers(response.graph_preview))
+            && cursor.is_some_and(|[cx, cy]| cx >= x && cy >= y && cx < x + w && cy < y + h);
         let [dx, dy] = self.input.drag();
         let pointer = crate::graph::Pointer {
             at: cursor,
@@ -21605,14 +21742,75 @@ impl<G> EditorGame<G> {
             let parts = shared.preview_parts(subject);
             let key = thumbnails::preview_key(subject);
             match parts {
-                Some(parts) => player.request_preview(engine_app::PreviewRequest { key, parts }),
+                Some(parts) => player.request_preview(engine_app::PreviewRequest {
+                    key,
+                    parts,
+                    same_code: false,
+                }),
                 None => shared.thumbnails.drawn(key, Vec::new()),
+            }
+        }
+        // The shown graph's preview (ADR 0123 E10-3f-2): its material held by the player,
+        // a sphere of it asked for.
+        if let Some(preview) = shared.graph_preview.as_mut() {
+            if let Some(held) = preview.give.take() {
+                player.set_material_file(preview.material, Some(held));
+            }
+            if preview.ask {
+                preview.ask = false;
+                preview.refused = false;
+                player.request_preview(engine_app::PreviewRequest {
+                    key: GRAPH_PREVIEW_KEY,
+                    parts: vec![(
+                        builtin::SPHERE,
+                        AssetRef::file(preview.material),
+                        Affine3A::IDENTITY,
+                    )],
+                    same_code: preview.same_code,
+                });
             }
         }
         let mut previews = Vec::new();
         player.take_previews(&mut previews);
         for preview in previews {
+            if preview.key == GRAPH_PREVIEW_KEY {
+                if let Some(p) = shared.graph_preview.as_mut() {
+                    if preview.pixels.is_empty() {
+                        p.refused = true;
+                        p.unmade = false;
+                    } else {
+                        p.upload = Some(preview.pixels);
+                    }
+                }
+                continue;
+            }
             shared.thumbnails.drawn(preview.key, preview.pixels);
+        }
+        // A sphere refused while its material could not be made (its type's layout behind
+        // the module just written, a parameter it does not have yet): asked for again once
+        // it is made. Why, in the graph's bar, once it stays so with no type on its way (a
+        // layout arrives a frame before the material is laid out with it).
+        if let Some(p) = shared.graph_preview.as_mut() {
+            p.problem.clear();
+            if p.refused {
+                match player.assets().problem(AssetRef::file(p.material)) {
+                    Some(why) => {
+                        p.unmade = true;
+                        let quiet = player.renderer().forward().material_types_pending() == 0;
+                        p.quiet = if quiet { p.quiet.saturating_add(1) } else { 0 };
+                        if p.quiet > 1 {
+                            p.problem.push_str(why);
+                        }
+                    }
+                    // A refusal with no such cause is not asked again.
+                    None if p.unmade => {
+                        p.ask = true;
+                        p.same_code = false;
+                        p.quiet = 0;
+                    }
+                    None => {}
+                }
+            }
         }
         shared.compressing = player.assets().compressing();
         shared.loading = player.assets().loading();
@@ -23951,6 +24149,8 @@ pub struct EditorOverlay {
     atlas: engine_render::texture::GpuTexture,
     /// The inspector's sound waveform (E11-3c).
     wave: engine_render::texture::GpuTexture,
+    /// The shown graph's preview (ADR 0123 E10-3f-2).
+    preview: engine_render::texture::GpuTexture,
 }
 
 impl EditorOverlay {
@@ -23971,6 +24171,8 @@ impl EditorOverlay {
             self.atlas
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
             self.wave
+                .destroy(setup.device, setup.allocator, setup.bindless, 0);
+            self.preview
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
             self.picker.destroy(setup.allocator);
         }
@@ -24412,6 +24614,15 @@ impl Overlay for EditorOverlay {
                 self.atlas
                     .upload_region(pass.fg, pass.ring, (x, y, side, side), pixels)
                     .map_err(AppError::at("a thumbnail"))?;
+            }
+            // The shown graph's preview, once drawn (ADR 0123 E10-3f-2).
+            if let Some(pixels) = editor.graph_preview.as_mut().and_then(|p| p.upload.take()) {
+                self.preview
+                    .upload(pass.fg, pass.ring, &pixels)
+                    .map_err(AppError::at("the graph's preview"))?;
+                if let Some(p) = editor.graph_preview.as_mut() {
+                    p.shown = true;
+                }
             }
             // The inspector's sound waveform, once read, into the texture's corner (E11-3c).
             if let Some(([width, height], pixels)) = editor

@@ -352,6 +352,7 @@ fn a_typed_material_file_draws_its_look_then_its_type() {
     player.request_preview(PreviewRequest {
         key: 7,
         parts: vec![(builtin::CUBE, stripes_ref, Affine3A::IDENTITY)],
+        same_code: false,
     });
     let started = Instant::now();
     let mut previews = Vec::new();
@@ -407,6 +408,29 @@ fn a_typed_material_file_draws_its_look_then_its_type() {
     }
     let [r, g, b] = middle(&player.capture(&mut game).unwrap().unwrap());
     assert!(r > 1.5 * b && g > 1.5 * b, "held: {r} {g} {b}");
+
+    // Its preview again, only its values changed (ADR 0123's E10-3f-2): drawn once with
+    // the type's pipelines made, answered as soon as that frame is done (a request that
+    // first asks for them takes two drawings, five frames).
+    player.request_preview(PreviewRequest {
+        key: 7,
+        parts: vec![(builtin::CUBE, stripes_ref, Affine3A::IDENTITY)],
+        same_code: true,
+    });
+    previews.clear();
+    let mut frames = 0;
+    while previews.is_empty() {
+        player.frame(&mut game).unwrap();
+        player.take_previews(&mut previews);
+        frames += 1;
+        assert!(frames < 600, "no preview");
+    }
+    let [r, g, b] = [0, 1, 2].map(|c| f32::from(previews[0].pixels[at + c]));
+    assert!(
+        r > 1.5 * b && g > 1.5 * b,
+        "the held values' preview: {r} {g} {b}"
+    );
+    assert!(frames <= 3, "drawn once: answered after {frames} frames");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

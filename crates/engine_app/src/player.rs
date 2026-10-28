@@ -3455,6 +3455,10 @@ impl Player {
             Marker::RenderSubmitStart,
         );
         let t = Instant::now();
+        // Material types' pipelines on their way before the view's prepare takes what
+        // arrived: a layout taken there was not this frame's materials' (they were laid
+        // out above), so a preview waits for it (ADR 0123's E10-3f-2).
+        let types_pending = self.renderer.forward().material_types_pending();
         // The view, made with room for the scene's slots (and made again when it outgrows
         // them: a cut).
         let needed = self.scene.slot_count().max(16);
@@ -3487,7 +3491,6 @@ impl Player {
             .map_err(AppError::at("the view"))?;
         // A preview asked for, once its parts are made (ADR 0112): one a frame.
         self.previews.collect(frame.number);
-        let types_pending = self.renderer.forward().material_types_pending();
         let preview = self.previews.pick(
             &mut self.assets,
             &mut self.geometry,
@@ -3968,6 +3971,10 @@ impl Player {
                 .map_err(AppError::at("the frame graph"))?;
             report.execute = us(t);
         }
+        // A preview drawn with its types' own pipelines (none asked for by this frame) is
+        // answered as it is.
+        self.previews
+            .recorded(self.renderer.forward().material_types_pending());
 
         // Submission and presentation.
         let t = Instant::now();

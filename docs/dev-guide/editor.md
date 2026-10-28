@@ -1265,8 +1265,13 @@ Until its shaders are made, the material draws its colour.
 - **Saving** writes the file; the materials that name the graph draw it again (ADR 0123
   E10-3c). Unsaved graphs are autosaved as scenes are, and the session brings the tabs
   back, with their unsaved edits.
-- **Not yet:** the material's preview in the canvas's corner (next; until then the scene's
-  tab shows it after Ctrl+S), reroutes and frames (E10-3e-2), errors on nodes (E10-3f).
+- **The preview:** a sphere in the canvas's top right corner draws the material as the
+  graph is now, unsaved edits and all.
+  - A number dragged or typed reaches it within a few frames: the preview's build makes
+    every number a parameter, so nothing is compiled.
+  - A link or a node that changes the code is compiled first (about half a second).
+  - When the graph cannot be drawn, its bar says why ("not drawn: …").
+- **Not yet:** reroutes and frames (E10-3e-2), errors on nodes (E10-3f-3).
 
 ## Autosave and the session
 
@@ -1350,7 +1355,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E10 | materials: the graph's node search, values on nodes, errors and functions (its canvas is in), previews; the material file and Slang in the code editor are done |
+| E10 | materials: the graph's errors on nodes, reroutes and frames, functions, previews in the dock (its canvas, node search, values and preview sphere are in); the material file and Slang in the code editor are done |
 
 The whole plan is ADR 0107 §7.
 

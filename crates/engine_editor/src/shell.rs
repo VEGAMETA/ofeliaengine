@@ -781,14 +781,19 @@ pub struct BreakOptionsView<'a> {
     pub error: &'a str,
 }
 
+/// A graph's preview's side in the canvas's corner (E10-3f-2), logical pixels.
+const PREVIEW: f32 = 128.0;
+
 /// The bar over a material graph's canvas (ADR 0123 E10-3d), in the center instead of the
 /// viewport; the app draws the canvas under the panels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GraphBar<'a> {
     /// The graph's file.
     pub path: &'a str,
     /// Its nodes, its selection and the zoom.
     pub status: &'a str,
+    /// Its material's preview, once drawn: a sphere in the canvas's corner (E10-3f-2).
+    pub preview: Option<UiImage>,
 }
 
 /// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
@@ -1001,6 +1006,8 @@ pub struct ShellResponse {
     pub close_graph: Option<usize>,
     /// Id of the canvas while a graph is shown; its rectangle from [`Ui::rect_of`].
     pub graph_canvas: u64,
+    /// Id of its preview's picture (none: 0): presses there are not the canvas's.
+    pub graph_preview: u64,
     /// The find bar's query field was used (`Ui::edited_text` while it changes).
     pub find_query: Option<TextFieldResponse>,
     /// Its replace field was.
@@ -1395,14 +1402,35 @@ fn center(
                 ui.spacer("fill");
                 text(ui, "status", graph.status, TEXT, p.text_dim);
             });
+            // Its preview in the top right corner, over the canvas the app draws.
+            let mut preview = 0;
             out.graph_canvas = ui.container(
                 "graph",
                 Style {
                     clip: true,
+                    direction: Direction::Column,
+                    align_cross: Align::End,
+                    padding: [12.0; 4],
                     ..Style::fill()
                 },
-                |_| {},
+                |ui| {
+                    if let Some(image) = graph.preview {
+                        preview = ui.container(
+                            "preview",
+                            Style {
+                                size: [Size::Fixed(PREVIEW), Size::Fixed(PREVIEW)],
+                                radius: 6.0,
+                                background: Some(p.dock),
+                                border: Some((p.header, 1.0)),
+                                image: Some(image),
+                                ..Style::default()
+                            },
+                            |_| {},
+                        );
+                    }
+                },
             );
+            out.graph_preview = preview;
             file_browser(ui, model, p, out);
             return;
         }

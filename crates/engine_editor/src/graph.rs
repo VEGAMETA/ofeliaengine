@@ -29,13 +29,19 @@
 //! - **Values** (E10-3f-1): the inspector shows the node selected alone ([`NodeRow`]s: its
 //!   parameter's name, a constant's value, its unlinked inputs' own values, a texture's
 //!   image, its note), or the graph's shading model with none.
+//! - **The preview** (E10-3f-2, the team's «а»): a sphere the player draws with the graph's
+//!   editing build ([`preview_material`]), in the canvas's corner; every number is a
+//!   parameter there, so a value's change reaches it without compiling anything.
 
 use crate::paint::UiText;
 use crate::shell::Palette;
 use engine_assets::OutlineMaps;
+use engine_assets::graph_module::{GRAPH_TYPE, encoding};
+use engine_assets::material_file::{Look as MaterialLook, MaterialFile, MaterialTexture};
 use engine_core::math::{Vec2, Vec4};
 use engine_material_graph::graph::OUTPUT;
 use engine_material_graph::library::{self, Body, Fill, OUTPUT_KIND};
+use engine_material_graph::{Build, GraphError, ParamType};
 use engine_material_graph::{Graph, GraphFile, Kind, Model, Node, PortRef, PortType};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad};
 use engine_scene::{AssetId, AssetPaths, AssetRef};
@@ -714,6 +720,59 @@ fn shown_width(ty: PortType) -> u8 {
 fn is_param_name(name: &str) -> bool {
     name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !name.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// The editing build of `doc`'s graph for its preview (ADR 0123 E10-3f-2): its module's
+/// text (every number a parameter, so a value's change changes no code), and the material
+/// file drawing module `module` (at `module_path` in the project) with every parameter's
+/// value and every texture node's image (a normal map's where it feeds a Normal Map node),
+/// with the paths of its references.
+///
+/// # Errors
+///
+/// The graph cannot be generated (at its node).
+pub(crate) fn preview_material(
+    doc: &GraphDoc,
+    module: AssetRef,
+    module_path: &str,
+) -> Result<(String, MaterialFile, AssetPaths), GraphError> {
+    let generated = engine_material_graph::generate(&doc.graph, GRAPH_TYPE, Build::Editing)?;
+    let mut file = MaterialFile {
+        shader: module,
+        type_name: String::from(GRAPH_TYPE),
+        look: MaterialLook::Own,
+        ..MaterialFile::default()
+    };
+    let mut paths = AssetPaths::new();
+    paths.insert(module, module_path);
+    for p in &generated.params {
+        let Some(node) = doc.graph.nodes.get(&p.node) else {
+            continue;
+        };
+        match p.ty {
+            ParamType::Texture => {
+                let Some(path) = doc.paths.get(node.texture) else {
+                    continue;
+                };
+                paths.insert(node.texture, path);
+                file.textures.insert(
+                    p.name.clone(),
+                    MaterialTexture {
+                        image: node.texture,
+                        encoding: encoding(&doc.graph, &p.node),
+                    },
+                );
+            }
+            ParamType::Float(1) => {
+                file.numbers.insert(p.name.clone(), p.value[0]);
+            }
+            ParamType::Float(w) => {
+                file.vectors
+                    .insert(p.name.clone(), p.value[..usize::from(w)].to_vec());
+            }
+        }
+    }
+    Ok((generated.text, file, paths))
 }
 
 /// Nodes `ids` deleted with their links, the surface kept: how many went.
@@ -2825,6 +2884,62 @@ mod tests {
         assert!(d.text.contains("textures/wood.png"));
         d.set_comment("the grain").unwrap();
         assert_eq!(d.graph.nodes["t"].comment, "the grain");
+    }
+
+    #[test]
+    fn the_preview_draws_the_editing_build_whose_values_change_no_code() {
+        let mut d = doc();
+        // The roughness into the surface: only what the surface reaches is in the code.
+        d.graph.link(
+            PortRef::new("r", "value"),
+            PortRef::new(OUTPUT, "roughness"),
+        );
+        let module = AssetRef::file(AssetId::new());
+        let (text, file, paths) =
+            preview_material(&d, module, ".ofelia/cache/graphs/x-editing.slang").unwrap();
+        assert!(text.contains("struct GraphMaterial : IMaterial"), "{text}");
+        assert_eq!(file.shader, module);
+        assert_eq!(file.type_name, GRAPH_TYPE);
+        assert_eq!(
+            paths.get(module),
+            Some(".ofelia/cache/graphs/x-editing.slang")
+        );
+        // Every number a parameter: the named roughness, the colour by its node.
+        assert_eq!(file.numbers.get("roughness"), Some(&0.6));
+        assert_eq!(
+            file.vectors.get("_c").map(Vec::as_slice),
+            Some(&[0.9, 0.1, 0.1, 1.0][..])
+        );
+        // A value changed: the same code, the new value.
+        d.selected.insert(String::from("c"));
+        d.set_numbers(NodeRow::Value(4), [0.1, 0.8, 0.2, 1.0])
+            .unwrap();
+        let (again, file, _) =
+            preview_material(&d, module, ".ofelia/cache/graphs/x-editing.slang").unwrap();
+        assert_eq!(again, text);
+        assert_eq!(
+            file.vectors.get("_c").map(Vec::as_slice),
+            Some(&[0.1, 0.8, 0.2, 1.0][..])
+        );
+        // A texture into a Normal Map node: its image, a normal map's.
+        let image = AssetRef::file(AssetId::new());
+        d.add_texture(image, "textures/bumps.png", [0.0, 600.0])
+            .unwrap();
+        d.graph.add("nm", Node::new("normal_map", [150.0, 600.0]));
+        d.graph
+            .link(
+                PortRef::new("texture1", "rgba"),
+                PortRef::new("nm", "color"),
+            )
+            .link(PortRef::new("nm", "normal"), PortRef::new(OUTPUT, "normal"));
+        let (_, file, paths) =
+            preview_material(&d, module, ".ofelia/cache/graphs/x-editing.slang").unwrap();
+        assert_eq!(file.textures["bumps"].image, image);
+        assert_eq!(
+            file.textures["bumps"].encoding,
+            engine_assets::material_file::TextureEncoding::Normal
+        );
+        assert_eq!(paths.get(image), Some("textures/bumps.png"));
     }
 
     #[test]

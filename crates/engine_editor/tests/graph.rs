@@ -1,13 +1,15 @@
 //! A material graph's tab on the player (ADR 0123 E10-3d): the session brings the tab back,
 //! its canvas draws where the viewport is, under the panels: the grid, the boxes with their
-//! title bars by group, the links in their outputs' colours. `ENGINE_EDITOR_GRAPH_PNG=<file>`
-//! writes the frame.
+//! title bars by group, the links in their outputs' colours; the sphere of its preview in
+//! the corner (E10-3f-2), following a value typed and a link made. `ENGINE_EDITOR_GRAPH_PNG=
+//! <file>` writes the frame.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
 use engine_app::{Game, Player, PlayerSettings, Window};
 use engine_ecs::World;
-use engine_platform::window::{WindowEvent, WindowEventKind, WindowId};
+use engine_editor::{EditorGame, EditorOverlay};
+use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind, WindowId};
 use engine_scene::AssetId;
 use std::time::Instant;
 
@@ -17,18 +19,77 @@ impl Game for NoGame {
     fn tick(&mut self, _world: &mut World, _dt: f32) {}
 }
 
-fn key<G: Game>(game: &mut engine_editor::EditorGame<G>, vk: u16, scancode: u16, down: bool) {
-    game.event(&WindowEvent {
-        window: WindowId(0),
-        time: Instant::now(),
-        kind: WindowEventKind::Key {
+fn key<G: Game>(game: &mut EditorGame<G>, vk: u16, scancode: u16, down: bool) {
+    send(
+        game,
+        WindowEventKind::Key {
             virtual_key: vk,
             scancode,
             extended: false,
             pressed: down,
             repeat: false,
         },
+    );
+}
+
+fn send<G: Game>(game: &mut EditorGame<G>, kind: WindowEventKind) {
+    game.event(&WindowEvent {
+        window: WindowId(0),
+        time: Instant::now(),
+        kind,
     });
+}
+
+fn pointer<G: Game>(game: &mut EditorGame<G>, x: i32, y: i32) {
+    send(game, WindowEventKind::CursorMoved { x, y });
+}
+
+fn button<G: Game>(game: &mut EditorGame<G>, pressed: bool) {
+    send(
+        game,
+        WindowEventKind::MouseButton {
+            button: MouseButton::Left,
+            pressed,
+        },
+    );
+}
+
+/// A left click where the pointer is, a frame each for the press and the release.
+fn click(player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay) {
+    player.frame_overlaid(game, Some(&mut *overlay)).unwrap();
+    for pressed in [true, false] {
+        button(game, pressed);
+        player.frame_overlaid(game, Some(&mut *overlay)).unwrap();
+    }
+}
+
+/// Frames, the assets the editor asks for given before each as the editor's binary does,
+/// until `done` holds of one: that frame, how many, and the seconds they took.
+fn until(
+    player: &mut Player,
+    game: &mut EditorGame<NoGame>,
+    overlay: &mut EditorOverlay,
+    done: &dyn Fn(&[u8]) -> bool,
+) -> (Vec<u8>, usize, f64) {
+    let timer = engine_platform::time::HighResTimer::new().unwrap();
+    let started = Instant::now();
+    let mut frames = 0;
+    loop {
+        game.sync_assets(player);
+        let shot = player
+            .capture_overlaid(game, Some(&mut *overlay))
+            .unwrap()
+            .unwrap();
+        frames += 1;
+        if done(&shot) {
+            return (shot, frames, started.elapsed().as_secs_f64());
+        }
+        assert!(
+            started.elapsed().as_secs() < 90,
+            "not drawn after {frames} frames"
+        );
+        let _ = timer.sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 /// Pixels of a hue in an RGBA frame: the inputs' teal title bars, the maths' blue one, the
@@ -46,7 +107,8 @@ fn hues(rgba: &[u8]) -> [usize; 3] {
     ]
 }
 
-/// A lit graph: a colour multiplied by a number into the base, a number into the roughness.
+/// A lit graph: a colour multiplied by a number into the base, a number into the roughness,
+/// a magenta colour linked to nothing.
 fn moss(id: AssetId) -> String {
     format!(
         "[mgraph version=1 id={id}]\n\nmodel = \"lit\"\n\
@@ -57,6 +119,8 @@ fn moss(id: AssetId) -> String {
          nodes[\"m\"].kind = \"multiply\"\nnodes[\"m\"].at = [220, 30]\n\
          nodes[\"r\"].kind = \"number\"\nnodes[\"r\"].at = [220, 190]\n\
          nodes[\"r\"].value = [0.6]\nnodes[\"r\"].param = \"roughness\"\n\
+         nodes[\"e\"].kind = \"color\"\nnodes[\"e\"].at = [0, 185]\n\
+         nodes[\"e\"].value = [1, 0, 1, 1]\n\
          nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [460, 0]\n\
          links[\"m.a\"] = \"c.rgba\"\nlinks[\"m.b\"] = \"k.value\"\n\
          links[\"out.base\"] = \"m.out\"\nlinks[\"out.roughness\"] = \"r.value\"\n"
@@ -111,10 +175,24 @@ fn a_graphs_tab_draws_its_canvas_where_the_viewport_is() {
     }
     let said = game.message().unwrap_or_default();
     assert!(!said.contains("could not"), "{said}");
-    let rgba = player
-        .capture_overlaid(&mut game, Some(&mut overlay))
-        .unwrap()
-        .unwrap();
+    // The preview (E10-3f-2): a sphere of the graph in the canvas's top right once its
+    // editing build is compiled; its green against the canvas (the colour's swatch is
+    // under 500 pixels of it).
+    let green = |rgba: &[u8]| {
+        rgba.chunks_exact(4)
+            .filter(|p| {
+                let (r, g, b) = (f32::from(p[0]), f32::from(p[1]), f32::from(p[2]));
+                g > 1.3 * r && g > 1.3 * b && g > 60.0
+            })
+            .count()
+    };
+    let (rgba, _, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        green(shot) > 3_000
+    });
+    println!(
+        "the preview drawn {took:.2} s after the tab: {} green pixels",
+        green(&rgba)
+    );
     if let Ok(path) = std::env::var("ENGINE_EDITOR_GRAPH_PNG") {
         let png = engine_render::png::encode_png(
             width,
@@ -125,14 +203,62 @@ fn a_graphs_tab_draws_its_canvas_where_the_viewport_is() {
         .unwrap();
         std::fs::write(path, png).unwrap();
     }
+    // Numbers live (the team's «а», E10-3f-2): the colour clicked on the canvas, its green
+    // typed in the inspector, the sphere loses its green with no code compiled (the editing
+    // build's numbers are parameters); then the unlinked magenta colour linked into the
+    // emission, a parameter the module did not have, compiled. The positions are this
+    // graph's at its framing (100 %) in the window's first layout.
+    let before = green(&rgba);
+    pointer(&mut game, 100, 173);
+    click(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, 1140, 155);
+    click(&mut player, &mut game, &mut overlay);
+    for c in "0.05".chars() {
+        send(&mut game, WindowEventKind::Char(c));
+    }
+    player
+        .frame_overlaid(&mut game, Some(&mut overlay))
+        .unwrap();
+    key(&mut game, 0x0D, 0x1C, true);
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        green(shot) < 300
+    });
+    key(&mut game, 0x0D, 0x1C, false);
+    println!(
+        "a value typed: on the sphere after {took:.3} s, {frames} frames ({before} -> {} \
+         green pixels)",
+        green(&shot)
+    );
+    let pink = |rgba: &[u8]| {
+        rgba.chunks_exact(4)
+            .filter(|p| p[0] > 180 && p[2] > 180 && p[1] < 150)
+            .count()
+    };
+    let before = pink(&shot);
+    pointer(&mut game, 169, 382);
+    button(&mut game, true);
+    player
+        .frame_overlaid(&mut game, Some(&mut overlay))
+        .unwrap();
+    for (x, y) in [(350, 330), (519, 284)] {
+        pointer(&mut game, x, y);
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
+            .unwrap();
+    }
+    button(&mut game, false);
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        pink(shot) > before + 3_000
+    });
+    println!(
+        "a link with a new parameter: on the sphere after {took:.3} s, {frames} frames \
+         ({before} -> {} magenta pixels)",
+        pink(&shot)
+    );
     // Space over the canvas: the node search at the pointer, "mul" typed
     // (`ENGINE_EDITOR_GRAPH_SEARCH_PNG=<file>` writes it); Escape closes it.
     if let Ok(path) = std::env::var("ENGINE_EDITOR_GRAPH_SEARCH_PNG") {
-        game.event(&WindowEvent {
-            window: WindowId(0),
-            time: Instant::now(),
-            kind: WindowEventKind::CursorMoved { x: 200, y: 430 },
-        });
+        pointer(&mut game, 200, 430);
         player
             .frame_overlaid(&mut game, Some(&mut overlay))
             .unwrap();
@@ -142,11 +268,7 @@ fn a_graphs_tab_draws_its_canvas_where_the_viewport_is() {
             .unwrap();
         key(&mut game, 0x20, 0x39, false);
         for c in "mul".chars() {
-            game.event(&WindowEvent {
-                window: WindowId(0),
-                time: Instant::now(),
-                kind: WindowEventKind::Char(c),
-            });
+            send(&mut game, WindowEventKind::Char(c));
         }
         for _ in 0..3 {
             player

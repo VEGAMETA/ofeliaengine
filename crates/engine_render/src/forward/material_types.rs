@@ -403,6 +403,12 @@ impl MaterialTypes {
     pub(crate) fn set_hot_reload(&mut self, enabled: bool) {
         if !enabled {
             self.hot_reload = None;
+            // Reloads due go with it: nothing waits out their quiet any more.
+            for t in &mut self.types {
+                if matches!(t.reload, Reload::Changed(_)) {
+                    t.reload = Reload::Idle;
+                }
+            }
             return;
         }
         if self.hot_reload.is_some() {
@@ -849,13 +855,15 @@ impl MaterialTypes {
                 result,
             } => {
                 let index = usize::from(ty.0) - 1;
+                let hot = self.hot_reload.is_some();
                 let Some(t) = self.types.get_mut(index) else {
                     return;
                 };
                 if t.generation != generation {
                     return;
                 }
-                let again = matches!(t.reload, Reload::Compiling { again: true, .. });
+                // Changed again meanwhile: due again, while files are watched.
+                let again = hot && matches!(t.reload, Reload::Compiling { again: true, .. });
                 t.reload = if again {
                     Reload::Changed(Instant::now())
                 } else {
@@ -1004,7 +1012,8 @@ impl MaterialTypes {
     }
 
     /// Pipelines still on their way: waiting for SPIR-V, or described and not created yet,
-    /// and compiles in flight (tests and tools wait for 0).
+    /// compiles in flight, and reloads due (a file a type reads changed, its quiet not
+    /// over; tests and tools wait for 0).
     pub(crate) fn pending(&self) -> usize {
         let not_created = self
             .types
@@ -1012,8 +1021,14 @@ impl MaterialTypes {
             .flat_map(|t| t.pipelines.values())
             .filter(|d| matches!(d, Derived::Ready { derived, .. } if !derived.is_settled()))
             .count();
+        let due = self
+            .types
+            .iter()
+            .filter(|t| matches!(t.reload, Reload::Changed(_)))
+            .count();
         self.waiting
             + not_created
+            + due
             + self.compiling
             + self.requests.borrow().len()
             + self.params_requests.borrow().len()

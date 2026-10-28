@@ -192,3 +192,13 @@ ADR 0107's E4 asks for asset fields as in Godot (team decision, 2026-10-17).
   - picking a material file for a box's model through the palette is one step, and the
     dock's pick does not move;
   - on the GPU, the inspector shows the crate's mesh and its grid material on a sphere.
+
+## Addendum (E10-3f-2, 2026-10-28): requests whose code is unchanged
+
+ADR 0123's graph preview asks again after every edit. A request may say that only its
+materials' values changed since its key's last one (`PreviewRequest::same_code`): it
+waits until no material type is on its way and is drawn once, answered when that frame
+asked for no pipeline (drawn again once they are made otherwise). A number typed reaches
+the sphere in 5 frames instead of 8. The pipelines on their way are counted before the
+view's prepare, and a type's reload due (a file changed, its quiet not over) counts. A
+request waiting no longer allocates its draws each frame: they are made for the drawing.

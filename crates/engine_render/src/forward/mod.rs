@@ -1809,8 +1809,9 @@ impl ForwardRenderer {
         self.material_types.pack_misses()
     }
 
-    /// Material types' pipelines on their way (compiling, or described and not created):
-    /// a frame drawing them now draws their fallbacks. Tests and tools wait for 0.
+    /// Material types' pipelines on their way (compiling, described and not created, or a
+    /// reload due: a file they read changed, its quiet not over): a frame drawing them now
+    /// draws their fallbacks, or their previous versions. Tests and tools wait for 0.
     pub fn material_types_pending(&self) -> usize {
         self.material_types.pending() + self.bent_twins.pending()
     }
