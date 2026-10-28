@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 /// What a row of a material's section shows and edits.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Row {
+    /// A variant's base (E10-4b): the material file whose values it has where it sets none.
+    Base,
     /// The type and its module.
     Type,
     /// A field of the type's `Params`: its path, what it holds, its elements.
@@ -82,6 +84,7 @@ impl Row {
     /// Its name in the inspector.
     pub(crate) fn name(&self) -> &str {
         match self {
+            Self::Base => "base",
             Self::Type => "type",
             Self::Param { name, .. } => name,
             Self::Encoding { .. } => "  encoding",
@@ -104,6 +107,7 @@ impl Row {
             labels,
         };
         match self {
+            Self::Base => Shown::Image,
             Self::Type => Shown::Text,
             Self::Param { count, .. } if *count != 1 => Shown::Text,
             Self::Param { name, kind, .. } => match *kind {
@@ -242,6 +246,10 @@ pub(crate) fn type_cursor(template: &str) -> (usize, usize) {
 /// and its look only).
 pub(crate) fn rows(file: &MaterialFile, layout: Option<&StructLayout>, out: &mut Vec<Row>) {
     out.clear();
+    // A variant's base first (E10-4b).
+    if !file.base.is_none() {
+        out.push(Row::Base);
+    }
     let own = if file.is_typed() {
         out.push(Row::Type);
         // Fields starting with `_` are the code's own (a graph's editing numbers, a struct's
@@ -386,20 +394,33 @@ pub(crate) fn toggle(file: &mut MaterialFile, row: &Row) {
     }
 }
 
-/// Whether a row differs from its default (a parameter: whether the file sets it).
-pub(crate) fn changed(file: &MaterialFile, row: &Row) -> bool {
-    let d = MaterialFile::default();
+/// Whether a row differs from what it is without it: a variant's from its base's value
+/// (`base`, E10-4b: one of the variant's own), else from its default (a parameter: whether
+/// the file sets it).
+pub(crate) fn changed(file: &MaterialFile, row: &Row, base: Option<&MaterialFile>) -> bool {
+    let plain = MaterialFile::default();
+    let d = base.unwrap_or(&plain);
     match row {
-        Row::Type => false,
-        Row::Param { name, .. } => {
-            file.numbers.contains_key(name)
-                || file.vectors.contains_key(name)
-                || file.textures.contains_key(name)
+        Row::Base | Row::Type => false,
+        Row::Param { name, .. } => match base {
+            Some(b) => {
+                file.numbers.get(name) != b.numbers.get(name)
+                    || file.vectors.get(name) != b.vectors.get(name)
+                    || file.textures.get(name) != b.textures.get(name)
+            }
+            None => {
+                file.numbers.contains_key(name)
+                    || file.vectors.contains_key(name)
+                    || file.textures.contains_key(name)
+            }
+        },
+        Row::Encoding { name } => {
+            let encoding = |f: &MaterialFile| f.textures.get(name).map(|t| t.encoding);
+            match base {
+                Some(b) => encoding(file) != encoding(b),
+                None => encoding(file).is_some_and(|e| e != TextureEncoding::Color),
+            }
         }
-        Row::Encoding { name } => file
-            .textures
-            .get(name)
-            .is_some_and(|t| t.encoding != TextureEncoding::Color),
         Row::Look => file.look != d.look,
         Row::BaseColor => file.base_color != d.base_color,
         Row::Metallic => file.metallic != d.metallic,
@@ -411,19 +432,36 @@ pub(crate) fn changed(file: &MaterialFile, row: &Row) -> bool {
     }
 }
 
-/// A row back to its default (a parameter: unset, zero; an image none).
-pub(crate) fn reset(file: &mut MaterialFile, row: &Row) {
-    let d = MaterialFile::default();
+/// A row back to what it is without it: a variant's to its base's value (`base`, E10-4b:
+/// the variant's own value gone), else to its default (a parameter: unset, zero; an image
+/// none).
+pub(crate) fn reset(file: &mut MaterialFile, row: &Row, base: Option<&MaterialFile>) {
+    let plain = MaterialFile::default();
+    let d = base.unwrap_or(&plain);
     match row {
-        Row::Type => {}
+        Row::Base | Row::Type => {}
         Row::Param { name, .. } => {
-            file.numbers.remove(name);
-            file.vectors.remove(name);
-            file.textures.remove(name);
+            let key = name.clone();
+            match d.numbers.get(name) {
+                Some(&v) => file.numbers.insert(key.clone(), v),
+                None => file.numbers.remove(name),
+            };
+            match d.vectors.get(name) {
+                Some(v) => file.vectors.insert(key.clone(), v.clone()),
+                None => file.vectors.remove(name),
+            };
+            match d.textures.get(name) {
+                Some(&t) => file.textures.insert(key, t),
+                None => file.textures.remove(name),
+            };
         }
         Row::Encoding { name } => {
+            let encoding = d
+                .textures
+                .get(name)
+                .map_or(TextureEncoding::Color, |t| t.encoding);
             if let Some(t) = file.textures.get_mut(name) {
-                t.encoding = TextureEncoding::Color;
+                t.encoding = encoding;
             }
         }
         Row::Look => file.look = d.look,
@@ -508,6 +546,7 @@ fn texts(
                 let k = next(texts, &mut n);
                 let image = match row {
                     Row::Param { name, .. } => file.textures.get(name).map(|t| t.image),
+                    Row::Base => Some(file.base),
                     _ => None,
                 };
                 texts[k].push_str(file_name(written, image.unwrap_or(AssetRef::NONE)));
@@ -811,12 +850,12 @@ mod tests {
         // Within 0 and 1; a mask brings its cutoff.
         set_numbers(&mut file, &Row::Metallic, [1.7, 0.0, 0.0, 0.0]);
         assert_eq!(file.metallic, 1.0);
-        assert!(changed(&file, &Row::Metallic));
+        assert!(changed(&file, &Row::Metallic, None));
         choose(&mut file, &Row::Alpha, 1);
         rows(&file, None, &mut out);
         assert!(out.contains(&Row::AlphaCutoff));
-        reset(&mut file, &Row::Metallic);
-        assert!(!changed(&file, &Row::Metallic));
+        reset(&mut file, &Row::Metallic, None);
+        assert!(!changed(&file, &Row::Metallic, None));
         toggle(&mut file, &Row::DoubleSided);
         assert!(file.double_sided);
     }
@@ -883,14 +922,33 @@ mod tests {
             name: String::from("pattern")
         }));
         assert!(!out.contains(&Row::BaseColor));
-        assert!(changed(
-            &file,
-            &Row::Param {
-                name: String::from("pattern"),
-                kind: FieldKind::Texture,
-                count: 1
-            }
-        ));
+        let pattern = Row::Param {
+            name: String::from("pattern"),
+            kind: FieldKind::Texture,
+            count: 1,
+        };
+        assert!(changed(&file, &pattern, None));
+        // A variant's (E10-4b): changed where it is not its base's; reset to its base's.
+        let base = file.clone();
+        let mut variant = file.clone();
+        variant.base = AssetRef::file(AssetId::new());
+        rows(&variant, Some(&layout), &mut out);
+        assert_eq!(out[0], Row::Base, "a variant's base first");
+        assert!(!changed(&variant, &pattern, Some(&base)));
+        assert!(
+            !changed(&variant, &out[3], Some(&base)),
+            "roughness as its base's"
+        );
+        set_numbers(&mut variant, &out[3], [0.9, 0.0, 0.0, 0.0]);
+        assert!(changed(&variant, &out[3], Some(&base)));
+        let roughness = out[3].clone();
+        reset(&mut variant, &roughness, Some(&base));
+        assert_eq!(variant.numbers["roughness"], 0.6, "back to its base's");
+        variant.textures.remove("pattern");
+        assert!(changed(&variant, &pattern, Some(&base)));
+        reset(&mut variant, &pattern, Some(&base));
+        assert_eq!(variant.textures["pattern"].image, image);
+        assert!(!changed(&variant, &Row::Metallic, Some(&base)));
     }
 
     #[test]

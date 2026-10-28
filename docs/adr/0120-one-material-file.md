@@ -377,3 +377,25 @@ numbers["roughness"] = 0.2
 - **Next (E10-4b):** the inspector marks the values a variant sets as a prefab's overrides
   are marked (a bold label and a bar). ↺ puts one back to its base's value, Apply to Base
   writes it into the base, and a Base row names the base and opens it.
+
+### As built (E10-4b, 2026-10-29): a variant in the inspector
+
+- **Its own values:** a row of a variant is changed where it is not its base's (a
+  parameter by its entry in the base's maps, a texture's encoding by the base's), so ↺
+  shows on the variant's own values only, as on a prefab instance's overrides, and puts the
+  base's value back (`material::changed` and `reset` take the base). The inspector shows
+  overrides by ↺ alone, for prefabs too; the bold label and bar the UX note proposed stay a
+  later polish of both.
+- **A Base row** first (`Row::Base`, the base's file name, a material's icon): a click
+  shows the base in the FileSystem dock. The section's title says whose variant it is
+  ("Material · variant of red.material · used by 2 objects").
+- **Apply to Base** (the palette's Material commands, as a prefab instance's Apply
+  Overrides): the base (held for the inspector, opened if it was not) takes the variant's
+  values, its own base kept; the variant, over its base as it now is, keeps its `base` line
+  alone. One step changing both files; undo takes both back, and the variant follows its
+  base again in the editor's frame (the following moved from the player's sync to
+  `Editor::update`, so the editor's model holds without a player).
+- **Tests:** a variant's rows against its base (its base row first; changed where its own,
+  reset to the base's for a number and a texture); in the editor, the title, ↺ back to the
+  base's value with the variant's line gone, Apply to Base as one step (the base takes the
+  value, the variant names its base alone) and its undo.
