@@ -206,6 +206,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         playing: false,
         paused: false,
         stopped: false,
+        stop_error: false,
         status: "engine 0.0.0",
         snap: true,
         steps: ["0.1 m", "45°", "0.1"],

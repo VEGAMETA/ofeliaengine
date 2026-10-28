@@ -90,7 +90,7 @@ use crate::transform::{self, KeyTransform};
 use crate::undo::{PlayChange, PlayMark, WorldSnapshot};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
 use core::any::TypeId;
-use engine_app::scripts::Resume;
+use engine_app::scripts::{ErrorStops, Resume};
 use engine_app::{
     AppError, AssetMeta, Brush, BrushGroup, BrushOp, BrushShape, ColliderState, Game, Model,
     ModelCollider, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup, Window,
@@ -731,6 +731,10 @@ struct CommandIds {
     step_over: CommandId,
     step_into: CommandId,
     step_out: CommandId,
+    /// Which errors stop a script (E9-1b-4), and a break at the next line a script runs.
+    errors_uncaught: CommandId,
+    errors_caught: CommandId,
+    break_next: CommandId,
     find_references: CommandId,
     /// Prefabs (E5-2): the selection made a prefab's instance, an instance unpacked.
     make_prefab: CommandId,
@@ -877,6 +881,17 @@ fn commands() -> (Commands, CommandIds) {
         step_over: c.register("debug.step_over", "Debug", "Step Over"),
         step_into: c.register("debug.step_into", "Debug", "Step Into"),
         step_out: c.register("debug.step_out", "Debug", "Step Out"),
+        errors_uncaught: c.register(
+            "debug.errors_uncaught",
+            "Debug",
+            "Stop at Errors the Script Does Not Catch",
+        ),
+        errors_caught: c.register(
+            "debug.errors_caught",
+            "Debug",
+            "Stop at Errors Caught by pcall",
+        ),
+        break_next: c.register("debug.break_next", "Debug", "Break at the Next Script Line"),
         find_references: c.register("assets.references", "Assets", "Find References"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
         unpack_prefab: c.register("scene.unpack_prefab", "Scene", "Unpack Prefab"),
@@ -1945,6 +1960,10 @@ struct Editor {
     /// when the stop, the frame, the breakpoints or their states change.
     debug_frame: usize,
     debug_text: DebugText,
+    /// Which errors stop a script in Play (E9-1b-4), kept in the session.
+    error_stops: ErrorStops,
+    /// A break at the next script line waits for a hook to run.
+    break_pending: bool,
     /// When the open scripts' files were last compared with what was read.
     scripts_checked: Instant,
     /// The checkers on their threads (E8-3b, E10-2a), each started with its language's
@@ -2380,7 +2399,7 @@ struct CodeShown {
     marks_width: f32,
     marks: Vec<(usize, MarkLook)>,
     mark_hint: Option<(usize, MarkLook)>,
-    break_notes: Vec<(usize, usize, usize, usize, bool)>,
+    break_notes: Vec<(usize, usize, usize, usize, crate::shell::NoteKind)>,
     break_text: String,
     /// The line a stopped script runs next, in the text as it is (ADR 0119).
     stopped: Option<usize>,
@@ -2707,6 +2726,11 @@ impl Editor {
             stop: None,
             debug_frame: 0,
             debug_text: DebugText::default(),
+            error_stops: ErrorStops {
+                uncaught: true,
+                caught: false,
+            },
+            break_pending: false,
             scripts_checked: Instant::now(),
             checkers: Checkers::default(),
             generations: 0,
@@ -4016,6 +4040,11 @@ impl Editor {
             (self.bottom == Some(DEBUGGER_TAB)).then(|| crate::shell::DebuggerView {
                 header: &self.debug_text.header,
                 stopped: self.stop.is_some(),
+                error: self
+                    .stop
+                    .as_ref()
+                    .is_some_and(|s| s.stopped.error.is_some()),
+                error_stops: [self.error_stops.uncaught, self.error_stops.caught],
                 steppable: self.stop.as_ref().is_some_and(|s| s.stopped.steppable),
                 frames: &debug_frames,
                 frame: self.debug_frame,
@@ -4082,16 +4111,11 @@ impl Editor {
                 (line, column, shown.messages.get(a..b).unwrap_or(""), error)
             })
             .collect();
-        let code_break_notes: Vec<(usize, usize, &str, bool)> = shown
+        let code_break_notes: Vec<(usize, usize, &str, crate::shell::NoteKind)> = shown
             .break_notes
             .iter()
-            .map(|&(line, column, a, b, problem)| {
-                (
-                    line,
-                    column,
-                    shown.break_text.get(a..b).unwrap_or(""),
-                    problem,
-                )
+            .map(|&(line, column, a, b, kind)| {
+                (line, column, shown.break_text.get(a..b).unwrap_or(""), kind)
             })
             .collect();
         let code_rows: Vec<(&str, &str, &str)> = shown
@@ -4175,6 +4199,10 @@ impl Editor {
             marks: &shown.marks,
             mark_hint: shown.mark_hint,
             stopped: shown.stopped,
+            stopped_error: self
+                .stop
+                .as_ref()
+                .is_some_and(|s| s.stopped.error.is_some()),
             break_notes: &code_break_notes,
             break_options: self
                 .break_edit
@@ -4298,6 +4326,10 @@ impl Editor {
             playing,
             paused: self.play.as_ref().is_some_and(|p| p.paused),
             stopped: self.stop.is_some(),
+            stop_error: self
+                .stop
+                .as_ref()
+                .is_some_and(|s| s.stopped.error.is_some()),
             status: &self.status,
             snap: self.snapping.on,
             steps: self.step_labels.each_ref().map(String::as_str),
@@ -4487,6 +4519,11 @@ impl Editor {
                 .map(|b| (b.file.clone(), b.line))
         {
             self.enable_breakpoint(world, &file, line);
+        }
+        match response.debug_errors {
+            Some(0) => self.run(world, self.ids.errors_uncaught),
+            Some(1) => self.run(world, self.ids.errors_caught),
+            _ => {}
         }
         // The bottom panel's tabs: Output opens and closes; the others come later.
         if let Some(i) = response.bottom_tab {
@@ -8161,6 +8198,9 @@ impl Editor {
             ids.step_over,
             ids.step_into,
             ids.step_out,
+            ids.errors_uncaught,
+            ids.errors_caught,
+            ids.break_next,
             ids.debugger,
             ids.code_find,
             ids.code_replace,
@@ -8727,9 +8767,12 @@ impl Editor {
                         |n| n.1 + shown.messages[n.2..n.3].chars().count() + 3,
                     );
                     let end = shown.break_text.len();
-                    shown
-                        .break_notes
-                        .push((m.line, column, start, end, problem));
+                    let kind = if problem {
+                        crate::shell::NoteKind::Problem
+                    } else {
+                        crate::shell::NoteKind::Said
+                    };
+                    shown.break_notes.push((m.line, column, start, end, kind));
                 }
             }
             // The stopped line's values after its text, in place of its mark's hits.
@@ -8746,7 +8789,12 @@ impl Editor {
                     |n| n.1 + shown.messages[n.2..n.3].chars().count() + 3,
                 );
                 let end = shown.break_text.len();
-                shown.break_notes.push((line, column, start, end, false));
+                let kind = if stop.stopped.error.is_some() {
+                    crate::shell::NoteKind::Error
+                } else {
+                    crate::shell::NoteKind::Said
+                };
+                shown.break_notes.push((line, column, start, end, kind));
             }
             // A new breakpoint being made shows where it goes.
             if let Some(e) = self
@@ -9511,10 +9559,13 @@ impl Editor {
     fn sync_breakpoints(&mut self, player: &mut Player) {
         let scripts = &self.scripts;
         let debugger = player.script_debugger();
-        self.host_breaks
-            .sync(&mut self.breakpoints, debugger.as_ref(), |file| {
-                scripts.iter().find(|s| s.path == file).map(|s| &s.doc)
-            });
+        self.host_breaks.sync(
+            &mut self.breakpoints,
+            self.error_stops,
+            debugger.as_ref(),
+            |file| scripts.iter().find(|s| s.path == file).map(|s| &s.doc),
+        );
+        self.break_pending = debugger.as_ref().is_some_and(|d| d.break_pending());
     }
 
     /// The Debugger panel's texts (ADR 0119 E9-1b-3), made again only when the stop, the
@@ -9525,6 +9576,7 @@ impl Editor {
             self.debug_frame,
             self.breakpoints.revision(),
             self.host_breaks.version(),
+            self.break_pending,
         );
         if self.debug_text.key == Some(key) {
             return;
@@ -9542,14 +9594,25 @@ impl Editor {
                     .first()
                     .and_then(|f| f.function.as_deref())
                     .unwrap_or("a script");
+                let what = match &s.error {
+                    Some(e) if e.caught => "Error caught by pcall",
+                    Some(_) => "Error",
+                    None => "Stopped",
+                };
                 let _ = write!(
                     text.header,
-                    "Stopped · {hook} · {}:{}",
+                    "{what} · {hook} · {}:{}",
                     engine_app::scripts::module_file(&s.module),
                     s.line
                 );
-                if !s.steppable {
-                    text.header.push_str(" · no steps here: a call from C code");
+                match &s.error {
+                    Some(e) => {
+                        let _ = write!(text.header, " · {}", e.message);
+                    }
+                    None if !s.steppable => {
+                        text.header.push_str(" · no steps here: a call from C code");
+                    }
+                    None => {}
                 }
                 for f in &s.stack {
                     let function = f
@@ -9566,6 +9629,17 @@ impl Editor {
                     text.frames.push((function, place));
                 }
                 if let Some(f) = s.stack.get(self.debug_frame) {
+                    // Luau does not read a native frame's locals; a breakpoint in its function
+                    // runs it interpreted.
+                    if f.native {
+                        text.variables.push((
+                            String::from(
+                                "LOCALS · not readable: the function runs as native code \
+                                 (a breakpoint in it shows them)",
+                            ),
+                            String::new(),
+                        ));
+                    }
                     for (title, vars) in [("LOCALS", &f.locals), ("UPVALUES", &f.upvalues)] {
                         if vars.is_empty() {
                             continue;
@@ -9576,6 +9650,9 @@ impl Editor {
                         }
                     }
                 }
+            }
+            None if self.break_pending => {
+                text.header.push_str("Stops at the next line a script runs");
             }
             None => text.header.push_str(
                 "No script is stopped: a breakpoint (F9 in a script's tab) stops one in Play",
@@ -9664,9 +9741,19 @@ impl Editor {
             return;
         }
         let file = PathBuf::from(engine_app::scripts::module_file(&stopped.module));
-        // The frame's values, as they are: locals, then its function's upvalues.
-        let mut values = String::new();
-        for v in stopped.locals.iter().chain(&stopped.upvalues) {
+        // The frame's values, as they are: locals, then its function's upvalues; at an
+        // error, its message instead.
+        let mut values = stopped
+            .error
+            .as_ref()
+            .map_or_else(String::new, |e| e.message.clone());
+        let values_shown = stopped.error.is_none();
+        for v in stopped
+            .locals
+            .iter()
+            .chain(&stopped.upvalues)
+            .filter(|_| values_shown)
+        {
             if values.len() > 200 {
                 values.push_str("  \u{2026}");
                 break;
@@ -9701,6 +9788,19 @@ impl Editor {
             mouse,
         });
         self.open_script(world, &file, Some((line + 1, 1)));
+        if let Some(e) = &stopped.error {
+            let after = if e.caught {
+                "F5 goes on (the pcall gets it), F8 stops"
+            } else {
+                "F5 lets it take its course, F8 stops"
+            };
+            self.say(format!(
+                "Error at {shown}:{}{hook}: {}. {after}",
+                line + 1,
+                e.message
+            ));
+            return;
+        }
         let keys = if stopped.steppable {
             "F10 steps over, F11 into, Shift+F11 out, F5 goes on, F8 stops"
         } else {
@@ -11263,6 +11363,29 @@ impl Editor {
                 Resume::StepOut
             };
             self.play_request = Some(PlayRequest::ScriptStep(how));
+        } else if id == ids.errors_uncaught || id == ids.errors_caught {
+            let caught = id == ids.errors_caught;
+            let stops = &mut self.error_stops;
+            let flag = if caught {
+                &mut stops.caught
+            } else {
+                &mut stops.uncaught
+            };
+            *flag = !*flag;
+            let on = *flag;
+            self.write_session(world);
+            self.say(String::from(match (caught, on) {
+                (false, true) => "An error a script does not catch stops it in Play, at its line",
+                (false, false) => "Errors scripts do not catch go to the Output, the game going on",
+                (true, true) => "An error a pcall catches stops the script in Play, at its line",
+                (true, false) => "Errors a pcall catches do not stop scripts",
+            }));
+        } else if id == ids.break_next {
+            if self.play.is_some() {
+                self.play_request = Some(PlayRequest::BreakNext);
+            } else {
+                self.say(String::from("Nothing is playing (F5 plays the scene)"));
+            }
         } else if id == ids.keep {
             self.keep_selection(world);
         } else if id == ids.keep_list {
@@ -13832,6 +13955,9 @@ impl Editor {
         if let Some(on) = state.pick_transparent {
             self.pick_transparent = on;
         }
+        if let Some((uncaught, caught)) = state.error_stops {
+            self.error_stops = ErrorStops { uncaught, caught };
+        }
         if let Some(on) = state.scale_lock {
             self.scale_lock = on;
         }
@@ -13980,6 +14106,7 @@ impl Editor {
             view_mode: Some(String::from(self.view_mode.name())),
             pivot: Some(String::from(self.pivot.name())),
             overlays: Some(self.overlays),
+            error_stops: Some((self.error_stops.uncaught, self.error_stops.caught)),
             window: self.window,
             game_window: self.game_window,
             active: Some(self.active_tab()),
@@ -14963,6 +15090,18 @@ impl<G> EditorGame<G> {
                     None => shared.say(String::from(
                         "No script is stopped: F9 sets a breakpoint in a script's tab",
                     )),
+                }
+            }
+            Some((PlayRequest::BreakNext, _)) => {
+                let mut shared = self.shared.borrow_mut();
+                if player.script_stop().is_some() {
+                    shared.say(String::from(
+                        "A script is stopped: F10 steps to its next line",
+                    ));
+                } else if player.script_debugger().is_some_and(|d| d.break_next()) {
+                    shared.say(String::from("Stops at the next line a script runs"));
+                } else {
+                    shared.say(String::from("No scripts run in this game"));
                 }
             }
             // F5 while playing: a stopped script goes on, else a paused game.
@@ -16497,6 +16636,8 @@ enum PlayRequest {
     Continue,
     /// A stopped script's step (F10, F11, Shift+F11).
     ScriptStep(Resume),
+    /// A stop at the next line a script runs (E9-1b-4).
+    BreakNext,
     /// One tick while paused (pausing first).
     Step,
 }
@@ -16522,7 +16663,7 @@ struct StopShown {
 struct DebugText {
     /// What they were made for: the stop's number, the frame, the breakpoints' revision,
     /// the host's states' version.
-    key: Option<(u64, usize, u64, Option<u64>)>,
+    key: Option<(u64, usize, u64, Option<u64>, bool)>,
     header: String,
     frames: Vec<(String, String)>,
     variables: Vec<(String, String)>,

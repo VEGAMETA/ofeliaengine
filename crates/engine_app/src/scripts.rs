@@ -63,7 +63,8 @@ use engine_script::mlua::{
 };
 /// The debugger's breakpoints as the host takes them (ADR 0119): the editor's.
 pub use engine_script::{
-    BreakAction, BreakState, Breakpoint, Hits, Resume, ScriptDebugger, Stopped, Variable,
+    BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Hits, Resume, ScriptDebugger,
+    Stopped, Variable,
 };
 use engine_script::{ScriptError, ScriptSettings, ScriptVm};
 use std::cell::RefCell;
@@ -3846,10 +3847,13 @@ return SpinHook
             v[v.len() / 2]
         };
         // ADR 0119's debuggable compilation: `ENGINE_SCRIPTS_MEASURE=o1` measures level 1,
-        // `o1-debug` level 1 while debugging, `o1-stop` with a breakpoint that stops set.
+        // `o1-debug` level 1 while debugging, `o1-stop` with a breakpoint that stops set,
+        // `o1-errors` with errors not caught stopping; `-interp` after any of them without
+        // native code.
         let how = std::env::var("ENGINE_SCRIPTS_MEASURE").unwrap_or_default();
         let settings = ScriptSettings {
             optimization_level: if how.starts_with("o1") { 1 } else { 2 },
+            native: !how.ends_with("-interp"),
             ..ScriptSettings::default()
         };
         let run = |name: &str, count: usize| {
@@ -3857,6 +3861,14 @@ return SpinHook
             let mut scripts =
                 Scripts::load_with(&mut world, &dir, &dir.join("scripts"), settings).unwrap();
             scripts.set_debugging(how.starts_with("o1-"));
+            if how.starts_with("o1-errors") {
+                scripts
+                    .debugger()
+                    .set_error_stops(engine_script::ErrorStops {
+                        uncaught: true,
+                        caught: false,
+                    });
+            }
             // `o1-stop`: a breakpoint that stops is set (on a line no tick runs), so the hooks
             // go through the debugger's thread.
             if how == "o1-stop" {

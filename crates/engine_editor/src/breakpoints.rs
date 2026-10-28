@@ -5,7 +5,9 @@
 //! runs: a script's unsaved edits move its marks, not the code the host has.
 
 use crate::code::{Document, Move, follow_start};
-use engine_app::scripts::{BreakAction, BreakState, Breakpoint, Hits, ScriptDebugger, module_name};
+use engine_app::scripts::{
+    BreakAction, BreakState, Breakpoint, ErrorStops, Hits, ScriptDebugger, module_name,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -360,16 +362,19 @@ pub(crate) struct HostView {
     version: Option<u64>,
     /// A host was there at the last turn: a new one is given every breakpoint.
     seen: bool,
+    /// Which errors stop, as the host was last given them.
+    errors: Option<ErrorStops>,
 }
 
 impl HostView {
-    /// The host's turn, once a frame: the breakpoints that changed given to it, and what it
-    /// says of them read when that moved. A comment's or a blank line's breakpoint goes to
-    /// the line the host placed it on, where the script's text is as saved. Nothing is
-    /// made while nothing changed.
+    /// The host's turn, once a frame: the breakpoints that changed given to it, and which
+    /// errors stop where that changed, and what it says of them read when that moved. A
+    /// comment's or a blank line's breakpoint goes to the line the host placed it on, where
+    /// the script's text is as saved. Nothing is made while nothing changed.
     pub(crate) fn sync<'a>(
         &mut self,
         marks: &mut Breakpoints,
+        errors: ErrorStops,
         scripts: Option<&ScriptDebugger>,
         doc_of: impl Fn(&Path) -> Option<&'a Document>,
     ) {
@@ -379,7 +384,12 @@ impl HostView {
         };
         if !self.seen {
             self.seen = true;
+            self.errors = None;
             marks.touch_all();
+        }
+        if self.errors != Some(errors) {
+            self.errors = Some(errors);
+            scripts.set_error_stops(errors);
         }
         if marks.has_stale() {
             for file in marks.take_stale() {

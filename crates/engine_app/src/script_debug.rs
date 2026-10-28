@@ -223,6 +223,7 @@ impl ScriptDebug {
                     upvalues: Vec::new(),
                     stack: Vec::new(),
                     steppable: false,
+                    error: None,
                 });
             self.held = Some(Held {
                 kind,

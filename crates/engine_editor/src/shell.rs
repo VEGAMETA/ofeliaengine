@@ -80,6 +80,9 @@ pub struct Palette {
     pub logged: Color,
     /// The band behind the line a stopped script runs next (its arrow: `warning`).
     pub stopped: Color,
+    /// The band behind the line a script stopped at an error on (its arrow and message:
+    /// `error`).
+    pub stopped_error: Color,
 }
 
 impl Default for Palette {
@@ -115,6 +118,7 @@ impl Default for Palette {
             breakpoint: srgb(229, 72, 64),
             logged: srgb(126, 176, 214),
             stopped: srgb(74, 64, 30),
+            stopped_error: srgb(88, 38, 38),
         }
     }
 }
@@ -132,6 +136,17 @@ pub struct OutputView<'a> {
     pub counts: [usize; 4],
     /// The newest row is kept in view.
     pub follow: bool,
+}
+
+/// What a note after a line of code is (ADR 0119), for its color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteKind {
+    /// A logpoint's latest message, or a stop's values.
+    Said,
+    /// Something wrong with a breakpoint.
+    Problem,
+    /// The error a script stopped at (E9-1b-4).
+    Error,
 }
 
 /// What the Debugger panel's header buttons ask (ADR 0119 E9-1b-3).
@@ -157,6 +172,11 @@ pub struct DebuggerView<'a> {
     pub header: &'a str,
     /// A script is stopped: Continue works.
     pub stopped: bool,
+    /// At an error: the header in the error color.
+    pub error: bool,
+    /// Which errors stop scripts (E9-1b-4): the errors not caught, those a `pcall` catches;
+    /// the Breakpoints list's first rows.
+    pub error_stops: [bool; 2],
     /// And it can be stepped from there: the steps work.
     pub steppable: bool,
     /// The stack's frames, the stopped one first: its function and its place.
@@ -716,9 +736,11 @@ pub struct CodeView<'a> {
     /// The line a stopped script runs next (ADR 0119): its band, and the arrow in the
     /// breakpoints' column.
     pub stopped: Option<usize>,
-    /// What the breakpoints say after their lines: a line, a column, the text, and whether
-    /// it is a problem (else a logpoint's latest message).
-    pub break_notes: &'a [(usize, usize, &'a str, bool)],
+    /// What the breakpoints say after their lines: a line, a column, the text, and what it
+    /// is.
+    pub break_notes: &'a [(usize, usize, &'a str, NoteKind)],
+    /// The stopped line is an error's (E9-1b-4): its band and arrow in the error's colors.
+    pub stopped_error: bool,
     /// A breakpoint's options under its line, while open.
     pub break_options: Option<BreakOptionsView<'a>>,
 }
@@ -788,6 +810,8 @@ pub struct ShellModel<'a> {
     pub paused: bool,
     /// A script is stopped at a breakpoint (ADR 0119).
     pub stopped: bool,
+    /// At an error (E9-1b-4): the viewport's edge in the error color.
+    pub stop_error: bool,
     /// Right end of the bottom bar.
     pub status: &'a str,
     /// Dragged values snap by default (the tool bar's grid button).
@@ -947,6 +971,8 @@ pub struct ShellResponse {
     pub debug_breakpoint: Option<usize>,
     /// A breakpoint's mark there was clicked: it is turned off or on.
     pub debug_toggle: Option<usize>,
+    /// A row of which errors stop was clicked (0 not caught, 1 caught by `pcall`).
+    pub debug_errors: Option<usize>,
     /// The scene dock's tab was clicked (0 the tree, 1 History).
     pub scene_dock_tab: Option<usize>,
     /// A History row was clicked: its place.
@@ -1298,8 +1324,10 @@ fn center(
                 out.pivot = true;
             }
         });
-        // Amber while a script is stopped (ADR 0119): the game waits in its tick.
+        // Amber while a script is stopped (ADR 0119): the game waits in its tick; red at an
+        // error.
         let edge = match (model.playing, model.stopped) {
+            (true, true) if model.stop_error => Some((p.error, 2.0)),
             (true, true) => Some((p.warning, 2.0)),
             (true, false) => Some((p.playing, 2.0)),
             _ => None,
@@ -1508,7 +1536,12 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
         let lit = band([0.0, y(view.current)], [CODE_FAR, CODE_LINE], p.code_line);
         ui.container("current", lit, |_| {});
         if let Some(line) = view.stopped {
-            let at = band([0.0, y(line)], [CODE_FAR, CODE_LINE], p.stopped);
+            let color = if view.stopped_error {
+                p.stopped_error
+            } else {
+                p.stopped
+            };
+            let at = band([0.0, y(line)], [CODE_FAR, CODE_LINE], color);
             ui.container("stopped", at, |_| {});
         }
         for (i, &(line, a, b, on)) in view.selections.iter().enumerate() {
@@ -1564,13 +1597,17 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
         }
         // What the breakpoints say after their lines: a logpoint's latest message, a
         // problem.
-        for (i, &(line, column, said, problem)) in view.break_notes.iter().enumerate() {
+        for (i, &(line, column, said, kind)) in view.break_notes.iter().enumerate() {
             ui.push_id(i as u64);
             let style = Style {
                 placed: Some([x(column as f32), y(line) + CODE_TEXT_TOP]),
                 ..Style::default()
             };
-            let color = if problem { p.warning } else { p.logged };
+            let color = match kind {
+                NoteKind::Said => p.logged,
+                NoteKind::Problem => p.warning,
+                NoteKind::Error => p.error,
+            };
             ui.mono_text_node("break note", style, said, CODE_TEXT, color);
             ui.pop_id();
         }
@@ -1610,8 +1647,13 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
                     align_cross: Align::Center,
                     ..Style::default()
                 };
+                let color = if view.stopped_error {
+                    p.error
+                } else {
+                    p.warning
+                };
                 ui.container("stopped at", cell, |ui| {
-                    text(ui, "arrow", icons::STOPPED_AT, ICON, p.warning);
+                    text(ui, "arrow", icons::STOPPED_AT, ICON, color);
                 });
             }
         }
@@ -3703,7 +3745,11 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
                 },
                 |_| {},
             );
-            let color = if view.stopped { p.warning } else { p.text_dim };
+            let color = match (view.stopped, view.error) {
+                (true, true) => p.error,
+                (true, false) => p.warning,
+                _ => p.text_dim,
+            };
             text(ui, "header", view.header, SMALL, color);
         });
         let columns = Style {
@@ -3737,7 +3783,12 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
                         };
                         let id = ui.container("frame", shown, |ui| {
                             let mark = if i == 0 { icons::STOPPED_AT } else { "" };
-                            icon(ui, "mark", mark, p.warning);
+                            icon(
+                                ui,
+                                "mark",
+                                mark,
+                                if view.error { p.error } else { p.warning },
+                            );
                             text(ui, "function", function, SMALL, p.text);
                             ui.spacer("fill");
                             text(ui, "place", place, SMALL, p.text_dim);
@@ -3769,6 +3820,36 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
             ui.container("breakpoints", column(Size::Fixed(480.0)), |ui| {
                 text(ui, "title", "BREAKPOINTS", SMALL, p.text_dim);
                 ui.scroll_column("marks", |ui| {
+                    // Which errors stop (E9-1b-4), as VS Code's exception filters.
+                    let kinds = ["Errors the script does not catch", "Errors caught by pcall"];
+                    for (k, label) in kinds.into_iter().enumerate() {
+                        ui.push_id(1000 + k as u64);
+                        let on = view.error_stops[k];
+                        let id = ui.container("errors", row, |ui| {
+                            ui.container(
+                                "box",
+                                Style {
+                                    size: [Size::Fixed(14.0), Size::Fixed(14.0)],
+                                    radius: 3.0,
+                                    background: Some(if on { p.accent } else { p.field }),
+                                    border: (!on).then_some((p.text_dim, 1.0)),
+                                    align_main: Align::Center,
+                                    align_cross: Align::Center,
+                                    ..Style::default()
+                                },
+                                |ui| {
+                                    if on {
+                                        text(ui, "mark", icons::CHECK, 12.0, p.text);
+                                    }
+                                },
+                            );
+                            text(ui, "label", label, SMALL, p.text);
+                        });
+                        if ui.sense(id, false).clicked {
+                            out.debug_errors = Some(k);
+                        }
+                        ui.pop_id();
+                    }
                     if view.breakpoints.is_empty() {
                         text(
                             ui,
