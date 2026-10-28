@@ -54,7 +54,7 @@
 //!   Ctrl+Y or Ctrl+Shift+Z redo, Ctrl+S save, Delete, Ctrl+D duplicate, Ctrl+A add, Y
 //!   snapping by default, F2 rename.
 
-use crate::breakpoints::{Act, BreakEdit, Breakpoints, HostView, Mark};
+use crate::breakpoints::{Act, BreakEdit, Breakpoints, HostView, Mark, Only};
 use crate::build::{
     self as build, BUILD_VAR, BuildEvent, Builds, Built, GameCrate, Problem, RESTART_VAR, in_slot,
 };
@@ -3399,7 +3399,7 @@ impl Editor {
         let coding = self.code_frame();
         // The Debugger panel's texts, while it is open (ADR 0119 E9-1b-3).
         if self.bottom == Some(DEBUGGER_TAB) {
-            self.debug_text_frame();
+            self.debug_text_frame(world);
         }
         self.script_files.refresh(world);
         let properties = self.inspector.properties();
@@ -4093,6 +4093,7 @@ impl Editor {
         let debugger_view =
             (self.bottom == Some(DEBUGGER_TAB)).then(|| crate::shell::DebuggerView {
                 header: &self.debug_text.header,
+                only: self.debug_text.only.as_deref(),
                 stopped: self.stop.is_some(),
                 error: self
                     .stop
@@ -4558,6 +4559,11 @@ impl Editor {
                 crate::shell::DebugGo::Over => PlayRequest::ScriptStep(Resume::StepOver),
                 crate::shell::DebugGo::Into => PlayRequest::ScriptStep(Resume::StepInto),
                 crate::shell::DebugGo::Out => PlayRequest::ScriptStep(Resume::StepOut),
+                crate::shell::DebugGo::Finish => PlayRequest::Step,
+                crate::shell::DebugGo::Only => {
+                    self.limit_stopped_breakpoint(world);
+                    return;
+                }
             });
         }
         if let Some(k) = response.debug_frame {
@@ -7827,6 +7833,7 @@ impl Editor {
             ejected: None,
             mouse: true,
             freed_mouse: None,
+            ticks0: 0,
         }
     }
 
@@ -9726,20 +9733,36 @@ impl Editor {
     /// says of them read back (ADR 0119): once a frame, after the scripts that changed run
     /// again.
     fn sync_breakpoints(&mut self, player: &mut Player) {
+        if self.scene_ids.is_none() && self.breakpoints.any_only() {
+            self.scene_ids = Some(QueryState::new(player.world_mut()));
+        }
         let scripts = &self.scripts;
         let debugger = player.script_debugger();
+        // The host's id of each entity a breakpoint is limited to (E9-4a): looked up only
+        // for the breakpoints given to it now.
+        let ids = RefCell::new(self.scene_ids.as_mut());
+        let world = &player.runtime().world;
+        let resolve = |o: &Only| match *o {
+            Only::Scene(id) => ids.borrow_mut().as_mut().and_then(|q| {
+                q.iter_readonly(world)
+                    .find(|&(_, &i)| i == id)
+                    .map(|(e, _)| e.to_bits())
+            }),
+            Only::Spawned(e) => world.contains(e).then(|| e.to_bits()),
+        };
         self.host_breaks.sync(
             &mut self.breakpoints,
             self.error_stops,
             debugger.as_ref(),
             |file| scripts.iter().find(|s| s.path == file).map(|s| &s.doc),
+            &resolve,
         );
         self.break_pending = debugger.as_ref().is_some_and(|d| d.break_pending());
     }
 
     /// The Debugger panel's texts (ADR 0119 E9-1b-3), made again only when the stop, the
     /// shown frame, the breakpoints or the host's states changed.
-    fn debug_text_frame(&mut self) {
+    fn debug_text_frame(&mut self, world: &mut World) {
         let key = (
             self.stop.as_ref().map_or(0, |s| s.count),
             self.debug_frame,
@@ -9788,12 +9811,21 @@ impl Editor {
                     Some(_) => "Error",
                     None => "Stopped",
                 };
+                let _ = write!(text.header, "{what} · {hook}");
+                if let Some((_, name)) = &stop.entity {
+                    let _ = write!(text.header, " · {name}");
+                }
                 let _ = write!(
                     text.header,
-                    "{what} · {hook} · {}:{}",
+                    " · {}:{} · ",
                     engine_app::scripts::module_file(&s.module),
                     s.line
                 );
+                if stop.in_tick {
+                    let _ = write!(text.header, "tick {}, under way", grouped(stop.tick));
+                } else {
+                    let _ = write!(text.header, "after tick {}", grouped(stop.tick));
+                }
                 match &s.error {
                     Some(e) => {
                         let _ = write!(text.header, " · {}", e.message);
@@ -9870,6 +9902,52 @@ impl Editor {
             }
         }
         text.breakpoints.clear();
+        // The names of the entities breakpoints are limited to (E9-4a).
+        let mut named: Vec<(Only, String)> = Vec::new();
+        if self.breakpoints.any_only() {
+            let wanted: Vec<Only> = self
+                .breakpoints
+                .files()
+                .flat_map(|(_, marks)| marks.iter().flat_map(|m| m.only.iter().copied()))
+                .collect();
+            let ids = self.scene_ids.get_or_insert_with(|| QueryState::new(world));
+            for o in wanted {
+                if named.iter().any(|(n, _)| *n == o) {
+                    continue;
+                }
+                let e = match o {
+                    Only::Scene(id) => ids
+                        .iter_readonly(world)
+                        .find(|&(_, &i)| i == id)
+                        .map(|(e, _)| e),
+                    Only::Spawned(e) => world.contains(e).then_some(e),
+                };
+                let name = e.map_or_else(
+                    || String::from("(gone)"),
+                    |e| {
+                        world
+                            .get::<Name>(e)
+                            .map_or("an entity", Name::as_str)
+                            .to_owned()
+                    },
+                );
+                named.push((o, name));
+            }
+        }
+        // The header's filter button: the stopped breakpoint limited to the stopped entity,
+        // or to every one again.
+        let only = self.stop.as_ref().and_then(|stop| {
+            let (who, name) = stop.entity.as_ref()?;
+            let line = self.stop_mark_line()?;
+            let mark = self.breakpoints.at(&stop.file, line)?;
+            Some(if mark.only == [*who] {
+                String::from("Every instance")
+            } else {
+                format!("Only {name}")
+            })
+        });
+        let text = &mut self.debug_text;
+        text.only = only;
         for (file, marks) in self.breakpoints.files() {
             let doc = self.scripts.iter().find(|s| s.path == file).map(|s| &s.doc);
             for m in marks {
@@ -9888,6 +9966,20 @@ impl Editor {
                             detail.push_str(" · ");
                         }
                         let _ = write!(detail, "{word} {said}");
+                    }
+                }
+                for (k, o) in m.only.iter().enumerate() {
+                    let name = named
+                        .iter()
+                        .find(|(n, _)| n == o)
+                        .map_or("an entity", |(_, s)| s.as_str());
+                    if k == 0 {
+                        if !detail.is_empty() {
+                            detail.push_str(" · ");
+                        }
+                        let _ = write!(detail, "only {name}");
+                    } else {
+                        let _ = write!(detail, ", {name}");
                     }
                 }
                 if let Some(hits) = state.map(|s| s.hits).filter(|&h| h > 0) {
@@ -9916,6 +10008,51 @@ impl Editor {
         }
     }
 
+    /// The line (from 0) in the editor's text of the breakpoint the script stopped at: the
+    /// stop's line as saved, followed through unsaved edits.
+    fn stop_mark_line(&self) -> Option<usize> {
+        let stop = self.stop.as_ref()?;
+        let doc = self
+            .scripts
+            .iter()
+            .find(|s| s.path == stop.file)
+            .map(|s| &s.doc);
+        Some(
+            doc.and_then(|d| d.line_of_saved(stop.line))
+                .unwrap_or(stop.line),
+        )
+    }
+
+    /// The header's "Only Front door" (E9-4a; the UX note's §10): the breakpoint the script
+    /// stopped at limited to the stopped entity, or to every one again when it was.
+    fn limit_stopped_breakpoint(&mut self, world: &mut World) {
+        let Some(stop) = &self.stop else {
+            return;
+        };
+        let Some((who, name)) = stop.entity.clone() else {
+            return;
+        };
+        let file = stop.file.clone();
+        let Some(line) = self.stop_mark_line() else {
+            return;
+        };
+        let Some(was) = self.breakpoints.at(&file, line).map(|m| m.only.clone()) else {
+            self.say(String::from("No breakpoint at the stopped line to limit"));
+            return;
+        };
+        let place = format!("{}:{}", file_name(&file.to_string_lossy()), line + 1);
+        if was == [who] {
+            self.breakpoints.limit(&file, line, None);
+            self.say(format!(
+                "The breakpoint at {place} stops for every instance"
+            ));
+        } else {
+            self.breakpoints.limit(&file, line, Some(who));
+            self.say(format!("The breakpoint at {place} stops only for {name}"));
+        }
+        self.write_session(world);
+    }
+
     /// Frame `k` of the stop's stack shown: its variables in the panel, its line in its
     /// script.
     fn show_frame(&mut self, world: &World, k: usize) {
@@ -9936,7 +10073,12 @@ impl Editor {
 
     /// Where a script stopped in Play (ADR 0119 E9-1b), once a frame: a new stop brings its
     /// script to the front at the line, frees the mouse and says where; its end says so.
-    fn stop_frame(&mut self, world: &World, stopped: Option<(&engine_app::scripts::Stopped, u64)>) {
+    fn stop_frame(
+        &mut self,
+        world: &World,
+        stopped: Option<(&engine_app::scripts::Stopped, u64)>,
+        (ticks_run, in_tick): (u64, bool),
+    ) {
         let Some((stopped, count)) = stopped else {
             if let Some(stop) = self.stop.take() {
                 self.dap_refs.clear();
@@ -9946,8 +10088,13 @@ impl Editor {
                 if stop.mouse {
                     self.set_game_mouse(true);
                 }
-                if self.play.is_some() {
-                    self.say(String::from("Going on"));
+                match &self.play {
+                    // Shift+F7 finished the tick (E9-4a): Play is paused after it.
+                    Some(p) if p.paused => self.say(String::from(
+                        "The tick finished: paused (F7 goes on, Shift+F7 steps)",
+                    )),
+                    Some(_) => self.say(String::from("Going on")),
+                    None => {}
                 }
             }
             return;
@@ -10028,6 +10175,24 @@ impl Editor {
             .first()
             .and_then(|f| f.function.as_deref())
             .map_or_else(String::new, |f| format!(" in {f}"));
+        // The entity whose hook it stopped in (E9-4a): a scene entity by its scene id.
+        let entity = stopped
+            .instance
+            .map(Entity::from_bits)
+            .filter(|&e| world.contains(e))
+            .map(|e| {
+                let only = world
+                    .get::<SceneId>(e)
+                    .map_or(Only::Spawned(e), |&id| Only::Scene(id));
+                let name = world
+                    .get::<Name>(e)
+                    .map_or_else(|| String::from("an entity"), |n| n.as_str().to_owned());
+                (only, name)
+            });
+        let tick = self
+            .play
+            .as_ref()
+            .map_or(ticks_run, |p| ticks_run.saturating_sub(p.ticks0));
         // The Debugger opens by itself at a stop, and stays open (Godot's).
         self.bottom = Some(DEBUGGER_TAB);
         self.debug_frame = 0;
@@ -10040,6 +10205,9 @@ impl Editor {
             mouse,
             files,
             changed,
+            entity,
+            tick,
+            in_tick,
         });
         self.open_script(world, &file, Some((line + 1, 1)));
         if let Some(e) = &stopped.error {
@@ -10056,9 +10224,10 @@ impl Editor {
             return;
         }
         let keys = if stopped.steppable {
-            "F10 steps over, F11 into, Shift+F11 out, F5 goes on, F8 stops"
+            "F10 steps over, F11 into, Shift+F11 out, F5 goes on, Shift+F7 finishes the tick, \
+             F8 stops"
         } else {
-            "F5 goes on, F8 stops (no steps here: a call from C code)"
+            "F5 goes on, Shift+F7 finishes the tick, F8 stops (no steps here: a call from C code)"
         };
         self.say(format!("Stopped at {shown}:{}{hook}: {keys}", line + 1));
     }
@@ -10825,6 +10994,8 @@ impl Editor {
     /// to say.
     fn finish_play(&mut self, world: &mut World, playing: Playing, why: Option<String>) -> String {
         let t = Instant::now();
+        // The entities the game made are gone: breakpoints limited to them no longer are.
+        self.breakpoints.drop_spawned();
         if let Some(Some(devices)) = playing.ejected
             && let Some(input) = world.resource_mut::<engine_input::Input>()
         {
@@ -15592,11 +15763,23 @@ impl<G> EditorGame<G> {
             }
             Some((PlayRequest::Step, _)) => {
                 let mut shared = self.shared.borrow_mut();
+                let stopped = player.script_stop().is_some();
                 if let Some(p) = shared.play.as_mut() {
                     p.paused = true;
                     player.set_simulating(false);
-                    player.step_tick();
-                    self.stepping = true;
+                    if stopped {
+                        // Shift+F7 at a stop (ADR 0119 E9-4a): the rest of the tick, its
+                        // stops passed, then paused.
+                        player.finish_script_tick();
+                        self.stepping = false;
+                        shared.stop_reason = None;
+                        shared.say(String::from(
+                            "Finishing the tick, then paused (F7 goes on, Shift+F7 steps)",
+                        ));
+                    } else {
+                        player.step_tick();
+                        self.stepping = true;
+                    }
                 }
             }
             None => {}
@@ -15605,7 +15788,8 @@ impl<G> EditorGame<G> {
         {
             let mut shared = self.shared.borrow_mut();
             let stopped = player.script_stop().map(|s| (s, player.script_stops()));
-            shared.stop_frame(&player.runtime().world, stopped);
+            let tick = (player.ticks_run(), player.script_stop_in_tick());
+            shared.stop_frame(&player.runtime().world, stopped, tick);
         }
         // A pause point reached (ADR 0119): the player kept the world still after its
         // tick, and Play is paused as F7 pauses it.
@@ -15693,6 +15877,7 @@ impl<G> EditorGame<G> {
         let mut shared = self.shared.borrow_mut();
         if let Some(p) = shared.play.as_mut() {
             p.entered = asked.elapsed();
+            p.ticks0 = player.ticks_run();
             let ms = p.entered.as_secs_f64() * 1e3;
             shared.say(format!("Play started in {ms:.1} ms"));
         }
@@ -16053,6 +16238,12 @@ impl<G> EditorGame<G> {
             .filter(|n| n.0 + 1 == line)
             .map(|n| shown.break_text[n.2..n.3].to_owned())
             .collect()
+    }
+
+    /// The Debugger panel's header as it reads (what stopped, where, the entity and the
+    /// tick); for tests.
+    pub fn debug_header(&self) -> String {
+        self.shared.borrow().debug_text.header.clone()
     }
 
     /// The Debugger panel's Variables as their rows read (`  name = value`, indented by
@@ -17163,6 +17354,12 @@ struct StopShown {
     /// The stopped frame's locals whose values changed since the last stop in its
     /// function (E9-1b-5a): lit.
     changed: Vec<String>,
+    /// The entity whose hook it stopped in (E9-4a): how a filter names it, and its name.
+    entity: Option<(Only, String)>,
+    /// The tick it stopped in, counted from Play's start; in the frame's stage, the last.
+    tick: u64,
+    /// It stopped in a tick (the rest of the tick waits), not in the frame's stage.
+    in_tick: bool,
 }
 
 /// What the Debugger panel's texts were made for: the stop's number, the shown frame, the
@@ -17176,6 +17373,8 @@ struct DebugText {
     /// What they were made for.
     key: Option<DebugTextKey>,
     header: String,
+    /// The header's filter button (E9-4a): "Only Front door", or "Every instance".
+    only: Option<String>,
     frames: Vec<(String, String)>,
     variables: Vec<VarText>,
     breakpoints: Vec<DebugBreakpoint>,
@@ -17267,6 +17466,19 @@ struct DebugBreakpoint {
 
 /// The characters of a breakpoint's line the Debugger's list shows.
 const CODE_SHOWN: usize = 32;
+
+/// `n` with its thousands apart: `1,284`.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
 
 /// `text`'s first `chars` characters, `…` after them when there were more.
 fn cut(text: &str, chars: usize) -> String {
@@ -17439,6 +17651,8 @@ struct Playing {
     /// While the mouse is not the game's: whether the game's input listened to it before,
     /// given back with it (a game's own filter, local multiplayer's, is kept).
     freed_mouse: Option<bool>,
+    /// The player's ticks run when Play began: a stop's tick is counted from it.
+    ticks0: u64,
 }
 
 /// Whether `key` is one of F1 to F12 (the editor's keys while playing).

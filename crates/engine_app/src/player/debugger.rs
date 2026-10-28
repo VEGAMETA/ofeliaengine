@@ -328,6 +328,7 @@ mod tests {
             stack: Vec::new(),
             steppable: true,
             error: None,
+            instance: None,
         };
         assert_eq!(
             stop_title("My game", &stop),

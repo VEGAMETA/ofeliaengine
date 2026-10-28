@@ -385,8 +385,14 @@ fn a_logpoint_logs_in_play_and_f9_stops_the_script_at_its_line() {
     );
     // The Debugger panel opened by itself: the stop, its stack, its frame's values, the
     // breakpoints.
+    let header = game.debug_header();
+    assert!(
+        header.starts_with("Stopped · on_tick · Front door · scripts/spin.luau:3 · tick ")
+            && header.ends_with(", under way"),
+        "{header}"
+    );
     for drawn in [
-        "Stopped · on_tick · scripts/spin.luau:3",
+        header.as_str(),
         "CALL STACK",
         "on_tick",
         "spin.luau:3",
@@ -669,6 +675,120 @@ return Faulty
 "#;
 
 #[test]
+fn a_stop_names_its_entity_only_limits_its_breakpoint_and_shift_f7_finishes_the_tick() {
+    let dir = temp_dir("instances");
+    write_project(&dir, "Front door", true);
+    // A breakpoint on line 3 (`local t`) of the spinning script.
+    std::fs::create_dir_all(dir.join(".ofelia")).unwrap();
+    std::fs::write(
+        dir.join(".ofelia/session"),
+        "[session version=1]\n\n[breakpoint]\npath = \"scripts/spin.luau\"\nline = 3\n",
+    )
+    .unwrap();
+    let Some((mut player, settings)) = player(&dir) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    // Two doors spin: the scene's, and one made after it.
+    let front = find_named(player.world_mut(), "Front door").unwrap();
+    let back =
+        player
+            .world_mut()
+            .spawn((SceneId::new(), Name::new("Back door"), Transform::IDENTITY));
+    assert!(player.add_script(front, "EditorSpin"));
+    assert!(player.add_script(back, "EditorSpin"));
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    // Play: a tick stops in one door's hook, the header naming it and the tick; F5, and
+    // the same tick stops in the other's.
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..4 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    // The door and the tick a header names.
+    let read = |header: &str| {
+        let door = ["Front door", "Back door"]
+            .into_iter()
+            .find(|d| header.contains(&format!(" · {d} · scripts/spin.luau:3 · tick ")))
+            .unwrap_or_else(|| panic!("{header}"));
+        let tick: u64 = header
+            .rsplit("tick ")
+            .next()
+            .and_then(|t| t.strip_suffix(", under way"))
+            .and_then(|t| t.replace(',', "").parse().ok())
+            .unwrap_or_else(|| panic!("{header}"));
+        (door, tick)
+    };
+    let (first, tick) = read(&game.debug_header());
+    let (second, other) = if first == "Front door" {
+        ("Back door", back)
+    } else {
+        ("Front door", front)
+    };
+    assert!(
+        game.text_at(&format!("Only {first}")).is_some(),
+        "the filter button"
+    );
+    tap(&mut game, 0x74, 0x3F);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(read(&game.debug_header()), (second, tick), "the same tick");
+    // "Only" the second door: the breakpoint stops for it alone, which its row says.
+    click_text(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        &format!("Only {second}"),
+    );
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.text_at("Every instance").is_some(), "the button turns");
+    let row = format!("only {second}");
+    assert!(game.text_at(&row).is_some(), "the breakpoint's row");
+    // F5: in the next tick the first door passes; the second stops.
+    tap(&mut game, 0x74, 0x3F);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(
+        read(&game.debug_header()),
+        (second, tick + 1),
+        "the next tick"
+    );
+    // Shift+F7: the tick finishes and Play pauses, nothing stopping meanwhile.
+    let stops = player.script_stops();
+    assert!(game.run_command(player.world_mut(), "play.step"));
+    for _ in 0..6 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(player.script_stop().is_none(), "the tick finished");
+    assert_eq!(player.script_stops(), stops, "no stop while it finished");
+    assert!(!player.simulating(), "paused after it");
+    let said = game.message().unwrap_or_default();
+    assert!(said.starts_with("The tick finished: paused"), "{said}");
+    // The session keeps the filter by the back door's scene id.
+    game.stop_playing(&mut player);
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    game.end_session(player.world_mut());
+    let id = *player.world_mut().get::<SceneId>(other).unwrap();
+    let session = std::fs::read_to_string(dir.join(".ofelia/session")).unwrap();
+    assert!(session.contains(&format!("only = [@{id}]")), "{session}");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_error_stops_play_at_its_line_once_and_f5_lets_it_take_its_course() {
     let dir = temp_dir("errors");
     write_project(&dir, "Front door", true);
@@ -706,12 +826,15 @@ fn an_error_stops_play_at_its_line_once_and_f5_lets_it_take_its_course() {
     let stop = player.script_stop().cloned().unwrap();
     let error = stop.error.clone().unwrap();
     assert!(!error.caught);
+    let header = game.debug_header();
+    assert!(
+        header.starts_with("Error · on_tick · ")
+            && header.contains(" · scripts/faulty.luau:4 · tick ")
+            && header.ends_with(&format!(", under way · {}", error.message)),
+        "{header}"
+    );
     for drawn in [
-        format!(
-            "Error · on_tick · scripts/faulty.luau:4 · {}",
-            error.message
-        )
-        .as_str(),
+        header.as_str(),
         "Errors the script does not catch",
         "Errors caught by pcall",
     ] {

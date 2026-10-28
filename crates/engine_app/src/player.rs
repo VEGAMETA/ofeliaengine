@@ -579,6 +579,8 @@ pub struct Player {
     previews: crate::previews::Previews,
     /// Ticks to run while the world is kept still ([`Player::step_tick`]).
     steps: u32,
+    /// Fixed ticks run since the start ([`Player::ticks_run`]).
+    ticks_run: u64,
     /// The pause point a script reached (ADR 0119): the world was kept still after its
     /// tick, and the editor is told ([`Player::take_debug_pause`]).
     debug_pause: Option<(String, u32)>,
@@ -1218,6 +1220,7 @@ impl Player {
             wait_for_assets: true,
             previews: crate::previews::Previews::new(settings.frames_in_flight),
             steps: 0,
+            ticks_run: 0,
             debug_pause: None,
             script_debugging: false,
             script_debug: None,
@@ -1383,6 +1386,12 @@ impl Player {
     /// Whether the world's time runs ([`Self::set_simulating`]).
     pub fn simulating(&self) -> bool {
         self.simulating
+    }
+
+    /// Fixed ticks run since the start, a tick a script stopped in among them: the
+    /// Debugger's header names the stopped one (ADR 0119 E9-4a).
+    pub fn ticks_run(&self) -> u64 {
+        self.ticks_run
     }
 
     /// While the world is kept still, runs its next tick as if it were not: the timers
@@ -1613,6 +1622,15 @@ impl Player {
         Some(&held.at)
     }
 
+    /// Whether the script stopped now stopped in a tick (the rest of the tick waits), not
+    /// in the frame's stage (E9-4a: the Debugger's header).
+    pub fn script_stop_in_tick(&self) -> bool {
+        self.script_debug
+            .as_ref()
+            .and_then(|d| d.held.as_ref())
+            .is_some_and(|h| matches!(h.kind, crate::script_debug::StageKind::Tick { .. }))
+    }
+
     /// How many times scripts stopped since debugging began: a step's next stop is a new
     /// one, at the same line or not.
     pub fn script_stops(&self) -> u64 {
@@ -1642,6 +1660,18 @@ impl Player {
         unsafe { crate::scripts::with_world(world, || debugger.evaluate(frame, code, budget)) }
     }
 
+    /// The stopped stage goes on at the next frame with every stop passed until it ends,
+    /// then the rest of its tick (ADR 0119 E9-4a, the UX note's §7: Shift+F7 finishes the
+    /// tick); the caller keeps the world still after it ([`Self::set_simulating`]).
+    pub fn finish_script_tick(&mut self) {
+        if let Some(debug) = &mut self.script_debug
+            && let Some(held) = debug.held.as_mut()
+        {
+            held.answer = Some(engine_script::Resume::Continue);
+            debug.debugger().skip_stops(true);
+        }
+    }
+
     /// The stopped stage goes on at the next frame, and the rest of its tick after it.
     pub fn continue_script(&mut self) {
         self.step_script(engine_script::Resume::Continue);
@@ -1662,6 +1692,7 @@ impl Player {
         if let Some(debug) = &mut self.script_debug {
             // SAFETY: the player's world, alive for the rest of the stage, run here.
             unsafe { debug.abort(&mut self.runtime.world) };
+            debug.debugger().skip_stops(false);
         }
     }
 
@@ -1707,6 +1738,8 @@ impl Player {
         let Some(ended) = ended else {
             return;
         };
+        // A finished tick's stops passed (Shift+F7): the next stops stop again.
+        debug.debugger().skip_stops(false);
         if let crate::script_debug::StageKind::Tick { dt } = ended.kind
             && !ended.aborted
         {
@@ -2891,6 +2924,8 @@ impl Player {
         );
         // A stage stopped halfway: the world kept still until it goes on.
         let held = Cell::new(held_at_start);
+        // The ticks that simulated (the runtime also counts the steps a still world skips).
+        let simulated = Cell::new(0u32);
         let stages = {
             let game_cell = RefCell::new(&mut *game);
             // Scripts run in both stages, before the game's own hooks (ADR 0114 §7), only
@@ -3018,6 +3053,7 @@ impl Player {
                             }
                             steps -= 1;
                         }
+                        simulated.set(simulated.get() + 1);
                         // Hosting: the guests' inputs in, the host's input into its pawn.
                         if let Some(host) = net.as_mut() {
                             game_cell.borrow_mut().net_input(world);
@@ -3078,6 +3114,7 @@ impl Player {
             self.debug_pause = Some(at);
         }
         report.ticks = stages.ticks;
+        self.ticks_run += u64::from(simulated.get());
         report.simulate = stages.simulate_us;
         report.propagate = stages.propagate_us;
         report.extract = stages.extract_us;

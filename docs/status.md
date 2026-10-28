@@ -727,9 +727,14 @@ Last updated: 2026-10-28.
       goes with it;
     - the extension's "Attach to the player"; `engine_app::run` installs the engine's logger;
       the game template's shipping profile unwinds (ADR 0118).
+  - **E9-4a, the stopped entity** (#387, ADR 0119's as-built): the host tells the VM
+    whose hook runs; the Debugger's header names the entity and the tick; Shift+F7 finishes
+    the stopped tick and pauses; "Only Front door" limits a breakpoint to an entity (kept by
+    scene id in the session). Fixed on the way: the player counted the steps a still world
+    skips as ticks.
   - **Next, in this order:**
-    1. The debugger's leftovers (F2 to change a value, the header's entity and tick with
-       Shift+F7, "Only Front door", the editor's breakpoints sent to VS Code).
+    1. E9-4b, the debugger's last leftovers: F2 to change a value at a stop (and VS
+       Code's setVariable), the editor's breakpoints sent to VS Code.
        Asked (2026-10-28): native code in the editor's Play, whose frames' locals Luau does
        not read at a stop. E10-1 waits for the answer on the material file.
     2. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone

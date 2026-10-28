@@ -654,3 +654,41 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
   left behind is reached and goes on; the endpoint's file goes with the player. The editor's
   DAP test runs on the same client (`engine_app/tests/common/dap_client.rs`).
 
+## As built (E9-4a, 2026-10-28): the stopped entity, the tick, Shift+F7, "Only Front door"
+
+- **The instance a hook runs for** (`engine_script::with_instance`): the host calls every
+  instance's hook (start, tick, frame, touches, load, messages, stop) through `call_for`,
+  which sets a thread-local to the entity's bits around the call and puts the one before
+  back after it. A stop names it (`Stopped::instance`); a system's call has none. Measured
+  (A/B in one build, three runs each, medians of 51 ticks): an empty `on_tick` 0.145 ->
+  0.151 µs, 10,000 spinners a hook each 2.97 -> 2.94 ms, within the spread of the systems
+  that do not take the path (1.24 -> 1.30 ms).
+- **A breakpoint limited to instances** (`Breakpoint::only`, the host's ids; empty: every
+  one) passes in the hooks of others, and in a system's: checked before its condition, a
+  thread-local read. The editor's `Mark::only` keeps `Only::Scene(SceneId)` (written to the
+  session as `only = [@id, …]`) or `Only::Spawned(Entity)` (until Play stops, then dropped:
+  the breakpoint acts for every instance again); the host is given the entities' bits,
+  looked up only for the breakpoints given to it, and an id no instance has when every one
+  is gone.
+- **The header** names the entity and the tick (counted from Play's start, the ticks that
+  simulated only: the runtime also counts the steps a still world skips, which made a stop's
+  tick run ahead before this): `Stopped · on_tick · Front door · scripts/door.luau:14 · tick
+  1,284, under way`, or `after tick N` in the frame's stage (`Player::script_stop_in_tick`,
+  `Player::ticks_run`).
+- **"Only Front door"** in the header (when the stop is at a breakpoint of an entity's
+  hook) limits that breakpoint to the entity, and reads "Every instance" to take it away
+  again; the Breakpoints list says `only Front door`, the mark shows the limit's bar.
+- **Shift+F7 at a stop** (the header's Finish tick): `Player::finish_script_tick` goes on
+  with every stop passed (`ScriptDebugger::skip_stops`, breakpoints, errors and breaks;
+  logpoints still log) until the stage ends, then the rest of its tick, and Play is paused
+  after it ("The tick finished: paused").
+- **Tests:** a stop names its instance, a limited breakpoint passes the others and a
+  system's call, skipped stops pass (engine_script); two doors stop in turn in one tick,
+  "Only" one of them passes the other in the next tick, Shift+F7 finishes the tick with no
+  stop and pauses, the session keeps the filter by scene id (the editor on the player); the
+  session file round trip keeps a scene entity's filter and drops a spawned one's; a stop
+  goes on to the next instance's stop in the same stage (engine_app).
+- **Not done:** the options bar's "Only for" part (`@name` as the palette finds it, the
+  selection), filters on systems (a condition does it: `e.name == "Front door"`), the
+  player's DAP endpoint naming the entity.
+
