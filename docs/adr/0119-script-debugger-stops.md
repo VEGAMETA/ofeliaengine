@@ -455,3 +455,27 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
   - the editor on the player: F10 twice (the logpoint's line, the hook's end, a local made
     since among the values), F5 to the next tick's stop, then E9-1b-1's flow.
 
+## As built (E9-1b-3, 2026-10-28): the Debugger panel
+
+- **A bottom tab** after Output and Tasks (the layout's), Ctrl+Shift+D (VS Code's Run and
+  Debug). It opens by itself at a stop and stays open (Godot's).
+- **The header:** Continue, Over, Into and Out with their keys, dim where they do nothing
+  (no stop, or a stop that cannot be stepped from); the stop's hook and place
+  (`Stopped · on_tick · scripts/spin.luau:3`), or why there are no steps there.
+- **Call Stack:** the stop's frames, the stopped one first with the arrow; a click shows that
+  frame's variables and its line in its script. A C function's frame reads `engine`.
+- **Variables:** the shown frame's LOCALS, then UPVALUES. The core describes every frame of
+  a stop with its own (`Frame::locals`, `Frame::upvalues`).
+- **Breakpoints:** each with its mark, its place, its line's code (cut at 32 characters),
+  what it does in words (`logs …`, `pauses after its tick`, `if …`, `hits …`) and its hits
+  since Play; a click on the mark turns it off or on, on the row goes to its line.
+- **Its texts** are made again only when the stop, the shown frame, the breakpoints (a
+  revision raised at each change) or the host's states (their version) change: a frame
+  while it is open makes nothing new.
+- **Not done:** the header's entity and tick ("tick 1,284, under way") and Shift+F7; "Only
+  Front door"; Copy; "Skip breakpoints"; tables, entities and components opened in the
+  Variables; Watch and Evaluate; values changed since the last stop lit; F2 to change a
+  value; the list's keys (Space, Delete, Enter); the errors' rows.
+- **Tests:** the editor on the player: at the stop the panel shows the header, the frame, its
+  locals and both breakpoints with their code; its Over button steps.
+

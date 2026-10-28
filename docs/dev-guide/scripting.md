@@ -418,6 +418,10 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
     in the next hook. Each step's stop shows its line and its values, as a breakpoint's.
   - A stop inside a call from C code (a `table.sort` comparison, a metamethod written in
     Luau) cannot be stepped from: F5 goes on there. `self:method()` can.
+  - **The Debugger panel** (a bottom tab, Ctrl+Shift+D) opens at a stop: Continue and the
+    steps as buttons, the call stack (a click on a caller shows its line and its values),
+    the shown frame's locals and upvalues, and every breakpoint with what it does and its
+    hits (a click on its mark turns it off or on, on its row goes to its line).
   - A script saved while stopped runs again once it goes on.
 - **A logpoint** (◆) writes a message each time the line runs, and the script goes on:
   Shift+click the column, or Shift+F9, and type its text. `{…}` takes any Luau expression
@@ -443,8 +447,8 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
 
 Without breakpoints nothing is paid. A function with one runs Luau's interpreter instead of
 native code until its script runs again, and each hit costs a microsecond or so (below).
-The Debugger panel with the stack and the variables, values on the lines above the stopped
-one, and stopping at errors come next.
+Values on the lines above the stopped one, tables and entities opened in the Variables,
+watches and evaluation, and stopping at errors come next.
 
 In the editor, the scripts are compiled to be debugged: Luau's optimization level 1, which
 inlines nothing, so a step goes into a local function as its text reads. It costs nothing

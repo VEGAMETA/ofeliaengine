@@ -30,8 +30,9 @@ Last updated: 2026-10-28.
     code editor, is done: errors from the front end, completion, hover, signatures and
     definitions from `slangd`. E9, the script debugger (ADR 0119, accepted), is under way:
     logpoints and pause points work from the code editor's gutter (E9-1a), a breakpoint
-    stops a script at its line in Play, F5 going on (E9-1b-1), and F10, F11 and Shift+F11
-    step from a stop (E9-1b-2); the panel comes next. E10-1 waits for the answer on the material
+    stops a script at its line in Play, F5 going on (E9-1b-1), F10, F11 and Shift+F11 step
+    from a stop (E9-1b-2), and the Debugger panel shows the stop, its call stack, the
+    frame's values and every breakpoint (E9-1b-3). E10-1 waits for the answer on the material
     file. The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
@@ -679,11 +680,19 @@ Last updated: 2026-10-28.
     - the editor's scripts compiled at Luau's optimization level 1 (no inlining: steps follow
       the text), measured free on ADR 0114's scenes;
     - F10, F11, Shift+F11 in the editor and the game's window.
+  - **E9-1b-3, the Debugger panel** (#PR, ADR 0119's as-built):
+    - a bottom tab (Ctrl+Shift+D) opening by itself at a stop: Continue and the steps, the
+      stop's hook and place;
+    - the call stack (a caller's line and values a click away), the frame's locals and
+      upvalues (every frame described at the stop), every breakpoint with what it does and
+      its hits (its mark toggles it, its row goes to its line);
+    - its texts made again only when the stop, the frame, the breakpoints or their states
+      change.
   - **Next, in this order:**
-    1. E9-1b-3 on: the Debugger panel (stack, variables, the header), values on the lines
-       above the stopped one, pause on errors, Pause stopping at the next line; then E9-2
-       (DAP, VS Code) and E9-3 (the player). E10-1 waits for the answer on the material
-       file.
+    1. E9-1b-4 on: pause on errors (on by default, once per line per Play), the Pause
+       command stopping at the next line, values on the lines above the stopped one,
+       tables and entities opened in the Variables, Watch and Evaluate; then E9-2 (DAP,
+       VS Code) and E9-3 (the player). E10-1 waits for the answer on the material file.
     2. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
        per hook (`script Door.on_tick`) and each script's time and allocations in the
        editor's profiler; Tracy has only the stages' zones (`scripts::tick`).
