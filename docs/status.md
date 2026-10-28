@@ -796,7 +796,7 @@ Last updated: 2026-10-28.
     out again live (`Player::set_mixer_layout`, and when the file is written), what plays
     going on; the game's `Mixer` volumes multiply the faders; `AudioSettings::buses` is
     gone.
-  - **E11-1b-1, the mixer's strips** (#PR, ADR 0107's as-built): the Audio tab (Alt+A), a
+  - **E11-1b-1, the mixer's strips** (#403, ADR 0107's as-built): the Audio tab (Alt+A), a
     strip per bus with its fader (room near 0 dB, one undo step a drag) and the picked
     bus in the inspector (name, output without loops, gain, balance, voices, reverb);
     + Bus and ×; each change a file step of the one history, heard by the player the next
