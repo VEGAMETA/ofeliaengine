@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3f-3, errors on nodes and Show Slang** (#PR, ADR 0123's as-built): a node that
+  - **E10-3f-3, errors on nodes and Show Slang** (#429, ADR 0123's as-built): a node that
     stops the graph (a loop, a kind or a port a file holds) framed in red with why under
     it; Show Slang opens the saved build in a read only code tab that follows the graph.
     Slang's own errors at nodes come with E10-3g's nodes whose code the user writes.
