@@ -652,7 +652,7 @@ Last updated: 2026-10-28.
       instructions write their own opcode back); placed again after each hit;
     - measured: nothing without breakpoints; 0.6–1.4 µs a hit; F10 kept from the window
       menu.
-  - **E9-1b-1, stops** (#PR, ADR 0119's as-built):
+  - **E9-1b-1, stops** (#380, ADR 0119's as-built):
     - fibers in `engine_platform` (one made once, `suspend`, `resume`, panics handed back);
     - `BreakAction::Stop`: the frame described (locals, upvalues, the stack, values never
       through metamethods), the host's handler waits with the call's budget held;
@@ -683,7 +683,7 @@ Last updated: 2026-10-28.
        too. The editor's FPS now follows a fixed frame time (`Player::frame_time`), so the
        test is the same on both GPUs.
     4. The RTX's `forward` reads 3.1-3.7 % slower than its baseline in `sponza_fsr_quality`
-       and `sponza_smaa_t2x`, in two gates in a row (#379, #PR), on code those scenes do
+       and `sponza_smaa_t2x`, in two gates in a row (#379, #380), on code those scenes do
        not run (they render through the frame renderer, not the player; registers
        unchanged), with every frame 0.3-2 % slower: measure `main` alone, and give the RTX
        a new baseline if it holds.
