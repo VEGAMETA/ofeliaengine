@@ -193,3 +193,43 @@ double_sided = false
   - an image written anew keeps its previous texture until it is written again;
   - a material type's preview waits for every material type's pipelines, not only its own.
 
+## As built (E10-1c-1, 2026-10-28): a material file edited in the inspector
+
+- **Picked in the dock**, a `.material` shows a Material section under its path and kind
+  (`engine_editor::material`):
+  - a standard file: base color, metallic, roughness, emissive, alpha, its cutoff when
+    masked, double sided;
+  - a typed file: the type and its module; a row per field of the type's `Params` layout,
+    which the player reflects off the frame (`Player::material_type`,
+    `Player::material_params`): numbers, a vector's parts (r g b a when the field's name
+    says color, tint, albedo or base, until Slang attributes give hints in E10-2), an image
+    with its encoding, an array shown with its count; then the look and its values.
+- **The editor holds the file** (`MaterialDoc`: the file, the paths its references were
+  written with, its text now and as saved) and gives it to the player whenever it changes
+  (`Player::set_material_file`, `Assets::set_material`):
+  - the held file is read in place of the file on disk;
+  - its material is made again in its place: a standard file's values at once, a typed
+    file's parameters laid out again from the cached layout with no frame of its look.
+
+  An unedited file written anew on disk is read again; an edited one keeps its edits.
+- **Edits are steps of the one history:** `History::change_file` records a file's text
+  before and after a step, and drags merge as entity drags do. Undo, redo and a drag's
+  Escape hand the texts back (`History::take_files`) to the held files.
+- **Ctrl+S** writes the edited material files with the scene. The section says "Material
+  (unsaved: Ctrl+S)" until then.
+- **Tests:**
+  - the history: a file's text merged over a drag, handed back by undo, redo and cancel;
+  - the rows of a standard and a typed file (a vector to `vectors`, a number to `numbers`,
+    a whole number rounded, an image with its encoding, the look replaced hiding its
+    values);
+  - the editor: a click on a material's tile, roughness typed, undone and redone, a mask
+    bringing its cutoff's row, Ctrl+S writing the file;
+  - the player, on both GPUs: a held typed file laid out again in the same material,
+    never its look in between.
+- **Not done:**
+  - editing from a selected object's `Model.material` (E10-1c-2), New Material, Make
+    Variant and Apply to Selection;
+  - unsaved material edits are not in the session's autosave yet;
+  - edits made during Play stay, but their steps go with Play's;
+  - image previews on image rows.
+

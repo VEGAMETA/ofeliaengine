@@ -93,8 +93,8 @@ use core::any::TypeId;
 use engine_app::scripts::{ErrorStops, Place, Resume};
 use engine_app::{
     AppError, AssetMeta, AudioListener, AudioSource, AudioSource3D, Brush, BrushGroup, BrushOp,
-    BrushShape, ColliderState, Game, Model, ModelCollider, Overlay, OverlayOutput, OverlayPass,
-    Player, PlayerSettings, ReverbZone, Setup, Window, builtin,
+    BrushShape, ColliderState, Game, MaterialFile, Model, ModelCollider, Overlay, OverlayOutput,
+    OverlayPass, Player, PlayerSettings, ReverbZone, Setup, Window, builtin,
 };
 use engine_core::math::{Affine3A, Quat, Vec2, Vec3, Vec4, look_at, vulkan_orthographic};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
@@ -614,6 +614,8 @@ struct FrameLists {
     spans: Vec<(usize, usize)>,
     fields: Vec<Field<'static>>,
     asset_fields: Vec<Field<'static>>,
+    /// A material file's shown values (E10-1c).
+    material_values: Vec<&'static str>,
     sections: Vec<Section<'static>>,
 }
 
@@ -1152,6 +1154,17 @@ impl engine_scene::text::ReadRefs for IndexRefs<'_> {
             .copied()
             .ok_or_else(|| format!("no entity has the scene id {id}"))
     }
+}
+
+/// A material row's number being dragged in the inspector (ADR 0120's E10-1c): the row,
+/// the part, its numbers at the press, the gesture's merge key, whether it moved.
+#[derive(Debug, Clone, Copy)]
+struct MaterialDrag {
+    row: usize,
+    part: usize,
+    start: [f64; 4],
+    merge: u64,
+    moved: bool,
 }
 
 /// A number being dragged in the inspector.
@@ -2132,6 +2145,15 @@ struct Editor {
     /// The file the inspector shows instead of the entities, with its import settings
     /// (E4-9): the dock's last pick, until the entity selection changes.
     inspected: Option<crate::import::Inspected>,
+    /// Material files the inspector edited this session (ADR 0120's E10-1c), as the editor
+    /// holds them: drawn by the player, written by Ctrl+S, their steps in the history. The
+    /// inspected one's section among the inspector's, a drag of one of its numbers, the row
+    /// and part typed into, the row whose choice is open.
+    material_docs: Vec<crate::material::MaterialDoc>,
+    material_section: Option<usize>,
+    material_drag: Option<MaterialDrag>,
+    material_typing: Option<(usize, u8)>,
+    material_choice: Option<usize>,
     /// Each outermost prefab instance's prefab placed alone (E5-3), by the instance's id:
     /// what its entities' overrides are measured against, kept while the prefab's file is
     /// unchanged.
@@ -2910,6 +2932,11 @@ impl Editor {
             dock_focus: false,
             renaming_file: None,
             inspected: None,
+            material_docs: Vec::new(),
+            material_section: None,
+            material_drag: None,
+            material_typing: None,
+            material_choice: None,
             prefab_bases: HashMap::new(),
             pending_follow: Vec::new(),
             thumbnails,
@@ -3663,6 +3690,9 @@ impl Editor {
         let mut asset_fields: Vec<Field<'_>> =
             recycle(std::mem::take(&mut self.lists.asset_fields));
         let mut sections: Vec<Section<'_>> = recycle(std::mem::take(&mut self.lists.sections));
+        let mut material_values: Vec<&str> =
+            recycle(std::mem::take(&mut self.lists.material_values));
+        self.material_section = None;
         let scale_value: [&str; 1];
         if let Some(asset) = &self.inspected {
             scale_value = [asset.scale_text.as_str()];
@@ -3697,16 +3727,72 @@ impl Editor {
                     changed: asset.changed(s),
                 });
             }
+            let imports = asset_fields.len();
+            // A material file's own rows (E10-1c), edited live.
+            let doc = self.material_docs.iter().find(|d| d.id == asset.id);
+            if let Some(doc) = doc {
+                use crate::material::Shown;
+                for k in 0..doc.rows.len() {
+                    material_values.extend(doc.row_texts(k).iter().map(String::as_str));
+                }
+                let mut at = 0;
+                for (k, row) in doc.rows.iter().enumerate() {
+                    let n = doc.row_texts(k).len();
+                    let shown = &material_values[at..at + n];
+                    at += n;
+                    let first = shown.first().copied().unwrap_or("");
+                    let widget = match row.shown() {
+                        Shown::Text => Widget::Text(first),
+                        Shown::Numbers { labels, .. } => Widget::Numbers {
+                            values: shown,
+                            labels,
+                            typing: self
+                                .material_typing
+                                .filter(|&(r, _)| r == k)
+                                .map(|(_, part)| part),
+                            lock: None,
+                        },
+                        Shown::Choice(names) => Widget::Choice {
+                            current: first,
+                            open: (self.material_choice == Some(k)).then_some(names),
+                        },
+                        Shown::Check => Widget::Check(Some(doc.file.double_sided)),
+                        Shown::Image => Widget::Asset {
+                            preview: None,
+                            icon: if first == "none" { "" } else { icons::TEXTURE },
+                            name: first,
+                        },
+                    };
+                    asset_fields.push(Field {
+                        name: row.name(),
+                        widget,
+                        changed: crate::material::changed(&doc.file, row),
+                    });
+                }
+            }
             sections.push(Section {
                 title: "Asset",
                 fields: &asset_fields[..2],
                 script: "",
                 removable: false,
             });
-            if asset_fields.len() > 2 {
+            if imports > 2 {
                 sections.push(Section {
                     title: "Import",
-                    fields: &asset_fields[2..],
+                    fields: &asset_fields[2..imports],
+                    script: "",
+                    removable: false,
+                });
+            }
+            if let Some(doc) = doc {
+                self.material_section = Some(sections.len());
+                sections.push(Section {
+                    title: if doc.dirty() {
+                        "Material (unsaved: Ctrl+S)"
+                    } else {
+                        "Material"
+                    },
+                    fields: &asset_fields[imports..],
                     script: "",
                     removable: false,
                 });
@@ -4592,6 +4678,7 @@ impl Editor {
         self.lists.sections = recycle(sections);
         self.lists.fields = recycle(fields);
         self.lists.asset_fields = recycle(asset_fields);
+        self.lists.material_values = recycle(material_values);
         self.lists.values = recycle(values);
         self.lists.spans = spans;
         self.lists.tree = recycle(items);
@@ -5031,7 +5118,9 @@ impl Editor {
             }
         }
         if let Some(event) = response.field {
-            if self.inspected.is_some() {
+            if self.inspected.is_some() && Some(event.section) == self.material_section {
+                self.edit_material(world, event);
+            } else if self.inspected.is_some() {
                 self.edit_import(event);
             } else {
                 self.edit(world, event);
@@ -5057,7 +5146,9 @@ impl Editor {
                     field,
                     action,
                 };
-                if self.inspected.is_some() {
+                if self.inspected.is_some() && Some(section) == self.material_section {
+                    self.edit_material(world, event);
+                } else if self.inspected.is_some() {
                     self.edit_import(event);
                 } else {
                     self.edit(world, event);
@@ -5085,6 +5176,14 @@ impl Editor {
             drag.cancelled = true;
             let merge = drag.merge;
             self.history.revert(world, merge);
+        }
+        // A material's number too (E10-1c): the drag ends, and what it moved goes back.
+        if self.ui.input().keys.contains(&UiKey::Escape)
+            && let Some(drag) = self.material_drag.take()
+            && drag.moved
+        {
+            self.history.revert(world, drag.merge);
+            self.put_back_files();
         }
         // The shortcuts; while a field is typed in, only saving and Play's and the steps'
         // function keys (the rest are the field's: the Debugger's Evaluate line keeps the
@@ -12182,6 +12281,8 @@ impl Editor {
             } else {
                 self.history.redo(world).map(|name| format!("Redo: {name}"))
             };
+            // Material files' texts the step put back (E10-1c).
+            self.put_back_files();
             if let Some(message) = done {
                 self.say(message);
             }
@@ -12318,7 +12419,15 @@ impl Editor {
                 ));
             } else {
                 match self.save(world) {
-                    Ok(path) => self.say(format!("Saved {}", path.display())),
+                    Ok(path) => {
+                        // The material files edited since they were written, with it (E10-1c).
+                        let message = match self.save_materials() {
+                            0 => format!("Saved {}", path.display()),
+                            1 => format!("Saved {} and a material", path.display()),
+                            n => format!("Saved {} and {n} materials", path.display()),
+                        };
+                        self.say(message);
+                    }
                     Err(e) => self.say(format!("Not saved: {e}")),
                 }
             }
@@ -13022,7 +13131,225 @@ impl Editor {
             meta,
             self.selection.clone(),
         ));
+        self.material_drag = None;
+        self.material_typing = None;
+        self.material_choice = None;
+        if kind == engine_scene::AssetKind::Material {
+            self.open_material(id, &path);
+        }
         self.say(format!("{path} ({})", kind.name()));
+    }
+
+    /// Material file `id` at `path` held for the inspector (E10-1c): read the first time it
+    /// is picked, kept for the session (its steps stay in the history).
+    fn open_material(&mut self, id: AssetId, path: &str) {
+        if self.material_docs.iter().any(|d| d.id == id) {
+            return;
+        }
+        match crate::material::MaterialDoc::open(&self.root, id, path) {
+            Ok(doc) => self.material_docs.push(doc),
+            Err(e) => self.say(format!("Not editable: {e}")),
+        }
+    }
+
+    /// Applies an inspector field's action to the material file the inspector shows
+    /// (E10-1c): the file as the editor holds it changes, drawn by the next frame, and the
+    /// change is a step of the history (its text before and after; a drag's moves one step).
+    fn edit_material(&mut self, world: &mut World, event: FieldEvent) {
+        use crate::material::{self as m, Shown};
+        let Some(id) = self.inspected.as_ref().map(|i| i.id) else {
+            return;
+        };
+        let Some(d) = self.material_docs.iter().position(|d| d.id == id) else {
+            return;
+        };
+        let Some(row) = self.material_docs[d].rows.get(event.field).cloned() else {
+            return;
+        };
+        let name = row.name().trim().to_owned();
+        match event.action {
+            FieldAction::Drag {
+                part,
+                travel,
+                start,
+            } => {
+                let Shown::Numbers { whole, .. } = row.shown() else {
+                    return;
+                };
+                if start || self.material_drag.is_none() {
+                    self.gestures += 1;
+                    self.material_drag = Some(MaterialDrag {
+                        row: event.field,
+                        part: usize::from(part),
+                        start: m::numbers(&self.material_docs[d].file, &row),
+                        merge: self.gestures,
+                        moved: false,
+                    });
+                    self.material_typing = None;
+                    return;
+                }
+                let Some(drag) = self.material_drag.as_mut() else {
+                    return;
+                };
+                if travel != 0.0 {
+                    drag.moved = true;
+                }
+                let drag = *drag;
+                let quantity = if whole {
+                    Quantity::Integer
+                } else {
+                    Quantity::Number { step: None }
+                };
+                let (shift, ctrl) = (self.input.shift(), self.input.ctrl());
+                let mut values = drag.start;
+                values[drag.part] =
+                    self.snapping
+                        .drag(quantity, drag.start[drag.part], travel, shift, ctrl);
+                self.material_step(
+                    world,
+                    d,
+                    &format!("Edit {name}"),
+                    Some(drag.merge),
+                    |f, _| {
+                        m::set_numbers(f, &row, values);
+                    },
+                );
+            }
+            FieldAction::Release => {
+                if let Some(drag) = self.material_drag.take()
+                    && !drag.moved
+                {
+                    self.material_typing = Some((drag.row, drag.part as u8));
+                }
+            }
+            FieldAction::Typed { part, commit } => {
+                self.material_typing = None;
+                if !commit {
+                    return;
+                }
+                let text = self.ui.edited_text().trim().to_owned();
+                let part = usize::from(part).min(3);
+                let mut values = m::numbers(&self.material_docs[d].file, &row);
+                match crate::expr::evaluate(&text, values[part]) {
+                    Ok(value) => values[part] = value,
+                    Err(reason) => {
+                        self.say(format!("{name}: {reason}"));
+                        return;
+                    }
+                }
+                self.material_step(world, d, &format!("Set {name}"), None, |f, _| {
+                    m::set_numbers(f, &row, values);
+                });
+            }
+            FieldAction::Toggle => {
+                self.material_step(world, d, &format!("Toggle {name}"), None, |f, _| {
+                    m::toggle(f, &row);
+                });
+            }
+            FieldAction::Open => {
+                self.material_choice =
+                    (self.material_choice != Some(event.field)).then_some(event.field);
+            }
+            FieldAction::Choose(i) => {
+                self.material_choice = None;
+                self.material_step(world, d, &format!("Set {name}"), None, |f, _| {
+                    m::choose(f, &row, i);
+                });
+            }
+            FieldAction::Reset => {
+                self.material_step(world, d, &format!("Reset {name}"), None, |f, _| {
+                    m::reset(f, &row);
+                });
+            }
+            FieldAction::Pick => {
+                self.say(format!(
+                    "{name}: drop an image from the FileSystem dock onto it"
+                ));
+            }
+            FieldAction::Text { .. } | FieldAction::Lock => {}
+        }
+    }
+
+    /// `edit` made to material file `d` as a step called `name` (`merge`: one step for a
+    /// gesture's moves): its text before and after it in the history.
+    fn material_step(
+        &mut self,
+        world: &mut World,
+        d: usize,
+        name: &str,
+        merge: Option<u64>,
+        edit: impl FnOnce(&mut MaterialFile, &mut AssetPaths),
+    ) {
+        let doc = &mut self.material_docs[d];
+        let Some((before, after)) = doc.edit(edit) else {
+            return;
+        };
+        let id = doc.id;
+        self.history.begin(name, merge);
+        self.history.change_file(id, &before, &after);
+        self.history.commit(world);
+    }
+
+    /// The material files' texts the last undo, redo or revert put back (E10-1c): given to
+    /// the files as the editor holds them, drawn by the next frame.
+    fn put_back_files(&mut self) {
+        for (id, text) in self.history.take_files() {
+            if let Some(doc) = self.material_docs.iter_mut().find(|d| d.id == id)
+                && let Err(e) = doc.put_text(&text)
+            {
+                log::warn!(target: "engine_editor", "{e}");
+            }
+        }
+    }
+
+    /// The material files edited since they were last written, written (E10-1c): how many.
+    fn save_materials(&mut self) -> usize {
+        let mut n = 0;
+        for doc in &mut self.material_docs {
+            if !doc.dirty() {
+                continue;
+            }
+            match std::fs::write(self.root.join(&doc.path), &doc.text) {
+                Ok(()) => {
+                    doc.saved.clone_from(&doc.text);
+                    n += 1;
+                }
+                Err(e) => log::error!(target: "engine_editor", "{}: {e}", doc.path),
+            }
+        }
+        n
+    }
+
+    /// An image dropped onto the inspected material's row `field` (E10-1c): an image
+    /// parameter takes it, as a step.
+    fn drop_on_material(&mut self, world: &mut World, field: usize, drag: &AssetDrag) {
+        let Some(id) = self.inspected.as_ref().map(|i| i.id) else {
+            return;
+        };
+        let Some(d) = self.material_docs.iter().position(|d| d.id == id) else {
+            return;
+        };
+        let Some(row) = self.material_docs[d].rows.get(field).cloned() else {
+            return;
+        };
+        let crate::material::Row::Param {
+            name,
+            kind: engine_shader::FieldKind::Texture,
+            count: 1,
+        } = &row
+        else {
+            self.say(format!("{} takes no image", row.name().trim()));
+            return;
+        };
+        if drag.kind != engine_scene::AssetKind::Texture {
+            self.say(format!("{name} takes an image, not {}", drag.name));
+            return;
+        }
+        let (image, path) = (AssetRef::file(drag.asset), drag.path.clone());
+        self.material_step(world, d, &format!("Set {name}"), None, |f, w| {
+            crate::material::set_image(f, w, name, image, &path);
+        });
+        self.say(format!("{} → {name}", drag.name));
     }
 
     /// Rows of the scene tree dragged (`scene-tree.md` §5): started by a row held and
@@ -14493,6 +14820,13 @@ impl Editor {
         drag: &mut AssetDrag,
     ) {
         use engine_scene::AssetKind as K;
+        // The inspected file's rows: a material's image parameters take images (E10-1c).
+        if self.inspected.is_some() {
+            if Some(section) == self.material_section {
+                self.drop_on_material(world, field, drag);
+            }
+            return;
+        }
         let Some((p, component)) = self.shown_property(section, field) else {
             return;
         };
@@ -16543,9 +16877,61 @@ impl<G> EditorGame<G> {
         shared.loading = player.assets().loading();
         // Files written anew (E4-5): made again, the old versions drawn until then.
         for id in core::mem::take(&mut shared.changed_assets) {
+            // A material the inspector holds, unedited: read again (edited, its edits stay
+            // until Ctrl+S writes them).
+            if let Some(k) = shared.material_docs.iter().position(|d| d.id == id)
+                && !shared.material_docs[k].dirty()
+            {
+                let path = shared.material_docs[k].path.clone();
+                match crate::material::MaterialDoc::open(&shared.root, id, &path) {
+                    Ok(mut doc) => {
+                        doc.layout = shared.material_docs[k].layout.take();
+                        doc.refresh();
+                        shared.material_docs[k] = doc;
+                    }
+                    Err(e) => log::warn!(target: "engine_editor", "{e}"),
+                }
+            }
             if let Some(entry) = shared.asset_db.get(id) {
                 let path = entry.path.clone();
                 player.asset_changed(id, &path);
+            }
+        }
+        // Material files the inspector edits (E10-1c): given to the player as they change,
+        // drawn by its next frame; the inspected one's type's parameters' layout, for its
+        // rows.
+        let inspected = shared.inspected.as_ref().map(|i| i.id);
+        let shared = &mut *shared;
+        for doc in &mut shared.material_docs {
+            if !doc.given {
+                player.set_material_file(doc.id, Some((doc.file.clone(), doc.written.clone())));
+                doc.given = true;
+            }
+            if Some(doc.id) != inspected {
+                continue;
+            }
+            let ty = match doc.ty {
+                Some((ty, at)) if at == doc.revision => Some(ty),
+                _ => {
+                    let ty = doc
+                        .module(&shared.root)
+                        .map(|(module, type_name)| player.material_type(&module, &type_name));
+                    doc.ty = ty.map(|ty| (ty, doc.revision));
+                    ty
+                }
+            };
+            match ty.and_then(|ty| player.material_params(ty)) {
+                Some((layout, revision))
+                    if doc.layout.as_ref().map(|(r, _)| *r) != Some(revision) =>
+                {
+                    doc.layout = Some((revision, layout.cloned().map_err(str::to_owned)));
+                    doc.refresh();
+                }
+                None if ty.is_none() && doc.layout.is_some() => {
+                    doc.layout = None;
+                    doc.refresh();
+                }
+                _ => {}
             }
         }
         // Groups baked (E2b-6): their files written and read, their models in place.
@@ -20382,6 +20768,75 @@ mod tests {
         ed.selection.clear();
         ed.update(&mut world);
         assert!(ed.inspected.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_material_file_is_edited_in_the_inspector_undone_and_saved() {
+        let (dir, mut world, mut ed, _) = drop_project("material-inspector");
+        let red = ed.asset_db.find("props/red.material").unwrap().id;
+        let doc = |ed: &Editor| {
+            ed.material_docs
+                .iter()
+                .find(|d| d.id == red)
+                .map(|d| (d.file.clone(), d.dirty(), d.given))
+                .unwrap()
+        };
+        // A click on its tile: its path and kind, then its own rows.
+        let at = middle(texts(&ed, "red.material")[0]);
+        click(&mut ed, &mut world, at);
+        ed.update(&mut world);
+        assert_eq!(ed.inspected.as_ref().map(|i| i.id), Some(red));
+        assert!(!texts(&ed, "Material").is_empty(), "the material's section");
+        assert!(!texts(&ed, "base_color").is_empty());
+        // Its roughness typed: the file as the editor holds it changes, one step, to be
+        // given to the player.
+        let at = on_row(&ed, "roughness", "0.5");
+        click(&mut ed, &mut world, at);
+        ed.update(&mut world);
+        assert!(ed.ui.editing().is_some(), "a click types the number");
+        chars(&mut ed, "0.25");
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, true); // Enter
+        ed.update(&mut world);
+        let (file, dirty, given) = doc(&ed);
+        assert_eq!(file.roughness, 0.25);
+        assert!(dirty && !given);
+        assert_eq!(ed.history.steps().count(), 1);
+        // The next frame draws it unsaved.
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Material (unsaved: Ctrl+S)").is_empty());
+        // Undo and redo put its text back.
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(doc(&ed).0.roughness, 0.5);
+        ed.run(&mut world, ed.ids.redo);
+        assert_eq!(doc(&ed).0.roughness, 0.25);
+        // A masked alpha brings its cutoff's row.
+        let rows = &ed.material_docs.iter().find(|d| d.id == red).unwrap().rows;
+        let alpha = rows
+            .iter()
+            .position(|r| *r == crate::material::Row::Alpha)
+            .unwrap();
+        let section = ed.material_section.unwrap();
+        ed.edit_material(
+            &mut world,
+            FieldEvent {
+                section,
+                field: alpha,
+                action: FieldAction::Choose(1),
+            },
+        );
+        ed.update(&mut world);
+        assert!(!texts(&ed, "alpha_cutoff").is_empty());
+        assert_eq!(ed.history.steps().count(), 2);
+        // Ctrl+S writes it with the scene.
+        ed.run(&mut world, ed.ids.save);
+        let text = std::fs::read_to_string(dir.join("props/red.material")).unwrap();
+        assert!(
+            text.contains("roughness = 0.25") && text.contains("alpha = Mask"),
+            "{text}"
+        );
+        assert!(!doc(&ed).1, "saved");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

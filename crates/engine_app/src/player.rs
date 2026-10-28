@@ -1634,6 +1634,42 @@ impl Player {
         }
     }
 
+    /// Material file `file` as the editor holds it, read in place of the file on disk and
+    /// drawn by the next frame (`None`: the file again; [`crate::Assets::set_material`],
+    /// ADR 0120's E10-1c).
+    pub fn set_material_file(
+        &mut self,
+        file: engine_scene::AssetId,
+        held: Option<(crate::MaterialFile, engine_scene::AssetPaths)>,
+    ) {
+        self.assets.set_material(file, held, &mut self.materials);
+    }
+
+    /// Material type `type_name` of module `module` (an absolute path), registered with the
+    /// forward renderer if it was not (ADR 0092): what [`Self::material_params`] asks of.
+    pub fn material_type(
+        &mut self,
+        module: &Path,
+        type_name: &str,
+    ) -> engine_render::material::MaterialTypeId {
+        self.renderer.forward_mut().register_material_type(
+            engine_render::forward::MaterialTypeDesc {
+                name: type_name.to_owned(),
+                module: module.to_owned(),
+                type_name: type_name.to_owned(),
+            },
+        )
+    }
+
+    /// Material type `ty`'s parameters' layout, reflected off the frame's thread (ADR 0120's
+    /// E10-1b): `None` while on its way; then the layout or why not, and its revision.
+    pub fn material_params(
+        &self,
+        ty: engine_render::material::MaterialTypeId,
+    ) -> Option<(Result<&engine_render::forward::StructLayout, &str>, u32)> {
+        self.renderer.forward().material_params(ty)
+    }
+
     /// Watches material types' modules (and `forward.slang` with what it includes) and
     /// compiles a type again when one changes, its previous version drawing until then
     /// (ADR 0092); its parameters' layout is reflected again with it, and typed material
