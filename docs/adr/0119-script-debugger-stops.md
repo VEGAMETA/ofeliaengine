@@ -524,3 +524,42 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
   it); the editor on the player (two instances' error stops once; F5; the break; the row
   turning errors off; the session).
 
+## As built (E9-1b-5, 2026-10-28): values in the code, the Variables opened, Watch and Evaluate
+
+- **Values in the code:** `Frame::defined` (its function's first line) and
+  `Frame::params`. The editor reads, for each line of the shown frame's function above its
+  line, what the line assigns (`local a, b =`, `a =` and `a +=`, `for i =`, `for k, v in`,
+  `self.speed =` and `t.rotation =` as paths; strings, comments and table constructors'
+  fields skipped) and shows the values after it, dimmer than the code, after its
+  breakpoint's note; the function's line has its parameters. A local whose value changed
+  since the last stop in the same function is lit, there and in the Variables.
+- **What a value holds:** `Variable::children`, two levels down from a frame's variable,
+  within 4,000 values a stop:
+  - a table's fields read raw, nothing called: its array first, the rest by name; the first
+    100 (`CHILDREN`), then a row for how many more;
+  - the host's userdata through its `Describer` (`ScriptDebugger::set_describer`), called
+    inside the stop. engine_app's reads through reflection: `self` (its props, its
+    entity's other components, `entity`), entities (their `Name`, their components), views
+    (their fields as the scene writes them, `engine_scene::write_lines`), assets (their
+    paths).
+- **The Variables are a tree:** `self` open by default, a click opens or closes a row, the
+  paths opened kept through stops.
+- **Evaluate:** `ScriptDebugger::evaluate(frame, code, budget)`, the frame's locals and
+  upvalues as parameters by name and its module's environment, on a thread of its own (the
+  stopped one may be one an error left), under its own budget, breakpoints and error stops
+  passing; the value described as a variable. `Player::evaluate_script` opens the player's
+  world to scripts for it, as a hook has it (the stage stopped holds no borrow of it).
+- **The editor:** the Evaluate line under the Variables (Enter: its answer above it, the
+  last 20 kept until Stop; Ctrl+Enter: a watch); the watches first in the Variables,
+  evaluated again at every stop and frame, kept in the session (`watches = [...]`), an ×
+  takes one away. Play's and the steps' keys (F5, F8, F10, F11, Shift+F11) work while a
+  field is typed in, as from VS Code's debug console.
+- **Not done:** Globals in the Variables; `self.locals` opened; F2 to change a value; Up
+  and Down recalling earlier lines; tables past their first hundred fields; a native
+  frame's locals (Luau does not read them, the team's question).
+- **Tests:** the core (a table's first hundred fields and how many more, two levels down;
+  an evaluation's value, what it holds, its errors and its budget); the editor on the
+  player (the parameters on the function's line, `t` and `t.rotation` after theirs, `self`
+  open with its prop, components and entity, a component opened by a click, an answer, a
+  watch, the session's watches).
+

@@ -422,6 +422,18 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
     steps as buttons, the call stack (a click on a caller shows its line and its values),
     the shown frame's locals and upvalues, and every breakpoint with what it does and its
     hits (a click on its mark turns it off or on, on its row goes to its line).
+  - **Values in the code:** the lines above the stopped one, in its function, show what
+    they assigned at their ends (`t = Transform`, `self.speed = 2`), dimmer than the code;
+    the function's line has its parameters. A value that changed since the last stop is
+    lit, there and in the Variables.
+  - **The Variables open:** `self` shows its props, its entity's other components and the
+    entity; an entity shows its name and its components, a component its fields, a table
+    its fields (the first hundred, then how many more). A click opens or closes a row.
+  - **Evaluate** (the line under the Variables): a Luau expression in the shown frame, its
+    locals, upvalues and the module's globals in reach (`self.speed * 2`,
+    `t.translation.y`); its answer stands above the line. **Ctrl+Enter makes it a watch**,
+    evaluated again at every stop, first in the Variables, kept with the project (an ×
+    takes it away). It runs under the scripts' time budget; breakpoints it reaches pass.
   - A script saved while stopped runs again once it goes on.
 - **Errors stop a script too** while Play runs, before its frames unwind: an error the
   script does not catch stops it at the failing line, the line in red with the error's
@@ -465,8 +477,8 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
 
 Without breakpoints nothing is paid. A function with one runs Luau's interpreter instead of
 native code until its script runs again, and each hit costs a microsecond or so (below).
-Values on the lines above the stopped one, tables and entities opened in the Variables,
-and watches and evaluation come next.
+Changing a value from the Variables (F2), the header's entity and tick, and VS Code's
+debugging come next.
 
 Stopping at errors costs nothing until an error comes: hooks are called with a message
 handler, as they were with mlua's own, 14 ns a call more at most (below). "Errors caught by
