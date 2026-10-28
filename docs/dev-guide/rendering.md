@@ -2415,7 +2415,7 @@ double_sided = false
 - Textures in parameters are `TextureRef` fields, sampled with `ctx.sample(p.pattern)`;
   `Color` is sRGB, `Data` linear, `Normal` a tangent-space normal map.
 - **The look** (`look`) is what the material looks like before its shaders are made and in
-  GI's rays: its own `base_color`, `metallic`, `roughness` and `emissive` (`Own`), or the
+  GI's rays: its own `base_color`, `metallic`, `roughness` and `emissive` (`Own`, the default), or the
   glTF material it replaces in a scene's map (`Replaced`).
 - `alpha` is `Opaque`, `Mask` (cut below `alpha_cutoff`) or `Blend`.
 - To put material files on a glTF scene's meshes, write `<scene>.materials.ron` next to

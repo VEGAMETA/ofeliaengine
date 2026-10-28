@@ -6,3 +6,4 @@ type = "HairMaterial"
 numbers["hair_shift"] = 0.05
 numbers["roughness"] = 0.35
 vectors["base"] = [0.25, 0.12, 0.05, 1]
+look = Replaced

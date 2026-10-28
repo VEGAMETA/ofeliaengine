@@ -7,3 +7,4 @@ numbers["roughness"] = 0.8
 numbers["sheen_roughness"] = 0.6
 vectors["base"] = [0.15, 0.2, 0.55, 1]
 vectors["sheen"] = [0.6, 0.6, 0.65]
+look = Replaced

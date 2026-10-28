@@ -75,8 +75,8 @@ double_sided = false
   - A field the file does not set is zero (a texture none, white), as before.
 - **The look** (`look`): what a typed material looks like before its shaders are made, and
   what GI's rays see.
-  - `Own`: the standard material's values below (`base_color`, `metallic`, `roughness`,
-    `emissive`).
+  - `Own` (the default): the standard material's values below (`base_color`, `metallic`,
+    `roughness`, `emissive`).
   - `Replaced`: the glTF material the file replaces in a scene's map (the old
     `fallback: None`); where it replaces none, the values below.
   - For the standard material (no shader) the values below are the material.
@@ -138,8 +138,10 @@ double_sided = false
   sets the glTF material's values. `ofeliaengine cook --project <DIR>` (the current folder by
   default).
 - **The six golden files** are `tests/golden/materials/*.material`, converted by a one-off
-  script (their numbers and vectors, each with a fresh id; no fallback, texture or alpha
-  was set in any). The golden test bed is their project. The fabric shot writes version 2
+  script: their numbers and vectors, each with a fresh id, and `look = Replaced` (none set a
+  fallback, so each kept the look of the glTF material it replaces; without the line a
+  typed file is `Own`, and the shot of a type's first sight caught it). No texture or alpha
+  was set in any. The golden test bed is their project. The fabric shot writes version 2
   files outside any project (absolute paths, fresh ids, `look = Replaced`), and the frame
   crate's hot reload test writes version 2.
 - **Tests:** a typed file read, resolved, laid out (an array of vectors written flat) and
