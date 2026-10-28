@@ -515,6 +515,34 @@ fn a_logpoint_logs_in_play_and_f9_stops_the_script_at_its_line() {
     // Escape leaves the Evaluate line: the keys are the code's again.
     tap(&mut game, 0x1B, 0x01);
     frame(&mut player, &mut game, &mut overlay);
+    // A second click on a value soon after the first changes it (E9-4b): `dt`, a local,
+    // in sight once `self` is closed.
+    click_text(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        "EditorSpin \u{b7} Front door",
+    );
+    frame(&mut player, &mut game, &mut overlay);
+    for _ in 0..2 {
+        click_text(&mut player, &mut game, &mut overlay, "0.015625");
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    for c in "dt * 4".chars() {
+        send(&mut game, WindowEventKind::Char(c));
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    enter(&mut game);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let rows = game.debug_texts();
+    assert!(
+        rows.iter().any(|r| r == "dt = 0.0625"),
+        "changed: {rows:#?}"
+    );
+    let said = game.message().unwrap_or_default();
+    assert_eq!(said, "dt = 0.0625");
     tap(&mut game, 0x74, 0x3F);
     for _ in 0..3 {
         frame(&mut player, &mut game, &mut overlay);

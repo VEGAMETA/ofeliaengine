@@ -181,6 +181,9 @@ pub struct DebuggerView<'a> {
     /// The header's filter button (`Only Front door`, `Every instance`), when the script
     /// stopped at a breakpoint in an entity's hook.
     pub only: Option<&'a str>,
+    /// The Variables row whose value is being changed (E9-4b), the text in its field, and
+    /// whether the field takes the keys now.
+    pub editing: Option<(usize, &'a str, bool)>,
     /// A script is stopped: Continue works.
     pub stopped: bool,
     /// At an error: the header in the error color.
@@ -1015,6 +1018,12 @@ pub struct ShellResponse {
     pub debug_evaluate: Option<TextFieldResponse>,
     /// A watch's × was clicked: its row.
     pub debug_unwatch: Option<usize>,
+    /// The Variables row under the mouse.
+    pub debug_hover: Option<usize>,
+    /// A Variables row was clicked, whatever it holds.
+    pub debug_row: Option<usize>,
+    /// The field of a value being changed (E9-4b).
+    pub debug_set: Option<TextFieldResponse>,
     /// The scene dock's tab was clicked (0 the tree, 1 History).
     pub scene_dock_tab: Option<usize>,
     /// A History row was clicked: its place.
@@ -3899,8 +3908,23 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
                                 None => "",
                             };
                             icon(ui, "open", mark, p.text_dim);
+                            let editing = view.editing.filter(|&(k, _, _)| k == i);
                             if v.value.is_empty() {
                                 text(ui, "section", v.name, SMALL, p.text_dim);
+                            } else if let Some((_, typed, focus)) = editing {
+                                // Changing the value (E9-4b): its Luau, Enter gives it.
+                                text(ui, "name", v.name, SMALL, p.text);
+                                let style = Style {
+                                    size: [Size::Grow(1.0), Size::Fixed(20.0)],
+                                    align_cross: Align::Center,
+                                    ..Style::default()
+                                };
+                                let look = field_look(p, style, "", false);
+                                let r = ui.text_field("set", typed, &look);
+                                if focus && !r.editing {
+                                    ui.edit_field(r.id);
+                                }
+                                out.debug_set = used(r);
                             } else {
                                 text(ui, "name", v.name, SMALL, p.text);
                                 let color = match (v.error, v.changed) {
@@ -3920,11 +3944,15 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
                                 }
                             }
                         });
-                        if out.debug_unwatch != Some(i)
-                            && v.open.is_some()
-                            && ui.sense(id, false).clicked
-                        {
-                            out.debug_variable = Some(i);
+                        let sensed = ui.sense(id, false);
+                        if sensed.hovered {
+                            out.debug_hover = Some(i);
+                        }
+                        if out.debug_unwatch != Some(i) && sensed.clicked {
+                            out.debug_row = Some(i);
+                            if v.open.is_some() {
+                                out.debug_variable = Some(i);
+                            }
                         }
                         ui.pop_id();
                     }

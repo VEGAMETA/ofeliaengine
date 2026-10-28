@@ -242,6 +242,20 @@ fn vs_code_attaches_over_dap_and_debugs_a_stop() {
         json!({ "expression": "self.rate * 10", "frameId": 0, "context": "repl" }),
     );
     assert_eq!(r["body"]["result"], "20", "{r}");
+    // setVariable (E9-4b): self's prop as the inspector writes it, an undo step.
+    let r = client.request(
+        &mut || frame(p, g, o),
+        "setVariable",
+        json!({ "variablesReference": reference, "name": "rate", "value": "3" }),
+    );
+    assert_eq!(r["body"]["value"], "3", "{r}");
+    assert!(g.run_command(p.world_mut(), "edit.undo"));
+    let r = client.request(
+        &mut || frame(p, g, o),
+        "evaluate",
+        json!({ "expression": "self.rate", "frameId": 0, "context": "repl" }),
+    );
+    assert_eq!(r["body"]["result"], "2", "undone: {r}");
     // A step: the next line, `step` its reason; then on, and the logpoint's message comes
     // to the console.
     client.request(&mut || frame(p, g, o), "next", json!({ "threadId": 1 }));

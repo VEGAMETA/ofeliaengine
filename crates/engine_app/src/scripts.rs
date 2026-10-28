@@ -64,7 +64,7 @@ use engine_script::mlua::{
 };
 /// The debugger's breakpoints as the host takes them (ADR 0119): the editor's.
 pub use engine_script::{
-    BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Frame, Hits, Resume,
+    BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Frame, Hits, Place, Resume,
     ScriptDebugger, Stopped, Variable,
 };
 use engine_script::{ScriptError, ScriptSettings, ScriptVm};

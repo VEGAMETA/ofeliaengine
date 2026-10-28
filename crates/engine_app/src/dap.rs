@@ -12,7 +12,7 @@
 //!   (the stack, the scopes, the values, evaluations) alike ([`References::answer`]).
 //! - **Messages:** a `Content-Length` header, a blank line, UTF-8 JSON.
 
-use engine_script::{Breakpoint, ErrorStop, ErrorStops, Hits, Stopped, Variable};
+use engine_script::{Breakpoint, ErrorStop, ErrorStops, Hits, Place, Stopped, Variable};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -277,6 +277,7 @@ pub fn capabilities(errors: ErrorStops) -> Value {
         "supportsHitConditionalBreakpoints": true,
         "supportsLogPoints": true,
         "supportsEvaluateForHovers": true,
+        "supportsSetVariable": true,
         "exceptionBreakpointFilters": [
             {
                 "filter": "uncaught",
@@ -290,6 +291,57 @@ pub fn capabilities(errors: ErrorStops) -> Value {
             },
         ],
     })
+}
+
+/// The place Luau assigns to that names `names` down from a frame's variable
+/// (`["self", "Transform", "translation"]` is `self.Transform.translation`, `["t", "[1]"]`
+/// is `t[1]`): none where a name is not one Luau writes there (a table key shown as its
+/// text, a cut string).
+pub fn assignable(names: &[&str]) -> Option<String> {
+    let (root, rest) = names.split_first()?;
+    if !is_name(root) {
+        return None;
+    }
+    let mut out = String::from(*root);
+    for name in rest {
+        if is_name(name) {
+            out.push('.');
+            out.push_str(name);
+        } else if name
+            .strip_prefix('[')
+            .and_then(|k| k.strip_suffix(']'))
+            .is_some_and(is_literal)
+        {
+            out.push_str(name);
+        } else {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// Whether `s` is a name Luau reads as one (not a keyword).
+fn is_name(s: &str) -> bool {
+    const KEYWORDS: [&str; 22] = [
+        "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
+        "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+        "continue",
+    ];
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !KEYWORDS.contains(&s)
+}
+
+/// Whether a table key shown as `[k]` reads back as the key: a number, a boolean or a whole
+/// string.
+fn is_literal(k: &str) -> bool {
+    k == "true"
+        || k == "false"
+        || k.parse::<f64>().is_ok()
+        || (k.len() >= 2 && k.starts_with('"') && k.ends_with('"') && !k.contains('\u{2026}'))
 }
 
 /// The `stopped` event's body: why (`breakpoint`, `step`, `pause`; `exception` at an
@@ -492,6 +544,56 @@ impl References {
             }
             _ => return None,
         }))
+    }
+
+    /// Where variable `name` under reference `reference` lives in `stop` (VS Code's
+    /// setVariable): its frame and its place. None for an evaluation's value, or where the
+    /// names down to it are not a place Luau assigns to ([`assignable`]).
+    pub fn place(
+        &self,
+        reference: usize,
+        name: &str,
+        stop: Option<&Stopped>,
+    ) -> Option<(usize, Place)> {
+        let (frame, section, path) = reference.checked_sub(1).and_then(|k| self.keys.get(k))?;
+        if *section > 1 {
+            return None;
+        }
+        if path.is_empty() {
+            let name = String::from(name);
+            let place = if *section == 0 {
+                Place::Local(name)
+            } else {
+                Place::Upvalue(name)
+            };
+            return Some((*frame, place));
+        }
+        let f = stop?.stack.get(*frame)?;
+        let mut level: &[Variable] = if *section == 0 {
+            &f.locals
+        } else {
+            &f.upvalues
+        };
+        let mut names = Vec::with_capacity(path.len() + 1);
+        for &i in path {
+            let v = level.get(i)?;
+            names.push(v.name.as_str());
+            level = &v.children;
+        }
+        names.push(name);
+        assignable(&names).map(|target| (*frame, Place::Field(target)))
+    }
+
+    /// A value given by setVariable, as its response says it: its text and, where it holds
+    /// anything, the reference it opens by.
+    pub fn set_answer(&mut self, v: Variable) -> Value {
+        let reference = if v.children.is_empty() {
+            0
+        } else {
+            self.evaluated.push(v.clone());
+            self.reference(self.evaluated.len() - 1, 2, Vec::new())
+        };
+        json!({ "value": v.value, "variablesReference": reference })
     }
 
     /// The reference of the values at `(frame, section, path)`.
@@ -744,6 +846,30 @@ mod tests {
         assert_eq!(log.condition.as_deref(), Some("dt > 0"));
         assert_eq!(host[2].as_ref().unwrap().hits, Hits::From(10));
         assert!(host[3].is_err(), "not a hit rule");
+    }
+
+    #[test]
+    fn variables_down_a_frame_are_places_luau_assigns_to() {
+        assert_eq!(
+            assignable(&["self", "Transform", "translation"]).as_deref(),
+            Some("self.Transform.translation")
+        );
+        assert_eq!(assignable(&["t", "[1]"]).as_deref(), Some("t[1]"));
+        assert_eq!(
+            assignable(&["t", "[\"a b\"]"]).as_deref(),
+            Some("t[\"a b\"]")
+        );
+        assert_eq!(
+            assignable(&["t", "[table: 3]"]),
+            None,
+            "a key shown as its text"
+        );
+        assert_eq!(
+            assignable(&["t", "[\"long\u{2026}\"]"]),
+            None,
+            "a cut string"
+        );
+        assert_eq!(assignable(&["end", "x"]), None, "a keyword");
     }
 
     #[test]

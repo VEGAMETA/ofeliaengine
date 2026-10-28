@@ -90,7 +90,7 @@ use crate::transform::{self, KeyTransform};
 use crate::undo::{PlayChange, PlayMark, WorldSnapshot};
 use crate::{Chord, CommandId, Commands, Fuzzy, History, KeyContext, Keymap, Match};
 use core::any::TypeId;
-use engine_app::scripts::{ErrorStops, Resume};
+use engine_app::scripts::{ErrorStops, Place, Resume};
 use engine_app::{
     AppError, AssetMeta, Brush, BrushGroup, BrushOp, BrushShape, ColliderState, Game, Model,
     ModelCollider, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup, Window,
@@ -2002,6 +2002,16 @@ struct Editor {
     output_shown: Vec<u64>,
     /// The last click on a file in the dock, for double clicks (a scene opens).
     last_file_click: Option<(AssetId, Instant)>,
+    /// A Variables row's value being changed (E9-4b): its path, the text typed, and
+    /// whether its field takes the keys at the next frame.
+    var_edit: Option<(String, String, bool)>,
+    /// The Variables row under the mouse (F2 changes it), and the last row clicked and
+    /// when (a second click soon after changes it).
+    var_hover: Option<usize>,
+    var_click: Option<(usize, Instant)>,
+    /// Values to give at the next frame of Play, the player's: a row's path, the Luau
+    /// typed.
+    set_queue: Vec<(String, String)>,
     /// The session in the project's `.ofelia/` (ADR 0107 §4): none until
     /// `begin_session`, so editors that tests and tools make write nothing there.
     session: Option<Session>,
@@ -2781,6 +2791,10 @@ impl Editor {
             output_label: String::new(),
             output_shown: Vec::new(),
             last_file_click: None,
+            var_edit: None,
+            var_hover: None,
+            var_click: None,
+            set_queue: Vec::new(),
             session: None,
             dap: None,
             dap_requests: Vec::new(),
@@ -4094,6 +4108,13 @@ impl Editor {
             (self.bottom == Some(DEBUGGER_TAB)).then(|| crate::shell::DebuggerView {
                 header: &self.debug_text.header,
                 only: self.debug_text.only.as_deref(),
+                editing: self.var_edit.as_ref().and_then(|(path, text, focus)| {
+                    self.debug_text
+                        .variables
+                        .iter()
+                        .position(|v| v.path == *path)
+                        .map(|k| (k, text.as_str(), *focus))
+                }),
                 stopped: self.stop.is_some(),
                 error: self
                     .stop
@@ -4586,6 +4607,38 @@ impl Editor {
                 .map(|b| (b.file.clone(), b.line))
         {
             self.enable_breakpoint(world, &file, line);
+        }
+        // A Variables row's value changed (E9-4b): a second click on its row soon after the
+        // first, or F2 over it, opens its field; Enter gives its Luau at the next frame.
+        self.var_hover = response.debug_hover;
+        if let Some(k) = response.debug_row {
+            let now = Instant::now();
+            let double = self
+                .var_click
+                .is_some_and(|(row, at)| row == k && now.duration_since(at).as_secs_f32() < 0.45);
+            self.var_click = (!double).then_some((k, now));
+            if double {
+                self.edit_variable(k);
+            }
+        }
+        if let Some(r) = response.debug_set {
+            if (r.started || r.changed)
+                && let Some(edit) = self.var_edit.as_mut()
+            {
+                edit.1.clear();
+                edit.1.push_str(self.ui.edited_text());
+                edit.2 = false;
+            }
+            if r.committed && self.ui.input().keys.contains(&UiKey::Enter) {
+                if let Some((path, _, _)) = self.var_edit.take() {
+                    let code = self.ui.edited_text().trim().to_owned();
+                    if !code.is_empty() {
+                        self.set_queue.push((path, code));
+                    }
+                }
+            } else if r.committed || r.cancelled {
+                self.var_edit = None;
+            }
         }
         if let Some(k) = response.debug_variable
             && let Some(path) = self.debug_text.variables.get(k).map(|v| v.path.clone())
@@ -9812,8 +9865,8 @@ impl Editor {
                     None => "Stopped",
                 };
                 let _ = write!(text.header, "{what} · {hook}");
-                if let Some((_, name)) = &stop.entity {
-                    let _ = write!(text.header, " · {name}");
+                if let Some(who) = &stop.entity {
+                    let _ = write!(text.header, " · {}", who.name);
                 }
                 let _ = write!(
                     text.header,
@@ -9937,13 +9990,13 @@ impl Editor {
         // The header's filter button: the stopped breakpoint limited to the stopped entity,
         // or to every one again.
         let only = self.stop.as_ref().and_then(|stop| {
-            let (who, name) = stop.entity.as_ref()?;
+            let who = stop.entity.as_ref()?;
             let line = self.stop_mark_line()?;
             let mark = self.breakpoints.at(&stop.file, line)?;
-            Some(if mark.only == [*who] {
+            Some(if mark.only == [who.only] {
                 String::from("Every instance")
             } else {
-                format!("Only {name}")
+                format!("Only {}", who.name)
             })
         });
         let text = &mut self.debug_text;
@@ -10008,6 +10061,73 @@ impl Editor {
         }
     }
 
+    /// Variables row `k`'s value opened to be changed (E9-4b): whether it can be (a script
+    /// is stopped, and the row is a local, an upvalue, or a place down from one).
+    fn edit_variable(&mut self, k: usize) -> bool {
+        let Some(v) = self.debug_text.variables.get(k) else {
+            return false;
+        };
+        if self.stop.is_none() || place_of(&v.path).is_none() {
+            return false;
+        }
+        self.var_edit = Some((v.path.clone(), v.value.clone(), true));
+        true
+    }
+
+    /// `code`'s value given to the Variables row at `path` (E9-4b), said in the status bar.
+    fn set_variable(&mut self, player: &mut Player, frame: usize, path: &str, code: &str) {
+        let Some(place) = place_of(path) else {
+            self.say(String::from("This value cannot be changed here"));
+            return;
+        };
+        let label = place_text(&place);
+        match self.set_place(player, frame, &place, code) {
+            Ok(v) => self.say(format!("{label} = {}", v.value)),
+            Err(e) => self.say(format!("{label} not changed: {e}")),
+        }
+    }
+
+    /// `code`'s value given to `place` in frame `frame` of the stop (E9-4b): one of the
+    /// stopped entity's props or components (`self.…`) as one undo step, kept at Stop with
+    /// Ctrl+K as the inspector's edits are; a local, an upvalue or a table's field as it
+    /// is. The stop is read again after, so what changed shows wherever it is.
+    fn set_place(
+        &mut self,
+        player: &mut Player,
+        frame: usize,
+        place: &Place,
+        code: &str,
+    ) -> Result<engine_app::scripts::Variable, String> {
+        let entity = self
+            .stop
+            .as_ref()
+            .and_then(|s| s.entity.as_ref())
+            .map(|w| w.entity);
+        let own =
+            matches!(place, Place::Field(t) if t.starts_with("self.") || t.starts_with("self["));
+        let undo = entity.filter(|_| own);
+        if let Some(e) = undo {
+            self.history
+                .begin(&format!("Set {}", place_text(place)), None);
+            self.history.touch(player.world_mut(), e);
+        }
+        let result = player.set_script_value(frame, place, code);
+        if undo.is_some() {
+            if result.is_ok() {
+                self.history.commit(player.world_mut());
+            } else {
+                self.history.cancel(player.world_mut());
+            }
+        }
+        if result.is_ok() {
+            if let (Some(stop), Some(debugger)) = (self.stop.as_mut(), player.script_debugger()) {
+                debugger.refresh(&mut stop.stopped);
+            }
+            self.debug_values += 1;
+        }
+        result
+    }
+
     /// The line (from 0) in the editor's text of the breakpoint the script stopped at: the
     /// stop's line as saved, followed through unsaved edits.
     fn stop_mark_line(&self) -> Option<usize> {
@@ -10029,7 +10149,10 @@ impl Editor {
         let Some(stop) = &self.stop else {
             return;
         };
-        let Some((who, name)) = stop.entity.clone() else {
+        let Some(StopEntity {
+            only: who, name, ..
+        }) = stop.entity.clone()
+        else {
             return;
         };
         let file = stop.file.clone();
@@ -10180,14 +10303,14 @@ impl Editor {
             .instance
             .map(Entity::from_bits)
             .filter(|&e| world.contains(e))
-            .map(|e| {
-                let only = world
+            .map(|e| StopEntity {
+                entity: e,
+                only: world
                     .get::<SceneId>(e)
-                    .map_or(Only::Spawned(e), |&id| Only::Scene(id));
-                let name = world
+                    .map_or(Only::Spawned(e), |&id| Only::Scene(id)),
+                name: world
                     .get::<Name>(e)
-                    .map_or_else(|| String::from("an entity"), |n| n.as_str().to_owned());
-                (only, name)
+                    .map_or_else(|| String::from("an entity"), |n| n.as_str().to_owned()),
             });
         let tick = self
             .play
@@ -10362,6 +10485,21 @@ impl Editor {
                 self.error_stops = engine_app::dap::error_stops(args);
                 self.write_session(player.world_mut());
                 Ok(Value::Null)
+            }
+            "setVariable" => {
+                let reference = args["variablesReference"]
+                    .as_u64()
+                    .and_then(|r| usize::try_from(r).ok())
+                    .unwrap_or(0);
+                let name = args["name"].as_str().unwrap_or_default();
+                let code = args["value"].as_str().unwrap_or_default();
+                let stop = self.stop.as_ref().map(|s| &s.stopped);
+                let (frame, place) = self
+                    .dap_refs
+                    .place(reference, name, stop)
+                    .ok_or_else(|| format!("`{name}` cannot be changed here"))?;
+                let v = self.set_place(player, frame, &place, code)?;
+                Ok(self.dap_refs.set_answer(v))
             }
             "continue" => {
                 self.play_request = Some(PlayRequest::Continue);
@@ -12092,10 +12230,14 @@ impl Editor {
                 }
             }
         } else if id == ids.rename {
-            // In the listing, its file; else the selection.
-            match self.browser.selected.filter(|_| self.dock_focus) {
-                Some(file) => self.renaming_file = Some(file),
-                None => self.renaming = self.active(),
+            // In the Debugger at a stop, the value under the mouse (E9-4b); in the listing,
+            // its file; else the selection.
+            let row = self.var_hover.filter(|_| self.bottom == Some(DEBUGGER_TAB));
+            if !row.is_some_and(|k| self.edit_variable(k)) {
+                match self.browser.selected.filter(|_| self.dock_focus) {
+                    Some(file) => self.renaming_file = Some(file),
+                    None => self.renaming = self.active(),
+                }
             }
         } else if id == ids.find_references {
             self.find_references(world);
@@ -15644,6 +15786,9 @@ impl<G> EditorGame<G> {
         let mut shared = self.shared.borrow_mut();
         let ed = &mut *shared;
         let frame = ed.debug_frame;
+        for (path, code) in std::mem::take(&mut ed.set_queue) {
+            ed.set_variable(player, frame, &path, &code);
+        }
         for code in std::mem::take(&mut ed.eval_queue) {
             let result = player.evaluate_script(frame, &code);
             ed.answers.push((code, result));
@@ -17335,6 +17480,15 @@ enum PlayRequest {
     Step,
 }
 
+/// The entity whose hook a script stopped in (E9-4a): the entity, how a filter names it,
+/// its name.
+#[derive(Clone)]
+struct StopEntity {
+    entity: Entity,
+    only: Only,
+    name: String,
+}
+
 /// Where a script stopped in Play (ADR 0119 E9-1b), as the editor shows it.
 struct StopShown {
     /// The stop's number ([`Player::script_stops`]): a step's next stop is another.
@@ -17354,8 +17508,8 @@ struct StopShown {
     /// The stopped frame's locals whose values changed since the last stop in its
     /// function (E9-1b-5a): lit.
     changed: Vec<String>,
-    /// The entity whose hook it stopped in (E9-4a): how a filter names it, and its name.
-    entity: Option<(Only, String)>,
+    /// The entity whose hook it stopped in (E9-4a).
+    entity: Option<StopEntity>,
     /// The tick it stopped in, counted from Play's start; in the frame's stage, the last.
     tick: u64,
     /// It stopped in a tick (the rest of the tick waits), not in the frame's stage.
@@ -17466,6 +17620,30 @@ struct DebugBreakpoint {
 
 /// The characters of a breakpoint's line the Debugger's list shows.
 const CODE_SHOWN: usize = 32;
+
+/// The place a Variables row's path names (`LOCALS/self/Transform/translation`): a local
+/// or an upvalue at the top, a place Luau assigns to down from one; none for a section, a
+/// watch, an evaluation's answer, or a key shown as its text.
+fn place_of(path: &str) -> Option<Place> {
+    let mut parts = path.split('/');
+    let section = parts.next()?;
+    let names: Vec<&str> = parts.collect();
+    match (section, names.as_slice()) {
+        ("LOCALS", [name]) => Some(Place::Local((*name).to_owned())),
+        ("UPVALUES", [name]) => Some(Place::Upvalue((*name).to_owned())),
+        ("LOCALS" | "UPVALUES", [_, _, ..]) => {
+            engine_app::dap::assignable(&names).map(Place::Field)
+        }
+        _ => None,
+    }
+}
+
+/// A place as Luau writes it: `speed`, `self.Transform.translation`.
+fn place_text(place: &Place) -> &str {
+    match place {
+        Place::Local(name) | Place::Upvalue(name) | Place::Field(name) => name,
+    }
+}
 
 /// `n` with its thousands apart: `1,284`.
 fn grouped(n: u64) -> String {
