@@ -120,7 +120,8 @@ links["out.roughness"] = "b71c.value"
 
 - **One module a graph:** a `struct Graph_<id>Params` of its parameters (textures first,
   then vectors and numbers by name) and a `struct Graph_<id> : IMaterial` whose `surface`
-  is the output's terms. A material file of a graph names no `type`: a graph has one.
+  is the output's terms. A material file of a graph names the type its module declares,
+  `GraphMaterial` (as built in E10-3c: the one type of every graph's module).
 - **Three passes:** expand (functions and reroutes, later); count each node's uses from the
   output back; write each node once (in place when read once, a `let` when read more).
   Nodes the output does not reach are not written.
@@ -247,6 +248,37 @@ has graphs).
   text holds only what differs from the defaults, sorted, as the example above; a model
   or a link that cannot be read is said, a newer file and another kind of file are
   refused; the database's kind and id.
+
+## As built (E10-3c, 2026-10-28): graphs drawn by the player
+
+- **`engine_assets::graph_module`:** where a material file's `shader` is a `.graph`,
+  `MaterialFile::typed` makes it a module: the graph read, generated in the saved build
+  with the type `GraphMaterial`, written to `<project>/.ofelia/cache/graphs/<graph id>.slang`
+  only when the text changed (an unchanged graph compiles nothing again; the folder is the
+  editor's session folder, which new games' `.gitignore` leaves out). The resolved
+  material's shader is that module, so the player, the editor's material document and the
+  cook (which reads material files through `typed` as well) all compile the same text.
+- **The graph's own values** are the material's defaults under the file's: its named
+  numbers, and its texture nodes' images with an encoding inferred from the graph (a
+  normal map's where the node feeds a Normal Map node, else a colour's; a material file's
+  `textures["…"].encoding` says otherwise). `TypedMaterial::textures` names each texture
+  parameter's image asset, the file's or the graph's.
+- **The player** (`engine_app::Assets`) loads those images as a typed file's, and notes the
+  graph's file among the material's dependencies: a graph written anew reads the material
+  again, its module is generated anew, and the forward renderer's hot reload (which the
+  editor turns on) compiles it again, the previous version drawing until then.
+- **The editor's material rows** leave out fields starting with `_` (a graph's editing
+  numbers, a placeholder field).
+- **Measured** (the test's dev build, ref-1): a cube's graph drawn 0.71 s (RTX) and
+  0.47 s (Radeon) after its first frame, its look meanwhile; the graph's edit on screen
+  0.61 s and 0.49 s after it was written.
+- **Tests:** a material file naming a graph resolved to its module under the graph's id,
+  the type, the file's number over the graph's, the graph's colour and its texture (a
+  normal map's) where the file gives none, not written again when unchanged, a graph that
+  cannot be generated said with its node; on both GPUs, a cube drawing its look, then the
+  graph's colour, then the colour the graph was rewritten with.
+- **Not yet:** a cook test of a graph's material (the cook takes the same path); the
+  canvas (E10-3d).
 
 ## Questions for the team
 

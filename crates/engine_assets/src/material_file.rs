@@ -205,6 +205,9 @@ pub struct TypedMaterial {
     pub type_name: String,
     /// Its parameters by field name.
     pub params: BTreeMap<String, ParamValue>,
+    /// Its texture parameters' images as assets, by field name: the file's, or a graph's
+    /// own (ADR 0123) where the file gives none.
+    pub textures: BTreeMap<String, AssetRef>,
     /// Its glTF look; `None`: the replaced glTF material's, or [`Fallback::default`].
     pub fallback: Option<Fallback>,
     /// Alpha.
@@ -354,9 +357,14 @@ impl MaterialFile {
     /// as `paths` has them (those it was written with), from the project's `root` (an
     /// absolute path as it is). `None` for the standard material.
     ///
+    /// A shader that is a material graph (`.graph`, ADR 0123) is its generated module
+    /// ([`crate::graph_module::graph_module`], in the project's cache), its type
+    /// [`crate::graph_module::GRAPH_TYPE`], the graph's own values under the file's.
+    ///
     /// # Errors
     ///
-    /// A reference with no path, or a field set twice (as a number and as a vector).
+    /// A reference with no path, a field set twice (as a number and as a vector), or a
+    /// graph that cannot be made a module.
     pub fn typed(
         &self,
         paths: &AssetPaths,
@@ -377,11 +385,31 @@ impl MaterialFile {
                 .ok_or_else(|| error(format!("`{what}`: no path written for {}", asset.file)))
         };
         let shader = path_of(self.shader, "shader")?;
-        let mut params = BTreeMap::new();
+        // A graph: its module, its type, its own values.
+        let (shader, type_name, mut params, mut textures) =
+            if crate::graph_module::is_graph(&shader) {
+                let module = crate::graph_module::graph_module(&shader, root)?;
+                (
+                    module.module,
+                    String::from(crate::graph_module::GRAPH_TYPE),
+                    module.defaults,
+                    module.textures,
+                )
+            } else {
+                (
+                    shader,
+                    self.type_name.clone(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                )
+            };
+        // The file's own values, each once, over the graph's.
+        let mut own = std::collections::BTreeSet::new();
         let mut put = |name: &String, value: ParamValue| {
-            if params.insert(name.clone(), value).is_some() {
+            if !own.insert(name.clone()) {
                 return Err(error(format!("`{name}` is set twice")));
             }
+            params.insert(name.clone(), value);
             Ok(())
         };
         for (name, &n) in &self.numbers {
@@ -396,11 +424,13 @@ impl MaterialFile {
                 name,
                 ParamValue::Texture(path_of(texture.image, name)?, texture.encoding),
             )?;
+            textures.insert(name.clone(), texture.image);
         }
         Ok(Some(TypedMaterial {
             shader,
-            type_name: self.type_name.clone(),
+            type_name,
             params,
+            textures,
             fallback: match self.look {
                 Look::Own => Some(Fallback {
                     base_color: self.base_color,

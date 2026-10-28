@@ -410,6 +410,139 @@ fn a_typed_material_file_draws_its_look_then_its_type() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A material file naming a material graph (ADR 0123's E10-3c): the cube draws the file's
+/// look (green) at once, then the graph's surface (red, unlit) once its module is generated
+/// and compiled; the graph written anew (blue) is read again and its module compiled again,
+/// the red drawn until then.
+#[test]
+fn a_material_naming_a_graph_draws_the_graph_and_follows_its_edits() {
+    let dir = std::env::temp_dir().join(format!("ofelia-graph-material-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["materials", "scenes"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    let (graph_id, material_id) = (AssetId::new(), AssetId::new());
+    let glow = |color: &str| {
+        format!(
+            "[graph version=1 id={graph_id}]\n\nmodel = \"unlit\"\n\
+             nodes[\"c\"].kind = \"color\"\nnodes[\"c\"].value = [{color}, 1]\n\
+             nodes[\"out\"].kind = \"output\"\nlinks[\"out.base\"] = \"c.rgba\"\n"
+        )
+    };
+    std::fs::write(dir.join("materials/glow.graph"), glow("0.9, 0.05, 0.05")).unwrap();
+    std::fs::write(
+        dir.join("materials/glow.material"),
+        format!(
+            "[material version=2 id={material_id}]\n\nshader = asset(\"materials/glow.graph\", \
+             {graph_id})\ntype = \"GraphMaterial\"\nlook = Own\n\
+             base_color = [0.05, 0.8, 0.05, 1]\n"
+        ),
+    )
+    .unwrap();
+    let glow_ref = AssetRef::file(material_id);
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Glowing"),
+        Transform::IDENTITY,
+        Model::new(builtin::CUBE, glow_ref),
+    ));
+    let eye = Vec3::new(2.0, 1.2, 3.0);
+    world.spawn((
+        SceneId::new(),
+        Name::new("Camera"),
+        Transform::from_translation(eye).with_rotation(look_rotation(eye, Vec3::ZERO, Vec3::Y)),
+        Camera::perspective(1.0, 0.05, 200.0),
+    ));
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(glow_ref, "materials/glow.material");
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("scenes/main.scene"), &text).unwrap();
+
+    let (width, height) = (320u32, 180u32);
+    let settings = PlayerSettings {
+        title: String::from("graph material test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("scenes/main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    // As the editor runs it: a module changed on disk compiles again.
+    player.set_material_hot_reload(true);
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let middle = |rgba: &[u8]| {
+        let i = (((height / 2) * width + width / 2) * 4) as usize;
+        [rgba[i], rgba[i + 1], rgba[i + 2]].map(f32::from)
+    };
+    for _ in 0..2 {
+        player.frame(&mut game).unwrap();
+    }
+    let [r, g, b] = middle(&player.capture(&mut game).unwrap().unwrap());
+    assert!(g > 1.5 * r && g > 1.5 * b, "the look first: {r} {g} {b}");
+    // Frames until the middle is `channel`'s (0 red, 2 blue), at most 90 s.
+    let until = |player: &mut Player, game: &mut Still, channel: usize| {
+        let started = Instant::now();
+        loop {
+            player.frame(game).unwrap();
+            let pending = player.renderer().forward().material_types_pending();
+            if pending == 0 {
+                let c = middle(&player.capture(game).unwrap().unwrap());
+                let others = (0..3).filter(|&k| k != channel).map(|k| c[k]);
+                if others.clone().all(|o| c[channel] > 1.5 * o) {
+                    return started.elapsed();
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(90),
+                "never channel {channel}: {pending} pipelines pending"
+            );
+        }
+    };
+    let took = until(&mut player, &mut game, 0);
+    assert_eq!(player.assets().problem(glow_ref), None);
+    println!("the graph drawn after {:.2} s", took.as_secs_f64());
+    // The graph written anew: read again, its module made anew and compiled again.
+    std::fs::write(dir.join("materials/glow.graph"), glow("0.05, 0.05, 0.9")).unwrap();
+    player.asset_changed(graph_id, "materials/glow.graph");
+    let took = until(&mut player, &mut game, 2);
+    println!("the graph's edit drawn after {:.2} s", took.as_secs_f64());
+    let module = dir
+        .join(".ofelia/cache/graphs")
+        .join(format!("{graph_id}.slang"));
+    assert!(
+        std::fs::read_to_string(module)
+            .unwrap()
+            .contains("0.9, 1.0)")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A box from `lo` to `hi` of tint `tint` as a bake gives it: its faces' texture
 /// coordinates in metres.
 fn cuboid(tint: [f32; 4], lo: Vec3, hi: Vec3) -> BakedBrush {

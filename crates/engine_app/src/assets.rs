@@ -48,7 +48,7 @@
 
 use crate::loading::{Done, Job, Loader, Made};
 use engine_assets::colliders::{ColliderRules, Motion, cook_node_colliders};
-use engine_assets::material_file::{TextureEncoding, TypedMaterial};
+use engine_assets::material_file::{ParamValue, TextureEncoding, TypedMaterial};
 use engine_assets::{
     DerivedDataCache, EncodedTexture, ImportedScene, MaterialData, MeshData, TextureData,
     TextureImage, TextureSource, TextureUsage, TextureWrap,
@@ -1762,29 +1762,38 @@ impl Assets {
             .typed(written, &self.root)
             .map_err(|e| format!("{path}: {}", e.message))?
             .ok_or_else(|| format!("{path}: not a material type's instance"))?;
+        // Its images: the file's textures, and a graph's own (ADR 0123) where it gives none,
+        // each resolved by the file (`typed.params`).
         let mut images = Vec::new();
-        for texture in file.textures.values() {
-            let Some(at) = written.get(texture.image).filter(|p| !p.is_empty()) else {
+        let mut users_of = Vec::new();
+        for (name, image) in &typed.textures {
+            let Some(ParamValue::Texture(full, encoding)) = typed.params.get(name) else {
                 continue;
             };
-            let full = if Path::new(at).is_absolute() {
-                PathBuf::from(at)
-            } else {
-                self.root.join(at)
-            };
-            let usage = match texture.encoding {
+            let usage = match encoding {
                 TextureEncoding::Color => TextureUsage::Color,
                 TextureEncoding::Data => TextureUsage::Data,
                 TextureEncoding::Normal => TextureUsage::Normal,
             };
-            let key = TextureKey::new(texture.image.file, 0, usage);
+            let key = TextureKey::new(image.file, 0, usage);
+            users_of.push(full.clone());
+            images.push((full.clone(), key));
+        }
+        // A graph's file: read again when it changes, its module made anew.
+        if let Some(at) = written.get(file.shader).filter(|p| p.ends_with(".graph")) {
+            users_of.push(if Path::new(at).is_absolute() {
+                PathBuf::from(at)
+            } else {
+                self.root.join(at)
+            });
+        }
+        for full in users_of {
             if let Some(under) = project_path(&self.root, &full) {
                 let users = self.depends.entry(under).or_default();
                 if !users.contains(&asset.file) {
                     users.push(asset.file);
                 }
             }
-            images.push((full, key));
         }
         Ok(TypedState {
             asset,

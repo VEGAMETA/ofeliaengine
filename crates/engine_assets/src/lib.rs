@@ -21,6 +21,7 @@ mod gltf_import;
 pub mod gltf_models;
 mod gltf_outline;
 pub mod gltf_physics;
+pub mod graph_module;
 pub mod hdr;
 mod lod;
 pub mod material_file;
