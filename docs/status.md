@@ -746,7 +746,7 @@ Last updated: 2026-10-28.
     and glyph buffers reused; before, each change made a new string and glyph list. The
     editor's FPS follows a fixed frame time in its zero-allocation test
     (`Player::frame_time`), so a test of the text cache lays out 600 new texts instead.
-  - **The RTX's baseline remade under its new driver** (#PR): `forward` read 3.1-3.7 %
+  - **The RTX's baseline remade under its new driver** (#392): `forward` read 3.1-3.7 %
     slower in `sponza_fsr_quality` and `sponza_smaa_t2x` (2.8 % in `sponza_gi`) in three
     gates, `main` alone the third, on code those scenes do not run, registers unchanged.
     The baseline was taken on NVIDIA 616.92 (2026-10-15); ref-1 runs 617.42. Every NVIDIA
