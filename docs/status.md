@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3f-2, the graph's preview** (#PR, ADR 0123's as-built; the team's «а»): a
+  - **E10-3f-2, the graph's preview** (#428, ADR 0123's as-built; the team's «а»): a
     sphere in the canvas's corner draws the graph as it is through its editing build; a
     number typed reaches it in 5 frames (34–60 ms), a link that changes the code in
     0.56–0.77 s. On the way: a type's reload due counts as on its way, a preview whose
