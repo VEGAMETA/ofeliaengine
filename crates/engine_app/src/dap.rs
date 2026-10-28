@@ -397,6 +397,7 @@ impl Asked {
             condition: (!self.condition.is_empty()).then(|| self.condition.clone()),
             hits: Hits::parse(&self.hits)?,
             enabled: true,
+            only: Vec::new(),
         })
     }
 }

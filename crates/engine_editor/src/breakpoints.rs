@@ -8,8 +8,23 @@ use crate::code::{Document, Move, follow_start};
 use engine_app::scripts::{
     BreakAction, BreakState, Breakpoint, ErrorStops, Hits, ScriptDebugger, module_name,
 };
+use engine_ecs::Entity;
+use engine_scene::SceneId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+/// An entity a breakpoint is limited to (§8's "Only for", §10's "Only Front door").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Only {
+    /// A scene entity, by its scene id: kept in the session.
+    Scene(SceneId),
+    /// An entity the game made in Play: kept until Play stops.
+    Spawned(Entity),
+}
+
+/// The host's id of an entity no instance has: a breakpoint limited to entities that are
+/// gone acts for none.
+const NO_INSTANCE: u64 = u64::MAX;
 
 /// What a breakpoint does when a script reaches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,10 +52,13 @@ pub(crate) struct Mark {
     pub(crate) hits: String,
     /// Off: kept, never reached.
     pub(crate) enabled: bool,
+    /// The entities it acts for; empty: every one.
+    pub(crate) only: Vec<Only>,
 }
 
 impl Mark {
-    /// A breakpoint on `line` that does `act`, on, with no text, condition or hit rule.
+    /// A breakpoint on `line` that does `act`, on, with no text, condition, hit rule or
+    /// entity filter.
     pub(crate) fn new(line: usize, act: Act) -> Self {
         Self {
             line,
@@ -49,21 +67,30 @@ impl Mark {
             condition: String::new(),
             hits: String::new(),
             enabled: true,
+            only: Vec::new(),
         }
     }
 
-    /// Whether a condition or a hit rule limits it: the bar in its mark.
+    /// Whether a condition, a hit rule or an entity filter limits it: the bar in its mark.
     pub(crate) fn limited(&self) -> bool {
-        !self.condition.trim().is_empty() || !self.hits.trim().is_empty()
+        !self.condition.trim().is_empty() || !self.hits.trim().is_empty() || !self.only.is_empty()
     }
 
     /// The breakpoint the script host is given, on line `line` (from 1) of the code that
-    /// runs.
+    /// runs, its entities found by `resolve` (the host's id of each, none for one gone).
     ///
     /// # Errors
     ///
     /// Its hit rule does not read ([`Hits::parse`]).
-    pub(crate) fn to_host(&self, line: u32) -> Result<Breakpoint, String> {
+    pub(crate) fn to_host(
+        &self,
+        line: u32,
+        resolve: &dyn Fn(&Only) -> Option<u64>,
+    ) -> Result<Breakpoint, String> {
+        let mut only: Vec<u64> = self.only.iter().filter_map(resolve).collect();
+        if only.is_empty() && !self.only.is_empty() {
+            only.push(NO_INSTANCE);
+        }
         let condition = self.condition.trim();
         Ok(Breakpoint {
             line,
@@ -75,6 +102,7 @@ impl Mark {
             condition: (!condition.is_empty()).then(|| condition.to_owned()),
             hits: Hits::parse(&self.hits)?,
             enabled: self.enabled,
+            only,
         })
     }
 }
@@ -239,7 +267,12 @@ impl Breakpoints {
     /// which is the text as last saved where the script is open (`doc`) with unsaved
     /// edits. One on a line made since waits for the save; one whose hit rule does not read
     /// is left out.
-    pub(crate) fn for_host(&self, file: &Path, doc: Option<&Document>) -> Vec<Breakpoint> {
+    pub(crate) fn for_host(
+        &self,
+        file: &Path,
+        doc: Option<&Document>,
+        resolve: &dyn Fn(&Only) -> Option<u64>,
+    ) -> Vec<Breakpoint> {
         self.of(file)
             .iter()
             .filter_map(|m| {
@@ -247,9 +280,46 @@ impl Breakpoints {
                     Some(doc) => doc.saved_line(m.line)?,
                     None => m.line,
                 };
-                m.to_host(u32::try_from(line + 1).ok()?).ok()
+                m.to_host(u32::try_from(line + 1).ok()?, resolve).ok()
             })
             .collect()
+    }
+
+    /// Whether a breakpoint is limited to entities: the host's ids of them are looked up.
+    pub(crate) fn any_only(&self) -> bool {
+        self.files.values().flatten().any(|m| !m.only.is_empty())
+    }
+
+    /// The entities the game made, out of every filter: Play stopped, they are gone.
+    pub(crate) fn drop_spawned(&mut self) {
+        let mut touched = Vec::new();
+        for (file, marks) in &mut self.files {
+            for m in marks.iter_mut() {
+                let before = m.only.len();
+                m.only.retain(|o| matches!(o, Only::Scene(_)));
+                if m.only.len() != before {
+                    touched.push(file.clone());
+                }
+            }
+        }
+        for file in touched {
+            self.touch(&file);
+        }
+    }
+
+    /// The breakpoint on line `line` of `file` limited to `only`, or to every entity
+    /// (`None`): whether there is one.
+    pub(crate) fn limit(&mut self, file: &Path, line: usize, only: Option<Only>) -> bool {
+        let Some(m) = self
+            .files
+            .get_mut(file)
+            .and_then(|marks| marks.iter_mut().find(|m| m.line == line))
+        else {
+            return false;
+        };
+        m.only = only.into_iter().collect();
+        self.touch(file);
+        true
     }
 
     /// A line of `file`'s code where the host placed a breakpoint asked for another: a
@@ -277,6 +347,8 @@ pub(crate) struct BreakEdit {
     pub(crate) condition: String,
     pub(crate) hits: String,
     enabled: bool,
+    /// The entities it acts for, kept as they were.
+    only: Vec<Only>,
     /// No breakpoint was there: dropped, none is left.
     pub(crate) new: bool,
     /// The field given the keys at the next frame: 0 the text, 1 the condition, 2 the hits.
@@ -297,6 +369,7 @@ impl BreakEdit {
             condition: mark.condition.clone(),
             hits: mark.hits.clone(),
             enabled: mark.enabled,
+            only: mark.only.clone(),
             new,
             focus: Some(if mark.act == Act::Log { 0 } else { 1 }),
             error: String::new(),
@@ -317,6 +390,7 @@ impl BreakEdit {
             condition: self.condition.trim().to_owned(),
             hits: self.hits.trim().to_owned(),
             enabled: self.enabled,
+            only: self.only.clone(),
         })
     }
 }
@@ -351,6 +425,7 @@ impl HostView {
         errors: ErrorStops,
         scripts: Option<&ScriptDebugger>,
         doc_of: impl Fn(&Path) -> Option<&'a Document>,
+        resolve: &dyn Fn(&Only) -> Option<u64>,
     ) {
         let Some(scripts) = scripts else {
             self.seen = false;
@@ -370,7 +445,7 @@ impl HostView {
                 let Some(module) = module_name(&file) else {
                     continue;
                 };
-                let given = marks.for_host(&file, doc_of(&file));
+                let given = marks.for_host(&file, doc_of(&file), resolve);
                 if given.is_empty() {
                     self.given.remove(&file);
                     self.states.remove(&file);
@@ -485,22 +560,22 @@ mod tests {
         assert_eq!(lines, [3, 5]);
         assert!(b.has_stale(), "moved: given again");
         // Unsaved, the host keeps the lines its code has (from 1).
-        let given = b.for_host(file, Some(&doc));
+        let given = b.for_host(file, Some(&doc), &|_| None);
         assert_eq!((given[0].line, given[1].line), (3, 5));
         assert_eq!(given[1].condition.as_deref(), Some("x > 1"));
         assert_eq!(given[1].hits, Hits::EveryNth(2));
         // One set on the new line waits for the save; saved, the lines are the text's.
         b.put(file, log(1, "new"));
-        assert_eq!(b.for_host(file, Some(&doc)).len(), 2);
+        assert_eq!(b.for_host(file, Some(&doc), &|_| None).len(), 2);
         doc.mark_saved();
         let lines: Vec<u32> = b
-            .for_host(file, Some(&doc))
+            .for_host(file, Some(&doc), &|_| None)
             .iter()
             .map(|g| g.line)
             .collect();
         assert_eq!(lines, [2, 4, 6]);
         // Closed, its lines are the file's.
-        assert_eq!(b.for_host(file, None).len(), 3);
+        assert_eq!(b.for_host(file, None, &|_| None).len(), 3);
         // `c` and `d` taken out: the logpoint on `c` lands on `e`'s line, where the pause
         // point came with its text; the pause point stays.
         doc.select(Pos::new(3, 0), Pos::new(5, 0), false);

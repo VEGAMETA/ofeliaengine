@@ -10,7 +10,7 @@
 //! - [`Base`]: what a scene file was when it was loaded or saved, to tell whether it
 //!   changed on disk since.
 
-use crate::breakpoints::{Act, Mark};
+use crate::breakpoints::{Act, Mark, Only};
 use engine_platform::time::HighResTimer;
 use engine_platform::window::WindowPlacement;
 use engine_scene::text::{quote_into, split_assignment, split_items, unquote};
@@ -458,6 +458,16 @@ impl SessionFile {
             if !m.enabled {
                 out.push_str("enabled = false\n");
             }
+            // The scene entities it is limited to; one the game made lasts its Play only.
+            let scene: Vec<SceneId> = m
+                .only
+                .iter()
+                .filter_map(|o| match o {
+                    Only::Scene(id) => Some(*id),
+                    Only::Spawned(_) => None,
+                })
+                .collect();
+            write_ids(&mut out, "only", &scene);
         }
         out
     }
@@ -687,6 +697,7 @@ fn read_breakpoint_key(
         "condition" => m.condition = unquote(value)?,
         "hits" => m.hits = unquote(value)?,
         "enabled" => m.enabled = flag(value)?,
+        "only" => m.only = scene_ids(value)?.into_iter().map(Only::Scene).collect(),
         _ => {}
     }
     Ok(())
@@ -1191,6 +1202,11 @@ mod tests {
                     Mark {
                         condition: String::from("self.hp < 0"),
                         enabled: false,
+                        // A scene entity's filter is kept; one the game made is not.
+                        only: vec![
+                            Only::Scene(SceneId::from_u128(9)),
+                            Only::Spawned(engine_ecs::Entity::from_bits(42)),
+                        ],
                         ..Mark::new(0, Act::Pause)
                     },
                 ),
@@ -1203,7 +1219,14 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("line = 14\nlog = "), "lines from 1: {text}");
-        assert_eq!(SessionFile::parse(&text).unwrap(), file);
+        assert!(
+            text.contains("\nonly = [@"),
+            "the filter's scene entity: {text}"
+        );
+        // The entity the game made is not kept.
+        let mut kept = file.clone();
+        kept.breakpoints[1].1.only.truncate(1);
+        assert_eq!(SessionFile::parse(&text).unwrap(), kept);
         // A breakpoint without its line is dropped.
         let lineless =
             SessionFile::parse("[session version=1]\n[breakpoint]\npath = \"scripts/a.luau\"\n")

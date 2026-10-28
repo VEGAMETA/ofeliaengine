@@ -59,7 +59,8 @@ use engine_core::math::{Quat, Vec2, Vec3, Vec3A};
 use engine_ecs::{ComponentId, Entity, Relayout, World};
 use engine_reflect::{Attrs, Field, Primitive, Reflect, TypeInfo, TypeKind};
 use engine_script::mlua::{
-    self, AnyUserData, Function, Lua, MetaMethod, Table, UserData, UserDataMethods, Value, Vector,
+    self, AnyUserData, Function, IntoLuaMulti, Lua, MetaMethod, Table, UserData, UserDataMethods,
+    Value, Vector,
 };
 /// The debugger's breakpoints as the host takes them (ADR 0119): the editor's.
 pub use engine_script::{
@@ -1389,7 +1390,7 @@ impl Scripts {
             let c = &self.components[key.1 as usize];
             let (module, stop) = (c.module.clone(), c.hooks.stop.clone());
             if let Some(stop) = stop
-                && let Err(err) = self.vm.call_function::<_, ()>(&module, &stop, this)
+                && let Err(err) = call_for(&self.vm, e, &module, &stop, this)
             {
                 self.report(key.1 as usize, "on_stop", e, &err);
             }
@@ -1599,10 +1600,7 @@ impl Scripts {
                 && let Some(stop) = self.components[key.1 as usize].hooks.stop.clone()
             {
                 let module = self.components[key.1 as usize].module.clone();
-                if let Err(err) = self
-                    .vm
-                    .call_function::<_, ()>(&module, &stop, inst.this.clone())
-                {
+                if let Err(err) = call_for(&self.vm, e, &module, &stop, inst.this.clone()) {
                     self.report(key.1 as usize, "on_stop", e, &err);
                 }
             }
@@ -1658,9 +1656,7 @@ impl Scripts {
         if !inst.started && stage == Stage::Tick {
             inst.started = true;
             if let Some(start) = c.hooks.start.clone()
-                && let Err(err) = self
-                    .vm
-                    .call_function::<_, ()>(&module, &start, this.clone())
+                && let Err(err) = call_for(&self.vm, e, &module, &start, this.clone())
             {
                 self.stop(key, "on_start", e, &err);
                 return;
@@ -1675,10 +1671,8 @@ impl Scripts {
             return;
         };
         let result = match stage {
-            Stage::Tick => self.vm.call_function::<_, ()>(&module, &hook, (this, dt)),
-            Stage::Frame => self
-                .vm
-                .call_function::<_, ()>(&module, &hook, (this, dt, alpha)),
+            Stage::Tick => call_for(&self.vm, e, &module, &hook, (this, dt)),
+            Stage::Frame => call_for(&self.vm, e, &module, &hook, (this, dt, alpha)),
         };
         if let Err(err) = result {
             self.stop(key, name, e, &err);
@@ -1763,9 +1757,7 @@ impl Scripts {
         // Its `on_start` first, the first time.
         if !started
             && let Some(start) = c.hooks.start.clone()
-            && let Err(err) = self
-                .vm
-                .call_function::<_, ()>(&module, &start, this.clone())
+            && let Err(err) = call_for(&self.vm, me, &module, &start, this.clone())
         {
             self.stop(key, "on_start", me, &err);
             return;
@@ -1782,14 +1774,10 @@ impl Scripts {
         let other = other.map_or(Value::Nil, script_views::entity_value);
         let vector = |v: Vec3| Value::Vector(Vector::new(v.x, v.y, v.z));
         let result = if begin {
-            self.vm.call_function::<_, ()>(
-                &module,
-                &hook,
-                (this, other, vector(point), vector(normal)),
-            )
+            let args = (this, other, vector(point), vector(normal));
+            call_for(&self.vm, me, &module, &hook, args)
         } else {
-            self.vm
-                .call_function::<_, ()>(&module, &hook, (this, other))
+            call_for(&self.vm, me, &module, &hook, (this, other))
         };
         if let Err(err) = result {
             self.stop(key, name, me, &err);
@@ -1913,15 +1901,13 @@ impl Scripts {
             let (start, load) = (c.hooks.start.clone(), c.hooks.load.clone());
             if !started
                 && let Some(start) = start
-                && let Err(err) = self
-                    .vm
-                    .call_function::<_, ()>(&module, &start, this.clone())
+                && let Err(err) = call_for(&self.vm, e, &module, &start, this.clone())
             {
                 self.stop(key, "on_start", e, &err);
                 continue;
             }
             if let Some(load) = load
-                && let Err(err) = self.vm.call_function::<_, ()>(&module, &load, this)
+                && let Err(err) = call_for(&self.vm, e, &module, &load, this)
             {
                 self.stop(key, "on_load", e, &err);
             }
@@ -2040,24 +2026,19 @@ impl Scripts {
             let module = c.module.clone();
             if !started
                 && let Some(start) = c.hooks.start.clone()
-                && let Err(err) = self
-                    .vm
-                    .call_function::<_, ()>(&module, &start, this.clone())
+                && let Err(err) = call_for(&self.vm, target, &module, &start, this.clone())
             {
                 self.stop(key, "on_start", target, &err);
                 continue;
             }
             let [a, b, c, d] = &call.values;
+            let vm = &self.vm;
             let result = match call.count {
-                0 => self.vm.call_function::<_, ()>(&module, &hook, this),
-                1 => self.vm.call_function::<_, ()>(&module, &hook, (this, a)),
-                2 => self.vm.call_function::<_, ()>(&module, &hook, (this, a, b)),
-                3 => self
-                    .vm
-                    .call_function::<_, ()>(&module, &hook, (this, a, b, c)),
-                _ => self
-                    .vm
-                    .call_function::<_, ()>(&module, &hook, (this, a, b, c, d)),
+                0 => call_for(vm, target, &module, &hook, this),
+                1 => call_for(vm, target, &module, &hook, (this, a)),
+                2 => call_for(vm, target, &module, &hook, (this, a, b)),
+                3 => call_for(vm, target, &module, &hook, (this, a, b, c)),
+                _ => call_for(vm, target, &module, &hook, (this, a, b, c, d)),
             };
             if let Err(err) = result {
                 let name = call.hook.to_string_lossy();
@@ -2149,6 +2130,19 @@ impl Drop for Scripts {
 enum Stage {
     Tick,
     Frame,
+}
+
+/// Calls hook `f` of `module` for the instance of entity `e` with `args`, the debugger told
+/// whose hook runs (ADR 0119 E9-4a): a stop in it names the entity, and a breakpoint
+/// limited to other entities passes. A thread-local written twice: nothing measurable.
+fn call_for(
+    vm: &ScriptVm,
+    e: Entity,
+    module: &str,
+    f: &Function,
+    args: impl IntoLuaMulti,
+) -> Result<(), ScriptError> {
+    engine_script::with_instance(e.to_bits(), || vm.call_function::<_, ()>(module, f, args))
 }
 
 /// The module a project's script file is loaded as, from its path relative to the
@@ -3898,6 +3892,7 @@ return SpinHook
                         condition: None,
                         hits: engine_script::Hits::Every,
                         enabled: true,
+                        only: Vec::new(),
                     }],
                 );
             }
@@ -5360,6 +5355,7 @@ return Bell
                     condition: None,
                     hits: engine_script::Hits::Every,
                     enabled: true,
+                    only: Vec::new(),
                 },
                 engine_script::Breakpoint {
                     line: 24,
@@ -5367,6 +5363,7 @@ return Bell
                     condition: Some(String::from("near and self.lift > 2")),
                     hits: engine_script::Hits::Every,
                     enabled: true,
+                    only: Vec::new(),
                 },
             ],
         );
@@ -5430,6 +5427,7 @@ return Spin
                 condition: None,
                 hits: engine_script::Hits::Every,
                 enabled: true,
+                only: Vec::new(),
             }],
         );
         // Line 4's first instruction reads `self.Transform` through Luau's userdata
@@ -5467,6 +5465,7 @@ return Spin
                 condition: None,
                 hits,
                 enabled,
+                only: Vec::new(),
             };
         let cases: [(&str, Vec<engine_script::Breakpoint>); 5] = [
             ("no breakpoint", Vec::new()),
@@ -5482,6 +5481,7 @@ return Spin
                     condition: Some(String::from("self.speed > 100")),
                     hits: engine_script::Hits::Every,
                     enabled: true,
+                    only: Vec::new(),
                 }],
             ),
             (

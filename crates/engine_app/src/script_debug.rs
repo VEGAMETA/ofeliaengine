@@ -224,6 +224,7 @@ impl ScriptDebug {
                     stack: Vec::new(),
                     steppable: false,
                     error: None,
+                    instance: None,
                 });
             self.held = Some(Held {
                 kind,
@@ -293,6 +294,7 @@ return Count
             condition: None,
             hits,
             enabled: true,
+            only: Vec::new(),
         }
     }
 
@@ -350,6 +352,47 @@ return Count
         scripts.set_breakpoints("count", Vec::new());
         scripts.tick(&mut world, 0.25);
         assert_eq!((x(&world, a), x(&world, b)), (2.0, 2.0), "both run on");
+        drop(debug);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn going_on_from_a_stop_stops_again_in_the_next_instances_hook() {
+        let dir = std::env::temp_dir().join(format!("ofelia-stops-next-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts/count.luau"), COUNT).unwrap();
+        let mut world = World::new();
+        let mut scripts = Box::new(Scripts::load(&mut world, &dir, &dir.join("scripts")).unwrap());
+        let a = world.spawn((Transform::default(),));
+        let b = world.spawn((Transform::default(),));
+        assert!(scripts.add(&mut world, a, "Count") && scripts.add(&mut world, b, "Count"));
+        let mut debug = ScriptDebug::new(&scripts).unwrap();
+        scripts.set_debugging(true);
+        scripts.set_breakpoints("count", vec![stop(Hits::Every)]);
+        let host: *mut Scripts = &mut *scripts;
+        let tick = StageKind::Tick { dt: 0.25 };
+        // SAFETY: the host and the world outlive the stage; the test leaves the host alone
+        // while it is held.
+        assert!(unsafe { debug.run(host, &mut world, core::ptr::null(), tick) });
+        let first = debug.held.as_ref().unwrap().at.instance;
+        // On: the other instance's hook, in the same stage, stops at the same line.
+        debug.held.as_mut().unwrap().answer = Some(Resume::Continue);
+        // SAFETY: as above.
+        let ended = unsafe { debug.go_on(&mut world, core::ptr::null()) };
+        assert!(ended.is_none(), "the second instance stopped too");
+        let at = &debug.held.as_ref().unwrap().at;
+        assert_eq!(at.line, 3);
+        assert_ne!(at.instance, first, "the other instance");
+        debug.held.as_mut().unwrap().answer = Some(Resume::Continue);
+        // SAFETY: as above.
+        assert!(unsafe { debug.go_on(&mut world, core::ptr::null()) }.is_some());
+        // The next stage stops in the first instance again.
+        // SAFETY: as above.
+        assert!(unsafe { debug.run(host, &mut world, core::ptr::null(), tick) });
+        assert_eq!(debug.held.as_ref().unwrap().at.instance, first);
+        // SAFETY: as above.
+        unsafe { debug.abort(&mut world) };
         drop(debug);
         let _ = std::fs::remove_dir_all(&dir);
     }

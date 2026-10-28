@@ -80,6 +80,22 @@ thread_local! {
             caught: false,
         })
     };
+    /// The instance whose hook runs (the host's id for it, [`with_instance`]): a stop names
+    /// it, and a breakpoint limited to some instances acts only for them.
+    static INSTANCE: Cell<Option<u64>> = const { Cell::new(None) };
+    /// Stops pass ([`ScriptDebugger::skip_stops`]): the host finishes a stopped tick.
+    static SKIP_STOPS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `f`, a call of instance `instance`'s hook (the host's id for it: an entity), with
+/// the debugger knowing whose hook runs: a stop in it names the instance
+/// ([`Stopped::instance`]), and a breakpoint limited to other instances
+/// ([`Breakpoint::only`]) passes. Calls nest: the instance before is put back after.
+pub fn with_instance<R>(instance: u64, f: impl FnOnce() -> R) -> R {
+    let before = INSTANCE.replace(Some(instance));
+    let r = f();
+    INSTANCE.set(before);
+    r
 }
 
 /// Whether errors the scripts do not catch stop ([`ErrorStops::uncaught`]): hooks are
@@ -230,6 +246,17 @@ pub struct Breakpoint {
     pub hits: Hits,
     /// Off: kept, but not placed.
     pub enabled: bool,
+    /// The instances it acts for (the host's ids, [`with_instance`]); empty: every one.
+    /// Outside an instance's hook (a system) one limited so passes.
+    pub only: Vec<u64>,
+}
+
+impl Breakpoint {
+    /// Whether it acts in the hook running now: it is limited to no instance, or to this
+    /// one.
+    fn for_this_instance(&self) -> bool {
+        self.only.is_empty() || INSTANCE.get().is_some_and(|i| self.only.contains(&i))
+    }
 }
 
 /// How a breakpoint is doing: where Luau placed it and what it did.
@@ -277,6 +304,9 @@ pub struct Stopped {
     pub steppable: bool,
     /// The error it stopped at ([`ErrorStops`]); none at a breakpoint, a step or a break.
     pub error: Option<ErrorStop>,
+    /// The instance whose hook it stopped in (the host's id for it, [`with_instance`]);
+    /// none in a system or a call of the host's own.
+    pub instance: Option<u64>,
 }
 
 /// The error a script stopped at.
@@ -676,6 +706,12 @@ impl ScriptDebugger {
         });
     }
 
+    /// Stops pass from now on, or no longer: breakpoints that stop, errors and breaks (ADR
+    /// 0119, the UX note's §7: Shift+F7 finishes a stopped tick); logpoints still log.
+    pub fn skip_stops(&self, skip: bool) {
+        SKIP_STOPS.set(skip);
+    }
+
     /// Which errors stop a script.
     pub fn error_stops(&self) -> ErrorStops {
         self.with(|d| d.errors).unwrap_or_default()
@@ -1018,7 +1054,9 @@ unsafe fn reached(state: *mut ffi::lua_State, evaluating: bool) -> Then {
             slots
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| s.asked.enabled && s.state.placed == Some(line))
+                .filter(|(_, s)| {
+                    s.asked.enabled && s.state.placed == Some(line) && s.asked.for_this_instance()
+                })
                 .map(|(slot, s)| Ask {
                     slot,
                     condition: s.asked.condition.clone(),
@@ -1114,6 +1152,9 @@ fn ask_pause(lua: &Lua, module: &str, line: u32) {
 unsafe fn stop_at(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u32) -> Then {
     if ABORTING.get() {
         return Then::Abort;
+    }
+    if SKIP_STOPS.get() {
+        return Then::Go;
     }
     // A break asked is met by any stop.
     if let Some(mut d) = lua.app_data_mut::<Debugger>() {
@@ -1234,7 +1275,11 @@ pub(crate) unsafe extern "C-unwind" fn protected_error(state: *mut ffi::lua_Stat
 /// or the protected-error callback, or after its `lua_resume` failed), with room for four
 /// values; no function is called on it.
 pub(crate) unsafe fn error_stop(state: *mut ffi::lua_State, message: String, caught: bool) -> bool {
-    if ABORTING.get() || EVALUATING.get() || message.contains(crate::ABORT_MARKER) {
+    if ABORTING.get()
+        || EVALUATING.get()
+        || SKIP_STOPS.get()
+        || message.contains(crate::ABORT_MARKER)
+    {
         return false;
     }
     // Luau calls the handler for memory errors too: the stop could not be described.
@@ -1548,6 +1593,7 @@ unsafe fn describe(
         // SAFETY: as the caller says.
         steppable: unsafe { steppable(state, lua) },
         error: None,
+        instance: INSTANCE.get(),
     };
     let describer = lua.app_data_ref::<Debugger>().and_then(|d| d.describer);
     let mut budget = DESCRIBED;
@@ -2040,6 +2086,7 @@ return M
             condition: None,
             hits: Hits::Every,
             enabled: true,
+            only: Vec::new(),
         }
     }
 
@@ -2054,6 +2101,7 @@ return M
             condition: None,
             hits: Hits::Every,
             enabled: true,
+            only: Vec::new(),
         }
     }
 
@@ -2192,6 +2240,7 @@ return M
             condition: Some(String::from("doubled >= 10")),
             hits: Hits::Every,
             enabled: true,
+            only: Vec::new(),
         };
         vm.set_breakpoints("door", vec![every_second, pause]);
         for speed in [1.0, 3.0, 4.0] {
@@ -2357,6 +2406,58 @@ function M.mixed(n)
 end
 return M
 ";
+
+    #[test]
+    fn a_stop_names_its_instance_and_a_limited_breakpoint_passes_the_others() {
+        let mut vm = ScriptVm::new(ScriptSettings::default()).unwrap();
+        vm.load_module("steps", STEPS).unwrap();
+        vm.set_debugging(true);
+        vm.set_stop_handler(Some(Box::new(answer_in_turn)));
+        let mut only = stop(8);
+        only.only = vec![7];
+        vm.set_breakpoints("steps", vec![only]);
+        let fiber = Fiber::new(1 << 20).unwrap();
+        let tick: mlua::Function = vm.exports("steps").unwrap().get("tick").unwrap();
+        let mut c = Call {
+            vm: &raw const vm,
+            module: "steps",
+            f: tick,
+            arg: 1.0,
+            result: None,
+        };
+        STOPS.take();
+        // Another instance's hook, and a system's (no instance): it passes.
+        assert_eq!(
+            crate::with_instance(3, || run_through(&fiber, &mut c, &[])),
+            Ok(5.0)
+        );
+        assert_eq!(run_through(&fiber, &mut c, &[]), Ok(5.0));
+        assert!(STOPS.take().is_empty());
+        // Its own: it stops, and the stop names the instance.
+        assert_eq!(
+            crate::with_instance(7, || run_through(&fiber, &mut c, &[])),
+            Ok(5.0)
+        );
+        let seen: Vec<(u32, Option<u64>)> =
+            STOPS.take().iter().map(|s| (s.line, s.instance)).collect();
+        assert_eq!(seen, [(8, Some(7))]);
+        // Stops skipped (a stopped tick finished): it passes until they are not.
+        let debugger = vm.debugger();
+        debugger.skip_stops(true);
+        assert_eq!(
+            crate::with_instance(7, || run_through(&fiber, &mut c, &[])),
+            Ok(5.0)
+        );
+        assert!(STOPS.take().is_empty());
+        debugger.skip_stops(false);
+        assert_eq!(
+            crate::with_instance(7, || run_through(&fiber, &mut c, &[])),
+            Ok(5.0)
+        );
+        assert_eq!(STOPS.take().len(), 1);
+        SEEN.take();
+        STACKS.take();
+    }
 
     #[test]
     fn steps_go_over_into_and_out_and_past_the_hooks_end() {

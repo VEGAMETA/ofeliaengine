@@ -164,6 +164,10 @@ pub enum DebugGo {
     Into,
     /// Step out (Shift+F11).
     Out,
+    /// Finish the stopped tick, then pause (Shift+F7).
+    Finish,
+    /// Limit the stopped breakpoint to the stopped entity, or to every one again.
+    Only,
 }
 
 /// The Debugger panel (ADR 0119 E9-1b-3; `docs/research/ux/script-debugger.md` §3), while
@@ -174,6 +178,9 @@ pub struct DebuggerView<'a> {
     /// What stopped and where (`Breakpoint · on_tick · scripts/door.luau:14`), or that no
     /// script is stopped.
     pub header: &'a str,
+    /// The header's filter button (`Only Front door`, `Every instance`), when the script
+    /// stopped at a breakpoint in an entity's hook.
+    pub only: Option<&'a str>,
     /// A script is stopped: Continue works.
     pub stopped: bool,
     /// At an error: the header in the error color.
@@ -3749,6 +3756,12 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
                 ("over", "Over F10", DebugGo::Over, view.steppable),
                 ("into", "Into F11", DebugGo::Into, view.steppable),
                 ("out", "Out Shift+F11", DebugGo::Out, view.steppable),
+                (
+                    "finish",
+                    "Finish tick Shift+F7",
+                    DebugGo::Finish,
+                    view.stopped,
+                ),
             ];
             for (key, label, go, on) in buttons {
                 let id = ui.container(
@@ -3788,6 +3801,32 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
                 _ => p.text_dim,
             };
             text(ui, "header", view.header, SMALL, color);
+            if let Some(label) = view.only {
+                ui.container(
+                    "only gap",
+                    Style {
+                        size: [Size::Fixed(12.0), Size::Fixed(1.0)],
+                        ..Style::default()
+                    },
+                    |_| {},
+                );
+                let id = ui.container(
+                    "only",
+                    Style {
+                        padding: [8.0, 3.0, 8.0, 3.0],
+                        radius: 3.0,
+                        background: Some(p.field),
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        text(ui, "label", label, SMALL, p.text);
+                    },
+                );
+                if ui.sense(id, false).clicked {
+                    out.debug_go = Some(DebugGo::Only);
+                }
+            }
         });
         let columns = Style {
             size: [Size::Grow(1.0), Size::Grow(1.0)],
