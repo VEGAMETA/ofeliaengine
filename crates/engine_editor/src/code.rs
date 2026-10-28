@@ -102,6 +102,10 @@ pub(crate) struct Document {
     /// Each line's line in the text as last saved, [`NEW_LINE`] for one made since: where
     /// the code that runs has it (a breakpoint set on an unsaved line waits for the save).
     origin: Vec<u32>,
+    /// Shown, not edited (a generated module, ADR 0123's E10-3f-3): every edit refused, and
+    /// whether one was since [`Self::take_refused`] last asked.
+    read_only: bool,
+    refused: bool,
 }
 
 /// An edit across lines: the text from `start` to `end` became text ending at `to`.
@@ -154,7 +158,48 @@ impl Document {
             changed: None,
             moves: Vec::new(),
             origin,
+            read_only: false,
+            refused: false,
         }
+    }
+
+    /// Makes it shown and not edited (or edited again): its edits are refused.
+    pub(crate) fn set_read_only(&mut self, on: bool) {
+        self.read_only = on;
+    }
+
+    /// Whether an edit was refused since this was last asked (it is read only).
+    pub(crate) fn take_refused(&mut self) -> bool {
+        core::mem::take(&mut self.refused)
+    }
+
+    /// Its text replaced by `text` (`\r\n` read as `\n`) with no step of its own and as
+    /// saved, the carets kept where it has room for them: a generated module shown as its
+    /// source now makes it.
+    pub(crate) fn show_text(&mut self, text: &str) {
+        self.lines = text
+            .split('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l).to_owned())
+            .collect();
+        self.origin = (0..self.lines.len() as u32).collect();
+        self.undo.clear();
+        self.redo.clear();
+        self.saved = Some(0);
+        self.moves.clear();
+        self.version += 1;
+        self.changed = Some(0);
+        self.sealed = true;
+        let carets: Vec<Caret> = self
+            .carets
+            .iter()
+            .map(|c| Caret {
+                anchor: self.clamp(c.anchor),
+                head: self.clamp(c.head),
+                goal: None,
+            })
+            .collect();
+        self.carets = carets;
+        self.merge_carets();
     }
 
     /// The first line changed since this was last asked: the lines from it on hold other
@@ -340,6 +385,10 @@ impl Document {
         kind: Kind,
         mut edit: impl FnMut(&Self, &Caret) -> Option<(Pos, Pos, String)>,
     ) {
+        if self.read_only {
+            self.refused = true;
+            return;
+        }
         let before = self.carets.clone();
         let mut changes = Vec::new();
         let mut carets = self.carets.clone();
@@ -947,6 +996,10 @@ impl Document {
 
     /// Ctrl+/: the carets' lines commented out with `-- `, or back when all are.
     pub(crate) fn toggle_comment(&mut self) {
+        if self.read_only {
+            self.refused = true;
+            return;
+        }
         let lines = self.caret_lines();
         let all = lines.iter().all(|&l| {
             self.lines[l].trim_start().starts_with("--") || self.lines[l].trim().is_empty()
@@ -1024,6 +1077,10 @@ impl Document {
 
     /// Alt+Up and Alt+Down: the carets' lines moved past the line above or below.
     pub(crate) fn move_lines(&mut self, down: bool) {
+        if self.read_only {
+            self.refused = true;
+            return;
+        }
         let lines = self.caret_lines();
         let (Some(&first), Some(&last)) = (lines.first(), lines.last()) else {
             return;
@@ -1331,6 +1388,56 @@ mod tests {
         assert_eq!(doc.line(1), "return x+ 243");
         assert!(doc.undo());
         assert_eq!(doc.line(1), "return x+ 23");
+    }
+
+    /// ADR 0123's E10-3f-3: a generated module shown read only refuses every edit (and
+    /// says so once asked), copies, and takes a new text with no step, its caret kept.
+    #[test]
+    fn a_read_only_text_refuses_edits_and_takes_a_new_text_without_a_step() {
+        let mut doc = Document::new(
+            "struct A
+{
+    float x;
+}",
+        );
+        doc.set_read_only(true);
+        at(&mut doc, 2, 10);
+        doc.type_text("y");
+        doc.newline();
+        doc.backspace();
+        doc.toggle_comment();
+        doc.move_lines(true);
+        doc.paste("z");
+        assert_eq!(
+            doc.text(),
+            "struct A
+{
+    float x;
+}",
+            "nothing edited"
+        );
+        assert!(!doc.is_dirty());
+        assert!(doc.take_refused());
+        assert!(!doc.take_refused(), "told once");
+        // Copied, not cut.
+        doc.select(Pos::new(2, 4), Pos::new(2, 9), false);
+        assert_eq!(doc.cut(), "float");
+        assert_eq!(doc.line(2), "    float x;");
+        // The source changed: its new text, as saved, nothing to undo, the caret clamped.
+        at(&mut doc, 3, 1);
+        doc.show_text(
+            "struct A
+{
+    float x;
+    float y;
+}",
+        );
+        assert_eq!(doc.line_count(), 5);
+        assert!(!doc.is_dirty());
+        assert!(!doc.undo());
+        assert_eq!(doc.primary().head, Pos::new(3, 1));
+        doc.show_text("struct A {}");
+        assert_eq!(doc.primary().head, Pos::new(0, 1), "kept where it has room");
     }
 
     #[test]

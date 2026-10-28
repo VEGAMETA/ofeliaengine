@@ -868,6 +868,10 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3f-3, errors on nodes and Show Slang** (#429, ADR 0123's as-built): a node that
+    stops the graph (a loop, a kind or a port a file holds) framed in red with why under
+    it; Show Slang opens the saved build in a read only code tab that follows the graph.
+    Slang's own errors at nodes come with E10-3g's nodes whose code the user writes.
   - **E10-3f-2, the graph's preview** (#428, ADR 0123's as-built; the team's «а»): a
     sphere in the canvas's corner draws the graph as it is through its editing build; a
     number typed reaches it in 5 frames (34–60 ms), a link that changes the code in
@@ -934,9 +938,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3f-3 (errors on nodes, Show Slang), E10-3e-2 (reroutes and frames, the
-       file's version 2), E10-3g (functions), ADR 0123's steps; then E10-4, previews,
-       stats and variants with a base.
+       2D): E10-3e-2 (reroutes and frames, the file's version 2), E10-3g (functions,
+       and Slang's errors at their nodes), ADR 0123's steps; then E10-4, previews, stats
+       and variants with a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

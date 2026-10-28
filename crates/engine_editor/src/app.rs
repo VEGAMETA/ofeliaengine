@@ -813,6 +813,7 @@ struct CommandIds {
     new_type: CommandId,
     /// A material graph drawing the object's own look (ADR 0123 E10-3d-2).
     new_graph: CommandId,
+    show_slang: CommandId,
     /// The node search on a graph's canvas (ADR 0123 E10-3e).
     add_node: CommandId,
     make_variant: CommandId,
@@ -994,6 +995,7 @@ fn commands() -> (Commands, CommandIds) {
         new_material: c.register("material.new", "Material", "New Material"),
         new_type: c.register("material.new_type", "Material", "New Type"),
         new_graph: c.register("material.new_graph", "Material", "New Graph"),
+        show_slang: c.register("graph.show_slang", "Graph", "Show Slang"),
         add_node: c.register("graph.add_node", "Graph", "Add Node…"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
@@ -1492,8 +1494,6 @@ struct GraphPreview {
     unmade: bool,
     quiet: u8,
     problem: String,
-    /// Why the graph cannot be drawn.
-    failed: Option<String>,
 }
 
 /// A number of a graph node's row dragged in the inspector (ADR 0123 E10-3f-1): the row,
@@ -4164,6 +4164,7 @@ impl Editor {
         // A script shown: its keys, clicks and scroll before the UI is built, so a key
         // shows in this frame.
         let coding = self.code_frame();
+        self.generated_frame();
         self.graph_status_frame();
         // The Debugger panel's texts, while it is open (ADR 0119 E9-1b-3).
         if self.bottom == Some(DEBUGGER_TAB) {
@@ -6576,6 +6577,9 @@ impl Editor {
             self.graph_frame(world, &response, scale);
             // Its preview after this frame's edits (the inspector's and the canvas's).
             self.graph_preview_frame();
+            if response.show_slang {
+                self.show_graph_slang(world);
+            }
             self.input.next_frame();
             return;
         }
@@ -11892,8 +11896,88 @@ impl Editor {
                 ids.frame,
                 ids.duplicate,
                 ids.add_node,
+                ids.show_slang,
             ]
             .contains(&id)
+    }
+
+    /// Show Slang (ADR 0123 E10-3f-3): the shown graph's saved build, the module a game draws
+    /// it with, in a code tab of its own, read only and following the graph.
+    fn show_graph_slang(&mut self, world: &World) {
+        let Some(doc) = self.active_graph.and_then(|g| self.graphs.get(g)) else {
+            self.say(String::from(
+                "Show Slang shows a graph's code: open a graph",
+            ));
+            return;
+        };
+        let generated = match engine_material_graph::generate(
+            &doc.graph,
+            engine_assets::graph_module::GRAPH_TYPE,
+            engine_material_graph::Build::Saved,
+        ) {
+            Ok(generated) => generated,
+            Err(e) => {
+                let message = format!("{}: no code: {e}", doc.path);
+                self.say(message);
+                return;
+            }
+        };
+        let path = PathBuf::from(format!("{}.slang", doc.path));
+        let made = (doc.id, doc.revision);
+        let k = match self.scripts.iter().position(|s| s.path == path) {
+            Some(k) => {
+                self.scripts[k].doc.show_text(&generated.text);
+                k
+            }
+            None => {
+                let mut script = Script::new(path, &generated.text, None);
+                script.doc.set_read_only(true);
+                script.generation = self.next_generation();
+                self.scripts.push(script);
+                self.scripts.len() - 1
+            }
+        };
+        self.scripts[k].generated = Some(made);
+        self.show_script(world, k);
+    }
+
+    /// Show Slang's tabs (E10-3f-3): each made again from its graph's saved build where the
+    /// graph changed (its tab open); an edit tried in one, told. A steady frame writes
+    /// nothing.
+    fn generated_frame(&mut self) {
+        let mut refused = None;
+        for s in &mut self.scripts {
+            let Some((graph, revision)) = s.generated else {
+                continue;
+            };
+            if s.doc.take_refused() {
+                refused = Some(graph);
+            }
+            let Some(doc) = self.graphs.iter().find(|d| d.id == graph) else {
+                continue;
+            };
+            if doc.revision == revision {
+                continue;
+            }
+            s.generated = Some((graph, doc.revision));
+            // A graph that cannot be generated keeps its last code shown (its tab says why).
+            if let Ok(generated) = engine_material_graph::generate(
+                &doc.graph,
+                engine_assets::graph_module::GRAPH_TYPE,
+                engine_material_graph::Build::Saved,
+            ) {
+                s.doc.show_text(&generated.text);
+            }
+        }
+        if let Some(graph) = refused {
+            let from = self
+                .graphs
+                .iter()
+                .find(|d| d.id == graph)
+                .map_or("its graph", |d| d.path.as_str());
+            let message = format!("Made from {from}: read only (edit the graph)");
+            self.say(message);
+        }
     }
 
     /// The shown graph's preview made again where the graph changed (ADR 0123 E10-3f-2): its
@@ -11901,9 +11985,10 @@ impl Editor {
     /// compiles it), the material file drawing it to give the player, a preview to ask for.
     /// A value's change rewrites no code: only the material's values change.
     fn graph_preview_frame(&mut self) {
-        let Some(doc) = self.active_graph.and_then(|g| self.graphs.get(g)) else {
+        let Some(g) = self.active_graph.filter(|&g| g < self.graphs.len()) else {
             return;
         };
+        let doc = &self.graphs[g];
         if self
             .graph_preview
             .as_ref()
@@ -11949,9 +12034,10 @@ impl Editor {
                 }
                 preview.give = Some((file, paths));
                 preview.ask = true;
-                preview.failed = None;
+                self.graphs[g].error = None;
             }
-            Err(e) => preview.failed = Some(e.to_string()),
+            // At its node, marked on the canvas (E10-3f-3).
+            Err(e) => self.graphs[g].error = Some(e),
         }
     }
 
@@ -11991,18 +12077,16 @@ impl Editor {
             let _ = write!(self.graph_status, " · {} selected", doc.selected.len());
         }
         let _ = write!(self.graph_status, " · {:.0} %", doc.view.zoom() * 100.0);
-        // Why its preview cannot be drawn (E10-3f-2): the graph's code, or its material.
-        if let Some(why) = self
+        // Why its preview cannot be drawn (E10-3f-2): the graph's code (at its node,
+        // E10-3f-3), or its material.
+        if let Some(e) = &doc.error {
+            let _ = write!(self.graph_status, " · not drawn: {e}");
+        } else if let Some(p) = self
             .graph_preview
             .as_ref()
-            .filter(|p| p.graph == doc.id)
-            .and_then(|p| {
-                p.failed
-                    .as_deref()
-                    .or((!p.problem.is_empty()).then_some(&*p.problem))
-            })
+            .filter(|p| p.graph == doc.id && !p.problem.is_empty())
         {
-            let _ = write!(self.graph_status, " · not drawn: {why}");
+            let _ = write!(self.graph_status, " · not drawn: {}", p.problem);
         }
     }
 
@@ -12152,6 +12236,11 @@ impl Editor {
         let Some(s) = self.scripts.get_mut(k) else {
             return;
         };
+        if s.generated.is_some() {
+            let message = format!("{} is made from its graph: read only", s.path.display());
+            self.say(message);
+            return;
+        }
         let file = self.root.join(&s.path);
         match session::write_whole(&file, s.file_text().as_bytes(), 0, Duration::ZERO) {
             Ok(()) => {
@@ -14885,6 +14974,8 @@ impl Editor {
             self.new_material_type(world);
         } else if id == ids.new_graph {
             self.new_material_graph(world);
+        } else if id == ids.show_slang {
+            self.show_graph_slang(world);
         } else if id == ids.add_node {
             self.say(String::from(
                 "Add Node works in a material graph's tab (a double click on a .mgraph)",
@@ -20393,6 +20484,7 @@ impl Editor {
         let scripts = self
             .scripts
             .iter()
+            .filter(|s| s.generated.is_none())
             .map(|s| {
                 let head = s.doc.primary().head;
                 ScriptDoc {
@@ -33374,6 +33466,111 @@ return Coin
         // Each one step: Ctrl+Z takes the texture back.
         chord(&mut ed, &mut world, &[CTRL, Z]);
         assert!(!ed.graphs[0].graph.nodes.contains_key("texture1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0123 E10-3f-3: Show Slang opens the graph's saved build in a code tab of its own,
+    /// read only: typing refused and told, Ctrl+S writing nothing, the graph's edits followed,
+    /// the session keeping the graph's tab and not its code's.
+    #[test]
+    fn show_slang_opens_the_graphs_code_read_only_and_follows_it() {
+        let dir = project("graph-slang");
+        std::fs::create_dir_all(dir.join("materials")).unwrap();
+        std::fs::write(
+            dir.join("materials/glow.mgraph"),
+            format!(
+                "[mgraph version=1 id={}]\n\nmodel = \"unlit\"\n\
+                 nodes[\"c\"].kind = \"color\"\nnodes[\"c\"].value = [0.9, 0.1, 0.1, 1]\n\
+                 nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [300, 0]\n\
+                 links[\"out.base\"] = \"c.rgba\"\n",
+                AssetId::new()
+            ),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_graph(&world, Path::new("materials/glow.mgraph"));
+        ed.update(&mut world);
+        let id = ed.ids.show_slang;
+        ed.run(&mut world, id);
+        ed.update(&mut world);
+        let k = ed.active_script.expect("its code shown");
+        assert_eq!(ed.scripts[k].path, Path::new("materials/glow.mgraph.slang"));
+        assert!(ed.scripts[k].label().ends_with("(read only)"));
+        let text = ed.scripts[k].doc.text();
+        assert!(text.contains("GraphMaterial"), "{text}");
+        assert!(
+            text.contains("0.9"),
+            "the saved build's numbers in it: {text}"
+        );
+        // Typed into: nothing changes, and why is said.
+        chars(&mut ed, "x");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(ed.scripts[k].doc.text(), text);
+        let said = ed.message.as_ref().map_or("", |(m, _)| m.as_str());
+        assert!(said.contains("read only"), "{said}");
+        // Ctrl+S writes nothing.
+        chord(&mut ed, &mut world, &[CTRL, S]);
+        assert!(!dir.join("materials/glow.mgraph.slang").exists());
+        // The graph changed: its code follows.
+        ed.graphs[0].graph.nodes.get_mut("c").unwrap().value = [0.2, 0.7, 0.3, 1.0];
+        ed.graphs[0].revision += 1;
+        ed.update(&mut world);
+        assert!(ed.scripts[k].doc.text().contains("0.7"));
+        assert!(!ed.scripts[k].doc.is_dirty());
+        // The session keeps the graph's tab, not its code's.
+        ed.write_session(&world);
+        flush(&ed);
+        let session = std::fs::read_to_string(dir.join(".ofelia/session")).unwrap();
+        assert!(session.contains("materials/glow.mgraph"), "{session}");
+        assert!(!session.contains("glow.mgraph.slang"), "{session}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0123 E10-3f-3: a graph that cannot be generated (a loop a merge left) marks its
+    /// node: the error at it, why in the bar; the link taken away, generated again, gone.
+    #[test]
+    fn a_graph_error_is_marked_at_its_node_and_goes_with_its_cause() {
+        let dir = project("graph-error");
+        std::fs::create_dir_all(dir.join("materials")).unwrap();
+        std::fs::write(
+            dir.join("materials/loop.mgraph"),
+            format!(
+                "[mgraph version=1 id={}]\n\nmodel = \"lit\"\n\
+                 nodes[\"a\"].kind = \"multiply\"\n\
+                 nodes[\"b\"].kind = \"multiply\"\nnodes[\"b\"].at = [0, 120]\n\
+                 nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [300, 0]\n\
+                 links[\"a.a\"] = \"b.out\"\nlinks[\"b.a\"] = \"a.out\"\n\
+                 links[\"out.base\"] = \"a.out\"\n",
+                AssetId::new()
+            ),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_graph(&world, Path::new("materials/loop.mgraph"));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let error = ed.graphs[0].error.clone().expect("a loop stops the graph");
+        assert!(matches!(error.node.as_deref(), Some("a" | "b")), "{error}");
+        assert!(
+            ed.graph_status.contains(&format!("not drawn: {error}")),
+            "why in the bar: {}",
+            ed.graph_status
+        );
+        // The loop's link taken away: generated again, nothing in the way.
+        ed.graphs[0]
+            .graph
+            .links
+            .remove(&engine_material_graph::PortRef::new("b", "a"));
+        ed.graphs[0].revision += 1;
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(ed.graphs[0].error, None);
+        assert!(
+            !ed.graph_status.contains("not drawn"),
+            "{}",
+            ed.graph_status
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

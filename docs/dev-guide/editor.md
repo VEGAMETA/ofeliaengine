@@ -1271,7 +1271,17 @@ Until its shaders are made, the material draws its colour.
     every number a parameter, so nothing is compiled.
   - A link or a node that changes the code is compiled first (about half a second).
   - When the graph cannot be drawn, its bar says why ("not drawn: …").
-- **Not yet:** reroutes and frames (E10-3e-2), errors on nodes (E10-3f-3).
+- **Errors on nodes:** a node that stops the graph from generating is framed in red, with
+  why under it: a loop, or a kind or a port that is not there (a file merged from another
+  branch, or written by a newer engine). It goes as soon as its cause does.
+- **Show Slang** (the graph bar's button, or the palette's "Graph: Show Slang") opens the
+  code a game draws the graph with, the build that is saved, in a code tab of its own.
+  - The tab is read only, named after the graph (`glow.mgraph.slang (read only)`):
+    typing is refused and Ctrl+S writes nothing.
+  - It follows the graph while the graph's tab is open: edit the graph and look again.
+  - It is not kept in the session.
+- **Not yet:** reroutes and frames (E10-3e-2), functions (E10-3g); Slang's own errors
+  marked at their nodes come with E10-3g's nodes whose code you write.
 
 ## Autosave and the session
 
@@ -1355,7 +1365,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E10 | materials: the graph's errors on nodes, reroutes and frames, functions, previews in the dock (its canvas, node search, values and preview sphere are in); the material file and Slang in the code editor are done |
+| E10 | materials: the graph's reroutes and frames, functions, previews in the dock (its canvas, node search, values, preview sphere, errors on nodes and Show Slang are in); the material file and Slang in the code editor are done |
 
 The whole plan is ADR 0107 §7.
 

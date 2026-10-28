@@ -32,6 +32,8 @@
 //! - **The preview** (E10-3f-2, the team's «а»): a sphere the player draws with the graph's
 //!   editing build ([`preview_material`]), in the canvas's corner; every number is a
 //!   parameter there, so a value's change reaches it without compiling anything.
+//! - **Errors** (E10-3f-3): what stops the graph from generating, at its node (a loop, a
+//!   kind or a port a merge left), framed in red on the canvas with why under the box.
 
 use crate::paint::UiText;
 use crate::shell::Palette;
@@ -919,6 +921,9 @@ pub(crate) struct GraphDoc {
     /// material files').
     pub(crate) autosaved: Option<u64>,
     pub(crate) due: Option<std::time::Instant>,
+    /// What stopped it from generating when it was last generated (E10-3f-3), at its node
+    /// when it has one.
+    pub(crate) error: Option<GraphError>,
 }
 
 impl GraphDoc {
@@ -962,6 +967,7 @@ impl GraphDoc {
             tab: String::new(),
             autosaved: None,
             due: None,
+            error: None,
         }
     }
 
@@ -2130,8 +2136,15 @@ pub(crate) fn draw(
                 text.draw_left(canvas, look.glyphs, name, port_size, left, dim, order);
             }
         }
+        // Its node stops the graph (E10-3f-3): a red frame, why under the box.
+        let error = doc
+            .error
+            .as_ref()
+            .filter(|e| e.node.as_deref() == Some(b.id.as_str()));
         // Selected: an orange frame (the viewport's); under the pointer, a faint one.
-        let frame = if doc.selected.contains(&b.id) {
+        let frame = if error.is_some() {
+            Some(Vec4::from_array(p.error))
+        } else if doc.selected.contains(&b.id) {
             Some(Vec4::new(1.0, 0.62, 0.18, 1.0))
         } else if doc.hover == Hit::Node(k) {
             Some(Vec4::new(1.0, 1.0, 1.0, 0.3))
@@ -2144,6 +2157,19 @@ pub(crate) fn draw(
                     .outline(1.5 * look.scale)
                     .color(color)
                     .order(order),
+            );
+        }
+        if let Some(e) = error
+            && port_size >= 5.0
+        {
+            text.draw_left(
+                canvas,
+                look.glyphs,
+                &e.message,
+                port_size,
+                Vec2::new(lo.x, hi.y + ROW * 0.5 * z),
+                Vec4::from_array(p.error),
+                order,
             );
         }
     }
