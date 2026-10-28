@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3d-1, the graph canvas** (#PR, ADR 0123's as-built): a `.mgraph` opens in a tab of
+  - **E10-3d-1, the graph canvas** (#424, ADR 0123's as-built): a `.mgraph` opens in a tab of
     its own (a double click in the dock), its canvas where the viewport is: boxes with
     their ports and values, links as curves, pan, zoom by steps, F; links made, lifted,
     moved and taken out by the mouse (loops refused), selection by click and box, moves,
