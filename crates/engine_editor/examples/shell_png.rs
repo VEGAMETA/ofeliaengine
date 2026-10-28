@@ -537,6 +537,7 @@ fn main() {
             hint: "Type a command, or @ and an object's name",
             rows: &palette_rows,
             selected: 1,
+            at: None,
         }),
         hint: None,
     };

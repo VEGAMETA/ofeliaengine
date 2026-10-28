@@ -370,6 +370,37 @@ has graphs).
     again on the box, whose material is a file now (the standard look, numbered).
 - **Next:** the node search (E10-3e).
 
+## As built (E10-3e-1, 2026-10-28): the node search, links ending in it, dropped images
+
+- **The search is the palette's** list (its fuzzy matcher, its keys), opened at the
+  pointer (the palette learned a place, `PaletteView::at`) in a narrower box:
+  - every kind but the surface, by group (`Math: Multiply`), its ports beside it
+    (`a, b → out`);
+  - the pick added where the pointer was (`GraphDoc::add_node`: an id of its own, on
+    whole units, selected), one step.
+- **Keys:** a key context of the canvas's own (`GRAPH_KEYS`, as the code tabs' and the
+  dock's), Space and Blender's Shift+A in it; **Graph: Add Node…** in the palette opens it
+  at the canvas's middle.
+- **A link dropped on the empty canvas** asks for the search there
+  (`Outcome::Search`):
+  - it offers only the kinds that can take the link: with an input for an output's link,
+    with an output for an input's;
+  - the node added is linked by its port that fits best: one as wide, else a dynamic one,
+    else its first.
+- **An image dropped from the dock** onto the canvas (a drop target of its own,
+  `DropTarget::Graph`) is a texture node of it at the pointer, its parameter named after
+  the file (`Wood Grain.png`: `wood_grain`, numbered when taken), its path in the graph's
+  references. Anything else is refused with why.
+- **Tests:**
+  - the kinds offered, the ports' text, nodes added plainly and linked both ways by the
+    port that fits, the surface refused, the search asked for by a dropped link, images'
+    nodes and their names;
+  - in the editor: Space at the pointer, typed and Enter (the node where the pointer
+    was, one step), a dropped link's search linking its pick, an image dragged from the
+    dock onto the canvas, undone;
+  - the editor's and the graph tab's frames still allocate nothing.
+- **Next (E10-3e-2):** reroutes and frames (the file's version 2).
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,

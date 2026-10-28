@@ -125,6 +125,52 @@ fn a_graphs_tab_draws_its_canvas_where_the_viewport_is() {
         .unwrap();
         std::fs::write(path, png).unwrap();
     }
+    // Space over the canvas: the node search at the pointer, "mul" typed
+    // (`ENGINE_EDITOR_GRAPH_SEARCH_PNG=<file>` writes it); Escape closes it.
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_GRAPH_SEARCH_PNG") {
+        game.event(&WindowEvent {
+            window: WindowId(0),
+            time: Instant::now(),
+            kind: WindowEventKind::CursorMoved { x: 200, y: 430 },
+        });
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
+            .unwrap();
+        key(&mut game, 0x20, 0x39, true);
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
+            .unwrap();
+        key(&mut game, 0x20, 0x39, false);
+        for c in "mul".chars() {
+            game.event(&WindowEvent {
+                window: WindowId(0),
+                time: Instant::now(),
+                kind: WindowEventKind::Char(c),
+            });
+        }
+        for _ in 0..3 {
+            player
+                .frame_overlaid(&mut game, Some(&mut overlay))
+                .unwrap();
+        }
+        let shot = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &shot,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+        key(&mut game, 0x1B, 0x01, true);
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
+            .unwrap();
+        key(&mut game, 0x1B, 0x01, false);
+    }
     // Ctrl+Tab: the scene's tab, the viewport where the canvas was.
     key(&mut game, 0x11, 0x1D, true);
     key(&mut game, 0x09, 0x0F, true);
