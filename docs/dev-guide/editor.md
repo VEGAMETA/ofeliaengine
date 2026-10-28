@@ -689,7 +689,8 @@ A click on a folder opens it, a click on a file picks it.
   - an image is its own picture made smaller;
   - a model is drawn by the engine with its own materials, seen from the front and a
     little above;
-  - a material is drawn on a sphere;
+  - a material is drawn on a sphere; a material type's once its shaders are compiled, not
+    its look;
   - a sound is its waveform over its whole length, every channel together; a part that
     reaches full scale (it may clip) shows in orange;
   - other kinds show their icon.

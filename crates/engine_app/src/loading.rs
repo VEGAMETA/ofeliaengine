@@ -72,6 +72,14 @@ pub(crate) enum Job {
         cache: Option<Arc<DerivedDataCache>>,
         generation: u32,
     },
+    /// An image file (a material type's texture parameter, ADR 0120's E10-1b) read,
+    /// decoded and given its levels for its use, or loaded compressed from `cache`.
+    Image {
+        key: TextureKey,
+        path: PathBuf,
+        cache: Option<Arc<DerivedDataCache>>,
+        generation: u32,
+    },
     /// A texture made uncompressed, compressed into `cache` (on the compressing thread):
     /// its image read again from `source`, beside the glTF file in `dir`.
     Compress {
@@ -446,6 +454,13 @@ fn failed(job: &Job, why: &str) -> Done {
             generation: *generation,
             result: Err(why),
         },
+        Job::Image {
+            key, generation, ..
+        } => Done::Texture {
+            key: *key,
+            generation: *generation,
+            result: Err(why),
+        },
         Job::Compress {
             key, generation, ..
         } => Done::Compressed {
@@ -541,6 +556,47 @@ fn run(job: Job, root: &Path, pool: Option<&ThreadPool>) -> Done {
                 .ok_or_else(|| String::from("the file has no such mesh"));
             Done::Primitives {
                 asset,
+                generation,
+                result,
+            }
+        }
+        Job::Image {
+            key,
+            path,
+            cache,
+            generation,
+        } => {
+            engine_profiler::zone!("assets::load::image");
+            let result = std::fs::read(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))
+                .and_then(|bytes| {
+                    // The image's own settings (E4-9): one kept uncompressed skips the cache.
+                    let settings = AssetMeta::read(&path);
+                    let cache = cache.filter(|_| {
+                        settings.texture.compression != TextureCompression::Uncompressed
+                    });
+                    if let Some(texture) = cache
+                        .as_deref()
+                        .and_then(|cache| cached_texture(cache, &bytes, key.usage()))
+                    {
+                        return Ok(Made::Cached(texture));
+                    }
+                    let image = decode_image(&bytes).map_err(|e| e.to_string())?;
+                    let compress = cache.map(|_| Source {
+                        texture: TextureSource::Uri(
+                            path.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                        ),
+                        dir: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+                    });
+                    Ok(Made::Decoded {
+                        image: build_mips(&image, key.usage()),
+                        compress,
+                    })
+                });
+            Done::Texture {
+                key,
                 generation,
                 result,
             }

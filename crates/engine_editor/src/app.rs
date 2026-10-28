@@ -555,6 +555,8 @@ pub fn editor<G: Game>(
     // Editing: the world's time stands until Play (ADR 0107 E3), so a scene's tweens,
     // timers and sounds do not change it.
     player.set_simulating(false);
+    // Material types compile again when their modules change (ADR 0092, ADR 0120).
+    player.set_material_hot_reload(true);
     // The project's assets, their paths to the player (ADR 0108, E4-1).
     {
         let mut editor = shared.borrow_mut();

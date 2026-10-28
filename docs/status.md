@@ -766,10 +766,14 @@ Last updated: 2026-10-28.
   - **Full script debugging** (#396, ADR 0119's as-built): the Debugger's switch runs the
     scripts interpreted from the next Play, so a stop shows every frame's locals; off by
     default (native code, as the game runs them); kept in the session.
+  - **E10-1b, typed materials drawn by the player** (#397, ADR 0120's as-built): a typed
+    `.material` on a model draws its look at once, then its type once the forward
+    renderer's material compiler thread has reflected its layout and compiled its entry
+    points (1.6 s on the RTX, 1.1 s on the Radeon, no frame over 7.6 ms meanwhile); its
+    images load in the background; thumbnails wait for the type's shaders.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E10-1b and E10-1c: typed materials made by the player (the type registered, its
-       entry points compiled off the frame, the look meanwhile), parameters in the
-       inspector, New Material, Make Variant (a copy), Apply to Selection.
+    1. E10-1c: parameters in the inspector, New Material, Make Variant (a copy), Apply to
+       Selection.
     2. E11-3b and E11-3c, previews: ▶, Space and Auto Play in the dock on an editor bus,
        the inspector's waveform with seeking. Then E11-1, the mixer file (`main.mixer`)
        and panel, E11-2, effects and sends, E11-4b, handles and hearing in place.

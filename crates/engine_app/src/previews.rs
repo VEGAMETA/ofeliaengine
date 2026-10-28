@@ -3,6 +3,9 @@
 //! asked: the editor's thumbnails and the inspector's previews.
 //!
 //! - **One a frame at most,** once every part is made and each material has its textures.
+//! - **A material type's** (ADR 0120's E10-1b) is drawn once to ask for its pipelines and
+//!   not answered; it is drawn again, and answered, once no material type's pipeline is on
+//!   its way, so that a thumbnail shows the type, not its look.
 //! - **A view of the frame renderer** of its own: its draw list, a key light and an
 //!   ambient term, no sky, nothing of the scene's; drawn at twice the side and averaged
 //!   down (four samples a pixel, edges and shading alike), its alpha kept.
@@ -18,7 +21,7 @@ use engine_frame::{
 };
 use engine_render::forward::{DirectionalLight, DrawItem, ViewFeatures};
 use engine_render::graph::{Access, BufferState, FrameGraph, ImportedBuffer, LoadOp, TextureDesc};
-use engine_render::material::{MaterialFrame, MaterialTable};
+use engine_render::material::{MaterialFrame, MaterialTable, MaterialTypeId};
 use engine_render::mesh::{GeometryFrame, GeometryPool};
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, MemoryLocation};
@@ -59,6 +62,8 @@ struct Readback {
     allocation: Option<Allocation>,
     /// The frame that writes it and the preview's key.
     written: Option<(u64, u64)>,
+    /// A material type's first drawing: asked for again once read, not answered.
+    again: Option<PreviewRequest>,
 }
 
 /// The preview a frame draws: its draws, its camera and its read back's slot (which holds
@@ -76,6 +81,8 @@ pub(crate) struct Previews {
     readbacks: Vec<Readback>,
     done: Vec<Preview>,
     frames_in_flight: u64,
+    /// Previews of material types drawn once already (their pipelines asked for), by key.
+    warmed: Vec<u64>,
 }
 
 impl Previews {
@@ -86,6 +93,7 @@ impl Previews {
             readbacks: Vec::new(),
             done: Vec::new(),
             frames_in_flight: frames_in_flight.max(1) as u64,
+            warmed: Vec::new(),
         }
     }
 
@@ -110,6 +118,12 @@ impl Previews {
                 continue;
             };
             r.written = None;
+            if let Some(request) = r.again.take() {
+                if !self.asked.iter().any(|a| a.key == key) {
+                    self.asked.push_back(request);
+                }
+                continue;
+            }
             let pixels = r
                 .allocation
                 .as_ref()
@@ -129,7 +143,9 @@ impl Previews {
     /// The preview this frame draws, if one asked for has every part made (each part's
     /// mesh, and its material with its textures): made now where it was not, its read
     /// back's slot taken. A request with a part that cannot be made is answered with no
-    /// pixels.
+    /// pixels. One with a material type waits while `types_pending` (the forward
+    /// renderer's material type pipelines on their way) is not zero, after a first drawing
+    /// that asks for its pipelines.
     pub(crate) fn pick(
         &mut self,
         assets: &mut Assets,
@@ -137,6 +153,7 @@ impl Previews {
         materials: &mut MaterialTable,
         allocator: &mut Allocator,
         frame: u64,
+        types_pending: usize,
     ) -> Option<Drawing> {
         if self.asked.is_empty() {
             return None;
@@ -146,7 +163,32 @@ impl Previews {
             let request = self.asked.pop_front()?;
             match resolve(&request, assets, geometry, materials) {
                 Resolved::Ready(draws, (lo, hi)) => {
-                    self.readbacks[slot].written = Some((frame, request.key));
+                    let typed = draws.iter().any(|d| {
+                        materials
+                            .material_type(d.material)
+                            .is_some_and(|t| t != MaterialTypeId::GLTF)
+                    });
+                    let key = request.key;
+                    let warmed = self.warmed.iter().position(|&k| k == key);
+                    let again = match (typed, warmed) {
+                        (false, _) => None,
+                        (true, None) => {
+                            self.warmed.push(key);
+                            Some(request)
+                        }
+                        // Its pipelines asked for, some still on their way: later.
+                        (true, Some(_)) if types_pending > 0 => {
+                            self.asked.push_back(request);
+                            continue;
+                        }
+                        (true, Some(k)) => {
+                            self.warmed.swap_remove(k);
+                            None
+                        }
+                    };
+                    let readback = &mut self.readbacks[slot];
+                    readback.written = Some((frame, key));
+                    readback.again = again;
                     return Some(Drawing {
                         draws,
                         camera: framing(lo, hi),
@@ -180,6 +222,7 @@ impl Previews {
                     buffer,
                     allocation: Some(allocation),
                     written: None,
+                    again: None,
                 });
             }
         }

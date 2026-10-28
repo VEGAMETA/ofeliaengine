@@ -1634,6 +1634,14 @@ impl Player {
         }
     }
 
+    /// Watches material types' modules (and `forward.slang` with what it includes) and
+    /// compiles a type again when one changes, its previous version drawing until then
+    /// (ADR 0092); its parameters' layout is reflected again with it, and typed material
+    /// files laid out again (ADR 0120's E10-1b). Off by default; the editor turns it on.
+    pub fn set_material_hot_reload(&mut self, on: bool) {
+        self.renderer.forward_mut().set_material_hot_reload(on);
+    }
+
     /// Where a script stopped, while a stage is stopped halfway.
     pub fn script_stop(&self) -> Option<&engine_script::Stopped> {
         let held = self.script_debug.as_ref()?.held.as_ref()?;
@@ -3179,6 +3187,10 @@ impl Player {
             &mut self.materials,
             (&self.bindless, frame.number),
         );
+        // Typed material files of their type once their layouts are reflected, off this
+        // thread (ADR 0120's E10-1b).
+        self.assets
+            .make_material_types(self.renderer.forward_mut(), &mut self.materials);
         self.wait_for_assets = false;
         // Saves asked for during the ticks: taken now, at the tick boundary.
         self.process_saves(game, elapsed);
@@ -3345,12 +3357,14 @@ impl Player {
             .map_err(AppError::at("the view"))?;
         // A preview asked for, once its parts are made (ADR 0112): one a frame.
         self.previews.collect(frame.number);
+        let types_pending = self.renderer.forward().material_types_pending();
         let preview = self.previews.pick(
             &mut self.assets,
             &mut self.geometry,
             &mut self.materials,
             &mut self.allocator,
             frame.number,
+            types_pending,
         );
         if preview.is_some() {
             self.previews.prepare(

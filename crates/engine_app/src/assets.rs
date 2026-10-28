@@ -29,9 +29,16 @@
 //!   thread. A model draws once its mesh and material are made; its material's textures
 //!   fill in as they come. The frame after a scene is loaded waits for its assets, so a
 //!   scene shows whole.
+//! - **A material type's instance** (a typed `.material`, ADR 0120's E10-1b) draws its look
+//!   at once; its type is registered with the forward renderer, which reflects its
+//!   parameters' layout and compiles the entry points it is drawn with on its material
+//!   compiler's thread ([`Assets::make_material_types`]). Once the layout is back the
+//!   parameters are laid out and the material is of its type (its look still drawn until
+//!   its pipelines exist); its texture parameters' images load in the background as glTF
+//!   textures do and fill in as they come.
 //! - **A file written anew** ([`Assets::changed`], E4-5) is made again the same way, its
 //!   old version drawn until the new one is whole (a material: with its textures). An
-//!   image makes the glTF files that use it again.
+//!   image makes the glTF files and material files that use it again.
 //! - **The file's id** is its `.meta`'s ([`AssetMeta`]); a file without one is found by
 //!   its path alone.
 //! - **A model's collider** ([`Assets::collider`], ADR 0117) is what the cook makes of its
@@ -41,6 +48,7 @@
 
 use crate::loading::{Done, Job, Loader, Made};
 use engine_assets::colliders::{ColliderRules, Motion, cook_node_colliders};
+use engine_assets::material_file::{TextureEncoding, TypedMaterial};
 use engine_assets::{
     DerivedDataCache, EncodedTexture, ImportedScene, MaterialData, MeshData, TextureData,
     TextureImage, TextureSource, TextureUsage, TextureWrap,
@@ -49,7 +57,11 @@ use engine_collision::{Collider, ColliderShape, Origin, Shape};
 use engine_core::math::{Affine3A, Quat, Vec3};
 use engine_ecs::{Changed, Entity, GlobalTransform, QueryState, Transform, With, Without, World};
 use engine_reflect::Reflect;
-use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
+use engine_render::forward::{ForwardRenderer, MaterialTypeDesc};
+use engine_render::material::{
+    AlphaMode, MaterialDesc, MaterialId, MaterialParams, MaterialTable, MaterialTypeId,
+    PARAMS_BYTES, TextureRef,
+};
 use engine_render::mesh::{GeometryPool, MeshId, OwnedMeshData};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_rhi::{Allocator, Bindless, Device, Wrap};
@@ -647,6 +659,35 @@ struct PendingMaterial {
     slots: Slots,
 }
 
+/// A typed material file's material (ADR 0120's E10-1b): drawn with its look until its
+/// type's parameters are laid out ([`Assets::make_material_types`]).
+struct TypedState {
+    asset: AssetRef,
+    material: MaterialId,
+    look: MaterialDesc,
+    file: TypedMaterial,
+    /// Its images: their paths as the parameters name them, and their textures' keys.
+    images: Vec<(PathBuf, TextureKey)>,
+    /// Its type, once registered, and the revision of the layout its parameters were laid
+    /// out with.
+    ty: Option<MaterialTypeId>,
+    revision: Option<u32>,
+    /// The parameters laid out (`None`: the type failed, the look draws), their texture
+    /// fields (offset and key), and how many of those were made or failed when the
+    /// parameters were last given.
+    bytes: Option<Vec<u8>>,
+    slots: Vec<(u32, TextureKey)>,
+    given: usize,
+}
+
+impl TypedState {
+    /// What it draws now is what it will draw: laid out and given every image (made or
+    /// failed), or its type failed.
+    fn settled(&self) -> bool {
+        self.revision.is_some() && (self.bytes.is_none() || self.given == self.slots.len())
+    }
+}
+
 /// A texture compressed in the background (E4-8), swapped in for the uncompressed one
 /// once it is whole on the GPU.
 #[derive(Clone, Copy)]
@@ -726,6 +767,8 @@ pub struct Assets {
     compressed_textures: HashSet<TextureKey>,
     /// glTF materials waiting for their textures.
     pending_materials: Vec<PendingMaterial>,
+    /// Typed material files' materials (ADR 0120's E10-1b).
+    typed: Vec<TypedState>,
     /// Models waiting for their meshes and materials, given renderers once those are made.
     waiting: HashSet<Entity>,
     retry: Vec<Entity>,
@@ -801,6 +844,7 @@ impl Assets {
             swapping: Vec::new(),
             compressed_textures: HashSet::new(),
             pending_materials: Vec::new(),
+            typed: Vec::new(),
             waiting: HashSet::new(),
             retry: Vec::new(),
             frame: 0,
@@ -914,10 +958,12 @@ impl Assets {
             }
             keep
         });
-        // Stale materials take no more textures.
+        // Stale materials take no more textures, nor parameters.
         let stale = &self.stale_materials;
         self.pending_materials
             .retain(|m| !stale.values().any(|&id| id == m.material));
+        self.typed
+            .retain(|t| !stale.values().any(|&id| id == t.material));
         *self.generations.entry(file).or_default() += 1;
         self.building.retain(|a| a.file != file);
         self.decoding.retain(|k| k.file != file);
@@ -1010,6 +1056,10 @@ impl Assets {
             .pending_materials
             .iter()
             .any(|p| p.material == material)
+            && !self
+                .typed
+                .iter()
+                .any(|t| t.material == material && !t.settled())
     }
 
     /// How many textures have been made from glTF files so far.
@@ -1192,14 +1242,23 @@ impl Assets {
             };
         }
         let file = if asset == builtin::MATERIAL {
-            Ok(MaterialFile::default())
+            Ok((MaterialFile::default(), AssetPaths::new()))
         } else {
             self.read_material(asset)
         };
         match file {
-            Ok(file) => {
-                let material = table.add(material_desc(&file));
+            Ok((file, written)) => {
+                let look = material_desc(&file);
+                let material = table.add(look);
                 self.materials.insert(asset, material);
+                // A material type's instance (ADR 0120's E10-1b): its look until its type's
+                // parameters are laid out.
+                if file.is_typed() {
+                    match self.typed_state(asset, &file, &written, material, look) {
+                        Ok(state) => self.typed.push(state),
+                        Err(why) => self.fail(asset, why),
+                    }
+                }
                 Some(material)
             }
             Err(why) => {
@@ -1589,7 +1648,8 @@ impl Assets {
         }
     }
 
-    fn read_material(&self, asset: AssetRef) -> Result<MaterialFile, String> {
+    /// Material file `asset` read, and the paths its references were written with.
+    fn read_material(&self, asset: AssetRef) -> Result<(MaterialFile, AssetPaths), String> {
         if asset.part != 0 {
             return Err(String::from(
                 "a material is a whole file, not a part of one",
@@ -1612,7 +1672,183 @@ impl Assets {
                 "{path} holds the material {id}, not {}",
                 asset.file
             )),
-            _ => Ok(file),
+            _ => Ok((file, report.assets)),
+        }
+    }
+
+    /// Typed material file `asset` (`file`, its references written as `written`) resolved
+    /// for its material: its images' keys, and noted as their user, so that an image
+    /// written anew reads it again ([`Self::changed`]).
+    fn typed_state(
+        &mut self,
+        asset: AssetRef,
+        file: &MaterialFile,
+        written: &AssetPaths,
+        material: MaterialId,
+        look: MaterialDesc,
+    ) -> Result<TypedState, String> {
+        let path = self.paths.get(asset).unwrap_or("").to_owned();
+        let typed = file
+            .typed(written, &self.root)
+            .map_err(|e| format!("{path}: {}", e.message))?
+            .ok_or_else(|| format!("{path}: not a material type's instance"))?;
+        let mut images = Vec::new();
+        for texture in file.textures.values() {
+            let Some(at) = written.get(texture.image).filter(|p| !p.is_empty()) else {
+                continue;
+            };
+            let full = if Path::new(at).is_absolute() {
+                PathBuf::from(at)
+            } else {
+                self.root.join(at)
+            };
+            let usage = match texture.encoding {
+                TextureEncoding::Color => TextureUsage::Color,
+                TextureEncoding::Data => TextureUsage::Data,
+                TextureEncoding::Normal => TextureUsage::Normal,
+            };
+            let key = TextureKey::new(texture.image.file, 0, usage);
+            if let Some(under) = project_path(&self.root, &full) {
+                let users = self.depends.entry(under).or_default();
+                if !users.contains(&asset.file) {
+                    users.push(asset.file);
+                }
+            }
+            images.push((full, key));
+        }
+        Ok(TypedState {
+            asset,
+            material,
+            look,
+            file: typed,
+            images,
+            ty: None,
+            revision: None,
+            bytes: None,
+            slots: Vec::new(),
+            given: 0,
+        })
+    }
+
+    /// Typed material files' materials made of their type (ADR 0120's E10-1b), where the
+    /// forward renderer is at hand, after the frame's stages: the type registered; the
+    /// parameters laid out once its layout is reflected (on the forward renderer's
+    /// material compiler thread, never this one) and again when a reload of its module
+    /// moves the layout; their images asked for and given as they are made. Until then a
+    /// material draws its look, as it does while its type's pipelines compile. Nothing
+    /// when no typed file is loaded.
+    pub(crate) fn make_material_types(
+        &mut self,
+        forward: &mut ForwardRenderer,
+        materials: &mut MaterialTable,
+    ) {
+        if self.typed.is_empty() {
+            return;
+        }
+        // Those whose material went (read again and retired, forgotten) go too.
+        self.typed
+            .retain(|t| materials.material_type(t.material).is_some());
+        let Self {
+            typed,
+            textures,
+            decoding,
+            loader,
+            cache,
+            generations,
+            paths,
+            problems,
+            retry_waiting,
+            ..
+        } = self;
+        for t in typed.iter_mut() {
+            // Models drawing a stale version of it try again once it settles.
+            let was = t.settled();
+            let ty = *t.ty.get_or_insert_with(|| {
+                forward.register_material_type(MaterialTypeDesc {
+                    name: t.file.type_name.clone(),
+                    module: t.file.shader.clone(),
+                    type_name: t.file.type_name.clone(),
+                })
+            });
+            if let Some((layout, revision)) = forward.material_params(ty)
+                && t.revision != Some(revision)
+            {
+                t.revision = Some(revision);
+                let built = layout.map_err(str::to_owned).and_then(|layout| {
+                    let built = t.file.build_params(layout).map_err(|e| e.message)?;
+                    if built.bytes.len() > PARAMS_BYTES {
+                        return Err(format!(
+                            "`{}` is {} bytes; parameters are at most {PARAMS_BYTES}",
+                            layout.name,
+                            built.bytes.len()
+                        ));
+                    }
+                    Ok(built)
+                });
+                match built {
+                    Ok(built) => {
+                        t.slots.clear();
+                        for param in &built.textures {
+                            let Some(&(_, key)) = t.images.iter().find(|(p, _)| *p == param.path)
+                            else {
+                                continue;
+                            };
+                            t.slots.push((param.offset, key));
+                            if !textures.contains_key(&key) && decoding.insert(key) {
+                                loader.give(Job::Image {
+                                    key,
+                                    path: param.path.clone(),
+                                    cache: cache.clone(),
+                                    generation: generations.get(&key.file).copied().unwrap_or(0),
+                                });
+                            }
+                        }
+                        t.bytes = Some(built.bytes);
+                        t.given = usize::MAX;
+                        problems.remove(&t.asset);
+                    }
+                    Err(why) => {
+                        let path = paths.get(t.asset).unwrap_or("");
+                        log::error!(target: "engine_app::assets", "{path}: {why}; its look draws");
+                        problems.insert(t.asset, why);
+                        t.bytes = None;
+                        t.slots.clear();
+                        materials.set(t.material, t.look);
+                    }
+                }
+            }
+            if !was && t.settled() {
+                *retry_waiting = true;
+            }
+            // The parameters with the images made so far, given again as more are made.
+            let Some(bytes) = &t.bytes else {
+                continue;
+            };
+            let made = t
+                .slots
+                .iter()
+                .filter(|(_, key)| textures.contains_key(key))
+                .count();
+            if made == t.given {
+                continue;
+            }
+            t.given = made;
+            let params = MaterialParams {
+                bytes: bytes.clone(),
+                textures: t
+                    .slots
+                    .iter()
+                    .filter_map(|&(offset, key)| {
+                        let texture = (*textures.get(&key)?)?;
+                        let wrap = [Wrap::Repeat; 2];
+                        Some((offset, TextureRef { texture, wrap }))
+                    })
+                    .collect(),
+            };
+            materials.set_typed(t.material, ty, t.look, Some(params));
+            if !was && t.settled() {
+                *retry_waiting = true;
+            }
         }
     }
 
@@ -1832,7 +2068,10 @@ impl Assets {
         materials: &mut MaterialTable,
     ) -> (Option<MaterialId>, bool) {
         let made = self.material(asset, materials);
-        let unsettled = |m: MaterialId| self.pending_materials.iter().any(|p| p.material == m);
+        let unsettled = |m: MaterialId| {
+            self.pending_materials.iter().any(|p| p.material == m)
+                || self.typed.iter().any(|t| t.material == m && !t.settled())
+        };
         let drawn = match (made, self.stale_materials.get(&asset)) {
             (Some(new), Some(&old)) if unsettled(new) => (Some(old), true),
             (None, Some(&old)) => (Some(old), true),

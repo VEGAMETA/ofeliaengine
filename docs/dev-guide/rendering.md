@@ -2425,6 +2425,19 @@ double_sided = false
   file's texture parameters are cooked like the scene's and its type's shaders compiled
   into the pack (about 3 s per type), so a game never compiles them; a standard one sets
   the glTF material's values.
+- **On a scene's `Model`, in the player and the editor**, a typed `.material` draws its look
+  at once:
+  - its type's parameters are reflected and the entry points it is drawn with compiled on
+    the material compiler's thread, never the frame's. On ref-1 a new type took 1.6 s (the
+    RTX) and 1.1 s (the Radeon), and the longest frame meanwhile was 7.6 ms and 5.7 ms;
+  - then it draws its type, its texture parameters' images loading in the background, as
+    glTF textures do (compressed through the derived data cache);
+  - a file written anew draws its previous version until the new one is laid out: 4 ms for
+    the same type.
+  - The editor compiles a type again when its module changes, and lays its materials out
+    again if their parameters moved (`Player::set_material_hot_reload`).
+  - Running a project's typed materials needs Slang at run time; a cooked game's pack
+    carries them compiled.
 - Loading such a pack: `engine_streaming::register_material_types` then `add_materials`
   (as `flight` does).
 - **Hot reload** (development): `ForwardRenderer::set_material_hot_reload(true)` watches
