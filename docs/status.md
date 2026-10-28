@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3b-1, the material graph's node library and generator** (#PR, ADR 0123's
+  - **E10-3b-1, the material graph's node library and generator** (#420, ADR 0123's
     as-built): `engine_material_graph`: 40 node kinds as Slang snippets with typed ports,
     the graph in memory, the generator (one module a graph, each function its own nodes,
     Slang's type rules, a variable for a value read twice, literals when saved and
