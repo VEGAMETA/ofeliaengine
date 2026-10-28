@@ -124,7 +124,8 @@ pub use settings::{DebuggerSettings, FrameCap, PlayerSettings, Window};
 pub use sound::{
     AcousticSettings, AudioListener, AudioSettings, AudioSource, AudioSource3D, BusLayout,
     EffectLayout, Falloff, MIXER_FILE_EXTENSION, MasterLayout, Mixer, MixerFile, PlacedBus,
-    PlayMode, PreviewState, ReverbZone, Room, Routes, SendLayout, SoundFiles, Waveform, waveform,
+    PlayMode, PreviewState, ReverbZone, Room, RoomFrom, RoomHeard, RoomLayout, Routes, SendLayout,
+    SoundFiles, Waveform, waveform,
 };
 pub use text::TextSource;
 

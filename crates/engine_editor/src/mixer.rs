@@ -28,6 +28,9 @@ pub(crate) const CEILING: f32 = 6.0;
 pub(crate) const TICKS: [f32; 5] = [0.0, -6.0, -12.0, -24.0, -48.0];
 /// The master's name, in the panel and the inspector.
 pub(crate) const MASTER: &str = "master";
+/// The room's reverb's strip (E11-2c): the player's own bus, made and set by the room
+/// around the listener; only its fader, `room.gain`, is the file's.
+pub(crate) const ROOM: &str = "reverb";
 
 /// The fader's travel: where each gain sits, 0 at the bottom, 1 at the top.
 const TRAVEL: [(f32, f32); 6] = [
@@ -159,7 +162,9 @@ pub(crate) fn silenced(
     soloed: &[String],
     name: &str,
 ) -> bool {
-    if name == MASTER {
+    // The room's reverb is never silenced (a soloed bus keeps its reverb, as a desk's
+    // returns are solo safe).
+    if name == MASTER || name == ROOM {
         return false;
     }
     if muted.iter().any(|m| m == name) {
@@ -215,6 +220,8 @@ impl BusRow {
     ];
     /// The master's.
     pub(crate) const OF_MASTER: [Self; 2] = [Self::Gain, Self::Balance];
+    /// The room's reverb's: its fader alone (E11-2c).
+    pub(crate) const OF_ROOM: [Self; 1] = [Self::Gain];
 
     /// Its name in the inspector.
     pub(crate) fn name(self) -> &'static str {
@@ -230,10 +237,10 @@ impl BusRow {
 
     /// The rows of bus `bus`.
     pub(crate) fn of(bus: &str) -> &'static [Self] {
-        if bus == MASTER {
-            &Self::OF_MASTER
-        } else {
-            &Self::ALL
+        match bus {
+            MASTER => &Self::OF_MASTER,
+            ROOM => &Self::OF_ROOM,
+            _ => &Self::ALL,
         }
     }
 }
@@ -385,6 +392,18 @@ impl MixerDoc {
             strip.bypassed = effects_text(&mut strip.effects, &placed.layout.effects);
             self.strips.push(strip);
         }
+        // The room's reverb at the right end (E11-2c): its fader the file's trim.
+        let mut room = Strip {
+            name: String::from(ROOM),
+            depth: 0,
+            gain: self.layout.room.gain,
+            gain_text: String::new(),
+            output: format!("\u{2192} {MASTER}"),
+            effects: String::new(),
+            bypassed: false,
+        };
+        gain_text(&mut room.gain_text, room.gain);
+        self.strips.push(room);
     }
 
     /// The strip of bus `bus`.
@@ -394,10 +413,11 @@ impl MixerDoc {
 
     /// Bus `bus`'s gain in dB (the master's for [`MASTER`]).
     pub(crate) fn gain(&self, bus: &str) -> Option<f32> {
-        if bus == MASTER {
-            return Some(self.layout.master.gain);
+        match bus {
+            MASTER => Some(self.layout.master.gain),
+            ROOM => Some(self.layout.room.gain),
+            _ => self.layout.buses.get(bus).map(|b| b.gain),
         }
-        self.layout.buses.get(bus).map(|b| b.gain)
     }
 }
 
@@ -713,16 +733,18 @@ pub(crate) fn toggle_send_tap(layout: &mut MixerFile, bus: &str, to: &str) {
 /// Whether bus `bus` (the master for [`MASTER`]) differs between layouts `before` and
 /// `after`: its fader, balance, voices, reverb or output, or it came or went.
 pub(crate) fn bus_changed(before: &MixerFile, after: &MixerFile, bus: &str) -> bool {
-    if bus == MASTER {
-        return before.master != after.master;
+    match bus {
+        MASTER => before.master != after.master,
+        ROOM => before.room != after.room,
+        _ => before.buses.get(bus) != after.buses.get(bus),
     }
-    before.buses.get(bus) != after.buses.get(bus)
 }
 
 /// How many buses (the master among them) differ between `before` and `after`, those that
 /// came and went too.
 pub(crate) fn changes(before: &MixerFile, after: &MixerFile) -> usize {
-    let master = usize::from(before.master != after.master);
+    let master =
+        usize::from(before.master != after.master) + usize::from(before.room != after.room);
     let names = before.buses.keys().chain(
         after
             .buses
@@ -737,6 +759,8 @@ pub(crate) fn set_gain(layout: &mut MixerFile, bus: &str, db: f32) {
     let db = (10.0 * db.clamp(FLOOR, CEILING)).round() / 10.0;
     if bus == MASTER {
         layout.master.gain = db;
+    } else if bus == ROOM {
+        layout.room.gain = db;
     } else if let Some(b) = layout.buses.get_mut(bus) {
         b.gain = db;
     }
@@ -1157,7 +1181,8 @@ mod tests {
                 .iter()
                 .map(|s| s.name.as_str())
                 .collect::<Vec<_>>(),
-            [MASTER, "effects", "music", "ui", "voice"]
+            [MASTER, "effects", "music", "ui", "voice", ROOM],
+            "the room's reverb at the end"
         );
         let (before, after) = doc.edit(|l| set_gain(l, "music", -6.0)).unwrap();
         assert!(doc.dirty());

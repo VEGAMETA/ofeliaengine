@@ -1488,6 +1488,13 @@ impl Player {
         self.sound.take_peak(bus)
     }
 
+    /// The room the listener hears now: the room's reverb as it plays, and what it follows
+    /// (a reverb zone and its weight, the walls, nothing); the editor's room strip
+    /// (E11-2c). Its bus's meter is `take_bus_peak("reverb")`.
+    pub fn room_heard(&self) -> crate::RoomHeard {
+        self.sound.room_heard()
+    }
+
     /// How far effect `effect` (its place in the chain) of bus `bus` (`master` for the
     /// master's) lowered the gain since the last call, in dB (`None` without sound, such a
     /// bus or such an effect): a compressor's or a limiter's meter in the editor.

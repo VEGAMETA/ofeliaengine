@@ -189,3 +189,21 @@ buses["music"].effects.1.params["frequency_hz"] = 2000
 - Latency compensation across buses (the limiter's 1.5 ms is not made up elsewhere).
 - A game's own effects in the file (a registry of kinds), VST3 plugins (ADR 0107), and
   effects on the room's reverb.
+
+## The room's fader: version 3 (E11-2c, 2026-10-28)
+
+The sound UX note's §9 (accepted with E11's recommendations, team decision 2026-10-28):
+the room's reverb is shown for what it is, a strip marked automatic whose parameters
+follow the room and whose fader is a trim kept in the file.
+
+- **`room.gain`** (`RoomLayout`), in dB, 0 by default: the room's reverb bus's fader, a
+  trim on what the reverb returns. Its parameters stay the room's (the walls, a reverb
+  zone): the file holds nothing else of it. A version 1 or 2 file reads with it at 0.
+- **The player:** the trim is the reverb bus's gain when the bus is made (the first room
+  heard) and with every new layout (over 50 ms). `take_peak("reverb")` meters the bus;
+  `Player::room_heard` says what the room is now and what it follows (`RoomFrom`: a zone
+  with its weight and whether the walls are heard under it, the walls, or nothing).
+- **Options not taken:** the room as an ordinary bus in the file, its reverb's parameters
+  editable (the room's would fight them; the UX note's §9: "showing them raw confuses");
+  no trim at all (a mix could not bring the room's reverb down without changing every
+  zone).

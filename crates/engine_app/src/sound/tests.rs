@@ -950,6 +950,32 @@ fn a_reverb_zone_takes_over_where_the_listener_is() {
         bed.sound.room
     );
     assert!((bed.sound.room.decay - Room::CAVE.decay).abs() < 0.05);
+    // What the editor's room strip shows (E11-2c): the zone, all of it, no walls; the
+    // reverb's bus metered.
+    let heard = bed.sound.room_heard();
+    assert!(heard.made);
+    match heard.from {
+        RoomFrom::Zone {
+            entity,
+            weight,
+            walls,
+        } => {
+            assert_eq!(entity, zone);
+            assert!((weight - 1.0).abs() < 1e-3, "{weight}");
+            assert!(!walls);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(bed.sound.take_peak("reverb").is_some());
+    // The layout's room fader trims it, now and for a reverb made later.
+    let mut layout = MixerFile::builtin();
+    layout.room.gain = -6.0;
+    bed.sound.set_layout(&layout);
+    assert!(
+        (bed.sound.room_trim - 0.501).abs() < 0.01,
+        "{}",
+        bed.sound.room_trim
+    );
     // Away from it, the reverb dies down.
     bed.world.get_mut::<GlobalTransform>(zone).unwrap().0 =
         Affine3A::from_translation(Vec3::new(0.0, 0.0, -100.0));
@@ -957,6 +983,7 @@ fn a_reverb_zone_takes_over_where_the_listener_is() {
         bed.frame(16);
     }
     assert!(bed.sound.room.level < 0.01, "{:?}", bed.sound.room);
+    assert_eq!(bed.sound.room_heard().from, RoomFrom::Nothing);
 }
 
 /// What a frame's sound costs the game thread: `n` looping placed sources circling the

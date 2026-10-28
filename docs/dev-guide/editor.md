@@ -965,6 +965,13 @@ change something.
   the room).
 - **+ Bus** ("Audio: Add Bus") adds one into the master, picked to be named; a picked
   strip's × takes it away, and the buses it was fed by go to the bus it fed.
+- **The room** ("room (auto)", at the right end): the reverb the engine makes from the
+  room around the listener. Its strip says what it follows ("Hall 62 %": a reverb zone
+  and how far into it the listener is; "the walls"; "nothing near"), and its meter is the
+  reverb's. Its fader is a trim kept in `main.mixer` (`room.gain`); everything else
+  follows the room. Picked, the inspector shows the trim and, read-only, the room heard
+  now: what it follows, decay, size, damping, pre-delay and level. A soloed bus keeps its
+  reverb: the room is never silenced by a solo.
 - **The meters:** a bar a channel beside each fader, −60 to +6 dBFS, falling back at
   24 dB a second, yellow from −6 dBFS and red over full scale. Above them, the loudest
   peak since you last looked, and **!** when the bus went over full scale (it may clip).

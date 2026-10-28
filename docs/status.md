@@ -842,13 +842,18 @@ Last updated: 2026-10-28.
     changed); a bus renamed in the mixer takes the open scene's sources along in the same
     undo step and names the other scenes; Find References finds a sound's users. E11-3 is
     done.
+  - **E11-2c, the room's reverb strip** (#PR, ADR 0107's as-built, ADR 0121's version 3):
+    "room (auto)" at the mixer's right end: the reverb's meter, what the room follows
+    ("Hall 62 %", "the walls"), its fader a trim kept as `room.gain`; picked, the room
+    heard now, read-only. E11-2 is done.
   - **Test runs keep their windows out of sight** (#411; the owner's request, 2026-10-28):
     `tools/check.ps1` sets `ENGINE_HIDDEN_WINDOWS=1`, and every window `engine_platform`
     makes is then cloaked (composed, its swapchain presenting, never on the screen), with
     no taskbar button, shown without being activated; uncloaking and bringing it to the
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. The room's reverb strip, then E11-5's layered snapshots.
+    1. E11-5's layered snapshots (an ADR first: the file's snapshots, `audio.blend`),
+       then View: Sound Ranges and the falloff curve.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
     the later in the file's list winning where they meet; scripts blend one in and out

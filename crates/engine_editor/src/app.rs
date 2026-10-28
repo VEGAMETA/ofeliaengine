@@ -2396,6 +2396,10 @@ struct Editor {
     part_drag: Option<PartDrag>,
     /// A bus field's list while it is open (E11-3d): `master` and the mixer's buses.
     bus_choices: Vec<String>,
+    /// The room the player hears (E11-2c), taken with the meters, and its texts for the
+    /// inspector: what it follows, decay, size, damping, pre-delay, level.
+    room_heard: Option<engine_app::RoomHeard>,
+    room_texts: [String; 6],
     /// A sound field's file path, joined each frame without allocating (E11-3d).
     joined: String,
     /// Each bus's effects' gain reduction as shown (dB, falling back at 24 dB/s), and
@@ -3248,6 +3252,8 @@ impl Editor {
             part_options: Vec::new(),
             part_drag: None,
             bus_choices: Vec::new(),
+            room_heard: None,
+            room_texts: Default::default(),
             joined: String::new(),
             reductions: Vec::new(),
             fx_texts: Vec::new(),
@@ -3693,7 +3699,7 @@ impl Editor {
         }
         self.thumbnails.begin_frame();
         self.follow_sound_view();
-        self.follow_mixer();
+        self.follow_mixer(world);
         if let Some(under) = self.under_pointer.take() {
             self.offer_under_pointer(world, under);
         }
@@ -4245,33 +4251,57 @@ impl Editor {
                     self.mixer_parts.push(MixerPart::Send(i));
                 }
             }
+            let room = bus == crate::mixer::ROOM;
             let from = asset_fields.len();
             let adds: &[&str] = if bus == crate::mixer::MASTER {
                 &["add effect"]
             } else {
                 &["add effect", "add send"]
             };
-            for (f, &name) in adds.iter().enumerate() {
-                let here = Some((MixerPart::Add, f));
-                asset_fields.push(Field {
-                    name,
-                    widget: Widget::Choice {
-                        current: "\u{2026}",
-                        open: (self.part_choice == here).then_some(part_options.as_slice()),
-                        missing: false,
-                    },
-                    changed: false,
-                });
+            if !room {
+                for (f, &name) in adds.iter().enumerate() {
+                    let here = Some((MixerPart::Add, f));
+                    asset_fields.push(Field {
+                        name,
+                        widget: Widget::Choice {
+                            current: "\u{2026}",
+                            open: (self.part_choice == here).then_some(part_options.as_slice()),
+                            missing: false,
+                        },
+                        changed: false,
+                    });
+                }
+                self.part_spans.push((from, asset_fields.len()));
+                self.mixer_parts.push(MixerPart::Add);
             }
-            self.part_spans.push((from, asset_fields.len()));
-            self.mixer_parts.push(MixerPart::Add);
+            // The room's reverb (E11-2c): the room it follows, read-only, after its fader.
+            let heard_from = asset_fields.len();
+            if room {
+                const NAMES: [&str; 6] =
+                    ["follows", "decay", "size", "damping", "pre-delay", "level"];
+                for (name, value) in NAMES.iter().zip(&self.room_texts) {
+                    asset_fields.push(Field {
+                        name,
+                        widget: Widget::Text(value),
+                        changed: false,
+                    });
+                }
+            }
             self.mixer_section = Some(sections.len());
             sections.push(Section {
-                title: "Bus",
+                title: if room { "Room (auto)" } else { "Bus" },
                 fields: &asset_fields[..bus_end],
                 script: "",
                 removable: false,
             });
+            if room {
+                sections.push(Section {
+                    title: "Heard now",
+                    fields: &asset_fields[heard_from..],
+                    script: "",
+                    removable: false,
+                });
+            }
             self.mixer_parts_at = sections.len();
             movable = [sections.len(), sections.len() + chain.len()];
             for (&(from, to), &part) in self.part_spans.iter().zip(&self.mixer_parts) {
@@ -5222,8 +5252,9 @@ impl Editor {
                 let meter = self.meters.iter().find(|m| m.name == s.name);
                 let level =
                     |k: usize| meter.map_or(0.0, |m| crate::mixer::meter_position(m.level[k]));
+                let room = s.name == crate::mixer::ROOM;
                 crate::shell::StripView {
-                    name: &s.name,
+                    name: if room { "room (auto)" } else { &s.name },
                     depth: s.depth,
                     fader: crate::mixer::fader_position(s.gain),
                     gain: &s.gain_text,
@@ -5243,6 +5274,7 @@ impl Editor {
                             .is_some_and(|at| crate::mixer::bus_changed(at, &doc.layout, &s.name)),
                     effects: self.fx_texts.get(i).map_or("", String::as_str),
                     bypassed: s.bypassed,
+                    room,
                 }
             }));
         }
@@ -14918,7 +14950,7 @@ impl Editor {
 
     /// The mixer for the frame (E11-1): held once the Audio tab opens, its header and the
     /// picked bus's numbers written.
-    fn follow_mixer(&mut self) {
+    fn follow_mixer(&mut self, world: &World) {
         if self.bottom == Some(AUDIO_TAB) {
             self.open_mixer();
         }
@@ -14964,6 +14996,61 @@ impl Editor {
             let r = most(&self.reductions, &s.name);
             if r >= 0.1 {
                 let _ = write!(text, " \u{2212}{r:.1}");
+            }
+        }
+        // The room's reverb (E11-2c): what it follows on its strip, its room in the
+        // inspector.
+        let heard = self.room_heard;
+        let zone = |e: Entity| world.get::<Name>(e).map_or("a zone", |n| n.as_str());
+        if let Some(text) = doc
+            .strip(crate::mixer::ROOM)
+            .and_then(|k| self.fx_texts.get_mut(k))
+        {
+            text.clear();
+            match heard.map(|h| h.from) {
+                Some(engine_app::RoomFrom::Zone { entity, weight, .. }) => {
+                    let _ = write!(text, "{} {:.0} %", zone(entity), weight * 100.0);
+                }
+                Some(engine_app::RoomFrom::Walls) => text.push_str("the walls"),
+                Some(engine_app::RoomFrom::Nothing) | None => text.push_str("nothing near"),
+            }
+        }
+        if self.mixer_picked.as_deref() == Some(crate::mixer::ROOM) {
+            let t = &mut self.room_texts;
+            for s in t.iter_mut() {
+                s.clear();
+            }
+            match heard.map(|h| h.from) {
+                Some(engine_app::RoomFrom::Zone {
+                    entity,
+                    weight,
+                    walls,
+                }) => {
+                    let _ = write!(t[0], "{} at {:.0} %", zone(entity), weight * 100.0);
+                    if walls {
+                        t[0].push_str(", the walls under it");
+                    }
+                }
+                Some(engine_app::RoomFrom::Walls) => {
+                    t[0].push_str("the walls around the listener");
+                }
+                Some(engine_app::RoomFrom::Nothing) | None => {
+                    t[0].push_str("no zone and no walls near");
+                }
+            }
+            match heard.filter(|h| h.made).map(|h| h.room) {
+                Some(room) => {
+                    let _ = write!(t[1], "{:.2} s", room.decay);
+                    let _ = write!(t[2], "{:.2}", room.size);
+                    let _ = write!(t[3], "{:.0} Hz", room.damping);
+                    let _ = write!(t[4], "{:.0} ms", room.pre_delay * 1e3);
+                    let _ = write!(t[5], "{:.0} %", room.level * 100.0);
+                }
+                None => {
+                    for s in &mut t[1..] {
+                        s.push('\u{2013}');
+                    }
+                }
             }
         }
         let Some(bus) = self.mixer_picked.as_deref() else {
@@ -15026,6 +15113,8 @@ impl Editor {
         }
         let (gain, balance, voices) = if bus == crate::mixer::MASTER {
             (doc.layout.master.gain, doc.layout.master.balance, 0)
+        } else if bus == crate::mixer::ROOM {
+            (doc.layout.room.gain, 0.0, 0)
         } else if let Some(b) = doc.layout.buses.get(bus) {
             (b.gain, b.balance, b.voices)
         } else {
@@ -19924,6 +20013,7 @@ impl<G> EditorGame<G> {
                         .meters_at
                         .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
                     shared.meters_at = Some(now);
+                    shared.room_heard = Some(player.room_heard());
                     shared.meters.retain(|m| doc.strip(&m.name).is_some());
                     for strip in &doc.strips {
                         let k = match shared.meters.iter().position(|m| m.name == strip.name) {
@@ -25673,6 +25763,85 @@ mod tests {
         click(&mut ed, &mut world, at);
         ed.update(&mut world);
         assert!(ed.sound_view.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_rooms_reverb_has_a_strip_of_its_own() {
+        let dir = folder("room-strip");
+        let mut world = World::new();
+        let hall = world.spawn((SceneId::new(), Name::new("Hall")));
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        let mixer = ed.ids.mixer;
+        ed.run(&mut world, mixer);
+        // The player hears a hall zone at 62 %, the walls under it.
+        ed.room_heard = Some(engine_app::RoomHeard {
+            room: engine_app::Room::CAVE,
+            from: engine_app::RoomFrom::Zone {
+                entity: hall,
+                weight: 0.62,
+                walls: true,
+            },
+            made: true,
+        });
+        ed.update(&mut world);
+        ed.update(&mut world);
+        // At the right end: the room, what it follows, its fader at 0.
+        let doc = ed.mixer.as_ref().unwrap();
+        assert_eq!(doc.strips.last().unwrap().name, crate::mixer::ROOM);
+        assert!(!texts(&ed, "room (auto)").is_empty());
+        assert!(!texts(&ed, "Hall 62 %").is_empty(), "what it follows");
+        // A click on it: its fader and the room it hears, read-only.
+        ed.pick_bus(crate::mixer::ROOM);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Room (auto)").is_empty());
+        assert!(!texts(&ed, "Heard now").is_empty());
+        assert!(!texts(&ed, "Hall at 62 %, the walls under it").is_empty());
+        let decay = format!("{:.2} s", engine_app::Room::CAVE.decay);
+        assert!(!texts(&ed, &decay).is_empty(), "{decay}");
+        assert!(texts(&ed, "add effect").is_empty(), "nothing to add to it");
+        // Its fader is the file's `room.gain`: one step, undone.
+        let steps = ed.history.steps().count();
+        ed.mixer_step(&mut world, "Mixer: room -3 dB", None, |l| {
+            crate::mixer::set_gain(l, crate::mixer::ROOM, -3.0);
+        });
+        let gain = |ed: &Editor| ed.mixer.as_ref().unwrap().gain(crate::mixer::ROOM).unwrap();
+        assert_eq!(gain(&ed), -3.0);
+        assert_eq!(ed.history.steps().count(), steps + 1);
+        let doc = ed.mixer.as_ref().unwrap();
+        assert!(doc.text.contains("room.gain = -3"), "{}", doc.text);
+        assert_eq!(doc.strips.last().unwrap().gain_text, "\u{2212}3.0");
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(gain(&ed), 0.0);
+        // A soloed bus keeps its reverb: the room is never silenced.
+        let layout = &ed.mixer.as_ref().unwrap().layout;
+        let soloed = [String::from("music")];
+        assert!(!crate::mixer::silenced(
+            layout,
+            &[],
+            &soloed,
+            crate::mixer::ROOM
+        ));
+        assert!(crate::mixer::silenced(layout, &[], &soloed, "ui"));
+        // Nothing near: said so, the room's numbers dashed.
+        ed.room_heard = Some(engine_app::RoomHeard {
+            room: engine_app::Room::OUTDOORS,
+            from: engine_app::RoomFrom::Nothing,
+            made: false,
+        });
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "nothing near").is_empty());
+        assert!(!texts(&ed, "no zone and no walls near").is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
