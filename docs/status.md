@@ -756,7 +756,7 @@ Last updated: 2026-10-28.
     questions (below). **E11-4a, sounds in the viewport** (#393, ADR 0107's as-built):
     icons, the add menu's Sound group, a selected source's two distances as rings (dashed
     where the sound holds beyond them), a selected reverb zone's box and its fade.
-  - **E11-3a, sounds' waveforms in the dock** (#PR, ADR 0107's as-built): a sound's tile is
+  - **E11-3a, sounds' waveforms in the dock** (#394, ADR 0107's as-built): a sound's tile is
     its waveform, read once on the thumbnail thread (`engine_app::waveform`) and cached;
     3 minutes of Ogg in 188 ms, off the frame.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
