@@ -824,7 +824,7 @@ Last updated: 2026-10-28.
     each of a selected sound's rings (pointed at: "40 m · −16 dB, held"; dragged: its
     distance, the inner ring pushing the outer), a zone's sides (the opposite side
     staying) and its fade; one undo step a drag, Escape.
-  - **E11-4b-2, hearing in place** (#PR, ADR 0107's as-built): P plays the selected sources
+  - **E11-4b-2, hearing in place** (#409, ADR 0107's as-built): P plays the selected sources
     where they are, looping, heard from the editor's camera with the zones, until P, Escape
     or another selection; Sound: Listen to the Scene plays every source set to play;
     nothing written back (`Player::audition`, copies of the components). E11-4 is done but
@@ -833,6 +833,11 @@ Last updated: 2026-10-28.
     1. E11-3's last part, then
        sounds dropped on the viewport, the tree or an entity, and the sound and bus fields
        (the team's 4a); the room's reverb strip.
+  - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
+    as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
+    the later in the file's list winning where they meet; scripts blend one in and out
+    (`audio.blend("underwater", 1.0, 0.5)`, a weight over a fade), one snapshot alone being
+    a blend to 1 (the sound UX note's question, answer b).
   - **Settled (2026-10-28, team decisions, every recommendation):**
     - E11's four (`docs/research/ux/sound.md`): the bus layout in a `.mixer` file named
       by `PlayerSettings::audio.layout` (`buses` goes; the four built-in buses without a
