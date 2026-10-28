@@ -265,6 +265,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         output: None,
         tasks: None,
         profiler: None,
+        mixer: None,
         debugger: None,
         history: None,
         playing: false,

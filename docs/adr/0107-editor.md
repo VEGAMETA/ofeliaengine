@@ -2069,3 +2069,44 @@ for the first answer. This step is the part of E11-4 that needs none.
     picked;
   - on the player (GPU): a tone picked (never played): its facts, its picture uploaded
     by the overlay and shown (`ENGINE_EDITOR_SOUND_PNG` keeps the frame).
+
+## As built (E11-1b-1, 2026-10-28): the mixer's strips
+
+- **The Audio tab** (Alt+A, "View: Audio Mixer"; `docs/research/ux/sound.md`, the mixer
+  panel): the project's `main.mixer` held as `engine_editor::mixer::MixerDoc` (the
+  built-in buses with a new id until it is first saved, unsaved only once edited), opened
+  when the tab first shows.
+- **A strip per bus,** the master first, then `MixerFile::order` (each after the bus it
+  feeds, a dot for each step down): name, output, a fader with marks at 0, −6, −12, −24
+  and −48 dB, the gain. **The fader's travel** gives room near 0 dB: +6 dB at the top,
+  0 at four fifths, −10, −24 and −48 below, −80 (silence) at the bottom. A drag follows
+  the pointer from where it was pressed (taking the thumb moves nothing); Ctrl gives whole
+  dB; one step for the drag (a merge key); Escape takes it back.
+- **The inspector's Bus section** for the picked strip: name (a rename carries its
+  children; names the player keeps and taken ones refused), output (a choice of the master
+  and every bus but itself and those it is fed by), gain, balance and voices (the
+  inspector's numbers: dragged with the snapping rules, typed with expressions, ↺), and
+  reverb. The master has its gain and balance. Picking an entity or a file drops the bus.
+- **+ Bus** ("Audio: Add Bus") adds `bus` (`bus 2`, …) into the master, picked; a picked
+  strip's × removes its bus, its children going to the bus it fed.
+- **Each change is a file step** of the one history (`History::change_file`, as material
+  files are), its name the change ("Mixer: music −6.0 dB"); undo and redo put the text
+  back. The layout goes to the player the frame after (`Player::set_mixer_layout`), so the
+  game hears a fader as it moves, editing or playing.
+- **Ctrl+S** writes `main.mixer` with the scene. The header says "unsaved (Ctrl+S writes
+  it)", or "not written yet: the built-in buses play". `.mixer` files carry their id in
+  their header (`AssetKind::Mixer` is one of ours). A file changed on disk is read again
+  when the editor holds no edits of its own; with edits, they go to the player again over
+  the file it read.
+- **Not done:** the meters, held peaks and clip lights; solo, mute, bypass and Monitor; the
+  header's output numbers; autosave of an unsaved layout; edits made in Play marked, and
+  the command that takes them back (the team's answer 3a); the panel's own keys; strips
+  dragged into a new order; bus renames following into the scene's sources; effects and
+  sends (E11-2).
+- **Tests:** the fader's travel (round trips, the room near 0 dB, the gain's text); buses
+  added, renamed, moved and removed with the layout kept whole (loops refused, children
+  following); the doc unsaved once edited, its text back on undo, opened again from its
+  file with its id; the panel: Alt+A's strips, a fader drag as one step with undo and redo,
+  the Bus section's rows, + Bus, the output list without loops, reverb, the file written
+  and read back, × as a step; on the player (GPU): a bus added in the editor heard by the
+  player's mixer the next frame, the file only once saved, undone off the player again.

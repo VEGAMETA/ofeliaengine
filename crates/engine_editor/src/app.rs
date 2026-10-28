@@ -188,6 +188,8 @@ const MESSAGE_SECONDS: f32 = 4.0;
 const PROFILER_TAB: usize = 6;
 /// The bottom tab of the script debugger's panel (ADR 0119 E9-1b-3).
 const DEBUGGER_TAB: usize = 2;
+/// The bottom bar's Audio tab: the mixer (E11-1).
+const AUDIO_TAB: usize = 3;
 
 /// How many closed scenes "Reopen Closed Scene" can bring back.
 const CLOSED_KEPT: usize = 20;
@@ -564,6 +566,7 @@ pub fn editor<G: Game>(
         crate::sound_view::TEXTURE[1],
     )?;
     editor.wave_texture = Some(wave.sampled_index());
+    editor.mixer_path = settings.audio.layout.to_string_lossy().replace('\\', "/");
     let shared = Rc::new(RefCell::new(editor));
     // Editing: the world's time stands until Play (ADR 0107 E3), so a scene's tweens,
     // timers and sounds do not change it.
@@ -631,6 +634,9 @@ struct FrameLists {
     /// A material file's shown values (E10-1c).
     material_values: Vec<&'static str>,
     sections: Vec<Section<'static>>,
+    /// The mixer's strips, and the picked bus's outputs (E11-1).
+    strips: Vec<crate::shell::StripView<'static>>,
+    outputs: Vec<&'static str>,
 }
 
 /// What the tree's rows are collected with, kept between frames.
@@ -698,6 +704,9 @@ struct CommandIds {
     history: CommandId,
     /// The profiler's panel (E6-5) opened or closed.
     profiler: CommandId,
+    /// The mixer (E11-1): the Audio tab, and a bus added to it.
+    mixer: CommandId,
+    add_bus: CommandId,
     /// The script debugger's panel (ADR 0119 E9-1b-3) opened or closed.
     debugger: CommandId,
     find: CommandId,
@@ -857,6 +866,8 @@ fn commands() -> (Commands, CommandIds) {
         tasks: c.register("view.tasks", "View", "Tasks"),
         history: c.register("view.history", "View", "History"),
         profiler: c.register("view.profiler", "View", "Profiler"),
+        mixer: c.register("view.mixer", "View", "Audio Mixer"),
+        add_bus: c.register("audio.add_bus", "Audio", "Add Bus"),
         debugger: c.register("view.debugger", "View", "Debugger"),
         find: c.register("scene.find", "Scene", "Go to Object"),
         select_next: c.register("scene.select_next", "Scene", "Select Next Row"),
@@ -1067,6 +1078,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+J", ids.output),
         // VS Code's Run and Debug view.
         ("Ctrl+Shift+D", ids.debugger),
+        ("Alt+A", ids.mixer),
         ("Ctrl+P", ids.find),
         ("Ctrl+R", ids.restart),
         ("Space", ids.local_axes),
@@ -1190,6 +1202,19 @@ impl engine_scene::text::ReadRefs for IndexRefs<'_> {
             .copied()
             .ok_or_else(|| format!("no entity has the scene id {id}"))
     }
+}
+
+/// A bus's fader or number being dragged (E11-1b): its bus and row, the value at the
+/// press, where a fader was pressed (its position and the pointer's height), the step's
+/// merge key, whether it moved.
+#[derive(Debug, Clone)]
+struct MixerDrag {
+    bus: String,
+    row: crate::mixer::BusRow,
+    start: f32,
+    fader: Option<(f32, f32)>,
+    merge: u64,
+    moved: bool,
 }
 
 /// What the editor asks of the player's sound preview (E11-3b), sent with its next frame.
@@ -2256,6 +2281,21 @@ struct Editor {
     /// overlay's bindless index; none without an overlay).
     sound_view: Option<crate::sound_view::SoundView>,
     wave_texture: Option<u32>,
+    /// The mixer (E11-1): its layout file's path (`AudioSettings::layout` under the
+    /// project), held once the Audio tab opens (or why it could not be read), the bus
+    /// picked (the inspector shows it), a fader or number being dragged, the number being
+    /// typed, the open output list, the inspector's section of the picked bus, the panel's
+    /// header and the picked bus's numbers as text.
+    mixer_path: String,
+    mixer: Option<crate::mixer::MixerDoc>,
+    mixer_error: Option<String>,
+    mixer_picked: Option<String>,
+    mixer_drag: Option<MixerDrag>,
+    mixer_typing: Option<usize>,
+    mixer_choice: Option<usize>,
+    mixer_section: Option<usize>,
+    mixer_header: String,
+    bus_texts: [String; 3],
     /// The material whose rows the inspector shows (the one picked in the dock, else the
     /// selected object's), its section's title, the models query that counts its users, and
     /// the material files that could not be read (not tried again until written anew).
@@ -3052,6 +3092,16 @@ impl Editor {
             browser_columns: 4,
             sound_view: None,
             wave_texture: None,
+            mixer_path: String::from("main.mixer"),
+            mixer: None,
+            mixer_error: None,
+            mixer_picked: None,
+            mixer_drag: None,
+            mixer_typing: None,
+            mixer_choice: None,
+            mixer_section: None,
+            mixer_header: String::new(),
+            bus_texts: Default::default(),
             shown_material: None,
             material_title: String::new(),
             material_models: None,
@@ -3480,6 +3530,7 @@ impl Editor {
         }
         self.thumbnails.begin_frame();
         self.follow_sound_view();
+        self.follow_mixer();
         if let Some(under) = self.under_pointer.take() {
             self.offer_under_pointer(world, under);
         }
@@ -3821,7 +3872,62 @@ impl Editor {
         self.material_section = None;
         let mut sound_section = None;
         let scale_value: [&str; 1];
-        if let Some(asset) = &self.inspected {
+        let bus_values: [&str; 3];
+        self.mixer_section = None;
+        let mut outputs: Vec<&str> = recycle(std::mem::take(&mut self.lists.outputs));
+        let picked = self.mixer_picked.as_deref().and_then(|bus| {
+            let doc = self.mixer.as_ref()?;
+            doc.strip(bus).map(|_| (doc, bus))
+        });
+        if let Some((doc, bus)) = picked {
+            // The picked bus of the mixer (E11-1b): its name, output, fader, balance,
+            // voices and reverb.
+            use crate::mixer::BusRow;
+            bus_values = [
+                self.bus_texts[0].as_str(),
+                self.bus_texts[1].as_str(),
+                self.bus_texts[2].as_str(),
+            ];
+            let layout = doc.layout.buses.get(bus);
+            let parent = layout
+                .map(|l| l.parent.as_str())
+                .filter(|p| !p.is_empty())
+                .unwrap_or(crate::mixer::MASTER);
+            outputs.extend(crate::mixer::outputs(&doc.layout, bus));
+            let rows = BusRow::of(bus);
+            for (k, &row) in rows.iter().enumerate() {
+                let typing = (self.mixer_typing == Some(k)).then_some(0);
+                let number = |i: usize| Widget::Numbers {
+                    values: &bus_values[i..=i],
+                    labels: &[],
+                    typing,
+                    lock: None,
+                };
+                let widget = match row {
+                    BusRow::Name => Widget::Edit(bus),
+                    BusRow::Output => Widget::Choice {
+                        current: parent,
+                        open: (self.mixer_choice == Some(k)).then_some(outputs.as_slice()),
+                    },
+                    BusRow::Gain => number(0),
+                    BusRow::Balance => number(1),
+                    BusRow::Voices => number(2),
+                    BusRow::Reverb => Widget::Check(Some(layout.is_some_and(|l| l.reverb))),
+                };
+                asset_fields.push(Field {
+                    name: row.name(),
+                    widget,
+                    changed: false,
+                });
+            }
+            self.mixer_section = Some(sections.len());
+            sections.push(Section {
+                title: "Bus",
+                fields: &asset_fields[..],
+                script: "",
+                removable: false,
+            });
+        } else if let Some(asset) = &self.inspected {
             scale_value = [asset.scale_text.as_str()];
             let list = &mut asset_fields;
             list.push(Field {
@@ -3992,7 +4098,9 @@ impl Editor {
             }
         }));
         self.selection_label.clear();
-        if let Some(asset) = &self.inspected {
+        if let Some(bus) = self.mixer_section.and(self.mixer_picked.as_deref()) {
+            let _ = write!(self.selection_label, "Bus \u{b7} {bus}");
+        } else if let Some(asset) = &self.inspected {
             self.selection_label
                 .push_str(asset.path.rsplit('/').next().unwrap_or(&asset.path));
         } else if let Some(e) = self.active() {
@@ -4742,6 +4850,25 @@ impl Editor {
             outline: &outline_rows,
             filter: &self.code_filter,
         });
+        // The Audio tab's mixer (E11-1): a strip per bus, the master first.
+        let mut strips: Vec<crate::shell::StripView<'_>> =
+            recycle(std::mem::take(&mut self.lists.strips));
+        if self.bottom == Some(AUDIO_TAB)
+            && let Some(doc) = &self.mixer
+        {
+            strips.extend(doc.strips.iter().map(|s| crate::shell::StripView {
+                name: &s.name,
+                depth: s.depth,
+                fader: crate::mixer::fader_position(s.gain),
+                gain: &s.gain_text,
+                output: &s.output,
+                selected: self.mixer_picked.as_deref() == Some(s.name.as_str()),
+            }));
+        }
+        let mixer_view = (self.bottom == Some(AUDIO_TAB)).then(|| crate::shell::MixerView {
+            header: &self.mixer_header,
+            strips: &strips,
+        });
         let model = ShellModel {
             scenes: &scenes,
             active_scene: active_tab,
@@ -4782,6 +4909,7 @@ impl Editor {
             tasks: (self.bottom == Some(1)).then_some(task_rows.as_slice()),
             history: self.history_shown.then_some(history_rows.as_slice()),
             profiler: profiler_view,
+            mixer: mixer_view,
             debugger: debugger_view,
             playing,
             paused: self.play.as_ref().is_some_and(|p| p.paused),
@@ -4846,6 +4974,8 @@ impl Editor {
         self.lists.view_modes = recycle(view_mode_items);
         self.lists.folders = recycle(folder_items);
         self.lists.files = recycle(file_items);
+        self.lists.strips = recycle(strips);
+        self.lists.outputs = recycle(outputs);
         self.lists.scenes = recycle(scenes);
         self.listing = self
             .ui
@@ -4857,6 +4987,26 @@ impl Editor {
 
         if let Some(i) = response.tool {
             self.active_tool = i;
+        }
+        // The mixer (E11-1b): + Bus, a strip picked, a fader, a bus taken away.
+        if response.mixer_add {
+            self.run(world, self.ids.add_bus);
+        }
+        if let Some(i) = response.mixer_strip
+            && let Some(name) = self.strip_name(i)
+        {
+            self.pick_bus(&name);
+        }
+        if let Some(fader) = response.mixer_fader {
+            self.use_fader(world, fader);
+        }
+        if let Some(i) = response.mixer_remove
+            && let Some(name) = self.strip_name(i)
+            && self.mixer_step(world, &format!("Mixer: remove {name}"), None, |l| {
+                crate::mixer::remove_bus(l, &name);
+            })
+        {
+            self.mixer_picked = None;
         }
         // The inspector's sound (E11-3c): ▶ or ■, the loop, the waveform.
         if response.sound_play
@@ -5120,10 +5270,11 @@ impl Editor {
                 0 => self.run(world, self.ids.output),
                 1 => self.run(world, self.ids.tasks),
                 DEBUGGER_TAB => self.run(world, self.ids.debugger),
+                AUDIO_TAB => self.run(world, self.ids.mixer),
                 PROFILER_TAB => self.run(world, self.ids.profiler),
                 _ => self.say(String::from(
-                    "Only the Output, the Tasks, the Debugger and the Profiler are there yet \
-                     (ADR 0107's phases)",
+                    "Only the Output, the Tasks, the Debugger, the Audio mixer and the Profiler \
+                     are there yet (ADR 0107's phases)",
                 )),
             }
         }
@@ -5326,7 +5477,9 @@ impl Editor {
             }
         }
         if let Some(event) = response.field {
-            if Some(event.section) == self.material_section {
+            if Some(event.section) == self.mixer_section {
+                self.edit_bus(world, event);
+            } else if Some(event.section) == self.material_section {
                 self.edit_material(world, event);
             } else if self.inspected.is_some() {
                 self.edit_import(event);
@@ -5354,7 +5507,9 @@ impl Editor {
                     field,
                     action,
                 };
-                if Some(section) == self.material_section {
+                if Some(section) == self.mixer_section {
+                    self.edit_bus(world, event);
+                } else if Some(section) == self.material_section {
                     self.edit_material(world, event);
                 } else if self.inspected.is_some() {
                     self.edit_import(event);
@@ -5394,6 +5549,14 @@ impl Editor {
             && self.material_drag.is_none()
         {
             self.stop_preview();
+        }
+        // A mixer's fader or number too (E11-1b).
+        if self.ui.input().keys.contains(&UiKey::Escape)
+            && let Some(drag) = self.mixer_drag.take()
+            && drag.moved
+        {
+            self.history.revert(world, drag.merge);
+            self.put_back_files();
         }
         // A material's number too (E10-1c): the drag ends, and what it moved goes back.
         if self.ui.input().keys.contains(&UiKey::Escape)
@@ -6344,6 +6507,7 @@ impl Editor {
             self.open_choice = None;
             self.typing = None;
             self.drag = None;
+            self.mixer_picked = None;
         }
         self.reveal = self.active();
     }
@@ -12539,6 +12703,14 @@ impl Editor {
             } else {
                 Some(PROFILER_TAB)
             };
+        } else if id == ids.mixer {
+            self.bottom = if self.bottom == Some(AUDIO_TAB) {
+                None
+            } else {
+                Some(AUDIO_TAB)
+            };
+        } else if id == ids.add_bus {
+            self.add_bus(world);
         } else if id == ids.debugger {
             self.bottom = if self.bottom == Some(DEBUGGER_TAB) {
                 None
@@ -12651,11 +12823,15 @@ impl Editor {
                 match self.save(world) {
                     Ok(path) => {
                         // The material files edited since they were written, with it (E10-1c).
-                        let message = match self.save_materials() {
+                        let mut message = match self.save_materials() {
                             0 => format!("Saved {}", path.display()),
                             1 => format!("Saved {} and a material", path.display()),
                             n => format!("Saved {} and {n} materials", path.display()),
                         };
+                        // And the mixer's layout (E11-1b).
+                        if self.save_mixer() {
+                            message.push_str(", and the mixer");
+                        }
                         self.say(message);
                     }
                     Err(e) => self.say(format!("Not saved: {e}")),
@@ -13389,6 +13565,7 @@ impl Editor {
         let Some(e) = self.asset_db.get(id) else {
             return;
         };
+        self.mixer_picked = None;
         let (path, kind) = (e.path.clone(), e.kind);
         let folder = path.rsplit_once('/').map_or("", |(f, _)| f).to_owned();
         self.open_folder(&folder);
@@ -13954,6 +14131,360 @@ impl Editor {
                 && let Err(e) = doc.put_text(&text)
             {
                 log::warn!(target: "engine_editor", "{e}");
+            }
+            // The mixer's layout (E11-1b).
+            if let Some(doc) = self.mixer.as_mut().filter(|d| d.id == id)
+                && let Err(e) = doc.put_text(&text)
+            {
+                log::warn!(target: "engine_editor", "{e}");
+            }
+        }
+    }
+
+    /// The mixer's layout held (E11-1): its file, or the built-in buses until it is first
+    /// saved; why it could not be read is kept (and said once) until the file changes.
+    fn open_mixer(&mut self) {
+        if self.mixer.is_some() || self.mixer_error.is_some() {
+            return;
+        }
+        match crate::mixer::MixerDoc::open(&self.root, &self.mixer_path) {
+            Ok(doc) => self.mixer = Some(doc),
+            Err(e) => {
+                self.say(format!("The mixer: {e}"));
+                self.mixer_error = Some(e);
+            }
+        }
+    }
+
+    /// The mixer for the frame (E11-1): held once the Audio tab opens, its header and the
+    /// picked bus's numbers written.
+    fn follow_mixer(&mut self) {
+        if self.bottom == Some(AUDIO_TAB) {
+            self.open_mixer();
+        }
+        self.mixer_header.clear();
+        let Some(doc) = &self.mixer else {
+            if let Some(e) = &self.mixer_error {
+                self.mixer_header.push_str(e);
+            }
+            return;
+        };
+        self.mixer_header.push_str(&doc.path);
+        if doc.dirty() {
+            self.mixer_header
+                .push_str(" \u{b7} unsaved (Ctrl+S writes it)");
+        } else if !doc.exists {
+            self.mixer_header
+                .push_str(" \u{b7} not written yet: the built-in buses play");
+        }
+        let Some(bus) = self.mixer_picked.as_deref() else {
+            return;
+        };
+        let (gain, balance, voices) = if bus == crate::mixer::MASTER {
+            (doc.layout.master.gain, doc.layout.master.balance, 0)
+        } else if let Some(b) = doc.layout.buses.get(bus) {
+            (b.gain, b.balance, b.voices)
+        } else {
+            return;
+        };
+        for t in &mut self.bus_texts {
+            t.clear();
+        }
+        let _ = write!(self.bus_texts[0], "{gain:.1}");
+        let _ = write!(self.bus_texts[1], "{balance:.2}");
+        let _ = write!(self.bus_texts[2], "{voices}");
+    }
+
+    /// Strip `i`'s bus.
+    fn strip_name(&self, i: usize) -> Option<String> {
+        Some(self.mixer.as_ref()?.strips.get(i)?.name.clone())
+    }
+
+    /// Bus `name` picked in the mixer: the inspector shows it.
+    fn pick_bus(&mut self, name: &str) {
+        self.mixer_picked = Some(name.to_owned());
+        self.inspected = None;
+        self.mixer_choice = None;
+        self.mixer_typing = None;
+    }
+
+    /// `edit` made to the mixer's layout as a step called `name` (`merge`: one step for a
+    /// gesture's moves): its text before and after it in the history. Whether it changed.
+    fn mixer_step(
+        &mut self,
+        world: &mut World,
+        name: &str,
+        merge: Option<u64>,
+        edit: impl FnOnce(&mut engine_app::MixerFile),
+    ) -> bool {
+        let Some(doc) = self.mixer.as_mut() else {
+            return false;
+        };
+        let Some((before, after)) = doc.edit(edit) else {
+            return false;
+        };
+        let id = doc.id;
+        self.history.begin(name, merge);
+        self.history.change_file(id, &before, &after);
+        self.history.commit(world);
+        true
+    }
+
+    /// A bus added to the mixer (E11-1b), picked.
+    fn add_bus(&mut self, world: &mut World) {
+        self.open_mixer();
+        let mut name = String::new();
+        if self.mixer_step(world, "Mixer: add a bus", None, |l| {
+            name = crate::mixer::add_bus(l);
+        }) {
+            self.say(format!("Bus `{name}` added: name it in the inspector"));
+            self.pick_bus(&name);
+        }
+    }
+
+    /// A strip's fader used (E11-1b): pressed, it holds the gain; dragged, the gain follows
+    /// the pointer from where it was (Ctrl: whole dB), one step for the drag; let go, the
+    /// drag ends.
+    fn use_fader(&mut self, world: &mut World, fader: crate::shell::FaderUse) {
+        let Some(name) = self.strip_name(fader.strip) else {
+            return;
+        };
+        let (Some(r), Some([_, y])) = (self.ui.rect_of(fader.node), self.ui.input().mouse) else {
+            return;
+        };
+        if fader.pressed {
+            self.gestures += 1;
+            let start = self
+                .mixer
+                .as_ref()
+                .and_then(|d| d.gain(&name))
+                .unwrap_or(0.0);
+            self.mixer_drag = Some(MixerDrag {
+                bus: name.clone(),
+                row: crate::mixer::BusRow::Gain,
+                start,
+                fader: Some((crate::mixer::fader_position(start), y)),
+                merge: self.gestures,
+                moved: false,
+            });
+            self.pick_bus(&name);
+            return;
+        }
+        let Some(drag) = self.mixer_drag.clone().filter(|d| d.bus == name) else {
+            return;
+        };
+        if fader.released {
+            self.mixer_drag = None;
+            return;
+        }
+        let Some((from, from_y)) = drag.fader else {
+            return;
+        };
+        let travel = (r.size[1] - 8.0).max(1.0);
+        let mut db = crate::mixer::fader_gain(from + (from_y - y) / travel);
+        if self.input.ctrl() {
+            db = db.round();
+        }
+        let mut text = String::new();
+        crate::mixer::gain_text(&mut text, db);
+        if self.mixer_step(
+            world,
+            &format!("Mixer: {name} {text} dB"),
+            Some(drag.merge),
+            |l| crate::mixer::set_gain(l, &name, db),
+        ) && let Some(d) = self.mixer_drag.as_mut()
+        {
+            d.moved = true;
+        }
+    }
+
+    /// A field of the picked bus used in the inspector (E11-1b): each change a step of the
+    /// mixer's layout.
+    fn edit_bus(&mut self, world: &mut World, event: FieldEvent) {
+        use crate::mixer::{self as m, BusRow};
+        let Some(bus) = self.mixer_picked.clone() else {
+            return;
+        };
+        let Some(&row) = BusRow::of(&bus).get(event.field) else {
+            return;
+        };
+        let Some(doc) = self.mixer.as_ref() else {
+            return;
+        };
+        let value = |doc: &m::MixerDoc| -> f32 {
+            let b = doc.layout.buses.get(&bus);
+            match row {
+                BusRow::Gain => doc.gain(&bus).unwrap_or(0.0),
+                BusRow::Balance if bus == m::MASTER => doc.layout.master.balance,
+                BusRow::Balance => b.map_or(0.0, |b| b.balance),
+                BusRow::Voices => b.map_or(0.0, |b| b.voices as f32),
+                _ => 0.0,
+            }
+        };
+        let current = value(doc);
+        let set = |row: BusRow, bus: &str, v: f32| {
+            let bus = bus.to_owned();
+            move |l: &mut engine_app::MixerFile| match row {
+                BusRow::Gain => m::set_gain(l, &bus, v),
+                BusRow::Balance => m::set_balance(l, &bus, v),
+                BusRow::Voices => m::set_voices(l, &bus, v.round().max(0.0) as u32),
+                _ => {}
+            }
+        };
+        let label = row.name();
+        match event.action {
+            FieldAction::Drag { travel, start, .. } => {
+                if !matches!(row, BusRow::Gain | BusRow::Balance | BusRow::Voices) {
+                    return;
+                }
+                let other = self
+                    .mixer_drag
+                    .as_ref()
+                    .is_none_or(|d| d.row != row || d.bus != bus);
+                if start || other {
+                    self.gestures += 1;
+                    self.mixer_drag = Some(MixerDrag {
+                        bus: bus.clone(),
+                        row,
+                        start: current,
+                        fader: None,
+                        merge: self.gestures,
+                        moved: false,
+                    });
+                    self.mixer_typing = None;
+                    return;
+                }
+                let Some(drag) = self.mixer_drag.as_mut() else {
+                    return;
+                };
+                if travel != 0.0 {
+                    drag.moved = true;
+                }
+                let drag = drag.clone();
+                let quantity = if row == BusRow::Voices {
+                    Quantity::Integer
+                } else {
+                    Quantity::Number { step: None }
+                };
+                let (shift, ctrl) = (self.input.shift(), self.input.ctrl());
+                let v = self
+                    .snapping
+                    .drag(quantity, f64::from(drag.start), travel, shift, ctrl)
+                    as f32;
+                self.mixer_step(
+                    world,
+                    &format!("Mixer: {bus} {label}"),
+                    Some(drag.merge),
+                    set(row, &bus, v),
+                );
+            }
+            FieldAction::Release => {
+                if let Some(drag) = self.mixer_drag.take()
+                    && !drag.moved
+                    && drag.fader.is_none()
+                {
+                    self.mixer_typing = Some(event.field);
+                }
+            }
+            FieldAction::Typed { commit, .. } => {
+                self.mixer_typing = None;
+                if !commit {
+                    return;
+                }
+                let text = self.ui.edited_text().trim().to_owned();
+                match crate::expr::evaluate(&text, f64::from(current)) {
+                    Ok(v) => {
+                        self.mixer_step(
+                            world,
+                            &format!("Mixer: {bus} {label}"),
+                            None,
+                            set(row, &bus, v as f32),
+                        );
+                    }
+                    Err(reason) => self.say(format!("{label}: {reason}")),
+                }
+            }
+            FieldAction::Text { commit } => {
+                if !commit || row != BusRow::Name {
+                    return;
+                }
+                let to = self.ui.edited_text().trim().to_owned();
+                let mut refused = None;
+                let renamed = self.mixer_step(world, &format!("Mixer: rename {bus}"), None, |l| {
+                    if let Err(e) = m::rename_bus(l, &bus, &to) {
+                        refused = Some(e);
+                    }
+                });
+                match refused {
+                    Some(e) => self.say(format!("Not renamed: {e}")),
+                    None if renamed => self.mixer_picked = Some(to),
+                    None => {}
+                }
+            }
+            FieldAction::Toggle => {
+                self.mixer_step(world, &format!("Mixer: {bus} reverb"), None, |l| {
+                    m::toggle_reverb(l, &bus);
+                });
+            }
+            FieldAction::Open => {
+                self.mixer_choice = (self.mixer_choice != Some(event.field)).then_some(event.field);
+            }
+            FieldAction::Choose(i) => {
+                self.mixer_choice = None;
+                let Some(to) = m::outputs(&doc.layout, &bus)
+                    .get(i)
+                    .map(|s| (*s).to_owned())
+                else {
+                    return;
+                };
+                let mut refused = None;
+                self.mixer_step(world, &format!("Mixer: {bus} into {to}"), None, |l| {
+                    if let Err(e) = m::set_parent(l, &bus, &to) {
+                        refused = Some(e);
+                    }
+                });
+                if let Some(e) = refused {
+                    self.say(format!("Not moved: {e}"));
+                }
+            }
+            FieldAction::Reset => {
+                let name = format!("Mixer: reset {bus} {label}");
+                match row {
+                    BusRow::Gain | BusRow::Balance | BusRow::Voices => {
+                        self.mixer_step(world, &name, None, set(row, &bus, 0.0));
+                    }
+                    BusRow::Output => {
+                        self.mixer_step(world, &name, None, |l| {
+                            let _ = m::set_parent(l, &bus, m::MASTER);
+                        });
+                    }
+                    BusRow::Reverb => {
+                        self.mixer_step(world, &name, None, |l| {
+                            if let Some(b) = l.buses.get_mut(&bus) {
+                                b.reverb = false;
+                            }
+                        });
+                    }
+                    BusRow::Name => {}
+                }
+            }
+            FieldAction::Lock | FieldAction::Pick => {}
+        }
+    }
+
+    /// The mixer's layout written when it was edited (E11-1b): whether it was.
+    fn save_mixer(&mut self) -> bool {
+        let Some(doc) = self.mixer.as_mut().filter(|d| d.dirty()) else {
+            return false;
+        };
+        match std::fs::write(self.root.join(&doc.path), &doc.text) {
+            Ok(()) => {
+                doc.saved_now();
+                true
+            }
+            Err(e) => {
+                log::error!(target: "engine_editor", "{}: {e}", doc.path);
+                false
             }
         }
     }
@@ -17562,6 +18093,16 @@ impl<G> EditorGame<G> {
             if shared.sound_view.as_ref().is_some_and(|v| v.id == id) {
                 shared.sound_view = None;
             }
+            // The mixer's layout written anew (E11-1b): read again when unedited; edited,
+            // given to the player again over the file it reads.
+            if let Some(doc) = shared.mixer.as_mut().filter(|d| d.id == id) {
+                if doc.dirty() {
+                    doc.given = false;
+                } else {
+                    shared.mixer = None;
+                    shared.mixer_error = None;
+                }
+            }
             // A material the inspector holds, unedited: read again (edited, its edits stay
             // until Ctrl+S writes them).
             if let Some(k) = shared.material_docs.iter().position(|d| d.id == id)
@@ -17581,6 +18122,14 @@ impl<G> EditorGame<G> {
                 let path = entry.path.clone();
                 player.asset_changed(id, &path);
             }
+        }
+        // The mixer's layout as the editor holds it (E11-1b): given to the player once it
+        // changes, what plays going on.
+        if let Some(doc) = shared.mixer.as_mut()
+            && !doc.given
+        {
+            player.set_mixer_layout(&doc.layout);
+            doc.given = true;
         }
         // Sound previews (E11-3b): what the editor asked, then the preview as it plays.
         match shared.preview_ask.take() {
@@ -22849,6 +23398,111 @@ mod tests {
         click(&mut ed, &mut world, at);
         ed.update(&mut world);
         assert!(ed.sound_view.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_mixer_panel_edits_its_layout_as_steps_and_writes_it() {
+        let dir = folder("mixer-panel");
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        // Alt+A: the Audio tab, a strip per built-in bus.
+        let mixer = ed.ids.mixer;
+        ed.run(&mut world, mixer);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        for name in ["master", "effects", "music", "ui", "voice"] {
+            assert!(!texts(&ed, name).is_empty(), "{name}'s strip");
+        }
+        let header = "main.mixer \u{b7} not written yet: the built-in buses play";
+        assert!(!texts(&ed, header).is_empty(), "the file's state");
+        // Music's fader taken by its thumb (0 dB) and dragged 40 px down: one step.
+        let name = texts(&ed, "music")[0];
+        let left = name.pos[0] - 6.0;
+        let output = texts(&ed, "\u{2192} master")
+            .into_iter()
+            .find(|r| (r.pos[0] - left).abs() < 40.0)
+            .expect("music's output");
+        let thumb = [left + 55.0, output.pos[1] + output.size[1] + 3.0 + 28.0];
+        mouse(&mut ed, thumb, None);
+        ed.update(&mut world);
+        mouse(&mut ed, thumb, Some(true));
+        ed.update(&mut world);
+        let gain = |ed: &Editor| ed.mixer.as_ref().unwrap().gain("music").unwrap();
+        assert_eq!(gain(&ed), 0.0, "taken, not moved");
+        assert_eq!(ed.mixer_picked.as_deref(), Some("music"), "picked");
+        mouse(&mut ed, [thumb[0], thumb[1] + 20.0], None);
+        ed.update(&mut world);
+        mouse(&mut ed, [thumb[0], thumb[1] + 40.0], None);
+        ed.update(&mut world);
+        mouse(&mut ed, [thumb[0], thumb[1] + 40.0], Some(false));
+        ed.update(&mut world);
+        assert!((gain(&ed) + 19.3).abs() < 0.2, "{}", gain(&ed));
+        assert!(ed.mixer.as_ref().unwrap().dirty());
+        // One step for the drag: undone, 0 dB; redone, the drag's end.
+        let (undo, redo) = (ed.ids.undo, ed.ids.redo);
+        ed.run(&mut world, undo);
+        assert_eq!(gain(&ed), 0.0);
+        ed.run(&mut world, redo);
+        assert!((gain(&ed) + 19.3).abs() < 0.2);
+        // The inspector shows the picked bus: its rows.
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Bus \u{b7} music").is_empty(), "the heading");
+        let section = ed.mixer_section.expect("the bus's section");
+        for row in ["name", "output", "gain", "balance", "voices", "reverb"] {
+            assert!(!texts(&ed, row).is_empty(), "{row}");
+        }
+        // + Bus: a bus picked; into effects through the output list; reverberant.
+        let add = texts(&ed, "Bus")
+            .into_iter()
+            .find(|r| r.pos[1] > 400.0)
+            .expect("the panel's + Bus");
+        click(&mut ed, &mut world, middle(add));
+        assert_eq!(ed.mixer_picked.as_deref(), Some("bus"));
+        ed.update(&mut world);
+        let event = |field: usize, action: FieldAction| FieldEvent {
+            section,
+            field,
+            action,
+        };
+        ed.edit_bus(&mut world, event(1, FieldAction::Open));
+        ed.update(&mut world);
+        let outputs = crate::mixer::outputs(&ed.mixer.as_ref().unwrap().layout, "bus");
+        let effects = outputs.iter().position(|&o| o == "effects").unwrap();
+        ed.edit_bus(&mut world, event(1, FieldAction::Choose(effects)));
+        ed.edit_bus(&mut world, event(5, FieldAction::Toggle));
+        let layout = ed.mixer.as_ref().unwrap().layout.clone();
+        assert_eq!(layout.buses["bus"].parent, "effects");
+        assert!(layout.buses["bus"].reverb);
+        // Effects cannot feed its own child: the list leaves it out.
+        assert!(!crate::mixer::outputs(&layout, "effects").contains(&"bus"));
+        // Written: the file reads back as the panel holds it, and is no longer unsaved.
+        assert!(ed.save_mixer());
+        let written = engine_app::MixerFile::load(&dir.join("main.mixer")).unwrap();
+        assert_eq!(written, layout);
+        assert!(!ed.mixer.as_ref().unwrap().dirty());
+        // The bus's × takes it away, as a step.
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let strip = ed.mixer.as_ref().unwrap().strip("bus").unwrap();
+        let close = texts(&ed, icons::CLOSE)
+            .into_iter()
+            .find(|r| r.pos[1] > 400.0)
+            .expect("the picked strip's ×");
+        click(&mut ed, &mut world, middle(close));
+        assert!(!ed.mixer.as_ref().unwrap().layout.buses.contains_key("bus"));
+        assert!(strip > 0);
+        ed.run(&mut world, undo);
+        assert!(ed.mixer.as_ref().unwrap().layout.buses.contains_key("bus"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

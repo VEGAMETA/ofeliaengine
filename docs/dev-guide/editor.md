@@ -178,6 +178,7 @@ editor = ["dep:engine_editor"]
 | Find an asset (the palette with `#`) | Ctrl+Shift+P, then `#` |
 | Rename the picked file (after a click in the FileSystem dock) | F2 |
 | Where the picked asset is used | Shift+F12 |
+| The mixer (the Audio tab), open or closed | Alt+A |
 | Play or stop the picked sound; pick the next file (after a click in the FileSystem dock) | Space; the arrows |
 | Stop the sound playing | Escape |
 | Move, scale, rotate the selection at once ([keyboard transforms](#keyboard-transforms)) | Q, E, R |
@@ -906,6 +907,29 @@ The bottom bar's **Profiler** tab ("View: Profiler") shows how long the frames t
   panel is open.
 
 For a whole timeline, run under Tracy with the profiling build ([profiling.md](profiling.md)).
+
+## The mixer
+
+The bottom bar's **Audio** tab (Alt+A, "View: Audio Mixer") is your game's mix: the
+project's `main.mixer` ([audio.md](audio.md), ADR 0121), or the built-in buses until you
+change something.
+
+- **A strip per bus**, the master first, then each bus after the bus it feeds (a dot for
+  each step down): its name, where it goes, its fader and its gain in dB.
+- **The fader:** drag its thumb; there is more travel near 0 dB, as on a console, with
+  marks at 0, −6, −12, −24 and −48. Hold Ctrl for whole dB. The game hears it at once,
+  playing or not. A drag is one undo step, and Escape takes it back.
+- **A click on a strip** shows its bus in the inspector: its **name** (a rename carries the
+  buses it feeds along), its **output** (the list leaves out the buses that would make the
+  sound go round), its **gain**, **balance** and **voices** (the most mixed at once, 0 for
+  no limit), dragged or typed as every number is, and **reverb** (its 3D sounds take on
+  the room).
+- **+ Bus** ("Audio: Add Bus") adds one into the master, picked to be named; a picked
+  strip's × takes it away, and the buses it was fed by go to the bus it fed.
+- Every change is an undo step ("Mixer: music −6.0 dB"), and Ctrl+S writes `main.mixer`
+  with the scene. The header says when it is unsaved, or not written yet.
+- A `main.mixer` changed outside the editor is read again, unless you have changes of
+  your own in it.
 
 ## Scenes in tabs
 

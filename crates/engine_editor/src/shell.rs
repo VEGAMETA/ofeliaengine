@@ -895,6 +895,8 @@ pub struct ShellModel<'a> {
     pub tasks: Option<&'a [TaskRow<'a>]>,
     /// The profiler's panel there instead, while its tab is open.
     pub profiler: Option<ProfilerView<'a>>,
+    /// The mixer there instead, while the Audio tab is open (E11-1).
+    pub mixer: Option<MixerView<'a>>,
     /// The script debugger's panel there instead, while its tab is open.
     pub debugger: Option<DebuggerView<'a>>,
     /// The scene dock's History tab (E6-4) instead of the tree, while it is chosen: its
@@ -1016,6 +1018,14 @@ pub struct ShellResponse {
     pub sound_loop: bool,
     /// Its waveform was pressed, dragged along or let go.
     pub sound_wave: Option<WaveUse>,
+    /// The mixer (E11-1): + Bus was clicked.
+    pub mixer_add: bool,
+    /// A strip was clicked: its bus is picked.
+    pub mixer_strip: Option<usize>,
+    /// A strip's fader was pressed, dragged or let go.
+    pub mixer_fader: Option<FaderUse>,
+    /// A picked strip's × was clicked: its bus is taken away.
+    pub mixer_remove: Option<usize>,
     /// The inspector field under the mouse (section, field): Backspace resets it, Ctrl+C
     /// and Ctrl+V copy and paste its value.
     pub hovered_field: Option<(usize, usize)>,
@@ -1229,6 +1239,9 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
         }
         if let Some(view) = &model.profiler {
             profiler_panel(ui, view, p);
+        }
+        if let Some(view) = &model.mixer {
+            mixer_panel(ui, view, p, &mut out);
         }
         if let Some(view) = &model.debugger {
             debugger_panel(ui, view, p, &mut out);
@@ -3987,6 +4000,268 @@ fn output_panel(ui: &mut Ui, view: &OutputView<'_>, p: &Palette, out: &mut Shell
             ui.reveal(id);
         }
     });
+}
+
+/// A strip's fader: its height, its thumb's, and the strips' width.
+const FADER_HEIGHT: f32 = 128.0;
+const THUMB: f32 = 8.0;
+const STRIP_WIDTH: f32 = 84.0;
+
+/// The Audio tab's mixer (ADR 0107 E11-1, ADR 0121): its file's state and a strip per
+/// bus, the master first.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MixerView<'a> {
+    /// The file and its state: `main.mixer · unsaved`.
+    pub header: &'a str,
+    /// The strips, the master first, then the tree depth first.
+    pub strips: &'a [StripView<'a>],
+}
+
+/// A strip of the mixer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StripView<'a> {
+    /// Its bus's name.
+    pub name: &'a str,
+    /// How deep under the master (0 the master).
+    pub depth: u8,
+    /// Its fader's position, 0 (the bottom) to 1.
+    pub fader: f32,
+    /// Its gain as text: "−6.0".
+    pub gain: &'a str,
+    /// Where it goes: "→ master".
+    pub output: &'a str,
+    /// Picked: the inspector shows its bus.
+    pub selected: bool,
+}
+
+/// A strip's fader pressed, dragged or let go this frame (E11-1b): the strip and the
+/// fader's node, whose laid-out rectangle says where along it the pointer is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FaderUse {
+    /// The strip.
+    pub strip: usize,
+    /// The fader's node.
+    pub node: u64,
+    /// The button went down on it.
+    pub pressed: bool,
+    /// The button is held since it went down on it.
+    pub held: bool,
+    /// The button went up after going down on it.
+    pub released: bool,
+}
+
+/// Where the pointer at height `y` is along a fader laid out at `rect`, 0 (the bottom)
+/// to 1 (the top): the thumb's middle under it.
+pub fn fader_at(rect: engine_ui::Rect, y: f32) -> f32 {
+    let travel = (rect.size[1] - THUMB).max(1.0);
+    (1.0 - (y - rect.pos[1] - THUMB / 2.0) / travel).clamp(0.0, 1.0)
+}
+
+/// The Audio tab's mixer: its header (the file's state, + Bus), then a strip per bus
+/// side by side, each its name, where it goes, its fader with the marks of
+/// [`crate::mixer::TICKS`] and its gain.
+fn mixer_panel(ui: &mut Ui, view: &MixerView<'_>, p: &Palette, out: &mut ShellResponse) {
+    let panel = Style {
+        size: [Size::Grow(1.0), Size::Fixed(240.0)],
+        direction: Direction::Column,
+        padding: [8.0, 4.0, 8.0, 4.0],
+        gap: 4.0,
+        background: Some(p.dock),
+        ..Style::default()
+    };
+    ui.container("mixer", panel, |ui| {
+        ui.row(
+            "header",
+            Style {
+                size: [Size::Grow(1.0), Size::Fixed(22.0)],
+                gap: 8.0,
+                align_cross: Align::Center,
+                ..Style::default()
+            },
+            |ui| {
+                text(ui, "file", view.header, SMALL, p.text_dim);
+                ui.spacer("fill");
+                let hovered = ui.is_hovered(ui.id("add"));
+                let id = ui.container(
+                    "add",
+                    Style {
+                        padding: [8.0, 2.0, 8.0, 2.0],
+                        gap: 4.0,
+                        radius: 3.0,
+                        background: Some(if hovered { p.field_hover } else { p.header }),
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        text(ui, "icon", icons::PLUS, ICON, p.text_dim);
+                        text(ui, "label", "Bus", TEXT, p.text);
+                    },
+                );
+                if ui.sense(id, false).clicked {
+                    out.mixer_add = true;
+                }
+            },
+        );
+        let strips = ui.row(
+            "strips",
+            Style {
+                size: [Size::Grow(1.0), Size::Grow(1.0)],
+                gap: 2.0,
+                scroll: true,
+                ..Style::default()
+            },
+            |ui| {
+                for (i, strip) in view.strips.iter().enumerate() {
+                    ui.push_id(i as u64);
+                    mixer_strip(ui, i, strip, p, out);
+                    ui.pop_id();
+                }
+            },
+        );
+        let _ = strips;
+    });
+}
+
+/// A strip: its name (× to take a picked bus away), where it goes, its fader and gain.
+fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &mut ShellResponse) {
+    let id = ui.column(
+        "strip",
+        Style {
+            size: [Size::Fixed(STRIP_WIDTH), Size::Grow(1.0)],
+            padding: [6.0, 4.0, 6.0, 4.0],
+            gap: 3.0,
+            radius: 3.0,
+            align_cross: Align::Center,
+            background: Some(if strip.selected {
+                p.selection
+            } else {
+                p.header
+            }),
+            ..Style::default()
+        },
+        |ui| {
+            ui.row(
+                "name",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(18.0)],
+                    gap: 2.0,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    // Its depth under the master, as dots.
+                    let dots = ["", "", "\u{b7}", "\u{b7}\u{b7}", "\u{b7}\u{b7}\u{b7}"];
+                    let indent = dots[usize::from(strip.depth).min(dots.len() - 1)];
+                    if !indent.is_empty() {
+                        text(ui, "depth", indent, SMALL, p.text_dim);
+                    }
+                    text(ui, "text", strip.name, TEXT, p.text);
+                    if strip.selected && strip.depth > 0 {
+                        ui.spacer("fill");
+                        let id = ui.container(
+                            "remove",
+                            Style {
+                                size: [Size::Fixed(16.0), Size::Fixed(16.0)],
+                                radius: 3.0,
+                                align_main: Align::Center,
+                                align_cross: Align::Center,
+                                ..Style::default()
+                            },
+                            |ui| {
+                                text(ui, "icon", icons::CLOSE, 12.0, p.text_dim);
+                            },
+                        );
+                        if ui.sense(id, false).clicked {
+                            out.mixer_remove = Some(i);
+                        }
+                    }
+                },
+            );
+            text(ui, "output", strip.output, SMALL, p.text_dim);
+            ui.row(
+                "fader row",
+                Style {
+                    size: [Size::Fit, Size::Fixed(FADER_HEIGHT)],
+                    gap: 4.0,
+                    ..Style::default()
+                },
+                |ui| {
+                    // The marks: their dB beside the travel.
+                    ui.container(
+                        "marks",
+                        Style {
+                            size: [Size::Fixed(22.0), Size::Fixed(FADER_HEIGHT)],
+                            ..Style::default()
+                        },
+                        |ui| {
+                            for (k, &db) in crate::mixer::TICKS.iter().enumerate() {
+                                ui.push_id(k as u64);
+                                let at = 1.0 - crate::mixer::fader_position(db);
+                                let y = at * (FADER_HEIGHT - THUMB) + THUMB / 2.0 - 6.0;
+                                let label = ["0", "6", "12", "24", "48"][k];
+                                ui.container(
+                                    "mark",
+                                    Style {
+                                        placed: Some([0.0, y.max(0.0)]),
+                                        ..Style::default()
+                                    },
+                                    |ui| {
+                                        text(ui, "text", label, 10.0, p.text_dim);
+                                    },
+                                );
+                                ui.pop_id();
+                            }
+                        },
+                    );
+                    let fader = ui.container(
+                        "fader",
+                        Style {
+                            size: [Size::Fixed(22.0), Size::Fixed(FADER_HEIGHT)],
+                            ..Style::default()
+                        },
+                        |ui| {
+                            ui.container(
+                                "track",
+                                Style {
+                                    size: [Size::Fixed(2.0), Size::Fixed(FADER_HEIGHT)],
+                                    background: Some(p.field),
+                                    placed: Some([10.0, 0.0]),
+                                    ..Style::default()
+                                },
+                                |_| {},
+                            );
+                            let y = (1.0 - strip.fader.clamp(0.0, 1.0)) * (FADER_HEIGHT - THUMB);
+                            ui.container(
+                                "thumb",
+                                Style {
+                                    size: [Size::Fixed(22.0), Size::Fixed(THUMB)],
+                                    radius: 2.0,
+                                    background: Some(p.accent),
+                                    placed: Some([0.0, y.round()]),
+                                    ..Style::default()
+                                },
+                                |_| {},
+                            );
+                        },
+                    );
+                    let used = ui.sense(fader, false);
+                    if used.pressed || used.active || used.released {
+                        out.mixer_fader = Some(FaderUse {
+                            strip: i,
+                            node: fader,
+                            pressed: used.pressed,
+                            held: used.active,
+                            released: used.released,
+                        });
+                    }
+                },
+            );
+            text(ui, "gain", strip.gain, SMALL, p.text);
+        },
+    );
+    if ui.sense(id, false).clicked {
+        out.mixer_strip = Some(i);
+    }
 }
 
 /// The profiler's panel (ADR 0107 E6-5): the latest frame's times, a bar per frame kept

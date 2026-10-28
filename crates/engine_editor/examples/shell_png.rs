@@ -65,6 +65,7 @@ fn main() {
     let playing = args.iter().any(|a| a == "--playing");
     let show_palette = args.iter().any(|a| a == "--palette");
     let show_menu = args.iter().any(|a| a == "--menu");
+    let show_mixer = args.iter().any(|a| a == "--mixer");
     let out_path = args
         .iter()
         .find(|a| !a.starts_with("--"))
@@ -422,6 +423,28 @@ fn main() {
         group(icons::LIGHT, "Light", &lights[..]),
         leaf(icons::CAMERA, "Camera"),
     ];
+    // The mixer's strips (`--mixer`, E11-1b).
+    let strip = |name, depth, db: f32, gain, output, selected| engine_editor::shell::StripView {
+        name,
+        depth,
+        // The editor's fader travel near 0 dB: +6 at the top, 0 at 0.8, -10 at 0.6.
+        fader: if db >= 0.0 {
+            0.8 + db / 30.0
+        } else {
+            0.8 + db * 0.02
+        },
+        gain,
+        output,
+        selected,
+    };
+    let strips = [
+        strip("master", 0, 0.0, "0.0", "\u{2192} speakers", false),
+        strip("effects", 1, -3.0, "\u{2212}3.0", "\u{2192} master", false),
+        strip("steps", 2, -6.0, "\u{2212}6.0", "\u{2192} effects", true),
+        strip("music", 1, -8.0, "\u{2212}8.0", "\u{2192} master", false),
+        strip("ui", 1, 0.0, "0.0", "\u{2192} master", false),
+        strip("voice", 1, 2.0, "2.0", "\u{2192} master", false),
+    ];
     let model = ShellModel {
         scenes: &["main.scene", "level_01.scene*", "меню.scene"],
         active_scene: 1,
@@ -453,10 +476,14 @@ fn main() {
             "Shader",
             "Profiler",
         ],
-        active_bottom: None,
+        active_bottom: show_mixer.then_some(2),
         output: None,
         tasks: None,
         profiler: None,
+        mixer: show_mixer.then_some(engine_editor::shell::MixerView {
+            header: "main.mixer \u{b7} unsaved (Ctrl+S writes it)",
+            strips: &strips,
+        }),
         debugger: None,
         history: None,
         playing,
