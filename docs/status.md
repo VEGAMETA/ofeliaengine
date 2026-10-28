@@ -868,6 +868,9 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3e-2a, reroutes** (#430, ADR 0123's as-built): a double-click on a link (or the
+    node search) puts a reroute on it, a capsule in the colour of what it carries; it
+    adds no code (a graph through reroutes generates the same module).
   - **E10-3f-3, errors on nodes and Show Slang** (#429, ADR 0123's as-built): a node that
     stops the graph (a loop, a kind or a port a file holds) framed in red with why under
     it; Show Slang opens the saved build in a read only code tab that follows the graph.
@@ -938,9 +941,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3e-2 (reroutes and frames, the file's version 2), E10-3g (functions,
-       and Slang's errors at their nodes), ADR 0123's steps; then E10-4, previews, stats
-       and variants with a base.
+       2D): E10-3e-2b (frames, the file's version 2: C around the selection, the nodes
+       inside moving with it, Unreal's), E10-3g (functions, and Slang's errors at their
+       nodes), ADR 0123's steps; then E10-4, previews, stats and variants with a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

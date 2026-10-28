@@ -511,6 +511,40 @@ The team's «а» (answer 4 below).
 - **Next:** reroutes and frames (E10-3e-2, the file's version 2), then functions
   (E10-3g), with Slang's errors at their nodes.
 
+## As built (E10-3e-2a, 2026-10-28): reroutes
+
+Studied for this and E10-3e-2b (2026-10-28):
+- Unreal's material editor puts a reroute on a wire double-clicked, and wraps the
+  selection in a comment box by C; the box moves the nodes inside it, and a node dragged
+  in or out joins or leaves
+  (dev.epicgames.com, "Organizing a Material Graph in Unreal Engine").
+- Godot 4.3 attaches nodes to a frame explicitly (`attach_node_to_frame`), the frame
+  fitting itself around them (`VisualShaderNodeFrame`).
+- Blender joins the selection in a new frame (Ctrl+J in 4.1, F in 4.5) and adds a node
+  to one by Ctrl+P or by dropping it on it; Shift and the right button swept across a
+  link add a reroute (manual 4.1, "Frame Node").
+
+What was built:
+- **A node kind** (`library::REROUTE_KIND`, category Layout): one dynamic input `in`, one
+  output `out`, its body `{in}`. Written in place, it adds nothing to the code: a graph
+  through a chain of reroutes generates the module it does without, in both builds
+  (tested). No new file version: a reroute is a node as others are.
+- **On the canvas:** a capsule of 28 by 14 units in the colour of what it carries,
+  followed back through a chain of reroutes to the first node that is not one
+  (`GraphDoc::carried_by`, no allocation); its pins at its ends, reaching half as far as
+  a node's ports so that its middle can be grabbed to move it; no title.
+- **Added** by a double-click on a link (two presses within 400 ms and 3 pixels, the
+  link within 60 % of a port's reach of its curve), the link passing through it, it
+  selected alone, one step; or from the node search.
+- **Tests:**
+  - the generated module unchanged by a chain of two reroutes;
+  - a double-click on a link (a press and its release, then a second press) adding one
+    in the link's place, laid out as a capsule centred there, its middle and its pins
+    hit, and what it carries;
+  - the graph tab's frames allocate nothing with a reroute shown, and the GPU test's
+    graph draws one.
+- **Next:** frames (E10-3e-2b, the file's version 2).
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,

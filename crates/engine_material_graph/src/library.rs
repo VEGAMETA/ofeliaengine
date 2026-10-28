@@ -103,6 +103,9 @@ pub fn kind(name: &str) -> Option<&'static Kind> {
 /// The output node's kind.
 pub const OUTPUT_KIND: &str = "output";
 
+/// A reroute's kind: a point a link passes through (E10-3e-2a), its value its input's.
+pub const REROUTE_KIND: &str = "reroute";
+
 const F1: PortType = PortType::Float(1);
 const F2: PortType = PortType::Float(2);
 const F3: PortType = PortType::Float(3);
@@ -579,6 +582,17 @@ pub const KINDS: &[Kind] = &[
             "pow(1.0 - saturate(dot({normal}, normalize(read_float4(&push.frame.camera_position).xyz - ctx.world_position))), {power})",
         ]),
         context: true,
+    },
+    // A point a link passes through to keep a graph tidy: its value its input's, written
+    // in place (no code of its own).
+    Kind {
+        name: REROUTE_KIND,
+        title: "Reroute",
+        category: "Layout",
+        inputs: &[input("in", DYN, Fill::Value(ZERO))],
+        outputs: &[output("out", DYN)],
+        body: Body::Expr(&["{in}"]),
+        context: false,
     },
     // The surface's terms: those of every model, then each model's own (`Model::terms`).
     Kind {

@@ -1280,8 +1280,12 @@ Until its shaders are made, the material draws its colour.
     typing is refused and Ctrl+S writes nothing.
   - It follows the graph while the graph's tab is open: edit the graph and look again.
   - It is not kept in the session.
-- **Not yet:** reroutes and frames (E10-3e-2), functions (E10-3g); Slang's own errors
-  marked at their nodes come with E10-3g's nodes whose code you write.
+- **Reroutes:** double-click a link to put a reroute on it, a point the link passes
+  through, to lead it round other nodes; or add one from the node search ("Reroute").
+  - Drag its middle to move it; its ends are its pins, as a node's ports are.
+  - It is drawn in the colour of what passes through it, and it changes no code.
+- **Not yet:** frames (E10-3e-2b), functions (E10-3g); Slang's own errors marked at their
+  nodes come with E10-3g's nodes whose code you write.
 
 ## Autosave and the session
 
