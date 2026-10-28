@@ -855,7 +855,7 @@ Last updated: 2026-10-28.
     each snapshot, + Snapshot); a chosen snapshot shows over the mix and is heard alone,
     and the panel's value edits go into it (one step each, ↺ takes one out, buses and
     effects refused); its section names it and sets its fade. E11-5 is done.
-  - **E11-4c, the last sound gizmos and the falloff curve** (#PR, ADR 0107's as-built):
+  - **E11-4c, the last sound gizmos and the falloff curve** (#417, ADR 0107's as-built):
     View: Sound Ranges (every source's outer ring and every zone's box, dim); a 3D
     sound's level over distance in the inspector, the camera's distance in red with the
     level there; in Play, ejected, sources filled while they play and hollow while
