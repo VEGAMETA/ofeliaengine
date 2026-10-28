@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3b-2, the `.graph` file** (#PR, ADR 0123's as-built; its proposed shape, the
+  - **E10-3b-2, the `.graph` file** (#421, ADR 0123's as-built; its proposed shape, the
     recommendation): read and written in the editor's grammar, defaults left out, nodes
     by id and links by input, sorted; a texture node's own image; `.graph` files known to
     the asset database with their id inside.
