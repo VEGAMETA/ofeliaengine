@@ -1218,7 +1218,8 @@ Until its shaders are made, the material draws its colour.
 - **Adding nodes:** **Space** (or Blender's Shift+A) over the canvas opens the node search
   at the pointer:
   - every kind by its group (`Math: Multiply`), its ports beside it (`a, b → out`);
-  - type to narrow it, then Enter or a click adds the node where the pointer was, selected;
+  - type to narrow it, the best matches first, then Enter or a click adds the node where
+    the pointer was, selected;
   - **Graph: Add Node…** in the palette does the same, at the canvas's middle.
 - **The mouse:**
   - **drag from an output to an input** (or from an input to an output): a link. A link
@@ -1332,7 +1333,32 @@ Until its shaders are made, the material draws its colour.
     and the game need no Slang to read it. Change the function and its calls follow (the
     graph's tab is marked changed); a call whose function is gone is an error at its node.
   - Slang's errors in the module are shown at its first call.
-- **Not yet:** functions (E10-3g-2), a group of nodes made one node of its own.
+- **Functions** (`.mfunc` files): a group of nodes made one node of its own and called from
+  any graph, as Unreal's material functions and Blender's node groups are.
+  - **Make one:** select nodes and press **Ctrl+G**. They go into `New Function.mfunc`
+    beside the graph, and a call of it takes their place, linked as they were. Rename the
+    file in the FileSystem dock: its calls take the new name.
+    - The function's inputs are what the nodes read from outside: one per output read,
+      named after the port that reads it. Its outputs are what is read of them outside.
+    - Ctrl+Z takes the call back; the file stays.
+  - **Open one:** double-click it in the dock, or select a call and press **Tab**. Tab
+    again with no call selected goes back to the graph you came from.
+    - A function's tab is a graph like any other, without a surface. Its **ports** are its
+      input and output nodes (the node search's Function group, `float` to `float4`). Each
+      is named by its Name row, and they are ordered as they sit on the canvas, top to
+      bottom.
+    - An input's Value is what a call gives where nothing is linked to it, and what the
+      function's own preview shows.
+    - The preview sphere shows the first output, unlit.
+  - **Call one:** the node search lists the project's functions under Functions, with
+    their ports. A call keeps its function's ports, so a graph reads without the file.
+    Edit the function, even unsaved in its tab, and its calls follow, as do the previews of
+    the graphs that call it.
+  - **Take a call apart:** select it and press **Ctrl+Alt+G**. The function's nodes go
+    where the call was, under their own names where those are free, linked as the call
+    was. A function that the function calls stays a call.
+  - Before a graph is written, each call is replaced by its function's nodes (inlining,
+    as Unreal does). An error inside a function is shown at its call ("in tint: …").
 
 ## Autosave and the session
 
@@ -1416,7 +1442,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E10 | materials: the graph's reroutes and frames, functions, previews in the dock (its canvas, node search, values, preview sphere, errors on nodes and Show Slang are in); the material file and Slang in the code editor are done |
+| E10 | materials: previews in the dock, a graph's statistics, variants with a base (E10-4); the graph (its canvas, node search, values, preview sphere, errors on nodes, Show Slang, reroutes, frames, Slang functions and `.mfunc` functions), the material file and Slang in the code editor are done |
 
 The whole plan is ADR 0107 §7.
 

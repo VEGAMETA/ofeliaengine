@@ -112,10 +112,11 @@ impl GraphFile {
             .nodes
             .iter()
             .map(|(id, n)| {
-                // As many components as a constant is wide; none for the rest.
+                // As many components as a constant (or a function's input, its value
+                // when a call leaves it unlinked) is wide; none for the rest.
                 let kind = node_kind(n).ok();
                 let width = match kind.map(|k| k.body) {
-                    Some(Body::Constant(w)) => usize::from(w),
+                    Some(Body::Constant(w) | Body::FunctionInput(w)) => usize::from(w),
                     _ => 0,
                 };
                 let node = NodeFile {
@@ -477,11 +478,21 @@ mod tests {
         use crate::function::{input_kind, output_kind};
         let mut f = Graph::new(Model::Lit);
         f.nodes.clear();
-        f.add("i", Node::new(input_kind(3), [0.0, 0.0]).named("color"))
-            .add("o", Node::new(output_kind(3), [200.0, 0.0]).named("tinted"))
-            .link(PortRef::new("i", "value"), PortRef::new("o", "value"));
+        f.add(
+            "i",
+            Node::new(input_kind(3), [0.0, 0.0])
+                .named("color")
+                .with_value([1.0, 0.5, 0.25, 0.0]),
+        )
+        .add("o", Node::new(output_kind(3), [200.0, 0.0]).named("tinted"))
+        .link(PortRef::new("i", "value"), PortRef::new("o", "value"));
         let id = AssetId::new();
         let text = GraphFile::of(&f).to_function_text(id, None);
+        // An input's own value, a call's where it leaves the input unlinked (E10-3g-2b).
+        assert!(
+            text.contains("nodes[\"i\"].value = [1, 0.5, 0.25]"),
+            "{text}"
+        );
         assert!(
             text.starts_with(&format!("[mfunc version=1 id={id}]")),
             "{text}"

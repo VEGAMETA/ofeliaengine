@@ -31,7 +31,7 @@ pub mod library;
 
 pub use call::{CALL_KIND, Signature, call_kind, node_kind};
 pub use file::GraphFile;
-pub use function::{FUNCTION_KIND, expand, signature_of};
+pub use function::{FUNCTION_KIND, expand, function_call_kind, inline, signature_of};
 pub use generate::{
     Build, Generated, GraphError, Param, ParamType, Sources, generate, generate_with,
 };

@@ -28,6 +28,19 @@ pub const FUNCTION_KIND: &str = "function";
 /// The group functions are found under in the node search.
 pub const FUNCTION_CATEGORY: &str = "Functions";
 
+/// The kind of a call of the function named `function` whose ports are `signature`
+/// ([`signature_of`]'s text): [`crate::call_kind`]'s, for a function file's call.
+///
+/// # Errors
+///
+/// The signature is not one a call can have.
+pub fn function_call_kind(
+    function: &str,
+    signature: &str,
+) -> Result<&'static library::Kind, String> {
+    crate::call::made_kind(FUNCTION_KIND, function, signature)
+}
+
 /// The kind of a function's input of width `w` (1 to 4).
 pub fn input_kind(w: u8) -> &'static str {
     [
@@ -150,93 +163,128 @@ fn expand_in(
         let (inner, _) =
             expanded.map_err(|e| at(format!("in {}: {}", call.function, e.message)))?;
         let prefix = |id: &str| format!("{call_id}__{id}");
-        let mut add = |out: &mut Graph, id: String, node: Node| {
-            origin.insert(id.clone(), call_id.clone());
-            out.nodes.insert(id, node);
-        };
-        // What each of the function's inputs reads: the call's link into it, else a
-        // constant of the call's own value for it (or the input's).
-        let mut given: BTreeMap<PortRef, PortRef> = BTreeMap::new();
-        let mut names: Vec<(&str, bool)> = Vec::new();
-        for (id, node) in &inner.nodes {
-            let Some((input, width)) = port_of(node) else {
-                add(&mut out, prefix(id), node.clone());
-                continue;
-            };
-            names.push((node.param.as_str(), input));
-            if !input {
-                continue;
-            }
-            // From the graph as made so far: a call before it may feed it.
-            let source = match out.links.get(&PortRef::new(call_id, &node.param)) {
-                Some(from) => from.clone(),
-                None => {
-                    let value = call.inputs.get(&node.param).copied().unwrap_or(node.value);
-                    let constant = constant(width, value, node.at);
-                    add(&mut out, prefix(id), constant);
-                    PortRef::new(&prefix(id), "value")
-                }
-            };
-            given.insert(PortRef::new(id, "value"), source);
+        for id in inline_into(&mut out, call_id, &inner, &prefix).map_err(at)? {
+            origin.insert(id, call_id.clone());
         }
-        let through = |from: &PortRef| {
-            given
-                .get(from)
-                .cloned()
-                .unwrap_or_else(|| PortRef::new(&prefix(&from.node), &from.port))
-        };
-        // The function's links, but into its outputs.
-        let mut gives: BTreeMap<String, PortRef> = BTreeMap::new();
-        for (to, from) in &inner.links {
-            match inner.nodes.get(&to.node).and_then(port_of) {
-                Some((false, _)) => {
-                    gives.insert(inner.nodes[&to.node].param.clone(), through(from));
-                }
-                _ => {
-                    out.links
-                        .insert(PortRef::new(&prefix(&to.node), &to.port), through(from));
-                }
-            }
-        }
-        // An output given nothing gives its own value.
-        for (id, node) in &inner.nodes {
-            if let Some((false, width)) = port_of(node)
-                && !gives.contains_key(&node.param)
-            {
-                let value = node.inputs.get("value").copied().unwrap_or([0.0; 4]);
-                add(&mut out, prefix(id), constant(width, value, node.at));
-                gives.insert(node.param.clone(), PortRef::new(&prefix(id), "value"));
-            }
-        }
-        // The call's links: into it, gone (read inside now) once each is the function's
-        // input; out of it, from what the function gives.
-        if let Some(name) = out
-            .links
-            .keys()
-            .filter(|to| to.node == *call_id)
-            .find(|to| !names.contains(&(to.port.as_str(), true)))
-        {
-            return Err(at(format!(
-                "{} has no input `{}`",
-                call.function, name.port
-            )));
-        }
-        out.links.retain(|to, _| to.node != *call_id);
-        for (to, from) in &mut out.links {
-            if from.node != *call_id {
-                continue;
-            }
-            *from = gives.get(&from.port).cloned().ok_or_else(|| {
-                at(format!(
-                    "{} has no output `{}` (read by {to})",
-                    call.function, from.port
-                ))
-            })?;
-        }
-        out.nodes.remove(call_id);
         origin.remove(call_id);
     }
     Ok((out, origin))
+}
+
+/// `graph` with its call `call_id` made the nodes of `function`, the function it calls (its
+/// own calls kept calls), as Blender's Ungroup takes a group apart (E10-3g-2b): each node
+/// under the id `id_for` gives its own id, which must be free in `graph`; the ids made.
+///
+/// # Errors
+///
+/// No node `call_id`, or a link of it to a port the function has not.
+pub fn inline(
+    graph: &Graph,
+    call_id: &str,
+    function: &Graph,
+    id_for: &dyn Fn(&str) -> String,
+) -> Result<(Graph, Vec<String>), String> {
+    let mut out = graph.clone();
+    let made = inline_into(&mut out, call_id, function, id_for)?;
+    Ok((out, made))
+}
+
+/// Call `call_id` of `out` made `function`'s nodes in `out` (see the module), each under
+/// the id `id_for` gives its own: the ids added.
+fn inline_into(
+    out: &mut Graph,
+    call_id: &str,
+    function: &Graph,
+    id_for: &dyn Fn(&str) -> String,
+) -> Result<Vec<String>, String> {
+    let call = out
+        .nodes
+        .get(call_id)
+        .cloned()
+        .ok_or_else(|| format!("no node `{call_id}`"))?;
+    let mut added = Vec::new();
+    // What each of the function's inputs reads: the call's link into it, else a constant
+    // of the call's own value for it (or the input's).
+    let mut given: BTreeMap<PortRef, PortRef> = BTreeMap::new();
+    let mut names: Vec<(&str, bool)> = Vec::new();
+    for (id, node) in &function.nodes {
+        let Some((input, width)) = port_of(node) else {
+            added.push(id_for(id));
+            out.nodes.insert(id_for(id), node.clone());
+            continue;
+        };
+        names.push((node.param.as_str(), input));
+        if !input {
+            continue;
+        }
+        // From the graph as made so far: a call before it may feed it.
+        let source = match out.links.get(&PortRef::new(call_id, &node.param)) {
+            Some(from) => from.clone(),
+            None => {
+                let value = call.inputs.get(&node.param).copied().unwrap_or(node.value);
+                added.push(id_for(id));
+                out.nodes
+                    .insert(id_for(id), constant(width, value, node.at));
+                PortRef::new(&id_for(id), "value")
+            }
+        };
+        given.insert(PortRef::new(id, "value"), source);
+    }
+    let through = |from: &PortRef| {
+        given
+            .get(from)
+            .cloned()
+            .unwrap_or_else(|| PortRef::new(&id_for(&from.node), &from.port))
+    };
+    // The function's links, but into its outputs.
+    let mut gives: BTreeMap<String, PortRef> = BTreeMap::new();
+    for (to, from) in &function.links {
+        match function.nodes.get(&to.node).and_then(port_of) {
+            Some((false, _)) => {
+                gives.insert(function.nodes[&to.node].param.clone(), through(from));
+            }
+            _ => {
+                out.links
+                    .insert(PortRef::new(&id_for(&to.node), &to.port), through(from));
+            }
+        }
+    }
+    // An output given nothing gives its own value.
+    for (id, node) in &function.nodes {
+        if let Some((false, width)) = port_of(node)
+            && !gives.contains_key(&node.param)
+        {
+            let value = node.inputs.get("value").copied().unwrap_or([0.0; 4]);
+            added.push(id_for(id));
+            out.nodes
+                .insert(id_for(id), constant(width, value, node.at));
+            gives.insert(node.param.clone(), PortRef::new(&id_for(id), "value"));
+        }
+    }
+    // The call's links: into it, gone (read inside now) once each is the function's input;
+    // out of it, from what the function gives.
+    if let Some(name) = out
+        .links
+        .keys()
+        .filter(|to| to.node == call_id)
+        .find(|to| !names.contains(&(to.port.as_str(), true)))
+    {
+        return Err(format!("{} has no input `{}`", call.function, name.port));
+    }
+    out.links.retain(|to, _| to.node != call_id);
+    for (to, from) in &mut out.links {
+        if from.node != call_id {
+            continue;
+        }
+        *from = gives.get(&from.port).cloned().ok_or_else(|| {
+            format!(
+                "{} has no output `{}` (read by {to})",
+                call.function, from.port
+            )
+        })?;
+    }
+    out.nodes.remove(call_id);
+    Ok(added)
 }
 
 /// A constant node of width `width` holding `value`, at `at`.
@@ -371,5 +419,40 @@ mod tests {
             "{}",
             error.message
         );
+    }
+    /// E10-3g-2b: a call taken apart one level (Ungroup) is its function's nodes under the
+    /// ids asked for, the call's links read through them, a call inside the function kept a
+    /// call; a link of the call to a port the function has not is refused.
+    #[test]
+    fn a_call_taken_apart_is_its_functions_nodes_one_level() {
+        let signature = signature_of(&darken()).unwrap().to_string();
+        let mut outer = Graph::new(Model::Lit);
+        outer.nodes.clear();
+        let mut call = Node::new(FUNCTION_KIND, [100.0, 0.0]).with_call("darken", &signature);
+        call.module = AssetRef::file(AssetId::from_u128(6));
+        outer
+            .add("i", Node::new(input_kind(3), [0.0, 0.0]).named("base"))
+            .add("d", call)
+            .add("o", Node::new(output_kind(3), [200.0, 0.0]).named("result"))
+            .link(port("i", "value"), port("d", "color"))
+            .link(port("d", "darkened"), port("o", "value"));
+        let outer_signature = signature_of(&outer).unwrap().to_string();
+        let mut g = Graph::new(Model::Lit);
+        let mut call = Node::new(FUNCTION_KIND, [0.0, 0.0]).with_call("outer", &outer_signature);
+        call.module = AssetRef::file(AssetId::from_u128(7));
+        g.add("tex", Node::new("vector3", [-200.0, 0.0]))
+            .add("f", call)
+            .link(port("tex", "value"), port("f", "base"))
+            .link(port("f", "result"), port(OUTPUT, "base"));
+        let (made, ids) = inline(&g, "f", &outer, &|id| format!("{id}_x")).unwrap();
+        assert!(!made.nodes.contains_key("f"));
+        assert_eq!(ids, ["d_x"]);
+        assert_eq!(made.nodes["d_x"].kind, FUNCTION_KIND);
+        assert_eq!(made.links[&port("d_x", "color")], port("tex", "value"));
+        assert_eq!(made.links[&port(OUTPUT, "base")], port("d_x", "darkened"));
+        let mut wrong = g.clone();
+        wrong.link(port("tex", "value"), port("f", "nope"));
+        let why = inline(&wrong, "f", &outer, &|id| id.to_owned()).unwrap_err();
+        assert!(why.contains("no input `nope`"), "{why}");
     }
 }
