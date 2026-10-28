@@ -824,11 +824,15 @@ Last updated: 2026-10-28.
     each of a selected sound's rings (pointed at: "40 m · −16 dB, held"; dragged: its
     distance, the inner ring pushing the outer), a zone's sides (the opposite side
     staying) and its fade; one undo step a drag, Escape.
+  - **E11-4b-2, hearing in place** (#PR, ADR 0107's as-built): P plays the selected sources
+    where they are, looping, heard from the editor's camera with the zones, until P, Escape
+    or another selection; Sound: Listen to the Scene plays every source set to play;
+    nothing written back (`Player::audition`, copies of the components). E11-4 is done but
+    for View: Sound Ranges and the falloff curve.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-4b-2, hearing in place (P plays the selected sources where they are, heard
-       from the editor's camera with the zones; Sound: Listen to the Scene), then
-       E11-3's last part: sounds dropped on the viewport, the tree or an entity, and the
-       sound and bus fields; the room's reverb strip.
+    1. E11-3's last part, then
+       sounds dropped on the viewport, the tree or an entity, and the sound and bus fields
+       (the team's 4a); the room's reverb strip.
   - **Settled (2026-10-28, team decisions, every recommendation):**
     - E11's four (`docs/research/ux/sound.md`): the bus layout in a `.mixer` file named
       by `PlayerSettings::audio.layout` (`buses` goes; the four built-in buses without a

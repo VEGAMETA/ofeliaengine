@@ -1469,6 +1469,19 @@ impl Player {
         self.sound.set_listening(muted, soloed);
     }
 
+    /// The editor's hearing in place (ADR 0107 E11-4b): while the world is kept still
+    /// ([`Self::set_simulating`]), `entities`' sources play where they are, looping, heard
+    /// from the main camera with the reverb zones; an empty list ends it. The world is not
+    /// written to: no position, no source stopped, nothing despawned.
+    pub fn audition(&mut self, entities: &[Entity]) {
+        self.sound.set_audition(entities);
+    }
+
+    /// The entities heard in place ([`Self::audition`]).
+    pub fn auditioned(&self) -> &[Entity] {
+        self.sound.audition()
+    }
+
     /// Bus `bus`'s peak level per channel since the last call (linear, after its fader;
     /// `None` without sound or such a bus): what the editor's meters show.
     pub fn take_bus_peak(&self, bus: &str) -> Option<[f32; 2]> {

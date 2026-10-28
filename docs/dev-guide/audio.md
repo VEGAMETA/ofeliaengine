@@ -105,6 +105,10 @@ world.spawn((
   | `delay` | `time_ms` (1 to 2,000, 250), `feedback` (0 to 0.98, 0.35), `mix` (0 to 1, 0.35) |
   | `reverb` (for a bus sends feed: fully wet) | `decay_s` (0.1 to 30, 1.5), `size` (0 to 1, 0.5), `damping_hz` (500 to 20,000, 8,000), `pre_delay_ms` (0 to 500, 20), `early` (0 to 1, 0.5), `mix` (0 to 1, 1) |
 
+- **Hearing in place** (the editor's P): `player.audition(&entities)` plays those
+  entities' sources while the world is kept still (`set_simulating(false)`), looping, heard
+  from the main camera with the reverb zones, from copies of their components, so the
+  world is not written to; `audition(&[])` ends it.
 - **No sound needed?** `settings.audio.enabled = false`. A game that plays nothing never
   opens the audio device anyway: it opens, on another thread, with the first sound.
 - **Cost on ref-1:**

@@ -361,6 +361,12 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   (drag it: the opposite side stays, as a brush's does; its label says the size) and one
   on top of its fade (how far out its room fades). One undo step a drag; Escape takes it
   back.
+- **Hearing in place** (E11-4b): **P** plays the selected sources where they are,
+  looping, heard from the editor's camera as you move it; the reverb zones answer (walls
+  and the room from the geometry need the game's physics, so they come with Play). P again,
+  Escape or another selection stops it. **Sound: Listen to the Scene** plays every source
+  set to play while you fly through the level; Escape stops it. Neither changes the scene:
+  nothing is written back, nothing despawns, and Play ends either.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.
