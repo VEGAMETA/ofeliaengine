@@ -868,6 +868,10 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **The RTX's `video_player` golden image re-taken** (#PR): on `main` it read a mean FLIP
+    of 0.0103–0.0108 (the limit 0.01) under NVIDIA 617.42, taken under 616.92; the
+    Radeon's matched exactly, the picture's content the same (the error spread thinly over
+    the scene's textures, none on the video). The new image against itself: 0.0007–0.0021.
   - **Test runs keep their windows out of sight** (#411; the owner's request, 2026-10-28):
     `tools/check.ps1` sets `ENGINE_HIDDEN_WINDOWS=1`, and every window `engine_platform`
     makes is then cloaked (composed, its swapchain presenting, never on the screen), with
