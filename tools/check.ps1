@@ -20,6 +20,9 @@
 #                                               #   changed and of those that depend on them:
 #                                               #   runs between commits. The full run gates
 #                                               #   every merge.
+#   powershell -File tools\check.ps1 -ShowWindows # the tests' windows on the screen: they are
+#                                               #   kept out of sight otherwise (cloaked, never
+#                                               #   taking the keyboard)
 #
 # Tests run under cargo-nextest (`cargo install cargo-nextest --locked`, ADR 0077): every
 # test in its own process, the whole workspace's test binaries in parallel, and one build of
@@ -36,7 +39,8 @@ param(
     [switch]$Profiles,
     [switch]$Perf,
     [switch]$Full,
-    [switch]$Affected
+    [switch]$Affected,
+    [switch]$ShowWindows
 )
 if ($Full) {
     $Gpu = $true
@@ -50,6 +54,11 @@ $ErrorActionPreference = 'Continue'
 # Under `powershell -File`, `-Only clippy,test` arrives as one string: split it.
 $Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
+# The tests' windows stay out of sight (engine_platform's ENGINE_HIDDEN_WINDOWS: cloaked, no
+# taskbar button, never taking the keyboard), so a run leaves the desktop to whoever works at
+# it; -ShowWindows lets them be seen.
+$hiddenWindowsWere = $env:ENGINE_HIDDEN_WINDOWS
+if (-not $ShowWindows) { $env:ENGINE_HIDDEN_WINDOWS = '1' }
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $logs = Join-Path $root 'target\check-logs'
@@ -464,4 +473,5 @@ foreach ($name in $steps.Keys) {
         $failed += $name
     }
 }
+$env:ENGINE_HIDDEN_WINDOWS = $hiddenWindowsWere
 if ($failed.Count) { exit 1 }
