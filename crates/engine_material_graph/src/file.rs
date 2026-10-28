@@ -23,8 +23,8 @@
 //! - **A node:** its `kind`, its place on the canvas (`at`), a constant's components
 //!   (`value`, as many as it is wide), a parameter's name (`param`), a texture node's own
 //!   image (`texture`: what the material shows until a material file gives one), its
-//!   inputs' own values (`inputs["strength"] = [0.7]`) and a `comment`. Fields at their
-//!   defaults are not written.
+//!   inputs' own values (`inputs["strength"] = [0.7]`), a `comment` and an Expression
+//!   node's `code` (E10-3g-1). Fields at their defaults are not written.
 //! - **A link** by the input it feeds, `<node>.<port>`, to the output it comes from.
 //! - **A frame** (version 2, E10-3e-2b) by id: its place (`at`), its `size` and its
 //!   `title` (`frames["frame1"].title = "Moss"`). Version 1 files, which have none, read.
@@ -76,6 +76,8 @@ pub struct NodeFile {
     pub inputs: BTreeMap<String, Vec<f32>>,
     /// A note on the node.
     pub comment: String,
+    /// An Expression node's Slang.
+    pub code: String,
 }
 
 impl GraphFile {
@@ -120,6 +122,7 @@ impl GraphFile {
                         })
                         .collect(),
                     comment: n.comment.clone(),
+                    code: n.code.clone(),
                 };
                 (id.clone(), node)
             })
@@ -168,6 +171,7 @@ impl GraphFile {
             node.param.clone_from(&n.param);
             node.texture = n.texture;
             node.comment.clone_from(&n.comment);
+            node.code.clone_from(&n.code);
             for (name, v) in &n.inputs {
                 let mut value = [0.0; 4];
                 for (k, x) in v.iter().take(4).enumerate() {

@@ -16,7 +16,9 @@
 //! Hot reload ([`MaterialTypes::set_hot_reload`]): the folders of the files a type's
 //! compiles read (Slang's dependencies: its module, `forward.slang` and what they include)
 //! are watched. When one changes and stays unchanged for [`RELOAD_QUIET`], the entry
-//! points the type is drawn with compile again in one request. The pipelines in use keep
+//! points the type is drawn with compile again in one request. A tool that writes a module
+//! itself says so ([`MaterialTypes::changed`], E10-3g-1): the reload is due at once, not
+//! when the watcher's event comes. The pipelines in use keep
 //! drawing until their successors are made; then they are retired, and destroyed once the
 //! frames that may use them are done ([`MaterialTypes::collect`]). A module that does not
 //! compile keeps the previous version drawing; its error is kept for tools
@@ -115,6 +117,20 @@ enum Reload {
         generation: u32,
         again: bool,
     },
+}
+
+impl Reload {
+    /// A file the type reads changed at `now`: due once the files are quiet; compiling,
+    /// to compile again after.
+    fn changed(self, now: Instant) -> Self {
+        match self {
+            Self::Compiling { generation, .. } => Self::Compiling {
+                generation,
+                again: true,
+            },
+            _ => Self::Changed(now),
+        }
+    }
 }
 
 struct TypeEntry {
@@ -695,6 +711,26 @@ impl MaterialTypes {
         self.retire();
     }
 
+    /// File `path` written anew by the caller (the editor's graph module, E10-3g-1): the
+    /// types that compile from it reload as when the watcher sees it, but due at once, so
+    /// what waits for [`Self::pending`] sees the reload on its way before the watcher's
+    /// event comes (its event within the quiet merges with it). Nothing with hot reload
+    /// off.
+    pub(crate) fn changed(&mut self, path: &Path) {
+        if self.hot_reload.is_none() {
+            return;
+        }
+        let key = path_key(path);
+        let now = Instant::now();
+        for t in self
+            .types
+            .iter_mut()
+            .filter(|t| t.dependencies.contains(&key))
+        {
+            t.reload = t.reload.changed(now);
+        }
+    }
+
     /// Changed files: their types reload once the files are quiet.
     fn watch_files(&mut self, device: &Device) {
         let Some(hot) = &self.hot_reload else {
@@ -705,13 +741,7 @@ impl MaterialTypes {
             let key = path_key(&event.path);
             for t in &mut self.types {
                 if event.kind == FileEventKind::Rescan || t.dependencies.contains(&key) {
-                    t.reload = match t.reload {
-                        Reload::Compiling { generation, .. } => Reload::Compiling {
-                            generation,
-                            again: true,
-                        },
-                        _ => Reload::Changed(now),
-                    };
+                    t.reload = t.reload.changed(now);
                 }
             }
         }
@@ -741,6 +771,12 @@ impl MaterialTypes {
             if entries.is_empty() || !int64 {
                 t.spirv.retain(|_, s| matches!(s, Spirv::Compiling));
                 t.reload = Reload::Idle;
+                // Nothing drawn with it, its parameters reflected again all the same: a
+                // type whose module never compiled (its materials never made, so never
+                // drawn) is fixed by the edit (E10-3g-1).
+                if !matches!(t.params, Params::NotAsked) {
+                    reflect.push(MaterialTypeId(k as u16 + 1));
+                }
                 continue;
             }
             if self.compiler.is_none() {
@@ -1032,5 +1068,52 @@ impl MaterialTypes {
             + self.compiling
             + self.requests.borrow().len()
             + self.params_requests.borrow().len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// E10-3g-1: a module written by the caller makes the types compiling from it due at
+    /// once (counted pending before any watcher's event), not the others; with hot reload
+    /// off, nothing.
+    #[test]
+    fn a_module_written_is_due_at_once() {
+        let dir =
+            std::env::temp_dir().join(format!("material_types_changed_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (one, two) = (dir.join("one.slang"), dir.join("two.slang"));
+        std::fs::write(&one, "").unwrap();
+        std::fs::write(&two, "").unwrap();
+        let mut types = MaterialTypes::new();
+        let desc = |module: &Path| MaterialTypeDesc {
+            name: String::from("T"),
+            module: module.to_owned(),
+            type_name: String::from("T"),
+        };
+        types.register(desc(&one));
+        types.register(desc(&two));
+        types.changed(&one);
+        assert_eq!(types.pending(), 0, "hot reload off");
+        types.set_hot_reload(true);
+        types.changed(&one);
+        assert_eq!(types.pending(), 1);
+        assert!(matches!(types.types[0].reload, Reload::Changed(_)));
+        assert_eq!(types.types[1].reload, Reload::Idle);
+        // Compiling: compiled again after.
+        types.types[1].reload = Reload::Compiling {
+            generation: 1,
+            again: false,
+        };
+        types.changed(&two);
+        assert_eq!(
+            types.types[1].reload,
+            Reload::Compiling {
+                generation: 1,
+                again: true
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

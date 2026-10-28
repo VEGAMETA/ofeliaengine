@@ -59,6 +59,9 @@ pub enum Body {
     /// A texture, always a parameter, sampled at the `uv` input; its outputs the sample
     /// (`rgba`), its colour (`rgb`) and each channel.
     Texture,
+    /// Slang the node holds (`Node::code`, E10-3g-1): a function of the type taking the
+    /// fragment and the node's inputs, returning its output.
+    Expression,
     /// The surface: the graph's one output node.
     Output,
 }
@@ -105,6 +108,9 @@ pub const OUTPUT_KIND: &str = "output";
 
 /// A reroute's kind: a point a link passes through (E10-3e-2a), its value its input's.
 pub const REROUTE_KIND: &str = "reroute";
+
+/// An Expression node's kind: Slang written in the node (E10-3g-1, Godot's Expression).
+pub const EXPRESSION_KIND: &str = "expression";
 
 const F1: PortType = PortType::Float(1);
 const F2: PortType = PortType::Float(2);
@@ -583,6 +589,23 @@ pub const KINDS: &[Kind] = &[
         ]),
         context: true,
     },
+    // Slang written in the node, Godot's Expression: an expression of `a` to `d` (four
+    // floats each, what is linked converted as everywhere) and the fragment's `ctx`, or a
+    // body that returns; the code a function of the type, Slang's errors in it the node's.
+    Kind {
+        name: EXPRESSION_KIND,
+        title: "Expression",
+        category: "Code",
+        inputs: &[
+            input("a", F4, Fill::Value(ZERO)),
+            input("b", F4, Fill::Value(ZERO)),
+            input("c", F4, Fill::Value(ZERO)),
+            input("d", F4, Fill::Value(ZERO)),
+        ],
+        outputs: &[output("out", F4)],
+        body: Body::Expression,
+        context: true,
+    },
     // A point a link passes through to keep a graph tidy: its value its input's, written
     // in place (no code of its own).
     Kind {
@@ -654,6 +677,8 @@ mod tests {
                     assert_eq!(scalar.len(), k.outputs.len(), "{}", k.name);
                 }
                 Body::Constant(_) | Body::Texture | Body::Output => {}
+                // One output, the code's value.
+                Body::Expression => assert_eq!(k.outputs.len(), 1, "{}", k.name),
             }
             // Every `{input}` a body names is one of its inputs.
             let exprs: Vec<&str> = match k.body {

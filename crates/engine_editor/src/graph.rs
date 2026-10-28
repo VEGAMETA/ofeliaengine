@@ -33,7 +33,9 @@
 //!   editing build ([`preview_material`]), in the canvas's corner; every number is a
 //!   parameter there, so a value's change reaches it without compiling anything.
 //! - **Errors** (E10-3f-3): what stops the graph from generating, at its node (a loop, a
-//!   kind or a port a merge left), framed in red on the canvas with why under the box.
+//!   kind or a port a merge left), framed in red on the canvas with why under the box;
+//!   Slang's own errors in the preview's module go to their nodes by the generator's line
+//!   map ([`slang_error`], E10-3g-1: an Expression node's code).
 
 use crate::paint::UiText;
 use crate::shell::Palette;
@@ -43,7 +45,7 @@ use engine_assets::material_file::{Look as MaterialLook, MaterialFile, MaterialT
 use engine_core::math::{Vec2, Vec4};
 use engine_material_graph::graph::OUTPUT;
 use engine_material_graph::library::{self, Body, Fill, OUTPUT_KIND, REROUTE_KIND};
-use engine_material_graph::{Build, GraphError, ParamType};
+use engine_material_graph::{Build, Generated, GraphError, ParamType};
 use engine_material_graph::{Frame, Graph, GraphFile, Kind, Model, Node, PortRef, PortType};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad};
 use engine_scene::{AssetId, AssetPaths, AssetRef};
@@ -298,6 +300,9 @@ pub(crate) fn layout(
             continue;
         }
         let title = match kind {
+            Some(k) if k.body == Body::Expression => {
+                format!("{} · {}", k.title, short_code(&node.code))
+            }
             Some(k) if !node.param.is_empty() => format!("{} · {}", k.title, node.param),
             Some(k) => k.title.to_owned(),
             None => node.kind.clone(),
@@ -717,6 +722,8 @@ pub(crate) enum NodeRow {
     Comment,
     /// A frame's title (E10-3e-2b).
     Title,
+    /// An Expression node's Slang (E10-3g-1).
+    Code,
 }
 
 impl NodeRow {
@@ -731,6 +738,7 @@ impl NodeRow {
             Self::Texture => "Image",
             Self::Comment => "Note",
             Self::Title => "Title",
+            Self::Code => "Code",
         }
     }
 
@@ -789,7 +797,7 @@ pub(crate) fn preview_material(
     doc: &GraphDoc,
     module: AssetRef,
     module_path: &str,
-) -> Result<(String, MaterialFile, AssetPaths), GraphError> {
+) -> Result<(Generated, MaterialFile, AssetPaths), GraphError> {
     let generated = engine_material_graph::generate(&doc.graph, GRAPH_TYPE, Build::Editing)?;
     let mut file = MaterialFile {
         shader: module,
@@ -826,7 +834,73 @@ pub(crate) fn preview_material(
             }
         }
     }
-    Ok((generated.text, file, paths))
+    Ok((generated, file, paths))
+}
+
+/// An Expression node's code as its title shows it: its first line, at most 24 characters.
+fn short_code(code: &str) -> String {
+    let line = code.lines().next().unwrap_or("").trim();
+    let line = if line.is_empty() { "a" } else { line };
+    match line.char_indices().nth(24) {
+        Some((at, _)) => format!("{}…", line[..at].trim_end()),
+        None => line.to_owned(),
+    }
+}
+
+/// Slang's first error in `diagnostics` placed in the module whose file is named `file`
+/// (E10-3g-1): the node the generator's line map `lines` gives its line (none for a line no
+/// node made), and what it says: the detail at its place when Slang gives one (`undefined
+/// identifier 'oops'.`), otherwise its title. Slang writes `error[E30015]: title`, then
+/// `--> path:line:column`, the line's source and carets under the place, the detail after
+/// them; warnings, and errors placed in other files, are passed over.
+pub(crate) fn slang_error<'a>(
+    diagnostics: &'a str,
+    file: &str,
+    lines: &'a [Option<String>],
+) -> Option<(Option<&'a str>, &'a str)> {
+    // The error being read (its title), whether its place was read, and its node once
+    // that place is in the module.
+    let mut title = None;
+    let mut placed = false;
+    let mut node: Option<Option<&str>> = None;
+    for line in diagnostics.lines().map(str::trim) {
+        let header = line.split_once('[').filter(|(kind, rest)| {
+            !kind.is_empty() && kind.bytes().all(|b| b.is_ascii_lowercase()) && rest.contains("]:")
+        });
+        if let Some((kind, rest)) = header {
+            if let Some(at) = node {
+                return Some((at, title.unwrap_or("")));
+            }
+            title = (kind == "error").then(|| rest.split_once("]:").map_or("", |(_, t)| t.trim()));
+            placed = false;
+        } else if let Some(place) = line.strip_prefix("--> ")
+            && title.is_some()
+            && !placed
+        {
+            placed = true;
+            let mut parts = place.rsplitn(3, ':');
+            let (_, number, path) = (parts.next(), parts.next(), parts.next());
+            if let (Some(Ok(number)), Some(path)) = (number.map(str::parse::<usize>), path)
+                && path.rsplit(['/', '\\']).next() == Some(file)
+            {
+                node = Some(lines.get(number.wrapping_sub(1)).and_then(Option::as_deref));
+            }
+        } else if let Some(at) = node
+            && let Some(rest) = line.strip_prefix('|').map(str::trim_start)
+            && rest.starts_with('^')
+        {
+            let detail = rest.trim_start_matches('^').trim();
+            return Some((
+                at,
+                if detail.is_empty() {
+                    title.unwrap_or("")
+                } else {
+                    detail
+                },
+            ));
+        }
+    }
+    node.map(|at| (at, title.unwrap_or("")))
 }
 
 /// Nodes `ids` deleted with their links, the surface kept: how many went.
@@ -1406,6 +1480,7 @@ impl GraphDoc {
                 out.push(NodeRow::Param);
                 out.push(NodeRow::Texture);
             }
+            Body::Expression => out.push(NodeRow::Code),
             _ => {}
         }
         for input in kind.inputs {
@@ -1464,6 +1539,7 @@ impl GraphDoc {
             NodeRow::Input(name, _) => node.inputs.contains_key(name),
             NodeRow::Texture => !node.texture.is_none(),
             NodeRow::Comment => !node.comment.is_empty(),
+            NodeRow::Code => !node.code.is_empty(),
         }
     }
 
@@ -1500,6 +1576,10 @@ impl GraphDoc {
                         .inspected_frame()
                         .and_then(|id| self.graph.frames.get(id));
                     text.push_str(frame.map_or("", |f| f.title.as_str()));
+                }
+                NodeRow::Code => {
+                    text.clear();
+                    text.push_str(node.map_or("", |n| n.code.as_str()));
                 }
                 NodeRow::Texture => {
                     text.clear();
@@ -1575,6 +1655,11 @@ impl GraphDoc {
         self.edit_inspected(|node| text.clone_into(&mut node.comment))
     }
 
+    /// The inspected Expression node's Slang: `text`.
+    pub(crate) fn set_code(&mut self, text: &str) -> Option<(String, String)> {
+        self.edit_inspected(|node| text.clone_into(&mut node.code))
+    }
+
     /// The inspected texture node's own image: `image`, at `path` in the project.
     pub(crate) fn set_texture(&mut self, image: AssetRef, path: &str) -> Option<(String, String)> {
         self.paths.insert(image, path);
@@ -1604,6 +1689,7 @@ impl GraphDoc {
             }
             NodeRow::Texture => node.texture = AssetRef::NONE,
             NodeRow::Comment => node.comment.clear(),
+            NodeRow::Code => node.code.clear(),
             NodeRow::Model | NodeRow::Title => {}
         })
     }
@@ -2792,6 +2878,57 @@ mod tests {
         assert_eq!(d.carried_by("c", "rgba"), PortType::Float(4));
     }
 
+    /// E10-3g-1: Slang's first error placed in the preview's module goes to the node the
+    /// line map gives its line, with the detail at its place (its title without one); one at
+    /// a line of no node to none; warnings, and errors placed elsewhere, are passed over. The
+    /// Expression node shows its code in its title and its inspector.
+    #[test]
+    fn slangs_error_goes_to_the_node_of_its_line() {
+        let lines = vec![None, Some(String::from("e")), None];
+        // As Slang 2026.18 writes them (indented here, read trimmed).
+        let diagnostics = "H:\\engine\\forward.slang: shader compilation failed:
+            warning[E30081]: implicit conversion not recommended
+              --> C:/game/.ofelia/cache/graphs/g-editing.slang:2:3
+            error[E30019]: type mismatch
+              --> H:\\engine\\forward.slang:2874:31
+               |
+            2874 | x = 1;
+               |     ^ elsewhere
+            error[E30015]: undefined identifier
+              --> C:/game/.ofelia/cache/graphs/g-editing.slang:2:20
+               |
+            2 | return a * oops;
+               |            ^^^^ undefined identifier 'oops'.
+            ---'";
+        assert_eq!(
+            slang_error(diagnostics, "g-editing.slang", &lines),
+            Some((Some("e"), "undefined identifier 'oops'."))
+        );
+        assert_eq!(slang_error(diagnostics, "h-editing.slang", &lines), None);
+        let titled = "error[E1]: no detail\n--> C:\\game\\g-editing.slang:3:1";
+        assert_eq!(
+            slang_error(titled, "g-editing.slang", &lines),
+            Some((None, "no detail"))
+        );
+        // The node: its code in its title, its row in the inspector.
+        let mut d = doc();
+        d.graph.add(
+            "e",
+            Node::new("expression", [0.0, 300.0]).with_code("a * 0.5 + sin(b) * 0.25 + c * d"),
+        );
+        d.revision += 1;
+        d.relayout(&mut measure);
+        let b = &d.boxes[d.box_of("e").unwrap()];
+        assert_eq!(b.title, "Expression · a * 0.5 + sin(b) * 0.25…");
+        d.selected = [String::from("e")].into_iter().collect();
+        let mut rows = Vec::new();
+        d.rows(&mut rows);
+        assert_eq!(rows[0], NodeRow::Code);
+        d.set_code("a.x").unwrap();
+        assert_eq!(d.graph.nodes["e"].code, "a.x");
+        assert!(d.text.contains("nodes[\"e\"].code = \"a.x\""), "{}", d.text);
+    }
+
     /// E10-3e-2b: C puts the selected nodes in a frame (room round them, a title bar); its
     /// title bar drags it with the nodes it holds whole (not the others), its corner resizes
     /// it, its inside is the canvas's; its title is the inspector's; Delete takes it away
@@ -3521,8 +3658,9 @@ mod tests {
             PortRef::new(OUTPUT, "roughness"),
         );
         let module = AssetRef::file(AssetId::new());
-        let (text, file, paths) =
+        let (generated, file, paths) =
             preview_material(&d, module, ".ofelia/cache/graphs/x-editing.slang").unwrap();
+        let text = generated.text;
         assert!(text.contains("struct GraphMaterial : IMaterial"), "{text}");
         assert_eq!(file.shader, module);
         assert_eq!(file.type_name, GRAPH_TYPE);
@@ -3542,6 +3680,7 @@ mod tests {
             .unwrap();
         let (again, file, _) =
             preview_material(&d, module, ".ofelia/cache/graphs/x-editing.slang").unwrap();
+        let again = again.text;
         assert_eq!(again, text);
         assert_eq!(
             file.vectors.get("_c").map(Vec::as_slice),

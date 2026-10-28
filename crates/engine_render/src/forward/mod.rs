@@ -1746,6 +1746,15 @@ impl ForwardRenderer {
         self.material_types.set_hot_reload(enabled);
     }
 
+    /// File `path` (a material type's module, or a file it includes) written anew by the
+    /// caller: the types compiling from it reload as hot reload does when its watcher sees
+    /// the change, but due at once, so [`Self::material_types_pending`] counts the reload
+    /// from now (the editor's graph modules, ADR 0123 E10-3g-1). Nothing with hot reload
+    /// off.
+    pub fn material_source_changed(&mut self, path: &std::path::Path) {
+        self.material_types.changed(path);
+    }
+
     /// The latest compile error of material type `ty`, if its last compile failed (its
     /// previous version, or its fallback, draws).
     pub fn material_type_error(&self, ty: MaterialTypeId) -> Option<&str> {

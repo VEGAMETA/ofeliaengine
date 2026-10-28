@@ -868,6 +868,12 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3g-1, the Expression node and Slang's errors at their nodes** (#432, ADR 0123's
+    as-built): Slang written in a node (`a` to `d`, `ctx`), a function of the type; Slang's
+    error in the preview's module framed at its node with the message, kept while the code
+    is. On the way: a module the editor writes is due at once (no stale error), and a
+    type broken from the start is reflected again once fixed (it stayed unmade until a
+    restart, hand-written types too).
   - **E10-3e-2b, frames** (#431, ADR 0123's as-built; the `.mgraph` file's version 2): C
     puts the selection in a frame, Unreal's comment box; its title bar drags it with the
     nodes inside it (by place, no list in the file), its corner resizes it, its title is
@@ -945,8 +951,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3g (functions, and Slang's errors at their nodes), ADR 0123's last step;
-       then E10-4, previews, stats and variants with a base.
+       2D): E10-3g-2 (functions: a group of nodes as one node, its file's extension
+       asked), ADR 0123's last step; then E10-4, previews, stats and variants with a
+       base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

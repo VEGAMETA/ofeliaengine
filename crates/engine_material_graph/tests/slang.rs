@@ -66,6 +66,47 @@ fn one(kind: &Kind, vectors: bool) -> Graph {
     g
 }
 
+/// E10-3g-1: Slang's error in an Expression node's code is at a line the generator's line
+/// map gives to that node.
+#[test]
+fn an_error_in_an_expressions_code_is_at_its_node() {
+    let Some(mut compiler) = compiler() else {
+        return;
+    };
+    let mut g = Graph::new(Model::Lit);
+    g.add(
+        "e",
+        Node::new("expression", [0.0; 2]).with_code("a * undefined_thing"),
+    )
+    .link(PortRef::new("e", "out"), PortRef::new(OUTPUT, "base"));
+    let out = generate(&g, "Broken", Build::Editing).unwrap();
+    let dir = std::env::temp_dir().join(format!("material_graph_error_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("broken.slang");
+    std::fs::write(&file, &out.text).unwrap();
+    let shaders = shader_dir();
+    let options = material_type_options(&shaders, &file, "Broken");
+    let found = compiler.check_file(&shaders.join("forward.slang"), &options);
+    let error = found
+        .iter()
+        .find(|f| f.error && f.path.ends_with("broken.slang"))
+        .unwrap_or_else(|| panic!("no error in the module: {found:?}"));
+    let line = error.start.0.saturating_sub(1) as usize;
+    assert_eq!(
+        out.node_at(line),
+        Some("e"),
+        "{}: {}",
+        error.message,
+        out.text
+    );
+    assert!(
+        error.message.contains("undefined_thing"),
+        "{}",
+        error.message
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn every_kind_and_model_compiles_inside_forward_slang() {
     let Some(mut compiler) = compiler() else {
