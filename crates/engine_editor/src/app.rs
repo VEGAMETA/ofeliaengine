@@ -33520,6 +33520,7 @@ return Coin
         assert!(!ed.scripts[k].doc.is_dirty());
         // The session keeps the graph's tab, not its code's.
         ed.write_session(&world);
+        flush(&ed);
         let session = std::fs::read_to_string(dir.join(".ofelia/session")).unwrap();
         assert!(session.contains("materials/glow.mgraph"), "{session}");
         assert!(!session.contains("glow.mgraph.slang"), "{session}");
