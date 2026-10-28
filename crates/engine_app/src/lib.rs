@@ -127,6 +127,12 @@ pub use sound::{
     PlayMode, PreviewState, ReverbZone, Room, Routes, SendLayout, SoundFiles, Waveform, waveform,
 };
 pub use text::TextSource;
+
+/// The mixer's built-in effects as files and the editor name them (ADR 0121): each kind,
+/// its parameters with their ranges, defaults and units.
+pub mod effects {
+    pub use engine_audio::dsp::{EFFECTS, EffectInfo, ParamInfo, Unit, effect_info};
+}
 pub use videos::{MaterialSlot, VideoId, Videos};
 // What opening a video takes and tells (ADR 0100).
 pub use engine_video::player::{VideoDesc, VideoEvent};

@@ -815,12 +815,16 @@ Last updated: 2026-10-28.
     loops left out in one order; the player follows live, effects carrying on through
     moves (a reverb's tail rings on); `engine_audio` moves and bypasses effects, publishes
     gain reduction, and describes the built-in kinds.
+  - **E11-2b, the mixer's effects and sends in the editor** (#407, ADR 0107's as-built): a
+    section per effect in the inspector (parameters in their units, bypass, a filter's
+    shape, a compressor's sidechain, ↑ ↓ ×), a section per send, Add Effect and Add Send
+    offering only what would not loop; on the strip the effect's short name or count with
+    the gain reduction now, and B. E11-2 is done but for the room's reverb strip.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-2b, the mixer panel's effects and sends: rows on the strips (bypass, gain
-       reduction), + effect and + send, the picked effect's parameters in the inspector,
-       B, reordering; the room reverb's strip. Then
-       E11-4b, handles and hearing in place, and E11-3's last part: sounds dropped on the
-       viewport, the tree or an entity, and the sound and bus fields.
+    1. E11-4b, handles and hearing in place (rings with radius handles, zones' side and
+       fade handles, P, Listen to the Scene), then
+       E11-3's last part: sounds dropped on the viewport, the tree or an entity, and the
+       sound and bus fields; the room's reverb strip.
   - **Settled (2026-10-28, team decisions, every recommendation):**
     - E11's four (`docs/research/ux/sound.md`): the bus layout in a `.mixer` file named
       by `PlayerSettings::audio.layout` (`buses` goes; the four built-in buses without a

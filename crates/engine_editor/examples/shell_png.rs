@@ -447,6 +447,12 @@ fn main() {
         soloed: false,
         silenced: name == "music",
         changed: name == "steps",
+        effects: if name == "music" {
+            "Comp \u{2212}3.1"
+        } else {
+            ""
+        },
+        bypassed: false,
     };
     let strips = [
         strip("master", 0, 0.0, "0.0", "\u{2192} speakers", false),
@@ -468,6 +474,7 @@ fn main() {
         selection: "Player  ·  CharacterBody",
         prefab: false,
         inspector: &inspector,
+        movable: [0, 0],
         add_component: true,
         add_at: None,
         view_mode: "Lit",

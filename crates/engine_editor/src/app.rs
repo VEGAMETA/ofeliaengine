@@ -637,6 +637,9 @@ struct FrameLists {
     /// The mixer's strips, and the picked bus's outputs (E11-1).
     strips: Vec<crate::shell::StripView<'static>>,
     outputs: Vec<&'static str>,
+    /// The picked bus's effects' and sends' values, and the open list's options (E11-2b).
+    part_values: Vec<&'static str>,
+    part_options: Vec<&'static str>,
 }
 
 /// What the tree's rows are collected with, kept between frames.
@@ -1231,6 +1234,53 @@ struct MixerDrag {
     fader: Option<(f32, f32)>,
     merge: u64,
     moved: bool,
+}
+
+/// A section of the picked bus after its Bus section (E11-2b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MixerPart {
+    /// Effect `k` of its chain.
+    Effect(usize),
+    /// Its send at place `i` of its sends (by the bus they feed).
+    Send(usize),
+    /// Add Effect and Add Send.
+    Add,
+}
+
+/// An effect's parameter or a send's level dragged (E11-2b): the field, its value as
+/// shown at the press, the step its changes merge into, and whether it moved.
+#[derive(Debug, Clone, PartialEq)]
+struct PartDrag {
+    bus: String,
+    part: MixerPart,
+    field: usize,
+    start: f32,
+    merge: u64,
+    moved: bool,
+}
+
+/// The picked bus's effect and send sections' texts (E11-2b), written each frame into
+/// the same strings.
+#[derive(Debug, Default)]
+struct PartTexts {
+    /// Each effect's title ("Compressor −3.1 dB").
+    titles: Vec<String>,
+    /// The effects' parameters' names and shown values, effect after effect; how many of
+    /// them this frame.
+    names: Vec<String>,
+    values: Vec<String>,
+    used: usize,
+    /// Each send's title ("Send → canyon") and level; how many.
+    send_titles: Vec<String>,
+    send_values: Vec<String>,
+    sends: usize,
+}
+
+/// `list` with room for `n` strings at least.
+fn fit(list: &mut Vec<String>, n: usize) {
+    if list.len() < n {
+        list.resize_with(n, String::new);
+    }
 }
 
 /// What the editor asks of the player's sound preview (E11-3b), sent with its next frame.
@@ -2312,6 +2362,21 @@ struct Editor {
     mixer_section: Option<usize>,
     mixer_header: String,
     bus_texts: [String; 3],
+    /// The picked bus's sections after its Bus section (E11-2b): each one's part, the
+    /// first one's place, each one's fields; their texts; the field typed into or with its
+    /// list open (and the list's options), the number dragged.
+    mixer_parts: Vec<MixerPart>,
+    mixer_parts_at: usize,
+    part_spans: Vec<(usize, usize)>,
+    part_texts: PartTexts,
+    part_typing: Option<(MixerPart, usize)>,
+    part_choice: Option<(MixerPart, usize)>,
+    part_options: Vec<String>,
+    part_drag: Option<PartDrag>,
+    /// Each bus's effects' gain reduction as shown (dB, falling back at 24 dB/s), and
+    /// each strip's effects text with it (E11-2b).
+    reductions: Vec<(String, Vec<f32>)>,
+    fx_texts: Vec<String>,
     /// The mixer's meters (E11-1b-2), when they were last fed, and its listening aids:
     /// buses muted and soloed (in the session, never the file), Monitor (all of them aside)
     /// and whether the player has them.
@@ -3130,6 +3195,16 @@ impl Editor {
             mixer_section: None,
             mixer_header: String::new(),
             bus_texts: Default::default(),
+            mixer_parts: Vec::new(),
+            mixer_parts_at: 0,
+            part_spans: Vec::new(),
+            part_texts: PartTexts::default(),
+            part_typing: None,
+            part_choice: None,
+            part_options: Vec::new(),
+            part_drag: None,
+            reductions: Vec::new(),
+            fx_texts: Vec::new(),
             meters: Vec::new(),
             meters_at: None,
             mixer_at_play: None,
@@ -3911,6 +3986,9 @@ impl Editor {
         let bus_values: [&str; 3];
         self.mixer_section = None;
         let mut outputs: Vec<&str> = recycle(std::mem::take(&mut self.lists.outputs));
+        let mut part_values: Vec<&str> = recycle(std::mem::take(&mut self.lists.part_values));
+        let mut part_options: Vec<&str> = recycle(std::mem::take(&mut self.lists.part_options));
+        let mut movable = [0usize; 2];
         let picked = self.mixer_picked.as_deref().and_then(|bus| {
             let doc = self.mixer.as_ref()?;
             doc.strip(bus).map(|_| (doc, bus))
@@ -3956,13 +4034,132 @@ impl Editor {
                     changed: false,
                 });
             }
+            let bus_end = asset_fields.len();
+            // Its effects, a section each, its sends, and Add (E11-2b).
+            use crate::mixer::EffectRow;
+            let t = &self.part_texts;
+            part_values.extend(t.values[..t.used].iter().map(String::as_str));
+            part_values.extend(t.send_values[..t.sends].iter().map(String::as_str));
+            part_options.extend(self.part_options.iter().map(String::as_str));
+            let chain = crate::mixer::chain(&doc.layout, bus);
+            self.mixer_parts.clear();
+            self.part_spans.clear();
+            let mut value = 0;
+            for (k, e) in chain.iter().enumerate() {
+                let from = asset_fields.len();
+                let info = engine_app::effects::effect_info(&e.kind);
+                for (f, row) in EffectRow::of(&e.kind).enumerate() {
+                    let here = Some((MixerPart::Effect(k), f));
+                    let open = (self.part_choice == here).then_some(part_options.as_slice());
+                    let (name, widget) = match row {
+                        EffectRow::Shape => (
+                            "shape",
+                            Widget::Choice {
+                                current: info.map_or("", |i| i.label),
+                                open,
+                            },
+                        ),
+                        EffectRow::Bypass => ("bypass", Widget::Check(Some(e.bypass))),
+                        EffectRow::Sidechain => (
+                            "sidechain",
+                            Widget::Choice {
+                                current: if e.sidechain.is_empty() {
+                                    "none"
+                                } else {
+                                    e.sidechain.as_str()
+                                },
+                                open,
+                            },
+                        ),
+                        EffectRow::Param(_) => {
+                            let i = value.min(t.used);
+                            value += 1;
+                            (
+                                t.names.get(i).map_or("", String::as_str),
+                                Widget::Numbers {
+                                    values: part_values.get(i..=i).unwrap_or(&[]),
+                                    labels: &[],
+                                    typing: (self.part_typing == here).then_some(0),
+                                    lock: None,
+                                },
+                            )
+                        }
+                        EffectRow::Unknown => ("kind (unknown)", Widget::Text(e.kind.as_str())),
+                    };
+                    asset_fields.push(Field {
+                        name,
+                        widget,
+                        changed: false,
+                    });
+                }
+                self.part_spans.push((from, asset_fields.len()));
+                self.mixer_parts.push(MixerPart::Effect(k));
+            }
+            if let Some(b) = doc.layout.buses.get(bus) {
+                for (i, send) in b.sends.values().enumerate() {
+                    let from = asset_fields.len();
+                    let here = Some((MixerPart::Send(i), 0));
+                    let at = t.used + i;
+                    asset_fields.push(Field {
+                        name: "gain dB",
+                        widget: Widget::Numbers {
+                            values: part_values.get(at..=at).unwrap_or(&[]),
+                            labels: &[],
+                            typing: (self.part_typing == here).then_some(0),
+                            lock: None,
+                        },
+                        changed: false,
+                    });
+                    asset_fields.push(Field {
+                        name: "before fader",
+                        widget: Widget::Check(Some(send.pre_fader)),
+                        changed: false,
+                    });
+                    self.part_spans.push((from, asset_fields.len()));
+                    self.mixer_parts.push(MixerPart::Send(i));
+                }
+            }
+            let from = asset_fields.len();
+            let adds: &[&str] = if bus == crate::mixer::MASTER {
+                &["add effect"]
+            } else {
+                &["add effect", "add send"]
+            };
+            for (f, &name) in adds.iter().enumerate() {
+                let here = Some((MixerPart::Add, f));
+                asset_fields.push(Field {
+                    name,
+                    widget: Widget::Choice {
+                        current: "\u{2026}",
+                        open: (self.part_choice == here).then_some(part_options.as_slice()),
+                    },
+                    changed: false,
+                });
+            }
+            self.part_spans.push((from, asset_fields.len()));
+            self.mixer_parts.push(MixerPart::Add);
             self.mixer_section = Some(sections.len());
             sections.push(Section {
                 title: "Bus",
-                fields: &asset_fields[..],
+                fields: &asset_fields[..bus_end],
                 script: "",
                 removable: false,
             });
+            self.mixer_parts_at = sections.len();
+            movable = [sections.len(), sections.len() + chain.len()];
+            for (&(from, to), &part) in self.part_spans.iter().zip(&self.mixer_parts) {
+                let (title, removable) = match part {
+                    MixerPart::Effect(k) => (t.titles.get(k).map_or("", String::as_str), true),
+                    MixerPart::Send(i) => (t.send_titles.get(i).map_or("", String::as_str), true),
+                    MixerPart::Add => ("Add", false),
+                };
+                sections.push(Section {
+                    title,
+                    fields: &asset_fields[from..to],
+                    script: "",
+                    removable,
+                });
+            }
         } else if let Some(asset) = &self.inspected {
             scale_value = [asset.scale_text.as_str()];
             let list = &mut asset_fields;
@@ -4893,7 +5090,7 @@ impl Editor {
             && let Some(doc) = &self.mixer
         {
             let (muted, soloed) = (&self.mixer_muted, &self.mixer_soloed);
-            strips.extend(doc.strips.iter().map(|s| {
+            strips.extend(doc.strips.iter().enumerate().map(|(i, s)| {
                 let meter = self.meters.iter().find(|m| m.name == s.name);
                 let level =
                     |k: usize| meter.map_or(0.0, |m| crate::mixer::meter_position(m.level[k]));
@@ -4916,6 +5113,8 @@ impl Editor {
                             .mixer_at_play
                             .as_ref()
                             .is_some_and(|at| crate::mixer::bus_changed(at, &doc.layout, &s.name)),
+                    effects: self.fx_texts.get(i).map_or("", String::as_str),
+                    bypassed: s.bypassed,
                 }
             }));
         }
@@ -4935,6 +5134,7 @@ impl Editor {
             tree: &items,
             selection: &self.selection_label,
             inspector: &sections,
+            movable,
             add_component: self.inspected.is_none() && !self.selection.is_empty(),
             path: &self.browser.label,
             folders: &folder_items,
@@ -5031,6 +5231,8 @@ impl Editor {
         self.lists.files = recycle(file_items);
         self.lists.strips = recycle(strips);
         self.lists.outputs = recycle(outputs);
+        self.lists.part_values = recycle(part_values);
+        self.lists.part_options = recycle(part_options);
         self.lists.scenes = recycle(scenes);
         self.listing = self
             .ui
@@ -5088,6 +5290,13 @@ impl Editor {
                     m.clear();
                 }
             }
+        }
+        if let Some(i) = response.mixer_bypass
+            && let Some(name) = self.strip_name(i)
+        {
+            self.mixer_step(world, &format!("Mixer: {name} bypass"), None, |l| {
+                crate::mixer::bypass_all(l, &name);
+            });
         }
         if let Some(i) = response.mixer_remove
             && let Some(name) = self.strip_name(i)
@@ -5235,7 +5444,16 @@ impl Editor {
             self.open_section_script(world, s);
         }
         if let Some(s) = response.remove_section {
-            self.remove_section(world, s);
+            if let Some(part) = self.mixer_part(s) {
+                self.remove_part(world, part);
+            } else {
+                self.remove_section(world, s);
+            }
+        }
+        if let Some((s, up)) = response.move_section
+            && let Some(MixerPart::Effect(k)) = self.mixer_part(s)
+        {
+            self.move_part(world, k, up);
         }
         // The Debugger panel's buttons, frames and breakpoints.
         if let Some(go) = response.debug_go {
@@ -5568,6 +5786,8 @@ impl Editor {
         if let Some(event) = response.field {
             if Some(event.section) == self.mixer_section {
                 self.edit_bus(world, event);
+            } else if let Some(part) = self.mixer_part(event.section) {
+                self.edit_part(world, part, event);
             } else if Some(event.section) == self.material_section {
                 self.edit_material(world, event);
             } else if self.inspected.is_some() {
@@ -5598,6 +5818,8 @@ impl Editor {
                 };
                 if Some(section) == self.mixer_section {
                     self.edit_bus(world, event);
+                } else if let Some(part) = self.mixer_part(section) {
+                    self.edit_part(world, part, event);
                 } else if Some(section) == self.material_section {
                     self.edit_material(world, event);
                 } else if self.inspected.is_some() {
@@ -14354,9 +14576,80 @@ impl Editor {
             self.mixer_header
                 .push_str(" \u{b7} not written yet: the built-in buses play");
         }
+        // Each strip's effects, with the most gain reduction now (E11-2b).
+        let most = |reductions: &[(String, Vec<f32>)], bus: &str| {
+            reductions
+                .iter()
+                .find(|(n, _)| n == bus)
+                .map_or(0.0, |(_, r)| r.iter().copied().fold(0.0, f32::max))
+        };
+        fit(&mut self.fx_texts, doc.strips.len());
+        for (s, text) in doc.strips.iter().zip(&mut self.fx_texts) {
+            text.clear();
+            text.push_str(&s.effects);
+            let r = most(&self.reductions, &s.name);
+            if r >= 0.1 {
+                let _ = write!(text, " \u{2212}{r:.1}");
+            }
+        }
         let Some(bus) = self.mixer_picked.as_deref() else {
             return;
         };
+        // The picked bus's effects' and sends' sections (E11-2b): titles, names, values.
+        let t = &mut self.part_texts;
+        let chain = crate::mixer::chain(&doc.layout, bus);
+        let reductions = self
+            .reductions
+            .iter()
+            .find(|(n, _)| n == bus)
+            .map_or(&[][..], |(_, r)| r.as_slice());
+        fit(&mut t.titles, chain.len());
+        t.used = 0;
+        for (k, e) in chain.iter().enumerate() {
+            let title = &mut t.titles[k];
+            title.clear();
+            let info = engine_app::effects::effect_info(&e.kind);
+            title.push_str(info.map_or(e.kind.as_str(), |i| i.label));
+            if e.bypass {
+                title.push_str(" (bypassed)");
+            } else if let Some(&r) = reductions.get(k)
+                && r >= 0.1
+            {
+                let _ = write!(title, "  \u{2212}{r:.1} dB");
+            }
+            for row in crate::mixer::EffectRow::of(&e.kind) {
+                if let crate::mixer::EffectRow::Param(p) = row {
+                    let n = t.used;
+                    fit(&mut t.names, n + 1);
+                    fit(&mut t.values, n + 1);
+                    crate::mixer::param_name(&mut t.names[n], p);
+                    t.values[n].clear();
+                    crate::mixer::param_text(
+                        &mut t.values[n],
+                        p,
+                        e.param(p.name).unwrap_or(p.default),
+                    );
+                    t.used += 1;
+                }
+            }
+        }
+        t.sends = 0;
+        if let Some(b) = doc.layout.buses.get(bus) {
+            fit(&mut t.send_titles, b.sends.len());
+            fit(&mut t.send_values, b.sends.len());
+            for (i, (to, send)) in b.sends.iter().enumerate() {
+                t.send_titles[i].clear();
+                let tap = if send.pre_fader {
+                    " (before fader)"
+                } else {
+                    ""
+                };
+                let _ = write!(t.send_titles[i], "Send \u{2192} {to}{tap}");
+                t.send_values[i].clear();
+                let _ = write!(t.send_values[i], "{:.1}", send.gain);
+            }
+            t.sends = b.sends.len();
+        }
         let (gain, balance, voices) = if bus == crate::mixer::MASTER {
             (doc.layout.master.gain, doc.layout.master.balance, 0)
         } else if let Some(b) = doc.layout.buses.get(bus) {
@@ -14383,6 +14676,349 @@ impl Editor {
         self.inspected = None;
         self.mixer_choice = None;
         self.mixer_typing = None;
+        self.part_choice = None;
+        self.part_typing = None;
+        self.part_drag = None;
+    }
+
+    /// The picked bus's part shown as inspector section `section` (E11-2b).
+    fn mixer_part(&self, section: usize) -> Option<MixerPart> {
+        self.mixer_section?;
+        let j = section.checked_sub(self.mixer_parts_at)?;
+        self.mixer_parts.get(j).copied()
+    }
+
+    /// A field of the picked bus's effects, sends or Add used (E11-2b): each change a step
+    /// of the one history, heard at once.
+    fn edit_part(&mut self, world: &mut World, part: MixerPart, event: FieldEvent) {
+        use crate::mixer::{self as m, EffectRow};
+        use engine_app::effects::{EFFECTS, Unit, effect_info};
+        let Some(bus) = self.mixer_picked.clone() else {
+            return;
+        };
+        let Some(doc) = self.mixer.as_ref() else {
+            return;
+        };
+        let field = event.field;
+        let here = Some((part, field));
+        match part {
+            MixerPart::Effect(k) => {
+                let Some(effect) = m::chain(&doc.layout, &bus).get(k).cloned() else {
+                    return;
+                };
+                let Some(row) = EffectRow::at(&effect.kind, field) else {
+                    return;
+                };
+                let label = effect_info(&effect.kind).map_or(effect.kind.as_str(), |i| i.label);
+                let label = label.to_lowercase();
+                match (row, event.action) {
+                    (EffectRow::Bypass, FieldAction::Toggle) => {
+                        self.mixer_step(
+                            world,
+                            &format!("Mixer: {bus} {label} bypass"),
+                            None,
+                            |l| {
+                                m::toggle_bypass(l, &bus, k);
+                            },
+                        );
+                    }
+                    (EffectRow::Shape | EffectRow::Sidechain, FieldAction::Open) => {
+                        if self.part_choice == here {
+                            self.part_choice = None;
+                            return;
+                        }
+                        self.part_options.clear();
+                        if row == EffectRow::Shape {
+                            self.part_options
+                                .extend(m::filters().map(|i| i.label.to_owned()));
+                        } else {
+                            self.part_options.push(String::from("none"));
+                            self.part_options.extend(
+                                m::sidechain_sources(&doc.layout, &bus, k)
+                                    .into_iter()
+                                    .map(str::to_owned),
+                            );
+                        }
+                        self.part_choice = here;
+                    }
+                    (EffectRow::Shape, FieldAction::Choose(i)) => {
+                        self.part_choice = None;
+                        let Some(kind) = m::filters().nth(i).map(|i| i.kind) else {
+                            return;
+                        };
+                        self.mixer_step(world, &format!("Mixer: {bus} {label} shape"), None, |l| {
+                            m::set_shape(l, &bus, k, kind);
+                        });
+                    }
+                    (EffectRow::Sidechain, FieldAction::Choose(i)) => {
+                        self.part_choice = None;
+                        let source = if i == 0 {
+                            String::new()
+                        } else {
+                            let Some(s) = self.part_options.get(i).cloned() else {
+                                return;
+                            };
+                            s
+                        };
+                        let by = if source.is_empty() {
+                            "itself"
+                        } else {
+                            source.as_str()
+                        };
+                        let name = format!("Mixer: {bus} {label} keyed by {by}");
+                        self.mixer_step(world, &name, None, |l| {
+                            m::set_sidechain(l, &bus, k, &source);
+                        });
+                    }
+                    (EffectRow::Sidechain, FieldAction::Reset) => {
+                        self.mixer_step(
+                            world,
+                            &format!("Mixer: {bus} {label} keyed by itself"),
+                            None,
+                            |l| {
+                                m::set_sidechain(l, &bus, k, "");
+                            },
+                        );
+                    }
+                    (EffectRow::Param(p), action) => {
+                        let current = m::shown(p, effect.param(p.name).unwrap_or(p.default));
+                        let name = format!("Mixer: {bus} {label} {}", p.label.to_lowercase());
+                        let target = bus.clone();
+                        self.edit_part_number(
+                            world,
+                            (&bus, part, field),
+                            action,
+                            [current, m::shown(p, p.default)],
+                            p.unit == Unit::Hz,
+                            &name,
+                            move |l, v| m::set_param(l, &target, k, p.name, m::stored(p, v)),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            MixerPart::Send(i) => {
+                let Some((to, send)) = doc
+                    .layout
+                    .buses
+                    .get(&bus)
+                    .and_then(|b| b.sends.iter().nth(i))
+                    .map(|(t, s)| (t.clone(), *s))
+                else {
+                    return;
+                };
+                match (field, event.action) {
+                    (1, FieldAction::Toggle) => {
+                        self.mixer_step(
+                            world,
+                            &format!("Mixer: {bus} send into {to} tap"),
+                            None,
+                            |l| {
+                                m::toggle_send_tap(l, &bus, &to);
+                            },
+                        );
+                    }
+                    (0, action) => {
+                        let name = format!("Mixer: {bus} send into {to}");
+                        let target = bus.clone();
+                        self.edit_part_number(
+                            world,
+                            (&bus, part, field),
+                            action,
+                            [send.gain, 0.0],
+                            false,
+                            &name,
+                            move |l, v| m::set_send_gain(l, &target, &to, v),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            MixerPart::Add => match event.action {
+                FieldAction::Open => {
+                    if self.part_choice == here {
+                        self.part_choice = None;
+                        return;
+                    }
+                    self.part_options.clear();
+                    if field == 0 {
+                        self.part_options
+                            .extend(EFFECTS.iter().map(|e| e.label.to_owned()));
+                    } else {
+                        self.part_options.extend(
+                            m::send_targets(&doc.layout, &bus)
+                                .into_iter()
+                                .map(str::to_owned),
+                        );
+                    }
+                    if self.part_options.is_empty() {
+                        self.say(format!("No bus `{bus}` can send into without a loop"));
+                        return;
+                    }
+                    self.part_choice = here;
+                }
+                FieldAction::Choose(i) => {
+                    self.part_choice = None;
+                    if field == 0 {
+                        let Some(info) = EFFECTS.get(i) else {
+                            return;
+                        };
+                        self.mixer_step(
+                            world,
+                            &format!("Mixer: {bus} + {}", info.label),
+                            None,
+                            |l| {
+                                m::add_effect(l, &bus, info.kind);
+                            },
+                        );
+                    } else if let Some(to) = self.part_options.get(i).cloned() {
+                        self.mixer_step(
+                            world,
+                            &format!("Mixer: {bus} sends into {to}"),
+                            None,
+                            |l| {
+                                m::add_send(l, &bus, &to);
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    /// A number of an effect or a send (E11-2b) dragged (a frequency by octaves, 120 px
+    /// each), typed (expressions too) or reset, as the bus's numbers are: `values` is its
+    /// shown value and its default; `apply` sets a shown value.
+    #[allow(clippy::too_many_arguments)]
+    fn edit_part_number(
+        &mut self,
+        world: &mut World,
+        (bus, part, field): (&str, MixerPart, usize),
+        action: FieldAction,
+        [current, default]: [f32; 2],
+        octaves: bool,
+        name: &str,
+        apply: impl Fn(&mut engine_app::MixerFile, f32),
+    ) {
+        match action {
+            FieldAction::Drag { travel, start, .. } => {
+                let other = self
+                    .part_drag
+                    .as_ref()
+                    .is_none_or(|d| d.part != part || d.field != field || d.bus != bus);
+                if start || other {
+                    self.gestures += 1;
+                    self.part_drag = Some(PartDrag {
+                        bus: bus.to_owned(),
+                        part,
+                        field,
+                        start: current,
+                        merge: self.gestures,
+                        moved: false,
+                    });
+                    self.part_typing = None;
+                    return;
+                }
+                let Some(drag) = self.part_drag.as_mut() else {
+                    return;
+                };
+                if travel != 0.0 {
+                    drag.moved = true;
+                }
+                let (from, merge) = (drag.start, drag.merge);
+                let (shift, ctrl) = (self.input.shift(), self.input.ctrl());
+                let v = if octaves {
+                    let v = from.max(1.0) * (travel / 120.0).exp2();
+                    if ctrl { v.round() } else { v }
+                } else {
+                    self.snapping.drag(
+                        Quantity::Number { step: None },
+                        f64::from(from),
+                        travel,
+                        shift,
+                        ctrl,
+                    ) as f32
+                };
+                self.mixer_step(world, name, Some(merge), |l| apply(l, v));
+            }
+            FieldAction::Release => {
+                if let Some(drag) = self.part_drag.take()
+                    && !drag.moved
+                {
+                    self.part_typing = Some((part, field));
+                }
+            }
+            FieldAction::Typed { commit, .. } => {
+                self.part_typing = None;
+                if !commit {
+                    return;
+                }
+                let text = self.ui.edited_text().trim().to_owned();
+                match crate::expr::evaluate(&text, f64::from(current)) {
+                    Ok(v) => {
+                        self.mixer_step(world, name, None, |l| apply(l, v as f32));
+                    }
+                    Err(reason) => self.say(format!("{name}: {reason}")),
+                }
+            }
+            FieldAction::Reset => {
+                self.mixer_step(world, &format!("{name} reset"), None, |l| apply(l, default));
+            }
+            _ => {}
+        }
+    }
+
+    /// The picked bus's effect or send taken away (its section's ×, E11-2b).
+    fn remove_part(&mut self, world: &mut World, part: MixerPart) {
+        use crate::mixer as m;
+        let (Some(bus), Some(doc)) = (self.mixer_picked.clone(), self.mixer.as_ref()) else {
+            return;
+        };
+        self.part_choice = None;
+        self.part_typing = None;
+        match part {
+            MixerPart::Effect(k) => {
+                let Some(kind) = m::chain(&doc.layout, &bus).get(k).map(|e| e.kind.clone()) else {
+                    return;
+                };
+                let label =
+                    engine_app::effects::effect_info(&kind).map_or(kind.as_str(), |i| i.label);
+                let name = format!("Mixer: {bus} \u{2212} {label}");
+                self.mixer_step(world, &name, None, |l| m::remove_effect(l, &bus, k));
+            }
+            MixerPart::Send(i) => {
+                let Some(to) = doc
+                    .layout
+                    .buses
+                    .get(&bus)
+                    .and_then(|b| b.sends.keys().nth(i))
+                    .cloned()
+                else {
+                    return;
+                };
+                let name = format!("Mixer: {bus} no longer sends into {to}");
+                self.mixer_step(world, &name, None, |l| m::remove_send(l, &bus, &to));
+            }
+            MixerPart::Add => {}
+        }
+    }
+
+    /// The picked bus's effect `k` a place earlier (`up`) or later in its chain (E11-2b).
+    fn move_part(&mut self, world: &mut World, k: usize, up: bool) {
+        let Some(bus) = self.mixer_picked.clone() else {
+            return;
+        };
+        let to = if up { k.saturating_sub(1) } else { k + 1 };
+        let way = if up { "up" } else { "down" };
+        self.mixer_step(
+            world,
+            &format!("Mixer: {bus} effect {} {way}", k + 1),
+            None,
+            |l| {
+                crate::mixer::move_effect(l, &bus, k, to);
+            },
+        );
     }
 
     /// `edit` made to the mixer's layout as a step called `name` (`merge`: one step for a
@@ -18369,6 +19005,32 @@ impl<G> EditorGame<G> {
                         };
                         if let Some(peak) = player.take_bus_peak(&strip.name) {
                             shared.meters[k].feed(peak, dt);
+                        }
+                        // Its dynamics' gain reduction (E11-2b), falling back at 24 dB/s.
+                        let chain = crate::mixer::chain(&doc.layout, &strip.name);
+                        let reduces = |e: &engine_app::EffectLayout| {
+                            engine_app::effects::effect_info(&e.kind).is_some_and(|i| i.reduction)
+                        };
+                        let at = shared.reductions.iter().position(|(n, _)| *n == strip.name);
+                        if !chain.iter().any(reduces) {
+                            if let Some(at) = at {
+                                shared.reductions.swap_remove(at);
+                            }
+                            continue;
+                        }
+                        let at = at.unwrap_or_else(|| {
+                            shared.reductions.push((strip.name.clone(), Vec::new()));
+                            shared.reductions.len() - 1
+                        });
+                        let shown = &mut shared.reductions[at].1;
+                        shown.resize(chain.len(), 0.0);
+                        for (j, e) in chain.iter().enumerate() {
+                            let now = if reduces(e) {
+                                player.take_effect_reduction(&strip.name, j).unwrap_or(0.0)
+                            } else {
+                                0.0
+                            };
+                            shown[j] = now.max(shown[j] - 24.0 * dt).max(0.0);
                         }
                     }
                 }
@@ -23786,9 +24448,12 @@ mod tests {
             .into_iter()
             .find(|r| (r.pos[0] - left).abs() < 40.0)
             .expect("music's output");
-        // Under the output: the held peak's row, then the fader (its thumb 19 px down at
-        // 0 dB), the marks left of it.
-        let thumb = [left + 48.0, output.pos[1] + output.size[1] + 20.0 + 23.0];
+        // Under the output: the effects' row and the held peak's, then the fader (its
+        // thumb 21 px down at 0 dB), the marks left of it.
+        let thumb = [
+            left + 48.0,
+            output.pos[1] + output.size[1] + 19.0 + 20.0 + 21.0,
+        ];
         mouse(&mut ed, thumb, None);
         ed.update(&mut world);
         mouse(&mut ed, thumb, Some(true));
@@ -23802,14 +24467,15 @@ mod tests {
         ed.update(&mut world);
         mouse(&mut ed, [thumb[0], thumb[1] + 40.0], Some(false));
         ed.update(&mut world);
-        assert!((gain(&ed) + 26.0).abs() < 0.2, "{}", gain(&ed));
+        // 40 px of its 84: from four fifths of the travel down to a third of it.
+        assert!((gain(&ed) + 33.1).abs() < 0.2, "{}", gain(&ed));
         assert!(ed.mixer.as_ref().unwrap().dirty());
         // One step for the drag: undone, 0 dB; redone, the drag's end.
         let (undo, redo) = (ed.ids.undo, ed.ids.redo);
         ed.run(&mut world, undo);
         assert_eq!(gain(&ed), 0.0);
         ed.run(&mut world, redo);
-        assert!((gain(&ed) + 26.0).abs() < 0.2);
+        assert!((gain(&ed) + 33.1).abs() < 0.2);
         // The listening aids: music's M, effects' S, Monitor; the session keeps the first
         // two, the player is told.
         let on_strip = |ed: &Editor, label: &str, strip: &str| {
@@ -23905,6 +24571,172 @@ mod tests {
         assert!(strip > 0);
         ed.run(&mut world, undo);
         assert!(ed.mixer.as_ref().unwrap().layout.buses.contains_key("bus"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_mixers_effects_and_sends_are_edited_in_the_inspector() {
+        use engine_app::effects::EFFECTS;
+        let dir = folder("mixer-effects");
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        let mixer = ed.ids.mixer;
+        ed.run(&mut world, mixer);
+        ed.update(&mut world);
+        ed.pick_bus("music");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let section = |ed: &Editor, part: MixerPart| {
+            let j = ed.mixer_parts.iter().position(|&p| p == part);
+            ed.mixer_parts_at + j.expect("the part's section")
+        };
+        let event = |section: usize, field: usize, action: FieldAction| FieldEvent {
+            section,
+            field,
+            action,
+        };
+        let layout = |ed: &Editor| ed.mixer.as_ref().unwrap().layout.clone();
+        let chain = |ed: &Editor| layout(ed).buses["music"].effects.clone();
+        // Add Effect: the twelve kinds; a compressor, its parameters written out.
+        let add = section(&ed, MixerPart::Add);
+        ed.edit_part(&mut world, MixerPart::Add, event(add, 0, FieldAction::Open));
+        assert_eq!(ed.part_options.len(), EFFECTS.len());
+        let comp = EFFECTS.iter().position(|e| e.kind == "compressor").unwrap();
+        ed.edit_part(
+            &mut world,
+            MixerPart::Add,
+            event(add, 0, FieldAction::Choose(comp)),
+        );
+        assert_eq!(chain(&ed).len(), 1);
+        assert_eq!(chain(&ed)[0].params.len(), 6);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        for shown in ["Compressor", "threshold dB", "-18.0", "sidechain", "bypass"] {
+            assert!(!texts(&ed, shown).is_empty(), "{shown}");
+        }
+        // A click on its threshold, then typed: −24.
+        let fx = MixerPart::Effect(0);
+        let s = section(&ed, fx);
+        let threshold = 2;
+        let press = FieldAction::Drag {
+            part: 0,
+            travel: 0.0,
+            start: true,
+        };
+        ed.edit_part(&mut world, fx, event(s, threshold, press));
+        ed.edit_part(&mut world, fx, event(s, threshold, FieldAction::Release));
+        assert_eq!(ed.part_typing, Some((fx, threshold)));
+        ed.update(&mut world);
+        chars(&mut ed, "-24");
+        key(&mut ed, 0x0D, 0x1C, true);
+        ed.update(&mut world);
+        assert_eq!(chain(&ed)[0].params["threshold_db"], -24.0);
+        // Dragged: the ratio up, one step for the drag.
+        let steps = ed.history.steps().count();
+        let ratio = 3;
+        ed.edit_part(&mut world, fx, event(s, ratio, press));
+        for travel in [20.0, 40.0] {
+            let drag = FieldAction::Drag {
+                part: 0,
+                travel,
+                start: false,
+            };
+            ed.edit_part(&mut world, fx, event(s, ratio, drag));
+        }
+        ed.edit_part(&mut world, fx, event(s, ratio, FieldAction::Release));
+        assert!(chain(&ed)[0].params["ratio"] > 4.0);
+        assert_eq!(ed.history.steps().count(), steps + 1, "one step");
+        // Keyed by the voice, from the sources that would not loop.
+        ed.edit_part(&mut world, fx, event(s, 1, FieldAction::Open));
+        assert_eq!(ed.part_options[0], "none");
+        let voice = ed.part_options.iter().position(|o| o == "voice").unwrap();
+        ed.edit_part(&mut world, fx, event(s, 1, FieldAction::Choose(voice)));
+        assert_eq!(chain(&ed)[0].sidechain, "voice");
+        // A low-pass after it, moved before it (↑), then shaped as a peak.
+        ed.edit_part(&mut world, MixerPart::Add, event(add, 0, FieldAction::Open));
+        let low = EFFECTS.iter().position(|e| e.kind == "low_pass").unwrap();
+        ed.edit_part(
+            &mut world,
+            MixerPart::Add,
+            event(add, 0, FieldAction::Choose(low)),
+        );
+        ed.move_part(&mut world, 1, true);
+        let kinds = |ed: &Editor| chain(ed).iter().map(|e| e.kind.clone()).collect::<Vec<_>>();
+        assert_eq!(kinds(&ed), ["low_pass", "compressor"]);
+        assert_eq!(chain(&ed)[1].params["threshold_db"], -24.0, "carried along");
+        ed.update(&mut world);
+        let s0 = section(&ed, fx);
+        ed.edit_part(&mut world, fx, event(s0, 0, FieldAction::Open));
+        let peak = ed.part_options.iter().position(|o| o == "Peak EQ").unwrap();
+        ed.edit_part(&mut world, fx, event(s0, 0, FieldAction::Choose(peak)));
+        assert_eq!(kinds(&ed), ["peak", "compressor"]);
+        // Bypassed one by one, and all with the strip's B.
+        ed.edit_part(&mut world, fx, event(s0, 1, FieldAction::Toggle));
+        assert!(chain(&ed)[0].bypass && !chain(&ed)[1].bypass);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let name = texts(&ed, "music")
+            .into_iter()
+            .find(|r| r.pos[1] > 400.0)
+            .expect("music's strip");
+        let b = texts(&ed, "B")
+            .into_iter()
+            .find(|r| {
+                r.pos[1] > 400.0 && r.pos[0] > name.pos[0] - 6.0 && r.pos[0] < name.pos[0] + 80.0
+            })
+            .expect("music's B");
+        click(&mut ed, &mut world, middle(b));
+        assert!(chain(&ed).iter().all(|e| e.bypass), "B: every one");
+        assert!(!texts(&ed, "2 fx").is_empty(), "the strip's effects");
+        // Add Send: into ui; its level dragged down; taken before the fader.
+        ed.edit_part(&mut world, MixerPart::Add, event(add, 1, FieldAction::Open));
+        let ui = ed.part_options.iter().position(|o| o == "ui").unwrap();
+        ed.edit_part(
+            &mut world,
+            MixerPart::Add,
+            event(add, 1, FieldAction::Choose(ui)),
+        );
+        assert!(layout(&ed).buses["music"].sends.contains_key("ui"));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        // Its section (below the fold of the inspector at this size).
+        assert_eq!(ed.part_texts.sends, 1);
+        assert_eq!(ed.part_texts.send_titles[0], "Send \u{2192} ui");
+        let send = MixerPart::Send(0);
+        let s2 = section(&ed, send);
+        ed.edit_part(&mut world, send, event(s2, 0, press));
+        let down = FieldAction::Drag {
+            part: 0,
+            travel: -60.0,
+            start: false,
+        };
+        ed.edit_part(&mut world, send, event(s2, 0, down));
+        ed.edit_part(&mut world, send, event(s2, 0, FieldAction::Release));
+        assert!(layout(&ed).buses["music"].sends["ui"].gain < 0.0);
+        ed.edit_part(&mut world, send, event(s2, 1, FieldAction::Toggle));
+        assert!(layout(&ed).buses["music"].sends["ui"].pre_fader);
+        // Ui cannot send back into music now: the list leaves music out.
+        assert!(!crate::mixer::send_targets(&layout(&ed), "ui").contains(&"music"));
+        // The sections' ×: the peak, then the send; undo brings the send back.
+        ed.remove_part(&mut world, fx);
+        assert_eq!(kinds(&ed), ["compressor"]);
+        ed.remove_part(&mut world, send);
+        assert!(layout(&ed).buses["music"].sends.is_empty());
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert!(layout(&ed).buses["music"].sends.contains_key("ui"));
+        // Written: the file reads back as the panel holds it.
+        assert!(ed.save_mixer());
+        let written = engine_app::MixerFile::load(&dir.join("main.mixer")).unwrap();
+        assert_eq!(written, layout(&ed));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

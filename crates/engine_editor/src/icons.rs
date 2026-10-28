@@ -4,6 +4,10 @@
 //! Each constant names its Nerd Fonts glyph (`glyphnames.json` of Nerd Fonts 3.5.1). Most are
 //! Material Design Icons (Apache-2.0); every set is credited in `THIRD_PARTY_NOTICES.md`.
 
+/// Move up (`md-arrow_up`): an effect earlier in its chain.
+pub const MOVE_UP: &str = "\u{F005D}";
+/// Move down (`md-arrow_down`).
+pub const MOVE_DOWN: &str = "\u{F0045}";
 /// Play (`md-play`).
 pub const PLAY: &str = "\u{F040A}";
 /// Pause (`md-pause`).

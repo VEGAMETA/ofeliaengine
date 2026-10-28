@@ -2163,3 +2163,39 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **E11-1 is done** but for the items listed under E11-1b-1 and E11-1b-2: bypass, the
   header's output numbers, RMS and loudness, the panel's own keys, strips dragged into a new
   order, and bus renames following into the scene's sources.
+
+## As built (E11-2b, 2026-10-28): the mixer's effects and sends
+
+- **Where they are edited:** in the inspector, below the picked bus's Bus section (the
+  sound UX note put `+ effect` and `+ send` on the strips themselves; an 84 px strip in a
+  240 px panel has room for one row, so the strip says what is there and the inspector
+  edits it, as Unity's mixer does with its inspector):
+  - a section per effect, titled by its kind (and its gain reduction now, or
+    "(bypassed)"): a filter's shape (the eight filter kinds), bypass, a compressor's
+    sidechain, then its parameters from the kind's description (`engine_app::effects`),
+    each named with its unit ("attack ms", "mix %", a share shown as a percentage);
+    ↑ and ↓ in its header move it (`ShellModel::movable`), × removes it;
+  - a section per send ("Send → canyon"): its level and its tap;
+  - Add: "add effect" (the twelve kinds) and "add send" (the buses that would not loop);
+  - numbers dragged (one step a drag, a frequency by octaves: 120 px each), typed
+    (expressions) or reset (Backspace over the field), as the bus's numbers are.
+- **Only what would not loop is offered:** a send target or a sidechain source is listed
+  when the layout's routes (ADR 0121) keep it and every other route as they were.
+- **On the strip:** a row between the output and the held peak: the effect's short name
+  ("Comp", "LP", "EQ") or how many ("3 fx"), the most gain reduction now ("Comp −3.1",
+  read from the player while the Audio tab is open, falling back at 24 dB/s), and B
+  (every effect bypassed, or every one back). The fader is 92 px tall (was 104) to make
+  room. A bus's sends show as `+1` after its output.
+- **The layout's edits** (`engine_editor::mixer`): add, remove, move, set a parameter
+  (within its range), bypass one or all, give a filter another shape (its frequency, Q and
+  gain kept where the shape has them), sidechain, sends and their taps; a rename carries
+  the sends into the bus and the sidechains it keys, a removal takes them away.
+- **Tests:** the layout's edits, the lists that leave loops out, the units; in the editor
+  (through its frames), a compressor added from Add, its threshold typed and its ratio
+  dragged as one step, keyed by the voice, a low-pass added, moved before it and shaped
+  as a peak, bypassed and B, a send added, dragged and taken before the fader, both
+  removed and the send brought back by undo, the file written; the fader's drag measured
+  again on the shorter fader.
+- **Not done:** the room's reverb strip, effects dragged between strips, a strip's
+  effects folded open on the strip itself (a taller panel, ADR 0107's resizable bottom
+  panels), delay compensation (ADR 0121).
