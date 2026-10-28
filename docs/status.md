@@ -766,7 +766,7 @@ Last updated: 2026-10-28.
   - **Full script debugging** (#396, ADR 0119's as-built): the Debugger's switch runs the
     scripts interpreted from the next Play, so a stop shows every frame's locals; off by
     default (native code, as the game runs them); kept in the session.
-  - **E10-1b, typed materials drawn by the player** (#PR, ADR 0120's as-built): a typed
+  - **E10-1b, typed materials drawn by the player** (#397, ADR 0120's as-built): a typed
     `.material` on a model draws its look at once, then its type once the forward
     renderer's material compiler thread has reflected its layout and compiled its entry
     points (1.6 s on the RTX, 1.1 s on the Radeon, no frame over 7.6 ms meanwhile); its
