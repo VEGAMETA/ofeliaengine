@@ -54,6 +54,14 @@ pub const TEXTURE: &str = "\u{F02E9}";
 pub const MESH: &str = "\u{F0831}";
 /// Sound (`md-music_note`).
 pub const AUDIO: &str = "\u{F0387}";
+/// A sound in the world, an `AudioSource3D` (`md-speaker`).
+pub const SPEAKER: &str = "\u{F04C3}";
+/// A sound heard as it is, an `AudioSource`: music, the UI (`md-volume_high`).
+pub const SOUND: &str = "\u{F057E}";
+/// The entity that hears, an `AudioListener` (`md-ear_hearing`).
+pub const LISTENER: &str = "\u{F07C5}";
+/// A place with a reverb of its own, a `ReverbZone` (`md-surround_sound`).
+pub const REVERB: &str = "\u{F05C5}";
 /// Any other file (`md-file_outline`).
 pub const FILE: &str = "\u{F0224}";
 

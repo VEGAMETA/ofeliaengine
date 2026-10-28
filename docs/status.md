@@ -751,13 +751,24 @@ Last updated: 2026-10-28.
     gates, `main` alone the third, on code those scenes do not run, registers unchanged.
     The baseline was taken on NVIDIA 616.92 (2026-10-15); ref-1 runs 617.42. Every NVIDIA
     row remade: the GPU frames moved by a median of +1.0 % (-1.2 to +3.7 %).
+  - **E11, sound,** started (ADR 0107's order; E10-1 waits for the answer on the material
+    file): its UX note `docs/research/ux/sound.md` orders the steps and asks four
+    questions (below). **E11-4a, sounds in the viewport** (#PR, ADR 0107's as-built):
+    icons, the add menu's Sound group, a selected source's two distances as rings (dashed
+    where the sound holds beyond them), a selected reverb zone's box and its fade.
   - **Next, in this order:**
-    1. E11, sound (ADR 0107's order; E10-1 waits for the answer on the material file): the
-       UX note (`docs/research/ux/sound.md`), then the viewport's gizmos for 3D sources and
-       reverb zones, previews in the asset browser, and the mixer panel on the running
-       mixer. Where the bus layout is kept waits for the team's answer.
+    1. E11-3, previews: waveform tiles, ▶ and Space and Auto Play in the dock, the
+       inspector's waveform with seeking, an editor bus for previews. Then E11-4b: radius
+       and zone handles, P to hear the selected sources in place, Listen to the Scene,
+       the falloff curve with the camera's distance, View: Sound Ranges. E11-1 (the mixer
+       file and panel) and E11-2 (effects and sends) wait for the first question.
   - **Asked (2026-10-28):** native code in the editor's Play, whose frames' locals Luau does
-    not read at a stop. E10-1 waits for the answer on the material file.
+    not read at a stop. E10-1 waits for the answer on the material file. E11's four
+    (`docs/research/ux/sound.md`): where the bus layout is kept (recommended: a `.mixer`
+    file, `PlayerSettings::audio.buses` gone), snapshots (recommended: in that file, as
+    E11's last step), mixer edits made in Play (recommended: kept, marked, one command
+    takes them back), how components name a sound (recommended: the path string kept,
+    marked as a sound so renames follow).
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
