@@ -22,6 +22,10 @@
 //! - **More** (E10-3d-2): Ctrl+D copies the selection with the links into it; Ctrl+drag
 //!   from an output carries all its links to another output (egui-snarl's yank) or takes
 //!   them out; [`starter`] is a new graph drawing a glTF material's own look.
+//! - **Adding** (E10-3e): the node search offers [`addable`] kinds (the editor's palette at
+//!   the pointer); a link dropped on the empty canvas asks for it, the node it adds linked
+//!   to the link's port by the port that fits best; an image dropped from the dock is a
+//!   texture node.
 
 use crate::paint::UiText;
 use crate::shell::Palette;
@@ -558,6 +562,81 @@ pub(crate) fn starter(
     (g, images, data)
 }
 
+/// The kinds the node search offers, in the library's order (its groups together): all
+/// but the surface (a graph has one); for a link drawn out of an output (`Some(true)`)
+/// those with an input, into an input (`Some(false)`) those with an output.
+pub(crate) fn addable(from: Option<bool>) -> impl Iterator<Item = &'static Kind> {
+    library::KINDS.iter().filter(move |k| {
+        k.name != OUTPUT_KIND
+            && match from {
+                Some(true) => !k.inputs.is_empty(),
+                Some(false) => !k.outputs.is_empty(),
+                None => true,
+            }
+    })
+}
+
+/// A kind's ports as the node search shows them beside its name: `a, b → out`.
+pub(crate) fn ports_text(kind: &Kind) -> String {
+    let mut out = String::new();
+    for (i, input) in kind.inputs.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(input.name);
+    }
+    out.push_str(if kind.inputs.is_empty() {
+        "→ "
+    } else {
+        " → "
+    });
+    for (i, output) in kind.outputs.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(output.name);
+    }
+    out
+}
+
+/// The port among `ports` a link carrying `ty` best meets: one as wide, else one as wide as
+/// what is linked (dynamic), else the first.
+fn best_port(ports: &[(&'static str, PortType)], ty: PortType) -> Option<&'static str> {
+    ports
+        .iter()
+        .find(|(_, t)| *t == ty)
+        .or_else(|| ports.iter().find(|(_, t)| *t == PortType::Dynamic))
+        .or_else(|| ports.first())
+        .map(|(name, _)| *name)
+}
+
+/// A texture parameter's name from its image's file (`textures/Wood Grain.png`:
+/// `wood_grain`): letters and digits, `_` between words.
+fn param_of(path: &str) -> String {
+    let stem = path
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .split('.')
+        .next()
+        .unwrap_or("");
+    let mut out = String::new();
+    for c in stem.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() || out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert_str(0, "texture_");
+    }
+    out
+}
+
 /// Nodes `ids` deleted with their links, the surface kept: how many went.
 pub(crate) fn delete(graph: &mut Graph, ids: &BTreeSet<String>) -> usize {
     let before = graph.nodes.len();
@@ -640,7 +719,7 @@ pub(crate) enum Drag {
 }
 
 /// What a frame of the canvas did to the graph.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Outcome {
     /// An edit made: the step's name, the text before and after it.
     Edited {
@@ -653,6 +732,14 @@ pub(crate) enum Outcome {
     },
     /// An edit refused, and why.
     Refused(&'static str),
+    /// A link dropped on the empty canvas: the node search asked for at canvas point `at`,
+    /// the node it adds linked to `from` (a port, and whether it is an output).
+    Search {
+        /// Where the link was dropped.
+        at: [f32; 2],
+        /// The port it was drawn from.
+        from: (PortRef, bool),
+    },
 }
 
 /// A material graph's file as the editor holds it.
@@ -908,6 +995,85 @@ impl GraphDoc {
         };
         Some(Outcome::Edited {
             name,
+            before,
+            after,
+        })
+    }
+
+    /// What port `port` of its node carries (an output's where `output`).
+    fn port_type(&self, port: &PortRef, output: bool) -> Option<PortType> {
+        let kind = library::kind(&self.graph.nodes.get(&port.node)?.kind)?;
+        if output {
+            kind.output(&port.port).map(|o| o.ty)
+        } else {
+            kind.input(&port.port).map(|i| i.ty)
+        }
+    }
+
+    /// A node of kind `kind` added at canvas point `at` (on whole units), and selected;
+    /// linked to `from` (a port, and whether it is an output) where the search came from a
+    /// link drawn out of it: an output into the node's input that fits best, the node's
+    /// output that fits best into an input.
+    pub(crate) fn add_node(
+        &mut self,
+        kind: &str,
+        at: [f32; 2],
+        from: Option<&(PortRef, bool)>,
+    ) -> Option<Outcome> {
+        let k = library::kind(kind)?;
+        if k.name == OUTPUT_KIND {
+            return Some(Outcome::Refused("A graph has one surface"));
+        }
+        let id = fresh_id(&self.graph, kind);
+        let link = match from {
+            Some((port, true)) => {
+                let ty = self.port_type(port, true)?;
+                let ports: Vec<_> = k.inputs.iter().map(|i| (i.name, i.ty)).collect();
+                Some((port.clone(), PortRef::new(&id, best_port(&ports, ty)?)))
+            }
+            Some((port, false)) => {
+                let ty = self.port_type(port, false)?;
+                let ports: Vec<_> = k.outputs.iter().map(|o| (o.name, o.ty)).collect();
+                Some((PortRef::new(&id, best_port(&ports, ty)?), port.clone()))
+            }
+            None => None,
+        };
+        let node = Node::new(kind, at.map(f32::round));
+        let (before, after) = self.edit(|g| {
+            g.add(&id, node);
+            if let Some((source, into)) = link {
+                g.links.insert(into, source);
+            }
+        })?;
+        self.selected = [id].into_iter().collect();
+        Some(Outcome::Edited {
+            name: "Add Node",
+            before,
+            after,
+        })
+    }
+
+    /// A texture node of image `image` (at `path` in the project) added at canvas point
+    /// `at`, its parameter named after the file (`wood_grain`), and selected: an image
+    /// dropped from the dock.
+    pub(crate) fn add_texture(
+        &mut self,
+        image: AssetRef,
+        path: &str,
+        at: [f32; 2],
+    ) -> Option<Outcome> {
+        let id = fresh_id(&self.graph, "texture");
+        let param = fresh_param(&self.graph, &param_of(path));
+        self.paths.insert(image, path);
+        let node = Node::new("texture", at.map(f32::round))
+            .named(&param)
+            .with_texture(image);
+        let (before, after) = self.edit(|g| {
+            g.add(&id, node);
+        })?;
+        self.selected = [id].into_iter().collect();
+        Some(Outcome::Edited {
+            name: "Add Texture",
             before,
             after,
         })
@@ -1270,6 +1436,16 @@ impl GraphDoc {
             (true, Some(Hit::Input(k, i))) => (from, port(k, self.boxes[k].inputs[i])),
             (false, Some(Hit::Output(k, o))) => (port(k, self.boxes[k].outputs[o]), from),
             _ => {
+                // Dropped on the empty canvas: the node search, for a node to end it on.
+                if lifted.is_none()
+                    && matches!(on, Some(Hit::Canvas))
+                    && let Some(at) = self.cursor
+                {
+                    return Some(Outcome::Search {
+                        at,
+                        from: (from, output),
+                    });
+                }
                 // Dropped on nothing a link can end on: a lifted link goes.
                 let lifted = lifted?;
                 let (before, after) = self.edit(|g| {
@@ -2188,6 +2364,70 @@ mod tests {
         )
         .unwrap();
         assert!(module.text.contains("struct GraphMaterial : IMaterial"));
+    }
+
+    #[test]
+    fn the_search_adds_nodes_linked_by_the_port_that_fits_and_images_become_textures() {
+        // The kinds offered: never the surface; from an output, those with an input.
+        assert!(addable(None).all(|k| k.name != OUTPUT_KIND));
+        assert!(addable(Some(true)).all(|k| !k.inputs.is_empty()));
+        assert!(
+            addable(Some(true)).any(|k| k.name == "texture"),
+            "its uv input"
+        );
+        assert!(addable(Some(false)).all(|k| !k.outputs.is_empty()));
+        assert_eq!(ports_text(library::kind("multiply").unwrap()), "a, b → out");
+        assert_eq!(ports_text(library::kind("number").unwrap()), "→ value");
+        let mut d = doc();
+        // Added plainly: an id of its own, on whole units, selected.
+        let Some(Outcome::Edited { name, .. }) = d.add_node("multiply", [10.4, 520.6], None) else {
+            panic!("added")
+        };
+        assert_eq!(name, "Add Node");
+        assert_eq!(d.graph.nodes["multiply1"].at, [10.0, 521.0]);
+        assert_eq!(d.selected.iter().collect::<Vec<_>>(), ["multiply1"]);
+        // From the colour's four-wide output: into a dynamic input (none is four wide).
+        let from = (PortRef::new("c", "rgba"), true);
+        d.add_node("one_minus", [0.0, 300.0], Some(&from)).unwrap();
+        let input = library::kind("one_minus").unwrap().inputs[0].name;
+        assert_eq!(
+            d.graph.links[&PortRef::new("one_minus1", input)],
+            PortRef::new("c", "rgba")
+        );
+        // Into the surface's roughness (a scalar): a number's value.
+        let into = (PortRef::new(OUTPUT, "roughness"), false);
+        d.add_node("number", [200.0, 300.0], Some(&into)).unwrap();
+        assert_eq!(
+            d.graph.links[&PortRef::new(OUTPUT, "roughness")],
+            PortRef::new("number1", "value")
+        );
+        assert_eq!(
+            d.add_node(OUTPUT_KIND, [0.0; 2], None),
+            Some(Outcome::Refused("A graph has one surface"))
+        );
+        // A link dropped on the empty canvas asks for the search there.
+        d.relayout(&mut measure);
+        let mut drag = None;
+        let rgba = d.boxes[d.box_of("c").unwrap()].output_at(0);
+        at(&mut d, &mut drag, rgba, true, true);
+        assert_eq!(
+            at(&mut d, &mut drag, [-300.0, 500.0], false, false),
+            Some(Outcome::Search {
+                at: [-300.0, 500.0],
+                from: (PortRef::new("c", "rgba"), true)
+            })
+        );
+        // An image from the dock: a texture node named after its file, its path known.
+        let image = AssetRef::file(AssetId::new());
+        d.add_texture(image, "textures/Wood Grain.png", [0.0, 600.0])
+            .unwrap();
+        assert_eq!(d.graph.nodes["texture1"].param, "wood_grain");
+        assert_eq!(d.graph.nodes["texture1"].texture, image);
+        assert!(d.text.contains("textures/Wood Grain.png"), "{}", d.text);
+        d.add_texture(image, "textures/Wood Grain.png", [0.0, 700.0])
+            .unwrap();
+        assert_eq!(d.graph.nodes["texture2"].param, "wood_grain_2");
+        assert_eq!(param_of("maps/2k-albedo.png"), "texture_2k_albedo");
     }
 
     #[test]

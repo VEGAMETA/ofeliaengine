@@ -178,6 +178,9 @@ const CODE_KEYS: KeyContext = KeyContext::Panel(2);
 /// The FileSystem dock's keys after a click in its listing (E11-3b): Space plays the
 /// picked sound (the gizmo's axes elsewhere), the arrows move the pick.
 const DOCK_KEYS: KeyContext = KeyContext::Panel(3);
+/// A material graph's canvas's keys while its tab is shown (ADR 0123 E10-3e): Space (and
+/// Blender's Shift+A) opens the node search.
+const GRAPH_KEYS: KeyContext = KeyContext::Panel(4);
 
 /// What a part shows while the selected entities hold different values there.
 const MIXED: &str = "—";
@@ -797,6 +800,8 @@ struct CommandIds {
     new_type: CommandId,
     /// A material graph drawing the object's own look (ADR 0123 E10-3d-2).
     new_graph: CommandId,
+    /// The node search on a graph's canvas (ADR 0123 E10-3e).
+    add_node: CommandId,
     make_variant: CommandId,
     apply_material: CommandId,
     break_next: CommandId,
@@ -976,6 +981,7 @@ fn commands() -> (Commands, CommandIds) {
         new_material: c.register("material.new", "Material", "New Material"),
         new_type: c.register("material.new_type", "Material", "New Type"),
         new_graph: c.register("material.new_graph", "Material", "New Graph"),
+        add_node: c.register("graph.add_node", "Graph", "Add Node…"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
         break_next: c.register("debug.break_next", "Debug", "Break at the Next Script Line"),
@@ -1204,7 +1210,9 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+Shift+F9", ids.remove_breakpoints),
     ]
     .map(|(chord, id)| (chord, id, CODE_KEYS));
-    for (chord, id, context) in global.chain(tree).chain(dock).chain(code) {
+    let graph = [("Space", ids.add_node), ("Shift+A", ids.add_node)]
+        .map(|(chord, id)| (chord, id, GRAPH_KEYS));
+    for (chord, id, context) in global.chain(tree).chain(dock).chain(code).chain(graph) {
         if let Some(chord) = Chord::parse(chord) {
             let _ = keymap.bind(chord, context, id);
             shortcuts.entry(id).or_insert_with(|| chord.to_string());
@@ -1439,6 +1447,18 @@ struct Choice {
     pick: Pick,
 }
 
+/// Where the node search's pick goes (ADR 0123 E10-3e).
+#[derive(Debug, Clone)]
+struct GraphAdd {
+    /// The graph's file.
+    graph: AssetId,
+    /// The canvas point the node goes to.
+    at: [f32; 2],
+    /// The port a link was drawn from, and whether it is an output: the node is linked to
+    /// it.
+    from: Option<(engine_material_graph::PortRef, bool)>,
+}
+
 /// What picking a palette list's item does.
 #[derive(Debug, Clone)]
 enum Pick {
@@ -1466,6 +1486,8 @@ enum Pick {
     NewScript,
     /// Opens this script (one of an entity's several).
     OpenScript(PathBuf),
+    /// Adds a node of this kind to a graph (the node search, ADR 0123 E10-3e).
+    Node(&'static str),
 }
 
 impl Pick {
@@ -1475,6 +1497,7 @@ impl Pick {
             Self::Component { script: true, .. } | Self::OpenScript(_) => icons::SCRIPT,
             Self::Component { script: false, .. } => icons::ADD_COMPONENT,
             Self::NewScript => icons::SCRIPT_MARK,
+            Self::Node(_) => icons::SHADER,
             _ => icons::SCENE,
         }
     }
@@ -2092,6 +2115,9 @@ struct CommandPalette {
     /// After `%`: the project's scripts' texts (read when the search starts, a tab's as it
     /// is), and the lines found in them with their rows' labels.
     sources: Option<Vec<(PathBuf, String)>>,
+    /// Where it opens (logical pixels) when not at the window's top: the node search's, at
+    /// the pointer.
+    at: Option<[f32; 2]>,
     texts: Vec<FoundText>,
     text_labels: Vec<String>,
 }
@@ -2251,6 +2277,9 @@ struct Editor {
     /// in pixels, for the overlay hook to draw it.
     graph_area: Option<[f32; 4]>,
     graph_rect: Option<[u32; 4]>,
+    /// Where the node search's pick goes: the graph, the canvas point, and the port a link
+    /// was drawn from (ADR 0123 E10-3e).
+    graph_add: Option<GraphAdd>,
     /// The graph bar's status, and a constant's value while the canvas draws it: written
     /// into the same room every frame.
     graph_status: String,
@@ -3270,6 +3299,7 @@ impl Editor {
             graph_drag: None,
             graph_area: None,
             graph_rect: None,
+            graph_add: None,
             graph_status: String::new(),
             graph_scratch: String::new(),
             code_focus: false,
@@ -5058,6 +5088,7 @@ impl Editor {
             ),
             rows: &palette_rows,
             selected: cp.selected.saturating_sub(cp.first),
+            at: cp.at,
         });
         // The Output (E6): the log's new records taken, its tab naming the errors, its rows
         // while it is open.
@@ -6326,11 +6357,15 @@ impl Editor {
         } else {
             None
         };
-        let mut list = [KeyContext::Global; 2];
+        let mut list = [KeyContext::Global; 3];
         let mut n = 0;
-        for context in [panel, self.active_script.map(|_| CODE_KEYS)]
-            .into_iter()
-            .flatten()
+        for context in [
+            panel,
+            self.active_script.map(|_| CODE_KEYS),
+            self.active_graph.map(|_| GRAPH_KEYS),
+        ]
+        .into_iter()
+        .flatten()
         {
             list[n] = context;
             n += 1;
@@ -6988,6 +7023,7 @@ impl Editor {
         cp.for_field = None;
         cp.opens = false;
         cp.sources = None;
+        cp.at = None;
         cp.query.clear();
         cp.query.push_str(query);
         self.search_palette(world);
@@ -7169,6 +7205,7 @@ impl Editor {
                             Pick::Component { name, .. } => self.add_component(world, &name),
                             Pick::NewScript => self.new_script(world),
                             Pick::OpenScript(path) => self.open_script(world, &path, None),
+                            Pick::Node(kind) => self.add_graph_node(world, kind),
                         }
                     }
                 } else if cp.finds_objects() {
@@ -11444,8 +11481,93 @@ impl Editor {
                 self.history.commit(world);
             }
             Some(crate::graph::Outcome::Refused(why)) => self.say(why.to_owned()),
+            Some(crate::graph::Outcome::Search { at, from }) => {
+                self.open_node_search(world, g, Some(at), Some(from));
+            }
             None => {}
         }
+    }
+
+    /// "Graph: Add Node…" (Space or Shift+A on the canvas, a link dropped on its empty
+    /// part; ADR 0123 E10-3e): the node kinds in the palette at the pointer, by group, the
+    /// query narrowing them; the one picked goes to canvas point `at` (the pointer's, or
+    /// the canvas's middle when the pointer is elsewhere), linked to `from` when given (only
+    /// the kinds that can be are offered).
+    fn open_node_search(
+        &mut self,
+        world: &mut World,
+        g: usize,
+        at: Option<[f32; 2]>,
+        from: Option<(engine_material_graph::PortRef, bool)>,
+    ) {
+        let scale = self.scale.max(0.5);
+        let pointer = self.input.cursor().map(|[x, y]| [x / scale, y / scale]);
+        let area = self.graph_area;
+        let Some(doc) = self.graphs.get(g) else {
+            return;
+        };
+        let inside = |[px, py]: [f32; 2]| {
+            area.is_some_and(|[x, y, w, h]| px >= x && py >= y && px < x + w && py < y + h)
+        };
+        let at = at.or_else(|| {
+            let [x, y, w, h] = area?;
+            let q = pointer
+                .filter(|&q| inside(q))
+                .unwrap_or([x + w * 0.5, y + h * 0.5]);
+            Some(doc.view.canvas_point(q, [x, y]))
+        });
+        let Some(at) = at else {
+            return;
+        };
+        let items: Vec<Choice> = crate::graph::addable(from.as_ref().map(|(_, output)| *output))
+            .map(|k| Choice {
+                label: format!("{}: {}", k.category, k.title),
+                detail: crate::graph::ports_text(k),
+                pick: Pick::Node(k.name),
+            })
+            .collect();
+        self.graph_add = Some(GraphAdd {
+            graph: doc.id,
+            at,
+            from,
+        });
+        self.open_list(world, "Add a node: its name or its group", items);
+        if let Some(cp) = &mut self.command_palette {
+            cp.at = pointer.filter(|&q| inside(q));
+        }
+    }
+
+    /// The node search's pick: a node of kind `kind` added where the search was opened, as
+    /// a step (its graph's tab shown).
+    fn add_graph_node(&mut self, world: &mut World, kind: &str) {
+        let Some(add) = self.graph_add.take() else {
+            return;
+        };
+        let Some(g) = self.graphs.iter().position(|d| d.id == add.graph) else {
+            return;
+        };
+        let outcome = self.graphs[g].add_node(kind, add.at, add.from.as_ref());
+        self.graph_outcome(world, g, outcome);
+        if self.active_graph != Some(g) {
+            self.show_graph(world, g);
+        }
+    }
+
+    /// An image dropped on the shown graph's canvas (ADR 0123 E10-3e): a texture node of
+    /// it where the pointer is, as a step.
+    fn drop_on_graph(&mut self, world: &mut World, drag: &AssetDrag) {
+        let scale = self.scale.max(0.5);
+        let (Some(g), Some([x, y, _, _]), Some([cx, cy])) =
+            (self.active_graph, self.graph_area, self.input.cursor())
+        else {
+            return;
+        };
+        let Some(doc) = self.graphs.get_mut(g) else {
+            return;
+        };
+        let at = doc.view.canvas_point([cx / scale, cy / scale], [x, y]);
+        let outcome = doc.add_texture(AssetRef::file(drag.asset), &drag.path, at);
+        self.graph_outcome(world, g, outcome);
     }
 
     /// F on a graph's tab: its selected nodes framed, or all of them.
@@ -11464,7 +11586,15 @@ impl Editor {
     fn graph_command(&self, id: CommandId) -> bool {
         let ids = &self.ids;
         self.editor_command(id)
-            || [ids.undo, ids.redo, ids.delete, ids.frame, ids.duplicate].contains(&id)
+            || [
+                ids.undo,
+                ids.redo,
+                ids.delete,
+                ids.frame,
+                ids.duplicate,
+                ids.add_node,
+            ]
+            .contains(&id)
     }
 
     /// The shown graph's bar: its nodes, its selection and the zoom, in the same room
@@ -14013,6 +14143,10 @@ impl Editor {
                 self.graph_outcome(world, g, outcome);
                 return;
             }
+            if id == ids.add_node {
+                self.open_node_search(world, g, None, None);
+                return;
+            }
         }
         // Ctrl+S on a script's tab saves the script, the game playing or not.
         if id == ids.save
@@ -14360,6 +14494,10 @@ impl Editor {
             self.new_material_type(world);
         } else if id == ids.new_graph {
             self.new_material_graph(world);
+        } else if id == ids.add_node {
+            self.say(String::from(
+                "Add Node works in a material graph's tab (a double click on a .mgraph)",
+            ));
         } else if id == ids.make_variant {
             self.make_variant(world);
         } else if id == ids.apply_material {
@@ -17459,6 +17597,16 @@ impl Editor {
                         && y < r.pos[1] + r.size[1]
                 })
             });
+        let over_graph = response.graph_canvas != 0
+            && cursor.is_some_and(|at| {
+                self.ui.rect_of(response.graph_canvas).is_some_and(|r| {
+                    let (x, y) = (at.x / scale, at.y / scale);
+                    x >= r.pos[0]
+                        && y >= r.pos[1]
+                        && x < r.pos[0] + r.size[0]
+                        && y < r.pos[1] + r.size[1]
+                })
+            });
         let folder_tile = response.listing_under.filter(|&i| {
             self.browser
                 .listing
@@ -17475,6 +17623,7 @@ impl Editor {
             None => match response.hovered_field {
                 Some((section, field)) => DropTarget::Field(section, field),
                 None if over_view => DropTarget::View,
+                None if over_graph => DropTarget::Graph,
                 None => DropTarget::Nowhere,
             },
         };
@@ -17677,6 +17826,10 @@ impl Editor {
         use engine_scene::AssetKind as K;
         let name = drag.name.clone();
         match (drag.over, drag.kind) {
+            (DropTarget::Graph, K::Texture) => self.drop_on_graph(world, &drag),
+            (DropTarget::Graph, _) => self.say(format!(
+                "{name} is not an image: an image dropped here makes a texture node"
+            )),
             (DropTarget::View, K::Model) => match (drag.placed, self.model_plan(&mut drag)) {
                 (Some(placed), Ok(_)) => {
                     self.show(world, placed.root);
@@ -22503,6 +22656,8 @@ enum DropTarget {
     /// into it.
     FolderTile(usize),
     FolderRow(usize),
+    /// A material graph's canvas (ADR 0123 E10-3e): an image a texture node there.
+    Graph,
 }
 
 /// An asset `#` in the palette found.
@@ -32629,6 +32784,114 @@ return Coin
         assert_eq!(ed.graphs.len(), 1, "opened again by the undo");
         assert!(ed.graphs[0].dirty() && ed.active_graph.is_none());
         assert_eq!(ed.graphs[0].graph.nodes["c"].at, [0.0, 0.0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0123 E10-3e: Space over a graph's canvas opens the node search at the pointer,
+    /// its pick added there; a link dropped on the empty canvas opens it too, the node it
+    /// adds linked; an image dragged from the dock onto the canvas is a texture node.
+    #[test]
+    fn the_node_search_adds_nodes_where_asked_and_images_drop_as_textures() {
+        use engine_material_graph::PortRef;
+        const SPACE: (u16, u16) = (0x20, 0x39);
+        let dir = project("graph-search");
+        for sub in ["materials", "textures"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let png = engine_render::png::encode_png(
+            1,
+            1,
+            engine_render::png::PngFormat::Rgba,
+            &[200, 150, 100, 255],
+        )
+        .unwrap();
+        std::fs::write(dir.join("textures/wood.png"), &png).unwrap();
+        std::fs::write(
+            dir.join("materials/glow.mgraph"),
+            format!(
+                "[mgraph version=1 id={}]\n\nmodel = \"unlit\"\n\
+                 nodes[\"c\"].kind = \"color\"\nnodes[\"c\"].value = [0.9, 0.1, 0.1, 1]\n\
+                 nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [300, 0]\n",
+                AssetId::new()
+            ),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        ed.open_folder("textures");
+        ed.update(&mut world);
+        ed.open_graph(&world, Path::new("materials/glow.mgraph"));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let [x, y, _, h] = ed.graph_area.unwrap();
+        // Space over the empty canvas: the search at the pointer; "multiply" and Enter add
+        // a Multiply where the pointer was.
+        let spot = [x + 30.0, y + h - 30.0];
+        mouse(&mut ed, spot, None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[SPACE]);
+        let cp = ed.command_palette.as_ref().expect("the node search");
+        assert!(
+            cp.choices.is_some() && cp.at.is_some(),
+            "a list, at the pointer"
+        );
+        ed.update(&mut world);
+        chars(&mut ed, "multiply");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "a, b → out").is_empty(), "its ports beside it");
+        chord(&mut ed, &mut world, &[ENTER]);
+        assert!(ed.command_palette.is_none());
+        let added = &ed.graphs[0].graph.nodes["multiply1"];
+        let wanted = ed.graphs[0].view.canvas_point(spot, [x, y]).map(f32::round);
+        assert_eq!(added.at, wanted);
+        assert_eq!(
+            ed.graphs[0].selected.iter().collect::<Vec<_>>(),
+            ["multiply1"]
+        );
+        assert_eq!(ed.history.steps().count(), 1);
+        // A link from the colour dropped on the empty canvas: the search, whose Multiply is
+        // linked from it.
+        ed.update(&mut world);
+        let c = ed.graphs[0].box_of("c").unwrap();
+        let rgba = ed.graphs[0]
+            .view
+            .panel_point(ed.graphs[0].boxes[c].output_at(0), [x, y]);
+        let empty = [x + 30.0, y + 30.0];
+        mouse(&mut ed, rgba, None);
+        ed.update(&mut world);
+        mouse(&mut ed, rgba, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, empty, None);
+        ed.update(&mut world);
+        mouse(&mut ed, empty, Some(false));
+        ed.update(&mut world);
+        assert!(
+            ed.command_palette.is_some(),
+            "the search for the link's end"
+        );
+        ed.update(&mut world);
+        chars(&mut ed, "multiply");
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[ENTER]);
+        assert_eq!(
+            ed.graphs[0].graph.links[&PortRef::new("multiply2", "a")],
+            PortRef::new("c", "rgba")
+        );
+        // The image dragged from the dock onto the canvas: a texture node of it.
+        drag_file(&mut ed, &mut world, "wood.png");
+        let drop_at = [x + 60.0, y + h - 60.0];
+        mouse(&mut ed, drop_at, None);
+        ed.update(&mut world);
+        mouse(&mut ed, drop_at, Some(false));
+        ed.update(&mut world);
+        let wood = ed.asset_db.find("textures/wood.png").unwrap().id;
+        let texture = &ed.graphs[0].graph.nodes["texture1"];
+        assert_eq!(texture.texture, AssetRef::file(wood));
+        assert_eq!(texture.param, "wood");
+        // Each one step: Ctrl+Z takes the texture back.
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        assert!(!ed.graphs[0].graph.nodes.contains_key("texture1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

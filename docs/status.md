@@ -868,6 +868,11 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3e-1, the node search** (#426, ADR 0123's as-built): Space (Shift+A) over a graph's
+    canvas opens the palette's list of node kinds at the pointer, its pick added there; a
+    link dropped on the empty canvas opens it for the kinds that can take the link, the
+    pick linked by the port that fits best; an image dragged from the dock onto the canvas
+    is a texture node.
   - **E10-3d-2, New Graph, copies, carried links** (#425, ADR 0123's as-built): Material: New
     Graph writes a graph and a material file named after the object. The graph draws its
     glTF material's own look (maps where the project has their files, factors;
@@ -918,9 +923,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3e (the node search: Space and a link dropped in empty space, textures
-       dropped from the dock, reroutes and frames), then E10-3f and E10-3g (ADR 0123's
-       steps); then E10-4, previews, stats and variants with a base.
+       2D): E10-3e-2 (reroutes and frames, the file's version 2), then E10-3f (live edits,
+       errors on nodes, Show Slang) and E10-3g (functions), ADR 0123's steps; then E10-4,
+       previews, stats and variants with a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

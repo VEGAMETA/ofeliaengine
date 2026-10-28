@@ -317,6 +317,7 @@ fn a_steady_shell_frame_does_not_allocate() {
             hint: "Type a command",
             rows: &rows,
             selected: 1,
+            at: None,
         }),
         hint: None,
     };

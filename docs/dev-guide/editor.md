@@ -1215,10 +1215,20 @@ Until its shaders are made, the material draws its colour.
     green, three yellow, four pink, as wide as what is linked blue). The ports' names say
     it too;
   - the surface shows the inputs its shading model reads, and any other that is linked.
+- **Adding nodes:** **Space** (or Blender's Shift+A) over the canvas opens the node search
+  at the pointer:
+  - every kind by its group (`Math: Multiply`), its ports beside it (`a, b → out`);
+  - type to narrow it, then Enter or a click adds the node where the pointer was, selected;
+  - **Graph: Add Node…** in the palette does the same, at the canvas's middle.
 - **The mouse:**
   - **drag from an output to an input** (or from an input to an output): a link. A link
     dropped on an input replaces the one it had. A link that would feed a node from
     itself is refused, and the status bar says why;
+  - **a link dropped on the empty canvas** opens the node search there. It offers only the
+    kinds that can take the link, and the node picked is linked by its port that fits best
+    (one as wide, else a dynamic one);
+  - **an image dragged from the FileSystem dock** onto the canvas is a texture node there,
+    its parameter named after the file (`Wood Grain.png`: `wood_grain`);
   - **drag a linked input's end**: its link comes off; drop it on another input to move
     it, or on the canvas to take it out;
   - **click a box** to select it, Shift+click to add it or take it out, and drag it (the
@@ -1243,8 +1253,8 @@ Until its shaders are made, the material draws its colour.
 - **Saving** writes the file; the materials that name the graph draw it again (ADR 0123
   E10-3c). Unsaved graphs are autosaved as scenes are, and the session brings the tabs
   back, with their unsaved edits.
-- **Not yet:** adding nodes (the node search, E10-3e), textures dropped from the dock,
-  editing a node's values, errors on nodes (E10-3f).
+- **Not yet:** reroutes and frames (E10-3e-2), editing a node's values, errors on nodes
+  (E10-3f).
 
 ## Autosave and the session
 

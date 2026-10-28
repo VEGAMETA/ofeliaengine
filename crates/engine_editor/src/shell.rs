@@ -482,6 +482,9 @@ pub struct PaletteView<'a> {
     pub rows: &'a [PaletteRow<'a>],
     /// The highlighted row (Enter runs it).
     pub selected: usize,
+    /// Where it opens (logical pixels), narrower: the node search's, at the pointer; none
+    /// at the window's top.
+    pub at: Option<[f32; 2]>,
 }
 
 /// What the user did in the command palette.
@@ -3363,14 +3366,19 @@ fn palette(
     out: &mut ShellResponse,
     popups: &mut Popups,
 ) {
-    const WIDTH: f32 = 560.0;
-    let x = ((ui.viewport()[0] - WIDTH) / 2.0).max(8.0);
+    let [w, h] = ui.viewport();
+    let width = if view.at.is_some() { 380.0 } else { 560.0 };
+    let place = match view.at {
+        // At the pointer, inside the window with room for its rows below.
+        Some([x, y]) => [x.min(w - width - 8.0).max(8.0), y.min(h - 320.0).max(8.0)],
+        None => [((w - width) / 2.0).max(8.0), 38.0],
+    };
     let mut action = None;
     let panel = ui.column(
         "palette",
         Style {
-            floating: Some([x, 38.0]),
-            size: [Size::Fixed(WIDTH), Size::Fit],
+            floating: Some(place),
+            size: [Size::Fixed(width), Size::Fit],
             padding: [6.0; 4],
             gap: 4.0,
             radius: 6.0,
