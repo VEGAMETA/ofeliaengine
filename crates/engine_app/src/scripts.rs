@@ -485,7 +485,10 @@ impl Hook<'_> {
 #[derive(Default)]
 struct Profiled {
     places: core::cell::Cell<[Option<engine_profiler::Place>; HOOKS]>,
-    messages: RefCell<Vec<(Box<[u8]>, engine_profiler::Place)>>,
+    /// Message's and timers' hooks' places, by their function (its address: the
+    /// component's table holds it until a reload, which forgets these). A name would be
+    /// read through mlua's `as_bytes`, which clones a reference: an allocation a call.
+    messages: RefCell<Vec<(usize, engine_profiler::Place)>>,
     /// Its memory category: 1 to 255, the last shared by those past it.
     category: u8,
     /// Its hooks' calls and nanoseconds since the profile was last taken.
@@ -502,31 +505,32 @@ impl Profiled {
     }
 
     /// Hook `hook`'s place in Tracy (`script Door.on_tick`, in its module's file), made the
-    /// first time.
-    fn place(&self, owner: &str, module: &str, hook: Hook<'_>) -> engine_profiler::Place {
+    /// first time; `f`, its function.
+    fn place(
+        &self,
+        owner: &str,
+        module: &str,
+        hook: Hook<'_>,
+        f: &Function,
+    ) -> engine_profiler::Place {
         let made = || {
             let name = format!("script {owner}.{}", hook.name());
             engine_profiler::Place::new(&name, &module_file(module), 0)
         };
-        match (hook.slot(), hook) {
-            (Some(k), _) => {
-                let mut places = self.places.get();
-                let place = *places[k].get_or_insert_with(made);
-                self.places.set(places);
-                place
-            }
-            (None, Hook::Message(name)) => {
-                let bytes = name.as_bytes();
-                let mut messages = self.messages.borrow_mut();
-                if let Some((_, place)) = messages.iter().find(|(n, _)| **n == *bytes) {
-                    return *place;
-                }
-                let place = made();
-                messages.push((Box::from(&*bytes), place));
-                place
-            }
-            (None, _) => made(),
+        if let Some(k) = hook.slot() {
+            let mut places = self.places.get();
+            let place = *places[k].get_or_insert_with(made);
+            self.places.set(places);
+            return place;
         }
+        let key = f.to_pointer() as usize;
+        let mut messages = self.messages.borrow_mut();
+        if let Some(&(_, place)) = messages.iter().find(|(k, _)| *k == key) {
+            return place;
+        }
+        let place = made();
+        messages.push((key, place));
+        place
     }
 }
 
@@ -1192,6 +1196,8 @@ impl Scripts {
         self.own(id, table);
         let c = &mut self.components[k];
         c.hooks = hooks_of(table);
+        // Its functions are new: the places by function go (ADR 0114 §11).
+        c.profiled.messages.get_mut().clear();
         c.info = info;
         c.id = id;
         c.defaults = defaults;
@@ -2345,7 +2351,7 @@ fn call_hook(
     f: &Function,
     args: impl IntoLuaMulti,
 ) -> Result<(), ScriptError> {
-    let _zone = engine_profiler::running().then(|| profiled.place(name, module, hook).zone());
+    let _zone = engine_profiler::running().then(|| profiled.place(name, module, hook, f).zone());
     let watched = PROFILING.get().then(|| {
         (
             CATEGORY.replace(profiled.category),
@@ -4085,16 +4091,22 @@ return Keeper
     #[test]
     fn a_hooks_place_in_tracy_is_made_once() {
         let profiled = Profiled::new(3);
+        let lua = Lua::new();
+        let tick = lua.create_function(|_, ()| Ok(())).unwrap();
         for _ in 0..3 {
-            let _ = profiled.place("Door", "door", Hook::Tick);
+            let _ = profiled.place("Door", "door", Hook::Tick, &tick);
         }
         let places = profiled.places.get();
         assert!(places[1].is_some() && places.iter().filter(|p| p.is_some()).count() == 1);
-        let lua = Lua::new();
-        let open = lua.create_string("open").unwrap();
-        let shut = lua.create_string("shut").unwrap();
-        for name in [&open, &shut, &open] {
-            let _ = profiled.place("Door", "door", Hook::Message(name));
+        // A message's, by its function.
+        let (open, shut) = (
+            lua.create_string("open").unwrap(),
+            lua.create_string("shut").unwrap(),
+        );
+        let on_open = lua.create_function(|_, ()| Ok(())).unwrap();
+        let on_shut = lua.create_function(|_, ()| Ok(())).unwrap();
+        for (name, f) in [(&open, &on_open), (&shut, &on_shut), (&open, &on_open)] {
+            let _ = profiled.place("Door", "door", Hook::Message(name), f);
         }
         assert_eq!(profiled.messages.borrow().len(), 2);
     }

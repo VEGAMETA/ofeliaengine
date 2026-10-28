@@ -1620,8 +1620,10 @@ profiler. Tracy had only the stages' zones (`scripts::tick`), and the editor not
 - **A zone a hook in Tracy:** `script Door.on_tick`, in its script's file.
   - Tracy's macros take literal names, so `engine_profiler::Place` makes a place at run
     time: its texts and Tracy's source location are made once a hook and kept for the
-    process's life. Each component and system keeps its hooks' places; a message's hooks
-    are kept by name.
+    process's life. Each component and system keeps its hooks' places; a message's or a
+    timer's hooks by their function, forgotten when the script reloads. By name they cost
+    an allocation a call: mlua's `as_bytes` clones a reference (the zero-allocation test
+    found it under Tracy).
   - Opened only while Tracy runs (`engine_profiler::running()`); without the `tracy`
     feature the check is a constant.
 - **The editor's profiler watches the scripts while its panel is open in Play**
@@ -1656,6 +1658,6 @@ profiler. Tracy had only the stages' zones (`scripts::tick`), and the editor not
     a stop waits is counted;
   - the host: hooks counted with their time and each script's memory while watched,
     nothing while not, the counts starting again when taken; a hook's place made once,
-    a message's kept by name;
+    a message's kept by its function;
   - the editor: Play with a spinning door and the panel open shows its row (about 1.07
     calls a frame: 64 ticks a second over frames of 1/60 s).
