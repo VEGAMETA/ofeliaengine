@@ -807,6 +807,13 @@ A click on a folder opens it, a click on a file picks it.
     variant has not set its own value. A variant of a variant is fine; a chain that comes
     back to a file of it is refused. The cook writes variants out whole, so a game never
     reads a chain;
+  - **a variant in the inspector:** its title says whose variant it is ("Material ·
+    variant of red.material"), and its first row is its **base** (a click shows it in the
+    dock). A row whose value is the variant's own has ↺, which puts the base's value back;
+    a row without ↺ follows the base;
+  - **Apply to Base** writes the variant's own values into its base, so every variant of
+    that base gets them, and leaves the variant naming its base alone, in one undo step;
+    Ctrl+S writes both files;
   - **Apply to Selection** gives the material picked in the dock to the selected objects;
   - **New Type** writes your own material type from a template, named after the active
     object (`Water`: `water.slang` declaring `WaterMaterial`; `Custom` with none), and a

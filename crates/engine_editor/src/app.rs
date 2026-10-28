@@ -823,6 +823,8 @@ struct CommandIds {
     enter_function: CommandId,
     ungroup_function: CommandId,
     make_variant: CommandId,
+    /// A variant's own values written into its base (E10-4b).
+    apply_to_base: CommandId,
     apply_material: CommandId,
     break_next: CommandId,
     find_references: CommandId,
@@ -1016,6 +1018,7 @@ fn commands() -> (Commands, CommandIds) {
         ),
         ungroup_function: c.register("graph.ungroup_function", "Graph", "Ungroup Function"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
+        apply_to_base: c.register("material.apply_base", "Material", "Apply to Base"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
         break_next: c.register("debug.break_next", "Debug", "Break at the Next Script Line"),
         find_references: c.register("assets.references", "Assets", "Find References"),
@@ -4120,6 +4123,7 @@ impl Editor {
                 _ => self.inspected = None,
             }
         }
+        follow_material_bases(&mut self.material_docs);
         self.update_shown_material(world);
         match self.active() {
             Some(e) => {
@@ -15585,6 +15589,8 @@ impl Editor {
             ));
         } else if id == ids.make_variant {
             self.make_variant(world);
+        } else if id == ids.apply_to_base {
+            self.apply_to_base(world);
         } else if id == ids.apply_material {
             self.apply_material(world);
         } else if id == ids.full_debugging {
@@ -16452,6 +16458,20 @@ impl Editor {
             .is_some_and(crate::material::MaterialDoc::dirty);
         self.material_title.clear();
         self.material_title.push_str("Material");
+        // A variant: of which (E10-4b).
+        let base = self
+            .material_docs
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.file.base)
+            .filter(|b| !b.is_none());
+        if let Some(base) = base {
+            let name = self
+                .asset_db
+                .get(base.file)
+                .map_or("its base", |e| e.path.rsplit('/').next().unwrap_or(&e.path));
+            let _ = write!(self.material_title, " · variant of {name}");
+        }
         if users > 0 {
             let s = if users == 1 { "" } else { "s" };
             let _ = write!(self.material_title, " · used by {users} object{s}");
@@ -16754,6 +16774,68 @@ impl Editor {
             self.reveal_asset(id);
         }
         self.say(objects_given(&path, given));
+    }
+
+    /// "Apply to Base" (E10-4b, as a prefab instance's Apply Overrides): the shown variant's
+    /// own values written into its base (held for the inspector, its unsaved edits kept),
+    /// the variant left naming its base alone, as one step that changes both files.
+    fn apply_to_base(&mut self, world: &mut World) {
+        let Some(v) = self
+            .shown_material
+            .and_then(|id| self.material_docs.iter().position(|d| d.id == id))
+        else {
+            self.say(String::from(
+                "Apply to Base: pick a variant in the FileSystem dock, or select an object \
+                 with one",
+            ));
+            return;
+        };
+        let base = self.material_docs[v].file.base;
+        if base.is_none() {
+            self.say(String::from(
+                "Apply to Base: this material is no variant (Make Variant makes one)",
+            ));
+            return;
+        }
+        if let Some(path) = self.asset_db.get(base.file).map(|e| e.path.clone()) {
+            self.open_material(base.file, &path);
+        }
+        let Some(b) = self.material_docs.iter().position(|d| d.id == base.file) else {
+            self.say(String::from("Apply to Base: its base cannot be read"));
+            return;
+        };
+        // The base takes the variant's values, its own base kept.
+        let mut values = self.material_docs[v].file.clone();
+        values.base = self.material_docs[b].file.base;
+        let written = self.material_docs[v].written.clone();
+        let Some((base_before, base_after)) = self.material_docs[b].edit(|f, w| {
+            *f = values.clone();
+            w.extend(&written);
+        }) else {
+            self.say(String::from(
+                "Apply to Base: the variant sets nothing of its own",
+            ));
+            return;
+        };
+        // The variant over its base as it is now: its own lines gone.
+        let held = (
+            self.material_docs[b].file.clone(),
+            self.material_docs[b].written.clone(),
+        );
+        let variant = &mut self.material_docs[v];
+        variant.set_base(held);
+        let changed = variant.edit(|_, _| {});
+        let (base_id, variant_id) = (self.material_docs[b].id, self.material_docs[v].id);
+        self.history.begin("Apply to Base", None);
+        self.history.change_file(base_id, &base_before, &base_after);
+        if let Some((before, after)) = changed {
+            self.history.change_file(variant_id, &before, &after);
+        }
+        self.history.commit(world);
+        let path = self.material_docs[b].path.clone();
+        self.say(format!(
+            "Applied to {path}: Ctrl+S writes it and the variant"
+        ));
     }
 
     /// "Apply to Selection" (E10-1c): the material picked in the dock given to the selected
@@ -17078,9 +17160,15 @@ impl Editor {
                 });
             }
             FieldAction::Reset => {
+                // A variant's value back to its base's (E10-4b), else to the default.
+                let base = self.material_docs[d].base.as_ref().map(|(b, _)| b.clone());
                 self.material_step(world, d, &format!("Reset {name}"), None, |f, _| {
-                    m::reset(f, &row);
+                    m::reset(f, &row, base.as_ref());
                 });
+            }
+            FieldAction::Pick if row == m::Row::Base => {
+                let base = self.material_docs[d].file.base;
+                self.reveal_asset(base.file);
             }
             FieldAction::Pick => {
                 self.say(format!(
@@ -22775,33 +22863,6 @@ impl<G> EditorGame<G> {
         // rows.
         let inspected = shared.shown_material;
         let shared = &mut *shared;
-        // Variants follow the bases the inspector holds (E10-4a), unsaved edits and all; a
-        // steady frame compares and copies nothing.
-        for k in 0..shared.material_docs.len() {
-            let base = shared.material_docs[k].file.base;
-            if base.is_none() {
-                continue;
-            }
-            let Some(j) = shared
-                .material_docs
-                .iter()
-                .position(|d| AssetRef::file(d.id) == base)
-            else {
-                continue;
-            };
-            let followed = shared.material_docs[k]
-                .base
-                .as_ref()
-                .is_some_and(|(b, _)| *b == shared.material_docs[j].file);
-            if followed || j == k {
-                continue;
-            }
-            let held = (
-                shared.material_docs[j].file.clone(),
-                shared.material_docs[j].written.clone(),
-            );
-            shared.material_docs[k].set_base(held);
-        }
         for doc in &mut shared.material_docs {
             if !doc.given {
                 player.set_material_file(doc.id, Some((doc.file.clone(), doc.written.clone())));
@@ -24079,7 +24140,11 @@ fn material_fields<'a>(
             Shown::Check => Widget::Check(Some(doc.file.double_sided)),
             Shown::Image => Widget::Asset {
                 preview: None,
-                icon: if first == "none" { "" } else { icons::TEXTURE },
+                icon: match row {
+                    _ if first == "none" => "",
+                    crate::material::Row::Base => icons::SHADER,
+                    _ => icons::TEXTURE,
+                },
                 name: first,
                 play: None,
             },
@@ -24087,7 +24152,7 @@ fn material_fields<'a>(
         out.push(Field {
             name: row.name(),
             widget,
-            changed: crate::material::changed(&doc.file, row),
+            changed: crate::material::changed(&doc.file, row, doc.base.as_ref().map(|(b, _)| b)),
         });
     }
 }
@@ -24108,6 +24173,29 @@ fn unique_file(root: &Path, folder: &str, name: &str, ext: &str) -> String {
         k += 1;
     }
     path
+}
+
+/// The variants the inspector holds over the bases it holds (E10-4a), each base as it holds
+/// it, unsaved edits and all: a steady frame compares and copies nothing.
+fn follow_material_bases(docs: &mut [crate::material::MaterialDoc]) {
+    for k in 0..docs.len() {
+        let base = docs[k].file.base;
+        if base.is_none() {
+            continue;
+        }
+        let Some(j) = docs.iter().position(|d| AssetRef::file(d.id) == base) else {
+            continue;
+        };
+        let followed = docs[k]
+            .base
+            .as_ref()
+            .is_some_and(|(b, _)| *b == docs[j].file);
+        if followed || j == k {
+            continue;
+        }
+        let held = (docs[j].file.clone(), docs[j].written.clone());
+        docs[k].set_base(held);
+    }
 }
 
 /// Material file `r` as the inspector holds it (E10-1c), for reading a variant over it
@@ -27513,6 +27601,94 @@ mod tests {
         assert_eq!(ed.inspected.as_ref().map(|i| i.id), Some(red));
         ed.run(&mut world, ed.ids.apply_material);
         assert_eq!(material(&world), AssetRef::file(red));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E10-4b: a variant's title names its base; its own value is marked against the base,
+    /// ↺ puts the base's back; Apply to Base writes the variant's values into the base and
+    /// leaves the variant naming its base alone, one step that undo takes back whole.
+    #[test]
+    fn a_variants_own_values_are_marked_reset_and_applied_to_its_base() {
+        use crate::material::Row;
+        let (dir, mut world, mut ed, boxed) = drop_project("variant-inspector");
+        ed.select_only(boxed);
+        ed.update(&mut world);
+        ed.run(&mut world, ed.ids.new_material);
+        let made = ed.asset_db.find("props/New Material.material").unwrap().id;
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let at =
+            |ed: &Editor, id: AssetId| ed.material_docs.iter().position(|d| d.id == id).unwrap();
+        let b = at(&ed, made);
+        ed.material_step(&mut world, b, "Set roughness", None, |f, _| {
+            f.roughness = 0.3
+        });
+        ed.run(&mut world, ed.ids.make_variant);
+        let variant = ed
+            .asset_db
+            .find("props/New Material 2.material")
+            .unwrap()
+            .id;
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(ed.shown_material, Some(variant));
+        assert!(
+            !texts(
+                &ed,
+                "Material · variant of New Material.material · used by 1 object"
+            )
+            .is_empty(),
+            "{}",
+            ed.material_title
+        );
+        let v = at(&ed, variant);
+        assert_eq!(ed.material_docs[v].rows[0], Row::Base);
+        let k = ed.material_docs[v]
+            .rows
+            .iter()
+            .position(|r| *r == Row::Roughness)
+            .unwrap();
+        let changed = |ed: &Editor| {
+            let d = &ed.material_docs[at(ed, variant)];
+            crate::material::changed(&d.file, &Row::Roughness, d.base.as_ref().map(|(b, _)| b))
+        };
+        assert!(!changed(&ed), "its base's roughness");
+        ed.material_step(&mut world, v, "Set roughness", None, |f, _| {
+            f.roughness = 0.7
+        });
+        assert!(changed(&ed), "its own");
+        ed.edit_material(
+            &mut world,
+            FieldEvent {
+                section: 0,
+                field: k,
+                action: FieldAction::Reset,
+            },
+        );
+        assert!(!changed(&ed));
+        assert_eq!(ed.material_docs[v].file.roughness, 0.3, "its base's again");
+        assert!(!ed.material_docs[v].text.contains("roughness"));
+        // Apply to Base: the base takes it, the variant names its base alone.
+        ed.material_step(&mut world, v, "Set roughness", None, |f, _| {
+            f.roughness = 0.7
+        });
+        let steps = ed.history.steps().count();
+        ed.run(&mut world, ed.ids.apply_to_base);
+        assert_eq!(ed.history.steps().count(), steps + 1, "one step");
+        assert_eq!(
+            ed.material_docs[at(&ed, made)].file.roughness,
+            0.7,
+            "the base took it"
+        );
+        let text = &ed.material_docs[at(&ed, variant)].text;
+        assert!(!text.contains("roughness"), "{text}");
+        assert!(text.contains("base = asset("), "{text}");
+        // Undo: the base as it was, the variant's own value again.
+        ed.run(&mut world, ed.ids.undo);
+        ed.update(&mut world);
+        assert_eq!(ed.material_docs[at(&ed, made)].file.roughness, 0.3);
+        assert_eq!(ed.material_docs[at(&ed, variant)].file.roughness, 0.7);
+        assert!(changed(&ed));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

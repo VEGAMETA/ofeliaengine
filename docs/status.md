@@ -34,7 +34,7 @@ Last updated: 2026-10-28.
       the code editor (`slangd`, Material: New Type), and E10-3, the material graph (ADR
       0123: canvas, search, values, preview, errors, reroutes, frames, `[Node]` and
       `.mfunc` functions), are done; E10-4 is under way: variants that follow their base
-      (E10-4a) are in, the inspector's marks for them, statistics and previews ahead.
+      (E10-4a, E10-4b) are in, statistics and previews ahead.
     - E11, sound, is done: the mixer file and panel (meters, effects, sends, the room's
       strip, snapshots, ADRs 0121 and 0122), previews and fields, the viewport's gizmos
       and hearing in place, the falloff curve.
@@ -870,6 +870,11 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-4b, a variant in the inspector** (#438, ADR 0120's addendum): ↺ on a variant's
+    own values (against its base, putting the base's back), a Base row and "variant of …"
+    in the title, Material: Apply to Base (one step writing the variant's values into its
+    base, the variant left naming its base alone); variants follow their held bases in the
+    editor's own frame.
   - **E10-4a, material variants** (#437, ADR 0120's addendum; the team's answer b): a
     material file may name its `base` and holds only the lines its base has not; every
     reader (player, cook, live files, inspector) reads it over its base, a held base as
@@ -983,10 +988,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-4b, a variant's values marked in the inspector as a prefab's overrides
-       (bold label, bar, ↺ to the base's, Apply to Base, a Base row); then statistics
-       (registers, samples, parameter bytes per variant drawn), the orbiting preview,
-       per-node previews, Draw as Fallback, the preview while dragging.
+       2D): E10-4's rest: statistics (registers, samples, parameter bytes per variant
+       drawn), the orbiting preview, per-node previews, Draw as Fallback, the preview
+       while dragging.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
