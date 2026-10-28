@@ -870,7 +870,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-4d, the material's preview** (#PR, ADR 0120's as-built): at the top of its
+  - **E10-4d, the material's preview** (#440, ADR 0120's as-built): at the top of its
     inspector section, drawn by the engine on the selected object's mesh (a sphere from the
     dock), redrawn on edits (values alone drawn once), turned by dragging.
   - **E10-4c, what a material costs** (#439, ADR 0120's as-built): the editor's device
