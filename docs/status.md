@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **ADR 0123 accepted** (#PR; the owner's answers, 2026-10-28): graph files are `.mgraph`
+  - **ADR 0123 accepted** (#423; the owner's answers, 2026-10-28): graph files are `.mgraph`
     (header `[mgraph version=1 id=…]`); graphs and shaders open as files in tabs of their
     own, as code does, not in a panel under the viewport; the bottom bar's Shader
     placeholder is gone.
