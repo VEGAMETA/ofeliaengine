@@ -775,7 +775,7 @@ Last updated: 2026-10-28.
     `.material` picked in the dock shows its rows (a material type's from its reflected
     `Params`); edits draw by the next frame with nothing compiled, are steps of the one
     history (file steps: its text before and after) and Ctrl+S writes them.
-  - **E10-1c-2, materials from the object and the material commands** (#PR, ADR 0120's
+  - **E10-1c-2, materials from the object and the material commands** (#399, ADR 0120's
     as-built): a selected object's material file shows its rows after its components,
     with how many objects use it; New Material, Make Variant (a copy with its own id) and
     Apply to Selection, each one undo step; unsaved material edits kept with the session.
