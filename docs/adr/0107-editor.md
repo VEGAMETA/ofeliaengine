@@ -2110,3 +2110,33 @@ for the first answer. This step is the part of E11-4 that needs none.
   the Bus section's rows, + Bus, the output list without loops, reverb, the file written
   and read back, × as a step; on the player (GPU): a bus added in the editor heard by the
   player's mixer the next frame, the file only once saved, undone off the player again.
+
+## As built (E11-1b-2, 2026-10-28): the mixer's meters, listening aids, autosave
+
+- **Meters** (`docs/research/ux/sound.md`'s §4 and §5): a bar a channel beside each fader,
+  −60 to +6 dBFS (`mixer::meter_position`), fed with `Player::take_bus_peak` (the bus's
+  peak per channel after its fader since the last look) only while the Audio tab is open,
+  so a shipped game pays nothing. A level falls back at 24 dB a second; above the bars the
+  loudest peak since cleared ("−3.2", "+1.6") and a clip light with its sign ("!", not
+  colour alone) once the bus went over full scale. A click on them clears the strip's,
+  Ctrl+click every strip's. Bars are yellow from −6 dBFS and red over 0.
+- **Listening aids** (§6): M and S per strip and Monitor in the header, kept with the
+  session (`mixer_muted`, `mixer_soloed`), never in the file. `Player::set_mixer_listening`
+  silences, on top of the game's own mutes (which stay), the muted buses and, while any bus
+  is soloed, every bus that is neither soloed nor on a soloed bus's way to the master nor
+  feeding one (so a soloed child keeps its parent, a soloed parent its children; the room
+  reverb, the master and the editor's preview bus are never silenced). Monitor sets them
+  all aside and back. Silenced strips are dimmed.
+- **Autosave:** an unsaved layout goes to `.ofelia/autosave/<stem>-<hash>.mixer` once the
+  edits are quiet, and at once before Play, a restart and the end of the session; the
+  session lists it in a `[mixer]` block and the next editor holds it again, unsaved.
+  Saving deletes it.
+- **Not done:** RMS and loudness meters (E11-5), bypass, the header's output numbers,
+  edits made in Play marked with the command taking them back (E11-1b-3), the panel's own
+  keys.
+- **Tests:** the player's silencing (a soloed parent keeps its child heard and music
+  silent, a soloed child keeps its parent, mutes add up, the game's mute stays), each bus's
+  peak per channel (a mono sound in the middle at −3 dB a side); the meter's fall, held
+  peak, clip light and clearing; the editor's silencing rule; the panel's M, S, Monitor and
+  a clip light cleared by a click; the unsaved layout and the aids back in a new editor's
+  session, the autosave gone once saved.

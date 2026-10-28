@@ -1462,6 +1462,19 @@ impl Player {
         layout_path(&self.settings)
     }
 
+    /// The editor's listening aids (E11-1b): `muted` buses silent, and while any bus is
+    /// `soloed`, only the soloed ones, the buses they feed and those that feed them heard.
+    /// On top of the game's own mutes (`Mixer::set_muted`), which stay as they are.
+    pub fn set_mixer_listening(&mut self, muted: &[String], soloed: &[String]) {
+        self.sound.set_listening(muted, soloed);
+    }
+
+    /// Bus `bus`'s peak level per channel since the last call (linear, after its fader;
+    /// `None` without sound or such a bus): what the editor's meters show.
+    pub fn take_bus_peak(&self, bus: &str) -> Option<[f32; 2]> {
+        self.sound.take_peak(bus)
+    }
+
     /// The blockout brushes' meshes (ADR 0110).
     pub fn blockout(&self) -> &crate::Blockout {
         &self.blockout

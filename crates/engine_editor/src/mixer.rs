@@ -71,6 +71,104 @@ pub(crate) fn gain_text(out: &mut String, db: f32) {
     }
 }
 
+/// The quietest a meter shows, and the loudest, in dBFS.
+pub(crate) const METER_FLOOR: f32 = -60.0;
+pub(crate) const METER_TOP: f32 = 6.0;
+/// How fast a meter falls back, in dB a second (a peak meter's usual ballistics).
+const FALL: f32 = 24.0;
+
+/// Where level `db` (dBFS) stands on a meter, 0 (the floor) to 1 (the top).
+pub(crate) fn meter_position(db: f32) -> f32 {
+    ((db - METER_FLOOR) / (METER_TOP - METER_FLOOR)).clamp(0.0, 1.0)
+}
+
+/// A strip's meter (E11-1b-2): each channel's level in dBFS falling back at [`FALL`], the
+/// loudest peak since it was last cleared (as text: "−3.2", "+0.4"), and whether the bus
+/// went over full scale (it may clip: a light until cleared).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Meter {
+    pub(crate) name: String,
+    pub(crate) level: [f32; 2],
+    pub(crate) held: f32,
+    pub(crate) clip: bool,
+    pub(crate) text: String,
+}
+
+impl Meter {
+    /// Bus `name`'s meter, silent.
+    pub(crate) fn new(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            level: [METER_FLOOR; 2],
+            held: f32::NEG_INFINITY,
+            clip: false,
+            text: String::new(),
+        }
+    }
+
+    /// The bus's peaks since the last look (linear, per channel), `dt` seconds after it.
+    pub(crate) fn feed(&mut self, peak: [f32; 2], dt: f32) {
+        let held = self.held;
+        for (level, &p) in self.level.iter_mut().zip(&peak) {
+            let db = if p > 0.0 {
+                20.0 * p.log10()
+            } else {
+                f32::NEG_INFINITY
+            };
+            *level = db.max(*level - FALL * dt).max(METER_FLOOR);
+            self.held = self.held.max(db);
+            self.clip |= p > 1.0;
+        }
+        if self.held != held {
+            self.write_held();
+        }
+    }
+
+    /// Its held peak and clip light cleared.
+    pub(crate) fn clear(&mut self) {
+        self.held = f32::NEG_INFINITY;
+        self.clip = false;
+        self.text.clear();
+    }
+
+    fn write_held(&mut self) {
+        self.text.clear();
+        if !self.held.is_finite() {
+            return;
+        }
+        let _ = if self.held >= 0.05 {
+            write!(self.text, "+{:.1}", self.held)
+        } else if self.held <= -0.05 {
+            write!(self.text, "\u{2212}{:.1}", -self.held)
+        } else {
+            write!(self.text, "0.0")
+        };
+    }
+}
+
+/// Whether the listening aids silence bus `name` of `layout` (the player's rule,
+/// E11-1b-2): muted, or while a bus is soloed, neither soloed nor on a soloed bus's way to
+/// the master nor feeding one. The master never.
+pub(crate) fn silenced(
+    layout: &MixerFile,
+    muted: &[String],
+    soloed: &[String],
+    name: &str,
+) -> bool {
+    if name == MASTER {
+        return false;
+    }
+    if muted.iter().any(|m| m == name) {
+        return true;
+    }
+    if soloed.is_empty() {
+        return false;
+    }
+    !soloed
+        .iter()
+        .any(|s| s == name || feeds_into(layout, s, name) || feeds_into(layout, name, s))
+}
+
 /// A strip of the panel.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Strip {
@@ -146,6 +244,11 @@ pub(crate) struct MixerDoc {
     pub(crate) exists: bool,
     /// Given to the player since it last changed.
     pub(crate) given: bool,
+    /// How many times it changed, the count its unsaved text was autosaved at, and when an
+    /// autosave is due (E11-1b-2, as material files').
+    pub(crate) revision: u64,
+    pub(crate) autosaved: Option<u64>,
+    pub(crate) due: Option<std::time::Instant>,
     /// The panel's strips.
     pub(crate) strips: Vec<Strip>,
 }
@@ -184,6 +287,9 @@ impl MixerDoc {
             text,
             exists: true,
             given: false,
+            revision: 0,
+            autosaved: None,
+            due: None,
             strips: Vec::new(),
         };
         doc.refresh();
@@ -204,6 +310,7 @@ impl MixerDoc {
         }
         let before = core::mem::replace(&mut self.text, after.clone());
         self.given = false;
+        self.revision += 1;
         self.refresh();
         Some((before, after))
     }
@@ -218,6 +325,7 @@ impl MixerDoc {
         self.layout = layout;
         self.text = text.to_owned();
         self.given = false;
+        self.revision += 1;
         self.refresh();
         Ok(())
     }
@@ -483,6 +591,43 @@ mod tests {
         assert_eq!(layout.buses["music"].balance, 1.0);
         toggle_reverb(&mut layout, "music");
         assert!(layout.buses["music"].reverb);
+    }
+
+    #[test]
+    fn a_meter_falls_back_holds_its_peak_and_lights_at_full_scale() {
+        let mut m = Meter::new("music");
+        m.feed([0.5, 0.25], 0.0);
+        assert!((m.level[0] + 6.02).abs() < 0.05 && (m.level[1] + 12.04).abs() < 0.05);
+        assert_eq!(m.text, "\u{2212}6.0");
+        // Silence: half a second later 12 dB lower, the peak held.
+        m.feed([0.0, 0.0], 0.5);
+        assert!((m.level[0] + 18.02).abs() < 0.05, "{:?}", m.level);
+        assert_eq!(m.text, "\u{2212}6.0");
+        assert!(!m.clip);
+        m.feed([1.2, 0.1], 0.016);
+        assert!(m.clip, "over full scale");
+        assert_eq!(m.text, "+1.6");
+        m.clear();
+        assert!(!m.clip && m.text.is_empty());
+        assert_eq!(meter_position(METER_TOP), 1.0);
+        assert_eq!(meter_position(-100.0), 0.0);
+    }
+
+    #[test]
+    fn soloing_keeps_the_way_to_the_master_and_what_feeds_it() {
+        let mut layout = MixerFile::builtin();
+        layout
+            .buses
+            .insert(String::from("steps"), BusLayout::new().under("effects"));
+        let s = |n: &[&str]| n.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+        let on = |muted: &[&str], soloed: &[&str], name: &str| {
+            !silenced(&layout, &s(muted), &s(soloed), name)
+        };
+        assert!(on(&[], &["effects"], "steps") && on(&[], &["effects"], "effects"));
+        assert!(!on(&[], &["effects"], "music"));
+        assert!(on(&[], &["steps"], "effects"), "what it feeds");
+        assert!(on(&["master"], &["music"], MASTER), "the master never");
+        assert!(!on(&["voice"], &[], "voice"));
     }
 
     #[test]

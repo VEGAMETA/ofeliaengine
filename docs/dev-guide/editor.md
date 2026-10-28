@@ -926,8 +926,20 @@ change something.
   the room).
 - **+ Bus** ("Audio: Add Bus") adds one into the master, picked to be named; a picked
   strip's × takes it away, and the buses it was fed by go to the bus it fed.
+- **The meters:** a bar a channel beside each fader, −60 to +6 dBFS, falling back at
+  24 dB a second, yellow from −6 dBFS and red over full scale. Above them, the loudest
+  peak since you last looked, and **!** when the bus went over full scale (it may clip).
+  A click there clears them; Ctrl+click clears every strip's. Only the Audio tab reads
+  them, so a game costs nothing for them.
+- **Listening:** **M** mutes a bus and **S** solos it: while a bus is soloed, you hear it,
+  the buses it feeds on the way to the master, and the buses that feed it; the others are
+  silent and dimmed. **Monitor** sets every solo and mute aside, and back. They are for
+  your ears only: kept with the session, never in `main.mixer`, and they leave the game's
+  own mutes (`Mixer::set_muted`) as they are.
 - Every change is an undo step ("Mixer: music −6.0 dB"), and Ctrl+S writes `main.mixer`
-  with the scene. The header says when it is unsaved, or not written yet.
+  with the scene. The header says when it is unsaved, or not written yet. Unsaved changes
+  are kept in `.ofelia/` with the session, as a scene's are, and come back at the next
+  start.
 - A `main.mixer` changed outside the editor is read again, unless you have changes of
   your own in it.
 
