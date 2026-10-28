@@ -1,6 +1,8 @@
 //! A glTF file's outline (ADR 0107 E4-3): its node tree, its meshes with their
-//! primitives' materials and bounds, and its materials' names, read from the file's JSON
-//! alone (no buffers, no images). The editor makes a dropped model's entities from it.
+//! primitives' materials and bounds, and its materials' names and own looks (their factors
+//! and their maps' image files, ADR 0123 E10-3d-2), read from the file's JSON alone (no
+//! buffers, no images). The editor makes a dropped model's entities from it, and a new
+//! material graph drawing a model's material.
 
 use crate::gltf_import::ImportError;
 use std::io::Read;
@@ -18,6 +20,49 @@ pub struct GltfOutline {
     pub meshes: Vec<OutlineMesh>,
     /// The materials' names, in the file's order (empty for unnamed ones).
     pub materials: Vec<String>,
+    /// The materials' own looks, in the same order.
+    pub maps: Vec<OutlineMaps>,
+}
+
+/// A material's own look as its JSON gives it: its factors, and its maps' images where they
+/// are files beside the glTF (an image inside the file is none).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineMaps {
+    /// Linear RGBA base color factor.
+    pub base_color: [f32; 4],
+    /// Metallic factor.
+    pub metallic: f32,
+    /// Roughness factor.
+    pub roughness: f32,
+    /// Linear emissive color (with `KHR_materials_emissive_strength` applied).
+    pub emissive: [f32; 3],
+    /// The base color map's image: its path from the glTF's folder, percent-decoded.
+    pub base_color_image: Option<String>,
+    /// The metallic (blue) and roughness (green) map's.
+    pub metallic_roughness_image: Option<String>,
+    /// The tangent-space normal map's.
+    pub normal_image: Option<String>,
+    /// The ambient occlusion map's (red).
+    pub occlusion_image: Option<String>,
+    /// The emissive map's.
+    pub emissive_image: Option<String>,
+}
+
+impl Default for OutlineMaps {
+    /// glTF's defaults: white, metallic and rough factors of 1, no emission, no maps.
+    fn default() -> Self {
+        Self {
+            base_color: [1.0; 4],
+            metallic: 1.0,
+            roughness: 1.0,
+            emissive: [0.0; 3],
+            base_color_image: None,
+            metallic_roughness_image: None,
+            normal_image: None,
+            occlusion_image: None,
+            emissive_image: None,
+        }
+    }
 }
 
 /// A node: its name, its transform in its parent's space, its mesh and its children.
@@ -102,6 +147,44 @@ impl GltfOutline {
             .materials()
             .map(|m| m.name().unwrap_or_default().to_owned())
             .collect();
+        // The maps' images through the JSON's indices, each checked: the document is not
+        // validated, and its own accessors would index past a bad one.
+        let json = document.as_json();
+        let image = |texture: usize| -> Option<String> {
+            let source = json.textures.get(texture)?.source.value();
+            let uri = json.images.get(source)?.uri.as_deref()?;
+            (!uri.starts_with("data:")).then(|| crate::gltf_import::percent_decode(uri))
+        };
+        let maps = document
+            .materials()
+            .zip(&json.materials)
+            .map(|(m, j)| {
+                let pbr = m.pbr_metallic_roughness();
+                let strength = m.emissive_strength().unwrap_or(1.0);
+                let info = |t: &Option<gltf::json::texture::Info>| {
+                    t.as_ref().and_then(|t| image(t.index.value()))
+                };
+                OutlineMaps {
+                    base_color: pbr.base_color_factor(),
+                    metallic: pbr.metallic_factor(),
+                    roughness: pbr.roughness_factor(),
+                    emissive: m.emissive_factor().map(|e| e * strength),
+                    base_color_image: info(&j.pbr_metallic_roughness.base_color_texture),
+                    metallic_roughness_image: info(
+                        &j.pbr_metallic_roughness.metallic_roughness_texture,
+                    ),
+                    normal_image: j
+                        .normal_texture
+                        .as_ref()
+                        .and_then(|t| image(t.index.value())),
+                    occlusion_image: j
+                        .occlusion_texture
+                        .as_ref()
+                        .and_then(|t| image(t.index.value())),
+                    emissive_image: info(&j.emissive_texture),
+                }
+            })
+            .collect();
         let meshes = document
             .meshes()
             .map(|mesh| OutlineMesh {
@@ -160,6 +243,7 @@ impl GltfOutline {
             roots,
             meshes,
             materials,
+            maps,
         })
     }
 }
@@ -197,7 +281,24 @@ mod tests {
             ]},
             {"primitives": [{"attributes": {"POSITION": 1}}]}
         ],
-        "materials": [{"name": "Wood"}, {}],
+        "materials": [
+            {"name": "Wood", "pbrMetallicRoughness": {
+                "baseColorFactor": [0.5, 0.4, 0.3, 1],
+                "baseColorTexture": {"index": 0},
+                "metallicFactor": 0,
+                "metallicRoughnessTexture": {"index": 1}},
+             "normalTexture": {"index": 2},
+             "emissiveFactor": [1, 0.5, 0],
+             "extensions": {"KHR_materials_emissive_strength": {"emissiveStrength": 2}}},
+            {"occlusionTexture": {"index": 7}}
+        ],
+        "textures": [{"source": 0}, {"source": 1}, {"source": 2}],
+        "images": [
+            {"uri": "textures/wood%20grain.png"},
+            {"uri": "data:image/png;base64,AAAA"},
+            {"uri": "textures/wood_n.png"}
+        ],
+        "extensionsUsed": ["KHR_materials_emissive_strength"],
         "accessors": [
             {"componentType": 5126, "count": 3, "type": "VEC3",
              "min": [-0.5, 0, -0.25], "max": [0.5, 1, 0.25]},
@@ -223,6 +324,20 @@ mod tests {
         assert_eq!(seat[0].bounds, Some(([-0.5, 0.0, -0.25], [0.5, 1.0, 0.25])));
         assert_eq!(outline.meshes[1].primitives[0].bounds, None);
         assert_eq!(outline.materials, ["Wood", ""]);
+        // The materials' own looks: factors, files beside the glTF, an embedded image and a
+        // bad index none.
+        let wood = &outline.maps[0];
+        assert_eq!(wood.base_color, [0.5, 0.4, 0.3, 1.0]);
+        assert_eq!((wood.metallic, wood.roughness), (0.0, 1.0));
+        assert_eq!(wood.emissive, [2.0, 1.0, 0.0]);
+        assert_eq!(
+            wood.base_color_image.as_deref(),
+            Some("textures/wood grain.png")
+        );
+        assert_eq!(wood.metallic_roughness_image, None, "inside the file");
+        assert_eq!(wood.normal_image.as_deref(), Some("textures/wood_n.png"));
+        assert_eq!(outline.maps[1].occlusion_image, None, "no texture 7");
+        assert_eq!(outline.maps[1].base_color, [1.0; 4], "glTF's defaults");
     }
 
     #[test]

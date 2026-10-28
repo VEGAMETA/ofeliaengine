@@ -19,17 +19,21 @@
 //!   the pointer, Escape takes a drag back.
 //! - **Edits** keep the graph whole: a link that would loop back is refused, the surface
 //!   stays, a link dropped on an input replaces the one it had; moves end on whole units.
+//! - **More** (E10-3d-2): Ctrl+D copies the selection with the links into it; Ctrl+drag
+//!   from an output carries all its links to another output (egui-snarl's yank) or takes
+//!   them out; [`starter`] is a new graph drawing a glTF material's own look.
 
 use crate::paint::UiText;
 use crate::shell::Palette;
+use engine_assets::OutlineMaps;
 use engine_core::math::{Vec2, Vec4};
 use engine_material_graph::graph::OUTPUT;
 use engine_material_graph::library::{self, Body, OUTPUT_KIND};
-use engine_material_graph::{Graph, GraphFile, Kind, Model, PortRef, PortType};
+use engine_material_graph::{Graph, GraphFile, Kind, Model, Node, PortRef, PortType};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad};
-use engine_scene::{AssetId, AssetPaths};
+use engine_scene::{AssetId, AssetPaths, AssetRef};
 use engine_ui::TextMeasure;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// The zoom's steps: each draws the text at one size.
@@ -359,6 +363,201 @@ pub(crate) fn connect(graph: &mut Graph, from: PortRef, to: PortRef) -> Result<(
     Ok(())
 }
 
+/// A new node's id: its kind's name and the first number free (`multiply2`).
+pub(crate) fn fresh_id(graph: &Graph, kind: &str) -> String {
+    (1..)
+        .map(|n| format!("{kind}{n}"))
+        .find(|id| !graph.nodes.contains_key(id))
+        .unwrap_or_default()
+}
+
+/// A parameter's name no node of `graph` has: `name`, else `name_2`, `name_3`…
+fn fresh_param(graph: &Graph, name: &str) -> String {
+    let taken = |p: &str| graph.nodes.values().any(|n| n.param == p);
+    if !taken(name) {
+        return name.to_owned();
+    }
+    (2..)
+        .map(|n| format!("{name}_{n}"))
+        .find(|p| !taken(p))
+        .unwrap_or_default()
+}
+
+/// Whether `v` is `one` in every component, to within rounding.
+fn is(v: &[f32], one: f32) -> bool {
+    v.iter().all(|x| (x - one).abs() < 1e-4)
+}
+
+/// A new graph drawing `maps`, a glTF material's own look (ADR 0123 E10-3d-2): its maps
+/// where `image` finds their files in the project (an image's path from the glTF's folder
+/// to its reference and its path in the project), each times its factor where that is not
+/// 1, the factors alone where there is no map; the standard material's grey, roughness
+/// 0.5 and no metal without `maps`. The images found come back with their paths (the
+/// file's references); the maps of data (metallic and roughness, occlusion) are named
+/// too, for the material file to say they are not colours.
+pub(crate) fn starter(
+    maps: Option<&OutlineMaps>,
+    image: &mut dyn FnMut(&str) -> Option<(AssetRef, String)>,
+) -> (Graph, Vec<(AssetRef, String)>, Vec<&'static str>) {
+    let standard = OutlineMaps {
+        base_color: [0.8, 0.8, 0.8, 1.0],
+        metallic: 0.0,
+        roughness: 0.5,
+        ..OutlineMaps::default()
+    };
+    let m = maps.unwrap_or(&standard);
+    let mut g = Graph::new(Model::Lit);
+    let mut images = Vec::new();
+    let mut data = Vec::new();
+    // Map `uri` as texture node `id` (parameter `param`) at `at`, if its file is found.
+    let mut map = |g: &mut Graph, id: &str, param: &str, uri: &Option<String>, at: [f32; 2]| {
+        let (texture, path) = uri.as_deref().and_then(&mut *image)?;
+        g.add(
+            id,
+            Node::new("texture", at).named(param).with_texture(texture),
+        );
+        images.push((texture, path));
+        Some(PortRef::new(id, "rgba"))
+    };
+    let out = |port: &str| PortRef::new(OUTPUT, port);
+    let (maps_x, mid_x) = (-560.0, -300.0);
+    // The base colour: its map times its factor, or the factor.
+    match map(
+        &mut g,
+        "base_map",
+        "base_color_map",
+        &m.base_color_image,
+        [maps_x, 0.0],
+    ) {
+        Some(rgba) if is(&m.base_color, 1.0) => {
+            g.link(rgba, out("base"));
+        }
+        Some(rgba) => {
+            g.add(
+                "tint",
+                Node::new("color", [maps_x, 130.0])
+                    .with_value(m.base_color)
+                    .named("tint"),
+            );
+            g.add("base", Node::new("multiply", [mid_x, 0.0]));
+            g.link(rgba, PortRef::new("base", "a"))
+                .link(PortRef::new("tint", "rgba"), PortRef::new("base", "b"))
+                .link(PortRef::new("base", "out"), out("base"));
+        }
+        None => {
+            g.add(
+                "base_color",
+                Node::new("color", [mid_x, 0.0])
+                    .with_value(m.base_color)
+                    .named("base_color"),
+            );
+            g.link(PortRef::new("base_color", "rgba"), out("base"));
+        }
+    }
+    // Roughness (green) and metal (blue): the map's channels times their factors.
+    let mr = map(
+        &mut g,
+        "mr_map",
+        "metallic_roughness_map",
+        &m.metallic_roughness_image,
+        [maps_x, 260.0],
+    );
+    if mr.is_some() {
+        data.push("metallic_roughness_map");
+    }
+    for (term, channel, factor, y) in [
+        ("roughness", "g", m.roughness, 260.0),
+        ("metallic", "b", m.metallic, 390.0),
+    ] {
+        let number = |g: &mut Graph, at: [f32; 2]| {
+            g.add(
+                term,
+                Node::new("number", at)
+                    .with_value([factor, 0.0, 0.0, 0.0])
+                    .named(term),
+            );
+            PortRef::new(term, "value")
+        };
+        let value = match (&mr, (factor - 1.0).abs() < 1e-4) {
+            (Some(_), true) => PortRef::new("mr_map", channel),
+            (Some(_), false) => {
+                let k = number(&mut g, [maps_x, y + 130.0]);
+                let times = format!("{term}_times");
+                g.add(&times, Node::new("multiply", [mid_x, y]));
+                g.link(PortRef::new("mr_map", channel), PortRef::new(&times, "a"))
+                    .link(k, PortRef::new(&times, "b"));
+                PortRef::new(&times, "out")
+            }
+            (None, _) => number(&mut g, [mid_x, y]),
+        };
+        g.link(value, out(term));
+    }
+    // The normal map through a Normal Map node.
+    if let Some(rgba) = map(
+        &mut g,
+        "normal_tex",
+        "normal_map",
+        &m.normal_image,
+        [maps_x, 650.0],
+    ) {
+        g.add("normal", Node::new("normal_map", [mid_x, 650.0]));
+        g.link(rgba, PortRef::new("normal", "color"))
+            .link(PortRef::new("normal", "normal"), out("normal"));
+    }
+    // Emission: its map times its colour, or the colour where it glows.
+    let glow = [m.emissive[0], m.emissive[1], m.emissive[2], 1.0];
+    match map(
+        &mut g,
+        "emissive_map",
+        "emissive_map",
+        &m.emissive_image,
+        [maps_x, 780.0],
+    ) {
+        Some(_) if is(&m.emissive, 1.0) => {
+            g.link(PortRef::new("emissive_map", "rgb"), out("emission"));
+        }
+        Some(_) => {
+            g.add(
+                "glow",
+                Node::new("color", [maps_x, 910.0])
+                    .with_value(glow)
+                    .named("emission"),
+            );
+            g.add("emission", Node::new("multiply", [mid_x, 780.0]));
+            g.link(
+                PortRef::new("emissive_map", "rgb"),
+                PortRef::new("emission", "a"),
+            )
+            .link(PortRef::new("glow", "rgba"), PortRef::new("emission", "b"))
+            .link(PortRef::new("emission", "out"), out("emission"));
+        }
+        None if !is(&m.emissive, 0.0) => {
+            g.add(
+                "glow",
+                Node::new("color", [mid_x, 780.0])
+                    .with_value(glow)
+                    .named("emission"),
+            );
+            g.link(PortRef::new("glow", "rgba"), out("emission"));
+        }
+        None => {}
+    }
+    // Ambient occlusion (red).
+    if map(
+        &mut g,
+        "occlusion_map",
+        "occlusion_map",
+        &m.occlusion_image,
+        [maps_x, 1040.0],
+    )
+    .is_some()
+    {
+        data.push("occlusion_map");
+        g.link(PortRef::new("occlusion_map", "r"), out("occlusion"));
+    }
+    (g, images, data)
+}
+
 /// Nodes `ids` deleted with their links, the surface kept: how many went.
 pub(crate) fn delete(graph: &mut Graph, ids: &BTreeSet<String>) -> usize {
     let before = graph.nodes.len();
@@ -392,6 +591,8 @@ pub(crate) struct Pointer {
     pub(crate) wheel: f32,
     /// Shift held.
     pub(crate) shift: bool,
+    /// Ctrl held: a press on an output carries its links (a yank).
+    pub(crate) ctrl: bool,
     /// Escape pressed.
     pub(crate) escape: bool,
 }
@@ -420,6 +621,14 @@ pub(crate) enum Drag {
         output: bool,
         /// The input it was lifted off.
         lifted: Option<PortRef>,
+    },
+    /// An output's links lifted off it (Ctrl+drag, egui-snarl's yank): to be carried to
+    /// another output, or taken out.
+    Yank {
+        /// The output they came from.
+        from: PortRef,
+        /// The inputs it fed.
+        inputs: Vec<PortRef>,
     },
     /// A box drawn from canvas point `from`; Shift adds what it meets to the selection.
     Select {
@@ -704,6 +913,64 @@ impl GraphDoc {
         })
     }
 
+    /// The selected nodes copied (Ctrl+D), the surface not: each with an id of its own 30
+    /// units down and right, a parameter with a name of its own; the links among them
+    /// copied between the copies, and those into them from the others kept (Blender's);
+    /// the copies selected.
+    pub(crate) fn duplicate_selected(&mut self) -> Option<Outcome> {
+        let picked: Vec<String> = self
+            .selected
+            .iter()
+            .filter(|id| id.as_str() != OUTPUT && self.graph.nodes.contains_key(id.as_str()))
+            .cloned()
+            .collect();
+        if picked.is_empty() {
+            return (!self.selected.is_empty()).then_some(Outcome::Refused(
+                "The surface is not copied: a graph has one",
+            ));
+        }
+        let mut copies = BTreeSet::new();
+        let (before, after) = self.edit(|g| {
+            let mut renamed = BTreeMap::new();
+            for id in &picked {
+                let mut node = g.nodes[id].clone();
+                node.at = [node.at[0] + 30.0, node.at[1] + 30.0];
+                if !node.param.is_empty() {
+                    node.param = fresh_param(g, &node.param);
+                }
+                let new = fresh_id(g, &node.kind);
+                g.nodes.insert(new.clone(), node);
+                renamed.insert(id.clone(), new.clone());
+                copies.insert(new);
+            }
+            let into: Vec<(PortRef, PortRef)> = g
+                .links
+                .iter()
+                .filter(|(to, _)| renamed.contains_key(&to.node))
+                .map(|(to, from)| (to.clone(), from.clone()))
+                .collect();
+            for (to, from) in into {
+                let from = match renamed.get(&from.node) {
+                    Some(n) => PortRef::new(n, &from.port),
+                    None => from,
+                };
+                g.links
+                    .insert(PortRef::new(&renamed[&to.node], &to.port), from);
+            }
+        })?;
+        self.selected = copies;
+        let name = if picked.len() == 1 {
+            "Duplicate Node"
+        } else {
+            "Duplicate Nodes"
+        };
+        Some(Outcome::Edited {
+            name,
+            before,
+            after,
+        })
+    }
+
     /// A frame of the pointer on the canvas whose panel has its top left at `origin`: the
     /// view panned and zoomed, the selection made, nodes moved and linked; `drag` is the
     /// drag under way, kept between frames.
@@ -760,7 +1027,7 @@ impl GraphDoc {
                 && p.over
                 && let Some(c) = at
             {
-                *drag = Some(self.press(c, p.shift));
+                *drag = Some(self.press(c, p.shift, p.ctrl));
             }
             return None;
         }
@@ -825,6 +1092,15 @@ impl GraphDoc {
                 };
                 self.drop_link(from, output, lifted, at.map(|c| self.hit(c, reach)))
             }
+            Drag::Yank { .. } => {
+                if !ended {
+                    return None;
+                }
+                let Some(Drag::Yank { from, inputs }) = drag.take() else {
+                    return None;
+                };
+                self.drop_yank(&from, &inputs, at.map(|c| self.hit(c, reach)))
+            }
             Drag::Select { from, add } => {
                 if !ended {
                     return None;
@@ -857,9 +1133,28 @@ impl GraphDoc {
 
     /// The drag a press at canvas point `c` starts: a link from a port (an input's link
     /// lifted off it), a move of the selection made by the press, or a box.
-    fn press(&mut self, c: [f32; 2], shift: bool) -> Drag {
+    fn press(&mut self, c: [f32; 2], shift: bool, ctrl: bool) -> Drag {
         let reach = PORT_REACH / self.view.zoom();
         match self.hit(c, reach) {
+            Hit::Output(k, o) if ctrl => {
+                let from = PortRef::new(&self.boxes[k].id, self.boxes[k].outputs[o]);
+                let inputs: Vec<PortRef> = self
+                    .graph
+                    .links
+                    .iter()
+                    .filter(|(_, f)| **f == from)
+                    .map(|(to, _)| to.clone())
+                    .collect();
+                if inputs.is_empty() {
+                    Drag::Link {
+                        from,
+                        output: true,
+                        lifted: None,
+                    }
+                } else {
+                    Drag::Yank { from, inputs }
+                }
+            }
             Hit::Output(k, o) => Drag::Link {
                 from: PortRef::new(&self.boxes[k].id, self.boxes[k].outputs[o]),
                 output: true,
@@ -905,6 +1200,58 @@ impl GraphDoc {
                 from: c,
                 add: shift,
             },
+        }
+    }
+
+    /// The links lifted off output `from` (into `inputs`) dropped on `on`: carried to the
+    /// output there (refused, all of them, where one would loop back), or taken out.
+    fn drop_yank(
+        &mut self,
+        from: &PortRef,
+        inputs: &[PortRef],
+        on: Option<Hit>,
+    ) -> Option<Outcome> {
+        match on {
+            Some(Hit::Output(k, o)) => {
+                let to = PortRef::new(&self.boxes[k].id, self.boxes[k].outputs[o]);
+                if to == *from {
+                    return None;
+                }
+                let mut trial = self.graph.clone();
+                for input in inputs {
+                    if let Err(why) = connect(&mut trial, to.clone(), input.clone()) {
+                        return Some(Outcome::Refused(why));
+                    }
+                }
+                let (before, after) = self.edit(|g| *g = trial)?;
+                let name = if inputs.len() == 1 {
+                    "Move Link"
+                } else {
+                    "Move Links"
+                };
+                Some(Outcome::Edited {
+                    name,
+                    before,
+                    after,
+                })
+            }
+            _ => {
+                let (before, after) = self.edit(|g| {
+                    for input in inputs {
+                        g.links.remove(input);
+                    }
+                })?;
+                let name = if inputs.len() == 1 {
+                    "Remove Link"
+                } else {
+                    "Remove Links"
+                };
+                Some(Outcome::Edited {
+                    name,
+                    before,
+                    after,
+                })
+            }
         }
     }
 
@@ -1118,9 +1465,13 @@ pub(crate) fn draw(
         }) => Some(l),
         _ => None,
     };
+    let yanked = match drag {
+        Some(Drag::Yank { inputs, .. }) => inputs.as_slice(),
+        _ => &[],
+    };
     // The links, those of the selected nodes brighter.
     for (into, from) in &doc.graph.links {
-        if Some(into) == lifted {
+        if Some(into) == lifted || yanked.contains(into) {
             continue;
         }
         let (Some(a), Some(b)) = (doc.port_point(from, true), doc.port_point(into, false)) else {
@@ -1278,6 +1629,26 @@ pub(crate) fn draw(
             2.0 * look.scale,
             Vec4::new(1.0, 1.0, 1.0, 0.85),
         );
+    }
+    // Links being carried: from the pointer, or the output they would go to, into theirs.
+    if let Some(cursor) = doc.cursor
+        && !yanked.is_empty()
+    {
+        let start = match doc.hover {
+            Hit::Output(k, o) => doc.boxes[k].output_at(o),
+            _ => cursor,
+        };
+        for input in yanked {
+            if let Some(end) = doc.port_point(input, false) {
+                line(
+                    canvas,
+                    start,
+                    end,
+                    2.0 * look.scale,
+                    Vec4::new(1.0, 1.0, 1.0, 0.85),
+                );
+            }
+        }
     }
     if let Some((a, b)) = select_box(drag, doc.cursor) {
         let (a, b) = (to(a), to(b));
@@ -1645,6 +2016,178 @@ mod tests {
             Some(Outcome::Refused("A node cannot feed itself"))
         );
         assert_eq!(d.text, text);
+    }
+
+    #[test]
+    fn duplicates_take_their_links_and_ctrl_drag_carries_an_outputs_links() {
+        let mut d = doc();
+        // Number r into the surface's roughness and metallic.
+        d.graph
+            .link(
+                PortRef::new("r", "value"),
+                PortRef::new(OUTPUT, "roughness"),
+            )
+            .link(PortRef::new("r", "value"), PortRef::new(OUTPUT, "metallic"));
+        d.graph.add("m", Node::new("multiply", [150.0, 200.0]));
+        d.graph
+            .link(PortRef::new("c", "rgba"), PortRef::new("m", "a"))
+            .link(PortRef::new("r", "value"), PortRef::new("m", "b"));
+        d.revision += 1;
+        d.relayout(&mut measure);
+        // Ctrl+D on m and r: copies with ids and a parameter of their own, m's copy fed by
+        // r's copy and still by c (not copied); the copies selected.
+        d.selected = ["m", "r"].map(String::from).into_iter().collect();
+        let Some(Outcome::Edited { name, .. }) = d.duplicate_selected() else {
+            panic!("duplicated")
+        };
+        assert_eq!(name, "Duplicate Nodes");
+        assert_eq!(
+            d.selected.iter().collect::<Vec<_>>(),
+            ["multiply1", "number1"]
+        );
+        assert_eq!(d.graph.nodes["number1"].param, "roughness_2");
+        assert_eq!(d.graph.nodes["number1"].at, [30.0, 150.0]);
+        assert_eq!(
+            d.graph.links[&PortRef::new("multiply1", "b")],
+            PortRef::new("number1", "value")
+        );
+        assert_eq!(
+            d.graph.links[&PortRef::new("multiply1", "a")],
+            PortRef::new("c", "rgba")
+        );
+        assert!(
+            !d.graph.links.values().any(|f| f.node == "number1"
+                && d.graph
+                    .links
+                    .keys()
+                    .any(|t| t.node == OUTPUT && d.graph.links[t] == *f)),
+            "the surface not fed by a copy"
+        );
+        d.selected = [OUTPUT.to_owned()].into_iter().collect();
+        assert_eq!(
+            d.duplicate_selected(),
+            Some(Outcome::Refused(
+                "The surface is not copied: a graph has one"
+            ))
+        );
+        // Ctrl+drag from r's output onto number1's: its three links carried over, one step.
+        d.relayout(&mut measure);
+        let mut drag = None;
+        let (r, n) = (d.box_of("r").unwrap(), d.box_of("number1").unwrap());
+        let (from, onto) = (d.boxes[r].output_at(0), d.boxes[n].output_at(0));
+        let p = |c: [f32; 2], press, held| Pointer {
+            at: Some(c),
+            over: true,
+            press,
+            held,
+            ctrl: true,
+            ..Pointer::default()
+        };
+        assert_eq!(d.pointer(&p(from, true, true), [0.0; 2], &mut drag), None);
+        assert!(matches!(&drag, Some(Drag::Yank { inputs, .. }) if inputs.len() == 3));
+        let Some(Outcome::Edited { name, .. }) =
+            d.pointer(&p(onto, false, false), [0.0; 2], &mut drag)
+        else {
+            panic!("carried")
+        };
+        assert_eq!(name, "Move Links");
+        assert!(d.graph.links.values().all(|f| f.node != "r"));
+        assert_eq!(
+            d.graph.links[&PortRef::new(OUTPUT, "metallic")],
+            PortRef::new("number1", "value")
+        );
+        // Carried onto an output fed by them: refused, all of them kept where they were.
+        d.relayout(&mut measure);
+        let (n, m1) = (d.box_of("number1").unwrap(), d.box_of("multiply1").unwrap());
+        let text = d.text.clone();
+        d.pointer(&p(d.boxes[n].output_at(0), true, true), [0.0; 2], &mut drag);
+        assert_eq!(
+            d.pointer(
+                &p(d.boxes[m1].output_at(0), false, false),
+                [0.0; 2],
+                &mut drag
+            ),
+            Some(Outcome::Refused("A node cannot feed itself"))
+        );
+        assert_eq!(d.text, text);
+        // Dropped on the canvas: taken out.
+        d.pointer(&p(d.boxes[n].output_at(0), true, true), [0.0; 2], &mut drag);
+        let Some(Outcome::Edited { name, .. }) =
+            d.pointer(&p([-400.0, -400.0], false, false), [0.0; 2], &mut drag)
+        else {
+            panic!("removed")
+        };
+        assert_eq!(name, "Remove Links");
+        assert!(d.graph.links.values().all(|f| f.node != "number1"));
+    }
+
+    #[test]
+    fn a_starter_graph_draws_a_gltf_materials_own_look() {
+        // No look: the standard material's grey and numbers.
+        let (g, images, data) = starter(None, &mut |_| None);
+        assert!(images.is_empty() && data.is_empty());
+        assert_eq!(g.nodes["base_color"].value, [0.8, 0.8, 0.8, 1.0]);
+        assert_eq!(g.nodes["roughness"].value[0], 0.5);
+        assert_eq!(
+            g.links[&PortRef::new(OUTPUT, "metallic")],
+            PortRef::new("metallic", "value")
+        );
+        engine_material_graph::generate(&g, "GraphMaterial", engine_material_graph::Build::Saved)
+            .unwrap();
+        // Wood: its colour map times its tint, its metal/rough map's channels (roughness
+        // times 0.7), its normal map through a Normal Map node, its glow alone; a map whose
+        // file the project lacks left out.
+        let wood = OutlineMaps {
+            base_color: [0.9, 0.8, 0.7, 1.0],
+            metallic: 1.0,
+            roughness: 0.7,
+            emissive: [0.2, 0.1, 0.0],
+            base_color_image: Some(String::from("wood.png")),
+            metallic_roughness_image: Some(String::from("wood_mr.png")),
+            normal_image: Some(String::from("wood_n.png")),
+            occlusion_image: Some(String::from("gone.png")),
+            emissive_image: None,
+        };
+        let ids: BTreeMap<&str, AssetRef> = ["wood.png", "wood_mr.png", "wood_n.png"]
+            .into_iter()
+            .map(|p| (p, AssetRef::file(AssetId::new())))
+            .collect();
+        let (g, images, data) = starter(Some(&wood), &mut |uri| {
+            ids.get(uri).map(|&r| (r, format!("props/{uri}")))
+        });
+        assert_eq!(images.len(), 3);
+        assert_eq!(data, ["metallic_roughness_map"]);
+        assert_eq!(g.nodes["base_map"].texture, ids["wood.png"]);
+        assert_eq!(
+            g.links[&PortRef::new("base", "a")],
+            PortRef::new("base_map", "rgba")
+        );
+        assert_eq!(g.nodes["tint"].value, wood.base_color);
+        assert_eq!(
+            g.links[&PortRef::new(OUTPUT, "metallic")],
+            PortRef::new("mr_map", "b"),
+            "a factor of 1: the channel itself"
+        );
+        assert_eq!(
+            g.links[&PortRef::new("roughness_times", "a")],
+            PortRef::new("mr_map", "g")
+        );
+        assert_eq!(
+            g.links[&PortRef::new(OUTPUT, "normal")],
+            PortRef::new("normal", "normal")
+        );
+        assert_eq!(
+            g.links[&PortRef::new(OUTPUT, "emission")],
+            PortRef::new("glow", "rgba")
+        );
+        assert!(!g.nodes.contains_key("occlusion_map"));
+        let module = engine_material_graph::generate(
+            &g,
+            "GraphMaterial",
+            engine_material_graph::Build::Saved,
+        )
+        .unwrap();
+        assert!(module.text.contains("struct GraphMaterial : IMaterial"));
     }
 
     #[test]

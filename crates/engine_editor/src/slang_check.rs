@@ -429,6 +429,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// ADR 0123 E10-3d-2: a new graph's module compiles inside `forward.slang`, a glTF
+    /// material's look with every map and the standard one.
+    #[test]
+    fn a_new_graphs_module_compiles_inside_forward_slang() {
+        use engine_assets::OutlineMaps;
+        use engine_scene::{AssetId, AssetRef};
+        let dir = std::env::temp_dir().join(format!("slang_starter_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let Some(mut analyzer) = SlangAnalyzer::new(&dir) else {
+            assert!(
+                std::env::var("ENGINE_REQUIRE_SLANG").is_err(),
+                "no Slang library"
+            );
+            return;
+        };
+        let every = OutlineMaps {
+            base_color: [0.9, 0.8, 0.7, 1.0],
+            metallic: 0.5,
+            roughness: 0.7,
+            emissive: [0.3, 0.2, 0.1],
+            base_color_image: Some(String::from("a.png")),
+            metallic_roughness_image: Some(String::from("b.png")),
+            normal_image: Some(String::from("c.png")),
+            occlusion_image: Some(String::from("d.png")),
+            emissive_image: Some(String::from("e.png")),
+        };
+        for maps in [Some(&every), None] {
+            let (graph, images, _) = crate::graph::starter(maps, &mut |uri| {
+                Some((AssetRef::file(AssetId::new()), uri.to_owned()))
+            });
+            assert_eq!(images.len(), if maps.is_some() { 5 } else { 0 });
+            let module = engine_material_graph::generate(
+                &graph,
+                "GraphMaterial",
+                engine_material_graph::Build::Saved,
+            )
+            .unwrap();
+            analyzer.set_source("graph.slang", &module.text);
+            let errors: Vec<_> = analyzer
+                .check("graph.slang")
+                .into_iter()
+                .filter(|d| d.severity == Severity::Error)
+                .collect();
+            assert!(errors.is_empty(), "{errors:?}\n{}", module.text);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn findings_are_placed_in_the_module_or_on_its_first_line() {
         let dir = std::env::temp_dir().join(format!("slang_check_{}", std::process::id()));

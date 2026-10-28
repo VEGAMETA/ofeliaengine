@@ -795,6 +795,8 @@ struct CommandIds {
     new_material: CommandId,
     /// A material type from the template (E10-2c).
     new_type: CommandId,
+    /// A material graph drawing the object's own look (ADR 0123 E10-3d-2).
+    new_graph: CommandId,
     make_variant: CommandId,
     apply_material: CommandId,
     break_next: CommandId,
@@ -973,6 +975,7 @@ fn commands() -> (Commands, CommandIds) {
         full_debugging: c.register("debug.full_debugging", "Debug", "Full Script Debugging"),
         new_material: c.register("material.new", "Material", "New Material"),
         new_type: c.register("material.new_type", "Material", "New Type"),
+        new_graph: c.register("material.new_graph", "Material", "New Graph"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
         break_next: c.register("debug.break_next", "Debug", "Break at the Next Script Line"),
@@ -11460,7 +11463,8 @@ impl Editor {
     /// the canvas's own (Delete, F). The scene's tools are off.
     fn graph_command(&self, id: CommandId) -> bool {
         let ids = &self.ids;
-        self.editor_command(id) || [ids.undo, ids.redo, ids.delete, ids.frame].contains(&id)
+        self.editor_command(id)
+            || [ids.undo, ids.redo, ids.delete, ids.frame, ids.duplicate].contains(&id)
     }
 
     /// The shown graph's bar: its nodes, its selection and the zoom, in the same room
@@ -11533,6 +11537,7 @@ impl Editor {
             moved: [dx / scale, dy / scale],
             wheel: self.input.wheel_notches(),
             shift: self.input.shift(),
+            ctrl: self.input.ctrl(),
             escape: free && self.ui.input().keys.contains(&UiKey::Escape),
         };
         let outcome = self.graphs[g].pointer(&pointer, [x, y], &mut self.graph_drag);
@@ -14003,6 +14008,11 @@ impl Editor {
                 self.frame_graph(g);
                 return;
             }
+            if id == ids.duplicate && canvas {
+                let outcome = self.graphs[g].duplicate_selected();
+                self.graph_outcome(world, g, outcome);
+                return;
+            }
         }
         // Ctrl+S on a script's tab saves the script, the game playing or not.
         if id == ids.save
@@ -14348,6 +14358,8 @@ impl Editor {
             self.new_material(world);
         } else if id == ids.new_type {
             self.new_material_type(world);
+        } else if id == ids.new_graph {
+            self.new_material_graph(world);
         } else if id == ids.make_variant {
             self.make_variant(world);
         } else if id == ids.apply_material {
@@ -15328,6 +15340,131 @@ impl Editor {
             "{} ({base}Material in {module}; Ctrl+S compiles it)",
             objects_given(&path, given)
         ));
+    }
+
+    /// "Material: New Graph" (ADR 0123 E10-3d-2): a material graph in the dock's folder,
+    /// named after the active entity (`Box`: `box.mgraph`), drawing its model's glTF
+    /// material's own look (its maps where the project has their files, its factors,
+    /// [`crate::graph::starter`]; the standard material's without one), and a material file
+    /// naming it beside it (`box.material`) given to the selected models in one step; the
+    /// graph opens in its tab. Until its shaders are made the file draws its look (its
+    /// colour).
+    fn new_material_graph(&mut self, world: &mut World) {
+        use engine_material_graph::GraphFile;
+        let active = self.active();
+        let name = active
+            .and_then(|e| world.get::<Name>(e))
+            .map_or("", Name::as_str)
+            .to_owned();
+        let look = active.and_then(|e| self.object_maps(world, e));
+        let folder = self.browser.folder.clone();
+        let at = |stem: &str, ext: &str| {
+            if folder.is_empty() {
+                format!("{stem}.{ext}")
+            } else {
+                format!("{folder}/{stem}.{ext}")
+            }
+        };
+        let root = self.root.clone();
+        let (_, stem) = crate::material::type_names(&name, |stem| {
+            root.join(at(stem, "mgraph")).exists() || root.join(at(stem, "material")).exists()
+        });
+        let (graph_path, path) = (at(&stem, "mgraph"), at(&stem, "material"));
+        // The maps' images, from the glTF's folder to the project's files.
+        let db = &self.asset_db;
+        let mut image = |uri: &str| {
+            let (from, _) = look.as_ref()?;
+            let full = if from.is_empty() {
+                uri.to_owned()
+            } else {
+                format!("{from}/{uri}")
+            };
+            let full = full.replace('\\', "/").replace("/./", "/");
+            let entry = db.find(&full)?;
+            Some((AssetRef::file(entry.id), full))
+        };
+        let (graph, images, data) =
+            crate::graph::starter(look.as_ref().map(|(_, maps)| maps), &mut image);
+        let mut paths = AssetPaths::new();
+        for (texture, at) in &images {
+            paths.insert(*texture, at);
+        }
+        let graph_id = AssetId::new();
+        let text = GraphFile::of(&graph).to_text(graph_id, Some(&paths));
+        if let Err(e) = self.write_material_file(&graph_path, graph_id, &text) {
+            self.say(format!("{graph_path} could not be written: {e}"));
+            return;
+        }
+        paths.insert(AssetRef::file(graph_id), &graph_path);
+        // The material file: the graph's type, the maps of data said to be data, its look
+        // the graph's colour meanwhile.
+        let colour = look
+            .as_ref()
+            .map_or([0.8, 0.8, 0.8, 1.0], |(_, m)| m.base_color);
+        let mut file = MaterialFile {
+            shader: AssetRef::file(graph_id),
+            type_name: String::from(engine_assets::graph_module::GRAPH_TYPE),
+            base_color: colour,
+            ..MaterialFile::default()
+        };
+        if let Some((_, m)) = &look {
+            file.metallic = m.metallic;
+            file.roughness = m.roughness;
+            file.emissive = m.emissive;
+        }
+        for param in data {
+            if let Some(node) = graph.nodes.values().find(|n| n.param == param) {
+                file.textures.insert(
+                    param.to_owned(),
+                    engine_assets::material_file::MaterialTexture {
+                        image: node.texture,
+                        encoding: engine_assets::material_file::TextureEncoding::Data,
+                    },
+                );
+            }
+        }
+        let id = AssetId::new();
+        if let Err(e) = self.write_material_file(&path, id, &file.to_text_with(id, &paths)) {
+            self.say(format!("{path} could not be written: {e}"));
+            return;
+        }
+        let targets = self.selection.clone();
+        let given = self.material_to(world, id, &targets);
+        self.open_graph(world, Path::new(&graph_path));
+        let maps = match images.len() {
+            0 => String::new(),
+            1 => String::from(", with its map"),
+            n => format!(", with its {n} maps"),
+        };
+        self.say(format!(
+            "{} (its graph {graph_path}{maps}; Ctrl+S on the graph draws it)",
+            objects_given(&path, given)
+        ));
+    }
+
+    /// The glTF material entity `e`'s model draws with, as its file gives it (ADR 0123
+    /// E10-3d-2): the folder its images are named from (the glTF's), and its own look;
+    /// none for a material file or the built-in material.
+    fn object_maps(
+        &self,
+        world: &World,
+        e: Entity,
+    ) -> Option<(String, engine_assets::OutlineMaps)> {
+        let material = world.get::<Model>(e)?.material;
+        let entry = self
+            .asset_db
+            .get(material.file)
+            .filter(|entry| entry.kind == engine_scene::AssetKind::Model)?;
+        let outline = engine_assets::GltfOutline::read(&self.root.join(&entry.path)).ok()?;
+        let names: Vec<&str> = outline.materials.iter().map(String::as_str).collect();
+        let k = (0..names.len()).find(|&k| {
+            AssetRef::part(material.file, &crate::drop::part_name(&names, k)) == material
+        })?;
+        let folder = entry
+            .path
+            .rsplit_once('/')
+            .map_or(String::new(), |(f, _)| f.to_owned());
+        Some((folder, outline.maps.get(k)?.clone()))
     }
 
     /// "Make Variant" (E10-1c): the material shown copied beside its file (`Red 2`, …), its
@@ -25649,6 +25786,127 @@ mod tests {
             "{text}"
         );
         assert!(!doc(&ed).1, "saved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0123 E10-3d-2: "Material: New Graph" draws the selected box's glTF material (its
+    /// colour map times its tint, its normal map, its factors), a material file naming it
+    /// given to the box in one step, its tab opened; Ctrl+D there copies a node. Again on
+    /// the box, whose material is a file now: the standard look, numbered.
+    #[test]
+    fn a_new_material_graph_draws_the_objects_own_look() {
+        use engine_material_graph::{GraphFile, PortRef};
+        const D: (u16, u16) = (0x44, 0x20);
+        let dir = folder("material-new-graph");
+        std::fs::create_dir_all(dir.join("props/maps")).unwrap();
+        let gltf = r#"{
+            "asset": {"version": "2.0"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"name": "Crate", "mesh": 0}],
+            "meshes": [{"name": "Crate", "primitives": [
+                {"attributes": {"POSITION": 0}, "material": 0}]}],
+            "materials": [{"name": "Wood",
+                "pbrMetallicRoughness": {"baseColorFactor": [0.9, 0.8, 0.7, 1],
+                    "baseColorTexture": {"index": 0},
+                    "metallicFactor": 0, "roughnessFactor": 0.7},
+                "normalTexture": {"index": 1}}],
+            "textures": [{"source": 0}, {"source": 1}],
+            "images": [{"uri": "maps/wood.png"}, {"uri": "maps/wood_n.png"}],
+            "accessors": [{"componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [-0.5, 0, -0.5], "max": [0.5, 1, 0.5]}]
+        }"#;
+        std::fs::write(dir.join("props/crate.gltf"), gltf).unwrap();
+        let png = engine_render::png::encode_png(
+            1,
+            1,
+            engine_render::png::PngFormat::Rgba,
+            &[200, 150, 100, 255],
+        )
+        .unwrap();
+        std::fs::write(dir.join("props/maps/wood.png"), &png).unwrap();
+        std::fs::write(dir.join("props/maps/wood_n.png"), &png).unwrap();
+        let mut world = World::new();
+        let mut ed = Editor::new(
+            [1280, 720],
+            dir.clone(),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.open_assets();
+        let crate_id = ed.asset_db.find("props/crate.gltf").unwrap().id;
+        let wood = ed.asset_db.find("props/maps/wood.png").unwrap().id;
+        let boxed = world.spawn((
+            SceneId::new(),
+            Name::new("Box"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            Model::new(
+                AssetRef::part(crate_id, "Crate"),
+                AssetRef::part(crate_id, "Wood"),
+            ),
+            RootOrder(RootOrder::STEP),
+        ));
+        ed.open_folder("props");
+        ed.update(&mut world);
+        ed.select_only(boxed);
+        ed.update(&mut world);
+        let id = ed.ids.new_graph;
+        ed.run(&mut world, id);
+        assert!(message(&ed).contains("with its 2 maps"), "{}", message(&ed));
+        // The graph, named after the box: the wood's colour map times its tint into the
+        // base, its normal map through a Normal Map node, its factors as numbers.
+        let text = std::fs::read_to_string(dir.join("props/box.mgraph")).unwrap();
+        let (file, _) = GraphFile::parse(&text).unwrap();
+        let graph = file.graph().unwrap();
+        assert_eq!(graph.nodes["base_map"].texture, AssetRef::file(wood));
+        assert_eq!(graph.nodes["tint"].value, [0.9, 0.8, 0.7, 1.0]);
+        assert_eq!(
+            graph.links[&PortRef::new("out", "base")],
+            PortRef::new("base", "out")
+        );
+        assert_eq!(
+            graph.links[&PortRef::new("normal", "color")],
+            PortRef::new("normal_tex", "rgba")
+        );
+        assert_eq!(graph.nodes["roughness"].value[0], 0.7);
+        assert_eq!(graph.nodes["metallic"].value[0], 0.0);
+        // The material file naming it, given to the box in one step.
+        let graph_id = ed.asset_db.find("props/box.mgraph").unwrap().id;
+        let made = ed.asset_db.find("props/box.material").unwrap().id;
+        assert_eq!(
+            world.get::<Model>(boxed).unwrap().material,
+            AssetRef::file(made)
+        );
+        assert_eq!(ed.history.steps().count(), 1);
+        let text = std::fs::read_to_string(dir.join("props/box.material")).unwrap();
+        let (material, _) = engine_app::MaterialFile::parse(&text).unwrap();
+        assert_eq!(material.shader, AssetRef::file(graph_id));
+        assert_eq!(material.type_name, "GraphMaterial");
+        assert_eq!(material.base_color, [0.9, 0.8, 0.7, 1.0]);
+        // Its tab, shown; Ctrl+D copies the tint there.
+        assert_eq!(ed.active_graph, Some(0));
+        assert_eq!(ed.graphs[0].path, "props/box.mgraph");
+        ed.update(&mut world);
+        ed.graphs[0].selected = [String::from("tint")].into_iter().collect();
+        chord(&mut ed, &mut world, &[CTRL, D]);
+        assert!(ed.graphs[0].graph.nodes.contains_key("color1"), "copied");
+        assert_eq!(ed.graphs[0].graph.nodes["color1"].param, "tint_2");
+        assert_eq!(
+            row_names(&ed, &world),
+            ["Box"],
+            "the scene's box not duplicated"
+        );
+        // Again, the box's material a file now: the standard look, numbered.
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        ed.select_only(boxed);
+        ed.run(&mut world, id);
+        let text = std::fs::read_to_string(dir.join("props/box_2.mgraph")).unwrap();
+        let graph = GraphFile::parse(&text).unwrap().0.graph().unwrap();
+        assert_eq!(graph.nodes["base_color"].value, [0.8, 0.8, 0.8, 1.0]);
+        assert!(!graph.nodes.contains_key("base_map"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

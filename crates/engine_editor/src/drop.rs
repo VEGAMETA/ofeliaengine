@@ -172,7 +172,7 @@ impl ModelPlan {
 
 /// The part that names thing `i` of `names`: its name when nothing else has it, else
 /// `#i` (also for names starting with `#`, which read as indices).
-fn part_name(names: &[&str], i: usize) -> String {
+pub(crate) fn part_name(names: &[&str], i: usize) -> String {
     let name = names[i];
     if !name.is_empty()
         && !name.starts_with('#')
@@ -295,6 +295,7 @@ mod tests {
             roots: vec![0],
             meshes: vec![mesh("Crate", &[Some(0)])],
             materials: vec![String::from("Wood")],
+            maps: Vec::new(),
         };
         let plan = ModelPlan::new(file(), "props/crate.glb", "crate", &outline, 1.0).unwrap();
         assert_eq!(plan.nodes.len(), 1);
@@ -335,6 +336,7 @@ mod tests {
             // Two meshes of one name: by index.
             meshes: vec![mesh("Part", &[Some(0), Some(1)]), mesh("Part", &[None])],
             materials: vec![String::from("Wood"), String::new()],
+            maps: Vec::new(),
         };
         let plan = ModelPlan::new(file(), "chair.glb", "chair", &outline, 1.0).unwrap();
         let names: Vec<&str> = plan.nodes.iter().map(|n| n.name.as_str()).collect();

@@ -1188,6 +1188,24 @@ A material graph (a `.mgraph` file, ADR 0123) opens in a tab of its own after th
 its canvas where the viewport is: a double click on it in the FileSystem dock. The bar over
 the canvas names the file, its nodes, the selection and the zoom.
 
+**Material: New Graph** (Ctrl+Shift+P) starts one from the selected object. It writes
+`<name>.mgraph` and `<name>.material`, named after the object, in the dock's folder, gives
+the material to the selected models in one step, and opens the graph:
+
+- **For a glTF model's material**, the graph draws that material's own look:
+  - its colour map times its tint;
+  - its metallic and roughness map's channels (blue and green) times their factors;
+  - its normal map through a Normal Map node;
+  - its emission and its occlusion.
+
+  A map is used only where its image is a file in the project (an image inside a `.glb`
+  is not). The metallic/roughness and occlusion maps are marked as data in the material
+  file, not colours.
+- **For anything else**, the graph draws the standard material: a grey colour, roughness
+  0.5, no metal.
+
+Until its shaders are made, the material draws its colour.
+
 - **The canvas:**
   - each node is a box: its title (a parameter's name after its kind's, `Number ·
     roughness`), its inputs down the left edge and its outputs down the right. A colour
@@ -1207,19 +1225,25 @@ the canvas names the file, its nodes, the selection and the zoom.
     selection moves with it, to whole units);
   - **drag on the empty canvas**: a box selects what it meets (Shift adds); a click there
     lets the selection go;
+  - **Ctrl+drag from an output** carries all its links: drop them on another output to
+    move them there, or on the canvas to take them out (a move that would make a loop is
+    refused, all of them kept);
   - **the middle or the right button** pans, **the wheel** zooms about the pointer (25 %
     to 300 %, by steps).
-- **The keys:** Delete deletes the selected nodes (the surface stays), F frames them (all
-  of them, none selected), Escape takes a drag back or lets the selection go, Ctrl+S
+- **The keys:** Delete deletes the selected nodes (the surface stays), Ctrl+D copies them
+  (each with an id and a parameter name of its own, 30 units down and right, with the
+  links into them; the copies selected), F frames them (all of them, none selected),
+  Escape takes a drag back or lets the selection go, Ctrl+S
   writes the file, Ctrl+W closes the tab (asked twice with unsaved changes), Ctrl+Z and
   Ctrl+Y undo and redo. The scene's keys (the tools' letters, H, B) do nothing while a
   graph is shown.
-- **Every edit is one step** of the editor's one history: a link, a move, a delete. A
+- **Every edit is one step** of the editor's one history: a link, a move, a copy, a
+  delete. A
   step of a graph whose tab was closed, undone, opens it again (behind the scene, unsaved).
 - **Saving** writes the file; the materials that name the graph draw it again (ADR 0123
   E10-3c). Unsaved graphs are autosaved as scenes are, and the session brings the tabs
   back, with their unsaved edits.
-- **Not yet:** adding nodes (the node search, E10-3e), duplicating, "Material: New Graph",
+- **Not yet:** adding nodes (the node search, E10-3e), textures dropped from the dock,
   editing a node's values, errors on nodes (E10-3f).
 
 ## Autosave and the session

@@ -868,6 +868,13 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3d-2, New Graph, copies, carried links** (#425, ADR 0123's as-built): Material: New
+    Graph writes a graph and a material file named after the object. The graph draws its
+    glTF material's own look (maps where the project has their files, factors;
+    `GltfOutline::maps` from the JSON), or the standard one. The file is given to the
+    selection in one step and the graph opens. On the canvas, Ctrl+D copies nodes with
+    the links into them; Ctrl+drag from an output carries its links to another output or
+    takes them out. **E10-3d is done.**
   - **E10-3d-1, the graph canvas** (#424, ADR 0123's as-built): a `.mgraph` opens in a tab of
     its own (a double click in the dock), its canvas where the viewport is: boxes with
     their ports and values, links as curves, pan, zoom by steps, F; links made, lifted,
@@ -911,9 +918,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3d-2 (Material: New Graph with the object's own textures, duplicates,
-       Ctrl+drag yanking links), then E10-3e to E10-3g (ADR 0123's steps); then E10-4,
-       previews, stats and variants with a base.
+       2D): E10-3e (the node search: Space and a link dropped in empty space, textures
+       dropped from the dock, reroutes and frames), then E10-3f and E10-3g (ADR 0123's
+       steps); then E10-4, previews, stats and variants with a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
