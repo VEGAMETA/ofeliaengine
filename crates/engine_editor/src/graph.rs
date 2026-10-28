@@ -42,7 +42,7 @@ use engine_assets::graph_module::{GRAPH_TYPE, encoding};
 use engine_assets::material_file::{Look as MaterialLook, MaterialFile, MaterialTexture};
 use engine_core::math::{Vec2, Vec4};
 use engine_material_graph::graph::OUTPUT;
-use engine_material_graph::library::{self, Body, Fill, OUTPUT_KIND};
+use engine_material_graph::library::{self, Body, Fill, OUTPUT_KIND, REROUTE_KIND};
 use engine_material_graph::{Build, GraphError, ParamType};
 use engine_material_graph::{Graph, GraphFile, Kind, Model, Node, PortRef, PortType};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad};
@@ -83,6 +83,10 @@ const GRID: f32 = 20.0;
 const GRID_MAJOR: f32 = 100.0;
 /// Pieces a link is drawn in.
 const LINK_SEGMENTS: usize = 24;
+/// A reroute's capsule (E10-3e-2a): its pins at its ends, its middle grabbed to move it.
+const REROUTE: [f32; 2] = [28.0, 14.0];
+/// Two presses this close in time (and in place, [`CLICK_SLOP`]) are a double-click.
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 /// Under this many panel pixels a box's drag is a click.
 const CLICK_SLOP: f32 = 3.0;
 
@@ -200,9 +204,17 @@ impl NodeBox {
         [self.at[0] + self.size[0], self.row(k)]
     }
 
-    /// Row `k`'s middle.
+    /// Row `k`'s middle (a reroute's middle).
     fn row(&self, k: usize) -> f32 {
+        if self.is_reroute() {
+            return self.at[1] + self.size[1] * 0.5;
+        }
         self.at[1] + TITLE + ROW * (k as f32 + 0.5)
+    }
+
+    /// Whether it is a reroute (E10-3e-2a): a capsule with a pin at each end, no title.
+    pub(crate) fn is_reroute(&self) -> bool {
+        self.kind.is_some_and(|k| k.name == REROUTE_KIND)
     }
 
     /// Its input `name`'s row.
@@ -264,6 +276,18 @@ pub(crate) fn layout(
     out.clear();
     for (id, node) in &graph.nodes {
         let kind = library::kind(&node.kind);
+        if kind.is_some_and(|k| k.name == REROUTE_KIND) {
+            out.push(NodeBox {
+                id: id.clone(),
+                kind,
+                title: String::new(),
+                at: node.at,
+                size: REROUTE,
+                inputs: vec!["in"],
+                outputs: vec!["out"],
+            });
+            continue;
+        }
         let title = match kind {
             Some(k) if !node.param.is_empty() => format!("{} · {}", k.title, node.param),
             Some(k) => k.title.to_owned(),
@@ -338,6 +362,18 @@ pub(crate) fn link_point(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
         w[0] * a[0] + w[1] * c1[0] + w[2] * c2[0] + w[3] * b[0],
         w[0] * a[1] + w[1] * c1[1] + w[2] * c2[1] + w[3] * b[1],
     ]
+}
+
+/// How far point `p` is from the segment `a`–`b`.
+fn segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let length = dx * dx + dy * dy;
+    let t = if length > 0.0 {
+        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p[0] - (a[0] + t * dx)).hypot(p[1] - (a[1] + t * dy))
 }
 
 /// Whether node `node`'s value comes from `target`: `target` is `node`, or one of the nodes
@@ -924,6 +960,8 @@ pub(crate) struct GraphDoc {
     /// What stopped it from generating when it was last generated (E10-3f-3), at its node
     /// when it has one.
     pub(crate) error: Option<GraphError>,
+    /// The canvas's last press: when and where (a double-click on a link, E10-3e-2a).
+    last_press: Option<(std::time::Instant, [f32; 2])>,
 }
 
 impl GraphDoc {
@@ -968,6 +1006,7 @@ impl GraphDoc {
             autosaved: None,
             due: None,
             error: None,
+            last_press: None,
         }
     }
 
@@ -1063,9 +1102,11 @@ impl GraphDoc {
     /// What lies under canvas point `p`, the top box first, a port within `reach` canvas
     /// units of its dot before the box it is on.
     pub(crate) fn hit(&self, p: [f32; 2], reach: f32) -> Hit {
-        let near = |q: [f32; 2]| (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) <= reach * reach;
         for k in self.order().rev() {
             let b = &self.boxes[k];
+            // A reroute's pins reach half as far: its middle is grabbed to move it.
+            let reach = if b.is_reroute() { reach * 0.5 } else { reach };
+            let near = |q: [f32; 2]| (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) <= reach * reach;
             if let Some(i) = (0..b.inputs.len()).find(|&i| near(b.input_at(i))) {
                 return Hit::Input(k, i);
             }
@@ -1077,6 +1118,73 @@ impl GraphDoc {
             }
         }
         Hit::Canvas
+    }
+
+    /// The link under canvas point `p` (within `reach` of its curve), by the input it
+    /// feeds.
+    pub(crate) fn link_at(&self, p: [f32; 2], reach: f32) -> Option<PortRef> {
+        self.graph.links.iter().find_map(|(into, from)| {
+            let (a, b) = (self.port_point(from, true)?, self.port_point(into, false)?);
+            let mut last = a;
+            let near = (1..=LINK_SEGMENTS).any(|s| {
+                let next = link_point(a, b, s as f32 / LINK_SEGMENTS as f32);
+                let d = segment_distance(p, last, next);
+                last = next;
+                d <= reach
+            });
+            near.then(|| into.clone())
+        })
+    }
+
+    /// What output `port` of node `node` carries: its kind's type, or through reroutes
+    /// (each passing its input on) what feeds the first node that is not one; nothing
+    /// linked, any.
+    pub(crate) fn carried_by(&self, node: &str, port: &str) -> PortType {
+        let (mut node, mut port) = (node, port);
+        // A chain of reroutes is followed back; a loop of them stops.
+        for _ in 0..64 {
+            let Some(k) = self.box_of(node) else {
+                break;
+            };
+            let b = &self.boxes[k];
+            if !b.is_reroute() {
+                return b
+                    .output(port)
+                    .map_or(PortType::Dynamic, |o| b.output_type(o));
+            }
+            let Some((_, from)) = self
+                .graph
+                .links
+                .iter()
+                .find(|(to, _)| to.node == node && to.port == "in")
+            else {
+                break;
+            };
+            (node, port) = (&from.node, &from.port);
+        }
+        PortType::Dynamic
+    }
+
+    /// A reroute put on the link into `to`, its middle at canvas point `at`, the link
+    /// passing through it, and it selected alone (a double-click on the link, Unreal's).
+    pub(crate) fn add_reroute(&mut self, to: &PortRef, at: [f32; 2]) -> Option<Outcome> {
+        let from = self.graph.links.get(to)?.clone();
+        let id = fresh_id(&self.graph, REROUTE_KIND);
+        let place = [
+            (at[0] - REROUTE[0] * 0.5).round(),
+            (at[1] - REROUTE[1] * 0.5).round(),
+        ];
+        let (before, after) = self.edit(|g| {
+            g.add(&id, Node::new(REROUTE_KIND, place));
+            g.links.insert(PortRef::new(&id, "in"), from);
+            g.links.insert(to.clone(), PortRef::new(&id, "out"));
+        })?;
+        self.selected = [id].into_iter().collect();
+        Some(Outcome::Edited {
+            name: "Add Reroute",
+            before,
+            after,
+        })
     }
 
     /// Where port `port` is (an output's where `output`), if its node shows it.
@@ -1559,6 +1667,20 @@ impl GraphDoc {
                 && p.over
                 && let Some(c) = at
             {
+                // A second press soon after the first, in its place, on a link: a reroute
+                // on it (E10-3e-2a, Unreal's double-click).
+                let now = std::time::Instant::now();
+                let again = self.last_press.replace((now, c)).is_some_and(|(t, q)| {
+                    now.duration_since(t) <= DOUBLE_CLICK
+                        && (q[0] - c[0]).hypot(q[1] - c[1]) * self.view.zoom() <= CLICK_SLOP
+                });
+                if again
+                    && self.hover == Hit::Canvas
+                    && let Some(to) = self.link_at(c, reach * 0.6)
+                {
+                    self.last_press = None;
+                    return self.add_reroute(&to, c);
+                }
                 *drag = Some(self.press(c, p.shift, p.ctrl));
             }
             return None;
@@ -2019,13 +2141,7 @@ pub(crate) fn draw(
         let (Some(a), Some(b)) = (doc.port_point(from, true), doc.port_point(into, false)) else {
             continue;
         };
-        let ty = doc
-            .box_of(&from.node)
-            .and_then(|k| {
-                let b = &doc.boxes[k];
-                b.output(&from.port).map(|o| b.output_type(o))
-            })
-            .unwrap_or(PortType::Dynamic);
+        let ty = doc.carried_by(&from.node, &from.port);
         let lit = doc.selected.contains(&from.node) || doc.selected.contains(&into.node);
         let mut color = port_color(ty);
         color.w = if lit { 1.0 } else { 0.7 };
@@ -2042,50 +2158,61 @@ pub(crate) fn draw(
         if hi.x < rx || hi.y < ry || lo.x > rx + rw || lo.y > ry + rh {
             continue;
         }
-        let radius = RADIUS * z;
         let size = hi - lo;
-        canvas.draw(
-            &Quad::rounded_rect((lo + hi) * 0.5, size, radius)
-                .color(BODY)
-                .order(order),
-        );
-        // The title bar: rounded at the top only.
-        let bar = title_color(b.kind.map_or("", |k| k.category));
-        let bar_hi = Vec2::new(hi.x, lo.y + TITLE * z);
-        canvas.draw(
-            &Quad::rounded_rect((lo + bar_hi) * 0.5, bar_hi - lo, radius)
-                .color(bar)
-                .order(order),
-        );
-        solid(canvas, Vec2::new(lo.x, bar_hi.y - radius), bar_hi, bar);
-        if title_size >= 5.0 {
-            text.draw_left(
-                canvas,
-                look.glyphs,
-                &b.title,
-                title_size,
-                Vec2::new(lo.x + PAD * z, lo.y + TITLE * 0.5 * z),
-                text_color,
-                order,
+        // A reroute (E10-3e-2a): a capsule in what it carries, a pin at each end, no title.
+        let reroute = b.is_reroute();
+        let radius = if reroute { size.y * 0.5 } else { RADIUS * z };
+        let carried = reroute.then(|| port_color(doc.carried_by(&b.id, "out")));
+        if let Some(color) = carried {
+            canvas.draw(
+                &Quad::rounded_rect((lo + hi) * 0.5, size, radius)
+                    .color(Vec4::new(color.x, color.y, color.z, 0.55))
+                    .order(order),
             );
-        }
-        // A constant's value where its inputs would be: a colour's swatch, the numbers.
-        if let Some(kind) = b.kind
-            && let Body::Constant(w) = kind.body
-            && let Some(node) = doc.graph.nodes.get(&b.id)
-        {
-            let row = Vec2::new(lo.x + PAD * z, to([0.0, b.at[1] + TITLE + ROW * 0.5]).y);
-            if kind.name == "color" {
-                let c = node.value;
-                let swatch = Vec2::new(28.0, 14.0) * z;
-                canvas.draw(
-                    &Quad::rounded_rect(row + Vec2::new(swatch.x * 0.5, 0.0), swatch, 2.0 * z)
-                        .color(Vec4::new(c[0], c[1], c[2], 1.0))
-                        .order(order),
+        } else {
+            canvas.draw(
+                &Quad::rounded_rect((lo + hi) * 0.5, size, radius)
+                    .color(BODY)
+                    .order(order),
+            );
+            // The title bar: rounded at the top only.
+            let bar = title_color(b.kind.map_or("", |k| k.category));
+            let bar_hi = Vec2::new(hi.x, lo.y + TITLE * z);
+            canvas.draw(
+                &Quad::rounded_rect((lo + bar_hi) * 0.5, bar_hi - lo, radius)
+                    .color(bar)
+                    .order(order),
+            );
+            solid(canvas, Vec2::new(lo.x, bar_hi.y - radius), bar_hi, bar);
+            if title_size >= 5.0 {
+                text.draw_left(
+                    canvas,
+                    look.glyphs,
+                    &b.title,
+                    title_size,
+                    Vec2::new(lo.x + PAD * z, lo.y + TITLE * 0.5 * z),
+                    text_color,
+                    order,
                 );
-            } else if port_size >= 6.0 {
-                value_text(scratch, &node.value[..usize::from(w)]);
-                text.draw_left(canvas, look.glyphs, scratch, port_size, row, dim, order);
+            }
+            // A constant's value where its inputs would be: a colour's swatch, the numbers.
+            if let Some(kind) = b.kind
+                && let Body::Constant(w) = kind.body
+                && let Some(node) = doc.graph.nodes.get(&b.id)
+            {
+                let row = Vec2::new(lo.x + PAD * z, to([0.0, b.at[1] + TITLE + ROW * 0.5]).y);
+                if kind.name == "color" {
+                    let c = node.value;
+                    let swatch = Vec2::new(28.0, 14.0) * z;
+                    canvas.draw(
+                        &Quad::rounded_rect(row + Vec2::new(swatch.x * 0.5, 0.0), swatch, 2.0 * z)
+                            .color(Vec4::new(c[0], c[1], c[2], 1.0))
+                            .order(order),
+                    );
+                } else if port_size >= 6.0 {
+                    value_text(scratch, &node.value[..usize::from(w)]);
+                    text.draw_left(canvas, look.glyphs, scratch, port_size, row, dim, order);
+                }
             }
         }
         let linked_in = |name: &str| {
@@ -2108,12 +2235,12 @@ pub(crate) fn draw(
                 canvas,
                 at,
                 dot,
-                port_color(b.input_type(i)),
+                carried.unwrap_or_else(|| port_color(b.input_type(i))),
                 linked_in(name),
                 lit,
                 order,
             );
-            if port_size >= 6.0 {
+            if port_size >= 6.0 && !reroute {
                 let left = at + Vec2::new(dot + 5.0 * z, 0.0);
                 text.draw_left(canvas, look.glyphs, name, port_size, left, dim, order);
             }
@@ -2125,12 +2252,12 @@ pub(crate) fn draw(
                 canvas,
                 at,
                 dot,
-                port_color(b.output_type(o)),
+                carried.unwrap_or_else(|| port_color(b.output_type(o))),
                 linked_out(name),
                 lit,
                 order,
             );
-            if port_size >= 6.0 {
+            if port_size >= 6.0 && !reroute {
                 let width = text.measure(name, port_size, None)[0];
                 let left = at - Vec2::new(dot + 5.0 * z + width, 0.0);
                 text.draw_left(canvas, look.glyphs, name, port_size, left, dim, order);
@@ -2298,6 +2425,57 @@ mod tests {
         );
         d.relayout(&mut measure);
         d
+    }
+
+    /// E10-3e-2a: a double-click on a link puts a reroute on it (the link passing through,
+    /// one step); a reroute is a capsule with a pin at each end, its middle grabbed to move
+    /// it, and what goes out of it is what goes in.
+    #[test]
+    fn a_double_click_on_a_link_puts_a_reroute_on_it() {
+        let mut d = doc();
+        let (c, out) = (d.box_of("c").unwrap(), d.box_of(OUTPUT).unwrap());
+        let middle = link_point(d.boxes[c].output_at(0), d.boxes[out].input_at(0), 0.5);
+        let base = PortRef::new(OUTPUT, "base");
+        assert_eq!(d.link_at(middle, 3.0), Some(base.clone()));
+        assert_eq!(d.link_at([middle[0], middle[1] + 40.0], 3.0), None);
+        // A press and its release: a selection; a second press in its place: the reroute.
+        let mut drag = None;
+        let p = |press, held| Pointer {
+            at: Some(middle),
+            over: true,
+            press,
+            held,
+            ..Pointer::default()
+        };
+        assert_eq!(d.pointer(&p(true, true), [0.0; 2], &mut drag), None);
+        d.pointer(&p(false, false), [0.0; 2], &mut drag);
+        assert!(drag.is_none());
+        let Some(Outcome::Edited { name, .. }) = d.pointer(&p(true, true), [0.0; 2], &mut drag)
+        else {
+            panic!("a reroute")
+        };
+        assert_eq!(name, "Add Reroute");
+        assert_eq!(d.graph.links[&base], PortRef::new("reroute1", "out"));
+        assert_eq!(
+            d.graph.links[&PortRef::new("reroute1", "in")],
+            PortRef::new("c", "rgba")
+        );
+        assert!(d.selected.contains("reroute1") && d.selected.len() == 1);
+        // Laid out as a capsule, its middle where it was put, its pins at its ends.
+        d.relayout(&mut measure);
+        let k = d.box_of("reroute1").unwrap();
+        let b = d.boxes[k].clone();
+        assert!(b.is_reroute());
+        assert_eq!(b.size, REROUTE);
+        let mid = [b.at[0] + REROUTE[0] * 0.5, b.at[1] + REROUTE[1] * 0.5];
+        assert!((mid[0] - middle[0]).abs() <= 0.5 && (mid[1] - middle[1]).abs() <= 0.5);
+        assert_eq!(b.input_at(0), [b.at[0], mid[1]]);
+        assert_eq!(b.output_at(0), [b.at[0] + REROUTE[0], mid[1]]);
+        assert_eq!(d.hit(mid, PORT_REACH), Hit::Node(k));
+        assert_eq!(d.hit(b.output_at(0), PORT_REACH), Hit::Output(k, 0));
+        // What it carries: the colour's four floats, through it (and a chain of them).
+        assert_eq!(d.carried_by("reroute1", "out"), PortType::Float(4));
+        assert_eq!(d.carried_by("c", "rgba"), PortType::Float(4));
     }
 
     #[test]

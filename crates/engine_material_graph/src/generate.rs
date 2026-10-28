@@ -694,6 +694,31 @@ mod tests {
         PortRef::new(node, port)
     }
 
+    /// A reroute (E10-3e-2a) writes nothing of its own: a graph through one generates the
+    /// module it does without, in both builds.
+    #[test]
+    fn a_reroute_passes_its_input_on_and_writes_no_code() {
+        let mut direct = Graph::new(Model::Lit);
+        direct.add(
+            "c",
+            Node::new("color", [0.0; 2]).with_value([0.9, 0.1, 0.1, 1.0]),
+        );
+        direct.link(port("c", "rgba"), port(OUTPUT, "base"));
+        let mut through = direct.clone();
+        through.links.clear();
+        through.add("r1", Node::new("reroute", [100.0, 0.0]));
+        through.add("r2", Node::new("reroute", [200.0, 0.0]));
+        through
+            .link(port("c", "rgba"), port("r1", "in"))
+            .link(port("r1", "out"), port("r2", "in"))
+            .link(port("r2", "out"), port(OUTPUT, "base"));
+        for build in [Build::Saved, Build::Editing] {
+            let a = generate(&direct, "Glow", build).unwrap();
+            let b = generate(&through, "Glow", build).unwrap();
+            assert_eq!(a.text, b.text, "{build:?}");
+        }
+    }
+
     /// A textured, numbered lit graph: an albedo texture into the base, a roughness.
     fn lit() -> Graph {
         let mut g = Graph::new(Model::Lit);

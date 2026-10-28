@@ -91,8 +91,9 @@ fn a_graph_tabs_frames_do_not_allocate() {
              nodes[\"k\"].value = [0.8]\n\
              nodes[\"m\"].kind = \"multiply\"\nnodes[\"m\"].at = [220, 30]\n\
              nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [460, 0]\n\
+             nodes[\"rr\"].kind = \"reroute\"\nnodes[\"rr\"].at = [380, 60]\n\
              links[\"m.a\"] = \"c.rgba\"\nlinks[\"m.b\"] = \"k.value\"\n\
-             links[\"out.base\"] = \"m.out\"\n",
+             links[\"rr.in\"] = \"m.out\"\nlinks[\"out.base\"] = \"rr.out\"\n",
             AssetId::new()
         ),
     )
