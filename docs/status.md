@@ -753,7 +753,7 @@ Last updated: 2026-10-28.
     row remade: the GPU frames moved by a median of +1.0 % (-1.2 to +3.7 %).
   - **E11, sound,** started (ADR 0107's order; E10-1 waits for the answer on the material
     file): its UX note `docs/research/ux/sound.md` orders the steps and asks four
-    questions (below). **E11-4a, sounds in the viewport** (#PR, ADR 0107's as-built):
+    questions (below). **E11-4a, sounds in the viewport** (#393, ADR 0107's as-built):
     icons, the add menu's Sound group, a selected source's two distances as rings (dashed
     where the sound holds beyond them), a selected reverb zone's box and its fade.
   - **Next, in this order:**
