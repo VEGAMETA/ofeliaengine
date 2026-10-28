@@ -863,12 +863,12 @@ Last updated: 2026-10-28.
     silent; the camera that hears without a listener marked with an ear; a selected
     zone's room and priority on a label; a zone added with a selection takes its box.
     **E11, sound, is done.**
-  - **E10-2c, Material: New Type** (#PR, ADR 0107's as-built): a material type from a
+  - **E10-2c, Material: New Type** (#418, ADR 0107's as-built): a material type from a
     template named after the active object (`water.slang`, `WaterMaterial`) and a material
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **The RTX's `video_player` golden image re-taken** (#PR): on `main` it read a mean FLIP
+  - **The RTX's `video_player` golden image re-taken** (#418): on `main` it read a mean FLIP
     of 0.0103–0.0108 (the limit 0.01) under NVIDIA 617.42, taken under 616.92; the
     Radeon's matched exactly, the picture's content the same (the error spread thinly over
     the scene's textures, none on the video). The new image against itself: 0.0007–0.0021.
