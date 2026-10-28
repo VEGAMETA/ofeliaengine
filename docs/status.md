@@ -868,6 +868,11 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3g-3b, the editor's `[Node]` functions** (#PR, ADR 0123's as-built): the
+    project's Slang modules scanned on a thread of their own once a graph is shown; their
+    marked functions in the node search under their groups (one a node cannot call with
+    why); calls titled by their marks; a call's signature following its function when the
+    module changes; Slang's errors in a module at its first call.
   - **E10-3g-3a, `[Node]` functions in the engine** (#433, ADR 0123's as-built; the
     `.mgraph` file's version 3): Slang functions marked `[Node("Title", "Group")]` are read
     through Slang's reflection. A call node keeps the function, its module and its
@@ -957,9 +962,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3g-3b (the editor's `[Node]` functions: found, searched, refreshed),
-       E10-3g-2 (functions: a group of nodes as one node, its file's extension asked),
-       ADR 0123's last steps; then E10-4, previews, stats and variants with a base.
+       2D): E10-3g-2 (functions: a group of nodes as one node, its file's extension
+       asked), ADR 0123's last step; then E10-4, previews, stats and variants with a
+       base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

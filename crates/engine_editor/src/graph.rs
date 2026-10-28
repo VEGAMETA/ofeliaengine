@@ -45,7 +45,7 @@ use engine_assets::material_file::{Look as MaterialLook, MaterialFile, MaterialT
 use engine_core::math::{Vec2, Vec4};
 use engine_material_graph::graph::OUTPUT;
 use engine_material_graph::library::{self, Body, Fill, OUTPUT_KIND, REROUTE_KIND};
-use engine_material_graph::{Build, Generated, GraphError, ParamType};
+use engine_material_graph::{Build, CALL_KIND, Generated, GraphError, ParamType};
 use engine_material_graph::{Frame, Graph, GraphFile, Kind, Model, Node, PortRef, PortType};
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad};
 use engine_scene::{AssetId, AssetPaths, AssetRef};
@@ -278,9 +278,11 @@ fn value_width(kind: &Kind) -> f32 {
 }
 
 /// `graph`'s nodes laid out into `out` in their ids' order, each as wide as its texts need
-/// (`measure`: a text's width at a size, at zoom 1).
+/// (`measure`: a text's width at a size, at zoom 1); a call titled by its function's mark
+/// where `titles` knows it (module, function, title; E10-3g-3b).
 pub(crate) fn layout(
     graph: &Graph,
+    titles: &[(AssetRef, String, String)],
     measure: &mut dyn FnMut(&str, f32) -> f32,
     out: &mut Vec<NodeBox>,
 ) {
@@ -303,6 +305,10 @@ pub(crate) fn layout(
             Some(k) if k.body == Body::Expression => {
                 format!("{} · {}", k.title, short_code(&node.code))
             }
+            Some(k) if matches!(k.body, Body::Call(_)) => titles
+                .iter()
+                .find(|(m, f, _)| *m == node.module && *f == node.function)
+                .map_or_else(|| k.title.to_owned(), |(.., t)| t.clone()),
             Some(k) if !node.param.is_empty() => format!("{} · {}", k.title, node.param),
             Some(k) => k.title.to_owned(),
             None => node.kind.clone(),
@@ -860,11 +866,14 @@ fn short_code(code: &str) -> String {
 /// node made), and what it says: the detail at its place when Slang gives one (`undefined
 /// identifier 'oops'.`), otherwise its title. Slang writes `error[E30015]: title`, then
 /// `--> path:line:column`, the line's source and carets under the place, the detail after
-/// them; warnings, and errors placed in other files, are passed over.
+/// them; warnings, and errors placed in other files, are passed over, but for an error in
+/// a module a call names (`calls`: its file's name and the call, E10-3g-3b), which is that
+/// call's.
 pub(crate) fn slang_error<'a>(
     diagnostics: &'a str,
     file: &str,
     lines: &'a [Option<String>],
+    calls: &'a [(String, String)],
 ) -> Option<(Option<&'a str>, &'a str)> {
     // The error being read (its title), whether its place was read, and its node once
     // that place is in the module.
@@ -888,10 +897,14 @@ pub(crate) fn slang_error<'a>(
             placed = true;
             let mut parts = place.rsplitn(3, ':');
             let (_, number, path) = (parts.next(), parts.next(), parts.next());
-            if let (Some(Ok(number)), Some(path)) = (number.map(str::parse::<usize>), path)
-                && path.rsplit(['/', '\\']).next() == Some(file)
-            {
-                node = Some(lines.get(number.wrapping_sub(1)).and_then(Option::as_deref));
+            if let (Some(Ok(number)), Some(path)) = (number.map(str::parse::<usize>), path) {
+                let name = path.rsplit(['/', '\\']).next();
+                if name == Some(file) {
+                    node = Some(lines.get(number.wrapping_sub(1)).and_then(Option::as_deref));
+                } else if let Some((_, call)) = calls.iter().find(|(f, _)| Some(f.as_str()) == name)
+                {
+                    node = Some(Some(call.as_str()));
+                }
             }
         } else if let Some(at) = node
             && let Some(rest) = line.strip_prefix('|').map(str::trim_start)
@@ -1049,6 +1062,8 @@ pub(crate) struct GraphDoc {
     pub(crate) selected: BTreeSet<String>,
     /// Its nodes' boxes as last laid out, in their ids' order.
     pub(crate) boxes: Vec<NodeBox>,
+    /// Its calls' titles, from their functions' marks (module, function, title; E10-3g-3b).
+    pub(crate) call_titles: Vec<(AssetRef, String, String)>,
     /// The revision they were laid out at.
     laid_out: Option<u64>,
     /// What the pointer is over, and the canvas point under it.
@@ -1108,6 +1123,7 @@ impl GraphDoc {
             view: View::default(),
             selected: BTreeSet::new(),
             boxes: Vec::new(),
+            call_titles: Vec::new(),
             laid_out: None,
             hover: Hit::Canvas,
             cursor: None,
@@ -1186,7 +1202,7 @@ impl GraphDoc {
     /// at a size).
     pub(crate) fn relayout(&mut self, measure: &mut dyn FnMut(&str, f32) -> f32) {
         if self.laid_out != Some(self.revision) {
-            layout(&self.graph, measure, &mut self.boxes);
+            layout(&self.graph, &self.call_titles, measure, &mut self.boxes);
             self.laid_out = Some(self.revision);
         }
     }
@@ -1727,7 +1743,41 @@ impl GraphDoc {
         if k.name == OUTPUT_KIND {
             return Some(Outcome::Refused("A graph has one surface"));
         }
-        let id = fresh_id(&self.graph, kind);
+        let node = Node::new(kind, at.map(f32::round));
+        self.add_linked(k, node, kind, from, "Add Node")
+    }
+
+    /// A call of function `function` of module `module` (at `path` in the project) of
+    /// signature `signature` added at canvas point `at`, linked to `from` as
+    /// [`Self::add_node`] does, and selected (E10-3g-3b: the node search's `[Node]`
+    /// functions).
+    pub(crate) fn add_call(
+        &mut self,
+        module: AssetRef,
+        path: &str,
+        function: &str,
+        signature: &str,
+        at: [f32; 2],
+        from: Option<&(PortRef, bool)>,
+    ) -> Option<Outcome> {
+        let k = engine_material_graph::call_kind(function, signature).ok()?;
+        self.paths.insert(module, path);
+        let mut node = Node::new(CALL_KIND, at.map(f32::round)).with_call(function, signature);
+        node.module = module;
+        self.add_linked(k, node, function, from, "Add Call")
+    }
+
+    /// Node `node` of kind `k` added under an id from `base`, linked to `from` (the port
+    /// that fits best), and selected, as the step `name`.
+    fn add_linked(
+        &mut self,
+        k: &'static Kind,
+        node: Node,
+        base: &str,
+        from: Option<&(PortRef, bool)>,
+        name: &'static str,
+    ) -> Option<Outcome> {
+        let id = fresh_id(&self.graph, base);
         let link = match from {
             Some((port, true)) => {
                 let ty = self.port_type(port, true)?;
@@ -1741,7 +1791,6 @@ impl GraphDoc {
             }
             None => None,
         };
-        let node = Node::new(kind, at.map(f32::round));
         let (before, after) = self.edit(|g| {
             g.add(&id, node);
             if let Some((source, into)) = link {
@@ -1750,10 +1799,62 @@ impl GraphDoc {
         })?;
         self.selected = [id].into_iter().collect();
         Some(Outcome::Edited {
-            name: "Add Node",
+            name,
             before,
             after,
         })
+    }
+
+    /// Its calls' titles from their functions' marks (module, function, title), laid out
+    /// again where they changed (no code changes with them).
+    pub(crate) fn set_call_titles(&mut self, titles: &[(AssetRef, String, String)]) {
+        if self.call_titles != titles {
+            titles.clone_into(&mut self.call_titles);
+            self.laid_out = None;
+        }
+    }
+
+    /// Its calls' signatures as their functions now have them, where `functions` (by
+    /// module) knows them (E10-3g-3b): a function's change follows into the graph, as
+    /// Unreal's function calls follow their functions; no step of its own, as the
+    /// signature is the function's, not the graph's. Whether any changed.
+    pub(crate) fn refresh_calls(
+        &mut self,
+        functions: &BTreeMap<AssetId, Vec<crate::node_functions::NodeFunction>>,
+    ) -> bool {
+        let stale = |node: &Node| {
+            functions
+                .get(&node.module.file)?
+                .iter()
+                .find(|f| f.name == node.function)?
+                .signature
+                .as_ref()
+                .ok()
+                .filter(|s| **s != node.signature)
+        };
+        if !self
+            .graph
+            .nodes
+            .values()
+            .any(|n| n.kind == CALL_KIND && stale(n).is_some())
+        {
+            return false;
+        }
+        let fresh: Vec<(String, String)> = self
+            .graph
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.kind == CALL_KIND)
+            .filter_map(|(id, n)| Some((id.clone(), stale(n)?.clone())))
+            .collect();
+        self.edit(|g| {
+            for (id, signature) in fresh {
+                if let Some(node) = g.nodes.get_mut(&id) {
+                    node.signature = signature;
+                }
+            }
+        })
+        .is_some()
     }
 
     /// A texture node of image `image` (at `path` in the project) added at canvas point
@@ -2887,6 +2988,62 @@ mod tests {
         assert_eq!(d.carried_by("c", "rgba"), PortType::Float(4));
     }
 
+    /// E10-3g-3b: a `[Node]` function's call is added as a step, its module's path in the
+    /// file; titled by its function's name, then by its mark once that is known; its
+    /// signature made its function's again when that changes, with no step of its own; the
+    /// same signature, or a function no node can call, changes nothing.
+    #[test]
+    fn a_call_is_added_titled_and_follows_its_function() {
+        use crate::node_functions::NodeFunction;
+        let mut d = doc();
+        let module = AssetRef::file(AssetId::from_u128(9));
+        let old = "float3(MaterialContext ctx, float3 color)";
+        let added = d.add_call(
+            module,
+            "shaders/mapping.slang",
+            "swirl",
+            old,
+            [0.0, 400.0],
+            None,
+        );
+        assert!(matches!(
+            added,
+            Some(Outcome::Edited {
+                name: "Add Call",
+                ..
+            })
+        ));
+        let id = d.selected.iter().next().unwrap().clone();
+        assert!(
+            d.text.contains("module = asset(\"shaders/mapping.slang\""),
+            "{}",
+            d.text
+        );
+        d.relayout(&mut measure);
+        assert_eq!(d.boxes[d.box_of(&id).unwrap()].title, "swirl");
+        d.set_call_titles(&[(module, String::from("swirl"), String::from("Swirl"))]);
+        d.relayout(&mut measure);
+        assert_eq!(d.boxes[d.box_of(&id).unwrap()].title, "Swirl");
+        let new = "float3(MaterialContext ctx, float3 color, float amount)";
+        let mut functions = BTreeMap::new();
+        functions.insert(
+            module.file,
+            vec![NodeFunction {
+                name: String::from("swirl"),
+                title: String::from("Swirl"),
+                category: String::from("Mapping"),
+                signature: Ok(String::from(new)),
+            }],
+        );
+        assert!(d.refresh_calls(&functions));
+        assert_eq!(d.graph.nodes[&id].signature, new);
+        assert!(d.text.contains("float amount"), "{}", d.text);
+        assert!(!d.refresh_calls(&functions));
+        functions.get_mut(&module.file).unwrap()[0].signature = Err(String::from("no"));
+        assert!(!d.refresh_calls(&functions));
+        assert_eq!(d.graph.nodes[&id].signature, new);
+    }
+
     /// E10-3g-1: Slang's first error placed in the preview's module goes to the node the
     /// line map gives its line, with the detail at its place (its title without one); one at
     /// a line of no node to none; warnings, and errors placed elsewhere, are passed over. The
@@ -2910,14 +3067,23 @@ mod tests {
                |            ^^^^ undefined identifier 'oops'.
             ---'";
         assert_eq!(
-            slang_error(diagnostics, "g-editing.slang", &lines),
+            slang_error(diagnostics, "g-editing.slang", &lines, &[]),
             Some((Some("e"), "undefined identifier 'oops'."))
         );
-        assert_eq!(slang_error(diagnostics, "h-editing.slang", &lines), None);
+        assert_eq!(
+            slang_error(diagnostics, "h-editing.slang", &lines, &[]),
+            None
+        );
         let titled = "error[E1]: no detail\n--> C:\\game\\g-editing.slang:3:1";
         assert_eq!(
-            slang_error(titled, "g-editing.slang", &lines),
+            slang_error(titled, "g-editing.slang", &lines, &[]),
             Some((None, "no detail"))
+        );
+        // E10-3g-3b: an error in a module a call names is that call's.
+        let calls = [(String::from("forward.slang"), String::from("sw"))];
+        assert_eq!(
+            slang_error(diagnostics, "h-editing.slang", &lines, &calls),
+            Some((Some("sw"), "elsewhere"))
         );
         // The node: its code in its title, its row in the inspector.
         let mut d = doc();
@@ -3105,7 +3271,7 @@ mod tests {
         g.model = Model::Clearcoat;
         g.link(PortRef::new("r", "value"), PortRef::new(OUTPUT, "rim"));
         let mut boxes = Vec::new();
-        layout(&g, &mut measure, &mut boxes);
+        layout(&g, &[], &mut measure, &mut boxes);
         let out = boxes.iter().find(|b| b.id == OUTPUT).unwrap();
         assert!(out.inputs.contains(&"clearcoat") && out.inputs.contains(&"rim"));
         assert!(!out.inputs.contains(&"sheen"));

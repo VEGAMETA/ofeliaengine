@@ -1567,6 +1567,8 @@ enum Pick {
     OpenScript(PathBuf),
     /// Adds a node of this kind to a graph (the node search, ADR 0123 E10-3e).
     Node(&'static str),
+    /// Adds a call of this module's function (its `[Node]` mark, E10-3g-3b).
+    Call(AssetId, String),
 }
 
 impl Pick {
@@ -1576,7 +1578,7 @@ impl Pick {
             Self::Component { script: true, .. } | Self::OpenScript(_) => icons::SCRIPT,
             Self::Component { script: false, .. } => icons::ADD_COMPONENT,
             Self::NewScript => icons::SCRIPT_MARK,
-            Self::Node(_) => icons::SHADER,
+            Self::Node(_) | Self::Call(..) => icons::SHADER,
             _ => icons::SCENE,
         }
     }
@@ -2525,6 +2527,12 @@ struct Editor {
     asset_db: engine_scene::AssetDatabase,
     asset_watch: Option<engine_platform::fs_watch::DirectoryWatcher>,
     assets_changed: Option<Instant>,
+    /// The project's Slang functions marked as nodes (ADR 0123's E10-3g-3b): their
+    /// scanner (started with the first graph shown), what it found by module, and its
+    /// finished scans as taken.
+    node_scanner: Option<crate::node_functions::NodeScanner>,
+    node_functions: BTreeMap<AssetId, Vec<crate::node_functions::NodeFunction>>,
+    node_scans: Vec<crate::node_functions::Scanned>,
     /// The asset browser (the FileSystem dock, E4-2).
     browser: Browser,
     /// A file dragged out of the browser (E4-3).
@@ -3482,6 +3490,9 @@ impl Editor {
             asset_db: engine_scene::AssetDatabase::default(),
             asset_watch: None,
             assets_changed: None,
+            node_scanner: None,
+            node_functions: BTreeMap::new(),
+            node_scans: Vec::new(),
             browser: Browser::default(),
             asset_drag: None,
             row_drag: None,
@@ -6596,6 +6607,7 @@ impl Editor {
         if self.active_graph.is_some() {
             self.graph_frame(world, &response, scale);
             // Its preview after this frame's edits (the inspector's and the canvas's).
+            self.node_functions_frame();
             self.graph_preview_frame();
             if response.show_slang {
                 self.show_graph_slang(world);
@@ -7387,6 +7399,9 @@ impl Editor {
                             Pick::NewScript => self.new_script(world),
                             Pick::OpenScript(path) => self.open_script(world, &path, None),
                             Pick::Node(kind) => self.add_graph_node(world, kind),
+                            Pick::Call(module, function) => {
+                                self.add_graph_call(world, module, &function);
+                            }
                         }
                     }
                 } else if cp.finds_objects() {
@@ -11850,13 +11865,42 @@ impl Editor {
         let Some(at) = at else {
             return;
         };
-        let items: Vec<Choice> = crate::graph::addable(from.as_ref().map(|(_, output)| *output))
+        let direction = from.as_ref().map(|(_, output)| *output);
+        let mut items: Vec<Choice> = crate::graph::addable(direction)
             .map(|k| Choice {
                 label: format!("{}: {}", k.category, k.title),
                 detail: crate::graph::ports_text(k),
                 pick: Pick::Node(k.name),
             })
             .collect();
+        // The project's `[Node]` functions (E10-3g-3b), under their marks' groups; one a
+        // node cannot call shown with why.
+        for (&module, functions) in &self.node_functions {
+            for f in functions {
+                let detail = match &f.signature {
+                    Ok(signature) => {
+                        let Ok(kind) = engine_material_graph::call_kind(&f.name, signature) else {
+                            continue;
+                        };
+                        let fits = match direction {
+                            Some(true) => !kind.inputs.is_empty(),
+                            Some(false) => !kind.outputs.is_empty(),
+                            None => true,
+                        };
+                        if !fits {
+                            continue;
+                        }
+                        crate::graph::ports_text(kind)
+                    }
+                    Err(why) => why.clone(),
+                };
+                items.push(Choice {
+                    label: format!("{}: {}", f.category, f.title),
+                    detail,
+                    pick: Pick::Call(module, f.name.clone()),
+                });
+            }
+        }
         self.graph_add = Some(GraphAdd {
             graph: doc.id,
             at,
@@ -11881,6 +11925,108 @@ impl Editor {
         self.graph_outcome(world, g, outcome);
         if self.active_graph != Some(g) {
             self.show_graph(world, g);
+        }
+    }
+
+    /// The node search's pick of a `[Node]` function (E10-3g-3b): a call of it added where
+    /// the search was opened, as a step; one a node cannot call said why.
+    fn add_graph_call(&mut self, world: &mut World, module: AssetId, function: &str) {
+        let Some(add) = self.graph_add.take() else {
+            return;
+        };
+        let Some(g) = self.graphs.iter().position(|d| d.id == add.graph) else {
+            return;
+        };
+        let Some(f) = self
+            .node_functions
+            .get(&module)
+            .and_then(|fs| fs.iter().find(|f| f.name == function))
+        else {
+            return;
+        };
+        let signature = match &f.signature {
+            Ok(signature) => signature.clone(),
+            Err(why) => {
+                let message = format!("{} is not a node: {why}", f.title);
+                self.say(message);
+                return;
+            }
+        };
+        let Some(path) = self.asset_db.get(module).map(|e| e.path.clone()) else {
+            return;
+        };
+        let outcome = self.graphs[g].add_call(
+            AssetRef::file(module),
+            &path,
+            function,
+            &signature,
+            add.at,
+            add.from.as_ref(),
+        );
+        self.graph_outcome(world, g, outcome);
+        if self.active_graph != Some(g) {
+            self.show_graph(world, g);
+        }
+    }
+
+    /// The project's `[Node]` functions (ADR 0123's E10-3g-3b): their scanner started with
+    /// the first graph shown, every Slang module of the project given to it then (a module
+    /// written anew again, `Self::scan_assets`); what it found taken in; the graphs' calls
+    /// titled by their marks and their signatures their functions' again.
+    fn node_functions_frame(&mut self) {
+        if self.node_scanner.is_none() {
+            if self.active_graph.is_none() {
+                return;
+            }
+            let Some(scanner) = crate::node_functions::NodeScanner::start(&self.root) else {
+                return;
+            };
+            for e in self.asset_db.entries() {
+                if e.kind == engine_scene::AssetKind::Shader {
+                    scanner.scan(e.id, self.root.join(&e.path));
+                }
+            }
+            self.node_scanner = Some(scanner);
+        }
+        if let Some(scanner) = &self.node_scanner {
+            scanner.take(&mut self.node_scans);
+        }
+        if !self.node_scans.is_empty() {
+            for scanned in self.node_scans.drain(..) {
+                match scanned.found {
+                    Ok(found) if !found.is_empty() => {
+                        self.node_functions.insert(scanned.module, found);
+                    }
+                    Ok(_) => {
+                        self.node_functions.remove(&scanned.module);
+                    }
+                    Err(why) => {
+                        let path = self.asset_db.get(scanned.module).map(|e| e.path.as_str());
+                        log::warn!(
+                            target: "engine_editor",
+                            "{}: its [Node] functions cannot be read: {why}",
+                            path.unwrap_or("a Slang module")
+                        );
+                        self.node_functions.remove(&scanned.module);
+                    }
+                }
+            }
+            let titles: Vec<(AssetRef, String, String)> = self
+                .node_functions
+                .iter()
+                .flat_map(|(&id, fs)| {
+                    fs.iter()
+                        .map(move |f| (AssetRef::file(id), f.name.clone(), f.title.clone()))
+                })
+                .collect();
+            for doc in &mut self.graphs {
+                doc.set_call_titles(&titles);
+            }
+        }
+        // The shown graph's calls as their functions have them (an undo may bring back an
+        // older signature).
+        if let Some(doc) = self.active_graph.and_then(|g| self.graphs.get_mut(g)) {
+            doc.refresh_calls(&self.node_functions);
         }
     }
 
@@ -15483,6 +15629,15 @@ impl Editor {
         self.assets.extend(&paths);
         self.pending_assets.extend(&paths);
         self.asset_db = db;
+        // The modules' `[Node]` functions read again from the database as it is now
+        // (E10-3g-3b), where their scanner already runs.
+        if let Some(scanner) = &self.node_scanner {
+            for e in self.asset_db.entries() {
+                if e.kind == engine_scene::AssetKind::Shader {
+                    scanner.scan(e.id, self.root.join(&e.path));
+                }
+            }
+        }
         self.refresh_browser();
         self.asset_watch = engine_platform::fs_watch::DirectoryWatcher::new(&self.root, true).ok();
         for (path, why) in self.asset_db.problems() {
@@ -15530,6 +15685,12 @@ impl Editor {
         for id in report.changed {
             if !self.changed_assets.contains(&id) {
                 self.changed_assets.push(id);
+            }
+            // A Slang module written anew: its `[Node]` functions read again (E10-3g-3b).
+            if let (Some(scanner), Some(e)) = (&self.node_scanner, self.asset_db.get(id))
+                && e.kind == engine_scene::AssetKind::Shader
+            {
+                scanner.scan(id, self.root.join(&e.path));
             }
             if let Some(e) = self.asset_db.get(id)
                 && e.kind == engine_scene::AssetKind::Script
@@ -21961,13 +22122,30 @@ impl<G> EditorGame<G> {
                             // Slang's first error in the module (E10-3g-1): framed at the
                             // node whose line it is, what it says in the bar; looked for
                             // once a refusal, kept while the code stays the same.
-                            if !p.looked {
+                            if !p.looked
+                                && let Some(doc) =
+                                    editor.graphs.iter_mut().find(|d| d.id == p.graph)
+                            {
                                 p.looked = true;
                                 let file = p.module_path.rsplit('/').next().unwrap_or("");
+                                // The modules its calls name, by file name: an error in one
+                                // is its first call's (E10-3g-3b).
+                                let mut calls: Vec<(String, String)> = Vec::new();
+                                for (id, n) in &doc.graph.nodes {
+                                    if n.kind != engine_material_graph::CALL_KIND {
+                                        continue;
+                                    }
+                                    let Some(name) =
+                                        doc.paths.get(n.module).and_then(|p| p.rsplit('/').next())
+                                    else {
+                                        continue;
+                                    };
+                                    if !calls.iter().any(|(f, _)| f == name) {
+                                        calls.push((name.to_owned(), id.clone()));
+                                    }
+                                }
                                 if let Some((node, message)) =
-                                    crate::graph::slang_error(why, file, &p.lines)
-                                    && let Some(doc) =
-                                        editor.graphs.iter_mut().find(|d| d.id == p.graph)
+                                    crate::graph::slang_error(why, file, &p.lines, &calls)
                                     && doc.error.is_none()
                                 {
                                     doc.error = Some(engine_material_graph::GraphError {
@@ -33443,6 +33621,120 @@ return Coin
         assert_eq!(ed.graphs.len(), 1, "opened again by the undo");
         assert!(ed.graphs[0].dirty() && ed.active_graph.is_none());
         assert_eq!(ed.graphs[0].graph.nodes["c"].at, [0.0, 0.0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0123 E10-3g-3b: a Slang module's `[Node]` functions are found once a graph is
+    /// shown (the scanner's thread, Slang's reflection); the node search lists them under
+    /// their marks' groups with their ports, one a node cannot call with why; a pick adds a
+    /// call titled by its mark, its module's path and signature in the file, as a step, and
+    /// the one a node cannot call is refused. Skipped without Slang's library.
+    #[test]
+    fn the_node_search_offers_the_projects_node_functions() {
+        const SPACE: (u16, u16) = (0x20, 0x39);
+        if engine_shader::SlangLibrary::load().is_err() {
+            println!("skipped: no Slang library");
+            return;
+        }
+        let dir = project("graph-calls");
+        for sub in ["materials", "shaders"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(
+            dir.join("shaders/swirl.slang"),
+            "#include \"nodes.slang\"\n\n\
+             [Node(\"Swirl\", \"Mapping\")]\n\
+             float3 swirl(MaterialContext ctx, float3 color, float amount)\n\
+             {\n    return color * (1.0 + amount * ctx.uv.x);\n}\n\n\
+             [Node(\"Count\", \"Mapping\")]\n\
+             float count(int n)\n{\n    return float(n);\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("materials/glow.mgraph"),
+            format!(
+                "[mgraph version=3 id={}]\n\nmodel = \"unlit\"\n\
+                 nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [300, 0]\n",
+                AssetId::new()
+            ),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        ed.open_graph(&world, Path::new("materials/glow.mgraph"));
+        let timer = engine_platform::time::HighResTimer::new().unwrap();
+        let started = Instant::now();
+        while ed.node_functions.is_empty() && started.elapsed().as_secs() < 60 {
+            ed.update(&mut world);
+            let _ = timer.sleep(std::time::Duration::from_millis(5));
+        }
+        println!(
+            "the module's [Node] functions found in {:.0} ms",
+            started.elapsed().as_secs_f64() * 1e3
+        );
+        let module = ed.asset_db.find("shaders/swirl.slang").unwrap().id;
+        let found = &ed.node_functions[&module];
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(
+            found[0].signature.as_deref(),
+            Ok("float3(MaterialContext ctx, float3 color, float amount)")
+        );
+        assert!(found[1].signature.as_ref().unwrap_err().contains("int"));
+        // Space over the canvas, "swirl": its group and ports; Enter adds the call.
+        let [x, y, _, h] = ed.graph_area.unwrap();
+        mouse(&mut ed, [x + 30.0, y + h - 30.0], None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[SPACE]);
+        ed.update(&mut world);
+        chars(&mut ed, "swirl");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let listed = |ed: &Editor, label: &str| {
+            ed.command_palette
+                .as_ref()
+                .and_then(|cp| cp.choices.as_ref())
+                .is_some_and(|c| c.shown.iter().any(|&(i, _)| c.items[i].label == label))
+        };
+        assert!(listed(&ed, "Mapping: Swirl"), "under its group");
+        assert!(!texts(&ed, "color, amount → out").is_empty(), "its ports");
+        chord(&mut ed, &mut world, &[ENTER]);
+        let doc = &ed.graphs[0];
+        let (id, node) = doc
+            .graph
+            .nodes
+            .iter()
+            .find(|(_, n)| n.kind == engine_material_graph::CALL_KIND)
+            .map(|(id, n)| (id.clone(), n.clone()))
+            .expect("the call added");
+        assert_eq!(node.function, "swirl");
+        assert_eq!(node.module, AssetRef::file(module));
+        assert!(
+            doc.text.contains("module = asset(\"shaders/swirl.slang\""),
+            "{}",
+            doc.text
+        );
+        assert_eq!(ed.history.steps().count(), 1);
+        ed.update(&mut world);
+        let b = &ed.graphs[0].boxes[ed.graphs[0].box_of(&id).unwrap()];
+        assert_eq!(b.title, "Swirl", "titled by its mark");
+        // The function a node cannot call: listed with why, refused.
+        let [x, y, _, h] = ed.graph_area.unwrap();
+        mouse(&mut ed, [x + 30.0, y + h - 30.0], None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[SPACE]);
+        ed.update(&mut world);
+        chars(&mut ed, "count");
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(listed(&ed, "Mapping: Count"), "listed with why");
+        chord(&mut ed, &mut world, &[ENTER]);
+        assert_eq!(ed.history.steps().count(), 1, "nothing added");
+        let said = ed
+            .message
+            .as_ref()
+            .map(|(m, _)| m.clone())
+            .unwrap_or_default();
+        assert!(said.contains("Count is not a node"), "{said}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
