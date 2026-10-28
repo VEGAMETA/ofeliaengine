@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3e-2a, reroutes** (#PR, ADR 0123's as-built): a double-click on a link (or the
+  - **E10-3e-2a, reroutes** (#430, ADR 0123's as-built): a double-click on a link (or the
     node search) puts a reroute on it, a capsule in the colour of what it carries; it
     adds no code (a graph through reroutes generates the same module).
   - **E10-3f-3, errors on nodes and Show Slang** (#429, ADR 0123's as-built): a node that
