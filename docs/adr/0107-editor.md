@@ -2253,3 +2253,23 @@ for the first answer. This step is the part of E11-4 that needs none.
   selection, Escape, Play.
 - **E11-4 is done** but for View: Sound Ranges, the inspector's falloff curve with the
   camera's distance, and blockout's radius handles.
+
+## As built (E11-3d-1, 2026-10-28): sounds dropped into the scene
+
+- **Onto an object** (under the pointer in the viewport, or its row in the tree): it plays
+  the sound in the world, an `AudioSource3D` added (Unity's rule for a clip dropped on a
+  GameObject), or the sound of the source it has replaced; one undo step, "Give Lamp
+  hum.wav".
+- **Where no object is** in the viewport, or anywhere there with **Alt**: a new entity
+  named after the file (`hum`, `hum 2`), on the surface under the pointer (asked for while
+  the file is dragged, on the grid along it with snapping, the ground's plane where
+  nothing is), with an `AudioSource3D`; selected, one undo step.
+- **The tree below its rows:** a new root with a plain `AudioSource`, heard as it is
+  (music, ambience, the UI), which a sound without a place in the world is likelier to be.
+- **The path:** the file's path under the sounds folder (`AudioSettings::folder`, kept by
+  the editor as `sounds_folder`), as sources name sounds; a file outside it is refused with
+  a message. The hint says each case before the release.
+- **Tests:** through the editor's frames, a drop onto the box (the hint, the 3D source,
+  one step) and one onto the floor (a new `hum` at the surface point, selected); then
+  drops into the tree (a plain source, `hum 2`), onto a row (its sound replaced), from
+  outside the sounds folder (refused), and undo taking each back.

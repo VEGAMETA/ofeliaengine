@@ -829,10 +829,13 @@ Last updated: 2026-10-28.
     or another selection; Sound: Listen to the Scene plays every source set to play;
     nothing written back (`Player::audition`, copies of the components). E11-4 is done but
     for View: Sound Ranges and the falloff curve.
+  - **E11-3d-1, sounds dropped into the scene** (#410, ADR 0107's as-built): onto an object
+    (viewport or row) it plays there in 3D; on the floor (or with Alt) a new entity named
+    after the file on the surface; into the tree, heard as it is; one undo step each.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-3's last part, then
-       sounds dropped on the viewport, the tree or an entity, and the sound and bus fields
-       (the team's 4a); the room's reverb strip.
+    1. E11-3d-2, the sound and bus fields (the team's 4a: a sound field with a drop, the
+       `#sound:` list, a small waveform and ▶; renames rewriting marked strings), then the
+       room's reverb strip, then E11-5's layered snapshots.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
     the later in the file's list winning where they meet; scripts blend one in and out

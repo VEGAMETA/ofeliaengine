@@ -802,6 +802,9 @@ will do:
 | a model | a row of the scene tree | it goes under that entity, at its origin |
 | a model | the tree below its rows | a new root where the camera looks |
 | a material (`.material`) | an object in the viewport, or its row | the object's model takes it |
+| a sound (`.wav`, `.ogg`, `.flac`) | an object in the viewport, or its row | it plays the sound in the world: an `AudioSource3D`, or its source's sound replaced |
+| a sound | the viewport where no object is (or anywhere with Alt) | a new entity named after the file, on the surface under the pointer, playing it in the world |
+| a sound | the tree below its rows | a new entity playing it as it is (an `AudioSource`: music, ambience, the UI) |
 | an asset | an asset field in the inspector | the field takes it, on every selected entity with that component |
 
 - **Placing in the viewport:**
@@ -817,6 +820,9 @@ will do:
     scene (its transform, and a model of its mesh and material).
 - **Fields:** a model's `mesh` takes a model file of one mesh, its `material` a material
   file or a model file of one material.
+- **Sounds** must be under the sounds folder (`AudioSettings::folder`, `sounds/`): a
+  source names its sound by its path there (`ambience/hum.wav`); a file elsewhere is
+  refused, and the hint says why.
 
 **Asset fields in the inspector** show the asset as Godot's do:
 - a square preview the engine draws: a mesh with its own material, a material on a

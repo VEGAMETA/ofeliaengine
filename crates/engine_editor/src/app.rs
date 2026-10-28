@@ -568,6 +568,7 @@ pub fn editor<G: Game>(
     )?;
     editor.wave_texture = Some(wave.sampled_index());
     editor.mixer_path = settings.audio.layout.to_string_lossy().replace('\\', "/");
+    editor.sounds_folder = settings.audio.folder.to_string_lossy().replace('\\', "/");
     let shared = Rc::new(RefCell::new(editor));
     // Editing: the world's time stands until Play (ADR 0107 E3), so a scene's tweens,
     // timers and sounds do not change it.
@@ -2368,6 +2369,9 @@ struct Editor {
     /// typed, the open output list, the inspector's section of the picked bus, the panel's
     /// header and the picked bus's numbers as text.
     mixer_path: String,
+    /// The folder sources' sounds are named under (`AudioSettings::folder`), from the
+    /// project's root: what a dropped sound's path is taken from (E11-3d).
+    sounds_folder: String,
     mixer: Option<crate::mixer::MixerDoc>,
     mixer_error: Option<String>,
     mixer_picked: Option<String>,
@@ -3210,6 +3214,7 @@ impl Editor {
             sound_view: None,
             wave_texture: None,
             mixer_path: String::from("main.mixer"),
+            sounds_folder: String::from("sounds"),
             mixer: None,
             mixer_error: None,
             mixer_picked: None,
@@ -15961,6 +15966,7 @@ impl Editor {
                 placed: None,
                 selection: self.selection.clone(),
                 over: DropTarget::Nowhere,
+                point: None,
             });
             self.browser.selected = Some(id);
             // The surface under the pointer is asked for anew.
@@ -16016,6 +16022,9 @@ impl Editor {
                 Some(at),
             ) => {
                 self.place_dragged(world, &mut drag, at);
+            }
+            (engine_scene::AssetKind::Sound, DropTarget::View, Some(at)) => {
+                drag.point = self.point_under(at);
             }
             _ => self.take_back_placed(world, &mut drag),
         }
@@ -16225,6 +16234,17 @@ impl Editor {
             (DropTarget::Row(e), K::Scene) => self.add_instance(world, &drag, Some(e)),
             (DropTarget::Tree, K::Scene) => self.add_instance(world, &drag, None),
             (DropTarget::Row(e), K::Material) => self.give_material(world, e, &drag),
+            // A sound onto the object under the pointer, or on its own where it is (Alt:
+            // its own even over an object); onto a row, or into the tree heard as it is.
+            (DropTarget::View, K::Sound) => match self.sound_target() {
+                Some(e) => self.give_sound(world, e, &drag),
+                None => {
+                    let at = drag.point.unwrap_or(Vec3::ZERO);
+                    self.add_sound(world, &drag, Some(at));
+                }
+            },
+            (DropTarget::Row(e), K::Sound) => self.give_sound(world, e, &drag),
+            (DropTarget::Tree, K::Sound) => self.add_sound(world, &drag, None),
             (DropTarget::Field(section, field), _) => {
                 self.drop_on_field(world, section, field, &mut drag);
             }
@@ -16239,8 +16259,8 @@ impl Editor {
                 }
             }
             (DropTarget::View | DropTarget::Row(_) | DropTarget::Tree, _) => self.say(format!(
-                "{name}: models, scenes and materials go into the scene; other assets onto \
-                 fields"
+                "{name}: models, scenes, materials and sounds go into the scene; other assets \
+                 onto fields"
             )),
             (DropTarget::Nowhere, _) => {}
         }
@@ -17102,6 +17122,120 @@ impl Editor {
     }
 
     /// A dragged material file given to entity `e`'s model, as one undo step.
+    /// The object a sound dropped in the view goes onto: the one under the pointer, none
+    /// with Alt (a sound of its own there).
+    fn sound_target(&self) -> Option<Entity> {
+        self.hovered
+            .and_then(|(_, e)| e)
+            .filter(|_| !self.input.alt())
+    }
+
+    /// The point under `at` (physical pixels) in the view: the surface there (asked for
+    /// every frame, found a few frames on), else the ground's plane or ten metres ahead; on
+    /// the grid along the surface with snapping (Shift inverts it).
+    fn point_under(&mut self, at: Vec2) -> Option<Vec3> {
+        let rect = self.view_rect?;
+        let view = ViewProj::new(&self.orbit, rect);
+        let local = (at - Vec2::new(rect[0] as f32, rect[1] as f32)).max(Vec2::ZERO);
+        self.surface_request = Some(SurfaceRequest {
+            x: (local.x * self.view_scale[0]) as u32,
+            y: (local.y * self.view_scale[1]) as u32,
+            transparent: self.pick_transparent,
+        });
+        let (point, normal) = match self.surfaced.and_then(|r| r.hit) {
+            Some(hit) => (hit.point, hit.normal),
+            None => {
+                let ray = view.ray(at);
+                let ground = hit_plane(ray, Vec3::ZERO, Vec3::Y)
+                    .filter(|p| p.distance(ray.0) < 200.0)
+                    .unwrap_or(ray.0 + ray.1 * 10.0);
+                (ground, Vec3::Y)
+            }
+        };
+        Some(if self.snapping.on == self.input.shift() {
+            point
+        } else {
+            snap_along(point, normal, self.snapping.position as f32)
+        })
+    }
+
+    /// A dragged sound's name as sources give it: its path under the sounds folder.
+    fn sound_name(&self, drag: &AssetDrag) -> Result<String, String> {
+        let folder = format!("{}/", self.sounds_folder.trim_end_matches('/'));
+        drag.path
+            .strip_prefix(&folder)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                format!(
+                    "{} is not under `{folder}`: sources play the sounds folder's files",
+                    drag.name
+                )
+            })
+    }
+
+    /// Entity `e` given dropped sound `drag` (E11-3d): its source's sound, or an
+    /// `AudioSource3D` playing it; one undo step.
+    fn give_sound(&mut self, world: &mut World, e: Entity, drag: &AssetDrag) {
+        let sound = match self.sound_name(drag) {
+            Ok(s) => s,
+            Err(why) => {
+                self.say(why);
+                return;
+            }
+        };
+        let target = world
+            .get::<Name>(e)
+            .map_or_else(|| String::from("The entity"), |n| n.as_str().to_owned());
+        self.history
+            .begin(&format!("Give {target} {}", drag.name), None);
+        self.history.touch(world, e);
+        if let Some(s) = world.get_mut::<AudioSource3D>(e) {
+            s.source.sound = sound;
+        } else if let Some(s) = world.get_mut::<AudioSource>(e) {
+            s.sound = sound;
+        } else {
+            world.insert(e, AudioSource3D::new(&sound));
+        }
+        self.history.commit(world);
+        self.say(format!("{} \u{2192} {target}", drag.name));
+    }
+
+    /// A new entity playing dropped sound `drag` (E11-3d), named after its file: placed at
+    /// `at` with an `AudioSource3D`, or (dropped into the tree) heard as it is with an
+    /// `AudioSource`; selected, one undo step.
+    fn add_sound(&mut self, world: &mut World, drag: &AssetDrag, at: Option<Vec3>) {
+        let sound = match self.sound_name(drag) {
+            Ok(s) => s,
+            Err(why) => {
+                self.say(why);
+                return;
+            }
+        };
+        let stem = drag
+            .name
+            .rsplit_once('.')
+            .map_or(drag.name.as_str(), |(stem, _)| stem);
+        let name = self.sibling_name(world, None, stem, None);
+        let order = self.last_root_order(world);
+        self.history.begin(&format!("Add {}", drag.name), None);
+        let e = world.spawn((
+            SceneId::new(),
+            Name::new(&name),
+            Transform::from_translation(at.unwrap_or(Vec3::ZERO)),
+            GlobalTransform::default(),
+            RootOrder(order),
+        ));
+        if at.is_some() {
+            world.insert(e, AudioSource3D::new(&sound));
+        } else {
+            world.insert(e, AudioSource::new(&sound));
+        }
+        self.history.touch_new(world, e);
+        self.history.commit(world);
+        self.show(world, e);
+        self.say(format!("{name}: {} plays here", drag.name));
+    }
+
     fn give_material(&mut self, world: &mut World, e: Entity, drag: &AssetDrag) {
         let target = world
             .get::<Name>(e)
@@ -17413,6 +17547,7 @@ impl Editor {
             placed: None,
             selection: Vec::new(),
             over: DropTarget::Field(section, field),
+            point: None,
         };
         self.drop_on_field(world, section, field, &mut drag);
     }
@@ -17436,6 +17571,17 @@ impl Editor {
                 format!("{name}: let go to add it under {}", named(e))
             }
             (DropTarget::Row(e), K::Material) => format!("{name} → {}", named(e)),
+            (DropTarget::View, K::Sound) => match self.sound_target() {
+                Some(e) => format!(
+                    "{name} \u{2192} {}  \u{b7}  Alt: a sound of its own",
+                    named(e)
+                ),
+                None => format!("{name}: let go to place a sound here"),
+            },
+            (DropTarget::Row(e), K::Sound) => format!("{name} \u{2192} {}", named(e)),
+            (DropTarget::Tree, K::Sound) => {
+                format!("{name}: let go to add a sound heard as it is")
+            }
             (DropTarget::Tree, K::Model) => format!("{name}: let go to add it to the scene"),
             (DropTarget::View, K::Scene) => match &drag.refused {
                 Some(why) => why.clone(),
@@ -20462,6 +20608,8 @@ struct AssetDrag {
     /// The selection before the model was placed: back when it is taken back.
     selection: Vec<Entity>,
     over: DropTarget,
+    /// A dragged sound's place in the view: the surface under the pointer (E11-3d).
+    point: Option<Vec3>,
 }
 
 /// A dragged model placed in the view: its undo step and its root.
@@ -23147,6 +23295,119 @@ mod tests {
     }
 
     #[test]
+    fn a_sound_dropped_on_an_object_plays_on_it_and_one_dropped_on_the_floor_on_its_own() {
+        let (dir, mut world, mut ed, boxed) = drop_project("drop-sound");
+        std::fs::create_dir_all(dir.join("sounds/ambience")).unwrap();
+        std::fs::write(
+            dir.join("sounds/ambience/hum.wav"),
+            stereo_wav(4_800, |_| 0.0),
+        )
+        .unwrap();
+        std::fs::write(dir.join("props/beep.wav"), stereo_wav(480, |_| 0.0)).unwrap();
+        assert_eq!(ed.open_assets().files, 4);
+        ed.open_folder("sounds/ambience");
+        ed.update(&mut world);
+        let request = PickRequest {
+            x: 0,
+            y: 0,
+            transparent: false,
+        };
+        // Over the box in the view: the hint says so; let go, the box plays it in 3D, as
+        // the sounds folder names it, one step.
+        drag_file(&mut ed, &mut world, "hum.wav");
+        let at = view_middle(&ed);
+        mouse(&mut ed, at, None);
+        ed.hovered = Some((request, Some(boxed)));
+        ed.update(&mut world);
+        assert!(ed.hint.starts_with("hum.wav \u{2192} Box"), "{}", ed.hint);
+        ed.hovered = Some((request, Some(boxed)));
+        mouse(&mut ed, at, Some(false));
+        ed.update(&mut world);
+        let s = world
+            .get::<AudioSource3D>(boxed)
+            .expect("a source on the box");
+        assert_eq!(s.source.sound, "ambience/hum.wav");
+        assert_eq!(ed.history.steps().count(), 1);
+        // Over the floor with nothing under the pointer: a new "hum" there, selected.
+        drag_file(&mut ed, &mut world, "hum.wav");
+        ed.hovered = Some((request, None));
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        ed.surfaced = Some(engine_render::pick::SurfaceResult {
+            frame: 1,
+            request: ed.surface_request.expect("the surface asked for"),
+            hit: Some(hit(Vec3::new(1.0, 0.5, -2.0), Vec3::Y)),
+        });
+        ed.hovered = Some((request, None));
+        mouse(&mut ed, [at[0] + 1.0, at[1]], None);
+        ed.update(&mut world);
+        ed.hovered = Some((request, None));
+        mouse(&mut ed, [at[0] + 1.0, at[1]], Some(false));
+        ed.update(&mut world);
+        let hum = engine_scene::find_named(&mut world, "hum").expect("a new sound");
+        assert_eq!(ed.selection, [hum]);
+        let t = world.get::<Transform>(hum).unwrap().translation;
+        assert!((t - Vec3::new(1.0, 0.5, -2.0)).length() < 1e-4, "{t}");
+        assert_eq!(
+            world.get::<AudioSource3D>(hum).unwrap().source.sound,
+            "ambience/hum.wav"
+        );
+        assert_eq!(ed.history.steps().count(), 2);
+        // Into the tree below its rows: heard as it is; onto a row: that entity's source's
+        // sound replaced.
+        let id = ed.asset_db.find("sounds/ambience/hum.wav").unwrap().id;
+        let drag = |over: DropTarget, path: &str| AssetDrag {
+            asset: id,
+            kind: engine_scene::AssetKind::Sound,
+            path: path.to_owned(),
+            name: path.rsplit('/').next().unwrap().to_owned(),
+            plan: None,
+            refused: None,
+            placed: None,
+            selection: Vec::new(),
+            over,
+            point: None,
+        };
+        ed.drop_asset(
+            &mut world,
+            drag(DropTarget::Tree, "sounds/ambience/hum.wav"),
+        );
+        let plain = ed.active().unwrap();
+        assert_eq!(world.get::<Name>(plain).unwrap().as_str(), "hum 2");
+        assert_eq!(
+            world.get::<AudioSource>(plain).unwrap().sound,
+            "ambience/hum.wav"
+        );
+        assert!(world.get::<AudioSource3D>(plain).is_none());
+        world.get_mut::<AudioSource>(plain).unwrap().sound = String::from("old.wav");
+        ed.drop_asset(
+            &mut world,
+            drag(DropTarget::Row(plain), "sounds/ambience/hum.wav"),
+        );
+        assert_eq!(
+            world.get::<AudioSource>(plain).unwrap().sound,
+            "ambience/hum.wav"
+        );
+        // A file outside the sounds folder: said, nothing done.
+        let steps = ed.history.steps().count();
+        ed.drop_asset(&mut world, drag(DropTarget::Row(boxed), "props/beep.wav"));
+        assert_eq!(ed.history.steps().count(), steps);
+        assert_eq!(
+            world.get::<AudioSource3D>(boxed).unwrap().source.sound,
+            "ambience/hum.wav"
+        );
+        // Undo takes the drops back, one at a time.
+        ed.history.undo(&mut world);
+        ed.history.undo(&mut world);
+        assert!(!world.contains(plain));
+        ed.history.undo(&mut world);
+        assert!(!world.contains(hum));
+        ed.history.undo(&mut world);
+        assert!(world.get::<AudioSource3D>(boxed).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn escape_or_leaving_the_view_takes_a_dragged_model_back() {
         let (dir, mut world, mut ed, boxed) = drop_project("drop-escape");
         ed.select_only(boxed);
@@ -23835,6 +24096,7 @@ mod tests {
             placed: None,
             selection: Vec::new(),
             over: DropTarget::Tree,
+            point: None,
         };
         let steps = ed.history.steps().count();
         ed.drop_asset(&mut world, drag(lamp, "props/lamp.scene"));
@@ -23939,6 +24201,7 @@ mod tests {
             placed: None,
             selection: Vec::new(),
             over: DropTarget::Tree,
+            point: None,
         };
         ed.drop_asset(&mut world, drag);
         let root = engine_scene::find_named(&mut world, "Lamp").unwrap();
@@ -24038,6 +24301,7 @@ mod tests {
                 placed: None,
                 selection: Vec::new(),
                 over: DropTarget::Tree,
+                point: None,
             };
             ed.drop_asset(world, drag);
         };
@@ -24176,6 +24440,7 @@ mod tests {
             placed: None,
             selection: Vec::new(),
             over: DropTarget::Tree,
+            point: None,
         };
         ed.drop_asset(&mut world, drag);
         let mut q = QueryState::<(Entity, &PrefabInstance)>::new(&mut world);
@@ -24233,6 +24498,7 @@ mod tests {
                 placed: None,
                 selection: Vec::new(),
                 over: DropTarget::Tree,
+                point: None,
             };
             ed.drop_asset(&mut world, drag);
         }
@@ -24344,6 +24610,7 @@ mod tests {
                 placed: None,
                 selection: Vec::new(),
                 over: DropTarget::Tree,
+                point: None,
             };
             ed.drop_asset(&mut world, drag);
         }
