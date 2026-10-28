@@ -428,6 +428,51 @@ written by hand.
     row, undo, and the file read back as saved.
 - **Next (the team's answer, below):** the material's preview while its graph is shown.
 
+## As built (E10-3f-2, 2026-10-28): the preview sphere
+
+The team's «а» (answer 4 below).
+
+- **What draws it:** the graph's editing build (`Build::Editing`), every number a
+  parameter, so a value's edit changes no code.
+  - Its module is written to `.ofelia/cache/graphs/<graph id>-editing.slang` when its
+    text changes; the player's material hot reload compiles it.
+  - Its material is a file the editor holds (`Player::set_material_file`, with ids of its
+    own made from the graph's), never written to disk.
+  - A sphere of it is asked for as a preview (ADR 0112) and shown, 128 points square, in
+    the canvas's top right corner (an image over the canvas; the pointer over it is not
+    the canvas's).
+- **After every edit:** the inspector's and the canvas's edits of a frame reach the
+  preview's request in that frame.
+  - A value: the module's text unchanged, the request says so
+    (`PreviewRequest::same_code`) and is drawn once, as soon as no material type is on
+    its way.
+  - A change of code: the module written; the request draws twice, as a type's first
+    preview does (its pipelines asked for, then drawn once they are made).
+  - Refused (a parameter the old layout lacks fails the material until its type is
+    compiled again): asked for again once the material can be made. Why, in the bar,
+    only while no type is on its way.
+- **Found and fixed on the way** (`engine_render`, `engine_app`):
+  - a reload due (a file changed, its 30 ms of quiet not over) did not count as a type on
+    its way: a preview's second drawing could be made with the old code, and kept;
+  - the pipelines on their way were counted after the view's prepare, which takes layouts
+    that arrived after this frame's materials were laid out: counted before it now;
+  - a drawing whose code is unchanged is answered only when its frame asked for no
+    pipeline; otherwise it is drawn again once they are made.
+- **Measured** (the editor's GPU test, 1280 × 720 offscreen; Radeon / RTX):
+  - the first sphere after the tab: 0.70 s / 0.66 s (the module compiled);
+  - a number typed: 59 ms / 34 ms, 5 frames (with two frames in flight, the least);
+  - a link bringing a new parameter: 0.60 s / 0.56 s. On the Radeon about 340 ms go to
+    compiling the type's entry points again, then about 180 ms to reflecting its
+    parameters in a second compile (status §6);
+  - the editor's and the graph tab's frames still allocate nothing.
+- **Tests:**
+  - a value's edit changes no code (unit);
+  - a request whose code is unchanged answered after one drawing (the player's typed
+    material test: 3 frames);
+  - in the editor on the GPU: the sphere drawn, a typed number and a link with a new
+    parameter reaching it.
+- **Next:** errors on nodes and Show Slang (E10-3f-3), then E10-3e-2.
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,

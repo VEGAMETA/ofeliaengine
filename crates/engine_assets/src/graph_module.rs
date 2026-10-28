@@ -106,7 +106,7 @@ pub fn graph_module(path: &Path, root: &Path) -> Result<GraphModule, MaterialFil
 
 /// How a texture node's image is encoded: as a normal map where it feeds one, else as a
 /// colour (a material file's `textures["name"].encoding` says otherwise).
-fn encoding(graph: &Graph, node: &str) -> TextureEncoding {
+pub fn encoding(graph: &Graph, node: &str) -> TextureEncoding {
     let feeds_normal_map = graph.links.iter().any(|(to, from)| {
         from.node == node
             && graph

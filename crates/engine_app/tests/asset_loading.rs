@@ -904,10 +904,12 @@ fn previews_of_a_model_and_a_material_are_drawn_and_read_back() {
             AssetRef::part(post, &material),
             identity,
         )],
+        same_code: false,
     });
     player.request_preview(PreviewRequest {
         key: 2,
         parts: vec![(builtin::SPHERE, AssetRef::file(blue_id), identity)],
+        same_code: false,
     });
     // A part that cannot be made: answered with no pixels.
     player.request_preview(PreviewRequest {
@@ -917,6 +919,7 @@ fn previews_of_a_model_and_a_material_are_drawn_and_read_back() {
             builtin::MATERIAL,
             identity,
         )],
+        same_code: false,
     });
     let mut got = previews_until(&mut player, 3);
     got.sort_by_key(|p| p.key);
