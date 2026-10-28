@@ -87,7 +87,9 @@ editor = ["dep:engine_editor"]
     - **Sound:** a sound heard as it is (`AudioSource`: music, the UI), a sound in the
       world (`AudioSource3D`), the listener (`AudioListener`) or a reverb zone
       (`ReverbZone`). A new source is silent until the inspector gives it a sound
-      ([audio.md](audio.md)).
+      ([audio.md](audio.md)). A reverb zone added while something is selected takes the
+      selection's box: select a hall's brushes, add one, and it fills the hall (one undo
+      step).
 
     It is named after its kind, numbered when a sibling has that name ("Cube 2"); the
     palette has every kind ("Scene: Add Torus Brush");
@@ -344,6 +346,9 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   pointer turns white (the selected ones orange). A plain click again on the icon it
   selected goes through to what lies under it, as cycling does. Empty entities have
   nothing to show: pick them in the tree.
+  In Play, ejected (Shift+F8), a sound's disk is filled green while it plays and is only
+  a ring while it is silent. With no listener in the scene, the game's main camera hears
+  (as the player decides): its icon wears a small ear.
 - **Their reach:** a selected point light shows its range as three circles, a spot light
   its cone, a camera its view's pyramid (2 m deep), the sun its direction. A selected
   sound in the world shows its two distances, each as a ring on the level plane through it
@@ -351,8 +356,12 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   falloff's end at the second (fainter), dashed when the sound holds its level beyond it
   (`Inverse`) and solid when it falls silent there (`Linear`). A selected reverb zone shows
   its box (violet), turned and scaled with its entity, and dashed, where its room fades
-  out.
+  out; a label under its icon gives its room ("Hall", or its decay when it is none of the
+  presets) and its priority.
   **View: Overlays** in the palette hides icons and reach; the session keeps it.
+- **View: Sound Ranges** in the palette shows every sound's outer ring and every reverb
+  zone's box at once, dim, selected or not: where the level is heard, before you walk it.
+  The selected ones draw their own, as above.
 - **Their handles** (E11-4b): a square on each of a selected sound's rings, on the side
   toward the camera's right. Point at one to read it ("6 m · full", "40 m · −16 dB,
   held", "40 m · silent"); drag it to set the distance, by the snapping rules (G, Shift,
@@ -849,6 +858,13 @@ file dropped on the field takes its place.
   on the master.
 - Your own components' strings can be such fields too: `#[reflect(hint = "sound")]` or
   `#[reflect(hint = "bus")]` on the field.
+- **A sound in the world shows its falloff** after its components: its level over
+  distance as bars, from its place (0 m) out to its outer ring, half again past it when
+  the sound holds its level there (`Inverse`); a bar's height runs from −48 dB (empty)
+  to full. The bar at the editor camera's distance is red, and the line above says what
+  is heard there ("−11 dB at 22.0 m", "full at 3.0 m", "silent at 45.0 m"). Drag a
+  ring's handle or type a distance and the bars follow; fly the camera and the red bar
+  moves.
 - **Meshes of several materials** draw each primitive with its own: the drop gives the
   model the further primitives' materials in its `MaterialSlots` (ADR 0115). Slots are
   not editable in the inspector yet; the scene file holds them as a list.

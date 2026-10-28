@@ -823,6 +823,8 @@ struct CommandIds {
     overlays: CommandId,
     /// The blockout's colliders over the viewport (ADR 0110 E2b-4).
     colliders: CommandId,
+    /// View: Sound Ranges (E11-4c): every source's reach and every zone, dim.
+    sound_ranges: CommandId,
     docks_beside_code: CommandId,
     /// The navigation mesh baked from the brushes, over the viewport (E2b-4b).
     navigation: CommandId,
@@ -995,6 +997,7 @@ fn commands() -> (Commands, CommandIds) {
         pivot: c.register("transform.pivot", "Transform", "Next Pivot"),
         overlays: c.register("view.overlays", "View", "Overlays"),
         colliders: c.register("view.colliders", "View", "Colliders"),
+        sound_ranges: c.register("view.sound_ranges", "View", "Sound Ranges"),
         docks_beside_code: c.register("view.docks_beside_code", "View", "Scene Docks Beside Code"),
         navigation: c.register("view.navigation", "View", "Navigation"),
         keys: c.register("editor.keys", "Editor", "Key Map…"),
@@ -1737,6 +1740,27 @@ struct ViewIcon {
     entity: Entity,
     glyph: &'static str,
     at: Vec2,
+    /// In Play, a sound source's: filled while it plays, hollow while it is silent
+    /// (E11-4c); none for the rest, and outside Play.
+    sounding: Option<bool>,
+    /// The game's main camera when the scene has no listener: it hears, an ear beside it.
+    hears: bool,
+}
+
+/// A reverb zone added while something is selected (E11-4c): it takes the selection's box
+/// once a frame has measured it, in the add's undo step.
+#[derive(Debug)]
+struct ZoneFit {
+    zone: Entity,
+    /// The add's merge key: the fit joins its step.
+    merge: u64,
+    /// The selection's instances, from its outline.
+    slots: Vec<u32>,
+    /// Where the selected entities are: the box when none of them has one (lights,
+    /// sounds, empties).
+    points: Option<(Vec3, Vec3)>,
+    /// The box a frame found (none: nothing to measure).
+    found: Option<Option<(Vec3, Vec3)>>,
 }
 
 /// How far from an icon's middle the pointer takes it, in logical pixels.
@@ -1772,6 +1796,8 @@ enum Reach {
     Zone,
     /// Where its room fades out, `fade` metres outside the box.
     ZoneFade,
+    /// View: Sound Ranges (E11-4c): every source's outer ring and every zone's box, dim.
+    Range,
 }
 
 impl Reach {
@@ -1782,6 +1808,7 @@ impl Reach {
             Reach::Camera => Vec4::new(0.55, 0.75, 1.0, 0.8),
             Reach::Sound => Vec4::new(0.45, 0.95, 0.75, 0.85),
             Reach::SoundFar => Vec4::new(0.45, 0.95, 0.75, 0.4),
+            Reach::Range => Vec4::new(0.45, 0.95, 0.75, 0.22),
             Reach::Zone => Vec4::new(0.8, 0.6, 1.0, 0.85),
             Reach::ZoneFade => Vec4::new(0.8, 0.6, 1.0, 0.35),
         }
@@ -2587,6 +2614,14 @@ struct Editor {
     /// the world as the player last evaluated them, and what those were made from (each
     /// group's epoch and place) to make them again only when that changes.
     show_colliders: bool,
+    /// View: Sound Ranges (E11-4c).
+    show_sound_ranges: bool,
+    /// The active entity's 3D sound's falloff for the inspector (E11-4c): its bars, and
+    /// its texts (the level at the camera's distance, the far end's distance).
+    falloff_bars: [f32; FALLOFF_BARS],
+    falloff_texts: [String; 2],
+    falloff_mark: Option<f32>,
+    falloff_shown: bool,
     /// The scene's tree and inspector beside a code tab too (View: Scene Docks Beside Code).
     docks_beside_code: bool,
     /// What the code panel's open files are filtered by.
@@ -2691,6 +2726,10 @@ struct Editor {
     /// move toward a framing or a bookmark (from, to, since).
     frame_asked: Option<Option<(Vec3, Vec3)>>,
     framed: Option<(Vec3, Vec3)>,
+    /// A new reverb zone waiting for the selection's box (E11-4c).
+    zone_fit: Option<ZoneFit>,
+    /// The active reverb zone's label in the viewport: its room and priority (E11-4c).
+    zone_label: String,
     camera_move: Option<(OrbitCamera, OrbitCamera, Instant)>,
     /// Shift+F: the entity the camera follows and where it last was.
     follow: Option<(Entity, Vec3)>,
@@ -2849,6 +2888,42 @@ struct Doc {
     /// Its file changed on disk since its unsaved changes were made from it.
     conflict: bool,
     view: View,
+}
+
+/// A room's preset name when it is one ("Hall"), for a zone's label (E11-4c).
+fn room_name(room: &engine_app::Room) -> Option<&'static str> {
+    use engine_app::Room;
+    [
+        (Room::OUTDOORS, "Outdoors"),
+        (Room::ROOM, "Room"),
+        (Room::CORRIDOR, "Corridor"),
+        (Room::HALL, "Hall"),
+        (Room::CAVE, "Cave"),
+    ]
+    .into_iter()
+    .find_map(|(preset, name)| (preset == *room).then_some(name))
+}
+
+/// Bars in the inspector's falloff curve (E11-4c).
+const FALLOFF_BARS: usize = 64;
+
+/// A 3D sound's gain at `distance` (the mixer's rule, `engine_audio::spatial`): full up to
+/// `near`, then down to `far`, where `Linear` is silent and `Inverse` holds.
+fn falloff_gain(distance: f32, near: f32, far: f32, falloff: engine_app::Falloff) -> f32 {
+    let near = near.max(1e-3);
+    let far = far.max(near);
+    let d = distance.clamp(near, far);
+    match falloff {
+        engine_app::Falloff::Inverse => near / d,
+        engine_app::Falloff::Linear if far > near => 1.0 - (d - near) / (far - near),
+        engine_app::Falloff::Linear => {
+            if distance <= near {
+                1.0
+            } else {
+                0.0
+            }
+        }
+    }
 }
 
 /// `n` and the words for one or for several, for messages ("1 source", "2 sources").
@@ -3372,6 +3447,11 @@ impl Editor {
             guides: Vec::new(),
             hint: String::new(),
             show_colliders: false,
+            show_sound_ranges: false,
+            falloff_bars: [0.0; FALLOFF_BARS],
+            falloff_texts: Default::default(),
+            falloff_mark: None,
+            falloff_shown: false,
             docks_beside_code: false,
             code_filter: String::new(),
             outline: None,
@@ -3425,6 +3505,8 @@ impl Editor {
             box_drag: None,
             frame_asked: None,
             framed: None,
+            zone_fit: None,
+            zone_label: String::new(),
             camera_move: None,
             follow: None,
             bookmarks: [None; 9],
@@ -3723,6 +3805,7 @@ impl Editor {
         self.thumbnails.begin_frame();
         self.follow_sound_view();
         self.follow_mixer(world);
+        self.follow_falloff(world);
         if let Some(under) = self.under_pointer.take() {
             self.offer_under_pointer(world, under);
         }
@@ -5385,6 +5468,12 @@ impl Editor {
             folders: &folder_items,
             files: &file_items,
             auto_play: self.auto_play,
+            falloff: self.falloff_shown.then(|| crate::shell::FalloffView {
+                bars: &self.falloff_bars,
+                mark: self.falloff_mark,
+                label: &self.falloff_texts[0],
+                ends: ["0 m", &self.falloff_texts[1]],
+            }),
             sound: sound_section.and_then(|section| {
                 sound_panel(
                     self.sound_view.as_ref(),
@@ -6320,6 +6409,7 @@ impl Editor {
         self.gizmo_frame(world, scale);
         self.overlay_frame(world);
         self.drop_frame(world);
+        self.fit_zone(world);
         self.input.next_frame();
         let eye = self.orbit.eye();
         if let Some(camera) = camera
@@ -7619,14 +7709,30 @@ impl Editor {
     fn overlay_frame(&mut self, world: &World) {
         self.view_icons.clear();
         self.reach_lines.clear();
+        self.zone_label.clear();
         let Some(rect) = self.view_rect.filter(|_| self.overlays) else {
             return;
         };
         let view = ViewProj::new(&self.orbit, rect);
+        let playing = self.play.is_some();
+        // Who hears when the scene has no listener (E11-4c): the game's main camera, the
+        // active one of the highest priority, the lowest index among equals, as the
+        // player picks it.
+        let mut listener = false;
+        let mut hearing: Option<(Entity, i32)> = None;
         if let Some(q) = self.scene_ids.as_mut() {
             for (e, _) in q.iter_readonly(world) {
                 if Some(e) == self.camera {
                     continue;
+                }
+                listener |= world.get::<AudioListener>(e).is_some();
+                if let Some(c) = world.get::<Camera>(e)
+                    && c.is_active()
+                    && hearing.is_none_or(|(h, priority)| {
+                        c.priority > priority || (c.priority == priority && e.index() < h.index())
+                    })
+                {
+                    hearing = Some((e, c.priority));
                 }
                 let Some(glyph) = icon_of(world, e) else {
                     continue;
@@ -7638,11 +7744,90 @@ impl Editor {
                     && view.contains(at)
                     && (Vec3::from(g.0.translation) - view.eye).dot(view.forward) > 0.0
                 {
+                    // In Play a source shows whether it plays now.
+                    let heard = |s: &AudioSource| s.playing && !s.sound.is_empty();
+                    let sounding = if !playing {
+                        None
+                    } else if let Some(s) = world.get::<AudioSource3D>(e) {
+                        Some(heard(&s.source))
+                    } else {
+                        world.get::<AudioSource>(e).map(heard)
+                    };
                     self.view_icons.push(ViewIcon {
                         entity: e,
                         glyph,
                         at,
+                        sounding,
+                        hears: false,
                     });
+                }
+            }
+        }
+        if !listener
+            && let Some((camera, _)) = hearing
+            && let Some(icon) = self.view_icons.iter_mut().find(|i| i.entity == camera)
+        {
+            icon.hears = true;
+        }
+        // The active reverb zone's label under its icon: its room and priority.
+        if let Some(e) = self.active()
+            && let Some(zone) = world.get::<ReverbZone>(e)
+        {
+            let label = &mut self.zone_label;
+            let _ = match room_name(&zone.room) {
+                Some(name) => write!(label, "{name} \u{b7} priority {}", zone.priority),
+                None => write!(
+                    label,
+                    "{:.1} s decay \u{b7} priority {}",
+                    zone.room.decay, zone.priority
+                ),
+            };
+        }
+        // View: Sound Ranges (E11-4c): every 3D source's outer ring on the level plane
+        // through it and every reverb zone's box, dim; the selected ones draw their own.
+        if self.show_sound_ranges
+            && let Some(q) = self.scene_ids.as_mut()
+        {
+            for (e, _) in q.iter_readonly(world) {
+                if self.selection.contains(&e) {
+                    continue;
+                }
+                let Some(g) = world.get::<GlobalTransform>(e) else {
+                    continue;
+                };
+                let at = Vec3::from(g.0.translation);
+                let mut line = |a: Vec3, b: Vec3| {
+                    if let Some((a, b)) = segment_on_screen(&view, a, b) {
+                        self.reach_lines.push((a, b, Reach::Range));
+                    }
+                };
+                if let Some(sound) = world.get::<AudioSource3D>(e) {
+                    const SEGMENTS: usize = 48;
+                    let point = |k: usize| {
+                        let t = k as f32 / SEGMENTS as f32 * core::f32::consts::TAU;
+                        at + Vec3::new(t.cos(), 0.0, t.sin()) * sound.max_distance
+                    };
+                    for k in 0..SEGMENTS {
+                        line(point(k), point(k + 1));
+                    }
+                } else if let Some(zone) = world.get::<ReverbZone>(e) {
+                    let m = g.0.matrix3;
+                    let axes = [
+                        Vec3::from(m.x_axis) * zone.half_extents.x.abs(),
+                        Vec3::from(m.y_axis) * zone.half_extents.y.abs(),
+                        Vec3::from(m.z_axis) * zone.half_extents.z.abs(),
+                    ];
+                    let corner = |k: usize| {
+                        let sign = |bit: usize| if k & bit == 0 { -1.0 } else { 1.0 };
+                        at + axes[0] * sign(1) + axes[1] * sign(2) + axes[2] * sign(4)
+                    };
+                    for k in 0..8 {
+                        for bit in [1, 2, 4] {
+                            if k & bit == 0 {
+                                line(corner(k), corner(k | bit));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -9081,7 +9266,28 @@ impl Editor {
         let step = self.snapping.position as f32;
         let at = (self.orbit.target / step).round() * step;
         let kind = ADD[what].0;
-        self.history.begin(&format!("Add {kind}"), None);
+        // A reverb zone added with something selected takes the selection's box (E11-4c):
+        // its instances' boxes, measured by the next frame, in this step.
+        let fit = (kind == "Reverb Zone" && !self.selection.is_empty()).then(|| {
+            self.gestures += 1;
+            let slots = self
+                .outline_items
+                .iter()
+                .filter(|i| i.class != OutlineClass::Hovered)
+                .map(|i| i.slot)
+                .collect();
+            let points = self
+                .selection
+                .iter()
+                .filter_map(|&s| world.get::<GlobalTransform>(s))
+                .map(|g| Vec3::from(g.0.translation))
+                .fold(None, |b: Option<(Vec3, Vec3)>, at| {
+                    Some(b.map_or((at, at), |(lo, hi)| (lo.min(at), hi.max(at))))
+                });
+            (self.gestures, slots, points)
+        });
+        self.history
+            .begin(&format!("Add {kind}"), fit.as_ref().map(|f| f.0));
         let e = if ADD_BLOCKOUT.contains(&what) {
             let host = self
                 .active()
@@ -9110,6 +9316,47 @@ impl Editor {
         self.history.touch_new(world, e);
         self.history.commit(world);
         self.select_only(e);
+        self.zone_fit = fit.map(|(merge, slots, points)| ZoneFit {
+            zone: e,
+            merge,
+            slots,
+            points,
+            found: None,
+        });
+    }
+
+    /// A new reverb zone takes the box a frame measured around what was selected when it
+    /// was added (E11-4c), as part of the add's undo step: placed at its middle, unturned,
+    /// unscaled, half its size (a quarter metre at least).
+    fn fit_zone(&mut self, world: &mut World) {
+        let Some(fit) = self.zone_fit.take_if(|f| f.found.is_some()) else {
+            return;
+        };
+        let (Some((lo, hi)), true) = (
+            fit.found.flatten(),
+            world.get::<ReverbZone>(fit.zone).is_some(),
+        ) else {
+            return;
+        };
+        let half = ((hi - lo) * 0.5).max(Vec3::splat(0.25));
+        self.history.begin("Add Reverb Zone", Some(fit.merge));
+        self.history.touch(world, fit.zone);
+        if let Some(t) = world.get_mut::<Transform>(fit.zone) {
+            t.translation = (lo + hi) * 0.5;
+            t.rotation = Quat::IDENTITY;
+            t.scale = Vec3::ONE;
+        }
+        if let Some(zone) = world.get_mut::<ReverbZone>(fit.zone) {
+            zone.half_extents = half;
+        }
+        self.history.commit(world);
+        let size = half * 2.0;
+        self.say(format!(
+            "The reverb zone takes the selection's box: {} \u{d7} {} \u{d7} {} m",
+            transform::short(size.x),
+            transform::short(size.y),
+            transform::short(size.z)
+        ));
     }
 
     /// The blockout group a new brush joins, as [`Editor::brush_group`] finds it, or the
@@ -13845,6 +14092,13 @@ impl Editor {
             } else {
                 "Code tabs show their open files and outline"
             }));
+        } else if id == ids.sound_ranges {
+            self.show_sound_ranges = !self.show_sound_ranges;
+            self.say(String::from(if self.show_sound_ranges {
+                "Sound ranges shown: every source's reach and every reverb zone, dim"
+            } else {
+                "Sound ranges hidden"
+            }));
         } else if id == ids.colliders {
             self.show_colliders = !self.show_colliders;
             self.collider_key.clear();
@@ -17739,6 +17993,58 @@ impl Editor {
     }
 
     /// A dragged material file given to entity `e`'s model, as one undo step.
+    /// The active entity's 3D sound's falloff for the inspector (E11-4c): its level over
+    /// distance as bars (−48 dB to full), out to its far ring (a half again past it for a
+    /// sound that holds its level there), and what it is at the camera's distance.
+    fn follow_falloff(&mut self, world: &World) {
+        self.falloff_shown = false;
+        if self.inspected.is_some() || self.mixer_picked.is_some() {
+            return;
+        }
+        let Some(e) = self.active() else {
+            return;
+        };
+        let (Some(sound), Some(g)) = (
+            world.get::<AudioSource3D>(e),
+            world.get::<GlobalTransform>(e),
+        ) else {
+            return;
+        };
+        let (near, far, falloff) = (sound.min_distance, sound.max_distance, sound.falloff);
+        let holds = falloff == engine_app::Falloff::Inverse;
+        let end = if holds { far * 1.5 } else { far }.max(near + 0.1);
+        let level = |gain: f32| {
+            if gain <= 0.0 {
+                0.0
+            } else {
+                ((20.0 * gain.log10() + 48.0) / 48.0).clamp(0.0, 1.0)
+            }
+        };
+        for (k, bar) in self.falloff_bars.iter_mut().enumerate() {
+            let d = (k as f32 + 0.5) / FALLOFF_BARS as f32 * end;
+            *bar = level(falloff_gain(d, near, far, falloff));
+        }
+        let distance = (self.orbit.eye() - Vec3::from(g.0.translation)).length();
+        self.falloff_mark = (distance <= end).then(|| distance / end);
+        let gain = falloff_gain(distance, near, far, falloff);
+        let t = &mut self.falloff_texts;
+        t[0].clear();
+        if gain >= 0.999 {
+            let _ = write!(t[0], "full at {distance:.1} m");
+        } else if gain <= 0.0 {
+            let _ = write!(t[0], "silent at {distance:.1} m");
+        } else {
+            let _ = write!(
+                t[0],
+                "\u{2212}{:.0} dB at {distance:.1} m",
+                -20.0 * gain.log10()
+            );
+        }
+        t[1].clear();
+        let _ = write!(t[1], "{end:.0} m");
+        self.falloff_shown = true;
+    }
+
     /// A bus field's list (E11-3d): `master`, then the mixer's buses as its strips stand.
     fn fill_bus_choices(&mut self) {
         self.open_mixer();
@@ -20981,6 +21287,7 @@ fn draw_overlays(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, can
         canvas.draw(&Quad::line(a, b, scale).color(reach.color()).order(order));
     }
     let active = editor.active();
+    let mut active_at = None;
     for icon in &editor.view_icons {
         let color = if Some(icon.entity) == editor.icon_hover {
             Vec4::ONE
@@ -20991,11 +21298,22 @@ fn draw_overlays(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, can
         } else {
             Vec4::new(0.85, 0.85, 0.85, 1.0)
         };
-        canvas.draw(
-            &Quad::circle(icon.at, 11.0 * scale)
-                .color(Vec4::new(0.08, 0.08, 0.1, 0.75))
-                .order(order),
-        );
+        // A source in Play (E11-4c): a filled green disk while it plays, a hollow ring
+        // while it is silent; shapes, not colour alone.
+        let disk = match icon.sounding {
+            Some(true) => Vec4::new(0.12, 0.5, 0.3, 0.92),
+            Some(false) => Vec4::new(0.08, 0.08, 0.1, 0.3),
+            None => Vec4::new(0.08, 0.08, 0.1, 0.75),
+        };
+        canvas.draw(&Quad::circle(icon.at, 11.0 * scale).color(disk).order(order));
+        if icon.sounding == Some(false) {
+            canvas.draw(
+                &Quad::circle(icon.at, 11.0 * scale)
+                    .outline(1.5 * scale)
+                    .color(Vec4::new(0.85, 0.85, 0.85, 0.7))
+                    .order(order),
+            );
+        }
         editor.text.draw_centered(
             canvas,
             glyphs,
@@ -21005,6 +21323,43 @@ fn draw_overlays(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, can
             color,
             order,
         );
+        // The camera that hears, when the scene has no listener: an ear at its top right.
+        if icon.hears {
+            let ear = icon.at + Vec2::new(10.0, -10.0) * scale;
+            canvas.draw(
+                &Quad::circle(ear, 7.0 * scale)
+                    .color(Vec4::new(0.08, 0.08, 0.1, 0.85))
+                    .order(order),
+            );
+            editor.text.draw_centered(
+                canvas,
+                glyphs,
+                icons::LISTENER,
+                10.0 * scale,
+                ear,
+                Vec4::new(0.85, 0.85, 0.85, 1.0),
+                order,
+            );
+        }
+        if Some(icon.entity) == active {
+            active_at = Some(icon.at);
+        }
+    }
+    // The active reverb zone's room and priority, under its icon; taken for the label's
+    // while and put back, so no string is made a frame.
+    if let Some(at) = active_at
+        && !editor.zone_label.is_empty()
+    {
+        let text = std::mem::take(&mut editor.zone_label);
+        label(
+            &mut editor.text,
+            glyphs,
+            canvas,
+            at + Vec2::new(0.0, 24.0 * scale),
+            &text,
+            scale,
+        );
+        editor.zone_label = text;
     }
     canvas.set_clip(None);
 }
@@ -22741,6 +23096,19 @@ impl Overlay for EditorOverlay {
                         }
                     }
                     editor.framed = bounds;
+                }
+                // A new reverb zone's box: what was selected, by its instances' boxes, or
+                // by its places when none has one (E11-4c).
+                if let Some(fit) = editor.zone_fit.as_mut()
+                    && fit.found.is_none()
+                    && let Some(scene) = view.scene
+                {
+                    let boxes = fit
+                        .slots
+                        .iter()
+                        .filter_map(|&s| scene.slot_box(s))
+                        .reduce(|(a, b), (lo, hi)| (a.min(lo), b.max(hi)));
+                    fit.found = Some(boxes.or(fit.points));
                 }
                 // The square under the pointer last: drawn from the view's commands, it holds
                 // the picker for the frame.
@@ -26077,6 +26445,191 @@ mod tests {
         ed.update(&mut world);
         assert!(ed.sound_view.is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sources_in_play_show_whether_they_play_and_the_camera_hears_without_a_listener() {
+        let mut world = World::new();
+        let hum = thing_at(&mut world, "Hum", Vec3::ZERO, AudioSource3D::new("hum.wav"));
+        let quiet = thing_at(
+            &mut world,
+            "Quiet",
+            Vec3::new(1.0, 0.0, 0.0),
+            AudioSource3D::new("hum.wav"),
+        );
+        world
+            .get_mut::<AudioSource3D>(quiet)
+            .unwrap()
+            .source
+            .playing = false;
+        let camera = thing_at(
+            &mut world,
+            "Camera",
+            Vec3::new(-1.0, 0.0, 0.0),
+            Camera::perspective(1.0, 0.1, 100.0),
+        );
+        let mut ed = Editor::new(
+            [1280, 720],
+            folder("icons-in-play"),
+            None,
+            AssetId::new(),
+            AssetPaths::new(),
+        )
+        .unwrap();
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let icon = |ed: &Editor, e: Entity| {
+            let i = ed.view_icons.iter().find(|i| i.entity == e).unwrap();
+            (i.sounding, i.hears)
+        };
+        // Editing: no state on the sources; no listener, so the camera hears.
+        assert_eq!(icon(&ed, hum), (None, false));
+        assert_eq!(icon(&ed, camera), (None, true));
+        // In Play, ejected (Shift+F8: the editor's view, its overlays): the one playing
+        // filled, the stopped one hollow.
+        let playing = ed.prepare_play(&mut world, false);
+        ed.play = Some(playing);
+        ed.play.as_mut().unwrap().ejected = Some(None);
+        ed.update(&mut world);
+        assert_eq!(icon(&ed, hum), (Some(true), false));
+        assert_eq!(icon(&ed, quiet), (Some(false), false));
+        assert_eq!(icon(&ed, camera), (None, true));
+        // A listener in the scene: it hears, not the camera.
+        let ears = thing_at(&mut world, "Ears", Vec3::new(0.0, 1.0, 0.0), AudioListener);
+        ed.update(&mut world);
+        assert_eq!(icon(&ed, camera), (None, false));
+        assert_eq!(icon(&ed, ears), (None, false));
+    }
+
+    #[test]
+    fn a_reverb_zone_shows_its_room_and_takes_the_selections_box() {
+        let (mut world, mut ed, cube, lamp) = two_entities();
+        ed.select_only(cube);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        // Added with the cube selected: waits for the frame's measure of it.
+        let before = ed.history.steps().count();
+        let zone_kind = ADD.iter().position(|a| a.0 == "Reverb Zone").unwrap();
+        ed.add(&mut world, zone_kind);
+        let zone = ed.active().unwrap();
+        assert!(world.get::<ReverbZone>(zone).is_some());
+        let fit = ed.zone_fit.as_ref().expect("asked for the box");
+        assert_eq!(fit.zone, zone);
+        assert!(fit.points.is_some(), "the cube's place");
+        // The frame's answer: the cube's box.
+        ed.zone_fit.as_mut().unwrap().found =
+            Some(Some((Vec3::new(-1.0, 0.0, -2.0), Vec3::new(3.0, 2.0, 2.0))));
+        ed.update(&mut world);
+        assert!(ed.zone_fit.is_none());
+        let t = *world.get::<Transform>(zone).unwrap();
+        assert_eq!(t.translation, Vec3::new(1.0, 1.0, 0.0));
+        let z = *world.get::<ReverbZone>(zone).unwrap();
+        assert_eq!(z.half_extents, Vec3::new(2.0, 1.0, 2.0));
+        assert_eq!(
+            ed.history.steps().count(),
+            before + 1,
+            "one step with the add"
+        );
+        // Selected, its label gives its room and priority.
+        ed.update(&mut world);
+        assert_eq!(ed.zone_label, "Room \u{b7} priority 0");
+        world.get_mut::<ReverbZone>(zone).unwrap().room = engine_app::Room::HALL;
+        world.get_mut::<ReverbZone>(zone).unwrap().priority = 2;
+        ed.update(&mut world);
+        assert_eq!(ed.zone_label, "Hall \u{b7} priority 2");
+        world.get_mut::<ReverbZone>(zone).unwrap().room.decay = 1.7;
+        ed.update(&mut world);
+        assert_eq!(ed.zone_label, "1.7 s decay \u{b7} priority 2");
+        ed.select_only(lamp);
+        ed.update(&mut world);
+        assert!(ed.zone_label.is_empty());
+        // One undo takes the zone away, fit and all.
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert!(world.get::<ReverbZone>(zone).is_none());
+        // Added with nothing selected: its own size, nothing asked.
+        ed.selection.clear();
+        ed.add(&mut world, zone_kind);
+        assert!(ed.zone_fit.is_none());
+    }
+
+    #[test]
+    fn sound_ranges_show_every_reach_and_the_falloff_reads_from_the_camera() {
+        let (mut world, mut ed, cube, lamp) = two_entities();
+        world.insert(cube, AudioSource3D::new("hum.wav"));
+        let zone = world.spawn((
+            SceneId::new(),
+            Name::new("Hall"),
+            Transform::from_xyz(0.0, 0.0, -2.0),
+            GlobalTransform(Affine3A::from_translation(Vec3::new(0.0, 0.0, -2.0))),
+            ReverbZone::new(Vec3::splat(2.0), engine_app::Room::HALL),
+        ));
+        let _ = zone;
+        ed.select_only(lamp);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let ranges = |ed: &Editor| {
+            ed.reach_lines
+                .iter()
+                .filter(|(_, _, r)| *r == Reach::Range)
+                .count()
+        };
+        assert_eq!(ranges(&ed), 0, "off until asked");
+        let id = ed.ids.sound_ranges;
+        ed.run(&mut world, id);
+        ed.update(&mut world);
+        assert!(
+            ranges(&ed) > 12,
+            "the source's ring and the zone's box: {}",
+            ranges(&ed)
+        );
+        // A selected source draws its own rings: not twice.
+        ed.select_only(cube);
+        ed.update(&mut world);
+        let with_cube = ranges(&ed);
+        ed.select_only(lamp);
+        ed.update(&mut world);
+        assert!(ranges(&ed) > with_cube, "{} {}", ranges(&ed), with_cube);
+        // The falloff: the cube's sound (full to 2 m, silent at 20 m, linear) read at the
+        // camera's distance.
+        {
+            let s = world.get_mut::<AudioSource3D>(cube).unwrap();
+            s.min_distance = 2.0;
+            s.max_distance = 20.0;
+            s.falloff = engine_app::Falloff::Linear;
+        }
+        ed.select_only(cube);
+        ed.update(&mut world);
+        assert!(ed.falloff_shown);
+        let at = world.get::<GlobalTransform>(cube).unwrap().0.translation;
+        let distance = (ed.orbit.eye() - Vec3::from(at)).length();
+        let gain = falloff_gain(distance, 2.0, 20.0, engine_app::Falloff::Linear);
+        let label = &ed.falloff_texts[0];
+        if gain > 0.0 && gain < 0.999 {
+            let db = format!("\u{2212}{:.0} dB at {distance:.1} m", -20.0 * gain.log10());
+            assert_eq!(label, &db);
+        } else {
+            assert!(label.contains(&format!("{distance:.1} m")), "{label}");
+        }
+        assert_eq!(ed.falloff_texts[1], "20 m");
+        assert!(ed.falloff_bars[0] > 0.99 && ed.falloff_bars[FALLOFF_BARS - 1] < 0.2);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Falloff").is_empty());
+        // The level's rule: full inside, then down, silent at the end or held there.
+        assert_eq!(
+            falloff_gain(1.0, 2.0, 20.0, engine_app::Falloff::Linear),
+            1.0
+        );
+        assert!((falloff_gain(11.0, 2.0, 20.0, engine_app::Falloff::Linear) - 0.5).abs() < 1e-6);
+        assert_eq!(
+            falloff_gain(25.0, 2.0, 20.0, engine_app::Falloff::Linear),
+            0.0
+        );
+        assert!((falloff_gain(40.0, 2.0, 20.0, engine_app::Falloff::Inverse) - 0.1).abs() < 1e-6);
+        // Another entity, or a file picked: none.
+        ed.select_only(lamp);
+        ed.update(&mut world);
+        assert!(!ed.falloff_shown);
     }
 
     #[test]

@@ -2254,6 +2254,54 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **E11-4 is done** but for View: Sound Ranges, the inspector's falloff curve with the
   camera's distance, and blockout's radius handles.
 
+## As built (E11-4c, 2026-10-28): the last sound gizmos and the falloff curve
+
+What the sound UX note (`docs/research/ux/sound.md`, "Gizmos in the viewport" and its
+scenarios) still asked of E11-4 after E11-4b.
+
+- **View: Sound Ranges** (`view.sound_ranges`, the palette): every 3D source's outer
+  ring on the level plane through it (48 segments) and every reverb zone's box, turned
+  and scaled with its entity, drawn dim (`Reach::Range`); the selected ones are left to
+  their own rings and boxes, so nothing is drawn twice. Off by default; read through the
+  scene's ids query into the reach buffer each frame reuses.
+- **The falloff in the inspector** (`FalloffView`, `falloff_panel`): for the active
+  entity's `AudioSource3D` (no asset or mixer strip inspected), 64 bars of its level from
+  0 m to its far distance (`Linear`) or half again past it (`Inverse`, which holds
+  there), each bar's height its gain in dB from −48 to 0; the gain is the mixer's rule
+  (`falloff_gain`: full to `min_distance`, then linear to silence, or `near / d` held
+  from the far ring on). The bar under the editor camera's distance has the error colour
+  behind it and its level in the text colour; the line above reads the gain there.
+  - Bars and not a curve: the shell draws rectangles, and 64 columns at the inspector's
+    width read as a curve at one container each.
+  - The bars and both texts live in the editor (`falloff_bars`, `falloff_texts`),
+    rewritten in place each frame.
+- **Icons in Play:** ejected (the editor's view; the game's view draws no overlays), a
+  source's disk is filled green while it plays (`playing` set and a sound named) and a
+  ring while it is silent: shapes, not colour alone (`ViewIcon::sounding`).
+- **The camera that hears:** with no `AudioListener` in the scene, the game's main
+  camera, picked as `CameraView::resolve` picks it (active, highest priority, lowest
+  index among equals), wears an ear at its icon's top right (`ViewIcon::hears`).
+- **A selected zone's label:** under its icon, its room ("Hall" when it is one of
+  `Room`'s presets, else "1.7 s decay") and its priority, written into one string the
+  editor keeps.
+- **A zone fitted to the selection:** a reverb zone added while something is selected
+  takes the selection's box: its outline's instances (the selection with its children)
+  measured by the next frame's render scene (`slot_box`, as framing does), or its places
+  when none has a box; placed at the middle, unturned and unscaled, half the size (a
+  quarter metre at least), committed under the add's merge key so add and fit are one
+  undo step (`ZoneFit`, `fit_zone`).
+- **Tests:** the ranges off until asked, then the source's ring and the zone's box, the
+  selected source not drawn twice; the falloff's texts against the camera's distance, its
+  far end, its bars, the gain's rule (full inside, half way, silent past `Linear`'s end,
+  `Inverse` held), none without a sound; the icons' states while editing and ejected in
+  Play, the ear on the camera without a listener and not with one; a zone added with a
+  cube selected fitted to the measured box in one step that one undo takes back, its
+  label for a preset, another preset and a decay, none for another entity, and no fit
+  with nothing selected.
+- **E11 is done.** The note's later row leaves RMS and loudness meters, DSP time per bus
+  (with the profiler, CLAUDE.md §14), virtual voices marked and VST3 plugins' windows
+  (with VST3 hosting).
+
 ## As built (E11-5b, 2026-10-28): the panel's snapshots
 
 - **The list** (ADR 0122's editor part): a choice at the header's right, "Mix" and each
