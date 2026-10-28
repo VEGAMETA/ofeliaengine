@@ -15,7 +15,7 @@
 use engine_app::prelude::*;
 use engine_app::{AssetMeta, Assets, BakedBrush, PREVIEW_SIZE, PreviewRequest};
 use engine_render::material::MaterialTypeId;
-use engine_scene::{SaveOptions, SceneRegistry, save_with};
+use engine_scene::{AssetPaths, SaveOptions, SceneRegistry, save_with};
 use std::time::{Duration, Instant};
 
 struct Still;
@@ -1090,5 +1090,141 @@ fn a_scene_places_its_prefabs() {
         })
         .count();
     assert_eq!(red, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// E10-4a: a material variant (ADR 0120's addendum) draws its base's colour, which it leaves
+/// to its base; the base's file written anew, the variant follows; the base held by the
+/// editor, the variant follows that too, its own roughness kept throughout.
+#[test]
+fn a_variant_draws_its_base_and_follows_it() {
+    let dir = std::env::temp_dir().join(format!("ofelia-variant-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("materials")).unwrap();
+    std::fs::create_dir_all(dir.join("scenes")).unwrap();
+    let (red_id, rough_id) = (AssetId::new(), AssetId::new());
+    let base = |base_color: [f32; 4]| MaterialFile {
+        base_color,
+        roughness: 0.4,
+        ..MaterialFile::default()
+    };
+    let (red, green, blue) = (
+        [0.8, 0.15, 0.1, 1.0],
+        [0.1, 0.8, 0.15, 1.0],
+        [0.1, 0.15, 0.8, 1.0],
+    );
+    std::fs::write(
+        dir.join("materials/red.material"),
+        base(red).to_text(red_id),
+    )
+    .unwrap();
+    let (red_ref, rough_ref) = (AssetRef::file(red_id), AssetRef::file(rough_id));
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(red_ref, "materials/red.material");
+    paths.insert(rough_ref, "materials/rough.material");
+    let mut variant = base(red);
+    variant.base = red_ref;
+    variant.roughness = 0.9;
+    let text = variant.to_variant_text(rough_id, &paths, &base(red));
+    assert!(!text.contains("base_color"), "{text}");
+    std::fs::write(dir.join("materials/rough.material"), &text).unwrap();
+
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Cube"),
+        Transform::IDENTITY,
+        Model::new(builtin::CUBE, rough_ref),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Sun {
+            color: Vec3::splat(1.2),
+            ambient: Vec3::splat(0.04),
+        },
+    ));
+    let eye = Vec3::new(2.0, 1.2, 3.0);
+    world.spawn((
+        SceneId::new(),
+        Name::new("Camera"),
+        Transform::from_translation(eye).with_rotation(look_rotation(eye, Vec3::ZERO, Vec3::Y)),
+        Camera::perspective(1.0, 0.05, 200.0),
+    ));
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut scene = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut scene,
+    )
+    .unwrap();
+    std::fs::write(dir.join("scenes/main.scene"), &scene).unwrap();
+    let (width, height) = (320u32, 180u32);
+    let settings = PlayerSettings {
+        title: String::from("variant test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("scenes/main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let middle = |player: &mut Player, game: &mut Still| {
+        let rgba = player.capture(game).unwrap().unwrap();
+        let i = (((height / 2) * width + width / 2) * 4) as usize;
+        [rgba[i], rgba[i + 1], rgba[i + 2]].map(f32::from)
+    };
+    // Waits until the cube's middle is mostly channel `c`: the seconds it took.
+    let until = |player: &mut Player, game: &mut Still, c: usize| {
+        let started = Instant::now();
+        loop {
+            player.frame(game).unwrap();
+            let px = middle(player, game);
+            if (0..3).all(|k| k == c || px[c] > 1.5 * px[k]) {
+                return started.elapsed().as_secs_f64();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "not drawn: {px:?} (channel {c})"
+            );
+        }
+    };
+    let first = until(&mut player, &mut game, 0);
+    assert_eq!(player.assets().problem(rough_ref), None);
+    // Its base written anew: the variant follows.
+    std::fs::write(
+        dir.join("materials/red.material"),
+        base(green).to_text(red_id),
+    )
+    .unwrap();
+    player.asset_changed(red_id, "materials/red.material");
+    let followed = until(&mut player, &mut game, 1);
+    // Its base held by the editor: followed too.
+    player.set_material_file(red_id, Some((base(blue), AssetPaths::new())));
+    let held = until(&mut player, &mut game, 2);
+    println!(
+        "the variant drawn in its base's red after {first:.2} s; its base's file written \
+         anew, followed in {followed:.3} s; held by the editor, in {held:.3} s"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

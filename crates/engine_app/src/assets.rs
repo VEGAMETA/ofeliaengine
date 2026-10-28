@@ -800,6 +800,9 @@ pub struct Assets {
     /// ([`Self::set_material`], ADR 0120's E10-1c), with the paths their references were
     /// written with.
     held: HashMap<AssetId, (MaterialFile, AssetPaths)>,
+    /// Material files' variants by base (E10-4a): those read over each, made again when the
+    /// editor holds a new version of it.
+    variants: HashMap<AssetId, Vec<AssetId>>,
     changes: Option<Changes>,
     orphans: Option<Orphans>,
     changed: Vec<(Entity, Model)>,
@@ -863,6 +866,7 @@ impl Assets {
             depends: HashMap::new(),
             problems: HashMap::new(),
             held: HashMap::new(),
+            variants: HashMap::new(),
             changes: None,
             orphans: None,
             changed: Vec::new(),
@@ -914,12 +918,27 @@ impl Assets {
             Some(held) => self.held.insert(file, held),
             None => self.held.remove(&file),
         };
-        let asset = AssetRef::file(file);
+        self.remake_material(AssetRef::file(file), table);
+        // Its variants, read over it again (E10-4a).
+        let variants = self.variants.get(&file).cloned().unwrap_or_default();
+        for variant in variants {
+            if variant != file {
+                self.remake_material(AssetRef::file(variant), table);
+            }
+        }
+    }
+
+    /// Material file `asset`'s material, if made, made again in its place from the file as
+    /// it is read now ([`Self::set_material`]).
+    fn remake_material(&mut self, asset: AssetRef, table: &mut MaterialTable) {
         let Some(&material) = self.materials.get(&asset) else {
             return;
         };
         let (data, written) = match self.read_material(asset) {
-            Ok(read) => read,
+            Ok((data, written, bases)) => {
+                self.note_bases(asset.file, &bases);
+                (data, written)
+            }
             Err(why) => {
                 self.fail(asset, why);
                 return;
@@ -1308,7 +1327,10 @@ impl Assets {
         let file = if asset == builtin::MATERIAL {
             Ok((MaterialFile::default(), AssetPaths::new()))
         } else {
-            self.read_material(asset)
+            self.read_material(asset).map(|(file, written, bases)| {
+                self.note_bases(asset.file, &bases);
+                (file, written)
+            })
         };
         match file {
             Ok((file, written)) => {
@@ -1712,13 +1734,18 @@ impl Assets {
         }
     }
 
-    /// Material file `asset` read (as the editor holds it, if it does), and the paths its
-    /// references were written with.
-    fn read_material(&self, asset: AssetRef) -> Result<(MaterialFile, AssetPaths), String> {
+    /// Material file `asset` read (as the editor holds it, if it does) over its bases (a
+    /// variant's, E10-4a, each as the editor holds it or from its file): the file, the paths
+    /// its references were written with, and its bases (each one's id and file).
+    #[allow(clippy::type_complexity)]
+    fn read_material(
+        &self,
+        asset: AssetRef,
+    ) -> Result<(MaterialFile, AssetPaths, Vec<(AssetId, Option<PathBuf>)>), String> {
         if asset.part == 0
             && let Some((file, written)) = self.held.get(&asset.file)
         {
-            return Ok((file.clone(), written.clone()));
+            return Ok((file.clone(), written.clone(), Vec::new()));
         }
         if asset.part != 0 {
             return Err(String::from(
@@ -1733,16 +1760,45 @@ impl Assets {
         let full = self.root.join(path);
         let text =
             std::fs::read_to_string(&full).map_err(|e| format!("{}: {e}", full.display()))?;
-        let (file, report) = MaterialFile::parse(&text).map_err(|e| format!("{path}:{e}"))?;
-        for (line, warning) in &report.warnings {
+        let held = |r: AssetRef| {
+            if r.part == 0 {
+                self.held.get(&r.file).cloned()
+            } else {
+                None
+            }
+        };
+        let read =
+            MaterialFile::read_with_bases(&text, &self.root, &held).map_err(|e| match &e.path {
+                Some(_) => e.to_string(),
+                None => format!("{path}: {}", e.message),
+            })?;
+        for (line, warning) in &read.report.warnings {
             log::warn!(target: "engine_app::assets", "{path}:{line}: {warning}");
         }
-        match report.id {
+        match read.report.id {
             Some(id) if id != asset.file => Err(format!(
                 "{path} holds the material {id}, not {}",
                 asset.file
             )),
-            _ => Ok((file, report.assets)),
+            _ => Ok((read.file, read.report.assets, read.bases)),
+        }
+    }
+
+    /// Material file `file`'s bases (`bases`, E10-4a) noted: their files as files it reads
+    /// ([`Self::changed`] makes it again when one is written anew), and it as their
+    /// variant ([`Self::set_material`] makes it again when the editor holds one anew).
+    fn note_bases(&mut self, file: AssetId, bases: &[(AssetId, Option<PathBuf>)]) {
+        for (base, at) in bases {
+            let variants = self.variants.entry(*base).or_default();
+            if !variants.contains(&file) {
+                variants.push(file);
+            }
+            if let Some(under) = at.as_ref().and_then(|at| project_path(&self.root, at)) {
+                let users = self.depends.entry(under).or_default();
+                if !users.contains(&file) {
+                    users.push(file);
+                }
+            }
         }
     }
 

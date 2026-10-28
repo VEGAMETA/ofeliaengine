@@ -265,3 +265,115 @@ double_sided = false
   - material slots as asset fields (ADR 0115's last item);
   - variants that follow their base (`base`, E10-4).
 
+## Addendum (E10-4a, 2026-10-29): variants that follow their base
+
+The team answered the materials UX note's second question with b, in E10-4 (2026-10-28).
+A material file may name its `base` and hold only what it changes, and the inspector marks
+those values as it marks a prefab's overrides. Until now Make Variant copied the file
+("a copy first").
+
+### The file
+
+```text
+[material version=2 id=9a8b7c6d5e4f30211203f4e5d6c7b8a9]
+
+base = asset("materials/red.material", 4f8e1d2c3b4a59687706f5e4d3c2b1a0)
+base_color = [0.1, 0.3, 0.9, 1]
+numbers["roughness"] = 0.2
+```
+
+- **`base`** names another material file. Without one (the default, `none`, not written)
+  the file is as it was before.
+- **What it holds** is only what it changes: every line its base's resolved file does not
+  have, the `base` line included. A value set to what the base has is not written, so a
+  later change to the base reaches the variant.
+- **Maps merge by key.** A variant that sets `numbers["roughness"]` keeps the base's other
+  numbers. A variant cannot remove a key its base sets; no case for that has come up.
+- **The version stays 2.** A file without `base` is unchanged, and the editor and the
+  engine are one build, so no older reader meets the new field.
+
+### Options weighed
+
+- **a. Lines over the base's value (chosen).**
+  - It uses one reader and the scene grammar's own rule: a line sets one field and leaves
+    the rest.
+  - A variant's text is a diff of lines, so it merges in version control the way a prefab
+    instance's overrides do.
+- **b. A list of overridden field names next to full values,** as Unity's material variants
+  keep overrides as property paths.
+  - The list has to be kept in step with the values.
+  - Every value is still written, so a change to the base does not reach the variant
+    without the list. It gains nothing over a.
+- **c. Flatten on save:** the variant is written whole and its base is only a note.
+  - An edit of the base would not reach its variants, which is what the team chose
+    against.
+
+### Decision
+
+- **Reading** (`MaterialFile::read_with_bases(text, root, open)`, `load_with_bases`):
+  - while a file names a base, the base is read first, then the variant's own lines over
+    the base's values (`engine_scene::read_value` keeps what the text does not name);
+  - a base comes from `open` when the editor holds it, unsaved edits and all; otherwise it
+    is read from its file through its path in the variant;
+  - the result (`ResolvedMaterial`) is the resolved file, the report with every path in
+    the chain (the variant's own over its bases'), the bases (id, and file when read from
+    disk), and the base resolved without the variant's lines.
+  - `read_over(text, base)` reads a variant's text over a base already resolved: what the
+    editor does for undo and when a base changes.
+- **Refused, with the file's path:**
+  - a base that is the file itself, or that comes back to any file in the chain, as
+    prefabs refuse cycles;
+  - a base with no path written;
+  - a base file that holds another material's id.
+- **Writing** (`to_variant_text(id, assets, base)`): the header, then each of the file's
+  lines that the base's text does not have, both written with the same paths.
+- **Every reader resolves:**
+  - the player's assets;
+  - the cook (`apply_material_map`);
+  - the live material files of a cooked game in development (`engine_streaming`);
+  - the editor's inspector.
+
+  The cook writes materials out resolved, so a pack holds no chains and a game never
+  resolves.
+
+### As built (E10-4a, 2026-10-29)
+
+- **The player** (`engine_app::assets`):
+  - `read_material` reads a material over its bases, a base the editor holds coming from
+    there, and gives back the bases it read;
+  - `note_bases` makes each base file one of the variant's dependencies, so the
+    variant's material is made again when a base's file is written anew (`changed`, as an
+    image's user is);
+  - it also records the variant under each of its bases, so when the editor holds a new
+    version of a base (`set_material`), that base and every variant recorded under it are
+    made again in place (`remake_material`).
+- **Live material files** watch a variant's base files with its own and its module, and
+  read the variant again when one changes.
+- **The editor:**
+  - a material's doc (`MaterialDoc`) keeps a variant's base resolved. It shows the base's
+    values under the variant's own, writes only what the variant changes, and reads an
+    undone text over the same base;
+  - a base the inspector holds is followed every frame (compared, copied only when it
+    differs). A base the inspector does not hold is read again when its file changes. In
+    both cases the variant's own values are kept and the variant goes to the player
+    again;
+  - **Make Variant** now writes a variant: a file of `base` alone, given to the selection
+    in one step. It draws as its base, the base's unsaved edits with it.
+- **Tests:**
+  - in `engine_assets`:
+    - a variant read over its base's file, and over a base held in memory;
+    - a variant of a variant;
+    - the text holding only what the variant changed, read back the same;
+    - a base's later edit reaching the variant;
+    - a chain that goes round, and a base without a path, refused;
+  - in the editor:
+    - a variant's doc writing only its own lines;
+    - the doc following its base with its own values kept;
+    - undo reading over the base;
+    - Make Variant writing `base` alone and showing the base's unsaved edit;
+  - on the GPU (the player): a variant drawn in its base's colour, then following its base's
+    file written anew (3 ms after the change, on the Radeon), then following its base held
+    by the editor (2 ms).
+- **Next (E10-4b):** the inspector marks the values a variant sets as a prefab's overrides
+  are marked (a bold label and a bar). ↺ puts one back to its base's value, Apply to Base
+  writes it into the base, and a Base row names the base and opens it.

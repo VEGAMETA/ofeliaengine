@@ -29,6 +29,10 @@
 //!   scene's map (`Replaced`).
 //! - **Paths are asset references** from the project's root ([`MaterialFile::typed`] is given
 //!   it); an absolute path is used as it is.
+//! - **A variant** (ADR 0120's addendum, E10-4a) names its `base`, another material file,
+//!   and holds only what it changes: it is read over its base's values
+//!   ([`MaterialFile::read_with_bases`]), so what it leaves to its base follows the base, and
+//!   written as the lines its base has not ([`MaterialFile::to_variant_text`]).
 //! - [`TypedMaterial::build_params`] lays the values out as the type's `Params` struct (from
 //!   Slang's reflection, `engine_shader::StructLayout`). A field the file does not set is zero
 //!   (a texture none: white) and listed in [`BuiltParams::unset`]; a name the struct does not
@@ -141,6 +145,9 @@ impl Default for Fallback {
 /// material, or with a shader a material type's instance.
 #[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct MaterialFile {
+    /// The material file it is a variant of (E10-4a): what it does not set is its base's.
+    /// None: a material of its own.
+    pub base: AssetRef,
     /// The Slang module defining its type; none: the standard material.
     pub shader: AssetRef,
     /// The type's name in it.
@@ -179,6 +186,7 @@ impl Default for MaterialFile {
     /// The standard material: grey (0.8), dielectric, roughness 0.5, opaque.
     fn default() -> Self {
         Self {
+            base: AssetRef::NONE,
             shader: AssetRef::NONE,
             type_name: String::new(),
             numbers: BTreeMap::new(),
@@ -194,6 +202,101 @@ impl Default for MaterialFile {
             double_sided: false,
         }
     }
+}
+
+/// A material file read with its bases ([`MaterialFile::read_with_bases`], E10-4a).
+#[derive(Debug)]
+pub struct ResolvedMaterial {
+    /// The file as it draws: its bases' values under its own.
+    pub file: MaterialFile,
+    /// What reading it reported: its own id and warnings, and the paths of every reference
+    /// of its chain (its own over its bases').
+    pub report: ValueReport,
+    /// Its bases, nearest first: each one's id and file (none for one `open` held).
+    pub bases: Vec<(AssetId, Option<PathBuf>)>,
+    /// Its base resolved, without its own lines, and the paths that base's references were
+    /// written with: what the editor writes it as a variant of.
+    pub base: Option<(MaterialFile, AssetPaths)>,
+}
+
+/// The file of text `text` (at `path`, when known) read over its bases; `chain` the ids met
+/// so far, for a base that comes back.
+fn read_chain(
+    text: &str,
+    path: Option<&Path>,
+    root: &Path,
+    open: &dyn Fn(AssetRef) -> Option<(MaterialFile, AssetPaths)>,
+    chain: &mut Vec<AssetId>,
+) -> Result<ResolvedMaterial, MaterialFileError> {
+    let error = |message: String| MaterialFileError {
+        path: path.map(Path::to_owned),
+        message,
+    };
+    let (own, report) = MaterialFile::parse(text).map_err(|e| error(e.to_string()))?;
+    if own.base.is_none() {
+        return Ok(ResolvedMaterial {
+            file: own,
+            report,
+            bases: Vec::new(),
+            base: None,
+        });
+    }
+    if let Some(id) = report.id
+        && !chain.contains(&id)
+    {
+        chain.push(id);
+    }
+    let base = own.base;
+    if chain.contains(&base.file) {
+        return Err(error(String::from(
+            "its base comes back to it: a variant's bases cannot go round",
+        )));
+    }
+    chain.push(base.file);
+    // The base resolved: as it is held, else from its file.
+    let (under, under_paths, bases) = match open(base) {
+        Some((file, paths)) => (file, paths, vec![(base.file, None)]),
+        None => {
+            let at = report
+                .assets
+                .get(base)
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| error(format!("no path written for its base {}", base.file)))?;
+            let full = resolve(root, Path::new(at));
+            let base_text = std::fs::read_to_string(&full).map_err(|e| MaterialFileError {
+                path: Some(full.clone()),
+                message: e.to_string(),
+            })?;
+            let read = read_chain(&base_text, Some(&full), root, open, chain)?;
+            if let Some(id) = read.report.id
+                && id != base.file
+            {
+                return Err(MaterialFileError {
+                    path: Some(full),
+                    message: format!("holds the material {id}, not the base {}", base.file),
+                });
+            }
+            let mut bases = vec![(base.file, Some(full))];
+            bases.extend(read.bases);
+            (read.file, read.report.assets, bases)
+        }
+    };
+    // Its own lines over its base's values.
+    let mut file = under.clone();
+    let own_report =
+        engine_scene::read_value(MaterialFile::KIND, MaterialFile::VERSION, text, &mut file)
+            .map_err(|e| error(e.to_string()))?;
+    let mut paths = under_paths.clone();
+    paths.extend(&own_report.assets);
+    Ok(ResolvedMaterial {
+        file,
+        report: ValueReport {
+            assets: paths,
+            ..own_report
+        },
+        bases,
+        base: Some((under, under_paths)),
+    })
 }
 
 /// A typed material file resolved: what the cook and the run time build its parameters from.
@@ -320,7 +423,12 @@ impl MaterialFile {
         for line in all.lines() {
             let empty = matches!(
                 line,
-                "shader = none" | "type = \"\"" | "numbers = {}" | "vectors = {}" | "textures = {}"
+                "base = none"
+                    | "shader = none"
+                    | "type = \"\""
+                    | "numbers = {}"
+                    | "vectors = {}"
+                    | "textures = {}"
             ) || (!typed && line == "look = Own");
             if !empty {
                 out.push_str(line);
@@ -340,6 +448,73 @@ impl MaterialFile {
         let mut file = Self::default();
         let report = engine_scene::read_value(Self::KIND, Self::VERSION, text, &mut file)?;
         Ok((file, report))
+    }
+
+    /// A material file's text read with its bases (E10-4a): while it names a `base`, the
+    /// base is read first (as `open` holds it, an editor's unsaved edits and all, else from
+    /// its file under the project's `root`), and its own lines then over the base's values,
+    /// so what it does not set is its base's. A file without a base reads as
+    /// [`Self::parse`] reads it.
+    ///
+    /// # Errors
+    ///
+    /// The text or a base's file that cannot be read, a base without a path, a base's file
+    /// holding another material, or a chain of bases coming back to a file of it.
+    pub fn read_with_bases(
+        text: &str,
+        root: &Path,
+        open: &dyn Fn(AssetRef) -> Option<(Self, AssetPaths)>,
+    ) -> Result<ResolvedMaterial, MaterialFileError> {
+        let mut chain = Vec::new();
+        read_chain(text, None, root, open, &mut chain)
+    }
+
+    /// A variant's text read over its base's values `base` (resolved, E10-4a): what the
+    /// text does not set is the base's.
+    ///
+    /// # Errors
+    ///
+    /// Not a material file, a newer one, or a bad line (with its number).
+    pub fn read_over(text: &str, base: &Self) -> Result<(Self, ValueReport), LoadError> {
+        let mut file = base.clone();
+        let report = engine_scene::read_value(Self::KIND, Self::VERSION, text, &mut file)?;
+        Ok((file, report))
+    }
+
+    /// [`Self::read_with_bases`] of the file at `path`, its bases from their files.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_with_bases`]'s, with the file's path.
+    pub fn load_with_bases(
+        path: &Path,
+        root: &Path,
+    ) -> Result<ResolvedMaterial, MaterialFileError> {
+        let text = std::fs::read_to_string(path).map_err(|e| MaterialFileError {
+            path: Some(path.to_owned()),
+            message: e.to_string(),
+        })?;
+        let mut chain = Vec::new();
+        read_chain(&text, Some(path), root, &|_| None, &mut chain)
+    }
+
+    /// The text of the file as a variant of `base` (its base's values, resolved; E10-4a):
+    /// its header, then each of its lines the base's file has not (its `base` among them),
+    /// its references written with their paths from `assets`. A value it sets to its base's
+    /// is not written, so a later change of the base reaches it.
+    pub fn to_variant_text(&self, id: AssetId, assets: &AssetPaths, base: &Self) -> String {
+        let mine = self.text(id, Some(assets));
+        let theirs = base.text(id, Some(assets));
+        let theirs: std::collections::BTreeSet<&str> = theirs.lines().collect();
+        let mut out = String::with_capacity(mine.len());
+        for (k, line) in mine.lines().enumerate() {
+            // The header and the line after it are the file's own.
+            if k < 2 || !theirs.contains(line) {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
     }
 
     /// Reads and parses the file at `path`.
@@ -769,7 +944,9 @@ pub fn apply_material_map(
             path: Some(path.clone()),
             message,
         };
-        let (source, report) = MaterialFile::load(path)?;
+        // A variant over its bases (E10-4a): a pack holds every material flattened.
+        let read = MaterialFile::load_with_bases(path, root)?;
+        let (source, report) = (read.file, read.report);
         let alpha = |file_alpha: Alpha, cutoff: f32| match file_alpha {
             Alpha::Opaque => AlphaMode::Opaque,
             Alpha::Mask => AlphaMode::Mask(cutoff.to_bits()),
@@ -1053,5 +1230,97 @@ double_sided = true
             MaterialMap::path_for(Path::new("scenes/Sponza.gltf")),
             Path::new("scenes/Sponza.materials.ron")
         );
+    }
+    /// E10-4a: a variant is read over its base (from its file, or as `open` holds it):
+    /// what it sets is its own, the rest its base's, maps merged by key; it writes only the
+    /// lines its base has not, and reads back as it was; a chain of bases that comes back,
+    /// and a base without a path, are refused.
+    #[test]
+    fn a_variant_is_its_base_but_for_what_it_changes() {
+        let dir = std::env::temp_dir().join(format!("ofelia-variants-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("materials")).unwrap();
+        let (red, blue, cyan) = (AssetId::new(), AssetId::new(), AssetId::new());
+        let mut base = MaterialFile {
+            base_color: [1.0, 0.0, 0.0, 1.0],
+            roughness: 0.25,
+            ..MaterialFile::default()
+        };
+        base.numbers.insert(String::from("a"), 1.0);
+        base.numbers.insert(String::from("b"), 2.0);
+        std::fs::write(dir.join("materials/red.material"), base.to_text(red)).unwrap();
+        let mut paths = AssetPaths::new();
+        paths.insert(AssetRef::file(red), "materials/red.material");
+        paths.insert(AssetRef::file(blue), "materials/blue.material");
+        // Blue: red's but its colour and one number.
+        let mut variant = base.clone();
+        variant.base = AssetRef::file(red);
+        variant.base_color = [0.0, 0.0, 1.0, 1.0];
+        variant.numbers.insert(String::from("b"), 5.0);
+        let text = variant.to_variant_text(blue, &paths, &base);
+        assert!(
+            text.starts_with(&format!("[material version=2 id={blue}]\n\n")),
+            "{text}"
+        );
+        assert!(
+            text.contains("base = asset(\"materials/red.material\""),
+            "{text}"
+        );
+        assert!(text.contains("base_color = [0, 0, 1, 1]"), "{text}");
+        assert!(text.contains("numbers[\"b\"] = 5"), "{text}");
+        assert!(!text.contains("roughness"), "{text}");
+        assert!(!text.contains("numbers[\"a\"]"), "{text}");
+        std::fs::write(dir.join("materials/blue.material"), &text).unwrap();
+        let read =
+            MaterialFile::load_with_bases(&dir.join("materials/blue.material"), &dir).unwrap();
+        assert_eq!(read.file, variant);
+        assert_eq!(read.report.id, Some(blue));
+        assert_eq!(
+            read.bases,
+            [(red, Some(dir.join("materials/red.material")))]
+        );
+        assert_eq!(read.base.as_ref().map(|(b, _)| b), Some(&base));
+        // Red changed on disk: blue follows where it does not set its own.
+        let mut redder = base.clone();
+        redder.roughness = 0.75;
+        std::fs::write(dir.join("materials/red.material"), redder.to_text(red)).unwrap();
+        let read =
+            MaterialFile::load_with_bases(&dir.join("materials/blue.material"), &dir).unwrap();
+        assert_eq!(read.file.roughness, 0.75);
+        assert_eq!(read.file.base_color, [0.0, 0.0, 1.0, 1.0]);
+        // Held (an editor's unsaved edits): read from there, not the file.
+        let mut held = base.clone();
+        held.metallic = 1.0;
+        let open =
+            |r: AssetRef| (r == AssetRef::file(red)).then(|| (held.clone(), AssetPaths::new()));
+        let read = MaterialFile::read_with_bases(&text, &dir, &open).unwrap();
+        assert_eq!(read.file.metallic, 1.0);
+        assert_eq!(read.bases, [(red, None)]);
+        // A variant of a variant: cyan over blue over red.
+        let mut deeper = variant.clone();
+        deeper.base = AssetRef::file(blue);
+        deeper.emissive = [0.0, 1.0, 1.0];
+        let cyan_text = deeper.to_variant_text(cyan, &paths, &variant);
+        let read = MaterialFile::read_with_bases(&cyan_text, &dir, &|_| None).unwrap();
+        assert_eq!(read.file.emissive, [0.0, 1.0, 1.0]);
+        assert_eq!(read.file.base_color, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(read.file.roughness, 0.75);
+        assert_eq!(read.bases.len(), 2);
+        // Round: red made a variant of blue.
+        let mut round = redder.clone();
+        round.base = AssetRef::file(blue);
+        std::fs::write(
+            dir.join("materials/red.material"),
+            round.to_variant_text(red, &paths, &variant),
+        )
+        .unwrap();
+        let why =
+            MaterialFile::load_with_bases(&dir.join("materials/blue.material"), &dir).unwrap_err();
+        assert!(why.message.contains("comes back"), "{why}");
+        // A base the file gives no path for.
+        let lost = format!("[material version=2 id={cyan}]\n\nbase = asset(\"\", {red})\n");
+        let why = MaterialFile::read_with_bases(&lost, &dir, &|_| None).unwrap_err();
+        assert!(why.message.contains("no path"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

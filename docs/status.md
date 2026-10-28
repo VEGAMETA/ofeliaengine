@@ -33,8 +33,8 @@ Last updated: 2026-10-28.
     - E10-1, materials in the inspector (one `.material` file, ADR 0120), E10-2, Slang in
       the code editor (`slangd`, Material: New Type), and E10-3, the material graph (ADR
       0123: canvas, search, values, preview, errors, reroutes, frames, `[Node]` and
-      `.mfunc` functions), are done; E10-4 (previews in the dock, statistics, variants)
-      is ahead.
+      `.mfunc` functions), are done; E10-4 is under way: variants that follow their base
+      (E10-4a) are in, the inspector's marks for them, statistics and previews ahead.
     - E11, sound, is done: the mixer file and panel (meters, effects, sends, the room's
       strip, snapshots, ADRs 0121 and 0122), previews and fields, the viewport's gizmos
       and hearing in place, the falloff curve.
@@ -870,6 +870,12 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-4a, material variants** (#PR, ADR 0120's addendum; the team's answer b): a
+    material file may name its `base` and holds only the lines its base has not; every
+    reader (player, cook, live files, inspector) reads it over its base, a held base as
+    the editor holds it; cycles and pathless bases refused; the player makes a variant
+    again when its base's file or held version changes (3 ms / 2 ms on the Radeon); Make
+    Variant writes a file of `base` alone. The inspector's override marks are next.
   - **E10-3g-2b, the editor's functions** (#436, ADR 0123's as-built): `.mfunc` files in
     graph tabs (ports named in the inspector, an input's value now written to the file),
     previewed by their first output with unsaved edits; the project's functions in the
@@ -977,7 +983,10 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-4, previews in the dock, a graph's statistics and variants with a base.
+       2D): E10-4b, a variant's values marked in the inspector as a prefab's overrides
+       (bold label, bar, ↺ to the base's, Apply to Base, a Base row); then statistics
+       (registers, samples, parameter bytes per variant drawn), the orbiting preview,
+       per-node previews, Draw as Fallback, the preview while dragging.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

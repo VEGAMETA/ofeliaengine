@@ -800,9 +800,13 @@ A click on a folder opens it, a click on a file picks it.
 - **Material commands** (the palette):
   - **New Material** makes `New Material.material` in the dock's folder and gives it to the
     selected objects in one undo step (picked in the dock when none is selected);
-  - **Make Variant** copies the material shown beside its file (`Red 2.material`, with its
-    unsaved edits and an id of its own) and gives the copy to the selected objects in one
-    undo step; the original stays as it is;
+  - **Make Variant** makes a variant of the material shown beside its file (`Red 2.material`,
+    an id of its own) and gives it to the selected objects in one undo step. A variant names
+    its **base** and holds only what it changes: it draws as its base until edited, and an
+    edit of the base (saved, or unsaved in the inspector) reaches every variant where the
+    variant has not set its own value. A variant of a variant is fine; a chain that comes
+    back to a file of it is refused. The cook writes variants out whole, so a game never
+    reads a chain;
   - **Apply to Selection** gives the material picked in the dock to the selected objects;
   - **New Type** writes your own material type from a template, named after the active
     object (`Water`: `water.slang` declaring `WaterMaterial`; `Custom` with none), and a
