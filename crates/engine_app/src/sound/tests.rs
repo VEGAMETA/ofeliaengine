@@ -1039,6 +1039,18 @@ fn snapshots_blend_their_values_over_the_mix_by_weight() {
         "halfway from −2 to −20: {}",
         db(&bed)
     );
+    // The editor's chosen snapshot alone at full weight, whatever the game blended; then
+    // the game's weights again.
+    bed.sound.hear_snapshot(Some("paused"));
+    bed.frame(16);
+    assert!((db(&bed) + 40.0).abs() < 0.01, "{}", db(&bed));
+    assert_eq!(
+        bed.world.resource::<Mixer>().unwrap().weight("underwater"),
+        Some(0.0)
+    );
+    bed.sound.hear_snapshot(None);
+    bed.frame(16);
+    assert!((db(&bed) + 11.0).abs() < 0.01, "{}", db(&bed));
     // Back to 0: the mix as it is.
     bed.world
         .resource_mut::<Mixer>()

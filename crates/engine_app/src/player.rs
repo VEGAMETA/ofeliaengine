@@ -1495,6 +1495,13 @@ impl Player {
         self.sound.room_heard()
     }
 
+    /// The mixer's snapshot `name` heard alone at full weight over the mix, whatever the
+    /// game blended (the editor's chosen snapshot, ADR 0122); none: the game's weights
+    /// again.
+    pub fn hear_snapshot(&mut self, name: Option<&str>) {
+        self.sound.hear_snapshot(name);
+    }
+
     /// How far effect `effect` (its place in the chain) of bus `bus` (`master` for the
     /// master's) lowered the gain since the last call, in dB (`None` without sound, such a
     /// bus or such an effect): a compressor's or a limiter's meter in the editor.

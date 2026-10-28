@@ -2254,6 +2254,35 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **E11-4 is done** but for View: Sound Ranges, the inspector's falloff curve with the
   camera's distance, and blockout's radius handles.
 
+## As built (E11-5b, 2026-10-28): the panel's snapshots
+
+- **The list** (ADR 0122's editor part): a choice at the header's right, "Mix" and each
+  snapshot, "+ Snapshot"; "Audio: New Snapshot" and "Audio: Delete Snapshot" in the
+  palette. Choosing one picks the master's strip when none is.
+- **The view:** `MixerDoc` keeps the chosen snapshot and the layout as heard with it alone
+  at full weight (`MixerFile::with_snapshot`); the strips, the inspector's values and every
+  drag's start read it.
+- **Edits into it:** `MixerDoc::edit` applies an edit to the view; where the values
+  snapshots can set changed (`MixerFile::paths`), the snapshot takes them and the mix
+  stays; an edit that changes anything else (buses, effects, sends, parents, voices) is
+  refused with a message. `edit_mix` edits the mix itself (the snapshots' list, names,
+  fades); `forget` takes one value out (↺). One undo step each, the file's text before
+  and after as for every mixer step.
+- **Marks:** a strip's gain in the accent color where the snapshot sets its fader; the
+  inspector's gain, balance, sends' levels and effects' parameters and bypass with ↺,
+  checked against the snapshot's paths with nothing allocated.
+- **Heard:** `Player::hear_snapshot` given the chosen name when it changes (with the
+  meters); the player blends it alone at full weight over whatever the game asked.
+- **The Snapshot section:** its name (renamed in place), its fade (typed after a click,
+  ↺ to 0.5 s) and how many values it sets.
+- **Tests:** the doc (values into the snapshot and the mix kept, the view and the strip
+  marked, buses and effects refused, ↺, back to the mix, renamed, its fade, deleted); the
+  player hearing one alone and the game's weights again; through the editor's frames: the
+  list, + Snapshot chosen and the master picked, a fader into it as one step, the section
+  and its count, a bus refused, ↺ and undo, a rename typed in the section, the mix again,
+  deleted.
+- **E11-5 is done.** Left in E11: View: Sound Ranges and the falloff curve.
+
 ## As built (E11-5a, 2026-10-28): snapshots in the file and the player
 
 - **ADR 0122** (the team's answer b): the mixer file's version 4 with `snapshots`, each a

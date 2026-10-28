@@ -1048,6 +1048,11 @@ pub struct ShellResponse {
     pub mixer_monitor: bool,
     /// A strip's B was clicked (E11-2b): its effects bypassed, or back.
     pub mixer_bypass: Option<usize>,
+    /// The mixer's snapshot list was clicked (E11-5b): it opens or closes.
+    pub mixer_snapshots: bool,
+    /// Item `i` of the snapshot list was picked (0 Mix, then each snapshot, then
+    /// "+ Snapshot").
+    pub mixer_snapshot: Option<usize>,
     /// The inspector field under the mouse (section, field): Backspace resets it, Ctrl+C
     /// and Ctrl+V copy and paste its value.
     pub hovered_field: Option<(usize, usize)>,
@@ -1263,7 +1268,7 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
             profiler_panel(ui, view, p);
         }
         if let Some(view) = &model.mixer {
-            mixer_panel(ui, view, p, &mut out);
+            mixer_panel(ui, view, p, &mut out, &mut popups);
         }
         if let Some(view) = &model.debugger {
             debugger_panel(ui, view, p, &mut out);
@@ -4126,6 +4131,10 @@ pub struct MixerView<'a> {
     pub strips: &'a [StripView<'a>],
     /// Monitor: the solos and mutes left aside (E11-1b-2).
     pub monitor: bool,
+    /// The snapshot the panel edits ("Mix": the mix itself, E11-5b).
+    pub snapshot: &'a str,
+    /// The snapshot list while it is open: Mix, each snapshot, "+ Snapshot".
+    pub snapshots: Option<&'a [&'a str]>,
 }
 
 /// A strip of the mixer.
@@ -4165,6 +4174,8 @@ pub struct StripView<'a> {
     /// The room's reverb, made by the engine (E11-2c): `effects` says what it follows,
     /// without B.
     pub room: bool,
+    /// The chosen snapshot sets its fader (E11-5b): its gain in the accent color.
+    pub marked: bool,
 }
 
 /// A strip's fader pressed, dragged or let go this frame (E11-1b): the strip and the
@@ -4193,7 +4204,13 @@ pub fn fader_at(rect: engine_ui::Rect, y: f32) -> f32 {
 /// The Audio tab's mixer: its header (the file's state, + Bus), then a strip per bus
 /// side by side, each its name, where it goes, its fader with the marks of
 /// [`crate::mixer::TICKS`] and its gain.
-fn mixer_panel(ui: &mut Ui, view: &MixerView<'_>, p: &Palette, out: &mut ShellResponse) {
+fn mixer_panel(
+    ui: &mut Ui,
+    view: &MixerView<'_>,
+    p: &Palette,
+    out: &mut ShellResponse,
+    popups: &mut Popups,
+) {
     let panel = Style {
         size: [Size::Grow(1.0), Size::Fixed(240.0)],
         direction: Direction::Column,
@@ -4214,6 +4231,28 @@ fn mixer_panel(ui: &mut Ui, view: &MixerView<'_>, p: &Palette, out: &mut ShellRe
             |ui| {
                 text(ui, "file", view.header, SMALL, p.text_dim);
                 ui.spacer("fill");
+                // The snapshot the panel edits (E11-5b).
+                let mut action = None;
+                let list = Style {
+                    size: [Size::Fixed(150.0), Size::Fixed(20.0)],
+                    ..Style::default()
+                };
+                ui.container("snapshot", list, |ui| {
+                    choice(
+                        ui,
+                        view.snapshot,
+                        view.snapshots,
+                        false,
+                        p,
+                        &mut action,
+                        popups,
+                    );
+                });
+                match action {
+                    Some(FieldAction::Open) => out.mixer_snapshots = true,
+                    Some(FieldAction::Choose(i)) => out.mixer_snapshot = Some(i),
+                    _ => {}
+                }
                 // Monitor: every solo and mute aside, and back (FMOD's).
                 if listen_button(ui, "monitor", "Monitor", view.monitor, p.selection, p) {
                     out.mixer_monitor = true;
@@ -4510,7 +4549,8 @@ fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &
                     ..Style::default()
                 },
                 |ui| {
-                    text(ui, "gain", strip.gain, SMALL, p.text);
+                    let color = if strip.marked { p.accent } else { p.text };
+                    text(ui, "gain", strip.gain, SMALL, color);
                     ui.spacer("fill");
                     if strip.depth > 0 {
                         if listen_button(ui, "mute", "M", strip.muted, p.warning, p) {

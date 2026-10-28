@@ -455,6 +455,7 @@ fn main() {
         },
         bypassed: false,
         room: name == "room (auto)",
+        marked: false,
     };
     let strips = [
         strip("master", 0, 0.0, "0.0", "\u{2192} speakers", false),
@@ -512,6 +513,8 @@ fn main() {
             header: "main.mixer \u{b7} unsaved (Ctrl+S writes it)",
             strips: &strips,
             monitor: false,
+            snapshot: "Mix",
+            snapshots: None,
         }),
         debugger: None,
         history: None,

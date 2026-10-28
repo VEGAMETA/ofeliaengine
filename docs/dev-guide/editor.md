@@ -965,6 +965,20 @@ change something.
   the room).
 - **+ Bus** ("Audio: Add Bus") adds one into the master, picked to be named; a picked
   strip's × takes it away, and the buses it was fed by go to the bus it fed.
+- **Snapshots** (ADR 0122; your game blends them with `mixer.blend` or
+  `audio.blend`): the list at the header's right, "Mix" first.
+  - **+ Snapshot** (or "Audio: New Snapshot") makes one and chooses it. While a snapshot
+    is chosen, the panel shows it over the mix and the player hears it alone at full
+    weight, in the editor and in Play; "Mix" gives the game's own weights back.
+  - **Its values:** a fader dragged, a balance, a send's level, an effect's parameter or
+    bypass set while it is chosen becomes one of its values (one undo step each); the
+    mix stays as it was. What it sets is marked: the fader's number in the accent color,
+    the inspector's field with ↺, which takes the value out of the snapshot.
+  - **Buses, effects and sends themselves** are the mix's: adding, removing, renaming or
+    moving them while a snapshot is chosen is refused with a message; choose Mix first.
+  - **Picked strips show a Snapshot section** first: its name (rename it there), its fade
+    in seconds (what a blend takes when the game names none) and how many values it sets.
+    "Audio: Delete Snapshot" takes the chosen one away.
 - **The room** ("room (auto)", at the right end): the reverb the engine makes from the
   room around the listener. Its strip says what it follows ("Hall 62 %": a reverb zone
   and how far into it the listener is; "the walls"; "nothing near"), and its meter is the
