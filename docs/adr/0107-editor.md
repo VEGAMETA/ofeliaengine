@@ -2199,3 +2199,35 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **Not done:** the room's reverb strip, effects dragged between strips, a strip's
   effects folded open on the strip itself (a taller panel, ADR 0107's resizable bottom
   panels), delay compensation (ADR 0121).
+
+## As built (E11-4b-1, 2026-10-28): handles on sounds and reverb zones
+
+- **Where:** `engine_editor::sound_handles`, laid out each frame for the active entity
+  after the brush's sides (whose drag they never meet) and before the gizmo: a selected
+  `AudioSource3D`'s two rings each get a square on the side toward the camera's right (on
+  the outline facing the camera, where the level ring crosses it); a selected
+  `ReverbZone` gets a square in the middle of each side that faces the camera (or is seen
+  edge on) and one on top of its fade's box.
+- **A ring's drag** sets its radius to the pointer's distance from the source in the
+  plane through it facing the camera, by the owner's snapping rules (whole position steps
+  from where it was with snapping on, Shift inverting, Ctrl rounding), at least 1 cm. The
+  inner ring pushes the outer along; the outer stops at the inner (the sound UX note's
+  rule).
+- **A zone's side** moves along its normal with the opposite side staying: the half size
+  along that axis changes, and the entity moves half the change (the box is centered on
+  its entity, unlike a brush, whose origin is its base). **The fade's handle** moves along
+  the zone's up and sets `fade` (0 allowed: the room ends at the box).
+- **One undo step a drag** ("Sound Range", "Resize Reverb Zone", "Reverb Zone Fade");
+  Escape takes it back; a press on a handle is not a click or the start of a box (the
+  picking leaves it alone, as it does the gizmo's and the brush's handles).
+- **Labels:** the handle pointed at or dragged says its value: "6 m · full", "40 m · −16 dB,
+  held" (`Inverse`: half as loud each doubling past the near ring, held beyond the far
+  one), "40 m · silent" (`Linear`); a zone's size along the side's axis; "fade 2 m".
+- **Tests:** the drags' arithmetic (a ring's radius from the pointer, the push and the
+  stop, snapping in steps; a zone's side with its opposite side staying; the fade), the
+  labels; in the editor through its frames, the far ring's label and drag as one step,
+  the near ring pushed past the far one and taken back with Escape, a zone's top dragged
+  up with its base staying.
+- **Not done:** blockout's cylinders' and spheres' radius handles (ADR 0110 left them; the
+  same drag fits them), the inspector's falloff curve marking the camera's distance,
+  View: Sound Ranges, and hearing in place (P, Listen to the Scene: E11-4b-2).
