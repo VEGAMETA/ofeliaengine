@@ -519,6 +519,11 @@ breakpoints as the editor's gutter.
   watches and the debug console (evaluated in the frame shown), Set Value on a variable (as
   F2 in the editor, `self`'s an undo step), F5, F10, F11, Shift+F11 and Pause (the next line
   a script runs stops). Logpoints' messages come to the debug console.
+- **One set of breakpoints:** those set in VS Code become the editor's, and those set in the
+  editor show in VS Code as they are made, moved or taken away. Attaching joins the two sets.
+  VS Code shows an editor breakpoint by its line only (it keeps no options for breakpoints a
+  debugger makes): its condition, hit count, log text and entity filter stay the editor's,
+  and VS Code's own list for the file does not take them away.
 - **Safety:** the editor listens on 127.0.0.1 only, on a port it picks, and writes it with a
   token to `.ofelia/debug/editor.json`; the extension gives the token, and nothing without it
   attaches. One client at a time.

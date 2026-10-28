@@ -722,3 +722,29 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
 - **Not done:** the editor's breakpoints sent to VS Code (E9-4c); a changed value lit in
   the code's inline values until the next stop.
 
+## As built (E9-4c, 2026-10-28): the editor's breakpoints in VS Code
+
+- **Events:** while VS Code is attached and its configuration is done, the editor tells it
+  of its breakpoints with DAP `breakpoint` events, once their revision moved: `new` for one
+  VS Code lacks (its line as saved, its source's path), `removed` for one gone or changed in
+  the editor. A breakpoint changed in the editor is told again, as `removed` then `new`.
+- **What VS Code keeps:** read in VS Code's `debugSession.ts` (main, 2026-10-28): a `new`
+  event adds a breakpoint with its line only to VS Code's model (no condition, hit count or
+  log message; VS Code sends no setBreakpoints for it), `removed` and `changed` find it by
+  the adapter's id. So the editor keeps the options of the breakpoints it told VS Code of.
+- **VS Code's own list** (setBreakpoints) still becomes the file's set, with two rules:
+  - a breakpoint VS Code knows by its line only (the editor told it, or the two sets join
+    as it attaches) keeps the editor's options when VS Code sends it plain;
+  - the editor's breakpoints VS Code never knew are kept (attaching joins the two sets) and
+    told it at the next sync; those it knew and left out are taken away.
+  setBreakpoints answers with ids, which later events name.
+- **Kept per client:** what VS Code was told (`KnownBreak`: id, line as saved, whether it
+  knows the line only, the editor's breakpoint as it was then); dropped when it goes.
+  Nothing is compared while the breakpoints' revision stands.
+- **Tests:** the editor's logpoint joins VS Code's set at configurationDone as `new` on its
+  line; a breakpoint toggled in the editor arrives as `new`; VS Code's list sent back plain
+  keeps the logpoint's text and asks nothing more; one taken away in the editor arrives as
+  `removed` with the id setBreakpoints gave.
+- **Not done:** a breakpoint VS Code removes while the editor changed its options in the
+  same instant (the later one wins).
+
