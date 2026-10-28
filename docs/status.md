@@ -815,7 +815,7 @@ Last updated: 2026-10-28.
     loops left out in one order; the player follows live, effects carrying on through
     moves (a reverb's tail rings on); `engine_audio` moves and bypasses effects, publishes
     gain reduction, and describes the built-in kinds.
-  - **E11-2b, the mixer's effects and sends in the editor** (#PR, ADR 0107's as-built): a
+  - **E11-2b, the mixer's effects and sends in the editor** (#407, ADR 0107's as-built): a
     section per effect in the inspector (parameters in their units, bypass, a filter's
     shape, a compressor's sidechain, ↑ ↓ ×), a section per send, Add Effect and Add Send
     offering only what would not loop; on the strip the effect's short name or count with
