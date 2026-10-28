@@ -412,6 +412,12 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
     nothing in it moves but by your edits. Breakpoints can be set, changed or taken away;
   - **F5 goes on**: the rest of the tick runs, the game's own tick and the physics step
     with it. **F8 stops Play** there: the stopped hook ends at its line, without an error.
+  - **Steps:** F10 runs to the next line of the function (over the calls it makes), F11
+    to the next line that runs (into a function it calls), Shift+F11 to the line the
+    function returns to. A step past a hook's end stops at the next script line that runs,
+    in the next hook. Each step's stop shows its line and its values, as a breakpoint's.
+  - A stop inside a call from C code (a `table.sort` comparison, a metamethod written in
+    Luau) cannot be stepped from: F5 goes on there. `self:method()` can.
   - A script saved while stopped runs again once it goes on.
 - **A logpoint** (◆) writes a message each time the line runs, and the script goes on:
   Shift+click the column, or Shift+F9, and type its text. `{…}` takes any Luau expression
@@ -437,8 +443,12 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
 
 Without breakpoints nothing is paid. A function with one runs Luau's interpreter instead of
 native code until its script runs again, and each hit costs a microsecond or so (below).
-Stepping line by line, the Debugger panel with the stack and the variables, and stopping
-at errors come next.
+The Debugger panel with the stack and the variables, values on the lines above the stopped
+one, and stopping at errors come next.
+
+In the editor, the scripts are compiled to be debugged: Luau's optimization level 1, which
+inlines nothing, so a step goes into a local function as its text reads. It costs nothing
+measurable (below); a game outside the editor runs level 2.
 
 ## What it costs
 
@@ -451,7 +461,10 @@ Measured on ref-1 (Ryzen 7 7700, release):
 - a breakpoint turned off costs nothing; one on a line that runs costs about 0.6 µs a hit
   (one in 64 logging), 1 µs with a condition, 1.4 µs logging every hit;
 - in the editor's Play, the scripts' stages run on a stack of their own so that a
-  breakpoint can stop them: 1,000 spinners tick in 0.26 ms either way.
+  breakpoint can stop them: 1,000 spinners tick in 0.26 ms either way;
+- while a breakpoint that stops is set, each hook runs on a Luau thread of the debugger's,
+  which can be stepped: 0.12 µs more a hook (1,000 doors 0.59 -> 0.79 ms a tick); without
+  one, nothing.
 
 A field read is a call into the engine, though a short one: read it into a local when a
 hook uses it several times. Logic over thousands of objects every tick belongs in Rust.
