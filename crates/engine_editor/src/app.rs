@@ -174,6 +174,8 @@ const MESSAGE_SECONDS: f32 = 4.0;
 
 /// The bottom bar's Profiler tab (E6-5).
 const PROFILER_TAB: usize = 6;
+/// The bottom tab of the script debugger's panel (ADR 0119 E9-1b-3).
+const DEBUGGER_TAB: usize = 2;
 
 /// How many closed scenes "Reopen Closed Scene" can bring back.
 const CLOSED_KEPT: usize = 20;
@@ -669,6 +671,8 @@ struct CommandIds {
     history: CommandId,
     /// The profiler's panel (E6-5) opened or closed.
     profiler: CommandId,
+    /// The script debugger's panel (ADR 0119 E9-1b-3) opened or closed.
+    debugger: CommandId,
     find: CommandId,
     select_next: CommandId,
     select_previous: CommandId,
@@ -812,6 +816,7 @@ fn commands() -> (Commands, CommandIds) {
         tasks: c.register("view.tasks", "View", "Tasks"),
         history: c.register("view.history", "View", "History"),
         profiler: c.register("view.profiler", "View", "Profiler"),
+        debugger: c.register("view.debugger", "View", "Debugger"),
         find: c.register("scene.find", "Scene", "Go to Object"),
         select_next: c.register("scene.select_next", "Scene", "Select Next Row"),
         select_previous: c.register("scene.select_previous", "Scene", "Select Previous Row"),
@@ -993,6 +998,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+Shift+F", ids.find_in_files),
         // VS Code's key for its panel.
         ("Ctrl+J", ids.output),
+        // VS Code's Run and Debug view.
+        ("Ctrl+Shift+D", ids.debugger),
         ("Ctrl+P", ids.find),
         ("Ctrl+R", ids.restart),
         ("Space", ids.local_axes),
@@ -1934,6 +1941,10 @@ struct Editor {
     break_blur: bool,
     /// Where a script stopped in Play (ADR 0119 E9-1b), as the code shows it.
     stop: Option<StopShown>,
+    /// The Debugger panel: the frame whose variables it shows, and its texts, made again
+    /// when the stop, the frame, the breakpoints or their states change.
+    debug_frame: usize,
+    debug_text: DebugText,
     /// When the open scripts' files were last compared with what was read.
     scripts_checked: Instant,
     /// The checkers on their threads (E8-3b, E10-2a), each started with its language's
@@ -2694,6 +2705,8 @@ impl Editor {
             gutter_press: None,
             break_blur: false,
             stop: None,
+            debug_frame: 0,
+            debug_text: DebugText::default(),
             scripts_checked: Instant::now(),
             checkers: Checkers::default(),
             generations: 0,
@@ -3314,6 +3327,10 @@ impl Editor {
         // A script shown: its keys, clicks and scroll before the UI is built, so a key
         // shows in this frame.
         let coding = self.code_frame();
+        // The Debugger panel's texts, while it is open (ADR 0119 E9-1b-3).
+        if self.bottom == Some(DEBUGGER_TAB) {
+            self.debug_text_frame();
+        }
         self.script_files.refresh(world);
         let properties = self.inspector.properties();
         let mut values: Vec<&str> = recycle(std::mem::take(&mut self.lists.values));
@@ -3972,6 +3989,39 @@ impl Editor {
                 stages: &stage_rows,
                 passes: &pass_rows,
             });
+        let debug_frames: Vec<(&str, &str)> = self
+            .debug_text
+            .frames
+            .iter()
+            .map(|(f, p)| (f.as_str(), p.as_str()))
+            .collect();
+        let debug_variables: Vec<(&str, &str)> = self
+            .debug_text
+            .variables
+            .iter()
+            .map(|(n, v)| (n.as_str(), v.as_str()))
+            .collect();
+        let debug_breakpoints: Vec<crate::shell::BreakpointRow<'_>> = self
+            .debug_text
+            .breakpoints
+            .iter()
+            .map(|b| crate::shell::BreakpointRow {
+                look: b.look,
+                place: &b.place,
+                code: &b.code,
+                detail: &b.detail,
+            })
+            .collect();
+        let debugger_view =
+            (self.bottom == Some(DEBUGGER_TAB)).then(|| crate::shell::DebuggerView {
+                header: &self.debug_text.header,
+                stopped: self.stop.is_some(),
+                steppable: self.stop.as_ref().is_some_and(|s| s.stopped.steppable),
+                frames: &debug_frames,
+                frame: self.debug_frame,
+                variables: &debug_variables,
+                breakpoints: &debug_breakpoints,
+            });
         let task_rows: Vec<crate::shell::TaskRow<'_>> = self
             .task_rows
             .iter()
@@ -4244,6 +4294,7 @@ impl Editor {
             tasks: (self.bottom == Some(1)).then_some(task_rows.as_slice()),
             history: self.history_shown.then_some(history_rows.as_slice()),
             profiler: profiler_view,
+            debugger: debugger_view,
             playing,
             paused: self.play.as_ref().is_some_and(|p| p.paused),
             stopped: self.stop.is_some(),
@@ -4407,15 +4458,46 @@ impl Editor {
         if let Some(s) = response.remove_section {
             self.remove_section(world, s);
         }
+        // The Debugger panel's buttons, frames and breakpoints.
+        if let Some(go) = response.debug_go {
+            self.play_request = Some(match go {
+                crate::shell::DebugGo::Continue => PlayRequest::Continue,
+                crate::shell::DebugGo::Over => PlayRequest::ScriptStep(Resume::StepOver),
+                crate::shell::DebugGo::Into => PlayRequest::ScriptStep(Resume::StepInto),
+                crate::shell::DebugGo::Out => PlayRequest::ScriptStep(Resume::StepOut),
+            });
+        }
+        if let Some(k) = response.debug_frame {
+            self.show_frame(world, k);
+        }
+        if let Some(k) = response.debug_breakpoint
+            && let Some((file, line)) = self
+                .debug_text
+                .breakpoints
+                .get(k)
+                .map(|b| (b.file.clone(), b.line))
+        {
+            self.open_script(world, &file, Some((line + 1, 1)));
+        }
+        if let Some(k) = response.debug_toggle
+            && let Some((file, line)) = self
+                .debug_text
+                .breakpoints
+                .get(k)
+                .map(|b| (b.file.clone(), b.line))
+        {
+            self.enable_breakpoint(world, &file, line);
+        }
         // The bottom panel's tabs: Output opens and closes; the others come later.
         if let Some(i) = response.bottom_tab {
             match i {
                 0 => self.run(world, self.ids.output),
                 1 => self.run(world, self.ids.tasks),
+                DEBUGGER_TAB => self.run(world, self.ids.debugger),
                 PROFILER_TAB => self.run(world, self.ids.profiler),
                 _ => self.say(String::from(
-                    "Only the Output, the Tasks and the Profiler are there yet (ADR 0107's \
-                     phases)",
+                    "Only the Output, the Tasks, the Debugger and the Profiler are there yet \
+                     (ADR 0107's phases)",
                 )),
             }
         }
@@ -8079,6 +8161,7 @@ impl Editor {
             ids.step_over,
             ids.step_into,
             ids.step_out,
+            ids.debugger,
             ids.code_find,
             ids.code_replace,
             ids.find_next,
@@ -9434,6 +9517,135 @@ impl Editor {
             });
     }
 
+    /// The Debugger panel's texts (ADR 0119 E9-1b-3), made again only when the stop, the
+    /// shown frame, the breakpoints or the host's states changed.
+    fn debug_text_frame(&mut self) {
+        let key = (
+            self.stop.as_ref().map_or(0, |s| s.count),
+            self.debug_frame,
+            self.breakpoints.revision(),
+            self.host_breaks.version(),
+        );
+        if self.debug_text.key == Some(key) {
+            return;
+        }
+        let text = &mut self.debug_text;
+        text.key = Some(key);
+        text.header.clear();
+        text.frames.clear();
+        text.variables.clear();
+        match &self.stop {
+            Some(stop) => {
+                let s = &stop.stopped;
+                let hook = s
+                    .stack
+                    .first()
+                    .and_then(|f| f.function.as_deref())
+                    .unwrap_or("a script");
+                let _ = write!(
+                    text.header,
+                    "Stopped · {hook} · {}:{}",
+                    engine_app::scripts::module_file(&s.module),
+                    s.line
+                );
+                if !s.steppable {
+                    text.header.push_str(" · no steps here: a call from C code");
+                }
+                for f in &s.stack {
+                    let function = f
+                        .function
+                        .clone()
+                        .unwrap_or_else(|| String::from("(function)"));
+                    let place = match f.line {
+                        Some(line) => {
+                            let file = engine_app::scripts::module_file(&f.source);
+                            format!("{}:{line}", file_name(&file))
+                        }
+                        None => String::from("engine"),
+                    };
+                    text.frames.push((function, place));
+                }
+                if let Some(f) = s.stack.get(self.debug_frame) {
+                    for (title, vars) in [("LOCALS", &f.locals), ("UPVALUES", &f.upvalues)] {
+                        if vars.is_empty() {
+                            continue;
+                        }
+                        text.variables.push((String::from(title), String::new()));
+                        for v in vars {
+                            text.variables.push((v.name.clone(), v.value.clone()));
+                        }
+                    }
+                }
+            }
+            None => text.header.push_str(
+                "No script is stopped: a breakpoint (F9 in a script's tab) stops one in Play",
+            ),
+        }
+        text.breakpoints.clear();
+        for (file, marks) in self.breakpoints.files() {
+            let doc = self.scripts.iter().find(|s| s.path == file).map(|s| &s.doc);
+            for m in marks {
+                let state = self.host_breaks.state(file, doc, m.line);
+                let mut detail = String::new();
+                match m.act {
+                    Act::Log => {
+                        let _ = write!(detail, "logs {}", m.log);
+                    }
+                    Act::Pause => detail.push_str("pauses after its tick"),
+                    Act::Stop => {}
+                }
+                for (word, said) in [("if", &m.condition), ("hits", &m.hits)] {
+                    if !said.is_empty() {
+                        if !detail.is_empty() {
+                            detail.push_str(" · ");
+                        }
+                        let _ = write!(detail, "{word} {said}");
+                    }
+                }
+                if let Some(hits) = state.map(|s| s.hits).filter(|&h| h > 0) {
+                    if !detail.is_empty() {
+                        detail.push_str(" · ");
+                    }
+                    let _ = write!(detail, "×{hits}");
+                }
+                let code = doc
+                    .filter(|d| m.line < d.line_count())
+                    .map_or_else(String::new, |d| cut(d.line(m.line).trim(), CODE_SHOWN));
+                text.breakpoints.push(DebugBreakpoint {
+                    file: file.to_path_buf(),
+                    line: m.line,
+                    look: MarkLook {
+                        kind: mark_kind(m.act),
+                        on: m.enabled,
+                        limited: m.limited(),
+                        problem: state.is_some_and(|s| s.error.is_some()),
+                    },
+                    place: format!("{}:{}", file_name(&file.to_string_lossy()), m.line + 1),
+                    code,
+                    detail,
+                });
+            }
+        }
+    }
+
+    /// Frame `k` of the stop's stack shown: its variables in the panel, its line in its
+    /// script.
+    fn show_frame(&mut self, world: &World, k: usize) {
+        let Some(frame) = self
+            .stop
+            .as_ref()
+            .and_then(|s| s.stopped.stack.get(k))
+            .cloned()
+        else {
+            return;
+        };
+        self.debug_frame = k;
+        if let Some(line) = frame.line {
+            let file = PathBuf::from(engine_app::scripts::module_file(&frame.source));
+            self.open_script(world, &file, Some((line as usize, 1)));
+        }
+    }
+
     /// Where a script stopped in Play (ADR 0119 E9-1b), once a frame: a new stop brings its
     /// script to the front at the line, frees the mouse and says where; its end says so.
     fn stop_frame(&mut self, world: &World, stopped: Option<(&engine_app::scripts::Stopped, u64)>) {
@@ -9477,8 +9689,12 @@ impl Editor {
             .first()
             .and_then(|f| f.function.as_deref())
             .map_or_else(String::new, |f| format!(" in {f}"));
+        // The Debugger opens by itself at a stop, and stays open (Godot's).
+        self.bottom = Some(DEBUGGER_TAB);
+        self.debug_frame = 0;
         self.stop = Some(StopShown {
             count,
+            stopped: stopped.clone(),
             file: file.clone(),
             line,
             values,
@@ -10832,6 +11048,12 @@ impl Editor {
                 None
             } else {
                 Some(PROFILER_TAB)
+            };
+        } else if id == ids.debugger {
+            self.bottom = if self.bottom == Some(DEBUGGER_TAB) {
+                None
+            } else {
+                Some(DEBUGGER_TAB)
             };
         } else if id == ids.open_scene {
             self.open_palette(world, "#scene:");
@@ -16283,6 +16505,8 @@ enum PlayRequest {
 struct StopShown {
     /// The stop's number ([`Player::script_stops`]): a step's next stop is another.
     count: u64,
+    /// The stop as the host described it: its stack and values.
+    stopped: engine_app::scripts::Stopped,
     /// Its script's file, relative to the project.
     file: PathBuf,
     /// Its line (from 0) in the script's text as last saved, the code that runs.
@@ -16291,6 +16515,46 @@ struct StopShown {
     values: String,
     /// The game had the mouse: it gets it back when the script goes on.
     mouse: bool,
+}
+
+/// The Debugger panel's texts (ADR 0119 E9-1b-3), kept between frames.
+#[derive(Default)]
+struct DebugText {
+    /// What they were made for: the stop's number, the frame, the breakpoints' revision,
+    /// the host's states' version.
+    key: Option<(u64, usize, u64, Option<u64>)>,
+    header: String,
+    frames: Vec<(String, String)>,
+    variables: Vec<(String, String)>,
+    breakpoints: Vec<DebugBreakpoint>,
+}
+
+/// A row of the Debugger panel's breakpoints, with where it goes.
+struct DebugBreakpoint {
+    file: PathBuf,
+    /// Its line (from 0) in the editor's text.
+    line: usize,
+    look: MarkLook,
+    place: String,
+    code: String,
+    detail: String,
+}
+
+/// The characters of a breakpoint's line the Debugger's list shows.
+const CODE_SHOWN: usize = 32;
+
+/// `text`'s first `chars` characters, `…` after them when there were more.
+fn cut(text: &str, chars: usize) -> String {
+    let mut out: String = text.chars().take(chars).collect();
+    if out.len() < text.len() {
+        out.push('\u{2026}');
+    }
+    out
+}
+
+/// A file's name, the last part of its path (`scripts/npc/guard.luau` is `guard.luau`).
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// A breakpoint's mark's shape for what it does.

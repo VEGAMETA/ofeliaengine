@@ -448,6 +448,7 @@ fn main() {
         output: None,
         tasks: None,
         profiler: None,
+        debugger: None,
         history: None,
         playing,
         paused: false,

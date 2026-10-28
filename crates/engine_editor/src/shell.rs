@@ -134,6 +134,54 @@ pub struct OutputView<'a> {
     pub follow: bool,
 }
 
+/// What the Debugger panel's header buttons ask (ADR 0119 E9-1b-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugGo {
+    /// Continue (F5).
+    Continue,
+    /// Step over (F10).
+    Over,
+    /// Step into (F11).
+    Into,
+    /// Step out (Shift+F11).
+    Out,
+}
+
+/// The Debugger panel (ADR 0119 E9-1b-3; `docs/research/ux/script-debugger.md` §3), while
+/// its tab is open: the stop's header and buttons, its call stack, the shown frame's
+/// variables, every breakpoint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DebuggerView<'a> {
+    /// What stopped and where (`Breakpoint · on_tick · scripts/door.luau:14`), or that no
+    /// script is stopped.
+    pub header: &'a str,
+    /// A script is stopped: Continue works.
+    pub stopped: bool,
+    /// And it can be stepped from there: the steps work.
+    pub steppable: bool,
+    /// The stack's frames, the stopped one first: its function and its place.
+    pub frames: &'a [(&'a str, &'a str)],
+    /// The frame whose variables are shown.
+    pub frame: usize,
+    /// Its variables: a section's title (`LOCALS`, no value) or a name and its value.
+    pub variables: &'a [(&'a str, &'a str)],
+    /// Every breakpoint.
+    pub breakpoints: &'a [BreakpointRow<'a>],
+}
+
+/// A row of the Debugger panel's Breakpoints list.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BreakpointRow<'a> {
+    /// Its mark, as the gutter draws it.
+    pub look: MarkLook,
+    /// Its file and line (`door.luau:14`).
+    pub place: &'a str,
+    /// Its line's code, where the script is open.
+    pub code: &'a str,
+    /// What it does in words, and its hits (`if self.hp < 0 · ×12`).
+    pub detail: &'a str,
+}
+
 /// A row of the History panel (ADR 0107 E6-4): a step, or the start before them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HistoryRow<'a> {
@@ -727,6 +775,8 @@ pub struct ShellModel<'a> {
     pub tasks: Option<&'a [TaskRow<'a>]>,
     /// The profiler's panel there instead, while its tab is open.
     pub profiler: Option<ProfilerView<'a>>,
+    /// The script debugger's panel there instead, while its tab is open.
+    pub debugger: Option<DebuggerView<'a>>,
     /// The scene dock's History tab (E6-4) instead of the tree, while it is chosen: its
     /// rows, oldest first.
     pub history: Option<&'a [HistoryRow<'a>]>,
@@ -889,6 +939,14 @@ pub struct ShellResponse {
     pub output_clear: bool,
     /// An Output row was clicked: its place among the rows shown.
     pub output_row: Option<usize>,
+    /// A Debugger header button was clicked.
+    pub debug_go: Option<DebugGo>,
+    /// A frame of the Debugger's call stack was clicked.
+    pub debug_frame: Option<usize>,
+    /// A breakpoint's row of the Debugger was clicked: its line is shown.
+    pub debug_breakpoint: Option<usize>,
+    /// A breakpoint's mark there was clicked: it is turned off or on.
+    pub debug_toggle: Option<usize>,
     /// The scene dock's tab was clicked (0 the tree, 1 History).
     pub scene_dock_tab: Option<usize>,
     /// A History row was clicked: its place.
@@ -1021,6 +1079,9 @@ pub fn build(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) -> ShellResponse 
         }
         if let Some(view) = &model.profiler {
             profiler_panel(ui, view, p);
+        }
+        if let Some(view) = &model.debugger {
+            debugger_panel(ui, view, p, &mut out);
         }
         bottom_bar(ui, model, p, &mut out);
         if let (Some((entries, open)), Some(at)) = (model.add_menu, model.add_at) {
@@ -1631,14 +1692,7 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
 /// `top`: its shape filled or hollow, a bar inside when a condition or a hit rule limits
 /// it, a warning's dot beside it when something is wrong.
 fn gutter_mark(ui: &mut Ui, width: f32, top: f32, look: MarkLook, color: Color, p: &Palette) {
-    let glyph = match (look.kind, look.on) {
-        (MarkKind::Stop, true) => icons::BREAKPOINT,
-        (MarkKind::Stop, false) => icons::BREAKPOINT_OFF,
-        (MarkKind::Log, true) => icons::LOGPOINT,
-        (MarkKind::Log, false) => icons::LOGPOINT_OFF,
-        (MarkKind::Pause, true) => icons::PAUSE_POINT,
-        (MarkKind::Pause, false) => icons::PAUSE_POINT_OFF,
-    };
+    let glyph = mark_glyph(look);
     let cell = Style {
         size: [Size::Fixed(width), Size::Fixed(CODE_LINE)],
         placed: Some([0.0, top]),
@@ -3598,6 +3652,176 @@ fn profiler_panel(ui: &mut Ui, view: &ProfilerView<'_>, p: &Palette) {
             },
         );
     });
+}
+
+/// The Debugger panel (ADR 0119 E9-1b-3): the stop's header with Continue and the steps,
+/// then its call stack, the shown frame's variables and every breakpoint side by side.
+fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut ShellResponse) {
+    let panel = Style {
+        size: [Size::Grow(1.0), Size::Fixed(240.0)],
+        direction: Direction::Column,
+        background: Some(p.dock),
+        ..Style::default()
+    };
+    ui.container("debugger", panel, |ui| {
+        ui.row("debug header", bar(p, 28.0), |ui| {
+            let buttons = [
+                ("continue", "Continue F5", DebugGo::Continue, view.stopped),
+                ("over", "Over F10", DebugGo::Over, view.steppable),
+                ("into", "Into F11", DebugGo::Into, view.steppable),
+                ("out", "Out Shift+F11", DebugGo::Out, view.steppable),
+            ];
+            for (key, label, go, on) in buttons {
+                let id = ui.container(
+                    key,
+                    Style {
+                        padding: [8.0, 3.0, 8.0, 3.0],
+                        radius: 3.0,
+                        background: on.then_some(p.field),
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        text(
+                            ui,
+                            "label",
+                            label,
+                            SMALL,
+                            if on { p.text } else { p.text_dim },
+                        );
+                    },
+                );
+                if on && ui.sense(id, false).clicked {
+                    out.debug_go = Some(go);
+                }
+            }
+            ui.container(
+                "gap",
+                Style {
+                    size: [Size::Fixed(12.0), Size::Fixed(1.0)],
+                    ..Style::default()
+                },
+                |_| {},
+            );
+            let color = if view.stopped { p.warning } else { p.text_dim };
+            text(ui, "header", view.header, SMALL, color);
+        });
+        let columns = Style {
+            size: [Size::Grow(1.0), Size::Grow(1.0)],
+            gap: 1.0,
+            background: Some(p.window),
+            ..Style::default()
+        };
+        ui.row("debug columns", columns, |ui| {
+            let column = |width: Size| Style {
+                size: [width, Size::Grow(1.0)],
+                direction: Direction::Column,
+                padding: [8.0, 4.0, 8.0, 4.0],
+                background: Some(p.dock),
+                ..Style::default()
+            };
+            let row = Style {
+                size: [Size::Grow(1.0), Size::Fixed(18.0)],
+                gap: 8.0,
+                align_cross: Align::Center,
+                ..Style::default()
+            };
+            ui.container("stack", column(Size::Fixed(280.0)), |ui| {
+                text(ui, "title", "CALL STACK", SMALL, p.text_dim);
+                ui.scroll_column("frames", |ui| {
+                    for (i, &(function, place)) in view.frames.iter().enumerate() {
+                        ui.push_id(i as u64);
+                        let shown = Style {
+                            background: (i == view.frame).then_some(p.selection_dim),
+                            ..row
+                        };
+                        let id = ui.container("frame", shown, |ui| {
+                            let mark = if i == 0 { icons::STOPPED_AT } else { "" };
+                            icon(ui, "mark", mark, p.warning);
+                            text(ui, "function", function, SMALL, p.text);
+                            ui.spacer("fill");
+                            text(ui, "place", place, SMALL, p.text_dim);
+                        });
+                        if ui.sense(id, false).clicked {
+                            out.debug_frame = Some(i);
+                        }
+                        ui.pop_id();
+                    }
+                });
+            });
+            ui.container("variables", column(Size::Grow(1.0)), |ui| {
+                text(ui, "title", "VARIABLES", SMALL, p.text_dim);
+                ui.scroll_column("values", |ui| {
+                    for (i, &(name, value)) in view.variables.iter().enumerate() {
+                        ui.push_id(i as u64);
+                        ui.container("variable", row, |ui| {
+                            if value.is_empty() {
+                                text(ui, "section", name, SMALL, p.text_dim);
+                            } else {
+                                text(ui, "name", name, SMALL, p.text);
+                                text(ui, "value", value, SMALL, p.logged);
+                            }
+                        });
+                        ui.pop_id();
+                    }
+                });
+            });
+            ui.container("breakpoints", column(Size::Fixed(480.0)), |ui| {
+                text(ui, "title", "BREAKPOINTS", SMALL, p.text_dim);
+                ui.scroll_column("marks", |ui| {
+                    if view.breakpoints.is_empty() {
+                        text(
+                            ui,
+                            "none",
+                            "None: F9 sets one in a script's tab",
+                            SMALL,
+                            p.text_dim,
+                        );
+                    }
+                    for (i, b) in view.breakpoints.iter().enumerate() {
+                        ui.push_id(i as u64);
+                        let id = ui.container("breakpoint", row, |ui| {
+                            let mark = ui.container(
+                                "mark",
+                                Style {
+                                    size: [Size::Fixed(ICON + 6.0), Size::Fixed(18.0)],
+                                    align_main: Align::Center,
+                                    align_cross: Align::Center,
+                                    ..Style::default()
+                                },
+                                |ui| {
+                                    text(ui, "glyph", mark_glyph(b.look), ICON, p.breakpoint);
+                                },
+                            );
+                            if ui.sense(mark, false).clicked {
+                                out.debug_toggle = Some(i);
+                            }
+                            text(ui, "place", b.place, SMALL, p.text);
+                            text(ui, "code", b.code, SMALL, p.text_dim);
+                            ui.spacer("fill");
+                            text(ui, "detail", b.detail, SMALL, p.text_dim);
+                        });
+                        if out.debug_toggle != Some(i) && ui.sense(id, false).clicked {
+                            out.debug_breakpoint = Some(i);
+                        }
+                        ui.pop_id();
+                    }
+                });
+            });
+        });
+    });
+}
+
+/// The glyph of a breakpoint's mark: its shape for what it does, hollow when off.
+fn mark_glyph(look: MarkLook) -> &'static str {
+    match (look.kind, look.on) {
+        (MarkKind::Stop, true) => icons::BREAKPOINT,
+        (MarkKind::Stop, false) => icons::BREAKPOINT_OFF,
+        (MarkKind::Log, true) => icons::LOGPOINT,
+        (MarkKind::Log, false) => icons::LOGPOINT_OFF,
+        (MarkKind::Pause, true) => icons::PAUSE_POINT,
+        (MarkKind::Pause, false) => icons::PAUSE_POINT_OFF,
+    }
 }
 
 /// The Tasks panel (ADR 0107 E6-3): what runs in the background, how far it is and for how

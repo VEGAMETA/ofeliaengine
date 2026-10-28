@@ -9,7 +9,7 @@ use engine_app::{Assets, Game, Model, Player, PlayerSettings, Window, builtin};
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Transform, World};
 use engine_editor::{EditorGame, EditorOverlay};
-use engine_platform::window::{WindowEvent, WindowEventKind, WindowId};
+use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind, WindowId};
 use engine_runtime::{Camera, Sun, look_rotation};
 use engine_scene::{AssetId, Name, SaveOptions, SceneId, SceneRegistry, find_named, save_with};
 use std::path::{Path, PathBuf};
@@ -48,6 +48,35 @@ fn send<G: Game>(game: &mut EditorGame<G>, kind: WindowEventKind) {
         time: std::time::Instant::now(),
         kind,
     });
+}
+
+/// A click on the middle of where the last frame drew `label`, then two frames.
+fn click_text<G: Game>(
+    player: &mut Player,
+    game: &mut EditorGame<G>,
+    overlay: &mut EditorOverlay,
+    label: &str,
+) {
+    let [x, y] = game
+        .text_at(label)
+        .unwrap_or_else(|| panic!("`{label}` is not drawn"));
+    send(
+        game,
+        WindowEventKind::CursorMoved {
+            x: x as i32,
+            y: y as i32,
+        },
+    );
+    for pressed in [true, false] {
+        send(
+            game,
+            WindowEventKind::MouseButton {
+                button: MouseButton::Left,
+                pressed,
+            },
+        );
+        frame(player, game, overlay);
+    }
 }
 
 /// Enter pressed and released.
@@ -354,10 +383,28 @@ fn a_logpoint_logs_in_play_and_f9_stops_the_script_at_its_line() {
         values.starts_with("self = ") && values.contains("dt = "),
         "{values}"
     );
-    // F10 steps to the next line (the logpoint's), then to the hook's end; F5 goes on, and
-    // the next tick stops at the breakpoint again.
+    // The Debugger panel opened by itself: the stop, its stack, its frame's values, the
+    // breakpoints.
+    for drawn in [
+        "Stopped · on_tick · scripts/spin.luau:3",
+        "CALL STACK",
+        "on_tick",
+        "spin.luau:3",
+        "LOCALS",
+        "dt",
+        "spin.luau:4",
+        "t.rotation = quat.axis_angle(vec\u{2026}",
+    ] {
+        assert!(game.text_at(drawn).is_some(), "`{drawn}` in the Debugger");
+    }
+    // Its Over button steps to the next line (the logpoint's), then F10 to the hook's end;
+    // F5 goes on, and the next tick stops at the breakpoint again.
     for line in [4, 5] {
-        tap(&mut game, 0x79, 0x44);
+        if line == 4 {
+            click_text(&mut player, &mut game, &mut overlay, "Over F10");
+        } else {
+            tap(&mut game, 0x79, 0x44);
+        }
         for _ in 0..3 {
             frame(&mut player, &mut game, &mut overlay);
         }
