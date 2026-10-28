@@ -735,7 +735,7 @@ Last updated: 2026-10-28.
   - **E9-4b, changing a value at a stop** (#388, ADR 0119's as-built): F2 or a second click
     on a Variables row gives it Luau; `self`'s props and components are an undo step; VS
     Code's Set Value in the editor and the standalone player.
-  - **E9-4c, one set of breakpoints with VS Code** (#PR, ADR 0119's as-built): the editor's
+  - **E9-4c, one set of breakpoints with VS Code** (#389, ADR 0119's as-built): the editor's
     breakpoints reach VS Code as `breakpoint` events, attaching joins the two sets, and VS
     Code's own list keeps the editor's options. The script debugger's plan (E9) is done.
   - **Next, in this order:**
