@@ -56,6 +56,7 @@ engine_workspace_hack = { path = "crates/engine_workspace_hack" }
 engine_ui = { path = "crates/engine_ui" }
 engine_rhi = { path = "crates/engine_rhi" }
 engine_shader = { path = "crates/engine_shader" }
+engine_material_graph = { path = "crates/engine_material_graph" }
 engine_streaming = { path = "crates/engine_streaming" }
 
 [workspace.lints.rust]

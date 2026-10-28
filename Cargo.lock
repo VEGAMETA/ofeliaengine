@@ -589,6 +589,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_material_graph"
+version = "0.0.0"
+dependencies = [
+ "engine_profiler",
+ "engine_shader",
+ "engine_workspace_hack",
+]
+
+[[package]]
 name = "engine_nav"
 version = "0.0.0"
 dependencies = [
