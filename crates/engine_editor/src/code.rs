@@ -183,6 +183,14 @@ impl Document {
             .map(|&o| o as usize)
     }
 
+    /// The line of the text now that was line `saved` of the text as last saved, if it is
+    /// still there: where the code that runs is in the editor.
+    pub(crate) fn line_of_saved(&self, saved: usize) -> Option<usize> {
+        self.origin
+            .iter()
+            .position(|&o| o != NEW_LINE && o as usize == saved)
+    }
+
     /// The text as it is now is not what its file holds (unsaved changes brought back from
     /// an autosave), which is `saved`: the lines both begin and end with are found in it,
     /// those between are taken as new.

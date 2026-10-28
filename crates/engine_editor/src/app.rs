@@ -80,9 +80,9 @@ use crate::session::{
 };
 use crate::shell::{
     BreakOptionsView, CODE_LINE, CODE_TEXT, CodeRun, CodeSide, CodeView, Field, FieldAction,
-    FieldEvent, FileItem, FileKind, MarkLook, MenuEntry, MenuItem, OpenFile, OutlineRow, Palette,
-    PaletteAction, PaletteRow, PaletteView, Section, ShellModel, ShellResponse, Token, TreeItem,
-    Widget, build, dismissed,
+    FieldEvent, FileItem, FileKind, MarkKind, MarkLook, MenuEntry, MenuItem, OpenFile, OutlineRow,
+    Palette, PaletteAction, PaletteRow, PaletteView, Section, ShellModel, ShellResponse, Token,
+    TreeItem, Widget, build, dismissed,
 };
 use crate::snap::{Quantity, Snapping};
 use crate::thumbnails::{self, Subject, Thumbnails};
@@ -1917,6 +1917,8 @@ struct Editor {
     /// A press in the code away from the options line: what it holds is kept, as Enter
     /// keeps it, when it reads.
     break_blur: bool,
+    /// Where a script stopped in Play (ADR 0119 E9-1b), as the code shows it.
+    stop: Option<StopShown>,
     /// When the open scripts' files were last compared with what was read.
     scripts_checked: Instant,
     /// The checkers on their threads (E8-3b, E10-2a), each started with its language's
@@ -2354,6 +2356,8 @@ struct CodeShown {
     mark_hint: Option<(usize, MarkLook)>,
     break_notes: Vec<(usize, usize, usize, usize, bool)>,
     break_text: String,
+    /// The line a stopped script runs next, in the text as it is (ADR 0119).
+    stopped: Option<usize>,
 }
 
 /// A scene open in a tab but not in the world (ADR 0107 §4, E5-5a): its text as its tab
@@ -2674,6 +2678,7 @@ impl Editor {
             break_edit: None,
             gutter_press: None,
             break_blur: false,
+            stop: None,
             scripts_checked: Instant::now(),
             checkers: Checkers::default(),
             generations: 0,
@@ -2895,6 +2900,7 @@ impl Editor {
                     if pressed && !repeat {
                         match virtual_key {
                             0x70 if self.view_shift => self.toggle_game_mouse(),
+                            0x74 => self.play_request = Some(PlayRequest::Continue),
                             0x76 => self.play_request = Some(PlayRequest::Pause),
                             0x77 => self.play_request = Some(PlayRequest::Stop),
                             _ => {}
@@ -4094,6 +4100,7 @@ impl Editor {
             marks_width: shown.marks_width,
             marks: &shown.marks,
             mark_hint: shown.mark_hint,
+            stopped: shown.stopped,
             break_notes: &code_break_notes,
             break_options: self
                 .break_edit
@@ -4101,7 +4108,7 @@ impl Editor {
                 .filter(|e| e.file == s.path)
                 .map(|e| BreakOptionsView {
                     line: e.line,
-                    log: e.act == Act::Log,
+                    kind: mark_kind(e.act),
                     text: &e.log,
                     condition: &e.condition,
                     hits: &e.hits,
@@ -4215,6 +4222,7 @@ impl Editor {
             profiler: profiler_view,
             playing,
             paused: self.play.as_ref().is_some_and(|p| p.paused),
+            stopped: self.stop.is_some(),
             status: &self.status,
             snap: self.snapping.on,
             steps: self.step_labels.each_ref().map(String::as_str),
@@ -8559,6 +8567,12 @@ impl Editor {
         shown.break_text.clear();
         shown.marks_width = script.marks_width();
         shown.mark_hint = None;
+        // The line a stopped script runs next, where the code that runs is in the text.
+        shown.stopped = self
+            .stop
+            .as_ref()
+            .filter(|s| s.file == script.path)
+            .and_then(|s| doc.line_of_saved(s.line));
         if shown.marks_width > 0.0 {
             let file = &script.path;
             for m in self.breakpoints.of(file) {
@@ -8573,7 +8587,7 @@ impl Editor {
                 let waiting = doc.saved_line(m.line).is_none();
                 let problem = error.is_some() || unplaced;
                 let look = MarkLook {
-                    log: m.act == Act::Log,
+                    kind: mark_kind(m.act),
                     on: m.enabled,
                     limited: m.limited(),
                     problem,
@@ -8608,6 +8622,22 @@ impl Editor {
                         .push((m.line, column, start, end, problem));
                 }
             }
+            // The stopped line's values after its text, in place of its mark's hits.
+            if let (Some(line), Some(stop)) = (shown.stopped, self.stop.as_ref())
+                && (shown.first..shown.last).contains(&line)
+                && !stop.values.is_empty()
+            {
+                shown.break_notes.retain(|n| n.0 != line);
+                let start = shown.break_text.len();
+                shown.break_text.push_str(&stop.values);
+                let text = doc.line(line);
+                let column = shown.notes.iter().find(|n| n.0 == line).map_or_else(
+                    || char_column(text, text.len()) + 4,
+                    |n| n.1 + shown.messages[n.2..n.3].chars().count() + 3,
+                );
+                let end = shown.break_text.len();
+                shown.break_notes.push((line, column, start, end, false));
+            }
             // A new breakpoint being made shows where it goes.
             if let Some(e) = self
                 .break_edit
@@ -8616,7 +8646,7 @@ impl Editor {
                 && (shown.first..shown.last).contains(&e.line)
             {
                 let look = MarkLook {
-                    log: e.act == Act::Log,
+                    kind: mark_kind(e.act),
                     on: true,
                     limited: false,
                     problem: false,
@@ -8628,7 +8658,7 @@ impl Editor {
                 && !shown.marks.iter().any(|&(l, _)| l == line)
             {
                 let look = MarkLook {
-                    log: shift,
+                    kind: if shift { MarkKind::Log } else { MarkKind::Stop },
                     on: false,
                     limited: false,
                     problem: false,
@@ -9208,18 +9238,17 @@ impl Editor {
     }
 
     /// F9 or a click in the breakpoints' column: a breakpoint on `line` of `file`, or the
-    /// one there removed. Until stops come (E9-1b) the one set is a pause point: Play
-    /// pauses after the tick that reaches it.
+    /// one there removed. It stops the script there in Play (ADR 0119 E9-1b).
     fn toggle_breakpoint(&mut self, world: &World, file: &Path, line: usize) {
         self.break_edit = None;
         let at = format!("{}:{}", file.to_string_lossy().replace('\\', "/"), line + 1);
         if self.breakpoints.remove(file, line).is_some() {
             self.say(format!("Breakpoint removed at {at}"));
         } else {
-            self.breakpoints.put(file, Mark::new(line, Act::Pause));
+            self.breakpoints.put(file, Mark::new(line, Act::Stop));
             self.say(format!(
-                "Pause point at {at}: Play pauses after the tick that reaches it (Shift+F9: a \
-                 logpoint, Alt+F9: its options)"
+                "Breakpoint at {at}: a script stops there in Play (Shift+F9: a logpoint, \
+                 Alt+F9: its options)"
             ));
         }
         self.write_session(world);
@@ -9236,12 +9265,12 @@ impl Editor {
         self.code_focus = false;
     }
 
-    /// Alt+F9 or a right click: the options of the breakpoint on `line`, a new pause
-    /// point's when there is none.
+    /// Alt+F9 or a right click: the options of the breakpoint on `line`, a new one's when
+    /// there is none.
     fn open_break_options(&mut self, file: &Path, line: usize) {
         let edit = match self.breakpoints.at(file, line) {
             Some(m) => BreakEdit::of(file, m, false),
-            None => BreakEdit::of(file, &Mark::new(line, Act::Pause), true),
+            None => BreakEdit::of(file, &Mark::new(line, Act::Stop), true),
         };
         self.break_edit = Some(edit);
         self.code_focus = false;
@@ -9303,8 +9332,9 @@ impl Editor {
         edit.focus = None;
         if response.break_act {
             edit.act = match edit.act {
+                Act::Stop => Act::Log,
                 Act::Log => Act::Pause,
-                Act::Pause => Act::Log,
+                Act::Pause => Act::Stop,
             };
             edit.focus = Some(if edit.act == Act::Log { 0 } else { 1 });
         }
@@ -9348,6 +9378,7 @@ impl Editor {
                     mark.line + 1
                 );
                 let what = match mark.act {
+                    Act::Stop => "Breakpoint",
                     Act::Log => "Logpoint",
                     Act::Pause => "Pause point",
                 };
@@ -9369,10 +9400,65 @@ impl Editor {
     /// again.
     fn sync_breakpoints(&mut self, player: &mut Player) {
         let scripts = &self.scripts;
+        let debugger = player.script_debugger();
         self.host_breaks
-            .sync(&mut self.breakpoints, player.scripts_mut(), |file| {
+            .sync(&mut self.breakpoints, debugger.as_ref(), |file| {
                 scripts.iter().find(|s| s.path == file).map(|s| &s.doc)
             });
+    }
+
+    /// Where a script stopped in Play (ADR 0119 E9-1b), once a frame: a new stop brings its
+    /// script to the front at the line, frees the mouse and says where; its end says so.
+    fn stop_frame(&mut self, world: &World, stopped: Option<&engine_app::scripts::Stopped>) {
+        let Some(stopped) = stopped else {
+            if let Some(stop) = self.stop.take() {
+                if stop.mouse {
+                    self.set_game_mouse(true);
+                }
+                if self.play.is_some() {
+                    self.say(String::from("Going on"));
+                }
+            }
+            return;
+        };
+        let at = (stopped.module.clone(), stopped.line);
+        if self.stop.as_ref().is_some_and(|s| s.at == at) {
+            return;
+        }
+        let file = PathBuf::from(engine_app::scripts::module_file(&stopped.module));
+        // The frame's values, as they are: locals, then its function's upvalues.
+        let mut values = String::new();
+        for v in stopped.locals.iter().chain(&stopped.upvalues) {
+            if values.len() > 200 {
+                values.push_str("  \u{2026}");
+                break;
+            }
+            if !values.is_empty() {
+                values.push_str("   ");
+            }
+            let _ = write!(values, "{} = {}", v.name, v.value);
+        }
+        let mouse = self.play.as_ref().is_some_and(|p| p.mouse);
+        self.set_game_mouse(false);
+        let line = stopped.line.saturating_sub(1) as usize;
+        let shown = file.to_string_lossy().replace('\\', "/");
+        let hook = stopped
+            .stack
+            .first()
+            .and_then(|f| f.function.as_deref())
+            .map_or_else(String::new, |f| format!(" in {f}"));
+        self.stop = Some(StopShown {
+            at,
+            file: file.clone(),
+            line,
+            values,
+            mouse,
+        });
+        self.open_script(world, &file, Some((line + 1, 1)));
+        self.say(format!(
+            "Stopped at {shown}:{}{hook}: F5 goes on, F8 stops",
+            line + 1
+        ));
     }
 
     /// Script `path` (relative to the project) to run again at the player's next frame.
@@ -10885,6 +10971,8 @@ impl Editor {
             if self.play.is_none() {
                 let from_here = id == ids.play_from_here;
                 self.play_request = Some(PlayRequest::Play { from_here });
+            } else if id == ids.play {
+                self.play_request = Some(PlayRequest::Continue);
             }
         } else if id == ids.restart_play {
             self.play_request = Some(match self.play {
@@ -14600,6 +14688,20 @@ impl<G> EditorGame<G> {
                 self.end_play(player, None);
                 self.begin_play(player, from_here);
             }
+            // F5 while playing: a stopped script goes on, else a paused game.
+            Some((PlayRequest::Continue, _)) => {
+                let mut shared = self.shared.borrow_mut();
+                if player.script_stop().is_some() {
+                    player.continue_script();
+                } else if let Some(p) = shared.play.as_mut()
+                    && p.paused
+                {
+                    p.paused = false;
+                    player.set_simulating(true);
+                    self.stepping = false;
+                    shared.say(String::from("Going on"));
+                }
+            }
             Some((PlayRequest::Pause, _)) => {
                 let mut shared = self.shared.borrow_mut();
                 if let Some(p) = shared.play.as_mut() {
@@ -14621,6 +14723,11 @@ impl<G> EditorGame<G> {
             }
             None => {}
         }
+        // A script stopped at a breakpoint, or gone on (ADR 0119 E9-1b).
+        {
+            let mut shared = self.shared.borrow_mut();
+            shared.stop_frame(&player.runtime().world, player.script_stop());
+        }
         // A pause point reached (ADR 0119): the player kept the world still after its
         // tick, and Play is paused as F7 pauses it.
         if let Some((file, line)) = player.take_debug_pause() {
@@ -14635,15 +14742,11 @@ impl<G> EditorGame<G> {
         }
     }
 
-    /// Whether the game's hooks are called: playing and not paused, or a step running.
+    /// Whether the game's hooks are called: playing and not paused, or a step running;
+    /// never while a script is stopped (ADR 0119), the tick half done.
     fn running(&self) -> bool {
-        self.stepping
-            || self
-                .shared
-                .borrow()
-                .play
-                .as_ref()
-                .is_some_and(|p| !p.paused)
+        let shared = self.shared.borrow();
+        shared.stop.is_none() && (self.stepping || shared.play.as_ref().is_some_and(|p| !p.paused))
     }
 
     fn begin_play(&mut self, player: &mut Player, from_here: bool) {
@@ -14684,6 +14787,8 @@ impl<G> EditorGame<G> {
             }
         }
         player.set_simulating(true);
+        // Stops wait on the script stage's fiber (ADR 0119 E9-1b).
+        player.set_script_debugging(true);
         // The breakpoints' hits and messages counted from this Play on (ADR 0119).
         if let Some(scripts) = player.scripts_mut() {
             scripts.reset_breakpoint_states();
@@ -14715,6 +14820,9 @@ impl<G> EditorGame<G> {
     }
 
     fn end_play(&mut self, player: &mut Player, why: Option<String>) {
+        // A stage stopped at a breakpoint ends first, its stopped call failing, before the
+        // game goes and the world is put back (ADR 0119).
+        player.end_script_stop();
         self.game = None;
         self.failed = None;
         self.stepping = false;
@@ -14857,7 +14965,9 @@ impl<G> EditorGame<G> {
         }
         // A script New Script… made (E7-4a): loaded by the player's script host, then
         // attached to what it was made for.
-        if let Some(request) = shared.script_request.take() {
+        // While a script is stopped its host is the stage's: new and saved scripts wait.
+        let stopped = player.script_stop().is_some();
+        if !stopped && let Some(request) = shared.script_request.take() {
             let mut loaded = player.load_script(&shared.root.join(&request.path));
             // Loaded already (the file watcher came first): it is there all the same.
             if player
@@ -14871,9 +14981,11 @@ impl<G> EditorGame<G> {
         }
         // Scripts saved or changed on disk (E7-4b): run again by the player's host, their
         // instances going on with their state.
-        for path in core::mem::take(&mut shared.script_reloads) {
-            let reloaded = player.reload_script(&shared.root.join(&path));
-            shared.script_reloaded(&path, reloaded);
+        if !stopped {
+            for path in core::mem::take(&mut shared.script_reloads) {
+                let reloaded = player.reload_script(&shared.root.join(&path));
+                shared.script_reloaded(&path, reloaded);
+            }
         }
         // The breakpoints (ADR 0119), given where they changed once the scripts that
         // changed ran again: their lines are the new code's.
@@ -15041,6 +15153,12 @@ impl<G> EditorGame<G> {
         let shared = self.shared.borrow();
         let view = ViewProj::new(&shared.orbit, shared.view_rect?);
         view.screen(p).map(|p| p.to_array())
+    }
+
+    /// The line (from 1) of the shown script a stopped script runs next, as the code shows
+    /// it (ADR 0119 E9-1b); for tests.
+    pub fn stopped_line(&self) -> Option<usize> {
+        self.shared.borrow().code_shown.stopped.map(|l| l + 1)
     }
 
     /// What the breakpoint on line `line` (from 1) of the shown script says after its text
@@ -16097,8 +16215,33 @@ enum PlayRequest {
     Restart,
     /// Pause, or go on.
     Pause,
+    /// Go on: a stopped script, else a paused game (F5 while playing).
+    Continue,
     /// One tick while paused (pausing first).
     Step,
+}
+
+/// Where a script stopped in Play (ADR 0119 E9-1b), as the editor shows it.
+struct StopShown {
+    /// The stop's module and line, as the host gives them: a new stop is another.
+    at: (String, u32),
+    /// Its script's file, relative to the project.
+    file: PathBuf,
+    /// Its line (from 0) in the script's text as last saved, the code that runs.
+    line: usize,
+    /// The frame's values as they are shown after the line.
+    values: String,
+    /// The game had the mouse: it gets it back when the script goes on.
+    mouse: bool,
+}
+
+/// A breakpoint's mark's shape for what it does.
+fn mark_kind(act: Act) -> MarkKind {
+    match act {
+        Act::Stop => MarkKind::Stop,
+        Act::Log => MarkKind::Log,
+        Act::Pause => MarkKind::Pause,
+    }
 }
 
 /// Playing (ADR 0107 E3): the scene's world as Play found it, to put back at Stop.

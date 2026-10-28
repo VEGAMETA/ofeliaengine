@@ -450,8 +450,9 @@ pub struct Player {
     /// Blockout brushes' meshes (ADR 0110).
     blockout: crate::Blockout,
     /// The project's Luau scripts (ADR 0114): their components and hooks; none without a
-    /// project's `scripts/` folder.
-    scripts: Option<crate::scripts::Scripts>,
+    /// project's `scripts/` folder. Boxed: a stage stopped halfway (ADR 0119) holds the host
+    /// where it is.
+    scripts: Option<Box<crate::scripts::Scripts>>,
     /// The part of the output the scene covers ([`Player::set_view_rect`]); `None`: all of
     /// it.
     view_rect: Option<[u32; 4]>,
@@ -579,6 +580,10 @@ pub struct Player {
     /// The pause point a script reached (ADR 0119): the world was kept still after its
     /// tick, and the editor is told ([`Player::take_debug_pause`]).
     debug_pause: Option<(String, u32)>,
+    /// Whether the scripts are debugged ([`Player::set_script_debugging`]), and the
+    /// debugger's stage once they are: their fiber and the stage stopped on it.
+    script_debugging: bool,
+    script_debug: Option<crate::script_debug::ScriptDebug>,
     /// The game's last error in [`Game::before_ticks`], said once.
     scene_error: Option<String>,
     /// The player's own physics world (`PlayerSettings::physics`, ADR 0114 E7-3), and its
@@ -1209,6 +1214,8 @@ impl Player {
             previews: crate::previews::Previews::new(settings.frames_in_flight),
             steps: 0,
             debug_pause: None,
+            script_debugging: false,
+            script_debug: None,
             scene_error: None,
             own_physics: None,
             physics_error: None,
@@ -1241,7 +1248,7 @@ impl Player {
             if folder.is_dir() {
                 let world = &mut player.runtime.world;
                 match crate::scripts::Scripts::load(world, project, &folder) {
-                    Ok(scripts) => player.scripts = Some(scripts),
+                    Ok(scripts) => player.scripts = Some(Box::new(scripts)),
                     Err(e) => {
                         log::error!(target: "script", "the scripts' VM: {e}");
                     }
@@ -1376,6 +1383,8 @@ impl Player {
     /// Ends what a run of the game left in the player (ADR 0107 E3, the editor's Stop):
     /// every video closed, every voice stopped, the network session left.
     pub fn end_run(&mut self) {
+        // A stage stopped halfway ends first (ADR 0119).
+        self.end_script_stop();
         self.videos.close_all();
         self.sound.stop_all();
         if let Some(net) = self.net.as_mut() {
@@ -1531,14 +1540,123 @@ impl Player {
         applied.map_err(AppError::at("latency control"))
     }
 
-    /// The project's scripts (ADR 0114), when it has a `scripts/` folder that loaded.
+    /// The project's scripts (ADR 0114), when it has a `scripts/` folder that loaded; none
+    /// while a stage stopped halfway holds them ([`Self::script_stop`]).
     pub fn scripts(&self) -> Option<&crate::scripts::Scripts> {
-        self.scripts.as_ref()
+        if self.script_held() {
+            return None;
+        }
+        self.scripts.as_deref()
     }
 
-    /// The project's scripts, to change: the editor's breakpoints (ADR 0119).
+    /// The project's scripts, to change; none while a stage stopped halfway holds them.
     pub fn scripts_mut(&mut self) -> Option<&mut crate::scripts::Scripts> {
-        self.scripts.as_mut()
+        if self.script_held() {
+            return None;
+        }
+        self.scripts.as_deref_mut()
+    }
+
+    /// The scripts' debugger apart from the host (ADR 0119): it reads and sets breakpoints
+    /// at a stop too.
+    pub fn script_debugger(&self) -> Option<engine_script::ScriptDebugger> {
+        match &self.script_debug {
+            Some(debug) => Some(debug.debugger().clone()),
+            None => self
+                .scripts
+                .as_deref()
+                .map(crate::scripts::Scripts::debugger),
+        }
+    }
+
+    /// Debugs the scripts (ADR 0119): their stages run on a fiber of their own, and a stop
+    /// breakpoint stops a stage halfway, the frames going on without its rest and without
+    /// ticks, until [`Self::continue_script`]. Off: stops pause the game after their tick,
+    /// as pause points. The editor's Play turns it on.
+    pub fn set_script_debugging(&mut self, on: bool) {
+        self.script_debugging = on;
+        if !on {
+            self.end_script_stop();
+            self.script_debug = None;
+        }
+    }
+
+    /// Where a script stopped, while a stage is stopped halfway.
+    pub fn script_stop(&self) -> Option<&engine_script::Stopped> {
+        let held = self.script_debug.as_ref()?.held.as_ref()?;
+        Some(&held.at)
+    }
+
+    /// The stopped stage goes on at the next frame, and the rest of its tick after it.
+    pub fn continue_script(&mut self) {
+        if let Some(held) = self.script_debug.as_mut().and_then(|d| d.held.as_mut()) {
+            held.answer = Some(engine_script::Resume::Continue);
+        }
+    }
+
+    /// Ends the stopped stage now (Play stops, ADR 0119): its stopped call fails, every call
+    /// after it in the stage fails at once, and the rest of its tick does not run.
+    pub fn end_script_stop(&mut self) {
+        if let Some(debug) = &mut self.script_debug {
+            // SAFETY: the player's world, alive for the rest of the stage, run here.
+            unsafe { debug.abort(&mut self.runtime.world) };
+        }
+    }
+
+    /// A stage stopped halfway holds the host.
+    fn script_held(&self) -> bool {
+        self.script_debug.as_ref().is_some_and(|d| d.held.is_some())
+    }
+
+    /// The debugger's stage made once the scripts are there and debugging is on.
+    fn ready_script_debug(&mut self) {
+        if !self.script_debugging || self.script_debug.is_some() {
+            return;
+        }
+        let Some(scripts) = self.scripts.as_deref() else {
+            return;
+        };
+        match crate::script_debug::ScriptDebug::new(scripts) {
+            Ok(debug) => self.script_debug = Some(debug),
+            Err(e) => {
+                log::error!(target: "script", "the script debugger's fiber: {e}");
+                self.script_debugging = false;
+            }
+        }
+    }
+
+    /// The stopped stage goes on once the editor said how (ADR 0119), with this frame's
+    /// world and physics world; when it ends, the rest of its tick: the game's tick, the
+    /// physics step and the host's end of the tick.
+    fn go_on_with_scripts(&mut self, game: &mut impl Game) {
+        let Some(debug) = &mut self.script_debug else {
+            return;
+        };
+        let physics = game
+            .physics()
+            .or(self.own_physics.as_ref())
+            .map_or(core::ptr::null(), core::ptr::from_ref);
+        // SAFETY: this frame's world and physics world, alive while the stage runs here.
+        let ended = unsafe { debug.go_on(&mut self.runtime.world, physics) };
+        let Some(ended) = ended else {
+            return;
+        };
+        if let crate::script_debug::StageKind::Tick { dt } = ended.kind
+            && !ended.aborted
+        {
+            let world = &mut self.runtime.world;
+            game.tick(world, dt);
+            if let Some(own) = &mut self.own_physics
+                && let Err(e) = own.step(world, dt)
+            {
+                say_once(&mut self.physics_error, &e.to_string());
+            }
+            if let Some(host) = self.net.as_deref_mut()
+                && !host.is_client()
+            {
+                host.host_tick_end(world, Instant::now());
+            }
+        }
     }
 
     /// Loads script `file` (in the project's `scripts/`) made after the start, the editor's
@@ -1557,7 +1675,7 @@ impl Player {
             let world = &mut self.runtime.world;
             let scripts = crate::scripts::Scripts::load(world, &project, &folder)
                 .map_err(|e| e.to_string())?;
-            self.scripts = Some(scripts);
+            self.scripts = Some(Box::new(scripts));
             // The project's first script: the host made now loads every file, this one too.
             let names: Vec<String> = self
                 .scripts
@@ -1566,7 +1684,10 @@ impl Player {
                 .unwrap_or_default();
             return Ok(names);
         }
-        let Some(scripts) = self.scripts.as_mut() else {
+        if self.script_held() {
+            return Err(String::from("a script is stopped at a breakpoint"));
+        }
+        let Some(scripts) = self.scripts.as_deref_mut() else {
             return Err(String::from("no scripts"));
         };
         scripts.load_file(&mut self.runtime.world, &project, &folder, file)
@@ -1585,7 +1706,12 @@ impl Player {
             return Err(String::from("scripts need a project folder"));
         };
         let folder = project.join("scripts");
-        let Some(scripts) = self.scripts.as_mut() else {
+        if self.script_held() {
+            return Err(String::from(
+                "a script is stopped at a breakpoint: saved, it runs again once it goes on",
+            ));
+        }
+        let Some(scripts) = self.scripts.as_deref_mut() else {
             let started = std::time::Instant::now();
             let added = self.load_script(file)?;
             let shown = file.strip_prefix(&project).unwrap_or(file);
@@ -1603,6 +1729,9 @@ impl Player {
     /// props at their defaults: the editor's Add Component. False without that component
     /// or for a dead entity.
     pub fn add_script(&mut self, entity: Entity, name: &str) -> bool {
+        if self.script_held() {
+            return false;
+        }
         match &self.scripts {
             Some(scripts) => scripts.add(&mut self.runtime.world, entity, name),
             None => false,
@@ -2635,8 +2764,13 @@ impl Player {
             }
             None => false,
         };
+        // A stage stopped halfway (ADR 0119) goes on first, once the editor said how; while
+        // one is stopped the world is kept still: no ticks, no scene following.
+        self.ready_script_debug();
+        self.go_on_with_scripts(game);
+        let held_at_start = self.script_held();
         // The scene's parts the game's physics follows (ADR 0117), before the ticks.
-        if self.simulating || self.steps > 0 {
+        if (self.simulating || self.steps > 0) && !held_at_start {
             let mut scene = crate::SceneParts {
                 world: &mut self.runtime.world,
                 assets: &mut self.assets,
@@ -2672,8 +2806,17 @@ impl Player {
         let joined = self.net.as_ref().is_some_and(|n| n.is_client());
         let simulating = self.simulating;
         let mut steps = self.steps;
-        // A pause point reached in a tick (ADR 0119): the frame's other ticks wait.
-        let paused_by_script = Cell::new(false);
+        // A pause point reached in a tick (ADR 0119), here or in the stage that went on: the
+        // frame's other ticks wait.
+        let paused_by_script = Cell::new(
+            !held_at_start
+                && self
+                    .scripts
+                    .as_deref()
+                    .is_some_and(crate::scripts::Scripts::debug_pause_asked),
+        );
+        // A stage stopped halfway: the world kept still until it goes on.
+        let held = Cell::new(held_at_start);
         let stages = {
             let game_cell = RefCell::new(&mut *game);
             // Scripts run in both stages, before the game's own hooks (ADR 0114 §7), only
@@ -2682,6 +2825,13 @@ impl Player {
             // The player's own physics world, stepped after each tick's game hook and
             // interpolated in the presentation; scripts query the game's, else this one.
             let own_physics = RefCell::new(self.own_physics.as_mut());
+            // The debugger's stage (ADR 0119): the scripts' stages run on its fiber, but a
+            // joined client's, whose ticks its prediction drives.
+            let debug = RefCell::new(if joined {
+                None
+            } else {
+                self.script_debug.as_mut()
+            });
             let physics_error = &mut self.physics_error;
             let frame_dt = elapsed as f32;
             let timing = &mut self.timing;
@@ -2700,14 +2850,38 @@ impl Player {
                 if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                     input.sample_frame(Instant::now());
                 }
-                if let Some(own) = own_physics.borrow_mut().as_mut() {
+                if !held.get()
+                    && let Some(own) = own_physics.borrow_mut().as_mut()
+                {
                     own.interpolate(world, alpha);
                 }
-                if simulating && let Some(scripts) = scripts_cell.borrow_mut().as_mut() {
+                if simulating
+                    && !held.get()
+                    && let Some(scripts) = scripts_cell.borrow_mut().as_mut()
+                {
                     let game = game_cell.borrow();
                     let own = own_physics.borrow();
-                    scripts.frame_with(world, frame_dt, alpha, game.physics().or(own.as_deref()));
+                    let physics = game.physics().or(own.as_deref());
+                    match debug.borrow_mut().as_mut() {
+                        Some(debug) => {
+                            if scripts.has_frame_hooks() {
+                                let kind = crate::script_debug::StageKind::Frame {
+                                    dt: frame_dt,
+                                    alpha,
+                                };
+                                let physics =
+                                    physics.map_or(core::ptr::null(), core::ptr::from_ref);
+                                let host: *mut crate::scripts::Scripts = &mut ***scripts;
+                                // SAFETY: the host, this frame's world and physics world; while
+                                // the stage is held the player hands out no host and opens the
+                                // world and the physics world anew before it goes on.
+                                held.set(unsafe { debug.run(host, world, physics, kind) });
+                            }
+                        }
+                        None => scripts.frame_with(world, frame_dt, alpha, physics),
+                    }
                 }
+                // As while paused: a game in the editor draws the editor's frame here.
                 game_cell.borrow_mut().present(world, alpha);
                 // Models (ADR 0108): their meshes and materials reach the GPU this frame,
                 // the pools beginning theirs after the simulation.
@@ -2761,7 +2935,7 @@ impl Player {
                         }
                         // Kept still: the tick only places and extracts what is there, but
                         // for a step asked for (`Player::step_tick`).
-                        if paused_by_script.get() {
+                        if paused_by_script.get() || held.get() {
                             return;
                         }
                         if !simulating {
@@ -2779,7 +2953,23 @@ impl Player {
                         if let Some(scripts) = scripts_cell.borrow_mut().as_mut() {
                             let game = game_cell.borrow();
                             let own = own_physics.borrow();
-                            scripts.tick_with(world, dt, game.physics().or(own.as_deref()));
+                            let physics = game.physics().or(own.as_deref());
+                            match debug.borrow_mut().as_mut() {
+                                Some(debug) => {
+                                    let kind = crate::script_debug::StageKind::Tick { dt };
+                                    let physics =
+                                        physics.map_or(core::ptr::null(), core::ptr::from_ref);
+                                    let host: *mut crate::scripts::Scripts = &mut ***scripts;
+                                    // SAFETY: as the frame's stage above.
+                                    if unsafe { debug.run(host, world, physics, kind) } {
+                                        // Stopped halfway: the rest of this tick runs when
+                                        // it goes on, the frame's other ticks not at all.
+                                        held.set(true);
+                                        return;
+                                    }
+                                }
+                                None => scripts.tick_with(world, dt, physics),
+                            }
                             // The tick goes on to its end; the next ones wait.
                             if scripts.debug_pause_asked() {
                                 paused_by_script.set(true);
@@ -2803,7 +2993,12 @@ impl Player {
         self.steps = steps;
         // A pause point reached in a tick or in the frame's hooks: the world kept still
         // from now on, and the editor told where.
-        if let Some(at) = self.scripts.as_mut().and_then(|s| s.take_debug_pause()) {
+        if !self.script_held()
+            && let Some(at) = self
+                .scripts
+                .as_deref_mut()
+                .and_then(|s| s.take_debug_pause())
+        {
             self.simulating = false;
             self.steps = 0;
             self.debug_pause = Some(at);
@@ -3870,6 +4065,9 @@ impl Player {
 
 impl Drop for Player {
     fn drop(&mut self) {
+        // A stage stopped halfway ends before the host and the world go (ADR 0119).
+        self.end_script_stop();
+        self.script_debug = None;
         // Streamline's queues drain too.
         let _ = match &self.hooks {
             Some(hooks) => hooks.device_wait_idle(&self.device),
@@ -4087,6 +4285,10 @@ impl Player {
     /// Takes the frame's save and load requests (and a due autosave), at the tick
     /// boundary after the frame's ticks.
     fn process_saves(&mut self, game: &mut impl Game, frame_seconds: f64) {
+        // The world is halfway through a tick while a stage is stopped: saves wait.
+        if self.script_held() {
+            return;
+        }
         self.saves.play_ms += (frame_seconds * 1000.0) as u64;
         let mut requests = match self.runtime.world.resource_mut::<crate::Saves>() {
             Some(saves) if !saves.requests.is_empty() => core::mem::take(&mut saves.requests),
@@ -4128,7 +4330,7 @@ impl Player {
     fn take_save(&mut self, game: &mut impl Game, slot: &str) {
         engine_profiler::zone!("app::take_save");
         // Scripts' timers ride on their entities into the save (ADR 0114 §8).
-        if let Some(scripts) = self.scripts.as_mut() {
+        if let Some(scripts) = self.scripts.as_deref_mut() {
             scripts.before_save(&mut self.runtime.world);
         }
         let world = &self.runtime.world;
@@ -4137,7 +4339,7 @@ impl Player {
             ..engine_save::CaptureOptions::default()
         };
         let mut image = engine_save::capture(world, &options);
-        if let Some(scripts) = self.scripts.as_mut() {
+        if let Some(scripts) = self.scripts.as_deref_mut() {
             scripts.after_save(&mut self.runtime.world);
         }
         let world = &self.runtime.world;
@@ -4210,7 +4412,7 @@ impl Player {
         // Every sound starts again where the save had it (ADR 0105).
         self.sound.after_load(world);
         // Scripts' timers set again, their `on_load` at the next tick (ADR 0114 §8).
-        if let Some(scripts) = self.scripts.as_mut() {
+        if let Some(scripts) = self.scripts.as_deref_mut() {
             scripts.after_load(world);
         }
         game.after_load(world, &save, &report);

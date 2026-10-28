@@ -451,6 +451,7 @@ fn main() {
         history: None,
         playing,
         paused: false,
+        stopped: false,
         status: &status,
         snap: false,
         steps: ["0.1 m", "45°", "0.1"],

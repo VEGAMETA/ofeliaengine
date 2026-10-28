@@ -395,24 +395,37 @@ Save a script (Ctrl+S in the editor, or in another editor) and it runs again at 
 - **A hook that runs too long** (over 50 ms: a loop that never ends) is stopped the same
   way.
 
-## Logpoints and pause points
+## Breakpoints, logpoints and pause points
 
 In a script's tab, the column left of the line numbers holds breakpoints. They live in the
 editor's session (`.ofelia/`), never in the script, and follow their lines as you edit.
 
+- **A breakpoint** (●) stops the script at its line during Play: click the column, or F9
+  on the caret's line. The game waits in the middle of its tick (the hooks before this one
+  ran, the rest did not), and the editor goes on:
+  - the script's tab comes to the front at the line, with an amber band and an arrow, and
+    the frame's values after it (`self = Self   dt = 0.015625`): its locals, then the
+    upvalues its function uses;
+  - the viewport's edge turns amber, the mouse is the editor's, and the status bar says
+    where (`Stopped at scripts/door.luau:14 in on_tick`);
+  - the world is yours meanwhile: select, inspect, edit (as play edits, put back at Stop);
+    nothing in it moves but by your edits. Breakpoints can be set, changed or taken away;
+  - **F5 goes on**: the rest of the tick runs, the game's own tick and the physics step
+    with it. **F8 stops Play** there: the stopped hook ends at its line, without an error.
+  - A script saved while stopped runs again once it goes on.
 - **A logpoint** (◆) writes a message each time the line runs, and the script goes on:
-  Shift+click the column, or Shift+F9 on the caret's line, and type its text. `{…}` takes
-  any Luau expression in the line's scope, as Luau's own string interpolation does:
-  `speed = {self.speed}, near = {near}`. While Play runs, the latest message stands after
-  its line with how many times it came (`speed = 2  ×312`), and the Output has a row each
-  time, its place a click away.
+  Shift+click the column, or Shift+F9, and type its text. `{…}` takes any Luau expression
+  in the line's scope, as Luau's own string interpolation does: `speed = {self.speed}, near
+  = {near}`. While Play runs, the latest message stands after its line with how many times
+  it came (`speed = 2  ×312`), and the Output has a row each time, its place a click away.
 - **A pause point** (‖) pauses Play after the tick that reaches it, as F7 does: the world
-  is still, every hook of that tick done. Click the column, or F9. F7 goes on.
-- **Options** (Alt+F9, or a right click): a logpoint becomes a pause point or back, a
-  **condition** (`self.hp < 0`) limits it to when it holds, a **hit rule** to some of its
-  hits: `10` the tenth, `>= 10` from the tenth on, `% 64` every 64th (once a second at 64
-  ticks). Tab moves between the fields, Enter keeps, Escape drops. A mark with a condition
-  or a rule has a bar in it.
+  is still, every hook of that tick done. Make one from a breakpoint's options. F7 or F5
+  goes on.
+- **Options** (Alt+F9, or a right click): what it does (Stop, Log or Pause; a click on the
+  switch goes to the next), a **condition** (`self.hp < 0`) that limits it to when it holds,
+  a **hit rule** for some of its hits: `10` the tenth, `>= 10` from the tenth on, `% 64`
+  every 64th (once a second at 64 ticks). Tab moves between the fields, Enter keeps,
+  Escape drops. A mark with a condition or a rule has a bar in it.
 - Alt+click or Ctrl+F9 turns one off (its mark hollow) or on; a middle click removes it;
   Ctrl+Shift+F9 removes them all ("Restore Removed Breakpoints" in the palette brings them
   back).
@@ -424,7 +437,8 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
 
 Without breakpoints nothing is paid. A function with one runs Luau's interpreter instead of
 native code until its script runs again, and each hit costs a microsecond or so (below).
-Stopping at a line, stepping and the variables come next, with the Debugger panel.
+Stepping line by line, the Debugger panel with the stack and the variables, and stopping
+at errors come next.
 
 ## What it costs
 
@@ -435,7 +449,9 @@ Measured on ref-1 (Ryzen 7 7700, release):
   boolean, a vector, an entity);
 - 1,000 doors like the one above take 0.6 ms a tick;
 - a breakpoint turned off costs nothing; one on a line that runs costs about 0.6 µs a hit
-  (one in 64 logging), 1 µs with a condition, 1.4 µs logging every hit.
+  (one in 64 logging), 1 µs with a condition, 1.4 µs logging every hit;
+- in the editor's Play, the scripts' stages run on a stack of their own so that a
+  breakpoint can stop them: 1,000 spinners tick in 0.26 ms either way.
 
 A field read is a call into the engine, though a short one: read it into a local when a
 hook uses it several times. Logic over thousands of objects every tick belongs in Rust.

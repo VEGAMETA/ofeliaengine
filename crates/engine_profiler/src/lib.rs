@@ -28,6 +28,121 @@ pub const ENABLED: bool = cfg!(feature = "tracy-base");
 pub mod __private {
     #[cfg(feature = "tracy-base")]
     pub use tracy_client;
+
+    /// A zone [`zone!`](crate::zone) opened, noted while a fiber's job runs so a stop can
+    /// close it and open it again ([`crate::leave_fiber`]).
+    #[cfg(feature = "tracy-base")]
+    pub struct Zone {
+        _span: Option<tracy_client::Span>,
+        noted: bool,
+    }
+
+    #[cfg(feature = "tracy-base")]
+    impl Zone {
+        #[inline(always)]
+        pub fn new(loc: &'static tracy_client::SpanLocation) -> Self {
+            let span = tracy_client::Client::running().map(|c| c.span(loc, 0));
+            let noted = span.is_some() && crate::fiber_zones::note(loc);
+            Self { _span: span, noted }
+        }
+    }
+
+    #[cfg(feature = "tracy-base")]
+    impl Drop for Zone {
+        #[inline(always)]
+        fn drop(&mut self) {
+            // Before the span ends (fields drop after this).
+            if self.noted {
+                crate::fiber_zones::unnote();
+            }
+        }
+    }
+}
+
+/// The zones of a fiber's job (ADR 0119): Tracy keeps one stack of zones a thread, and a
+/// job that stops halfway leaves its zones open while the thread runs other code. They are
+/// noted while the job runs, closed when it gives the thread back and opened again when it
+/// goes on. Tracy's own fiber mode (`TRACY_FIBERS`) puts every zone of every thread
+/// through one lock instead.
+#[cfg(feature = "tracy-base")]
+mod fiber_zones {
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        /// Whether a fiber's job runs on this thread now.
+        static ON: Cell<bool> = const { Cell::new(false) };
+        /// The job's open zones, outermost first.
+        static OPEN: RefCell<Vec<&'static tracy_client::SpanLocation>> =
+            const { RefCell::new(Vec::new()) };
+    }
+
+    /// Notes a zone opened at `loc`, while a job runs: whether it was.
+    #[inline(always)]
+    pub(crate) fn note(loc: &'static tracy_client::SpanLocation) -> bool {
+        if !ON.get() {
+            return false;
+        }
+        OPEN.with_borrow_mut(|open| open.push(loc));
+        true
+    }
+
+    /// The innermost noted zone ended.
+    pub(crate) fn unnote() {
+        OPEN.with_borrow_mut(|open| {
+            open.pop();
+        });
+    }
+
+    pub(crate) fn leave() {
+        ON.set(false);
+        // On demand, a zone's end carries its connection, which Tracy's API does not
+        // give: the job's zones stay as they are there.
+        #[cfg(not(feature = "tracy-ondemand"))]
+        if tracy_client::Client::running().is_some() {
+            OPEN.with_borrow(|open| {
+                for _ in open {
+                    // SAFETY: ends the thread's innermost zone (the build does not verify
+                    // zones' ids); the zone's own end later ends the one opened again.
+                    unsafe {
+                        let mut ctx: tracy_client::sys::___tracy_c_zone_context =
+                            core::mem::zeroed();
+                        ctx.active = 1;
+                        tracy_client::sys::___tracy_emit_zone_end(ctx);
+                    }
+                }
+            });
+        }
+    }
+
+    pub(crate) fn enter() {
+        #[cfg(not(feature = "tracy-ondemand"))]
+        if let Some(client) = tracy_client::Client::running() {
+            OPEN.with_borrow(|open| {
+                for &loc in open {
+                    // Its end is the noted zone's own.
+                    core::mem::forget(client.clone().span(loc, 0));
+                }
+            });
+        }
+        ON.set(true);
+    }
+}
+
+/// A fiber's job starts or goes on (ADR 0119): the zones it had open are opened again,
+/// and those it opens are noted until [`leave_fiber`]. Nothing without the `tracy`
+/// feature.
+#[inline]
+pub fn enter_fiber() {
+    #[cfg(feature = "tracy-base")]
+    fiber_zones::enter();
+}
+
+/// A fiber's job gives the thread back, halfway or at its end: its open zones are closed
+/// (and opened again by [`enter_fiber`] when it goes on).
+#[inline]
+pub fn leave_fiber() {
+    #[cfg(feature = "tracy-base")]
+    fiber_zones::leave();
 }
 
 /// Opens a profiling zone that lasts until the end of the enclosing block.
@@ -48,12 +163,12 @@ pub mod __private {
 #[macro_export]
 macro_rules! zone {
     () => {
-        let _engine_profiler_zone = $crate::__private::tracy_client::Client::running()
-            .map(|c| c.span($crate::__private::tracy_client::span_location!(), 0));
+        let _engine_profiler_zone =
+            $crate::__private::Zone::new($crate::__private::tracy_client::span_location!());
     };
     ($name:literal) => {
-        let _engine_profiler_zone = $crate::__private::tracy_client::Client::running()
-            .map(|c| c.span($crate::__private::tracy_client::span_location!($name), 0));
+        let _engine_profiler_zone =
+            $crate::__private::Zone::new($crate::__private::tracy_client::span_location!($name));
     };
 }
 

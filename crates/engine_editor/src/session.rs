@@ -420,7 +420,9 @@ impl SessionFile {
             out.push_str("\n[breakpoint]\npath = ");
             quote_into(&mut out, &slashes(path));
             let _ = writeln!(out, "\nline = {}", m.line + 1);
+            // A breakpoint that stops says nothing more.
             match m.act {
+                Act::Stop => {}
                 Act::Log => {
                     out.push_str("log = ");
                     quote_into(&mut out, &m.log);
@@ -498,7 +500,7 @@ impl SessionFile {
                     "[breakpoint]" => {
                         // No line until its `line` key: a block without one is dropped.
                         file.breakpoints
-                            .push((PathBuf::new(), Mark::new(usize::MAX, Act::Pause)));
+                            .push((PathBuf::new(), Mark::new(usize::MAX, Act::Stop)));
                         Section::Breakpoint
                     }
                     _ => Section::Other,

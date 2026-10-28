@@ -78,6 +78,8 @@ pub struct Palette {
     pub breakpoint: Color,
     /// A logpoint's latest message after its line.
     pub logged: Color,
+    /// The band behind the line a stopped script runs next (its arrow: `warning`).
+    pub stopped: Color,
 }
 
 impl Default for Palette {
@@ -112,6 +114,7 @@ impl Default for Palette {
             find_current: srgb(156, 102, 36),
             breakpoint: srgb(229, 72, 64),
             logged: srgb(126, 176, 214),
+            stopped: srgb(74, 64, 30),
         }
     }
 }
@@ -558,12 +561,23 @@ pub struct FindView<'a> {
     pub focus_replace: bool,
 }
 
+/// What a breakpoint does, as its mark's shape says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkKind {
+    /// It stops the script (●).
+    Stop,
+    /// A logpoint (◆).
+    Log,
+    /// A pause point (‖).
+    Pause,
+}
+
 /// How a breakpoint's mark looks in the gutter (ADR 0119; `docs/research/ux/
 /// script-debugger.md` §1): by shape first, so color is never the only sign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarkLook {
-    /// A logpoint (◆), else a pause point (‖).
-    pub log: bool,
+    /// Its shape.
+    pub kind: MarkKind,
     /// On: the shape filled; off, hollow.
     pub on: bool,
     /// A condition or a hit rule limits it: a short bar inside.
@@ -580,8 +594,8 @@ pub struct MarkLook {
 pub struct BreakOptionsView<'a> {
     /// The breakpoint's line.
     pub line: usize,
-    /// A logpoint, else a pause point.
-    pub log: bool,
+    /// What it does.
+    pub kind: MarkKind,
     /// A logpoint's text.
     pub text: &'a str,
     /// Its condition.
@@ -651,6 +665,9 @@ pub struct CodeView<'a> {
     pub marks: &'a [(usize, MarkLook)],
     /// A faint mark where a click in the column would put one, while the mouse is there.
     pub mark_hint: Option<(usize, MarkLook)>,
+    /// The line a stopped script runs next (ADR 0119): its band, and the arrow in the
+    /// breakpoints' column.
+    pub stopped: Option<usize>,
     /// What the breakpoints say after their lines: a line, a column, the text, and whether
     /// it is a problem (else a logpoint's latest message).
     pub break_notes: &'a [(usize, usize, &'a str, bool)],
@@ -719,6 +736,8 @@ pub struct ShellModel<'a> {
     pub playing: bool,
     /// The game is paused.
     pub paused: bool,
+    /// A script is stopped at a breakpoint (ADR 0119).
+    pub stopped: bool,
     /// Right end of the bottom bar.
     pub status: &'a str,
     /// Dragged values snap by default (the tool bar's grid button).
@@ -1218,7 +1237,12 @@ fn center(
                 out.pivot = true;
             }
         });
-        let edge = model.playing.then_some((p.playing, 2.0));
+        // Amber while a script is stopped (ADR 0119): the game waits in its tick.
+        let edge = match (model.playing, model.stopped) {
+            (true, true) => Some((p.warning, 2.0)),
+            (true, false) => Some((p.playing, 2.0)),
+            _ => None,
+        };
         out.viewport = ui.container(
             "viewport",
             Style {
@@ -1422,6 +1446,10 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
         };
         let lit = band([0.0, y(view.current)], [CODE_FAR, CODE_LINE], p.code_line);
         ui.container("current", lit, |_| {});
+        if let Some(line) = view.stopped {
+            let at = band([0.0, y(line)], [CODE_FAR, CODE_LINE], p.stopped);
+            ui.container("stopped", at, |_| {});
+        }
         for (i, &(line, a, b, on)) in view.selections.iter().enumerate() {
             ui.push_id(i as u64);
             // A selection going on past a line's end shows a bit of its line break.
@@ -1512,6 +1540,19 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
                 gutter_mark(ui, view.marks_width, y(line), look, faint, p);
                 ui.pop_id();
             }
+            // Over the line's mark: the line a stopped script runs next.
+            if let Some(line) = view.stopped {
+                let cell = Style {
+                    size: [Size::Fixed(view.marks_width), Size::Fixed(CODE_LINE)],
+                    placed: Some([0.0, y(line)]),
+                    align_main: Align::Center,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                };
+                ui.container("stopped at", cell, |ui| {
+                    text(ui, "arrow", icons::STOPPED_AT, ICON, p.warning);
+                });
+            }
         }
         if let Some(list) = &view.completion {
             let at = [
@@ -1590,11 +1631,13 @@ fn code_view(ui: &mut Ui, view: &CodeView<'_>, p: &Palette, out: &mut ShellRespo
 /// `top`: its shape filled or hollow, a bar inside when a condition or a hit rule limits
 /// it, a warning's dot beside it when something is wrong.
 fn gutter_mark(ui: &mut Ui, width: f32, top: f32, look: MarkLook, color: Color, p: &Palette) {
-    let glyph = match (look.log, look.on) {
-        (true, true) => icons::LOGPOINT,
-        (true, false) => icons::LOGPOINT_OFF,
-        (false, true) => icons::PAUSE_POINT,
-        (false, false) => icons::PAUSE_POINT_OFF,
+    let glyph = match (look.kind, look.on) {
+        (MarkKind::Stop, true) => icons::BREAKPOINT,
+        (MarkKind::Stop, false) => icons::BREAKPOINT_OFF,
+        (MarkKind::Log, true) => icons::LOGPOINT,
+        (MarkKind::Log, false) => icons::LOGPOINT_OFF,
+        (MarkKind::Pause, true) => icons::PAUSE_POINT,
+        (MarkKind::Pause, false) => icons::PAUSE_POINT_OFF,
     };
     let cell = Style {
         size: [Size::Fixed(width), Size::Fixed(CODE_LINE)],
@@ -1650,10 +1693,10 @@ fn break_options(
         ..Style::default()
     };
     ui.row("break options", style, |ui| {
-        let (glyph, what) = if view.log {
-            (icons::LOGPOINT, "Log")
-        } else {
-            (icons::PAUSE_POINT, "Pause")
+        let (glyph, what) = match view.kind {
+            MarkKind::Stop => (icons::BREAKPOINT, "Stop"),
+            MarkKind::Log => (icons::LOGPOINT, "Log"),
+            MarkKind::Pause => (icons::PAUSE_POINT, "Pause"),
         };
         let switch = Style {
             padding: [6.0, 2.0, 8.0, 2.0],
@@ -1674,8 +1717,8 @@ fn break_options(
             ("hits", view.hits, "Hits: 10, >= 10, % 64", 150.0),
         ];
         for (k, (key, now, hint, width)) in fields.into_iter().enumerate() {
-            // A pause point has no text.
-            if k == 0 && !view.log {
+            // Only a logpoint has a text.
+            if k == 0 && view.kind != MarkKind::Log {
                 continue;
             }
             out.break_fields[k] = option_field(ui, key, now, hint, width, view.focus == Some(k), p);

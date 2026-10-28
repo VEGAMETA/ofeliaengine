@@ -303,3 +303,91 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
   - in the editor on the player, a logpoint from the session logs in Play (its message at
     its line), F9 sets a pause point that pauses Play, Alt+F9 gives it a condition that
     lets Play go on, and the session keeps both.
+
+## As built (E9-1b-1, 2026-10-28): stops on the fiber, F5, the stopped line
+
+- **Fibers** (`engine_platform::fiber`): one fiber, made once, runs one job after another;
+  `suspend` gives the thread back from inside a job, `resume` goes back into it. The thread
+  becomes a fiber the first time and stays one. A job's panic is caught at the fiber's
+  entry and handed back. `GetCurrentFiber` is an inline function of `winnt.h`, not an
+  export, so it is read from the TEB (`gs:[0x20]`).
+- **The core** (`engine_script::debug`):
+  - `BreakAction::Stop` describes the frame (`Stopped`: module, line, locals, its
+    function's upvalues, the stack), values read as they are, never through metamethods
+    (a userdata by its metatable's `__type`, a table with its length, a string cut at 60
+    characters), and calls the host's `StopHandler`;
+  - the handler waits and answers `Resume::Continue` or `Resume::Abort`; None, where it
+    cannot wait, makes the stop a pause point;
+  - the call's time budget is held while it waits;
+  - `Abort` raises its error once the callback's own frames are done (outside
+    `catch_unwind`), the call fails with `ScriptError::Aborted`, and until the host ends it
+    (`end_abort`) every later stop answers it and every call fails at once, so the stage
+    runs out fast;
+  - `ScriptDebugger`, the debugger apart from the VM (it holds the VM weakly), sets and
+    reads breakpoints through each module's chunk reference, so the editor uses it while a
+    stage holds the VM. A reload that fails puts the old chunk back for it.
+- **The player** (`engine_app::script_debug`):
+  - with `Player::set_script_debugging(true)` (the editor's Play), the tick's and the
+    frame's script stages run on the fiber;
+  - a stop suspends it: the frame goes on without the rest of the stage, without the game's
+    tick, the physics step and its interpolation, and later frames run no ticks and no
+    scene following (`before_ticks`) until `continue_script`;
+  - Continue: at the start of a later frame the stage goes on with that frame's world and
+    physics world opened anew (`scripts::reopen`); when it ends, the rest of its tick runs
+    (the game's tick, the physics step, the host's end of the tick);
+  - `end_script_stop` (Play stops, `end_run`, the player's drop) aborts it, no physics
+    world open; an aborted call stops and reports no instance;
+  - while a stage is held the player hands out no `Scripts` (`scripts()` is None),
+    `load_script` and `reload_script` refuse, saves wait, and breakpoints go through
+    `Player::script_debugger`;
+  - a joined client's stages stay off the fiber (its prediction drives its ticks).
+- **No frame of a waiting stage holds a borrow the editor's frames conflict with**, so the
+  world can be edited at every stop, not only where Luau could yield (the decision's
+  answer 2 asked for read-only where the stage holds borrows):
+  - the stage reaches the world and the physics world only through its open pointers, read
+    again after every hook (`tick_open`, `frame_open`, `follow`, `despawn_asked`; a step's
+    contacts are copied out before they are heard);
+  - the host is boxed, and the editor does not touch it while it is held;
+  - the views' C functions hold no reference across a call back into Luau (`self:open()`
+    calls `Door.open` through raw pointers), and a query's loop checks each entity again
+    at each step, so edits at a stop inside a loop are seen, not undefined.
+- **Tracy:** zones opened in a fiber's job are noted (`engine_profiler::enter_fiber`,
+  `leave_fiber`), closed when it gives the thread back and opened again when it goes on;
+  Tracy's own `TRACY_FIBERS` would put every zone of every thread through one lock. On
+  demand (`tracy-ondemand`) a zone's end needs its connection, which the API does not give:
+  zones there are left as they are.
+- **The editor** (the UX note's §1, §5 and §6):
+  - F9 and a click make a breakpoint that stops (●, hollow when off); the options' switch
+    goes Stop, Log, Pause; a session's `[breakpoint]` block with neither `log` nor `pause`
+    stops;
+  - at a stop: the script's tab at the line, an amber band and the arrow over its mark,
+    the frame's values after the line, the viewport's edge amber, the mouse freed (given
+    back when it goes on), the status bar saying where and which keys go on; the game's
+    hooks wait; new and saved scripts wait;
+  - F5 while playing goes on (a stopped script, else a paused game), in the game's window
+    too; F8 ends Play there.
+- **Measured** (ref-1, release; 1,000 instances of a one-line `on_tick`, medians of 101
+  ticks; `measure_stage_on_fiber`): 0.263-0.267 ms a tick straight, 0.264-0.265 ms on the
+  fiber, two runs: the two switches are below the tick's noise. A Tracy zone costs 18.0 ->
+  19.2 ns (`benches/zones.rs`, the thread-local read that notes it).
+- **Not done (E9-1b-2 on):**
+  - stepping (F10, F11, Shift+F11): hooks entered as Luau threads, `lua_singlestep`;
+  - the Debugger panel: the stack, the variables, the header (its entity, "tick 1,284, under
+    way"), Shift+F7 to finish the tick;
+  - values on the lines above the stopped one, hover values, our userdata through
+    reflection (`self` shows `Self` now);
+  - pause on errors;
+  - the game's window keeps its focus at a stop; the editor's window does not take the
+    keyboard yet.
+- **Tests:**
+  - fibers: a job runs, suspends, goes on; a panic comes back; two fibers on one thread;
+  - the core: a stop waits on a fiber with its frame (locals, upvalues, the stack), the
+    editor's breakpoints changed meanwhile, its budget held past its length, Continue,
+    Abort and the calls failing until `end_abort`; values read as they are;
+  - the player's stage: held while the world is edited and a breakpoint taken away, then
+    gone on with the edits seen; ended at a stop, the stage's other calls failing, no
+    instance stopped;
+  - the editor on the player: F9 stops Play at the line (the arrow, the values), the world
+    still, an edit at the stop kept, Ctrl+F9 and F5 go on, a condition from the options,
+    F8 at a stop ends Play with the world put back, the session keeps the breakpoint.
+

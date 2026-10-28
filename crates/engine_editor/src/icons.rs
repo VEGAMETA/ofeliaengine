@@ -152,6 +152,12 @@ pub const RESET: &str = "\u{F054C}";
 /// changes.
 pub const ALERT: &str = "\u{F0026}";
 
+/// A breakpoint in the gutter (`cod-circle_filled`): the script stops there.
+pub const BREAKPOINT: &str = "\u{EA71}";
+/// A breakpoint turned off (`cod-circle`).
+pub const BREAKPOINT_OFF: &str = "\u{EABC}";
+/// The line a stopped script runs next (`cod-debug_stackframe`).
+pub const STOPPED_AT: &str = "\u{EB8B}";
 /// A logpoint in the gutter (`cod-debug_breakpoint_log`): it logs, the script goes on.
 pub const LOGPOINT: &str = "\u{EAAB}";
 /// A logpoint turned off (`cod-debug_breakpoint_log_unverified`).

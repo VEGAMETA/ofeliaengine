@@ -773,6 +773,7 @@ name = "engine_script"
 version = "0.0.0"
 dependencies = [
  "engine_core",
+ "engine_platform",
  "engine_profiler",
  "mlua",
 ]

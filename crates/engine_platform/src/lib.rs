@@ -23,6 +23,8 @@ pub mod cpu;
 #[cfg(windows)]
 pub mod display;
 #[cfg(windows)]
+pub mod fiber;
+#[cfg(windows)]
 pub mod folders;
 #[cfg(any(windows, test))]
 pub mod fs_watch;

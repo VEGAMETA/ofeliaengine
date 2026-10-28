@@ -62,7 +62,9 @@ use engine_script::mlua::{
     self, AnyUserData, Function, Lua, MetaMethod, Table, UserData, UserDataMethods, Value, Vector,
 };
 /// The debugger's breakpoints as the host takes them (ADR 0119): the editor's.
-pub use engine_script::{BreakAction, BreakState, Breakpoint, Hits};
+pub use engine_script::{
+    BreakAction, BreakState, Breakpoint, Hits, ScriptDebugger, Stopped, Variable,
+};
 use engine_script::{ScriptError, ScriptSettings, ScriptVm};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -490,6 +492,19 @@ pub struct Scripts {
     /// The physics world whose contacts were heard last (its address), and its step then:
     /// a step's contacts are heard once.
     heard: (usize, u64),
+    /// A step's contacts, copied out of the physics world before any is heard (scratch):
+    /// no hook runs while the stage holds the physics world.
+    contacts: Vec<Contact>,
+}
+
+/// A contact between two bodies, by their entities, as the instances hear it.
+#[derive(Clone, Copy)]
+struct Contact {
+    a: Option<Entity>,
+    b: Option<Entity>,
+    begin: bool,
+    point: Vec3,
+    normal: Vec3,
 }
 
 /// What reloading a script did ([`Scripts::reload_file`]).
@@ -592,6 +607,7 @@ impl Scripts {
             modules,
             needs: BTreeMap::new(),
             heard: (0, 0),
+            contacts: Vec::new(),
             versions: HashMap::new(),
         };
         let mut main = 0;
@@ -1171,6 +1187,31 @@ impl Scripts {
 
     /// [`Self::tick`], scripts querying `physics` (`physics.raycast`; ADR 0114 E7-3).
     pub fn tick_with(&mut self, world: &mut World, dt: f32, physics: Option<&crate::ScenePhysics>) {
+        // SAFETY: both are this call's borrows, alive until it returns.
+        unsafe {
+            self.tick_open(
+                world,
+                dt,
+                physics.map_or(core::ptr::null(), core::ptr::from_ref),
+            )
+        }
+    }
+
+    /// [`Self::tick_with`] through pointers, for a stage that may stop halfway (ADR 0119):
+    /// it reaches the world and the physics world only through the stage's open pointers,
+    /// read again after every hook, so none of its frames holds them while it waits; the
+    /// player opens them anew ([`reopen`]) before it goes on.
+    ///
+    /// # Safety
+    ///
+    /// `world`, and `physics` when not null, are valid until the stage ends, but for what
+    /// [`reopen`] puts in their place; nothing else uses this host meanwhile.
+    pub unsafe fn tick_open(
+        &mut self,
+        world: *mut World,
+        dt: f32,
+        physics: *const crate::ScenePhysics,
+    ) {
         engine_profiler::zone!("scripts::tick");
         self.clock.ticks += 1;
         self.clock.dt = dt;
@@ -1179,17 +1220,15 @@ impl Scripts {
             *clock = self.clock;
         }
         self.open(world, physics, false);
-        self.follow(world);
+        self.follow();
         if core::mem::take(&mut self.loaded) {
             self.call_loaded();
         }
         self.deliver_later();
         self.timers_due();
-        if let Some(physics) = physics {
-            self.touches(physics);
-        }
+        self.touches();
         self.call_all(Stage::Tick, dt, 0.0);
-        self.despawn_asked(world);
+        self.despawn_asked();
         self.close();
     }
 
@@ -1204,12 +1243,12 @@ impl Scripts {
         if let Some(mut clock) = self.vm.lua().app_data_mut::<Clock>() {
             *clock = self.clock;
         }
-        self.open(world, None, false);
-        self.follow(world);
+        self.open(world, core::ptr::null(), false);
+        self.follow();
         self.predicted_only = true;
         self.call_all(Stage::Tick, dt, 0.0);
         self.predicted_only = false;
-        self.despawn_asked(world);
+        self.despawn_asked();
         self.close();
     }
 
@@ -1226,17 +1265,39 @@ impl Scripts {
         alpha: f32,
         physics: Option<&crate::ScenePhysics>,
     ) {
+        let physics = physics.map_or(core::ptr::null(), core::ptr::from_ref);
+        // SAFETY: both are this call's borrows, alive until it returns.
+        unsafe { self.frame_open(world, dt, alpha, physics) }
+    }
+
+    /// Whether a frame's stage has anything to call: a frame hook of a component or a
+    /// system.
+    pub fn has_frame_hooks(&self) -> bool {
+        self.components.iter().any(|c| c.hooks.frame.is_some())
+            || self.systems.iter().any(|s| s.frame.is_some())
+    }
+
+    /// [`Self::frame_with`] through pointers, as [`Self::tick_open`].
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::tick_open`]'s.
+    pub unsafe fn frame_open(
+        &mut self,
+        world: *mut World,
+        dt: f32,
+        alpha: f32,
+        physics: *const crate::ScenePhysics,
+    ) {
         engine_profiler::zone!("scripts::frame");
-        if !self.components.iter().any(|c| c.hooks.frame.is_some())
-            && !self.systems.iter().any(|s| s.frame.is_some())
-        {
+        if !self.has_frame_hooks() {
             return;
         }
         self.open(world, physics, true);
-        self.follow(world);
+        self.follow();
         self.deliver_later();
         self.call_all(Stage::Frame, dt, alpha);
-        self.despawn_asked(world);
+        self.despawn_asked();
         self.close();
     }
 
@@ -1258,7 +1319,7 @@ impl Scripts {
     /// their instances' `on_stop` first, their props still there, then the entities go.
     /// Despawns asked by those `on_stop`s go too, up to 16 passes; the rest wait for the
     /// next stage.
-    fn despawn_asked(&mut self, world: &mut World) {
+    fn despawn_asked(&mut self) {
         for _ in 0..16 {
             if self.tables.despawns.is_empty() {
                 return;
@@ -1267,15 +1328,22 @@ impl Scripts {
             gone.clear();
             gone.append(&mut self.tables.despawns);
             let asked = gone.len();
-            let mut at = 0;
-            while at < gone.len() {
-                let e = gone[at];
-                at += 1;
-                gone.extend(world.children(e));
+            {
+                // SAFETY: the stage's world, borrowed for this block only (no hook runs in
+                // it).
+                let world = unsafe { &*open_world() };
+                let mut at = 0;
+                while at < gone.len() {
+                    let e = gone[at];
+                    at += 1;
+                    gone.extend(world.children(e));
+                }
             }
             for &e in &gone {
                 self.stop_instances_of(e);
             }
+            // SAFETY: as above, read again after the hooks (a stop opens it anew).
+            let world = unsafe { &mut *open_world() };
             for &e in &gone[..asked] {
                 world.despawn_recursive(e);
             }
@@ -1356,7 +1424,9 @@ impl Scripts {
                 Stage::Frame => self.vm.call_function::<_, ()>(&module, &hook, (dt, alpha)),
             };
             self.deliver();
-            if let Err(err) = result {
+            if let Err(err) = result
+                && !matches!(err, ScriptError::Aborted { .. })
+            {
                 let name = match stage {
                     Stage::Tick => "on_tick",
                     Stage::Frame => "on_frame",
@@ -1370,9 +1440,9 @@ impl Scripts {
         }
     }
 
-    /// The world (and `physics`, if any) open to the scripts until [`Self::close`];
+    /// The world (and `physics`, when not null) open to the scripts until [`Self::close`];
     /// `frame`: a frame's stage, whose `input` is the frame's view.
-    fn open(&mut self, world: &mut World, physics: Option<&crate::ScenePhysics>, frame: bool) {
+    fn open(&mut self, world: *mut World, physics: *const crate::ScenePhysics, frame: bool) {
         script_views::take_dead_refs(self.main, &mut self.dead);
         if !self.dead.is_empty() {
             let dead = core::mem::take(&mut self.dead);
@@ -1388,7 +1458,7 @@ impl Scripts {
             self.dead.clear();
         }
         OPEN_WORLD.set(world);
-        OPEN_PHYSICS.set(physics.map_or(core::ptr::null(), core::ptr::from_ref));
+        OPEN_PHYSICS.set(physics);
         self.tables.frame = frame;
         script_views::open(&mut self.tables);
     }
@@ -1445,6 +1515,12 @@ impl Scripts {
         self.vm.breakpoints_version()
     }
 
+    /// The VM's debugger apart from the host (ADR 0119): what reads and sets breakpoints
+    /// while a stage is stopped halfway and holds the host.
+    pub fn debugger(&self) -> engine_script::ScriptDebugger {
+        self.vm.debugger()
+    }
+
     /// The module of script file `file` (relative to the project, as the editor names it),
     /// if it is loaded.
     pub fn module_of(&self, file: &Path) -> Option<&str> {
@@ -1456,9 +1532,12 @@ impl Scripts {
 
     /// The instances made to match the world: those that came get a `self` and are started
     /// (in their entities' order), those whose component went are stopped.
-    fn follow(&mut self, world: &mut World) {
+    fn follow(&mut self) {
         self.seen.clear();
         let mut came: Vec<((u32, u32), Entity)> = Vec::new();
+        // SAFETY: the stage's world, borrowed until the instances that came are found (no
+        // hook runs meanwhile).
+        let world = unsafe { &*open_world() };
         for (k, c) in self.components.iter().enumerate() {
             if !c.hooks.any() {
                 continue;
@@ -1490,7 +1569,9 @@ impl Scripts {
             let Some((e, inst)) = self.instances.remove(&key) else {
                 continue;
             };
-            if world.contains(e)
+            // SAFETY: as above, read again for each (an `on_stop` may stop and the stage
+            // open it anew).
+            if unsafe { &*open_world() }.contains(e)
                 && !inst.stopped
                 && let Some(stop) = self.components[key.1 as usize].hooks.stop.clone()
             {
@@ -1585,7 +1666,13 @@ impl Scripts {
     /// (ADR 0114 E7-3), once each step: `on_touch(self, other, point, normal)` when a body
     /// began touching one of the entity's bodies or its trigger, `on_untouch(self, other)`
     /// when it stopped; the normal points from the instance's entity toward the other.
-    fn touches(&mut self, physics: &crate::ScenePhysics) {
+    fn touches(&mut self) {
+        let physics = OPEN_PHYSICS.get();
+        if physics.is_null() {
+            return;
+        }
+        // SAFETY: the stage's physics world, borrowed until its contacts are copied out.
+        let physics = unsafe { &*physics };
         let at = (core::ptr::from_ref(physics) as usize, physics.steps());
         if at == self.heard {
             return;
@@ -1601,21 +1688,31 @@ impl Scripts {
             self.listening = listened;
             return;
         }
-        let events = engine_physics::PhysicsBackend::contact_events(physics.backend());
-        for event in events {
-            let a = physics.entity_of(event.a);
-            let b = physics.entity_of(event.b);
-            let begin = event.kind == engine_physics::ContactKind::Begin;
-            for (me, other, normal) in [(a, b, event.normal), (b, a, -event.normal)] {
+        let mut contacts = core::mem::take(&mut self.contacts);
+        contacts.clear();
+        contacts.extend(
+            engine_physics::PhysicsBackend::contact_events(physics.backend())
+                .iter()
+                .map(|event| Contact {
+                    a: physics.entity_of(event.a),
+                    b: physics.entity_of(event.b),
+                    begin: event.kind == engine_physics::ContactKind::Begin,
+                    point: event.point,
+                    normal: event.normal,
+                }),
+        );
+        for c in &contacts {
+            for (me, other, normal) in [(c.a, c.b, c.normal), (c.b, c.a, -c.normal)] {
                 let Some(me) = me else {
                     continue;
                 };
                 for &k in &listened {
-                    self.touch(me, k, other, begin, event.point, normal);
+                    self.touch(me, k, other, c.begin, c.point, normal);
                     self.deliver();
                 }
             }
         }
+        self.contacts = contacts;
         self.listening = listened;
     }
 
@@ -1946,8 +2043,8 @@ impl Scripts {
         }
         self.receivers = keys;
         if !heard && only.is_none() {
-            // SAFETY: as above.
-            let who = unsafe { &*world }
+            // SAFETY: as above, read again after the hooks (a stop opens it anew).
+            let who = unsafe { &*open_world() }
                 .get::<engine_scene::Name>(target)
                 .map_or_else(|| format!("{target:?}"), |n| n.as_str().to_owned());
             let line = format!(
@@ -1960,8 +2057,12 @@ impl Scripts {
         }
     }
 
-    /// Instance `key` stopped by `err` in hook `hook`.
+    /// Instance `key` stopped by `err` in hook `hook`. A call the debugger ended (Play
+    /// stopped at a stop) is no error of the script's.
     fn stop(&mut self, key: (u32, u32), hook: &str, e: Entity, err: &ScriptError) {
+        if matches!(err, ScriptError::Aborted { .. }) {
+            return;
+        }
         if let Some((_, inst)) = self.instances.get_mut(&key) {
             inst.stopped = true;
         }
@@ -1970,6 +2071,9 @@ impl Scripts {
 
     /// `err` in component `k`'s `hook` on `e`, in the log once.
     fn report(&mut self, k: usize, hook: &str, e: Entity, err: &ScriptError) {
+        if matches!(err, ScriptError::Aborted { .. }) {
+            return;
+        }
         let c = &self.components[k];
         let place = self.place(err);
         let line = format!("{place} ({}.{hook})", c.name);
@@ -2032,6 +2136,12 @@ pub fn module_name(file: &Path) -> Option<String> {
         return None;
     }
     module_of(Path::new("scripts"), file).ok()
+}
+
+/// The file of script module `module`, relative to the project (`scripts/npc/guard.luau`):
+/// what [`module_name`] reads back.
+pub fn module_file(module: &str) -> String {
+    format!("scripts/{module}.luau")
 }
 
 /// The module of script `file` under `folder`: its path from there, without `.luau`
@@ -3075,6 +3185,17 @@ fn overlap_sphere(
 /// The world the host opened for this stage (null outside), for the fast path.
 pub(crate) fn open_world() -> *mut World {
     OPEN_WORLD.get()
+}
+
+/// A stage stopped halfway (ADR 0119) goes on with the world and the physics world of the
+/// frame that resumes it: the borrows it was opened with belong to an earlier frame.
+///
+/// # Safety
+///
+/// As [`Scripts::tick_open`]'s, for the rest of the stage.
+pub unsafe fn reopen(world: *mut World, physics: *const crate::ScenePhysics) {
+    OPEN_WORLD.set(world);
+    OPEN_PHYSICS.set(physics);
 }
 
 /// The world the host opened for this stage. A caller dereferences it within one callback
