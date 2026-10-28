@@ -4,7 +4,8 @@
 //! - [`library`]: the node kinds, each a snippet of Slang with typed ports;
 //! - [`graph`]: a graph in memory: its shading model, its nodes by id, its links by the
 //!   input they feed;
-//! - [`generate`]: the module a graph makes, each line with the node that made it.
+//! - [`generate`]: the module a graph makes, each line with the node that made it;
+//! - [`file`]: the `.graph` file in the editor's grammar.
 //!
 //! ```
 //! use engine_material_graph::{Build, Graph, Model, Node, PortRef, generate, graph::OUTPUT};
@@ -21,10 +22,12 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod file;
 pub mod generate;
 pub mod graph;
 pub mod library;
 
+pub use file::GraphFile;
 pub use generate::{Build, Generated, GraphError, Param, ParamType, generate};
 pub use graph::{Graph, Model, Node, PortRef};
 pub use library::{Kind, PortType, kind};
