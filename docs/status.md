@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3d-2, New Graph, copies, carried links** (#PR, ADR 0123's as-built): Material: New
+  - **E10-3d-2, New Graph, copies, carried links** (#425, ADR 0123's as-built): Material: New
     Graph writes a graph and a material file named after the object. The graph draws its
     glTF material's own look (maps where the project has their files, factors;
     `GltfOutline::maps` from the JSON), or the standard one. The file is given to the
