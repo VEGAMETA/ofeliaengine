@@ -267,16 +267,31 @@ fn marked_functions_are_read_with_their_signatures() {
         shapes,
         [
             ("ctx", &context, Direction::In),
-            ("position", &ValueType::Field(FieldKind::Float(3)), Direction::In),
-            ("sharpness", &ValueType::Field(FieldKind::Float(1)), Direction::In),
-            ("image", &ValueType::Field(FieldKind::Texture), Direction::In),
+            (
+                "position",
+                &ValueType::Field(FieldKind::Float(3)),
+                Direction::In
+            ),
+            (
+                "sharpness",
+                &ValueType::Field(FieldKind::Float(1)),
+                Direction::In
+            ),
+            (
+                "image",
+                &ValueType::Field(FieldKind::Texture),
+                Direction::In
+            ),
         ]
     );
     let tint = &found[1];
     assert_eq!(tint.arguments, ["Tint", "Color"]);
     assert_eq!(tint.result, ValueType::Field(FieldKind::Float(3)));
     let directions: Vec<Direction> = tint.parameters.iter().map(|p| p.direction).collect();
-    assert_eq!(directions, [Direction::In, Direction::Out, Direction::InOut]);
+    assert_eq!(
+        directions,
+        [Direction::In, Direction::Out, Direction::InOut]
+    );
     assert_eq!(tint.parameters[2].ty, ValueType::Field(FieldKind::Uint(2)));
     let _ = std::fs::remove_dir_all(&dir);
 }
