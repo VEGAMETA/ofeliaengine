@@ -4,7 +4,7 @@
 
 use engine_assets::sounds::{SoundFormat, SoundPack};
 use engine_audio::{Clip, Decoder, PreparedStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
@@ -71,6 +71,29 @@ pub(crate) enum Request {
         looping: bool,
         buffer_ms: u32,
     },
+    /// File `path` (anywhere, not the store's) for the editor's preview from `from`
+    /// seconds (E11-3b).
+    Preview {
+        ticket: u64,
+        path: PathBuf,
+        stream_from: f32,
+        from: f64,
+        looping: bool,
+        buffer_ms: u32,
+    },
+}
+
+/// A file made ready for the editor's preview.
+pub(crate) enum PreviewSound {
+    /// Short (or a WAV file): decoded whole.
+    Clip(Clip),
+    /// Long: opened as a stream where the preview starts; its rate and length in frames,
+    /// when the file says.
+    Stream {
+        stream: PreparedStream,
+        rate: u32,
+        frames: Option<u64>,
+    },
 }
 
 /// What the loading thread made.
@@ -82,6 +105,10 @@ pub(crate) enum Done {
     Prepared {
         ticket: u64,
         result: Result<PreparedStream, String>,
+    },
+    Preview {
+        ticket: u64,
+        result: Result<PreviewSound, String>,
     },
 }
 
@@ -120,6 +147,17 @@ impl Loader {
                         } => Done::Prepared {
                             ticket,
                             result: prepare(&store, &path, offset, looping, buffer_ms),
+                        },
+                        Request::Preview {
+                            ticket,
+                            path,
+                            stream_from,
+                            from,
+                            looping,
+                            buffer_ms,
+                        } => Done::Preview {
+                            ticket,
+                            result: preview(&path, stream_from, from, looping, buffer_ms),
                         },
                     };
                     if outbox.send(answer).is_err() {
@@ -250,6 +288,39 @@ fn decode_up_to(decoder: &mut dyn Decoder, limit: u64) -> Result<Option<Clip>, S
     Clip::from_interleaved(decoder.sample_rate(), decoder.channels(), &samples)
         .map(Some)
         .map_err(|e| e.to_string())
+}
+
+/// File `path` (anywhere, not the store's) made ready for the editor's preview from
+/// `from` seconds: decoded whole when short (or a WAV file), else opened as a stream
+/// there.
+fn preview(
+    path: &Path,
+    stream_from: f32,
+    from: f64,
+    looping: bool,
+    buffer_ms: u32,
+) -> Result<PreviewSound, String> {
+    engine_profiler::zone!("app::sound::preview");
+    // The folder's reading, by the file's own path.
+    let disk = Store::Folder(PathBuf::new());
+    let name = path.to_string_lossy();
+    match load(&disk, &name, stream_from)? {
+        Loaded::Clip(clip) => Ok(PreviewSound::Clip(clip)),
+        Loaded::Long { rate } => {
+            // An Ogg stream does not say its length: its last page does.
+            let frames = engine_audio_decode::open_file(path)
+                .ok()
+                .and_then(|d| d.frames())
+                .or_else(|| engine_audio_decode::ogg_last_granule(path));
+            let offset = (from.max(0.0) * f64::from(rate)) as u64;
+            let stream = prepare(&disk, &name, offset, looping, buffer_ms)?;
+            Ok(PreviewSound::Stream {
+                stream,
+                rate,
+                frames,
+            })
+        }
+    }
 }
 
 /// Opens `path` and makes it ready to play from `offset`: the seek and the first decode.

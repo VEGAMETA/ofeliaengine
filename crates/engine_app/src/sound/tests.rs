@@ -761,3 +761,55 @@ fn a_changed_file_is_heard_at_once_from_where_it_was() {
         assert!((s - expected).abs() < 1e-6, "frame {i}: {s} vs {expected}");
     }
 }
+
+#[test]
+fn a_preview_plays_a_file_as_it_is_while_the_world_stands_still() {
+    let mut bed = Bed::new("preview", AudioSettings::default());
+    // The editor's world, kept still: its sources silent, the preview heard.
+    bed.simulating = false;
+    let file = bed.folder.join("beep.wav");
+    write_wav(&file, u64::from(RATE) / 2);
+    bed.sound.preview(&file, 0.0, false);
+    bed.until(|b| b.sound.preview_state().is_some_and(|p| p.playing));
+    let out = bed.frame(50);
+    assert!(energy(left(&out).into_iter()) > 0.0, "heard");
+    let state = bed.sound.preview_state().unwrap();
+    assert!(state.position > 0.0, "{state:?}");
+    assert_eq!(state.length, Some(0.5));
+    assert!(state.failed.is_none());
+    // Stopped: silent once its fade is out.
+    bed.sound.stop_preview();
+    assert!(bed.sound.preview_state().is_none());
+    bed.frame(30);
+    let out = bed.frame(20);
+    assert_eq!(energy(left(&out).into_iter()), 0.0);
+}
+
+#[test]
+fn a_long_preview_streams_from_where_it_is_asked() {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../engine_audio_decode/tests/data/stereo_44100.ogg");
+    let mut bed = Bed::new(
+        "preview-stream",
+        AudioSettings {
+            stream_from: 0.0,
+            ..AudioSettings::default()
+        },
+    );
+    bed.simulating = false;
+    bed.sound.preview(&file, 0.05, false);
+    bed.until(|b| b.sound.preview_state().is_some_and(|p| p.playing));
+    for _ in 0..10 {
+        bed.frame(10);
+    }
+    let state = bed.sound.preview_state().unwrap();
+    // 50 ms in, then 100 ms of mix: the voice's position, read after the last mix. Its
+    // length from the Ogg file's last page.
+    assert!((state.position - 0.15).abs() < 0.002, "{state:?}");
+    assert!(state.length.is_some_and(|l| l > 0.15), "{state:?}");
+    assert_eq!(bed.audio().stream_underruns(), 0);
+    // A file that is not there says why.
+    bed.sound
+        .preview(&bed.folder.join("missing.ogg"), 0.0, false);
+    bed.until(|b| b.sound.preview_state().is_some_and(|p| p.failed.is_some()));
+}

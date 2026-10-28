@@ -1634,6 +1634,29 @@ impl Player {
         }
     }
 
+    /// Plays sound file `file` (absolute, or from the project's folder) as it is, from
+    /// `from` seconds, looping or not: the editor's preview (E11-3b). On a bus of its own
+    /// straight into the master, dry, heard while the world stands still; one at a time, a
+    /// new one stopping the last with a 20 ms fade.
+    pub fn preview_sound(&mut self, file: &Path, from: f64, looping: bool) {
+        let file = if file.is_absolute() {
+            file.to_owned()
+        } else {
+            self.assets.root().join(file)
+        };
+        self.sound.preview(&file, from, looping);
+    }
+
+    /// The editor's preview stopped, faded out.
+    pub fn stop_sound_preview(&mut self) {
+        self.sound.stop_preview();
+    }
+
+    /// The editor's preview as it plays, if there is one.
+    pub fn sound_preview(&self) -> Option<crate::PreviewState<'_>> {
+        self.sound.preview_state()
+    }
+
     /// Material file `file` as the editor holds it, read in place of the file on disk and
     /// drawn by the next frame (`None`: the file again; [`crate::Assets::set_material`],
     /// ADR 0120's E10-1c).

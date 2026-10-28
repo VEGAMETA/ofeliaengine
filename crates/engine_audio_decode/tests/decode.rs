@@ -241,3 +241,34 @@ fn a_streamed_file_plays_exactly_like_its_decoded_clip() {
         assert!(streamed.iter().any(|&s| s != 0.0), "{}", case.file);
     }
 }
+
+#[test]
+fn an_ogg_files_length_is_read_from_its_last_page() {
+    let path = |name: &str| {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(name)
+    };
+    for name in ["mono_22050.ogg", "stereo_44100.ogg"] {
+        let mut decoder = engine_audio_decode::open_file(path(name)).unwrap();
+        let channels = usize::from(decoder.channels());
+        let frames = (read_all(decoder.as_mut(), 4096).len() / channels) as u64;
+        assert_eq!(
+            engine_audio_decode::ogg_last_granule(path(name)),
+            Some(frames),
+            "{name}: the decoded length"
+        );
+    }
+    // Opus: at 48 kHz with its pre-skip (a few milliseconds over the decoded length).
+    let mut decoder = engine_audio_decode::open_file(path("stereo_48000.opus")).unwrap();
+    let frames = (read_all(decoder.as_mut(), 4096).len() / 2) as u64;
+    let granule = engine_audio_decode::ogg_last_granule(path("stereo_48000.opus")).unwrap();
+    assert!(
+        granule >= frames && granule - frames < 1000,
+        "{granule} {frames}"
+    );
+    assert_eq!(
+        engine_audio_decode::ogg_last_granule(path("stereo_44100_s16.wav")),
+        None
+    );
+}

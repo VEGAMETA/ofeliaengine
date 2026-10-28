@@ -174,6 +174,9 @@ const TREE_KEYS: KeyContext = KeyContext::Panel(1);
 /// The keys of a script's tab (E8-2): its find bar and going to a line, over the
 /// editor's own (Ctrl+H hollows a brush elsewhere).
 const CODE_KEYS: KeyContext = KeyContext::Panel(2);
+/// The FileSystem dock's keys after a click in its listing (E11-3b): Space plays the
+/// picked sound (the gizmo's axes elsewhere), the arrows move the pick.
+const DOCK_KEYS: KeyContext = KeyContext::Panel(3);
 
 /// What a part shows while the selected entities hold different values there.
 const MIXED: &str = "—";
@@ -756,6 +759,9 @@ struct CommandIds {
     apply_material: CommandId,
     break_next: CommandId,
     find_references: CommandId,
+    /// Sound previews (E11-3b): the picked sound played or stopped, Auto Play.
+    preview_sound: CommandId,
+    auto_play: CommandId,
     /// Prefabs (E5-2): the selection made a prefab's instance, an instance unpacked.
     make_prefab: CommandId,
     unpack_prefab: CommandId,
@@ -917,6 +923,8 @@ fn commands() -> (Commands, CommandIds) {
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
         break_next: c.register("debug.break_next", "Debug", "Break at the Next Script Line"),
         find_references: c.register("assets.references", "Assets", "Find References"),
+        preview_sound: c.register("assets.preview", "Assets", "Play or Stop the Picked Sound"),
+        auto_play: c.register("assets.auto_play", "Assets", "Auto Play Sounds"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
         unpack_prefab: c.register("scene.unpack_prefab", "Scene", "Unpack Prefab"),
         revert_prefab: c.register("prefab.revert", "Prefab", "Revert Overrides"),
@@ -1007,6 +1015,15 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Shift+ArrowRight", ids.expand_all),
     ]
     .map(|(chord, id)| (chord, id, TREE_KEYS));
+    // The dock's arrows run the tree's commands, which move the pick there.
+    let dock = [
+        ("Space", ids.preview_sound),
+        ("ArrowDown", ids.select_next),
+        ("ArrowUp", ids.select_previous),
+        ("ArrowLeft", ids.collapse),
+        ("ArrowRight", ids.expand),
+    ]
+    .map(|(chord, id)| (chord, id, DOCK_KEYS));
     let global = [
         ("Ctrl+Z", ids.undo),
         ("Ctrl+Y", ids.redo),
@@ -1127,7 +1144,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+Shift+F9", ids.remove_breakpoints),
     ]
     .map(|(chord, id)| (chord, id, CODE_KEYS));
-    for (chord, id, context) in global.chain(tree).chain(code) {
+    for (chord, id, context) in global.chain(tree).chain(dock).chain(code) {
         if let Some(chord) = Chord::parse(chord) {
             let _ = keymap.bind(chord, context, id);
             shortcuts.entry(id).or_insert_with(|| chord.to_string());
@@ -1162,6 +1179,23 @@ impl engine_scene::text::ReadRefs for IndexRefs<'_> {
             .copied()
             .ok_or_else(|| format!("no entity has the scene id {id}"))
     }
+}
+
+/// What the editor asks of the player's sound preview (E11-3b), sent with its next frame.
+#[derive(Debug, Clone, PartialEq)]
+enum PreviewAsk {
+    Play { file: PathBuf, from: f64 },
+    Stop,
+}
+
+/// The sound file the editor previews (E11-3b): which, and as it plays (the player says
+/// each frame): where, its length when known, and whether it was heard yet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Previewing {
+    id: AssetId,
+    position: f64,
+    length: Option<f64>,
+    heard: bool,
 }
 
 /// A material row's number being dragged in the inspector (ADR 0120's E10-1c): the row,
@@ -2158,6 +2192,12 @@ struct Editor {
     /// inspected one's section among the inspector's, a drag of one of its numbers, the row
     /// and part typed into, the row whose choice is open.
     material_docs: Vec<crate::material::MaterialDoc>,
+    /// Sound previews (E11-3b): picking a sound plays it (Auto Play, kept in the session),
+    /// what to ask of the player next, the file previewed, the listing's tiles a row.
+    auto_play: bool,
+    preview_ask: Option<PreviewAsk>,
+    preview: Option<Previewing>,
+    browser_columns: usize,
     /// The material whose rows the inspector shows (the one picked in the dock, else the
     /// selected object's), its section's title, the models query that counts its users, and
     /// the material files that could not be read (not tried again until written anew).
@@ -2948,6 +2988,10 @@ impl Editor {
             renaming_file: None,
             inspected: None,
             material_docs: Vec::new(),
+            auto_play: false,
+            preview_ask: None,
+            preview: None,
+            browser_columns: 4,
             shown_material: None,
             material_title: String::new(),
             material_models: None,
@@ -4113,6 +4157,7 @@ impl Editor {
         let columns = self
             .listing
             .map_or(4, |(r, _)| crate::shell::tile_columns(r.size[0], self.tile));
+        self.browser_columns = columns;
         let shown = self.listing.map_or(0..columns * 2, |(r, scroll)| {
             let row = crate::shell::tile_row_height(self.tile);
             let first = (scroll / row).floor().max(0.0) as usize;
@@ -4132,12 +4177,18 @@ impl Editor {
                 }
                 _ => None,
             };
+            let playing = self
+                .preview
+                .filter(|p| l.asset == Some(p.id))
+                .map(|p| p.length.map(|len| (p.position / len.max(1e-6)) as f32));
             file_items.push(FileItem {
                 name: &l.name,
                 kind: l.kind,
                 selected: l.asset.is_some() && l.asset == self.browser.selected,
                 thumbnail,
                 renaming: l.asset.is_some() && l.asset == self.renaming_file,
+                playing: playing.is_some(),
+                progress: playing.flatten(),
             });
         }
         // The command palette's results in view.
@@ -4615,6 +4666,7 @@ impl Editor {
             path: &self.browser.label,
             folders: &folder_items,
             files: &file_items,
+            auto_play: self.auto_play,
             tile: self.tile,
             columns,
             bottom_tabs: &[
@@ -4707,6 +4759,25 @@ impl Editor {
         if let Some(i) = response.tool {
             self.active_tool = i;
         }
+        // Sound previews (E11-3b): ▶ on a tile, a click along a playing one, Auto Play.
+        if let Some(i) = response.file_play
+            && let Some(id) = self.browser.listing.get(i).and_then(|l| l.asset)
+        {
+            self.toggle_preview(id);
+        }
+        if let Some((i, tile)) = response.file_seek
+            && let Some(id) = self.browser.listing.get(i).and_then(|l| l.asset)
+            && let Some(length) = self.preview.filter(|p| p.id == id).and_then(|p| p.length)
+            && let (Some(r), Some([x, _])) = (self.ui.rect_of(tile), self.ui.input().mouse)
+        {
+            let along = crate::shell::tile_along(r, self.tile, x);
+            self.play_preview(id, f64::from(along) * length);
+        }
+        if response.auto_play {
+            // The listing's header: the dock's keys stay the dock's.
+            self.dock_focus = true;
+            self.run(world, self.ids.auto_play);
+        }
         // The browser: a folder opened, a file picked (a folder in the listing opened).
         if let Some(i) = response.folder
             && let Some((path, _)) = self.browser.folders.get(i).cloned()
@@ -4725,6 +4796,11 @@ impl Editor {
                     });
                     self.last_file_click = (!double).then_some((id, now));
                     self.reveal_asset(id);
+                    // With Auto Play on, the pick plays (E11-3b); a click along the playing
+                    // tile seeks instead (above).
+                    if response.file_seek.is_none() {
+                        self.auto_play_pick(id);
+                    }
                     let file = self
                         .asset_db
                         .get(id)
@@ -5187,6 +5263,16 @@ impl Editor {
             let merge = drag.merge;
             self.history.revert(world, merge);
         }
+        // Escape stops a sound's preview (E11-3b), when nothing else takes it.
+        if self.ui.input().keys.contains(&UiKey::Escape)
+            && self.preview.is_some()
+            && self.command_palette.is_none()
+            && self.ui.editing().is_none()
+            && self.drag.is_none()
+            && self.material_drag.is_none()
+        {
+            self.stop_preview();
+        }
         // A material's number too (E10-1c): the drag ends, and what it moved goes back.
         if self.ui.input().keys.contains(&UiKey::Escape)
             && let Some(drag) = self.material_drag.take()
@@ -5210,12 +5296,24 @@ impl Editor {
             ids.step_out,
         ];
         // A script shown: its code's keys (Ctrl+F, F3, Ctrl+G) before the editor's.
-        let contexts: &[KeyContext] = match (self.tree_focus, self.active_script.is_some()) {
-            (true, true) => &[TREE_KEYS, CODE_KEYS],
-            (true, false) => &[TREE_KEYS],
-            (false, true) => &[CODE_KEYS],
-            (false, false) => &[],
+        // The tree's or the dock's keys after a press in it (E11-3b).
+        let panel = if self.tree_focus {
+            Some(TREE_KEYS)
+        } else if self.dock_focus {
+            Some(DOCK_KEYS)
+        } else {
+            None
         };
+        let mut list = [KeyContext::Global; 2];
+        let mut n = 0;
+        for context in [panel, self.active_script.map(|_| CODE_KEYS)]
+            .into_iter()
+            .flatten()
+        {
+            list[n] = context;
+            n += 1;
+        }
+        let contexts = &list[..n];
         // F3 goes on finding while the find bar's field has the keys, and Ctrl+F and Ctrl+H
         // go from one of its fields to the other.
         let finding = self
@@ -12648,6 +12746,20 @@ impl Editor {
             } else {
                 "Clicks pick through transparent surfaces"
             }));
+        } else if id == ids.preview_sound {
+            // Space in the dock: the picked sound played or stopped (E11-3b).
+            match self.browser.selected {
+                Some(file) if self.is_sound(file) => self.toggle_preview(file),
+                _ => self.say(String::from("Pick a sound file in the FileSystem dock")),
+            }
+        } else if id == ids.auto_play {
+            self.auto_play = !self.auto_play;
+            self.write_session(world);
+            self.say(String::from(if self.auto_play {
+                "Auto Play: a sound picked in the dock plays"
+            } else {
+                "Auto Play off: Space plays the picked sound"
+            }));
         } else if id == ids.local_axes {
             self.local_axes = !self.local_axes;
             self.say(String::from(if self.local_axes {
@@ -12733,6 +12845,27 @@ impl Editor {
             self.offer_components(world, id == ids.attach_script);
         } else if id == ids.new_script {
             self.new_script(world);
+        } else if self.dock_focus
+            && [
+                ids.select_next,
+                ids.select_previous,
+                ids.collapse,
+                ids.expand,
+            ]
+            .contains(&id)
+        {
+            // The arrows in the dock move the pick (E11-3b): a row down or up, one along.
+            let columns = self.browser_columns.max(1) as isize;
+            let by = if id == ids.select_next {
+                columns
+            } else if id == ids.select_previous {
+                -columns
+            } else if id == ids.expand {
+                1
+            } else {
+                -1
+            };
+            self.move_pick(by);
         } else if id == ids.select_next || id == ids.select_previous {
             self.step(if id == ids.select_next { 1 } else { -1 }, false);
         } else if id == ids.extend_next || id == ids.extend_previous {
@@ -13154,6 +13287,88 @@ impl Editor {
             self.open_material(id, &path);
         }
         self.say(format!("{path} ({})", kind.name()));
+    }
+
+    /// Asset `id` is a sound file.
+    fn is_sound(&self, id: AssetId) -> bool {
+        self.asset_db
+            .get(id)
+            .is_some_and(|e| e.kind == engine_scene::AssetKind::Sound)
+    }
+
+    /// The dock's sound `id` played from its start, or stopped while it plays (▶ and Space,
+    /// E11-3b). A file that is not a sound does nothing.
+    fn toggle_preview(&mut self, id: AssetId) {
+        if self.preview.is_some_and(|p| p.id == id) {
+            self.stop_preview();
+        } else if self.is_sound(id) {
+            self.play_preview(id, 0.0);
+        }
+    }
+
+    /// File `id` picked in the dock with Auto Play on (E11-3b): a sound plays from its
+    /// start, anything else stops the preview.
+    fn auto_play_pick(&mut self, id: AssetId) {
+        if !self.auto_play {
+            return;
+        }
+        if self.is_sound(id) {
+            self.play_preview(id, 0.0);
+        } else {
+            self.stop_preview();
+        }
+    }
+
+    /// Sound `id` played from `from` seconds, on the player's preview bus (E11-3b).
+    fn play_preview(&mut self, id: AssetId, from: f64) {
+        let Some(path) = self.asset_db.get(id).map(|e| e.path.clone()) else {
+            return;
+        };
+        let length = self.preview.filter(|p| p.id == id).and_then(|p| p.length);
+        self.preview_ask = Some(PreviewAsk::Play {
+            file: self.root.join(&path),
+            from,
+        });
+        self.preview = Some(Previewing {
+            id,
+            position: from,
+            length,
+            heard: false,
+        });
+    }
+
+    /// The sound's preview stopped (E11-3b).
+    fn stop_preview(&mut self) {
+        if self.preview.take().is_some() {
+            self.preview_ask = Some(PreviewAsk::Stop);
+        }
+    }
+
+    /// The dock's pick moved `by` files along its listing (the arrows, E11-3b), Auto Play
+    /// following it.
+    fn move_pick(&mut self, by: isize) {
+        let files: Vec<AssetId> = self
+            .browser
+            .listing
+            .iter()
+            .filter_map(|l| l.asset)
+            .collect();
+        if files.is_empty() {
+            return;
+        }
+        let at = self
+            .browser
+            .selected
+            .and_then(|s| files.iter().position(|&f| f == s));
+        let next = match at {
+            Some(k) => (k as isize + by).clamp(0, files.len() as isize - 1) as usize,
+            None => 0,
+        };
+        if Some(next) == at {
+            return;
+        }
+        self.reveal_asset(files[next]);
+        self.auto_play_pick(files[next]);
     }
 
     /// Material file `id` at `path` held for the inspector (E10-1c): read the first time it
@@ -15648,6 +15863,9 @@ impl Editor {
         if let Some(on) = state.full_debugging {
             self.full_debugging = on;
         }
+        if let Some(on) = state.auto_play {
+            self.auto_play = on;
+        }
         self.watches.clone_from(&state.watches);
         if let Some(on) = state.scale_lock {
             self.scale_lock = on;
@@ -15799,6 +16017,7 @@ impl Editor {
             overlays: Some(self.overlays),
             error_stops: Some((self.error_stops.uncaught, self.error_stops.caught)),
             full_debugging: Some(self.full_debugging),
+            auto_play: Some(self.auto_play),
             watches: self.watches.clone(),
             window: self.window,
             game_window: self.game_window,
@@ -17175,6 +17394,39 @@ impl<G> EditorGame<G> {
             if let Some(entry) = shared.asset_db.get(id) {
                 let path = entry.path.clone();
                 player.asset_changed(id, &path);
+            }
+        }
+        // Sound previews (E11-3b): what the editor asked, then the preview as it plays.
+        match shared.preview_ask.take() {
+            Some(PreviewAsk::Play { file, from }) => player.preview_sound(&file, from, false),
+            Some(PreviewAsk::Stop) => player.stop_sound_preview(),
+            None => {}
+        }
+        if let Some(shown) = shared.preview.as_mut() {
+            match player.sound_preview() {
+                Some(state) if state.failed.is_none() => {
+                    if state.playing {
+                        shown.position = state.position;
+                        shown.length = state.length.or(shown.length);
+                        shown.heard = true;
+                    } else if shown.heard {
+                        // Played to its end.
+                        shared.preview = None;
+                    }
+                }
+                Some(state) => {
+                    let why = format!("Not played: {}", state.failed.unwrap_or(""));
+                    shared.preview = None;
+                    shared.say(why);
+                }
+                None => {
+                    // The player has no sound output to play it on.
+                    let asked = !shown.heard;
+                    shared.preview = None;
+                    if asked {
+                        shared.say(String::from("Not played: the editor has no sound output"));
+                    }
+                }
             }
         }
         // Material files the inspector edits (E10-1c): given to the player as they change,
@@ -22105,6 +22357,131 @@ mod tests {
             ed.asset_db.find("props/rocks/box.gltf").unwrap().id,
             crate_id
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Where glyph `glyph` is drawn on the tile of file `name` (its picture, above its name).
+    fn on_tile(ed: &Editor, name: &str, glyph: &str) -> Option<[f32; 2]> {
+        let label = middle(texts(ed, name)[0]);
+        texts(ed, glyph).into_iter().map(middle).find(|at| {
+            (at[0] - label[0]).abs() < ed.tile / 2.0
+                && at[1] < label[1]
+                && label[1] - at[1] < ed.tile + 16.0
+        })
+    }
+
+    #[test]
+    fn a_sound_in_the_dock_plays_with_space_its_button_the_arrows_and_auto_play() {
+        let (dir, mut world, mut ed, _) = drop_project("previews");
+        // Two sounds beside the crate and the material (the editor only asks the player to
+        // play them: their bytes do not matter here).
+        std::fs::write(dir.join("props/hum.wav"), b"a hum").unwrap();
+        std::fs::write(dir.join("props/zap.ogg"), b"a zap").unwrap();
+        ed.asset_db.scan();
+        ed.refresh_browser();
+        ed.update(&mut world);
+        let hum = ed.asset_db.find("props/hum.wav").unwrap().id;
+        let zap = ed.asset_db.find("props/zap.ogg").unwrap().id;
+        let red = ed.asset_db.find("props/red.material").unwrap().id;
+        let play = |file: &str, from: f64| {
+            Some(PreviewAsk::Play {
+                file: dir.join(file),
+                from,
+            })
+        };
+        const SPACE: (u16, u16) = (0x20, 0x39);
+        // An arrow pressed and let go, with the extended flag Windows sends them with.
+        let step = |ed: &mut Editor, world: &mut World, (vk, sc): (u16, u16)| {
+            for pressed in [true, false] {
+                event(
+                    ed,
+                    WindowEventKind::Key {
+                        virtual_key: vk,
+                        scancode: sc,
+                        extended: true,
+                        pressed,
+                        repeat: false,
+                    },
+                );
+                ed.update(world);
+            }
+        };
+        // A click picks it and plays nothing (Auto Play is off); Space plays it.
+        let at = middle(texts(&ed, "hum.wav")[0]);
+        click(&mut ed, &mut world, at);
+        assert_eq!(ed.browser.selected, Some(hum));
+        assert_eq!(ed.preview, None);
+        chord(&mut ed, &mut world, &[SPACE]);
+        assert_eq!(ed.preview.map(|p| p.id), Some(hum));
+        assert_eq!(ed.preview_ask, play("props/hum.wav", 0.0));
+        assert!(!ed.local_axes, "Space in the dock is the dock's");
+        // Playing, its tile shows ■; Space again stops it.
+        ed.update(&mut world);
+        assert!(on_tile(&ed, "hum.wav", icons::STOP).is_some(), "■ on it");
+        chord(&mut ed, &mut world, &[SPACE]);
+        assert_eq!(ed.preview, None);
+        assert_eq!(ed.preview_ask, Some(PreviewAsk::Stop));
+        // The pointer over another sound: ▶ on its tile, a click on it plays that one.
+        let zap_tile = middle(texts(&ed, "zap.ogg")[0]);
+        let over = [zap_tile[0], zap_tile[1] - ed.tile / 2.0];
+        mouse(&mut ed, over, None);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let button = on_tile(&ed, "zap.ogg", icons::PLAY).expect("▶ under the pointer");
+        assert!(
+            on_tile(&ed, "hum.wav", icons::PLAY).is_none(),
+            "not on the others"
+        );
+        click(&mut ed, &mut world, button);
+        assert_eq!(ed.preview.map(|p| p.id), Some(zap));
+        assert_eq!(ed.preview_ask, play("props/zap.ogg", 0.0));
+        assert_eq!(ed.browser.selected, Some(hum), "▶ plays, it does not pick");
+        // Auto Play, from the listing's header: the arrows move the pick, and what is
+        // picked plays (a file that is not a sound stops the preview).
+        let at = middle(texts(&ed, "Auto Play")[0]);
+        click(&mut ed, &mut world, at);
+        assert!(ed.auto_play);
+        let files: Vec<AssetId> = ed.browser.listing.iter().filter_map(|l| l.asset).collect();
+        let at = |id| files.iter().position(|&f| f == id).unwrap();
+        assert_eq!(at(red), at(hum) + 1, "{files:?}");
+        step(&mut ed, &mut world, RIGHT);
+        assert_eq!(ed.browser.selected, Some(red));
+        assert_eq!(ed.preview, None);
+        step(&mut ed, &mut world, RIGHT);
+        assert_eq!(ed.browser.selected, Some(zap));
+        assert_eq!(ed.preview.map(|p| p.id), Some(zap));
+        step(&mut ed, &mut world, LEFT);
+        step(&mut ed, &mut world, LEFT);
+        assert_eq!(ed.browser.selected, Some(hum));
+        assert_eq!(ed.preview_ask, play("props/hum.wav", 0.0));
+        assert!(ed.selection.is_empty(), "the scene's selection untouched");
+        // Its length known (the player says, 2 s) and halfway: a click three quarters
+        // along its tile plays from there.
+        let shown = ed.preview.as_mut().unwrap();
+        shown.length = Some(2.0);
+        shown.position = 1.0;
+        ed.update(&mut world);
+        let label = middle(texts(&ed, "hum.wav")[0]);
+        let along = [label[0] + ed.tile / 4.0, label[1] - ed.tile / 2.0];
+        click(&mut ed, &mut world, along);
+        match &ed.preview_ask {
+            Some(PreviewAsk::Play { file, from }) => {
+                assert_eq!(file, &dir.join("props/hum.wav"));
+                assert!((from - 1.5).abs() < 0.1, "from {from}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Escape stops it.
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert_eq!(ed.preview, None);
+        assert_eq!(ed.preview_ask, Some(PreviewAsk::Stop));
+        // Auto Play off: a pick plays nothing.
+        let at = middle(texts(&ed, "Auto Play")[0]);
+        click(&mut ed, &mut world, at);
+        assert!(!ed.auto_play);
+        let at = middle(texts(&ed, "zap.ogg")[0]);
+        click(&mut ed, &mut world, at);
+        assert_eq!(ed.preview, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
