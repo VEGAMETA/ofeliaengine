@@ -31,7 +31,8 @@ Last updated: 2026-10-28.
       gutter, steps, the Debugger panel, stops at errors, values at a stop, VS Code over
       DAP to the editor and to a development build started with `--debug`.
     - E10-1, materials in the inspector (one `.material` file, ADR 0120), and E10-2, Slang
-      in the code editor (`slangd`), are done; E10-3, the graph, and E10-4 are ahead.
+      in the code editor (`slangd`, Material: New Type), are done; E10-3, the graph, and
+      E10-4 are ahead.
     - E11, sound, is done: the mixer file and panel (meters, effects, sends, the room's
       strip, snapshots, ADRs 0121 and 0122), previews and fields, the viewport's gizmos
       and hearing in place, the falloff curve.
@@ -862,6 +863,15 @@ Last updated: 2026-10-28.
     silent; the camera that hears without a listener marked with an ear; a selected
     zone's room and priority on a label; a zone added with a selection takes its box.
     **E11, sound, is done.**
+  - **E10-2c, Material: New Type** (#418, ADR 0107's as-built): a material type from a
+    template named after the active object (`water.slang`, `WaterMaterial`) and a material
+    file of it given to the selection in one step, the module open at its surface; a
+    type's new fields reach the inspector after its save through the reflection's
+    revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **The RTX's `video_player` golden image re-taken** (#418): on `main` it read a mean FLIP
+    of 0.0103–0.0108 (the limit 0.01) under NVIDIA 617.42, taken under 616.92; the
+    Radeon's matched exactly, the picture's content the same (the error spread thinly over
+    the scene's textures, none on the video). The new image against itself: 0.0007–0.0021.
   - **Test runs keep their windows out of sight** (#411; the owner's request, 2026-10-28):
     `tools/check.ps1` sets `ENGINE_HIDDEN_WINDOWS=1`, and every window `engine_platform`
     makes is then cloaked (composed, its swapchain presenting, never on the screen), with
@@ -869,10 +879,7 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): what E10-2's row in `docs/research/ux/materials.md` lists beyond the code
-       editor (New Material Type from a template; a type's new fields in the inspector
-       after its save, values kept by name), checked against the code first; then
-       E10-3, the graph (question 3's register measurements first); then E10-4,
+       2D): E10-3, the graph (question 3's register measurements first); then E10-4,
        previews, stats and variants with a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,

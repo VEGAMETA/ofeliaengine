@@ -791,6 +791,8 @@ struct CommandIds {
     /// Materials (ADR 0120's E10-1c): a new one, a variant of the one shown, the one
     /// picked given to the selection.
     new_material: CommandId,
+    /// A material type from the template (E10-2c).
+    new_type: CommandId,
     make_variant: CommandId,
     apply_material: CommandId,
     break_next: CommandId,
@@ -968,6 +970,7 @@ fn commands() -> (Commands, CommandIds) {
         ),
         full_debugging: c.register("debug.full_debugging", "Debug", "Full Script Debugging"),
         new_material: c.register("material.new", "Material", "New Material"),
+        new_type: c.register("material.new_type", "Material", "New Type"),
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
         break_next: c.register("debug.break_next", "Debug", "Break at the Next Script Line"),
@@ -1547,27 +1550,7 @@ fn has_component(world: &World, e: Entity, name: &str) -> bool {
 /// `taken(component, file)`, a number is added (`FrontDoor2` in
 /// `scripts/front_door_2.luau`).
 fn script_names(name: &str, taken: impl Fn(&str, &str) -> bool) -> (String, String) {
-    // Words: runs of letters and digits, and a capital after a small letter starts one.
-    let mut words: Vec<String> = Vec::new();
-    let mut word = String::new();
-    let mut after_small = false;
-    for c in name.chars() {
-        if !c.is_ascii_alphanumeric() {
-            if !word.is_empty() {
-                words.push(core::mem::take(&mut word));
-            }
-            after_small = false;
-            continue;
-        }
-        if c.is_ascii_uppercase() && after_small {
-            words.push(core::mem::take(&mut word));
-        }
-        after_small = !c.is_ascii_uppercase();
-        word.push(c.to_ascii_lowercase());
-    }
-    if !word.is_empty() {
-        words.push(word);
-    }
+    let mut words = name_words(name);
     if words
         .first()
         .is_none_or(|w| w.starts_with(|c: char| c.is_ascii_digit()))
@@ -1590,6 +1573,33 @@ fn script_names(name: &str, taken: impl Fn(&str, &str) -> bool) -> (String, Stri
         .map(&candidate)
         .find(|(component, file)| !taken(component, file))
         .unwrap_or_else(|| candidate(1))
+}
+
+/// `name`'s words for a file or a type's name (E7-4a, E10-2c): runs of ASCII letters and
+/// digits, a capital after a small letter starting one, in small letters (`Front door` and
+/// `FrontDoor` give `front`, `door`).
+pub(crate) fn name_words(name: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut after_small = false;
+    for c in name.chars() {
+        if !c.is_ascii_alphanumeric() {
+            if !word.is_empty() {
+                words.push(core::mem::take(&mut word));
+            }
+            after_small = false;
+            continue;
+        }
+        if c.is_ascii_uppercase() && after_small {
+            words.push(core::mem::take(&mut word));
+        }
+        after_small = !c.is_ascii_uppercase();
+        word.push(c.to_ascii_lowercase());
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
 }
 
 /// A new script's text (E7-4a): component `name` without props yet, and the hooks most
@@ -14046,6 +14056,8 @@ impl Editor {
             }));
         } else if id == ids.new_material {
             self.new_material(world);
+        } else if id == ids.new_type {
+            self.new_material_type(world);
         } else if id == ids.make_variant {
             self.make_variant(world);
         } else if id == ids.apply_material {
@@ -14954,6 +14966,78 @@ impl Editor {
             self.reveal_asset(id);
         }
         self.say(objects_given(&path, given));
+    }
+
+    /// "Material: New Type" (E10-2c): a material type from the template in the dock's
+    /// folder, named after the active entity (`Water`: `WaterMaterial` in `water.slang`,
+    /// [`crate::material::type_names`]), and a material file of it beside it
+    /// (`water.material`: the template's values) given to the selected models in one step;
+    /// the module opens in a code tab at its surface. Until its shaders are made the file
+    /// draws its look (ADR 0120's E10-1b); a save of the module compiles it again.
+    fn new_material_type(&mut self, world: &mut World) {
+        let name = self
+            .active()
+            .and_then(|e| world.get::<Name>(e))
+            .map_or("", Name::as_str)
+            .to_owned();
+        let folder = self.browser.folder.clone();
+        let at = |stem: &str, ext: &str| {
+            if folder.is_empty() {
+                format!("{stem}.{ext}")
+            } else {
+                format!("{folder}/{stem}.{ext}")
+            }
+        };
+        let root = self.root.clone();
+        let (base, stem) = crate::material::type_names(&name, |stem| {
+            root.join(at(stem, "slang")).exists() || root.join(at(stem, "material")).exists()
+        });
+        let (module, path) = (at(&stem, "slang"), at(&stem, "material"));
+        let text = crate::material::type_template(&base);
+        let shader = AssetId::new();
+        let file = self.root.join(&module);
+        let written = file
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&file, &text))
+            .map_err(|e| e.to_string())
+            .and_then(|()| AssetMeta::default().write(&file, shader));
+        if let Err(e) = written {
+            self.say(format!("{module} could not be written: {e}"));
+            return;
+        }
+        // The module by its id and path, for the material file's reference to it.
+        let mut paths = AssetPaths::new();
+        paths.insert(AssetRef::file(shader), &module);
+        self.assets.extend(&paths);
+        self.pending_assets.extend(&paths);
+        let mut typed = MaterialFile {
+            shader: AssetRef::file(shader),
+            type_name: format!("{base}Material"),
+            ..MaterialFile::default()
+        };
+        typed
+            .vectors
+            .insert(String::from("base_color"), typed.base_color.to_vec());
+        typed
+            .numbers
+            .insert(String::from("roughness"), typed.roughness);
+        typed
+            .numbers
+            .insert(String::from("metallic"), typed.metallic);
+        let id = AssetId::new();
+        if let Err(e) = self.write_material_file(&path, id, &typed.to_text_with(id, &paths)) {
+            self.say(format!("{path} could not be written: {e}"));
+            return;
+        }
+        let targets = self.selection.clone();
+        let given = self.material_to(world, id, &targets);
+        let (line, col) = crate::material::type_cursor(&text);
+        self.open_script(world, Path::new(&module), Some((line + 1, col + 1)));
+        self.say(format!(
+            "{} ({base}Material in {module}; Ctrl+S compiles it)",
+            objects_given(&path, given)
+        ));
     }
 
     /// "Make Variant" (E10-1c): the material shown copied beside its file (`Red 2`, …), its
@@ -25145,6 +25229,59 @@ mod tests {
             "{text}"
         );
         assert!(!doc(&ed).1, "saved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_material_type_is_written_from_the_template_given_to_the_selection_and_opened() {
+        let (dir, mut world, mut ed, boxed) = drop_project("material-new-type");
+        let before = world.get::<Model>(boxed).unwrap().material;
+        ed.select_only(boxed);
+        ed.update(&mut world);
+        let id = ed.ids.new_type;
+        ed.run(&mut world, id);
+        // The module from the template, named after the box, with an id of its own.
+        let module = std::fs::read_to_string(dir.join("props/box.slang")).unwrap();
+        assert!(
+            module.contains("struct BoxMaterial : IMaterial"),
+            "{module}"
+        );
+        let shader = ed.asset_db.find("props/box.slang").unwrap().id;
+        // The material file of it beside it, given to the box in one step.
+        let made = ed.asset_db.find("props/box.material").unwrap().id;
+        assert_eq!(
+            world.get::<Model>(boxed).unwrap().material,
+            AssetRef::file(made)
+        );
+        assert_eq!(ed.history.steps().count(), 1);
+        let text = std::fs::read_to_string(dir.join("props/box.material")).unwrap();
+        let (file, _) = engine_app::MaterialFile::parse(&text).unwrap();
+        assert_eq!(file.shader, AssetRef::file(shader));
+        assert_eq!(file.type_name, "BoxMaterial");
+        assert_eq!(file.numbers.get("roughness"), Some(&0.5));
+        assert_eq!(
+            file.vectors.get("base_color").map(Vec::as_slice),
+            Some(&[0.8, 0.8, 0.8, 1.0][..])
+        );
+        // Open in a code tab, the caret at its surface.
+        let k = ed.active_script.expect("the module's tab");
+        assert_eq!(ed.scripts[k].path, Path::new("props/box.slang"));
+        let (line, col) = crate::material::type_cursor(&module);
+        assert_eq!(ed.scripts[k].doc.primary().head, Pos::new(line, col));
+        // Again: numbered, the first left as it is.
+        ed.run(&mut world, id);
+        assert!(dir.join("props/box_2.slang").is_file());
+        assert!(
+            std::fs::read_to_string(dir.join("props/box_2.slang"))
+                .unwrap()
+                .contains("struct Box2Material : IMaterial")
+        );
+        // Undo gives the box its material back; the files stay.
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        ed.run(&mut world, undo);
+        assert_eq!(world.get::<Model>(boxed).unwrap().material, before);
+        assert!(dir.join("props/box.slang").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

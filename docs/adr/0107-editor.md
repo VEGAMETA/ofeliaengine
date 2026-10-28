@@ -2254,6 +2254,42 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **E11-4 is done** but for View: Sound Ranges, the inspector's falloff curve with the
   camera's distance, and blockout's radius handles.
 
+## As built (E10-2c, 2026-10-28): Material: New Type
+
+What E10-2's row in `docs/research/ux/materials.md` lists beyond the code editor (E10-2a,
+E10-2b): New Material Type from a template, and a type's new fields in the inspector after
+its save.
+
+- **"Material: New Type"** (`material.new_type`, the palette): in the dock's folder,
+  `<stem>.slang` from the template and `<stem>.material` of it, named after the active
+  entity (`crate::material::type_names`: `Water` gives `WaterMaterial`, its parameters
+  `WaterParams`, in `water.slang`; a trailing "Material" is not doubled; `Custom` with no
+  name or one starting with a digit; numbered while either file exists, `Water2` in
+  `water_2.slang`). Named after the entity as New Script… is (E7-4a), with the same words.
+- **The template** (`type_template`): a lit type whose surface reads a `float4 base_color`,
+  a `roughness` and a `metallic` from its parameters, every other part of `IMaterial` at
+  its plain value, comments naming the shading models and what the context gives. No
+  padding field: a type's parameters have 256 bytes a slot (`PARAMS_BYTES`).
+- **The material file** names the module by the id written in its `.meta` and the type,
+  with the template's values (a grey 0.8, roughness 0.5, metallic 0); it is given to the
+  selected models in one undo step (as New Material, E10-1c), and the module opens in a
+  code tab at the surface's first line of its own.
+- **A type's new fields after its save:** nothing new was needed. The player watches the
+  module (the editor turns the types' hot reload on), a save compiles the type again and
+  reflects its parameters again, and the revision the reflection moves (ADR 0120's
+  E10-1b) is what the inspector's material document follows to lay its rows out again;
+  the file keeps its values by name. The frame's hot reload test now checks it: a field
+  added to a module is in the reflected layout after the save, its revision moved.
+- **Tests:** the names (an entity's, "Material" not doubled, `Custom`, numbered when
+  taken) and the template's parts; the template compiles inside `forward.slang` with the
+  pinned Slang, and a misspelt field in it is found at its line; through the editor's
+  commands: both files written, the module's id in the material file with the type and its
+  values, given to the box in one step, its tab open at the surface, a second one numbered,
+  undo giving the box its material back with the files kept; the frame's hot reload test on
+  both GPUs (the edit on screen in 383 ms on the RTX, 382 ms on the Radeon).
+- **E10-2 is done.** Next in E10: the graph (E10-3), its numbers' registers measured both
+  ways first (the materials note's question 3).
+
 ## As built (E11-4c, 2026-10-28): the last sound gizmos and the falloff curve
 
 What the sound UX note (`docs/research/ux/sound.md`, "Gizmos in the viewport" and its

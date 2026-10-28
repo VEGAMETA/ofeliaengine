@@ -135,6 +135,109 @@ impl Row {
     }
 }
 
+/// A new material type's names for an entity named `name` (E10-2c): `Water` gives the base
+/// `Water` (`WaterMaterial`, its parameters `WaterParams`) and the file stem `water`
+/// (`water.slang`, `water.material`); a name ending in "Material" keeps one; no name, or
+/// one starting with a digit, starts with `Custom`. While `taken(stem)`, a number is added
+/// (`Water2`, `water_2`).
+pub(crate) fn type_names(name: &str, taken: impl Fn(&str) -> bool) -> (String, String) {
+    let mut words = crate::app::name_words(name);
+    if words.last().is_some_and(|w| w == "material") && words.len() > 1 {
+        words.pop();
+    }
+    if words
+        .first()
+        .is_none_or(|w| w.starts_with(|c: char| c.is_ascii_digit()))
+    {
+        words.insert(0, String::from("custom"));
+    }
+    let pascal: String = words
+        .iter()
+        .map(|w| w[..1].to_ascii_uppercase() + &w[1..])
+        .collect();
+    let snake = words.join("_");
+    let candidate = |n: u32| {
+        if n == 1 {
+            (pascal.clone(), snake.clone())
+        } else {
+            (format!("{pascal}{n}"), format!("{snake}_{n}"))
+        }
+    };
+    (1..u32::MAX)
+        .map(&candidate)
+        .find(|(_, stem)| !taken(stem))
+        .unwrap_or_else(|| candidate(1))
+}
+
+/// A new material type's module (E10-2c): `{base}Material` with its parameters
+/// `{base}Params` (a color, a roughness, a metallic), lit, its surface read straight from
+/// them, every other part of `IMaterial` at its plain value; comments say where to write.
+pub(crate) fn type_template(base: &str) -> String {
+    format!(
+        r#"// {base}Material, a material type (ADR 0092; docs/dev-guide/materials.md). Its
+// parameters are the fields of {base}Params: each one a row in the inspector, its value
+// kept by name in the material files that use it. Save (Ctrl+S) and what uses it is drawn
+// with the change; until it compiles, and on an error, the previous version draws.
+struct {base}Params
+{{
+    float4 base_color;
+    float roughness;
+    float metallic;
+}};
+
+struct {base}Material : IMaterial
+{{
+    typealias Params = {base}Params;
+
+    // The shading model: MODEL_LIT, MODEL_UNLIT, MODEL_CLEARCOAT, MODEL_CLOTH, MODEL_HAIR,
+    // MODEL_TOON, MODEL_SHEEN or MODEL_SHEEN_CLEARCOAT.
+    static uint model()
+    {{
+        return MODEL_LIT;
+    }}
+
+    static {base}Params load(MaterialContext ctx)
+    {{
+        return material_params<{base}Params>(ctx);
+    }}
+
+    // What a point of the surface looks like: ctx has its place (world_position), normal,
+    // side and texture coordinates.
+    static Surface surface(MaterialContext ctx, {base}Params p, bool masked)
+    {{
+        Surface s;
+        s.base = p.base_color;
+        s.normal = normalize(ctx.normal * ctx.side);
+        s.metallic = p.metallic;
+        s.roughness = p.roughness;
+        s.subsurface = 0;
+        return surface_terms(s);
+    }}
+
+    static float occlusion(MaterialContext ctx, {base}Params p) {{ return 1.0; }}
+    static float3 emission(MaterialContext ctx, {base}Params p) {{ return 0.0; }}
+    static float alpha(MaterialContext ctx, {base}Params p) {{ return p.base_color.a; }}
+    static float alpha_cutoff({base}Params p) {{ return 0.5; }}
+    static float thickness(MaterialContext ctx, {base}Params p) {{ return 0.0; }}
+}}
+"#
+    )
+}
+
+/// Where a new material type opens (E10-2c): at the start of its surface's first line of
+/// its own (0-based line and byte column).
+pub(crate) fn type_cursor(template: &str) -> (usize, usize) {
+    template
+        .lines()
+        .enumerate()
+        .find_map(|(k, l)| {
+            l.trim_start()
+                .starts_with("s.base")
+                .then(|| (k, l.len() - l.trim_start().len()))
+        })
+        .unwrap_or((0, 0))
+}
+
 /// `file`'s rows into `out`, a material type's parameters from `layout` (none yet: the type
 /// and its look only).
 pub(crate) fn rows(file: &MaterialFile, layout: Option<&StructLayout>, out: &mut Vec<Row>) {
@@ -569,6 +672,36 @@ mod tests {
             count,
             stride: 0,
         }
+    }
+
+    #[test]
+    fn a_new_types_names_come_from_the_entity_and_are_numbered_when_taken() {
+        let none = |_: &str| false;
+        assert_eq!(type_names("Water", none), ("Water".into(), "water".into()));
+        assert_eq!(
+            type_names("Car Paint Material", none),
+            ("CarPaint".into(), "car_paint".into())
+        );
+        assert_eq!(type_names("", none), ("Custom".into(), "custom".into()));
+        // The words as New Script splits them: a capital after a digit starts one.
+        assert_eq!(
+            type_names("3D sign", none),
+            ("Custom3DSign".into(), "custom_3_d_sign".into())
+        );
+        assert_eq!(
+            type_names("Material", none),
+            ("Material".into(), "material".into())
+        );
+        let taken = |stem: &str| stem == "water";
+        assert_eq!(
+            type_names("Water", taken),
+            ("Water2".into(), "water_2".into())
+        );
+        let text = type_template("Water");
+        assert!(text.contains("struct WaterMaterial : IMaterial"), "{text}");
+        assert!(text.contains("struct WaterParams"), "{text}");
+        let (line, col) = type_cursor(&text);
+        assert!(text.lines().nth(line).unwrap()[col..].starts_with("s.base = p.base_color;"));
     }
 
     fn layout() -> StructLayout {

@@ -1,8 +1,10 @@
 //! Hot reload of a material type (ADR 0092): its module edited while frames are drawn. The
 //! new version is on screen without a restart, the one before drawing until it is made (and
 //! destroyed under the validation layer only once the GPU is done with it); a module that
-//! does not compile keeps the previous version and says why. And a material file edited:
-//! its parameters replaced in place (`engine_streaming::material_files`).
+//! does not compile keeps the previous version and says why; a parameter added is in the
+//! reflected layout, its revision moved (the editor's inspector follows it, E10-2c). And a
+//! material file edited: its parameters replaced in place
+//! (`engine_streaming::material_files`).
 
 use crate::common::{Bed, camera};
 use engine_core::math::Vec3;
@@ -13,11 +15,11 @@ use engine_streaming::material_files::LiveMaterialFiles;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// An unlit type of one color.
-fn glow(rgb: [f32; 3]) -> String {
+/// An unlit type of one color, its parameters `unused` and then `more`'s fields.
+fn glow(rgb: [f32; 3], more: &str) -> String {
     format!(
         r#"
-struct GlowParams {{ float4 unused; }};
+struct GlowParams {{ float4 unused;{more} }};
 struct GlowMaterial : IMaterial
 {{
     typealias Params = GlowParams;
@@ -66,7 +68,7 @@ fn a_material_type_reloads_when_its_module_changes() {
     let dir = std::env::temp_dir().join(format!("engine_frame_hot_reload_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let module = dir.join("glow.slang");
-    save(&module, &glow([0.9, 0.05, 0.05]));
+    save(&module, &glow([0.9, 0.05, 0.05], ""));
     let forward = bed.frame.forward_mut();
     forward.set_material_hot_reload(true);
     let ty = forward.register_material_type(MaterialTypeDesc {
@@ -121,6 +123,28 @@ fn a_material_type_reloads_when_its_module_changes() {
     }
     assert_eq!(frame(&mut bed, &mut view), 0, "red before the edit");
 
+    // The type's parameters' layout, reflected off the frame once asked for: its fields'
+    // names and its revision, when it is not `after` (frames for at most 20 s).
+    let reflected = |bed: &mut Bed,
+                     view: &mut View,
+                     after: Option<u32>,
+                     frame: &mut dyn FnMut(&mut Bed, &mut View) -> usize| {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(20) {
+            if let Some((Ok(layout), revision)) = bed.frame.forward().material_params(ty)
+                && Some(revision) != after
+            {
+                let names: Vec<String> = layout.fields.iter().map(|f| f.name.clone()).collect();
+                return Some((names, revision));
+            }
+            frame(bed, view);
+        }
+        None
+    };
+    let (names, revision) =
+        reflected(&mut bed, &mut view, None, &mut frame).expect("the parameters' layout");
+    assert_eq!(names, ["unused"]);
+
     // Frames until the center turns `channel`, at most 20 s: how long the edit took to
     // reach the screen.
     let until = |bed: &mut Bed,
@@ -135,10 +159,15 @@ fn a_material_type_reloads_when_its_module_changes() {
         }
         None
     };
-    save(&module, &glow([0.05, 0.9, 0.05]));
+    // The edit adds a parameter too.
+    save(&module, &glow([0.05, 0.9, 0.05], " float extra;"));
     let took = until(&mut bed, &mut view, 1, &mut frame).expect("green after the edit");
     println!("edit to screen: {:.0} ms", took.as_secs_f64() * 1e3);
     assert!(bed.frame.forward_mut().material_type_error(ty).is_none());
+    // Reflected again with it: the layout has the new field, its revision moved.
+    let (names, _) = reflected(&mut bed, &mut view, Some(revision), &mut frame)
+        .expect("the layout reflected again");
+    assert_eq!(names, ["unused", "extra"]);
 
     // A module that does not compile: the error is kept, green stays on screen.
     save(
@@ -168,7 +197,7 @@ fn a_material_type_reloads_when_its_module_changes() {
     assert_eq!(frame(&mut bed, &mut view), 1);
 
     // Fixed: blue, and the error is gone.
-    save(&module, &glow([0.05, 0.05, 0.9]));
+    save(&module, &glow([0.05, 0.05, 0.9], " float extra;"));
     let took = until(&mut bed, &mut view, 2, &mut frame).expect("blue after the fix");
     println!("fix to screen: {:.0} ms", took.as_secs_f64() * 1e3);
     assert!(bed.frame.forward_mut().material_type_error(ty).is_none());

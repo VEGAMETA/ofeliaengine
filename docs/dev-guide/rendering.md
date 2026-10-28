@@ -2326,7 +2326,9 @@ while it is loaded Streamline copies every frame.
 Besides glTF's material, a game can write its own (ADR 0092): a Slang type that turns the
 fragment's interpolants and its parameters into a surface, which the engine lights like
 any other (sun, local lights, shadows, sky light, GI, reflections, fog). The engine's
-passes are compiled for the type with nothing more to do.
+passes are compiled for the type with nothing more to do. In the editor, **Material: New
+Type** (the palette) writes one from a template with a material file of it and opens it
+in a code tab ([editor.md](editor.md#assets)).
 
 ```slang
 // my_checker.slang
