@@ -801,18 +801,34 @@ fn is_param_name(name: &str) -> bool {
 /// The graph cannot be generated (at its node).
 pub(crate) fn preview_material(
     doc: &GraphDoc,
+    root: &std::path::Path,
     module: AssetRef,
     module_path: &str,
 ) -> Result<(Generated, MaterialFile, AssetPaths), GraphError> {
-    // The modules its calls name (E10-3g-3), from the paths its file gave them.
+    // The functions its calls name (E10-3g-2), read from their files under `root`, and the
+    // modules its and their `[Node]` calls name (E10-3g-3), from the paths their files gave.
+    let functions = engine_assets::graph_module::read_functions(&doc.graph, &doc.paths, root)
+        .map_err(|e| {
+            let at = e.path.as_ref().map(|p| format!("{}: ", p.display()));
+            GraphError {
+                node: None,
+                message: format!("{}{}", at.unwrap_or_default(), e.message),
+            }
+        })?;
     let modules = |m| {
-        doc.paths
+        functions
+            .paths
             .get(m)
             .filter(|p| !p.is_empty())
             .map(engine_assets::graph_module::include_path)
     };
+    let found = |f| functions.graphs.get(&f).cloned();
+    let sources = engine_material_graph::Sources {
+        modules: &modules,
+        functions: &found,
+    };
     let generated =
-        engine_material_graph::generate_with(&doc.graph, GRAPH_TYPE, Build::Editing, &modules)?;
+        engine_material_graph::generate_with(&doc.graph, GRAPH_TYPE, Build::Editing, &sources)?;
     let mut file = MaterialFile {
         shader: module,
         type_name: String::from(GRAPH_TYPE),
@@ -821,13 +837,16 @@ pub(crate) fn preview_material(
     };
     let mut paths = AssetPaths::new();
     paths.insert(module, module_path);
+    // The graph written: a function's nodes among its own, their images in the functions'
+    // files.
+    let written = &generated.expanded;
     for p in &generated.params {
-        let Some(node) = doc.graph.nodes.get(&p.node) else {
+        let Some(node) = written.nodes.get(&p.node) else {
             continue;
         };
         match p.ty {
             ParamType::Texture => {
-                let Some(path) = doc.paths.get(node.texture) else {
+                let Some(path) = functions.paths.get(node.texture) else {
                     continue;
                 };
                 paths.insert(node.texture, path);
@@ -835,7 +854,7 @@ pub(crate) fn preview_material(
                     p.name.clone(),
                     MaterialTexture {
                         image: node.texture,
-                        encoding: encoding(&doc.graph, &p.node),
+                        encoding: encoding(written, &p.node),
                     },
                 );
             }
@@ -3833,8 +3852,13 @@ mod tests {
             PortRef::new(OUTPUT, "roughness"),
         );
         let module = AssetRef::file(AssetId::new());
-        let (generated, file, paths) =
-            preview_material(&d, module, ".ofelia/cache/graphs/x-editing.slang").unwrap();
+        let (generated, file, paths) = preview_material(
+            &d,
+            std::path::Path::new("."),
+            module,
+            ".ofelia/cache/graphs/x-editing.slang",
+        )
+        .unwrap();
         let text = generated.text;
         assert!(text.contains("struct GraphMaterial : IMaterial"), "{text}");
         assert_eq!(file.shader, module);
@@ -3853,8 +3877,13 @@ mod tests {
         d.selected.insert(String::from("c"));
         d.set_numbers(NodeRow::Value(4), [0.1, 0.8, 0.2, 1.0])
             .unwrap();
-        let (again, file, _) =
-            preview_material(&d, module, ".ofelia/cache/graphs/x-editing.slang").unwrap();
+        let (again, file, _) = preview_material(
+            &d,
+            std::path::Path::new("."),
+            module,
+            ".ofelia/cache/graphs/x-editing.slang",
+        )
+        .unwrap();
         let again = again.text;
         assert_eq!(again, text);
         assert_eq!(
@@ -3872,8 +3901,13 @@ mod tests {
                 PortRef::new("nm", "color"),
             )
             .link(PortRef::new("nm", "normal"), PortRef::new(OUTPUT, "normal"));
-        let (_, file, paths) =
-            preview_material(&d, module, ".ofelia/cache/graphs/x-editing.slang").unwrap();
+        let (_, file, paths) = preview_material(
+            &d,
+            std::path::Path::new("."),
+            module,
+            ".ofelia/cache/graphs/x-editing.slang",
+        )
+        .unwrap();
         assert_eq!(file.textures["bumps"].image, image);
         assert_eq!(
             file.textures["bumps"].encoding,

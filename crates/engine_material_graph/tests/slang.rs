@@ -121,7 +121,14 @@ fn every_kind_and_model_compiles_inside_forward_slang() {
         types.push(name.to_owned());
         generated
     };
-    for kind in KINDS.iter().filter(|k| k.body != Body::Output) {
+    // A function's inputs and outputs are made links when it is called (the functions'
+    // own test below).
+    for kind in KINDS.iter().filter(|k| {
+        !matches!(
+            k.body,
+            Body::Output | Body::FunctionInput(_) | Body::FunctionOutput(_)
+        )
+    }) {
         add(
             &one(kind, false),
             &format!("K_{}_scalar", kind.name),
@@ -251,7 +258,7 @@ fn reflected_signature(f: &engine_shader::MarkedFunction) -> String {
 /// includes the mark's declaration before the module.
 #[test]
 fn a_call_of_a_node_function_compiles_and_its_signature_is_slangs() {
-    use engine_material_graph::{CALL_KIND, generate_with};
+    use engine_material_graph::{CALL_KIND, Sources, generate_with};
     use engine_scene::{AssetId, AssetRef};
     let Some(mut compiler) = compiler() else {
         return;
@@ -279,7 +286,11 @@ fn a_call_of_a_node_function_compiles_and_its_signature_is_slangs() {
     let modules = |m: AssetRef| (m == module).then(|| String::from("../shaders/mapping.slang"));
     let shaders = shader_dir();
     for build in [Build::Editing, Build::Saved] {
-        let out = generate_with(&g, "Swirled", build, &modules).unwrap();
+        let sources = Sources {
+            modules: &modules,
+            functions: &|_| None,
+        };
+        let out = generate_with(&g, "Swirled", build, &sources).unwrap();
         let first = out
             .text
             .lines()
@@ -307,7 +318,106 @@ fn a_call_of_a_node_function_compiles_and_its_signature_is_slangs() {
         }
     }
     // A call whose module is not found is its node's error.
-    let error = generate_with(&g, "Swirled", Build::Saved, &|_| None).unwrap_err();
+    let error = generate_with(&g, "Swirled", Build::Saved, &Sources::none()).unwrap_err();
     assert_eq!(error.node.as_deref(), Some("sw"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// E10-3g-2: a graph calling a function that calls another (its inputs linked and left at
+/// their values, its outputs read by two terms) compiles inside `forward.slang` in both
+/// builds; the calls' nodes are written as the calls'.
+#[test]
+fn a_call_of_a_function_calling_a_function_compiles() {
+    use engine_material_graph::function::{FUNCTION_KIND, input_kind, output_kind};
+    use engine_material_graph::{Sources, generate_with, signature_of};
+    use engine_scene::{AssetId, AssetRef};
+    let Some(mut compiler) = compiler() else {
+        return;
+    };
+    // `scale`: its value times its factor.
+    let mut scale = Graph::new(Model::Lit);
+    scale.nodes.clear();
+    scale
+        .add("v", Node::new(input_kind(3), [0.0, 0.0]).named("value"))
+        .add(
+            "f",
+            Node::new(input_kind(1), [0.0, 100.0])
+                .named("factor")
+                .with_value([0.5, 0.0, 0.0, 0.0]),
+        )
+        .add("m", Node::new("multiply", [150.0, 0.0]))
+        .add("o", Node::new(output_kind(3), [300.0, 0.0]).named("scaled"))
+        .link(PortRef::new("v", "value"), PortRef::new("m", "a"))
+        .link(PortRef::new("f", "value"), PortRef::new("m", "b"))
+        .link(PortRef::new("m", "out"), PortRef::new("o", "value"));
+    let scale_file = AssetRef::file(AssetId::from_u128(11));
+    let scale_signature = signature_of(&scale).unwrap().to_string();
+    // `glow`: its colour scaled twice, and the once scaled colour's length.
+    let mut glow = Graph::new(Model::Lit);
+    glow.nodes.clear();
+    let call = |at: f32| {
+        let mut n = Node::new(FUNCTION_KIND, [at, 0.0]).with_call("scale", &scale_signature);
+        n.module = scale_file;
+        n
+    };
+    glow.add("c", Node::new(input_kind(3), [0.0, 0.0]).named("color"))
+        .add("s1", call(150.0))
+        .add("s2", call(300.0).with_input("factor", [2.0; 4]))
+        .add("l", Node::new("length", [450.0, 100.0]))
+        .add("o", Node::new(output_kind(3), [600.0, 0.0]).named("lit"))
+        .add(
+            "b",
+            Node::new(output_kind(1), [600.0, 100.0]).named("brightness"),
+        )
+        .link(PortRef::new("c", "value"), PortRef::new("s1", "value"))
+        .link(PortRef::new("s1", "scaled"), PortRef::new("s2", "value"))
+        .link(PortRef::new("s2", "scaled"), PortRef::new("o", "value"))
+        .link(PortRef::new("s1", "scaled"), PortRef::new("l", "in"))
+        .link(PortRef::new("l", "out"), PortRef::new("b", "value"));
+    let glow_file = AssetRef::file(AssetId::from_u128(12));
+    let mut g = Graph::new(Model::Lit);
+    let mut use_glow = Node::new(FUNCTION_KIND, [200.0, 0.0])
+        .with_call("glow", &signature_of(&glow).unwrap().to_string());
+    use_glow.module = glow_file;
+    g.add(
+        "col",
+        Node::new("color", [0.0; 2]).with_value([0.8, 0.4, 0.2, 1.0]),
+    )
+    .add("gl", use_glow)
+    .link(PortRef::new("col", "rgba"), PortRef::new("gl", "color"))
+    .link(PortRef::new("gl", "lit"), PortRef::new(OUTPUT, "base"))
+    .link(
+        PortRef::new("gl", "brightness"),
+        PortRef::new(OUTPUT, "roughness"),
+    );
+    let functions = |r: AssetRef| match r {
+        r if r == scale_file => Some(scale.clone()),
+        r if r == glow_file => Some(glow.clone()),
+        _ => None,
+    };
+    let sources = Sources {
+        modules: &|_| None,
+        functions: &functions,
+    };
+    let dir = std::env::temp_dir().join(format!("material_graph_functions_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let shaders = shader_dir();
+    for build in [Build::Editing, Build::Saved] {
+        let out = generate_with(&g, "Glowing", build, &sources).unwrap();
+        assert!(
+            out.lines
+                .iter()
+                .flatten()
+                .all(|n| n == "col" || n == "gl" || n == OUTPUT),
+            "every line a node of the graph's own: {:?}",
+            out.lines
+        );
+        let file = dir.join("glowing.slang");
+        std::fs::write(&file, &out.text).unwrap();
+        let options = material_type_options(&shaders, &file, "Glowing");
+        let found = compiler.check_file(&shaders.join("forward.slang"), &options);
+        let errors: Vec<_> = found.iter().filter(|f| f.error).collect();
+        assert!(errors.is_empty(), "{build:?}: {errors:#?}\n{}", out.text);
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

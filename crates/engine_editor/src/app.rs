@@ -12193,7 +12193,8 @@ impl Editor {
             return;
         }
         preview.revision = doc.revision;
-        match crate::graph::preview_material(doc, preview.module, &preview.module_path) {
+        match crate::graph::preview_material(doc, &self.root, preview.module, &preview.module_path)
+        {
             Ok((generated, file, paths)) => {
                 let text = generated.text;
                 preview.lines = generated.lines;
@@ -23752,8 +23753,9 @@ fn file_kind(kind: engine_scene::AssetKind) -> FileKind {
         K::Texture => FileKind::Texture,
         K::Sound => FileKind::Audio,
         K::Script => FileKind::Script,
-        // A graph is a material type, as a module is (ADR 0123); its canvas comes in E10-3d.
-        K::Shader | K::Graph => FileKind::Shader,
+        // A graph is a material type, as a module is (ADR 0123); a function is a graph's
+        // part (E10-3g-2).
+        K::Shader | K::Graph | K::Function => FileKind::Shader,
         K::Material | K::Video | K::Font | K::Mixer => FileKind::Other,
     }
 }

@@ -65,6 +65,14 @@ pub enum Body {
     /// A call of a project module's `[Node]` function (E10-3g-3, [`crate::call`]): its
     /// `out` and `inout` parameters variables, its result one.
     Call(&'static crate::call::Call),
+    /// A call of a function file (E10-3g-2, [`crate::function`]): made the function's
+    /// nodes before anything is written, so never written itself.
+    FunctionCall(&'static crate::call::Call),
+    /// A function's input of this width, named by the node's `param`: made a link through
+    /// it when the function is called, so never written itself.
+    FunctionInput(u8),
+    /// A function's output of this width, named by the node's `param`, as an input.
+    FunctionOutput(u8),
     /// The surface: the graph's one output node.
     Output,
 }
@@ -609,6 +617,90 @@ pub const KINDS: &[Kind] = &[
         body: Body::Expression,
         context: true,
     },
+    // A function's input (E10-3g-2): its port named by the node's `param`, its value
+    // unlinked the node's own; a call links what it is given through it.
+    Kind {
+        name: "input_float",
+        title: "Input",
+        category: "Function",
+        inputs: &[],
+        outputs: &[output("value", F1)],
+        body: Body::FunctionInput(1),
+        context: false,
+    },
+    // A function's output: its port named by the node's `param`.
+    Kind {
+        name: "output_float",
+        title: "Output",
+        category: "Function",
+        inputs: &[input("value", F1, Fill::Value(ZERO))],
+        outputs: &[],
+        body: Body::FunctionOutput(1),
+        context: false,
+    },
+    // A function's input (E10-3g-2): its port named by the node's `param`, its value
+    // unlinked the node's own; a call links what it is given through it.
+    Kind {
+        name: "input_float2",
+        title: "Input",
+        category: "Function",
+        inputs: &[],
+        outputs: &[output("value", F2)],
+        body: Body::FunctionInput(2),
+        context: false,
+    },
+    // A function's output: its port named by the node's `param`.
+    Kind {
+        name: "output_float2",
+        title: "Output",
+        category: "Function",
+        inputs: &[input("value", F2, Fill::Value(ZERO))],
+        outputs: &[],
+        body: Body::FunctionOutput(2),
+        context: false,
+    },
+    // A function's input (E10-3g-2): its port named by the node's `param`, its value
+    // unlinked the node's own; a call links what it is given through it.
+    Kind {
+        name: "input_float3",
+        title: "Input",
+        category: "Function",
+        inputs: &[],
+        outputs: &[output("value", F3)],
+        body: Body::FunctionInput(3),
+        context: false,
+    },
+    // A function's output: its port named by the node's `param`.
+    Kind {
+        name: "output_float3",
+        title: "Output",
+        category: "Function",
+        inputs: &[input("value", F3, Fill::Value(ZERO))],
+        outputs: &[],
+        body: Body::FunctionOutput(3),
+        context: false,
+    },
+    // A function's input (E10-3g-2): its port named by the node's `param`, its value
+    // unlinked the node's own; a call links what it is given through it.
+    Kind {
+        name: "input_float4",
+        title: "Input",
+        category: "Function",
+        inputs: &[],
+        outputs: &[output("value", F4)],
+        body: Body::FunctionInput(4),
+        context: false,
+    },
+    // A function's output: its port named by the node's `param`.
+    Kind {
+        name: "output_float4",
+        title: "Output",
+        category: "Function",
+        inputs: &[input("value", F4, Fill::Value(ZERO))],
+        outputs: &[],
+        body: Body::FunctionOutput(4),
+        context: false,
+    },
     // A point a link passes through to keep a graph tidy: its value its input's, written
     // in place (no code of its own).
     Kind {
@@ -682,7 +774,17 @@ mod tests {
                 Body::Constant(_) | Body::Texture | Body::Output => {}
                 // One output, the code's value.
                 Body::Expression => assert_eq!(k.outputs.len(), 1, "{}", k.name),
-                Body::Call(_) => panic!("{}: calls are made from signatures", k.name),
+                Body::Call(_) | Body::FunctionCall(_) => {
+                    panic!("{}: calls are made from signatures", k.name)
+                }
+                Body::FunctionInput(w) => {
+                    assert!(k.inputs.is_empty() && k.outputs.len() == 1, "{}", k.name);
+                    assert_eq!(k.outputs[0].ty, PortType::Float(w), "{}", k.name);
+                }
+                Body::FunctionOutput(w) => {
+                    assert!(k.outputs.is_empty() && k.inputs.len() == 1, "{}", k.name);
+                    assert_eq!(k.inputs[0].ty, PortType::Float(w), "{}", k.name);
+                }
             }
             // Every `{input}` a body names is one of its inputs.
             let exprs: Vec<&str> = match k.body {

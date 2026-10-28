@@ -216,6 +216,9 @@ pub struct TypedMaterial {
     pub alpha_cutoff: f32,
     /// Drawn without back-face culling.
     pub double_sided: bool,
+    /// The files besides it that its shader was made from: a graph's functions' (ADR 0123's
+    /// E10-3g-2), to make it again when one changes.
+    pub reads: Vec<PathBuf>,
 }
 
 /// An error in a material file or a material map: the file, and what is wrong.
@@ -386,7 +389,7 @@ impl MaterialFile {
         };
         let shader = path_of(self.shader, "shader")?;
         // A graph: its module, its type, its own values.
-        let (shader, type_name, mut params, mut textures) =
+        let (shader, type_name, mut params, mut textures, reads) =
             if crate::graph_module::is_graph(&shader) {
                 let module = crate::graph_module::graph_module(&shader, root)?;
                 (
@@ -394,6 +397,7 @@ impl MaterialFile {
                     String::from(crate::graph_module::GRAPH_TYPE),
                     module.defaults,
                     module.textures,
+                    module.functions,
                 )
             } else {
                 (
@@ -401,6 +405,7 @@ impl MaterialFile {
                     self.type_name.clone(),
                     BTreeMap::new(),
                     BTreeMap::new(),
+                    Vec::new(),
                 )
             };
         // The file's own values, each once, over the graph's.
@@ -443,6 +448,7 @@ impl MaterialFile {
             alpha: self.alpha,
             alpha_cutoff: self.alpha_cutoff,
             double_sided: self.double_sided,
+            reads,
         }))
     }
 }

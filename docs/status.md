@@ -868,6 +868,12 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3g-2a, functions in the engine** (#435, ADR 0123's as-built; the team's `.mfunc`):
+    a function's file is the graph's grammar, its input and output nodes its ports; a call
+    keeps the function's file and ports; before writing, calls are made their functions'
+    nodes (Unreal's inlining), what they write and what is wrong with them the call's; the
+    cook, the player and the preview read functions alike, and the player makes a
+    material again when its function changes. The editor's side is next.
   - **E10-3g-3b, the editor's `[Node]` functions** (#434, ADR 0123's as-built): the
     project's Slang modules scanned on a thread of their own once a graph is shown; their
     marked functions in the node search under their groups (one a node cannot call with
@@ -962,9 +968,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3g-2 (functions: a group of nodes as one node, its file's extension
-       asked), ADR 0123's last step; then E10-4, previews, stats and variants with a
-       base.
+       2D): E10-3g-2b (the editor's functions: `.mfunc` tabs, Ctrl+G, Tab,
+       Ctrl+Alt+G, the node search), ADR 0123's last step; then E10-4, previews, stats
+       and variants with a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

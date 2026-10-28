@@ -750,6 +750,61 @@ What was built:
   - parameter types other than float to float4.
 - **Next:** functions (E10-3g-2), their file's extension asked.
 
+## As built (E10-3g-2a, 2026-10-29): functions in the engine
+
+- **The file** (`.mfunc`, the team's answer 5): the graph file's grammar under
+  `[mfunc version=1 id=…]`, without a `model` (`GraphFile::to_function_text`,
+  `parse_function`, `function`). It is `AssetKind::Function`, its id in its header.
+- **Its ports** are its input and output nodes: `input_float` to `input_float4` and
+  `output_float` to `output_float4`, in the library's Function group.
+  - Each is named by its `param`. The order is the canvas's, top to bottom: the inputs,
+    then the outputs (`signature_of`: `void(float3 color, float amount, out float3 lit)`).
+  - An input's own value is what a call gives where nothing is linked to it.
+- **A call** is a node of kind `function` with the function's name, its file (`module`)
+  and its ports as a signature. It keeps them as a `[Node]` call keeps its function's, and
+  its kind is made the same way (`Body::FunctionCall`), so it is drawn and linked without
+  the file.
+- **Inlining** (`function::expand`, before anything is written, as Unreal inlines material
+  functions):
+  - each of the function's nodes becomes `<call>__<node>` in the graph;
+  - the call's link into an input is read where the input was; an unlinked input becomes a
+    constant of the call's own value for it (or the input's), a parameter in the editing
+    build, so typing it compiles nothing;
+  - the call's outputs are read from what the function's outputs were given; an output
+    given nothing gives its own value;
+  - nested functions expand first, and a call fed by another call reads the graph as
+    expanded so far;
+  - a function that calls itself, one not found, and a port it has not are refused at the
+    call.
+  - What the inlined nodes write is the call's (the line map), and so is what is wrong
+    with them ("in tint: …").
+  - Copies of a function's named parameter, one per call, are one parameter, as Unreal's
+    are.
+- **Sources** (`generate_with`'s) are the `[Node]` modules and the functions a graph's calls
+  name.
+  - `graph_module::read_functions` reads every function the graph calls, and those they
+    call, with every path their files wrote. The cook, the player and the editor's preview
+    use it alike.
+  - `Generated::expanded` is the graph written; parameters name its nodes.
+- **Following edits:** a typed material's `reads` are the function files its graph's module
+  was made from. The player makes the material again when one of them changes, as it does
+  for the graph's own file.
+- **Tests:**
+  - ports: their order, a port without a name or with another's refused, no output;
+  - inlining: the ids, links through inputs, unlinked inputs as constants, outputs, where
+    each node came from, and the refusals (not found, calls itself, a port it has not);
+  - the file: written and read back; a graph's file is not a function's, nor the other way
+    round;
+  - with Slang: a graph calling a function that calls another, its inputs linked and at
+    their values, compiles inside `forward.slang` in both builds, every line one of the
+    graph's own nodes';
+  - `graph_module`: made with the function's nodes, the function's file read, a broken
+    function's file failing with its path;
+  - the player: the function's colour drawn (0.80 s on the Radeon), and drawn again when
+    its file is written anew (0.76 s).
+- **Next:** E10-3g-2b, the editor's side: function files in tabs, Ctrl+G, Tab and
+  Ctrl+Alt+G, functions in the node search, and calls following their functions' ports.
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,
@@ -762,3 +817,7 @@ What was built:
 4. **The preview while a graph is shown** (asked with E10-3f-1; the 3D view is behind the
    canvas): a sphere in the canvas's corner drawing the graph as it is, its numbers live
    (the owner's «а», over the canvas and the viewport side by side, or switching tabs).
+5. **Function files** (asked with E10-3g-1, 2026-10-29): `.mfunc`, the owner's «а» over
+   `.msubgraph` and `.mgraph` with a kind in its header. The header is
+   `[mfunc version=1 id=…]`, the grammar the graph file's; the dock and drag and drop tell
+   the two apart by the extension.
