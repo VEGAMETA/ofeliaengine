@@ -31,10 +31,62 @@ const ASSETS: [(&str, &str); 3] = [
 /// The engine's pinned toolchain: the game builds the engine with it.
 const TOOLCHAIN: &str = include_str!("../../../rust-toolchain.toml");
 
+/// The VS Code extension (ADR 0119 E9-2, `tools/engine/vscode/ofeliaengine`): its files in the
+/// `.vsix` the game gets, under `extension/`.
+const EXTENSION: [(&str, &str); 3] = [
+    (
+        "package.json",
+        include_str!("../vscode/ofeliaengine/package.json"),
+    ),
+    (
+        "extension.js",
+        include_str!("../vscode/ofeliaengine/extension.js"),
+    ),
+    (
+        "README.md",
+        include_str!("../vscode/ofeliaengine/README.md"),
+    ),
+];
+
+/// The extension's version (its `package.json`'s).
+const EXTENSION_VERSION: &str = "0.1.0";
+
+/// The game's debug configurations: attaching to the editor, and attaching while the editor
+/// plays the open scene.
+const VSCODE_LAUNCH: &str = r#"{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "ofeliaengine",
+            "request": "attach",
+            "name": "Attach to the editor"
+        },
+        {
+            "type": "ofeliaengine",
+            "request": "attach",
+            "name": "Attach and Play",
+            "play": true
+        }
+    ]
+}
+"#;
+
+/// VS Code recommends the extension for the game's folder.
+const VSCODE_EXTENSIONS: &str = r#"{
+    "recommendations": [
+        "ofeliaengine.ofeliaengine",
+        "johnnymorganz.luau-lsp"
+    ]
+}
+"#;
+
 pub(crate) struct NewArgs {
     pub(crate) dir: PathBuf,
     pub(crate) engine: Option<PathBuf>,
     pub(crate) name: Option<String>,
+    /// Install the VS Code extension where VS Code's `code` is found (`--no-extension`
+    /// leaves it in `.vscode/` only).
+    pub(crate) install_extension: bool,
 }
 
 pub(crate) fn parse_new(mut args: impl Iterator<Item = String>) -> Result<NewArgs, String> {
@@ -42,6 +94,7 @@ pub(crate) fn parse_new(mut args: impl Iterator<Item = String>) -> Result<NewArg
         dir: PathBuf::new(),
         engine: None,
         name: None,
+        install_extension: true,
     };
     let mut dir = None;
     while let Some(arg) = args.next() {
@@ -49,6 +102,7 @@ pub(crate) fn parse_new(mut args: impl Iterator<Item = String>) -> Result<NewArg
         match arg.as_str() {
             "--engine" => parsed.engine = Some(PathBuf::from(value("--engine")?)),
             "--name" => parsed.name = Some(value("--name")?),
+            "--no-extension" => parsed.install_extension = false,
             other if other.starts_with('-') => return Err(format!("unknown option `{other}`")),
             path if dir.is_none() => dir = Some(PathBuf::from(path)),
             extra => return Err(format!("unexpected `{extra}`")),
@@ -170,6 +224,8 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
             String::from("/target\n*.pack\n/.ofelia/\n/types/\n"),
         ),
         (".vscode/settings.json", String::from(VSCODE_SETTINGS)),
+        (".vscode/launch.json", String::from(VSCODE_LAUNCH)),
+        (".vscode/extensions.json", String::from(VSCODE_EXTENSIONS)),
         ("README.md", readme(&name, &engine)),
     ];
     files.extend(assets()?);
@@ -184,6 +240,24 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    // The VS Code extension that debugs the scripts (ADR 0119 E9-2), installed where VS
+    // Code is.
+    let vsix = dir
+        .join(".vscode")
+        .join(format!("ofeliaengine-{EXTENSION_VERSION}.vsix"));
+    std::fs::write(&vsix, extension_vsix()).map_err(|e| format!("{}: {e}", vsix.display()))?;
+    if args.install_extension {
+        match install_extension(&vsix) {
+            Ok(()) => {
+                println!("VS Code has the ofeliaengine extension: F5 there attaches to the editor")
+            }
+            Err(why) => println!(
+                "the VS Code extension is in {} ({why}): install it with \
+                 `code --install-extension` or VS Code's Install from VSIX",
+                vsix.display()
+            ),
+        }
     }
     println!(
         "a game `{name}` in {}, on the engine in {}",
@@ -203,6 +277,132 @@ pub(crate) fn run_new(args: &NewArgs) -> Result<ExitCode, String> {
         )
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// The extension as VS Code installs it: a `.vsix`, a zip of its manifest, its content
+/// types and its files under `extension/` (what `vsce package` makes, uncompressed).
+fn extension_vsix() -> Vec<u8> {
+    let manifest = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
+  <Metadata>
+    <Identity Language="en-US" Id="ofeliaengine" Version="{EXTENSION_VERSION}" Publisher="ofeliaengine"/>
+    <DisplayName>ofeliaengine</DisplayName>
+    <Description xml:space="preserve">Debug an ofeliaengine game's Luau scripts: attach to the editor's Play.</Description>
+    <Categories>Debuggers</Categories>
+    <Properties>
+      <Property Id="Microsoft.VisualStudio.Code.Engine" Value="^1.80.0"/>
+      <Property Id="Microsoft.VisualStudio.Code.ExtensionKind" Value="workspace"/>
+    </Properties>
+  </Metadata>
+  <Installation>
+    <InstallationTarget Id="Microsoft.VisualStudio.Code"/>
+  </Installation>
+  <Dependencies/>
+  <Assets>
+    <Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true"/>
+    <Asset Type="Microsoft.VisualStudio.Services.Content.Details" Path="extension/README.md" Addressable="true"/>
+  </Assets>
+</PackageManifest>
+"#
+    );
+    let types = r#"<?xml version="1.0" encoding="utf-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension=".json" ContentType="application/json"/>
+  <Default Extension=".js" ContentType="application/javascript"/>
+  <Default Extension=".md" ContentType="text/markdown"/>
+  <Default Extension=".vsixmanifest" ContentType="text/xml"/>
+</Types>
+"#;
+    let mut files: Vec<(String, &[u8])> = vec![
+        (String::from("[Content_Types].xml"), types.as_bytes()),
+        (String::from("extension.vsixmanifest"), manifest.as_bytes()),
+    ];
+    for (name, text) in EXTENSION {
+        files.push((format!("extension/{name}"), text.as_bytes()));
+    }
+    zip(&files)
+}
+
+/// `files` as a zip, stored (no compression): what a `.vsix` of a few kilobytes needs.
+fn zip(files: &[(String, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    // 1980-01-01, zip's first day: no clock in the package.
+    let (time, date) = (0u16, 0x21u16);
+    for (name, data) in files {
+        let crc = crc32(data);
+        let size = u32::try_from(data.len()).unwrap_or(u32::MAX);
+        let name_len = u16::try_from(name.len()).unwrap_or(u16::MAX);
+        let offset = u32::try_from(out.len()).unwrap_or(u32::MAX);
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        for v in [20u16, 0, 0, time, date] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [crc, size, size] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&name_len.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        for v in [20u16, 20, 0, 0, time, date] {
+            central.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [crc, size, size] {
+            central.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [name_len, 0, 0, 0, 0] {
+            central.extend_from_slice(&v.to_le_bytes());
+        }
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let at = u32::try_from(out.len()).unwrap_or(u32::MAX);
+    let central_len = u32::try_from(central.len()).unwrap_or(u32::MAX);
+    let count = u16::try_from(files.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    for v in [0u16, 0, count, count] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&central_len.to_le_bytes());
+    out.extend_from_slice(&at.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+/// The CRC-32 zip checks its files with (IEEE 802.3, reflected).
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                0xedb8_8320 ^ (crc >> 1)
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// `vsix` installed in VS Code by its `code` command, where it is on the path.
+fn install_extension(vsix: &Path) -> Result<(), String> {
+    let out = std::process::Command::new("cmd")
+        .args(["/C", "code", "--install-extension"])
+        .arg(vsix)
+        .arg("--force")
+        .output()
+        .map_err(|e| format!("VS Code's `code` was not run: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from("VS Code's `code` is not on the path"))
+    }
 }
 
 fn manifest(name: &str, engine: &Path) -> String {
@@ -329,6 +529,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_extension_is_a_zip_vs_code_reads() {
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926, "zip's CRC-32");
+        let vsix = extension_vsix();
+        // The end of the central directory names the entries and where they are.
+        let end = vsix.len() - 22;
+        assert_eq!(&vsix[end..end + 4], &0x0605_4b50u32.to_le_bytes());
+        let count = u16::from_le_bytes([vsix[end + 10], vsix[end + 11]]);
+        assert_eq!(usize::from(count), 2 + EXTENSION.len());
+        let text = String::from_utf8_lossy(&vsix);
+        for name in [
+            "[Content_Types].xml",
+            "extension.vsixmanifest",
+            "extension/package.json",
+            "extension/extension.js",
+        ] {
+            assert!(text.contains(name), "{name}");
+        }
+        // The manifest's version is the package's.
+        let package: serde_json::Value = serde_json::from_str(EXTENSION[0].1).unwrap();
+        assert_eq!(package["version"], EXTENSION_VERSION);
+        assert_eq!(
+            package["contributes"]["debuggers"][0]["type"],
+            "ofeliaengine"
+        );
+    }
+
+    #[test]
     fn folder_names_become_crate_names() {
         assert_eq!(crate_name("My Game"), "my_game");
         assert_eq!(crate_name("space-shooter"), "space_shooter");
@@ -344,6 +571,7 @@ mod tests {
             dir: game.clone(),
             engine: None,
             name: None,
+            install_extension: false,
         };
         run_new(&args).unwrap();
         let read = |path: &str| std::fs::read_to_string(game.join(path)).unwrap();
@@ -374,6 +602,12 @@ mod tests {
         let settings = read(".vscode/settings.json");
         assert!(settings.contains("\"@ofelia\": \"types/ofelia.d.luau\""));
         assert!(settings.contains("\"luau-lsp.platform.type\": \"standard\""));
+        // The script debugger in VS Code: the attach configurations, the extension
+        // recommended and its package beside them.
+        assert!(read(".vscode/launch.json").contains("\"type\": \"ofeliaengine\""));
+        assert!(read(".vscode/extensions.json").contains("\"ofeliaengine.ofeliaengine\""));
+        let vsix = std::fs::read(game.join(".vscode/ofeliaengine-0.1.0.vsix")).unwrap();
+        assert_eq!(&vsix[..4], b"PK\x03\x04");
         // The engine's build, shared, and its dependencies' versions.
         let config = read(".cargo/config.toml");
         assert!(
@@ -413,6 +647,7 @@ mod tests {
             dir: other.clone(),
             engine: None,
             name: None,
+            install_extension: false,
         })
         .unwrap();
         let other_scene = std::fs::read_to_string(other.join("scenes/main.scene")).unwrap();

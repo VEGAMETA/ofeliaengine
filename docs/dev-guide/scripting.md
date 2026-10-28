@@ -477,8 +477,27 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
 
 Without breakpoints nothing is paid. A function with one runs Luau's interpreter instead of
 native code until its script runs again, and each hit costs a microsecond or so (below).
-Changing a value from the Variables (F2), the header's entity and tick, and VS Code's
-debugging come next.
+Changing a value from the Variables (F2) and the header's entity and tick come next.
+
+### Debugging from VS Code
+
+The editor is also a debug adapter (DAP): VS Code debugs the scripts it plays, with the same
+breakpoints as the editor's gutter.
+
+- **Set up:** `ofeliaengine new` writes `.vscode/launch.json` and installs the ofeliaengine
+  extension where VS Code's `code` command is on the path; its `.vsix` is in `.vscode/`
+  otherwise (Install from VSIX in VS Code's Extensions view).
+- **Attach:** start the editor on the game, open the game's folder in VS Code, and press F5
+  with **Attach to the editor**. **Attach and Play** also plays the open scene, and stopping
+  the session (Shift+F5) stops Play.
+- **What works:** breakpoints (conditions, hit counts, logpoints) set in either, the two
+  error filters ("Errors the script does not catch", "Errors caught by pcall"), the stack,
+  Locals and Upvalues (`self` opens into its props and its entity's components), hovers,
+  watches and the debug console (evaluated in the frame shown), F5, F10, F11, Shift+F11 and
+  Pause (the next line a script runs stops). Logpoints' messages come to the debug console.
+- **Safety:** the editor listens on 127.0.0.1 only, on a port it picks, and writes it with a
+  token to `.ofelia/debug/editor.json`; the extension gives the token, and nothing without it
+  attaches. One client at a time.
 
 Stopping at errors costs nothing until an error comes: hooks are called with a message
 handler, as they were with mlua's own, 14 ns a call more at most (below). "Errors caught by

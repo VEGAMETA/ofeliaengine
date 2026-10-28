@@ -563,3 +563,42 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
   open with its prop, components and entity, a component opened by a click, an answer, a
   watch, the session's watches).
 
+## As built (E9-2, 2026-10-28): VS Code over DAP
+
+- **The endpoint** (`engine_editor::dap`), the editor session's: 127.0.0.1, a port the
+  system picks, written with a 128-bit token (the system's random generator) to
+  `.ofelia/debug/editor.json` and taken away with the session. One client at a time;
+  `attach` must give the token, a wrong one is answered and let go.
+- **Threads:** one accepts and reads (raw reads into its own buffer, 100 ms at most each:
+  Windows wakes no read blocked on a socket another handle shut), one writes and closes the
+  connection once what it was given is written; they trade messages with the editor's frame
+  through channels. The frame never waits on the socket and makes nothing while no client
+  speaks.
+- **Requests answered in the frame:** initialize (configurationDone, conditional,
+  hit-conditional and log breakpoints, hovers, the two error filters with the editor's
+  settings as their defaults), attach (`token`; `play` plays the open scene and the session's
+  end stops it), setBreakpoints (the editor's own set for the file, lines through unsaved
+  edits), setExceptionBreakpoints, configurationDone, threads (one, "Scripts"), stackTrace,
+  scopes (Locals, Upvalues), variables (references valid while stopped, down what a value
+  holds), evaluate (in the frame asked, `Player::evaluate_script`), continue, next, stepIn,
+  stepOut, pause (the next line a script runs), disconnect.
+- **Events:** stopped (breakpoint, step, pause, exception with the error's message),
+  continued, output (the scripts' log records: logpoints, `print`), initialized.
+- **The extension** (`tools/engine/vscode/ofeliaengine`): the debug type `ofeliaengine`, two
+  attach configurations, the endpoint read and the token given, `DebugAdapterServer`.
+  `ofeliaengine new` packs it into a `.vsix` (a stored zip with the manifest VS Code reads),
+  writes `.vscode/launch.json` and `extensions.json`, and installs it with `code` when it is
+  on the path (`--no-extension` does not). Checked by installing the `.vsix` into a throwaway
+  extensions folder with VS Code's own command line.
+- **Not done:** the editor's breakpoint changes sent to VS Code (`breakpoint` events);
+  `setVariable`; `exceptionInfo`; `breakpointLocations`; the console's completions;
+  `terminate`; the standalone player's endpoint (E9-3); the extension on the Marketplace
+  (at the first public release, the team's answer 3).
+- **Tests:** a DAP client speaks to the editor on the player as VS Code does: a wrong token
+  refused and let go; initialize, attach, setBreakpoints (a stop and a logpoint),
+  setExceptionBreakpoints, configurationDone; Play to the stop; threads, stackTrace, scopes,
+  variables (self opened to its prop), evaluate; next (reason step, line 4); the breakpoint
+  taken away, continue, the logpoint's message in the console, no stop after; disconnect;
+  Attach and Play started and stopped; the endpoint's file gone with the session. The CLI's
+  `.vsix`: its CRC-32 and entries.
+
