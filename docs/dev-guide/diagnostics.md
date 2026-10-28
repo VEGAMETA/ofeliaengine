@@ -35,7 +35,10 @@ log::error!("save failed: {e}");
   validation, `0` off; `PlayerSettings::validation` decides over both.
 - Lines longer than 3,480 bytes are cut with `...`.
 
-Your own program (not the editor or `ofeliaengine`) installs it once, early in `main`:
+A game's `main` made by `engine_app::main!` installs it (`engine_app::run`), writing
+`%LOCALAPPDATA%\ofeliaengine\logs\<executable>.log`, unless the game installed one first.
+Your own program (not a game's `main!`, the editor or `ofeliaengine`) installs it once, early
+in `main`:
 
 ```rust
 let _log = engine_log::init(&engine_log::LogConfig {

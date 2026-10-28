@@ -602,3 +602,55 @@ Answered 2026-10-23 (team decision): a) to each, the recommendation.
   Attach and Play started and stopped; the endpoint's file gone with the session. The CLI's
   `.vsix`: its CRC-32 and entries.
 
+## As built (E9-3, 2026-10-28): the standalone player
+
+- **Asked on the command line:** `engine_app::run` (what a game's `main!` runs without the
+  editor) reads `--debug` and `--wait-for-debugger` into `PlayerSettings::debugger`
+  (`DebuggerSettings { wait }`), where the game's settings left it empty; the game's own
+  arguments are left to it. Only a development build listens (debug assertions on: `cargo
+  run`, the convention `FrameCap::for_build` and saves' text encoding follow); a release or
+  shipping build logs that it has no debugger. Listening, the scripts are compiled to be
+  debugged (level 1) and debugged on the fiber, as in the editor's Play.
+- **One endpoint for both** (`engine_app::dap`, moved from the editor): `Dap::start` takes
+  the debuggee, `editor.json` or `player-<pid>.json` in `.ofelia/debug/`, with the title for
+  the extension's list. The requests about a stop (threads, stackTrace, scopes, variables,
+  evaluate) are answered by one `References::answer`, the editor's and the player's alike;
+  `capabilities`, `stopped`, `continued`, `error_stops`, `project_file` and `Asked` (a
+  breakpoint VS Code asks for, made the host's with `Hits::parse`, moved from the editor
+  into `engine_script`) are shared too.
+- **The player's turn** (`player::debugger`), once a frame before a stopped script goes on:
+  - a stop's start and end told once each (`stopped` with breakpoint, step, pause or
+    exception; `continued`), the window's title saying where ("stopped at
+    scripts/door.luau:12", "an error at") and the mouse freed, locked again when it goes on;
+  - its requests answered: setBreakpoints by module, through the VM's debugger, answered at
+    the lines Luau placed them on; setExceptionBreakpoints; configurationDone (it ends the
+    wait); continue, next, stepIn, stepOut; pause (`break_next`);
+  - the scripts' log records to the console while a client is attached.
+- **Nothing without a client:** the player has no breakpoints of its own and no error stops
+  (uncaught errors stop by default once a client says so, as in the editor). When the client
+  goes, by its word or not, its breakpoints and error stops go and a stop goes on; a stop
+  that comes while none is attached (a pause asked for and reached after the client went)
+  goes on at once.
+- **`--wait-for-debugger`:** the world is kept still (`simulating` off), the title says it
+  waits, until the first configurationDone.
+- **The log:** `engine_app::run` installs the engine's logger unless the game installed one
+  (stderr, the debugger's output window, `%LOCALAPPDATA%\ofeliaengine\logs\<exe>.log`): a
+  game made by `ofeliaengine new` logged nowhere before, and its ring feeds VS Code's
+  console.
+- **The extension** (0.2.0): `"target": "player"` attaches to the newest player of the
+  project whose process runs, or to one picked from a list; `ofeliaengine new` writes
+  "Attach to the player" into `launch.json`. Checked by installing the `.vsix` into a
+  throwaway extensions folder with VS Code's own command line.
+- **Found on the way:** the game template's shipping profile still had `panic = "abort"`
+  (ADR 0118 changed only the engine's): it unwinds now.
+- **Not done:** Pause with no script running (the editor pauses the ticks; the player waits
+  for the next script line); `terminate` (closing the player from VS Code); a launch
+  configuration that builds and starts the player; attaching from another machine.
+- **Tests:** a DAP client attaches to an offscreen player started as `--wait-for-debugger`
+  asks: the world waits until configurationDone; the breakpoint stops the first tick with
+  the mouse freed; threads, stackTrace, scopes, variables (`self`), evaluate; next (reason
+  step, line 4); the breakpoint taken away, continue, the logpoint's message in the console,
+  the mouse locked again; disconnect takes the breakpoints and error stops away; a pause
+  left behind is reached and goes on; the endpoint's file goes with the player. The editor's
+  DAP test runs on the same client (`engine_app/tests/common/dap_client.rs`).
+

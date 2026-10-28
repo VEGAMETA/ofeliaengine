@@ -118,7 +118,10 @@ engine_app::main!(settings, start);
 
 - **Without the game's `editor` feature,** `main` runs the player:
   `engine_app::run(settings, start)` makes it, loads the scene, makes the game with
-  `start` and runs it until the window closes.
+  `start` and runs it until the window closes. It installs the engine's logger
+  ([diagnostics.md](diagnostics.md)), and in a development build `--debug` (or
+  `--wait-for-debugger`) lets VS Code debug the scripts ([scripting.md](scripting.md),
+  "Debugging the game outside the editor").
 - **With it** (`cargo run --features editor`, or `ofeliaengine edit`), the
   editor runs around the game ([editor.md](editor.md)); `start` makes the game when Play
   starts.

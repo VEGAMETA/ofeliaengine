@@ -499,13 +499,35 @@ breakpoints as the editor's gutter.
   token to `.ofelia/debug/editor.json`; the extension gives the token, and nothing without it
   attaches. One client at a time.
 
+### Debugging the game outside the editor
+
+A development build of the game (`cargo run`) is a debug adapter too, when you ask:
+
+- **Start it** with `cargo run -- --debug`. With `cargo run -- --wait-for-debugger` its world
+  waits, still, until VS Code has attached and set its breakpoints, so the scripts' first
+  hooks can stop.
+- **Attach:** F5 in VS Code with **Attach to the player** (`ofeliaengine new` writes it into
+  `launch.json`). With several players of the game running, pick one from the list.
+- **What works:** everything above but Play: breakpoints, logpoints, the error filters, the
+  stack, the values, hovers, watches, the debug console, the steps and Pause.
+- **At a stop** the world is kept still and still drawn; the window's title says where
+  ("stopped at scripts/door.luau:12", or "an error at"), and the mouse is freed until it goes
+  on.
+- **When VS Code goes,** its breakpoints and error stops go with it, and a stop goes on: the
+  game has no breakpoints of its own.
+- **Release and shipping builds have no debugger:** `--debug` there says so in the log and
+  does nothing. Each player writes its port and token to `.ofelia/debug/player-<pid>.json`
+  and takes the file away when it closes.
+
+`cargo run -- --debug` compiles the scripts to be debugged, as the editor does.
+
 Stopping at errors costs nothing until an error comes: hooks are called with a message
 handler, as they were with mlua's own, 14 ns a call more at most (below). "Errors caught by
 pcall" runs hooks on the debugger's thread, 0.12 µs a hook, only while it is on.
 
 In the editor, the scripts are compiled to be debugged: Luau's optimization level 1, which
 inlines nothing, so a step goes into a local function as its text reads. It costs nothing
-measurable (below); a game outside the editor runs level 2.
+measurable (below); a game outside the editor runs level 2, unless started with `--debug`.
 
 ## What it costs
 

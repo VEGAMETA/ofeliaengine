@@ -35,7 +35,8 @@ Last updated: 2026-10-28.
     values and every breakpoint (E9-1b-3), errors stop scripts at their lines (E9-1b-4),
     and a stop shows its values in the code, opens them in the Variables and evaluates
     Luau, with watches (E9-1b-5). VS Code attaches to the editor over DAP with the engine's
-    extension (E9-2). E10-1 waits for the answer on the material
+    extension (E9-2), and to a development build of the game started with `--debug`
+    (E9-3). E10-1 waits for the answer on the material
     file. The entries below are in the order merged.
   - **E1-1, scene format 2** (#251, ADR 0108 as built):
     - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
@@ -718,10 +719,17 @@ Last updated: 2026-10-28.
       continued, the scripts' log in the console);
     - the extension (`tools/engine/vscode/ofeliaengine`): Attach to the editor, Attach and
       Play; `ofeliaengine new` writes `launch.json` and installs its `.vsix`.
+  - **E9-3, the standalone player's debugger** (#PR, ADR 0119's as-built):
+    - `cargo run -- --debug` (`--wait-for-debugger` keeps the world still until VS Code is
+      ready) in a development build; the endpoint moved to `engine_app::dap`, the requests
+      about a stop answered alike for the editor and the player;
+    - at a stop the window's title says where and the mouse is freed; what the client set
+      goes with it;
+    - the extension's "Attach to the player"; `engine_app::run` installs the engine's logger;
+      the game template's shipping profile unwinds (ADR 0118).
   - **Next, in this order:**
-    1. E9-3 (the player's `--debug`), then the debugger's leftovers (F2 to change a value,
-       the header's entity and tick with Shift+F7, "Only Front door", the editor's
-       breakpoints sent to VS Code).
+    1. The debugger's leftovers (F2 to change a value, the header's entity and tick with
+       Shift+F7, "Only Front door", the editor's breakpoints sent to VS Code).
        Asked (2026-10-28): native code in the editor's Play, whose frames' locals Luau does
        not read at a stop. E10-1 waits for the answer on the material file.
     2. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
