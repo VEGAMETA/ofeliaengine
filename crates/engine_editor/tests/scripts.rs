@@ -418,10 +418,40 @@ fn a_logpoint_logs_in_play_and_f9_stops_the_script_at_its_line() {
     let values = game.breakpoint_note(5).unwrap_or_default();
     assert!(values.contains("t = "), "a local made since: {values}");
     // The lines above it show what they assigned: the parameters on the function's line,
-    // `t` after line 3 (beside its breakpoint's hits).
-    for drawn in ["self = Self", "dt = 0.015625", "t = View"] {
-        assert!(game.text_at(drawn).is_some(), "`{drawn}` on the lines above the stop");
+    // `t` after line 3 and the field line 4 wrote, beside their breakpoints' notes.
+    assert_eq!(
+        game.line_notes(2),
+        ["self = EditorSpin · Front door", "dt = 0.015625"]
+    );
+    assert!(game.line_notes(3).contains(&String::from("t = Transform")));
+    let rotation = game.line_notes(4);
+    assert!(
+        rotation.iter().any(|n| n.starts_with("t.rotation = (")),
+        "{rotation:?}"
+    );
+    // The Variables: `self` open, its prop, its entity's components and the entity; a
+    // click opens a component.
+    let rows = game.debug_texts();
+    for row in [
+        "self = EditorSpin · Front door",
+        "  rate = 2",
+        "  Transform = component",
+        "  Name = \"Front door\"",
+        "  entity = Front door",
+        "t = Transform",
+    ] {
+        assert!(rows.iter().any(|r| r == row), "`{row}` in {rows:#?}");
     }
+    click_text(&mut player, &mut game, &mut overlay, "MeshRenderer");
+    frame(&mut player, &mut game, &mut overlay);
+    let rows = game.debug_texts();
+    let under = rows
+        .iter()
+        .skip_while(|r| !r.starts_with("  MeshRenderer"))
+        .skip(1)
+        .take_while(|r| r.starts_with("    "))
+        .count();
+    assert!(under > 0, "MeshRenderer opened: {rows:#?}");
     tap(&mut game, 0x74, 0x3F);
     for _ in 0..3 {
         frame(&mut player, &mut game, &mut overlay);

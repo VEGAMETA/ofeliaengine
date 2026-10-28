@@ -281,9 +281,34 @@ pub struct ErrorStops {
 pub struct Variable {
     /// Its name.
     pub name: String,
-    /// Its value: `3`, `"open"`, `table #4`, `(1, 2, 3)`, a userdata's `__type`.
+    /// Its value: `3`, `"open"`, `table #4`, `(1, 2, 3)`, a userdata's `__type`, or what
+    /// the host's [`Describer`] says of its own.
     pub value: String,
+    /// What it holds, where it opens (E9-1b-5b): a table's fields, read raw (the first
+    /// [`CHILDREN`], then a row for how many more), the host's userdata's as its describer
+    /// gives them; two levels down from a frame's variable. Empty: it does not open.
+    pub children: Vec<Variable>,
 }
+
+/// The fields of a table a stop shows (the UX note's "chunks of 100").
+pub const CHILDREN: usize = 100;
+
+/// The values a stop describes, every frame's and every level's together: past them, the
+/// rest do not open.
+const DESCRIBED: usize = 4_000;
+
+/// The host's own userdata as a stop shows them (ADR 0119: `self`, entities and views
+/// through reflection, their metamethods never called): a value's text and what it holds,
+/// or none for a value it does not know. Called inside the stop, the script's state as it
+/// left it.
+///
+/// # Safety
+///
+/// Called with a thread stopped in a script (or whose frames an error left) and a valid
+/// index of a userdata or light userdata, with room for a few values; it must call no
+/// function on the thread and leave its stack as it was.
+pub type Describer =
+    unsafe fn(state: *mut ffi::lua_State, idx: c_int) -> Option<(String, Vec<Variable>)>;
 
 /// A frame of a stop's stack.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,6 +402,8 @@ pub(crate) struct Debugger {
     break_next: bool,
     /// Which errors stop.
     errors: ErrorStops,
+    /// How the host's userdata are described at a stop.
+    describer: Option<Describer>,
     /// The modules' lines whose errors stopped since the states were reset: they stop
     /// once.
     errors_seen: Vec<(String, u32)>,
@@ -623,6 +650,12 @@ impl ScriptDebugger {
     /// Which errors stop a script.
     pub fn error_stops(&self) -> ErrorStops {
         self.with(|d| d.errors).unwrap_or_default()
+    }
+
+    /// How a stop describes the host's own userdata from now on ([`Describer`]); without
+    /// one, by their `__type`.
+    pub fn set_describer(&self, describer: Option<Describer>) {
+        self.with(|d| d.describer = describer);
     }
 
     /// The first line a hook runs from now on stops ("Break at the Next Script Line"): the
@@ -1329,6 +1362,8 @@ unsafe fn describe(
         steppable: unsafe { steppable(state, lua) },
         error: None,
     };
+    let describer = lua.app_data_ref::<Debugger>().and_then(|d| d.describer);
+    let mut budget = DESCRIBED;
     // SAFETY: as the caller says; each value pushed is read, then popped, and the stack is
     // put back as it was.
     unsafe {
@@ -1344,7 +1379,7 @@ unsafe fn describe(
                 (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
             };
             let source = text(ar.source).unwrap_or_default();
-            let (locals, upvalues) = frame_variables(state, level);
+            let (locals, upvalues) = frame_variables(state, level, describer, &mut budget);
             let line = u32::try_from(ar.currentline).ok().filter(|&l| l > 0);
             let mut shape: ffi::lua_Debug = core::mem::zeroed();
             ffi::lua_getinfo(state, level, c"a".as_ptr(), &mut shape);
@@ -1368,7 +1403,8 @@ unsafe fn describe(
     stopped
 }
 
-/// The locals and the function's upvalues of the frame at `level` of `state`, as text.
+/// The locals and the function's upvalues of the frame at `level` of `state`, as text, and
+/// what they hold within `budget` values.
 ///
 /// # Safety
 ///
@@ -1377,6 +1413,8 @@ unsafe fn describe(
 unsafe fn frame_variables(
     state: *mut ffi::lua_State,
     level: c_int,
+    describer: Option<Describer>,
+    budget: &mut usize,
 ) -> (Vec<Variable>, Vec<Variable>) {
     let (mut locals, mut upvalues) = (Vec::new(), Vec::new());
     // SAFETY: as the caller says; each value pushed is read, then popped.
@@ -1389,8 +1427,7 @@ unsafe fn frame_variables(
             }
             let name = CStr::from_ptr(name).to_string_lossy().into_owned();
             if is_name(&name) {
-                let value = value_text(state, -1);
-                locals.push(Variable { name, value });
+                locals.push(described(state, name, 2, describer, budget));
             }
             ffi::lua_settop(state, -2);
         }
@@ -1404,8 +1441,7 @@ unsafe fn frame_variables(
                 }
                 let name = CStr::from_ptr(name).to_string_lossy().into_owned();
                 if is_name(&name) {
-                    let value = value_text(state, -1);
-                    upvalues.push(Variable { name, value });
+                    upvalues.push(described(state, name, 2, describer, budget));
                 }
                 ffi::lua_settop(state, -2);
             }
@@ -1413,6 +1449,128 @@ unsafe fn frame_variables(
         ffi::lua_settop(state, top);
     }
     (locals, upvalues)
+}
+
+/// The value on top of `state` as variable `name`: its text, and what it holds `depth`
+/// levels down within `budget` values (a table's fields, read raw; the host's userdata as
+/// `describer` says).
+///
+/// # Safety
+///
+/// `state` is a thread stopped in a script, a value on its top; the stack is put back as it
+/// was.
+unsafe fn described(
+    state: *mut ffi::lua_State,
+    name: String,
+    depth: u8,
+    describer: Option<Describer>,
+    budget: &mut usize,
+) -> Variable {
+    // SAFETY: as the caller says.
+    unsafe {
+        *budget = budget.saturating_sub(1);
+        let mut value = value_text(state, -1);
+        let mut children = Vec::new();
+        let kind = ffi::lua_type(state, -1);
+        if depth > 0 && *budget > 0 && ffi::lua_checkstack(state, 4) != 0 {
+            match kind {
+                ffi::LUA_TTABLE => children = fields(state, depth - 1, describer, budget),
+                ffi::LUA_TUSERDATA | ffi::LUA_TLIGHTUSERDATA => {
+                    if let Some((text, held)) = describer.and_then(|d| d(state, -1)) {
+                        value = text;
+                        *budget = budget.saturating_sub(held.len());
+                        children = held;
+                    }
+                }
+                _ => {}
+            }
+        } else if matches!(kind, ffi::LUA_TUSERDATA | ffi::LUA_TLIGHTUSERDATA)
+            && let Some((text, _)) = describer.and_then(|d| d(state, -1))
+        {
+            value = text;
+        }
+        Variable {
+            name,
+            value,
+            children,
+        }
+    }
+}
+
+/// The fields of the table on top of `state`, read raw: its array's first, then the rest by
+/// name; the first [`CHILDREN`] and a row for how many more, each `depth` levels down.
+///
+/// # Safety
+///
+/// As [`described`]'s, with room for four values.
+unsafe fn fields(
+    state: *mut ffi::lua_State,
+    depth: u8,
+    describer: Option<Describer>,
+    budget: &mut usize,
+) -> Vec<Variable> {
+    let mut out = Vec::new();
+    // SAFETY: as the caller says; each pushed key and value is popped once read.
+    unsafe {
+        let table = ffi::lua_absindex(state, -1);
+        let length = ffi::lua_objlen(state, table);
+        let mut more = 0usize;
+        for i in 1..=length {
+            if out.len() >= CHILDREN || *budget == 0 {
+                more += 1;
+                continue;
+            }
+            ffi::lua_rawgeti_(state, table, i as _);
+            out.push(described(state, format!("[{i}]"), depth, describer, budget));
+            ffi::lua_settop(state, -2);
+        }
+        let array = out.len();
+        ffi::lua_pushnil(state);
+        while ffi::lua_next(state, table) != 0 {
+            // The array's part was read above.
+            let in_array = ffi::lua_type(state, -2) == ffi::LUA_TNUMBER && {
+                let k = ffi::lua_tonumber(state, -2);
+                k >= 1.0 && k <= length as f64 && k == k.trunc()
+            };
+            if !in_array {
+                if out.len() >= CHILDREN || *budget == 0 {
+                    more += 1;
+                } else {
+                    let name = key_text(state, -2);
+                    out.push(described(state, name, depth, describer, budget));
+                }
+            }
+            ffi::lua_settop(state, -2);
+        }
+        // By name past the array, as Luau keeps no order there.
+        out[array..].sort_by(|a, b| a.name.cmp(&b.name));
+        if more > 0 {
+            out.push(Variable {
+                name: String::from("\u{2026}"),
+                value: format!("{more} more"),
+                children: Vec::new(),
+            });
+        }
+    }
+    out
+}
+
+/// A table's key as a field's name: a name as it is, anything else in brackets.
+///
+/// # Safety
+///
+/// `idx` is a valid index of `state`, with room for two more values.
+unsafe fn key_text(state: *mut ffi::lua_State, idx: c_int) -> String {
+    // SAFETY: as the caller says.
+    unsafe {
+        if ffi::lua_type(state, idx) == ffi::LUA_TSTRING
+            && let Some(name) = text_at(state, idx)
+            && is_name(&name)
+        {
+            return name;
+        }
+        format!("[{}]", value_text(state, idx))
+    }
 }
 
 /// The value at `idx` as text, never through its metamethods: a string quoted and cut, a
@@ -1666,6 +1824,7 @@ unsafe fn text_at(state: *mut ffi::lua_State, idx: c_int) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::CHILDREN;
     use crate::{
         BreakAction, Breakpoint, ErrorStop, ErrorStops, Frame, Hits, Logged, Resume, ScriptError,
         ScriptSettings, ScriptVm, Stopped, Variable,
@@ -2171,6 +2330,73 @@ return M
         );
         assert_eq!(fiber.resume(), Ran::Done);
         assert_eq!(c.result.take(), Some(Ok(4.0)));
+    }
+
+    #[test]
+    fn a_stops_tables_open_two_levels_down_their_first_hundred_fields_each() {
+        const TABLES: &str = "
+local M = {}
+function M.tick(n)
+    local list = {}
+    for i = 1, 150 do list[i] = i * n end
+    local config = { speed = 2, name = \"door\", nested = { deep = { deeper = 1 } } }
+    local marker = n
+    return #list + marker
+end
+return M
+";
+        let mut vm = ScriptVm::new(ScriptSettings::default()).unwrap();
+        vm.load_module("tables", TABLES).unwrap();
+        vm.set_stop_handler(Some(Box::new(wait_on_fiber)));
+        vm.set_breakpoints("tables", vec![stop(7)]);
+        let fiber = Fiber::new(1 << 20).unwrap();
+        let tick: mlua::Function = vm.exports("tables").unwrap().get("tick").unwrap();
+        let mut c = Call {
+            vm: &raw const vm,
+            module: "tables",
+            f: tick,
+            arg: 2.0,
+            result: None,
+        };
+        // SAFETY: `c` and the VM outlive the job, only read meanwhile.
+        let ran = unsafe { fiber.run(call, (&raw mut c).cast()) };
+        assert_eq!(ran, Ran::Suspended);
+        let at = AT.take().unwrap();
+        let local = |name: &str| at.locals.iter().find(|v| v.name == name).unwrap().clone();
+        let list = local("list");
+        assert_eq!(list.value, "table #150");
+        assert_eq!(
+            list.children.len(),
+            CHILDREN + 1,
+            "a hundred, and how many more"
+        );
+        assert_eq!(
+            (
+                list.children[0].name.as_str(),
+                list.children[0].value.as_str()
+            ),
+            ("[1]", "2")
+        );
+        let last = list.children.last().unwrap();
+        assert_eq!(
+            (last.name.as_str(), last.value.as_str()),
+            ("\u{2026}", "50 more")
+        );
+        let config = local("config");
+        assert_eq!(
+            named(&config.children),
+            [("name", "\"door\""), ("nested", "table"), ("speed", "2")],
+            "by name"
+        );
+        let nested = &config.children[1];
+        assert_eq!(named(&nested.children), [("deep", "table")]);
+        assert!(
+            nested.children[0].children.is_empty(),
+            "two levels down from the frame's variable"
+        );
+        ANSWER.set(Resume::Continue);
+        assert_eq!(fiber.resume(), Ran::Done);
+        assert_eq!(c.result.take(), Some(Ok(152.0)));
     }
 
     #[test]

@@ -63,8 +63,8 @@ use engine_script::mlua::{
 };
 /// The debugger's breakpoints as the host takes them (ADR 0119): the editor's.
 pub use engine_script::{
-    BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Hits, Resume, ScriptDebugger,
-    Stopped, Variable,
+    BreakAction, BreakState, Breakpoint, ErrorStop, ErrorStops, Frame, Hits, Resume,
+    ScriptDebugger, Stopped, Variable,
 };
 use engine_script::{ScriptError, ScriptSettings, ScriptVm};
 use std::cell::RefCell;
@@ -573,6 +573,8 @@ impl Scripts {
             let require = script_require::require_function(lua, modules.clone())?;
             lua.globals().set("require", require)
         })?;
+        // A stop describes `self`, entities and views through reflection (ADR 0119).
+        vm.debugger().set_describer(Some(script_views::describe));
         let mut tables = Box::new(Tables::default());
         tables.slow = vm
             .lua()

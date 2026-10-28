@@ -187,11 +187,25 @@ pub struct DebuggerView<'a> {
     pub frames: &'a [(&'a str, &'a str)],
     /// The frame whose variables are shown.
     pub frame: usize,
-    /// Its variables: a section's title (`LOCALS`, no value) or a name and its value, and
-    /// whether it changed since the last stop (lit).
-    pub variables: &'a [(&'a str, &'a str, bool)],
+    /// Its variables, and what those open hold under them.
+    pub variables: &'a [VariableRow<'a>],
     /// Every breakpoint.
     pub breakpoints: &'a [BreakpointRow<'a>],
+}
+
+/// A row of the Debugger panel's Variables (E9-1b-5b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VariableRow<'a> {
+    /// Its name, or a section's title (`LOCALS`).
+    pub name: &'a str,
+    /// Its value; empty for a section's title.
+    pub value: &'a str,
+    /// It changed since the last stop: lit.
+    pub changed: bool,
+    /// How far under its frame's variable it is.
+    pub depth: u8,
+    /// Whether it is open, where it holds anything.
+    pub open: Option<bool>,
 }
 
 /// A row of the Debugger panel's Breakpoints list.
@@ -978,6 +992,8 @@ pub struct ShellResponse {
     pub debug_toggle: Option<usize>,
     /// A row of which errors stop was clicked (0 not caught, 1 caught by `pcall`).
     pub debug_errors: Option<usize>,
+    /// A row of the Variables was clicked: it opens or closes.
+    pub debug_variable: Option<usize>,
     /// The scene dock's tab was clicked (0 the tree, 1 History).
     pub scene_dock_tab: Option<usize>,
     /// A History row was clicked: its place.
@@ -3810,17 +3826,37 @@ fn debugger_panel(ui: &mut Ui, view: &DebuggerView<'_>, p: &Palette, out: &mut S
             ui.container("variables", column(Size::Grow(1.0)), |ui| {
                 text(ui, "title", "VARIABLES", SMALL, p.text_dim);
                 ui.scroll_column("values", |ui| {
-                    for (i, &(name, value, changed)) in view.variables.iter().enumerate() {
+                    for (i, v) in view.variables.iter().enumerate() {
                         ui.push_id(i as u64);
-                        ui.container("variable", row, |ui| {
-                            if value.is_empty() {
-                                text(ui, "section", name, SMALL, p.text_dim);
+                        let id = ui.container("variable", row, |ui| {
+                            ui.container(
+                                "indent",
+                                Style {
+                                    size: [
+                                        Size::Fixed(f32::from(v.depth) * 14.0),
+                                        Size::Fixed(1.0),
+                                    ],
+                                    ..Style::default()
+                                },
+                                |_| {},
+                            );
+                            let mark = match v.open {
+                                Some(true) => icons::EXPANDED,
+                                Some(false) => icons::COLLAPSED,
+                                None => "",
+                            };
+                            icon(ui, "open", mark, p.text_dim);
+                            if v.value.is_empty() {
+                                text(ui, "section", v.name, SMALL, p.text_dim);
                             } else {
-                                text(ui, "name", name, SMALL, p.text);
-                                let color = if changed { p.warning } else { p.logged };
-                                text(ui, "value", value, SMALL, color);
+                                text(ui, "name", v.name, SMALL, p.text);
+                                let color = if v.changed { p.warning } else { p.logged };
+                                text(ui, "value", v.value, SMALL, color);
                             }
                         });
+                        if v.open.is_some() && ui.sense(id, false).clicked {
+                            out.debug_variable = Some(i);
+                        }
                         ui.pop_id();
                     }
                 });

@@ -2349,6 +2349,158 @@ unsafe extern "C-unwind" fn asset_tostring(state: *mut ffi::lua_State) -> c_int 
     }
 }
 
+/// The script debugger's look at the host's own values at a stop (ADR 0119 E9-1b-5b),
+/// through reflection, nothing called: `self` (its props, its entity's other components and
+/// the entity), an entity (its name, its components), a view (its fields) and an asset (its
+/// path). Inside a stage only, where the world is open.
+///
+/// # Safety
+///
+/// As [`engine_script::Describer`]'s.
+pub(crate) unsafe fn describe(
+    state: *mut ffi::lua_State,
+    idx: c_int,
+) -> Option<(String, Vec<engine_script::Variable>)> {
+    let world = crate::scripts::open_world();
+    if world.is_null() {
+        return None;
+    }
+    // SAFETY: the stage's world, read here only, while its hook is stopped: the stage holds
+    // no borrow of it meanwhile (ADR 0119 E9-1b-1).
+    let world = unsafe { &*world };
+    // SAFETY: as the caller says; each block's tag is checked before it is read.
+    unsafe {
+        match ffi::lua_type(state, idx) {
+            ffi::LUA_TLIGHTUSERDATA => {
+                let e = entity_at(state, idx)?;
+                Some((entity_text(world, e), components_of(world, e, None)))
+            }
+            ffi::LUA_TUSERDATA => match ffi::lua_userdatatag(state, idx) {
+                TAG_SELF => {
+                    let this = *this_at(ffi::lua_touserdatatagged(state, idx, TAG_SELF));
+                    let name = entity_text(world, this.entity);
+                    let mut held = fields_of(world, this.entity, this.id, this.info, 0);
+                    held.extend(components_of(world, this.entity, Some(this.id)));
+                    held.push(engine_script::Variable {
+                        name: String::from("entity"),
+                        value: name.clone(),
+                        children: Vec::new(),
+                    });
+                    Some((format!("{} · {name}", this.info.name), held))
+                }
+                TAG_VIEW => {
+                    let view = *view_at(ffi::lua_touserdatatagged(state, idx, TAG_VIEW));
+                    let held = fields_of(world, view.entity, view.id, view.info, view.offset);
+                    Some((String::from(view.info.name), held))
+                }
+                TAG_ASSET => {
+                    let a = asset_at(state, idx)?;
+                    let path = ASSET_PATHS.with_borrow(|paths| paths.get(&a).cloned());
+                    Some((
+                        path.map_or_else(|| String::from("asset"), |p| format!("asset {p}")),
+                        Vec::new(),
+                    ))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+/// An entity as the debugger names it: its `Name`, else its index.
+fn entity_text(world: &World, e: Entity) -> String {
+    if e == Entity::NULL || !world.contains(e) {
+        return String::from("no entity");
+    }
+    world.get::<Name>(e).map_or_else(
+        || format!("Entity({})", e.index()),
+        |n| String::from(n.as_str()),
+    )
+}
+
+/// Entity `e`'s reflected components but `skip`, each with its fields.
+fn components_of(
+    world: &World,
+    e: Entity,
+    skip: Option<ComponentId>,
+) -> Vec<engine_script::Variable> {
+    let Some(ids) = world.component_ids_of(e) else {
+        return Vec::new();
+    };
+    ids.iter()
+        .filter(|&&id| Some(id) != skip)
+        .filter_map(|&id| {
+            let info = world.components().type_info(id)?;
+            let mut held = fields_of(world, e, id, info, 0);
+            // A value written whole (`Name`'s text) is the component's own.
+            let value = match held.as_slice() {
+                [one] if one.name.is_empty() => held.pop().map(|v| v.value),
+                _ => None,
+            };
+            Some(engine_script::Variable {
+                name: String::from(info.name),
+                value: value.unwrap_or_else(|| String::from("component")),
+                children: held,
+            })
+        })
+        .collect()
+}
+
+/// The fields of the value of type `info` at `offset` in entity `e`'s component `id`, as the
+/// scene's lines write them (`translation = (0, 1, 0)`), a struct's own fields under it.
+fn fields_of(
+    world: &World,
+    e: Entity,
+    id: ComponentId,
+    info: &'static TypeInfo,
+    offset: usize,
+) -> Vec<engine_script::Variable> {
+    let Some(base) = world.get_raw(e, id) else {
+        return Vec::new();
+    };
+    let mut text = String::new();
+    // SAFETY: the component's value, of which `info` describes the part at `offset`.
+    unsafe {
+        let ids = |e: Entity| world.get::<engine_scene::SceneId>(e).copied();
+        engine_scene::write_lines_with(info, base.as_ptr().add(offset), &ids, None, &mut text);
+    }
+    let mut out: Vec<engine_script::Variable> = Vec::new();
+    for line in text.lines() {
+        let Some((path, value)) = line
+            .split_once(" = ")
+            .or_else(|| line.strip_prefix("= ").map(|v| ("", v)))
+        else {
+            continue;
+        };
+        let mut level = &mut out;
+        let mut parts = path.trim().split('.').peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() {
+                level.push(engine_script::Variable {
+                    name: String::from(part),
+                    value: String::from(value.trim()),
+                    children: Vec::new(),
+                });
+                break;
+            }
+            let k = match level.iter().position(|v| v.name == part) {
+                Some(k) => k,
+                None => {
+                    level.push(engine_script::Variable {
+                        name: String::from(part),
+                        value: String::from("struct"),
+                        children: Vec::new(),
+                    });
+                    level.len() - 1
+                }
+            };
+            level = &mut level[k].children;
+        }
+    }
+    out
+}
+
 /// `tostring(entity)`: `Entity(index)`.
 unsafe extern "C-unwind" fn entity_tostring(state: *mut ffi::lua_State) -> c_int {
     // SAFETY: a C function of the VM; the text is copied before the frame ends.

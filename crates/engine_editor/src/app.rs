@@ -1962,6 +1962,10 @@ struct Editor {
     debug_text: DebugText,
     /// Which errors stop a script in Play (E9-1b-4), kept in the session.
     error_stops: ErrorStops,
+    /// The Debugger's Variables' paths opened or closed by a click (E9-1b-5b), kept through
+    /// stops, and how many clicks there were.
+    debug_toggled: HashSet<String>,
+    debug_toggles: u64,
     /// The last stop's module, its function's first line and its locals, for what changed
     /// at the next (E9-1b-5a).
     last_values: Option<(String, Option<u32>, Vec<engine_app::scripts::Variable>)>,
@@ -2734,6 +2738,8 @@ impl Editor {
                 caught: false,
             },
             last_values: None,
+            debug_toggled: HashSet::new(),
+            debug_toggles: 0,
             break_pending: false,
             scripts_checked: Instant::now(),
             checkers: Checkers::default(),
@@ -4023,11 +4029,17 @@ impl Editor {
             .iter()
             .map(|(f, p)| (f.as_str(), p.as_str()))
             .collect();
-        let debug_variables: Vec<(&str, &str, bool)> = self
+        let debug_variables: Vec<crate::shell::VariableRow<'_>> = self
             .debug_text
             .variables
             .iter()
-            .map(|(n, v, c)| (n.as_str(), v.as_str(), *c))
+            .map(|v| crate::shell::VariableRow {
+                name: &v.name,
+                value: &v.value,
+                changed: v.changed,
+                depth: v.depth,
+                open: v.open,
+            })
             .collect();
         let debug_breakpoints: Vec<crate::shell::BreakpointRow<'_>> = self
             .debug_text
@@ -4523,6 +4535,14 @@ impl Editor {
                 .map(|b| (b.file.clone(), b.line))
         {
             self.enable_breakpoint(world, &file, line);
+        }
+        if let Some(k) = response.debug_variable
+            && let Some(path) = self.debug_text.variables.get(k).map(|v| v.path.clone())
+        {
+            if !self.debug_toggled.remove(&path) {
+                self.debug_toggled.insert(path);
+            }
+            self.debug_toggles += 1;
         }
         match response.debug_errors {
             Some(0) => self.run(world, self.ids.errors_uncaught),
@@ -8808,9 +8828,8 @@ impl Editor {
                 && stop.files.get(self.debug_frame) == Some(file)
                 && let (Some(at), Some(defined)) = (f.line, f.defined)
             {
-                let changed = |name: &str| {
-                    self.debug_frame == 0 && stop.changed.iter().any(|c| c == name)
-                };
+                let changed =
+                    |name: &str| self.debug_frame == 0 && stop.changed.iter().any(|c| c == name);
                 for line in shown.first..shown.last {
                     let Some(saved) = doc.saved_line(line).and_then(|l| u32::try_from(l + 1).ok())
                     else {
@@ -8847,15 +8866,9 @@ impl Editor {
                             put(&v.name, &v.value);
                         }
                     } else {
-                        assigned_names(text, |name| {
-                            let v = f
-                                .locals
-                                .iter()
-                                .rev()
-                                .find(|v| v.name == name)
-                                .or_else(|| f.upvalues.iter().find(|v| v.name == name));
-                            if let Some(v) = v {
-                                put(&v.name, &v.value);
+                        assigned_names(text, |path| {
+                            if let Some(v) = variable_at(f, path) {
+                                put(path, &v.value);
                             }
                         });
                     }
@@ -9642,6 +9655,7 @@ impl Editor {
             self.breakpoints.revision(),
             self.host_breaks.version(),
             self.break_pending,
+            self.debug_toggles,
         );
         if self.debug_text.key == Some(key) {
             return;
@@ -9697,26 +9711,30 @@ impl Editor {
                     // Luau does not read a native frame's locals; a breakpoint in its function
                     // runs it interpreted.
                     if f.native {
-                        text.variables.push((
-                            String::from(
-                                "LOCALS · not readable: the function runs as native code \
-                                 (a breakpoint in it shows them)",
-                            ),
-                            String::new(),
-                            false,
+                        text.variables.push(VarText::title(
+                            "LOCALS · not readable: the function runs as native code \
+                             (a breakpoint in it shows them)",
                         ));
                     }
                     for (title, vars) in [("LOCALS", &f.locals), ("UPVALUES", &f.upvalues)] {
                         if vars.is_empty() {
                             continue;
                         }
-                        text.variables.push((String::from(title), String::new(), false));
+                        text.variables.push(VarText::title(title));
                         for v in vars {
                             // Lit where it changed since the last stop (the stopped frame).
                             let changed = self.debug_frame == 0
                                 && title == "LOCALS"
-                                && stop.changed.iter().any(|c| *c == v.name);
-                            text.variables.push((v.name.clone(), v.value.clone(), changed));
+                                && stop.changed.contains(&v.name);
+                            let path = format!("{title}/{}", v.name);
+                            variable_rows(
+                                &mut text.variables,
+                                v,
+                                path,
+                                0,
+                                changed,
+                                &self.debug_toggled,
+                            );
                         }
                     }
                 }
@@ -15673,6 +15691,38 @@ impl<G> EditorGame<G> {
         view.screen(p).map(|p| p.to_array())
     }
 
+    /// Every note after line `line` (from 1) of the shown script, in order: what its
+    /// breakpoint says, the values it assigned at a stop (E9-1b-5a); for tests.
+    pub fn line_notes(&self, line: usize) -> Vec<String> {
+        let shared = self.shared.borrow();
+        let shown = &shared.code_shown;
+        shown
+            .break_notes
+            .iter()
+            .filter(|n| n.0 + 1 == line)
+            .map(|n| shown.break_text[n.2..n.3].to_owned())
+            .collect()
+    }
+
+    /// The Debugger panel's Variables as their rows read (`  name = value`, indented by
+    /// depth); for tests.
+    pub fn debug_texts(&self) -> Vec<String> {
+        self.shared
+            .borrow()
+            .debug_text
+            .variables
+            .iter()
+            .map(|v| {
+                format!(
+                    "{}{} = {}",
+                    "  ".repeat(usize::from(v.depth)),
+                    v.name,
+                    v.value
+                )
+            })
+            .collect()
+    }
+
     /// The line (from 1) of the shown script a stopped script runs next, as the code shows
     /// it (ADR 0119 E9-1b); for tests.
     pub fn stopped_line(&self) -> Option<usize> {
@@ -16769,11 +16819,68 @@ struct StopShown {
 struct DebugText {
     /// What they were made for: the stop's number, the frame, the breakpoints' revision,
     /// the host's states' version.
-    key: Option<(u64, usize, u64, Option<u64>, bool)>,
+    key: Option<(u64, usize, u64, Option<u64>, bool, u64)>,
     header: String,
     frames: Vec<(String, String)>,
-    variables: Vec<(String, String, bool)>,
+    variables: Vec<VarText>,
     breakpoints: Vec<DebugBreakpoint>,
+}
+
+/// A row of the Debugger panel's Variables (E9-1b-5b), with the path that opens it.
+struct VarText {
+    name: String,
+    value: String,
+    changed: bool,
+    depth: u8,
+    open: Option<bool>,
+    /// Its section and names down to it (`LOCALS/self/Transform`).
+    path: String,
+}
+
+impl VarText {
+    /// A section's title.
+    fn title(title: &str) -> Self {
+        Self {
+            name: String::from(title),
+            value: String::new(),
+            changed: false,
+            depth: 0,
+            open: None,
+            path: String::new(),
+        }
+    }
+}
+
+/// Variable `v`'s row at `depth` (its section and names down to it: `path`), then, where it
+/// is open, its children's: `self` opens by default, the rest when clicked (`toggled` keeps
+/// the paths clicked).
+fn variable_rows(
+    rows: &mut Vec<VarText>,
+    v: &engine_app::scripts::Variable,
+    path: String,
+    depth: u8,
+    changed: bool,
+    toggled: &HashSet<String>,
+) {
+    let open = (!v.children.is_empty()).then(|| {
+        let by_default = depth == 0 && path == "LOCALS/self";
+        by_default != toggled.contains(&path)
+    });
+    let shown = open == Some(true);
+    rows.push(VarText {
+        name: v.name.clone(),
+        value: v.value.clone(),
+        changed,
+        depth,
+        open,
+        path: path.clone(),
+    });
+    if shown {
+        for child in &v.children {
+            let path = format!("{path}/{}", child.name);
+            variable_rows(rows, child, path, depth.saturating_add(1), false, toggled);
+        }
+    }
 }
 
 /// A row of the Debugger panel's breakpoints, with where it goes.
@@ -16848,7 +16955,7 @@ fn assigned_names<'a>(line: &'a str, mut found: impl FnMut(&'a str)) {
     let code = line[..end].trim_start();
     let left = match eq {
         Some(at) => line[..at]
-            .trim_end_matches(|c| matches!(c, '+' | '-' | '*' | '/' | '%' | '^' | '.'))
+            .trim_end_matches(['+', '-', '*', '/', '%', '^', '.'])
             .trim_start(),
         None => {
             if let Some(rest) = code.strip_prefix("for ")
@@ -16878,20 +16985,42 @@ fn names_after_local<'a>(code: &'a str, found: &mut impl FnMut(&'a str)) {
     }
 }
 
-/// The names of a list (`a, b: number`), their types left out; anything else in it is not
-/// a name.
+/// The names of a list (`a, b: number`, `self.speed`), their types left out; anything else
+/// in it is not a name.
 fn names<'a>(list: &'a str, found: &mut impl FnMut(&'a str)) {
     for part in list.split(',') {
         let name = part.split(':').next().unwrap_or_default().trim();
-        let is_name = name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if is_name && !matches!(name, "local" | "function" | "return" | "then" | "do" | "end") {
+        let is_word = |w: &str| {
+            w.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !matches!(w, "local" | "function" | "return" | "then" | "do" | "end")
+        };
+        if !name.is_empty() && name.split('.').all(is_word) {
             found(name);
         }
     }
+}
+
+/// The variable of frame `f` at `path` (`t`, `self.speed`): a local (the latest of its
+/// name) or an upvalue, then what it holds by name.
+fn variable_at<'f>(
+    f: &'f engine_app::scripts::Frame,
+    path: &str,
+) -> Option<&'f engine_app::scripts::Variable> {
+    let mut parts = path.split('.');
+    let first = parts.next()?;
+    let mut v = f
+        .locals
+        .iter()
+        .rev()
+        .find(|v| v.name == first)
+        .or_else(|| f.upvalues.iter().find(|v| v.name == first))?;
+    for part in parts {
+        v = v.children.iter().find(|c| c.name == part)?;
+    }
+    Some(v)
 }
 
 /// A file's name, the last part of its path (`scripts/npc/guard.luau` is `guard.luau`).
@@ -17714,14 +17843,15 @@ mod tests {
         assert_eq!(assigned("a, b = b, a"), ["a", "b"]);
         assert_eq!(assigned("for i = 1, 10 do"), ["i"]);
         assert_eq!(assigned("for key, value in pairs(t) do"), ["key", "value"]);
+        assert_eq!(assigned("self.speed = 3"), ["self.speed"]);
+        assert_eq!(assigned("t.rotation *= q"), ["t.rotation"]);
         // Not assignments, or not to a name.
         for line in [
             "if a == b then",
             "while a <= 10 do",
             "return a ~= b",
             "f({ speed = 2 })",
-            "t.x = 1",
-            "self.speed = 3",
+            "t[1] = 1",
             "local function helper(x)",
             "print(\"a = b\")",
             "-- c = 4",
