@@ -155,6 +155,8 @@ mod pipelines;
 mod shadow_atlas;
 mod vsm_shading;
 
+/// A material type's parameters' layout ([`ForwardRenderer::material_params`]).
+pub use engine_shader::StructLayout;
 use layout::{Changes, Layout, MESHLET_ARGS, MESHLET_HEADER_BYTES, Source, local_box};
 pub(crate) use layout::{States, TypedPipelines, faces, mirrored, state};
 pub use material_types::{

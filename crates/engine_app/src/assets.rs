@@ -796,6 +796,10 @@ pub struct Assets {
     depends: HashMap<String, Vec<AssetId>>,
     /// Why an asset could not be made, said once.
     problems: HashMap<AssetRef, String>,
+    /// Material files as the editor holds them, read in place of their files
+    /// ([`Self::set_material`], ADR 0120's E10-1c), with the paths their references were
+    /// written with.
+    held: HashMap<AssetId, (MaterialFile, AssetPaths)>,
     changes: Option<Changes>,
     orphans: Option<Orphans>,
     changed: Vec<(Entity, Model)>,
@@ -858,6 +862,7 @@ impl Assets {
             retry_waiting: false,
             depends: HashMap::new(),
             problems: HashMap::new(),
+            held: HashMap::new(),
             changes: None,
             orphans: None,
             changed: Vec::new(),
@@ -891,6 +896,65 @@ impl Assets {
     /// Learns where assets are (a loaded scene's `LoadReport::assets`).
     pub fn add_paths(&mut self, paths: &AssetPaths) {
         self.paths.extend(paths);
+    }
+
+    /// Material file `file` as the editor holds it (ADR 0120's E10-1c), `written` the paths
+    /// its references were written with: read from now on in place of the file on disk
+    /// (`None`: the file again). Its material, if made, is made again in its place, by the
+    /// next frame: a standard file's values at once; a typed file's parameters laid out
+    /// again ([`Self::make_material_types`]), its previous ones drawn until then, so a
+    /// value dragged in the inspector draws without a frame of its look.
+    pub fn set_material(
+        &mut self,
+        file: AssetId,
+        held: Option<(MaterialFile, AssetPaths)>,
+        table: &mut MaterialTable,
+    ) {
+        match held {
+            Some(held) => self.held.insert(file, held),
+            None => self.held.remove(&file),
+        };
+        let asset = AssetRef::file(file);
+        let Some(&material) = self.materials.get(&asset) else {
+            return;
+        };
+        let (data, written) = match self.read_material(asset) {
+            Ok(read) => read,
+            Err(why) => {
+                self.fail(asset, why);
+                return;
+            }
+        };
+        self.problems.remove(&asset);
+        let look = material_desc(&data);
+        // Its type kept when the file still names it: laid out again with the layout the
+        // forward renderer has, in this frame's `make_material_types`.
+        let kept = self
+            .typed
+            .iter()
+            .position(|t| t.material == material)
+            .map(|k| self.typed.swap_remove(k));
+        if !data.is_typed() {
+            table.set(material, look);
+            return;
+        }
+        match self.typed_state(asset, &data, &written, material, look) {
+            Ok(mut state) => {
+                if let Some(old) = kept
+                    && old.file.shader == state.file.shader
+                    && old.file.type_name == state.file.type_name
+                {
+                    state.ty = old.ty;
+                } else {
+                    table.set(material, look);
+                }
+                self.typed.push(state);
+            }
+            Err(why) => {
+                table.set(material, look);
+                self.fail(asset, why);
+            }
+        }
     }
 
     /// Why an asset could not be made, if it could not.
@@ -1648,8 +1712,14 @@ impl Assets {
         }
     }
 
-    /// Material file `asset` read, and the paths its references were written with.
+    /// Material file `asset` read (as the editor holds it, if it does), and the paths its
+    /// references were written with.
     fn read_material(&self, asset: AssetRef) -> Result<(MaterialFile, AssetPaths), String> {
+        if asset.part == 0
+            && let Some((file, written)) = self.held.get(&asset.file)
+        {
+            return Ok((file.clone(), written.clone()));
+        }
         if asset.part != 0 {
             return Err(String::from(
                 "a material is a whole file, not a part of one",

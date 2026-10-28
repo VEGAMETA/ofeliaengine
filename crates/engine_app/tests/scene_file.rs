@@ -391,6 +391,22 @@ fn a_typed_material_file_draws_its_look_then_its_type() {
         "written anew, drawn in {:.3} s",
         started.elapsed().as_secs_f64()
     );
+
+    // Held by the editor (ADR 0120's E10-1c): a yellow version in place of the file, the
+    // same material laid out again by the next frame, never its look in between.
+    let (held, report) = MaterialFile::parse(&stripes("0.9, 0.9, 0.05")).unwrap();
+    player.set_material_file(stripes_id, Some((held, report.assets)));
+    for _ in 0..3 {
+        player.frame(&mut game).unwrap();
+        assert_eq!(named(&mut player, "Striped"), blue, "the same material");
+        let ty = player.setup().materials.material_type(blue);
+        assert!(
+            ty.is_some_and(|t| t != MaterialTypeId::GLTF),
+            "never its look"
+        );
+    }
+    let [r, g, b] = middle(&player.capture(&mut game).unwrap().unwrap());
+    assert!(r > 1.5 * b && g > 1.5 * b, "held: {r} {g} {b}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

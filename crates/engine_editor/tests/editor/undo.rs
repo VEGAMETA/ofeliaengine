@@ -741,3 +741,54 @@ fn records_follow_a_components_new_layout_by_name() {
     history.redo(&mut w);
     assert_eq!(bytes(&w)[0..4], 3.0f32.to_le_bytes());
 }
+
+/// A file's text is a step too (a material edited in the inspector, ADR 0120's E10-1c): a
+/// drag's steps merge into one, undo and redo hand the texts back, a cancel puts the first
+/// back, and a step that changes nothing is none.
+#[test]
+fn a_files_text_is_a_step_too() {
+    let mut w = World::new();
+    let mut h = History::new();
+    let file = engine_scene::AssetId::new();
+    let e = spawn(&mut w, 0.0);
+    // A drag: three moves of one gesture, the file and an entity in the same step.
+    for (k, text) in ["roughness = 0.6", "roughness = 0.7", "roughness = 0.8"]
+        .into_iter()
+        .enumerate()
+    {
+        h.begin("Edit roughness", Some(1));
+        let before = if k == 0 {
+            "roughness = 0.5"
+        } else {
+            "roughness = 0.0"
+        };
+        h.change_file(file, before, text);
+        h.touch(&mut w, e);
+        w.get_mut::<Transform>(e).unwrap().translation.x = k as f32 + 1.0;
+        assert!(h.commit(&mut w));
+    }
+    assert_eq!(h.steps().count(), 1, "one gesture, one step");
+    assert!(h.take_files().is_empty(), "nothing put back yet");
+    assert_eq!(h.undo(&mut w).as_deref(), Some("Edit roughness"));
+    let back = h.take_files();
+    assert_eq!(back.len(), 1);
+    assert_eq!(
+        (back[0].0, &*back[0].1),
+        (file, "roughness = 0.5"),
+        "the first before"
+    );
+    assert_eq!(w.get::<Transform>(e).unwrap().translation.x, 0.0);
+    assert!(h.redo(&mut w).is_some());
+    let forward = h.take_files();
+    assert_eq!(&*forward[0].1, "roughness = 0.8", "the last after");
+    // Set back to what it was: no step.
+    h.begin("Edit roughness", None);
+    h.change_file(file, "roughness = 0.8", "roughness = 0.8");
+    assert!(!h.commit(&mut w));
+    // A cancel puts the text back.
+    h.begin("Edit metallic", None);
+    h.change_file(file, "metallic = 0", "metallic = 1");
+    h.cancel(&mut w);
+    assert_eq!(&*h.take_files()[0].1, "metallic = 0");
+    assert_eq!(h.steps().count(), 1);
+}

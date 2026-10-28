@@ -543,7 +543,7 @@ fn kind_of(ty: &'static TypeInfo, attrs: Attrs, path: &str) -> Option<Kind> {
 
 /// Appends a number with at most `decimals` decimals, without trailing zeros (and `0`
 /// for -0).
-fn push_number(out: &mut String, v: f64, decimals: usize) {
+pub(crate) fn push_number(out: &mut String, v: f64, decimals: usize) {
     let start = out.len();
     let _ = write!(out, "{v:.decimals$}");
     if out[start..].contains('.') {

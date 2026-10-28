@@ -33,10 +33,11 @@
 
 use engine_ecs::{Children, ComponentId, Entity, Parent, QueryState, World};
 use engine_reflect::{TypeInfo, TypeKind};
-use engine_scene::SceneId;
 use engine_scene::text::ReadRefs;
+use engine_scene::{AssetId, SceneId};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 /// A component's recorded value.
 #[derive(Debug, Clone, PartialEq)]
@@ -180,6 +181,15 @@ struct Change {
     after: Option<EntityState>,
 }
 
+/// A file's text before and after a step (a material file edited in the inspector, ADR
+/// 0120's E10-1c): undo and redo hand it back to the editor ([`History::take_files`]).
+#[derive(Debug, Clone, PartialEq)]
+struct FileChange {
+    file: AssetId,
+    before: Arc<str>,
+    after: Arc<str>,
+}
+
 /// One undoable step.
 #[derive(Debug, Clone)]
 pub struct Transaction {
@@ -188,6 +198,8 @@ pub struct Transaction {
     name: String,
     merge: Option<u64>,
     changes: Vec<Change>,
+    /// The files it changed ([`History::change_file`]).
+    files: Vec<FileChange>,
     bytes: usize,
     /// The document it was made in ([`History::set_document`]).
     doc: u32,
@@ -215,6 +227,7 @@ struct Open {
     merge: Option<u64>,
     touched: Vec<(SceneId, Option<EntityState>)>,
     seen: HashSet<SceneId>,
+    files: Vec<FileChange>,
 }
 
 /// Entity `e`'s children of the scene: not those the engine made for it
@@ -267,6 +280,8 @@ pub struct History {
     /// Each document's newest step dropped for the budget: its head while none of its
     /// steps is left ([`Self::head_of`]).
     dropped: Vec<(u32, u64)>,
+    /// Files' texts the last undo, redo, revert or cancel put back ([`Self::take_files`]).
+    put_back: Vec<(AssetId, Arc<str>)>,
 }
 
 /// The world as it was, kept to put it back (ADR 0107 E3: Play runs on the scene's world,
@@ -299,7 +314,7 @@ impl WorldSnapshot {
 
     /// Bytes of recorded state.
     pub fn bytes(&self) -> usize {
-        transaction_bytes(&self.states)
+        transaction_bytes(&self.states, &[])
     }
 
     /// The name scene entity `id` had then.
@@ -436,6 +451,7 @@ impl History {
             floor: None,
             doc: 0,
             dropped: Vec::new(),
+            put_back: Vec::new(),
         }
     }
 
@@ -501,7 +517,32 @@ impl History {
             merge,
             touched: Vec::new(),
             seen: HashSet::new(),
+            files: Vec::new(),
         });
+    }
+
+    /// Records that the open action changed file `file`'s text from `before` to `after` (a
+    /// material file edited in the inspector, ADR 0120's E10-1c), the file being the
+    /// editor's to hold: undo hands `before` back and redo `after` ([`Self::take_files`]).
+    /// Nothing without an open action.
+    pub fn change_file(&mut self, file: AssetId, before: &str, after: &str) {
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        match open.files.iter_mut().find(|f| f.file == file) {
+            Some(f) => f.after = Arc::from(after),
+            None => open.files.push(FileChange {
+                file,
+                before: Arc::from(before),
+                after: Arc::from(after),
+            }),
+        }
+    }
+
+    /// The files' texts the last undo, redo, revert or cancel put back, in order, for the
+    /// editor to give to what holds them; taken once.
+    pub fn take_files(&mut self) -> Vec<(AssetId, Arc<str>)> {
+        core::mem::take(&mut self.put_back)
     }
 
     /// Records `entity`'s current state before the action changes it (once per action;
@@ -751,18 +792,22 @@ impl History {
         let Some(open) = self.open.take() else {
             return false;
         };
-        if open.touched.is_empty() {
+        if open.touched.is_empty() && open.files.is_empty() {
             return false;
         }
-        let index = id_index(world);
         let mut changes = Vec::with_capacity(open.touched.len());
-        for (id, before) in open.touched {
-            let after = index.get(&id).map(|&e| self.snapshot(world, e));
-            if before != after {
-                changes.push(Change { id, before, after });
+        if !open.touched.is_empty() {
+            let index = id_index(world);
+            for (id, before) in open.touched {
+                let after = index.get(&id).map(|&e| self.snapshot(world, e));
+                if before != after {
+                    changes.push(Change { id, before, after });
+                }
             }
         }
-        if changes.is_empty() {
+        let mut files = open.files;
+        files.retain(|f| f.before != f.after);
+        if changes.is_empty() && files.is_empty() {
             return false;
         }
         self.redo.clear();
@@ -781,21 +826,29 @@ impl History {
                 }
             }
             top.changes.retain(|c| c.before != c.after);
-            let bytes = transaction_bytes(&top.changes);
+            for f in files {
+                match top.files.iter_mut().find(|t| t.file == f.file) {
+                    Some(existing) => existing.after = f.after,
+                    None => top.files.push(f),
+                }
+            }
+            top.files.retain(|f| f.before != f.after);
+            let bytes = transaction_bytes(&top.changes, &top.files);
             self.bytes = self.bytes - top.bytes + bytes;
             top.bytes = bytes;
-            if top.changes.is_empty() {
+            if top.changes.is_empty() && top.files.is_empty() {
                 self.bytes -= top.bytes;
                 self.undo.pop_back();
             }
         } else {
-            let bytes = transaction_bytes(&changes);
+            let bytes = transaction_bytes(&changes, &files);
             self.bytes += bytes;
             self.undo.push_back(Transaction {
                 id: self.last_id,
                 name: open.name,
                 merge: open.merge,
                 changes,
+                files,
                 bytes,
                 doc: self.doc,
             });
@@ -817,6 +870,7 @@ impl History {
         let Some(open) = self.open.take() else {
             return;
         };
+        put_back(&mut self.put_back, &open.files, true);
         let changes: Vec<Change> = open
             .touched
             .into_iter()
@@ -842,6 +896,7 @@ impl History {
         };
         self.bytes -= t.bytes;
         apply(world, &mut self.codecs, &t.changes, true);
+        put_back(&mut self.put_back, &t.files, true);
         true
     }
 
@@ -858,6 +913,7 @@ impl History {
         let t = self.undo.pop_back()?;
         self.bytes -= t.bytes;
         apply(world, &mut self.codecs, &t.changes, true);
+        put_back(&mut self.put_back, &t.files, true);
         let name = t.name.clone();
         self.redo.push(t);
         Some(name)
@@ -869,6 +925,7 @@ impl History {
         self.open = None;
         let t = self.redo.pop()?;
         apply(world, &mut self.codecs, &t.changes, false);
+        put_back(&mut self.put_back, &t.files, false);
         let name = t.name.clone();
         self.bytes += t.bytes;
         self.undo.push_back(t);
@@ -1178,14 +1235,26 @@ impl History {
     }
 }
 
-fn transaction_bytes(changes: &[Change]) -> usize {
+fn transaction_bytes(changes: &[Change], files: &[FileChange]) -> usize {
     changes
         .iter()
         .map(|c| {
             c.before.as_ref().map_or(0, EntityState::bytes)
                 + c.after.as_ref().map_or(0, EntityState::bytes)
         })
-        .sum()
+        .sum::<usize>()
+        + files
+            .iter()
+            .map(|f| f.before.len() + f.after.len() + 32)
+            .sum::<usize>()
+}
+
+/// Files' texts a step puts back into `out`: as before it (`undo`) or after it.
+fn put_back(out: &mut Vec<(AssetId, Arc<str>)>, files: &[FileChange], undo: bool) {
+    for f in files {
+        let text = if undo { &f.before } else { &f.after };
+        out.push((f.file, Arc::clone(text)));
+    }
 }
 
 /// Byte offsets of `Entity` values inside a type.

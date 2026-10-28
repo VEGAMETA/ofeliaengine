@@ -26,6 +26,7 @@ pub mod icons;
 mod import;
 pub mod input;
 pub mod inspector;
+mod material;
 mod outline;
 mod output;
 pub mod paint;

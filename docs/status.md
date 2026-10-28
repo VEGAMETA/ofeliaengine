@@ -771,9 +771,13 @@ Last updated: 2026-10-28.
     renderer's material compiler thread has reflected its layout and compiled its entry
     points (1.6 s on the RTX, 1.1 s on the Radeon, no frame over 7.6 ms meanwhile); its
     images load in the background; thumbnails wait for the type's shaders.
+  - **E10-1c-1, a material file edited in the inspector** (#PR, ADR 0120's as-built): a
+    `.material` picked in the dock shows its rows (a material type's from its reflected
+    `Params`); edits draw by the next frame with nothing compiled, are steps of the one
+    history (file steps: its text before and after) and Ctrl+S writes them.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E10-1c: parameters in the inspector, New Material, Make Variant (a copy), Apply to
-       Selection.
+    1. E10-1c-2: editing from a selected object's `Model.material`, New Material, Make
+       Variant (a copy), Apply to Selection; unsaved material edits in the autosave.
     2. E11-3b and E11-3c, previews: ▶, Space and Auto Play in the dock on an editor bus,
        the inspector's waveform with seeking. Then E11-1, the mixer file (`main.mixer`)
        and panel, E11-2, effects and sends, E11-4b, handles and hearing in place.

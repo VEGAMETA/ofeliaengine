@@ -724,6 +724,18 @@ A click on a folder opens it, a click on a file picks it.
   A change is saved in the file's `.meta` at once and the asset is made again, with
   nothing to press. It is not an undo step (a file on disk, as a rename): ↺ puts a
   setting back.
+- **A material** (`.material`) picked in the dock shows its own rows under **Material**:
+  - the standard material's base color, metallic, roughness, emissive, alpha (with its
+    cutoff when masked) and double sided;
+  - a material type's instance: the type and its module, then a row for each field of its
+    `Params` struct, read from Slang's reflection: numbers, a vector's parts, an image
+    (drop one from the dock onto its row) with its encoding; then its look, and the look's
+    values when it is its own.
+
+  An edit shows in the scene by the next frame, and nothing compiles: drag a number, type
+  it, pick a choice, or ↺ to put a value back. Every edit is an undo step in the one
+  history (a drag one step). The section reads "Material (unsaved: Ctrl+S)" until **Ctrl+S**
+  writes the file with the scene.
 
 **`#` in the command palette** finds assets by path: `#crate`, or with a kind first,
 `#model:crate`, `#texture:rock` (`scene`, `material`, `model` or `mesh`, `texture`, `sound`
