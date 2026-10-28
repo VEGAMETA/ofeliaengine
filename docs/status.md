@@ -741,7 +741,7 @@ Last updated: 2026-10-28.
   - **Scripts in the profiler** (#390, ADR 0114's as-built): a Tracy zone a hook
     (`script Door.on_tick`); the editor's profiler lists each script's time, calls and
     memory a frame while the game plays, measured only while the panel is open.
-  - **The editor's changing texts allocate nothing** (#PR): a text laid out anew (the
+  - **The editor's changing texts allocate nothing** (#391): a text laid out anew (the
     status line's FPS, a counter) goes into a layout unused for two seconds, its string
     and glyph buffers reused; before, each change made a new string and glyph list. The
     editor's FPS follows a fixed frame time in its zero-allocation test
