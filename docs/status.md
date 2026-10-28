@@ -852,7 +852,7 @@ Last updated: 2026-10-28.
     `audio.blend(name, weight, fade?)`; fades on the game's thread, nothing allocated a
     frame; the editor's mixer functions keep the paths through renames, moves and
     removals.
-  - **E11-5b, the panel's snapshots** (#PR, ADR 0107's as-built): the header's list (Mix,
+  - **E11-5b, the panel's snapshots** (#416, ADR 0107's as-built): the header's list (Mix,
     each snapshot, + Snapshot); a chosen snapshot shows over the mix and is heard alone,
     and the panel's value edits go into it (one step each, ↺ takes one out, buses and
     effects refused); its section names it and sets its fade. E11-5 is done.
