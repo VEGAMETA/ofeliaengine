@@ -746,12 +746,16 @@ Last updated: 2026-10-28.
     and glyph buffers reused; before, each change made a new string and glyph list. The
     editor's FPS follows a fixed frame time in its zero-allocation test
     (`Player::frame_time`), so a test of the text cache lays out 600 new texts instead.
+  - **The RTX's baseline remade under its new driver** (#PR): `forward` read 3.1-3.7 %
+    slower in `sponza_fsr_quality` and `sponza_smaa_t2x` (2.8 % in `sponza_gi`) in three
+    gates, `main` alone the third, on code those scenes do not run, registers unchanged.
+    The baseline was taken on NVIDIA 616.92 (2026-10-15); ref-1 runs 617.42. Every NVIDIA
+    row remade: the GPU frames moved by a median of +1.0 % (-1.2 to +3.7 %).
   - **Next, in this order:**
-    1. The RTX's `forward` reads 3.1-3.7 % slower than its baseline in `sponza_fsr_quality`
-       and `sponza_smaa_t2x`, in two gates in a row (#379, #380), on code those scenes do
-       not run (they render through the frame renderer, not the player; registers
-       unchanged), with every frame 0.3-2 % slower: measure `main` alone, and give the RTX
-       a new baseline if it holds.
+    1. E11, sound (ADR 0107's order; E10-1 waits for the answer on the material file): the
+       UX note (`docs/research/ux/sound.md`), then the viewport's gizmos for 3D sources and
+       reverb zones, previews in the asset browser, and the mixer panel on the running
+       mixer. Where the bus layout is kept waits for the team's answer.
   - **Asked (2026-10-28):** native code in the editor's Play, whose frames' locals Luau does
     not read at a stop. E10-1 waits for the answer on the material file.
 
