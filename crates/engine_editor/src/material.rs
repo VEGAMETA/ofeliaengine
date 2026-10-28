@@ -244,7 +244,13 @@ pub(crate) fn rows(file: &MaterialFile, layout: Option<&StructLayout>, out: &mut
     out.clear();
     let own = if file.is_typed() {
         out.push(Row::Type);
-        for field in layout.map_or(&[][..], |l| &l.fields[..]) {
+        // Fields starting with `_` are the code's own (a graph's editing numbers, a struct's
+        // placeholder, ADR 0123): not the material's rows.
+        for field in layout
+            .map_or(&[][..], |l| &l.fields[..])
+            .iter()
+            .filter(|f| !f.name.starts_with('_'))
+        {
             out.push(Row::Param {
                 name: field.name.clone(),
                 kind: field.kind,

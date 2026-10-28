@@ -24,6 +24,8 @@ engine_ecs.workspace = true
 # Material files in the editor's grammar, reflected (ADR 0120).
 engine_reflect.workspace = true
 engine_scene.workspace = true
+# Material graphs made modules where a material file names one (ADR 0123).
+engine_material_graph.workspace = true
 # Unbuffered reads through an I/O ring for packs (ADR 0056).
 engine_platform.workspace = true
 engine_profiler.workspace = true

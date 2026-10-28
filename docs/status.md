@@ -868,6 +868,12 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3c, graphs drawn by the player** (#PR, ADR 0123's as-built): a material file
+    naming a `.graph` resolves to the graph's module, generated into
+    `.ofelia/cache/graphs/` (written when it changed), its type `GraphMaterial`, the
+    graph's numbers and texture images under the file's values; the player reads the
+    material again when the graph changes and hot reload compiles it (on screen in
+    0.6 s on the RTX, 0.5 s on the Radeon); the inspector hides `_` fields.
   - **E10-3b-2, the `.graph` file** (#421, ADR 0123's as-built; its proposed shape, the
     recommendation): read and written in the editor's grammar, defaults left out, nodes
     by id and links by input, sorted; a texture node's own image; `.graph` files known to
@@ -895,10 +901,10 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3c, the player and the cook drawing a material file that names a graph
-       (generated into the cache, compiled, reloaded when the graph changes; a golden
-       shot on both GPUs), then E10-3d to E10-3g (ADR 0123's steps); then E10-4,
-       previews, stats and variants with a base.
+       2D): E10-3d, the canvas (a `.graph` opened in the Shader panel, nodes, ports,
+       links, pan, zoom, selection, moves, deletes, undo; Material: New Graph), then
+       E10-3e to E10-3g (ADR 0123's steps); then E10-4, previews, stats and variants with
+       a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

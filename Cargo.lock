@@ -309,6 +309,7 @@ dependencies = [
  "engine_core",
  "engine_ecs",
  "engine_loc",
+ "engine_material_graph",
  "engine_nav",
  "engine_platform",
  "engine_profiler",
