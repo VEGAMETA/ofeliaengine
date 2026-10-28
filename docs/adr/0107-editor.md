@@ -2034,3 +2034,38 @@ for the first answer. This step is the part of E11-4 that needs none.
     quarters along, Escape, Auto Play off;
   - on the player (GPU): a silent WAV picked and Space, heard on the preview bus with its
     length, then Escape.
+
+## As built (E11-3c, 2026-10-28): a sound's waveform in the inspector
+
+- **A sound picked in the dock** (`docs/research/ux/sound.md`, previews) shows a **Sound**
+  section after its Asset section: its waveform, a band per channel (the first on top,
+  "L" and "R" on a stereo file's), ▶ or ■, the loop, the time ("0:01.20 / 0:03.20"),
+  then rows of its facts: length, rate and channels, peak in dBFS ("(it may clip)" from
+  −0.1 dBFS), silence at each end ("0.18 s first · 0.40 s last", none under 5 ms).
+- **Read on a thread of its own** when the file is picked (`engine_editor::sound_view`):
+  `engine_app::waveform` now keeps each channel's columns beside the mixed ones, and the
+  frames of silence (−60 dBFS) at each end from the same decode. "Reading…" shows until
+  it answers; a file written anew is read again; another file picked drops it.
+- **The picture is drawn at the size it is shown**, in the window's pixels (300 × 44 a
+  band at a UI scale of 1): sampled smaller, a 1024-column picture aliased into stripes
+  (seen on ref-1). It is uploaded once into the corner of a 1024 × 256 texture of the
+  overlay (room for a UI scale of 3) and drawn with its part's coordinates.
+- **Playing:** ▶ plays from the start, looped when the loop is on (`preview_sound`'s
+  `looping`); the loop toggled while it plays goes on from where it is. A press on the
+  waveform plays from there; a drag holds the playhead and the time under the pointer;
+  a release away from the press plays from there. The playhead and the shaded silence
+  are out of the layout's flow, at the panel's fixed width.
+- **Not done:** the length in a corner of the dock's tiles and a tooltip with these facts;
+  the waveform following a UI scale changed while it is shown (it is read again when
+  picked again).
+- **Tests:**
+  - the reader: each channel's columns of a stereo file (a tone on the left, silence on
+    the right), the silence at each end, the peak in dBFS, a silent file;
+  - the picture: a band a channel, full scale in the warning colour within its band's
+    margins; the clock's text; the facts' texts;
+  - the editor: a stereo WAV picked, its facts once read, its picture at the panel's
+    size drawn from the texture, ▶ and ■, the loop, a click three quarters along (1.5 s
+    of 2), a drag from a quarter to the middle (the time following), another file
+    picked;
+  - on the player (GPU): a tone picked (never played): its facts, its picture uploaded
+    by the overlay and shown (`ENGINE_EDITOR_SOUND_PNG` keeps the frame).

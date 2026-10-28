@@ -162,6 +162,11 @@ fn tap(game: &mut EditorGame<NoGame>, virtual_key: u16, scancode: u16) {
 /// A mono 16-bit WAV file of `frames` frames of silence at 48 kHz (heard as nothing, so
 /// a test that plays it is quiet on a machine people work at).
 fn silent_wav(frames: u32) -> Vec<u8> {
+    wav(frames, |_| 0.0)
+}
+
+/// A mono 16-bit WAV file of `frames` frames at 48 kHz, frame `i` at `sample(i)`.
+fn wav(frames: u32, sample: impl Fn(u32) -> f32) -> Vec<u8> {
     let data = frames * 2;
     let mut out = Vec::with_capacity(44 + data as usize);
     out.extend_from_slice(b"RIFF");
@@ -176,7 +181,10 @@ fn silent_wav(frames: u32) -> Vec<u8> {
     out.extend_from_slice(&16u16.to_le_bytes());
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data.to_le_bytes());
-    out.resize(44 + data as usize, 0);
+    for i in 0..frames {
+        let v = (sample(i).clamp(-1.0, 1.0) * 32767.0) as i16;
+        out.extend_from_slice(&v.to_le_bytes());
+    }
     out
 }
 
@@ -191,6 +199,15 @@ fn a_sound_picked_in_the_dock_plays_on_the_editors_own_bus() {
     )
     .unwrap();
     std::fs::write(dir.join("hush.wav"), silent_wav(48_000 * 3)).unwrap();
+    // A tone at half scale after a quarter second, picked but never played.
+    let tone = |i: u32| {
+        if i >= 12_000 {
+            0.5 * (i as f32 * 0.03).sin()
+        } else {
+            0.0
+        }
+    };
+    std::fs::write(dir.join("tone.wav"), wav(96_000, tone)).unwrap();
     let settings = PlayerSettings {
         title: String::from("editor preview test"),
         window: Window::Offscreen {
@@ -241,6 +258,42 @@ fn a_sound_picked_in_the_dock_plays_on_the_editors_own_bus() {
     frame(&mut player, &mut game, &mut overlay);
     frame(&mut player, &mut game, &mut overlay);
     assert!(player.sound_preview().is_none());
+    // The tone picked (Auto Play is off: nothing plays): the inspector reads it on a thread
+    // of its own and shows its facts and its waveform, the picture uploaded by the overlay
+    // (`ENGINE_EDITOR_SOUND_PNG` keeps the frame).
+    let tile = game.text_at("tone.wav").expect("the tone listed");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, tile, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    until(&mut player, &mut game, &mut overlay, |g| {
+        g.text_at("0:02.00").is_some()
+    });
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.text_at("\u{2212}6.0 dBFS").is_some(), "its peak");
+    assert!(game.text_at("0.25 s first").is_some(), "its silence");
+    assert!(
+        game.text_at("Reading\u{2026}").is_none(),
+        "its picture shown"
+    );
+    assert!(player.sound_preview().is_none(), "picked, not played");
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_SOUND_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let extent = player.extent();
+        let png = engine_render::png::encode_png(
+            extent.width,
+            extent.height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

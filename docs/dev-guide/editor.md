@@ -740,6 +740,16 @@ A click on a folder opens it, a click on a file picks it.
   A change is saved in the file's `.meta` at once and the asset is made again, with
   nothing to press. It is not an undo step (a file on disk, as a rename): ↺ puts a
   setting back.
+- **A sound** picked in the dock shows its waveform under **Sound**, a band per channel
+  (the left above the right), read in the background the moment it is picked:
+  - ▶ plays it from its start and ■ stops it; the loop button plays it over and over;
+  - a click on the waveform plays from there; a drag moves the playhead and the time
+    with it, and plays from where you let go;
+  - the time is where it plays and its length: "0:01.20 / 0:03.20";
+  - silence at its start and its end is shaded, and the rows below say how long it is,
+    its rate and channels, its **peak** in dBFS ("(it may clip)" at full scale) and its
+    **silence** at each end ("0.18 s first");
+  - it plays as the dock's previews do: on the editor's own bus, never through the game's.
 - **A material** (`.material`) picked in the dock shows its own rows under **Material**:
   - the standard material's base color, metallic, roughness, emissive, alpha (with its
     cutoff when masked) and double sided;

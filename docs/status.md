@@ -785,10 +785,15 @@ Last updated: 2026-10-28.
     a playhead with seeking, Escape; played as the file is on an editor bus of its own
     (`Player::preview_sound`), streamed from where it is asked; an Ogg file's length from
     its last page.
+  - **E11-3c, a sound's waveform in the inspector** (#401, ADR 0107's as-built): a band per
+    channel, read on a thread of its own and drawn at the size it is shown; ▶, ■ and the
+    loop; a click or a drag along it plays from there; its length, rate and channels,
+    peak in dBFS and silence at each end. E11-3 is done but for sounds dropped on the
+    viewport, the tree or an entity, and the sound and bus fields.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
-    1. E11-3c, the inspector's waveform per channel with seeking and the file's facts.
-       Then E11-1, the mixer file (`main.mixer`) and panel, E11-2, effects and sends,
-       E11-4b, handles and hearing in place.
+    1. E11-1, the mixer file (`main.mixer`) and panel. Then E11-2, effects and sends,
+       E11-4b, handles and hearing in place, and E11-3's last part: sounds dropped on the
+       viewport, the tree or an entity, and the sound and bus fields.
   - **Settled (2026-10-28, team decisions, every recommendation):**
     - E11's four (`docs/research/ux/sound.md`): the bus layout in a `.mixer` file named
       by `PlayerSettings::audio.layout` (`buses` goes; the four built-in buses without a

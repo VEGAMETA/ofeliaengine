@@ -11,13 +11,20 @@ use std::path::Path;
 const BLOCK: usize = 256;
 /// Frames decoded at a time.
 const CHUNK: usize = 4096;
+/// A sample this quiet or quieter is silence for a waveform's facts: −60 dBFS.
+const SILENCE: f32 = 0.001;
+/// A column before any sample: its lowest above its highest.
+const EMPTY: [f32; 2] = [f32::INFINITY, f32::NEG_INFINITY];
 
 /// A sound's waveform: each column's lowest and highest sample over its part of the file,
-/// every channel together, and what the file is.
+/// every channel together and each by itself, and what the file is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Waveform {
     /// Each column's lowest and highest sample, from the file's start to its end.
     pub columns: Vec<[f32; 2]>,
+    /// The same for each channel by itself (one list for a mono file): the inspector's
+    /// bands, a channel each.
+    pub channel_columns: Vec<Vec<[f32; 2]>>,
     /// Frames a second.
     pub sample_rate: u32,
     /// 1 or 2.
@@ -26,13 +33,36 @@ pub struct Waveform {
     pub frames: u64,
     /// Its loudest sample's level, from 0 (silence) to 1 (full scale) and over.
     pub peak: f32,
+    /// Frames of silence (every channel at −60 dBFS or below) at its start and at its end;
+    /// both its whole length for a silent file.
+    pub silence: [u64; 2],
 }
 
 impl Waveform {
     /// Its length in seconds.
     pub fn seconds(&self) -> f64 {
-        self.frames as f64 / f64::from(self.sample_rate.max(1))
+        self.seconds_of(self.frames)
     }
+
+    /// `frames` of it in seconds.
+    pub fn seconds_of(&self, frames: u64) -> f64 {
+        frames as f64 / f64::from(self.sample_rate.max(1))
+    }
+
+    /// Its peak in dBFS: 0 at full scale, below it negative (minus infinity for silence).
+    pub fn peak_dbfs(&self) -> f32 {
+        20.0 * self.peak.log10()
+    }
+
+    /// Nothing in it is heard: every sample at −60 dBFS or below.
+    pub fn is_silent(&self) -> bool {
+        self.peak <= SILENCE
+    }
+}
+
+/// Columns `a` and `b` as one.
+fn join(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    [a[0].min(b[0]), a[1].max(b[1])]
 }
 
 /// The waveform of the sound file at `file` (WAV, Ogg Vorbis or Opus, FLAC) in `columns`
@@ -69,29 +99,46 @@ pub fn waveform(file: &Path, columns: usize) -> Result<Waveform, String> {
 /// A clip's waveform.
 fn of_clip(clip: &Clip, columns: usize) -> Waveform {
     let frames = clip.frames();
-    let channels = clip.channels();
-    let mut out = vec![[0.0f32; 2]; columns];
+    let channels = usize::from(clip.channels().max(1));
+    let mut mixed = vec![[0.0f32; 2]; columns];
+    let mut each = vec![vec![[0.0f32; 2]; columns]; channels];
     let mut peak = 0.0f32;
-    for (k, column) in out.iter_mut().enumerate() {
+    for (k, column) in mixed.iter_mut().enumerate() {
         let (start, end) = span(k, columns, frames);
-        let mut low_high = [f32::INFINITY, f32::NEG_INFINITY];
-        for c in 0..usize::from(channels) {
-            for &s in &clip.channel(c)[start..end] {
-                low_high[0] = low_high[0].min(s);
-                low_high[1] = low_high[1].max(s);
-            }
+        if start == end {
+            continue;
         }
-        if start < end {
-            *column = low_high;
-            peak = peak.max(low_high[1]).max(-low_high[0]);
+        let mut all = EMPTY;
+        for (c, list) in each.iter_mut().enumerate() {
+            let low_high = clip.channel(c)[start..end]
+                .iter()
+                .fold(EMPTY, |a, &s| join(a, [s, s]));
+            list[k] = low_high;
+            all = join(all, low_high);
         }
+        *column = all;
+        peak = peak.max(all[1]).max(-all[0]);
     }
+    // The first and the last frame any channel is heard in.
+    let heard = |s: &f32| s.abs() > SILENCE;
+    let first = (0..channels)
+        .filter_map(|c| clip.channel(c).iter().position(heard))
+        .min();
+    let last = (0..channels)
+        .filter_map(|c| clip.channel(c).iter().rposition(heard))
+        .max();
+    let silence = match (first, last) {
+        (Some(first), Some(last)) => [first as u64, (frames - 1 - last) as u64],
+        _ => [frames as u64; 2],
+    };
     Waveform {
-        columns: out,
+        columns: mixed,
+        channel_columns: each,
         sample_rate: clip.sample_rate(),
-        channels,
+        channels: clip.channels(),
         frames: frames as u64,
         peak,
+        silence,
     }
 }
 
@@ -102,54 +149,72 @@ fn of_decoder(
 ) -> Result<Waveform, engine_audio::DecodeError> {
     let channels = usize::from(decoder.channels().max(1));
     let mut buffer = vec![0.0f32; CHUNK * channels];
-    // Each block's lowest and highest sample, and the block being filled.
+    // Each block's lowest and highest sample of each channel (a block's channels side by
+    // side), and the block being filled.
     let mut blocks: Vec<[f32; 2]> = Vec::new();
-    let mut current = [f32::INFINITY, f32::NEG_INFINITY];
+    let mut current = vec![EMPTY; channels];
     let mut in_block = 0;
     let mut frames = 0u64;
+    // The first and the last frame any channel is heard in.
+    let mut heard: Option<(u64, u64)> = None;
     loop {
         let read = decoder.read(&mut buffer)?;
         if read == 0 {
             break;
         }
-        for frame in buffer[..read * channels].chunks_exact(channels) {
-            for &s in frame {
-                current[0] = current[0].min(s);
-                current[1] = current[1].max(s);
+        for (i, frame) in buffer[..read * channels].chunks_exact(channels).enumerate() {
+            let mut loud = false;
+            for (low_high, &s) in current.iter_mut().zip(frame) {
+                *low_high = join(*low_high, [s, s]);
+                loud |= s.abs() > SILENCE;
+            }
+            if loud {
+                let at = frames + i as u64;
+                heard = Some(heard.map_or((at, at), |(first, _)| (first, at)));
             }
             in_block += 1;
             if in_block == BLOCK {
-                blocks.push(current);
-                current = [f32::INFINITY, f32::NEG_INFINITY];
+                blocks.extend_from_slice(&current);
+                current.fill(EMPTY);
                 in_block = 0;
             }
         }
         frames += read as u64;
     }
     if in_block > 0 {
-        blocks.push(current);
+        blocks.extend_from_slice(&current);
     }
-    let mut out = vec![[0.0f32; 2]; columns];
+    let count = blocks.len() / channels;
+    let mut mixed = vec![[0.0f32; 2]; columns];
+    let mut each = vec![vec![[0.0f32; 2]; columns]; channels];
     let mut peak = 0.0f32;
-    for (k, column) in out.iter_mut().enumerate() {
-        let (start, end) = span(k, columns, blocks.len());
+    for (k, column) in mixed.iter_mut().enumerate() {
+        let (start, end) = span(k, columns, count);
         if start == end {
             continue;
         }
-        let mut low_high = [f32::INFINITY, f32::NEG_INFINITY];
-        for block in &blocks[start..end] {
-            low_high[0] = low_high[0].min(block[0]);
-            low_high[1] = low_high[1].max(block[1]);
+        let mut all = EMPTY;
+        for (c, list) in each.iter_mut().enumerate() {
+            let low_high = blocks[start * channels..end * channels]
+                .iter()
+                .skip(c)
+                .step_by(channels)
+                .fold(EMPTY, |a, &b| join(a, b));
+            list[k] = low_high;
+            all = join(all, low_high);
         }
-        *column = low_high;
-        peak = peak.max(low_high[1]).max(-low_high[0]);
+        *column = all;
+        peak = peak.max(all[1]).max(-all[0]);
     }
+    let silence = heard.map_or([frames; 2], |(first, last)| [first, frames - 1 - last]);
     Ok(Waveform {
-        columns: out,
+        columns: mixed,
+        channel_columns: each,
         sample_rate: decoder.sample_rate(),
         channels: decoder.channels(),
         frames,
         peak,
+        silence,
     })
 }
 
@@ -222,14 +287,83 @@ mod tests {
                 assert!(swing.abs() < 1e-3, "column {k}: {column:?}");
             }
         }
+        // Its silence: the first and last thirds; its peak in dBFS.
+        assert_eq!(w.silence, [16_000, 16_000]);
+        assert!((w.peak_dbfs() - (-6.02)).abs() < 0.05, "{}", w.peak_dbfs());
+        assert_eq!(
+            w.channel_columns,
+            std::slice::from_ref(&w.columns),
+            "mono: one band, the same"
+        );
         // More columns than frames: each column shows a frame.
         std::fs::write(&file, wav(&[0.25, -0.25, 0.5])).unwrap();
         let w = waveform(&file, 6).unwrap();
         assert!(w.columns.iter().all(|c| c[0] <= c[1]));
         assert!((w.peak - 0.5).abs() < 1e-3);
+        assert_eq!(w.silence, [0, 0]);
+        // A silent file is silent from end to end.
+        std::fs::write(&file, wav(&[0.0; 480])).unwrap();
+        let w = waveform(&file, 6).unwrap();
+        assert_eq!(w.silence, [480, 480]);
+        assert_eq!(w.peak_dbfs(), f32::NEG_INFINITY);
+        assert!(w.is_silent());
         // Not a sound.
         std::fs::write(&file, b"not a sound at all").unwrap();
         assert!(waveform(&file, 6).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stereo_files_channels_have_their_own_bands() {
+        // Left: a tone in the second half; right: silence; 16-bit at 48 kHz.
+        let frames = 4_800u32;
+        let data = frames * 4;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&48_000u32.to_le_bytes());
+        bytes.extend_from_slice(&192_000u32.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data.to_le_bytes());
+        for i in 0..frames {
+            let left = if i >= frames / 2 {
+                (0.8 * (i as f32 * 0.1).sin() * 32767.0) as i16
+            } else {
+                0
+            };
+            bytes.extend_from_slice(&left.to_le_bytes());
+            bytes.extend_from_slice(&0i16.to_le_bytes());
+        }
+        let dir = std::env::temp_dir().join(format!("ofelia-waveform-st-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("left.wav");
+        std::fs::write(&file, bytes).unwrap();
+        let w = waveform(&file, 8).unwrap();
+        assert_eq!((w.channels, w.channel_columns.len()), (2, 2));
+        let swing = |c: [f32; 2]| c[1] - c[0];
+        for k in 0..8 {
+            let (left, right) = (w.channel_columns[0][k], w.channel_columns[1][k]);
+            assert!(swing(right).abs() < 1e-3, "right {k}: {right:?}");
+            if k >= 4 {
+                assert!(swing(left) > 1.2, "left {k}: {left:?}");
+            } else {
+                assert!(swing(left).abs() < 1e-3, "left {k}: {left:?}");
+            }
+            assert_eq!(w.columns[k], join(left, right), "together: both");
+        }
+        // Silent until the tone: its first half, and none at its end.
+        assert_eq!(w.silence[1], 0);
+        assert!(
+            w.silence[0] >= 2_400 && w.silence[0] < 2_410,
+            "{:?}",
+            w.silence
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -298,5 +432,14 @@ mod tests {
             assert!((pair[1][0] + pair[1][1]).abs() < 1e-6);
         }
         assert!((w.peak - 0.9999).abs() < 1e-3, "{}", w.peak);
+        // Each channel by itself: the left rises, the right falls.
+        for pair in w.channel_columns[0].windows(2) {
+            assert!(pair[1][1] > pair[0][1] && pair[1][0] >= 0.0, "{pair:?}");
+        }
+        for pair in w.channel_columns[1].windows(2) {
+            assert!(pair[1][0] < pair[0][0] && pair[1][1] <= 0.0, "{pair:?}");
+        }
+        // Silent while the ramp is at -60 dBFS or below (its first 11 frames), none at the end.
+        assert_eq!(w.silence, [11, 0]);
     }
 }

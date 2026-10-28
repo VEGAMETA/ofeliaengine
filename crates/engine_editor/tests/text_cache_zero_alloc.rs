@@ -257,6 +257,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         folders: &folders,
         files: &files,
         auto_play: true,
+        sound: None,
         tile: 64.0,
         columns: 4,
         bottom_tabs: &["Output", "Debugger"],
