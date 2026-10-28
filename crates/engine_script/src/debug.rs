@@ -240,6 +240,10 @@ pub struct Frame {
     pub line: Option<u32>,
     /// Its function's name, if it has one.
     pub function: Option<String>,
+    /// Its locals there, in the order they were made (none in a C function).
+    pub locals: Vec<Variable>,
+    /// Its function's upvalues.
+    pub upvalues: Vec<Variable>,
 }
 
 /// How a stopped script goes on.
@@ -1020,39 +1024,9 @@ unsafe fn describe(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u3
     // SAFETY: as the caller says; each value pushed is read, then popped, and the stack is
     // put back as it was.
     unsafe {
-        let top = ffi::lua_gettop(state);
         if ffi::lua_checkstack(state, 4) == 0 {
             return stopped;
         }
-        for n in 1..=200 {
-            let name = ffi::lua_getlocal(state, 0, n);
-            if name.is_null() {
-                break;
-            }
-            let name = CStr::from_ptr(name).to_string_lossy().into_owned();
-            if is_name(&name) {
-                let value = value_text(state, -1);
-                stopped.locals.push(Variable { name, value });
-            }
-            ffi::lua_settop(state, -2);
-        }
-        let mut ar: ffi::lua_Debug = core::mem::zeroed();
-        if ffi::lua_getinfo(state, 0, c"f".as_ptr(), &mut ar) != 0 {
-            let function = ffi::lua_gettop(state);
-            for n in 1..=255 {
-                let name = ffi::lua_getupvalue(state, function, n);
-                if name.is_null() {
-                    break;
-                }
-                let name = CStr::from_ptr(name).to_string_lossy().into_owned();
-                if is_name(&name) {
-                    let value = value_text(state, -1);
-                    stopped.upvalues.push(Variable { name, value });
-                }
-                ffi::lua_settop(state, -2);
-            }
-        }
-        ffi::lua_settop(state, top);
         for level in 0..64 {
             let mut ar: ffi::lua_Debug = core::mem::zeroed();
             if ffi::lua_getinfo(state, level, c"sln".as_ptr(), &mut ar) == 0 {
@@ -1062,14 +1036,68 @@ unsafe fn describe(state: *mut ffi::lua_State, lua: &Lua, module: &str, line: u3
                 (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
             };
             let source = text(ar.source).unwrap_or_default();
+            let (locals, upvalues) = frame_variables(state, level);
             stopped.stack.push(Frame {
                 source: source.strip_prefix('=').unwrap_or(&source).to_owned(),
                 line: u32::try_from(ar.currentline).ok().filter(|&l| l > 0),
                 function: text(ar.name),
+                locals,
+                upvalues,
             });
+        }
+        if let Some(frame) = stopped.stack.first() {
+            stopped.locals.clone_from(&frame.locals);
+            stopped.upvalues.clone_from(&frame.upvalues);
         }
     }
     stopped
+}
+
+/// The locals and the function's upvalues of the frame at `level` of `state`, as text.
+///
+/// # Safety
+///
+/// `state` is a running thread inside one of Luau's debug callbacks, with room for four
+/// more values; the stack is put back as it was.
+unsafe fn frame_variables(
+    state: *mut ffi::lua_State,
+    level: c_int,
+) -> (Vec<Variable>, Vec<Variable>) {
+    let (mut locals, mut upvalues) = (Vec::new(), Vec::new());
+    // SAFETY: as the caller says; each value pushed is read, then popped.
+    unsafe {
+        let top = ffi::lua_gettop(state);
+        for n in 1..=200 {
+            let name = ffi::lua_getlocal(state, level, n);
+            if name.is_null() {
+                break;
+            }
+            let name = CStr::from_ptr(name).to_string_lossy().into_owned();
+            if is_name(&name) {
+                let value = value_text(state, -1);
+                locals.push(Variable { name, value });
+            }
+            ffi::lua_settop(state, -2);
+        }
+        let mut ar: ffi::lua_Debug = core::mem::zeroed();
+        if ffi::lua_getinfo(state, level, c"f".as_ptr(), &mut ar) != 0 {
+            let function = ffi::lua_gettop(state);
+            for n in 1..=255 {
+                let name = ffi::lua_getupvalue(state, function, n);
+                if name.is_null() {
+                    break;
+                }
+                let name = CStr::from_ptr(name).to_string_lossy().into_owned();
+                if is_name(&name) {
+                    let value = value_text(state, -1);
+                    upvalues.push(Variable { name, value });
+                }
+                ffi::lua_settop(state, -2);
+            }
+        }
+        ffi::lua_settop(state, top);
+    }
+    (locals, upvalues)
 }
 
 /// The value at `idx` as text, never through its metamethods: a string quoted and cut, a
@@ -1401,12 +1429,14 @@ return M
         /// Each stop's line and whether it could be stepped from, and the answers given in
         /// turn (then Continue).
         static SEEN: RefCell<Vec<(u32, bool)>> = const { RefCell::new(Vec::new()) };
+        static STACKS: RefCell<Vec<Vec<Frame>>> = const { RefCell::new(Vec::new()) };
         static ANSWERS: RefCell<VecDeque<Resume>> = const { RefCell::new(VecDeque::new()) };
     }
 
     /// The stepping tests' host: notes each stop and answers the next answer.
     fn answer_in_turn(stopped: &Stopped) -> Option<Resume> {
         SEEN.with_borrow_mut(|s| s.push((stopped.line, stopped.steppable)));
+        STACKS.with_borrow_mut(|s| s.push(stopped.stack.clone()));
         if !fiber::suspend() {
             return None;
         }
@@ -1575,13 +1605,14 @@ return M
         assert_eq!(named(&at.locals), [("speed", "3"), ("doubled", "6")]);
         assert_eq!(named(&at.upvalues), [("BASE", "10")]);
         assert_eq!(
-            at.stack[0],
-            Frame {
-                source: String::from("door"),
-                line: Some(7),
-                function: Some(String::from("tick")),
-            }
+            (
+                at.stack[0].source.as_str(),
+                at.stack[0].line,
+                at.stack[0].function.as_deref()
+            ),
+            ("door", Some(7), Some("tick"))
         );
+        assert_eq!(at.stack[0].locals, at.locals, "the stopped frame's");
         // The editor's frames meanwhile: they read the breakpoints and change them, and
         // the time past the call's budget does not count.
         let debugger = vm.debugger();
@@ -1673,9 +1704,22 @@ return M
             Resume::StepOver,
         ];
         SEEN.take();
+        STACKS.take();
         assert_eq!(run_through(&fiber, &mut c, &answers), Ok(5.0));
         let lines: Vec<u32> = SEEN.take().into_iter().map(|(l, _)| l).collect();
         assert_eq!(lines, [8, 9, 4, 5, 10, 11]);
+        // In `double`: its frame, then its caller's, each with its own locals.
+        let stack = &STACKS.take()[2];
+        let frame = |k: usize| {
+            let f: &Frame = &stack[k];
+            (f.function.as_deref(), f.line, named(&f.locals))
+        };
+        assert_eq!(frame(0), (Some("double"), Some(4), vec![("x", "2")]));
+        assert_eq!(
+            frame(1),
+            (Some("tick"), Some(9), vec![("speed", "1"), ("a", "2")])
+        );
+        assert_eq!(named(&stack[1].upvalues), [("double", "function")]);
         // A step over the hook's last line: the next hook call stops at its first line.
         vm.set_breakpoints("steps", vec![stop(11)]);
         assert_eq!(run_through(&fiber, &mut c, &[Resume::StepOver]), Ok(5.0));

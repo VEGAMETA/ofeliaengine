@@ -196,6 +196,7 @@ editor = ["dep:engine_editor"]
 | In a script's tab: a breakpoint on the caret's line, or none; a logpoint ([breakpoints](scripting.md#breakpoints-logpoints-and-pause-points)) | F9; Shift+F9 |
 | In a script's tab: the line's breakpoint off or on; its options; remove them all | Ctrl+F9; Alt+F9; Ctrl+Shift+F9 |
 | At a script's stop: step over, into, out | F10; F11; Shift+F11 |
+| The Debugger panel (the stop, its call stack and values, every breakpoint) | Ctrl+Shift+D |
 
 These are our keys, the default (team decision, 2026-10-21): the left hand stays beside
 W, A, S, D, which fly the camera. **Editor: Key Map…** (Ctrl+Shift+P) takes another set,
@@ -944,7 +945,8 @@ sets one, Shift+click or Shift+F9 a logpoint, a right click or Alt+F9 opens its 
 [Scripting in Luau](scripting.md#breakpoints-logpoints-and-pause-points) has the rest.
 At a stop the script's tab comes to the front with the arrow on the line and the frame's
 values after it, the viewport's edge turns amber, and the editor works as while paused;
-F10, F11 and Shift+F11 step (over, into, out).
+F10, F11 and Shift+F11 step (over, into, out). The Debugger panel opens with it: the call
+stack, the shown frame's values and every breakpoint.
 
 **Slang modules** (`.slang`) open in code tabs too, with Slang's colors:
 

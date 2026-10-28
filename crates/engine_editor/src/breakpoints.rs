@@ -112,6 +112,8 @@ pub(crate) struct Breakpoints {
     stale: Vec<PathBuf>,
     /// What "Remove All Breakpoints" took, for "Restore Removed Breakpoints".
     removed: Vec<(PathBuf, Vec<Mark>)>,
+    /// Raised at every change: what the Debugger panel's list is made again for.
+    revision: u64,
 }
 
 impl Breakpoints {
@@ -226,8 +228,14 @@ impl Breakpoints {
         self.touch(file);
     }
 
+    /// Raised at every change.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// `file`'s breakpoints for the host from now on: given at its next turn.
     pub(crate) fn touch(&mut self, file: &Path) {
+        self.revision += 1;
         if !self.stale.iter().any(|f| f == file) {
             self.stale.push(file.to_path_buf());
         }
@@ -450,6 +458,11 @@ impl HostView {
     /// The states read again at the next turn (a new Play reset them).
     pub(crate) fn refresh(&mut self) {
         self.version = None;
+    }
+
+    /// The host's version when its states were last read.
+    pub(crate) fn version(&self) -> Option<u64> {
+        self.version
     }
 }
 
