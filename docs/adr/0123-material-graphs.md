@@ -181,6 +181,47 @@ autosaved.
 - The file reads in a diff, and two branches' new nodes merge.
 - The cost of a graph is the cost of its code: unnamed numbers compiled in.
 
+## As built (E10-3b-1, 2026-10-28): the node library and the generator
+
+- **`engine_material_graph`,** a new crate with no dependency but the profiler's zones:
+  - `library`: 40 node kinds and the surface, each a snippet of Slang with typed ports
+    (`Float(1..=4)` or `Dynamic`), what an input takes unlinked (values, or an expression
+    of the fragment such as `ctx.uv`), and whether it reads the fragment;
+  - `graph`: a graph in memory as the file holds it (its model, nodes by id with their
+    place, value, parameter name and inputs' own values, links by the input they feed);
+  - `generate`: the module, with `Generated::node_at(line)` for Slang's errors.
+- **The generator** as decided above, in detail:
+  - each of `IMaterial`'s functions writes only the nodes its terms reach, each after
+    those it reads; a loop is an error at a node in it;
+  - a node's dynamic width is the narrowest vector linked to its dynamic inputs (a
+    scalar where only scalars are); `dot`, `length`, `distance` and `normalize` of a
+    scalar have their own forms;
+  - conversions: a scalar fills a vector (`float3(x)`), a wider vector is cut
+    (`(v).xy`), a narrower one gains zeros and a `w` of 1;
+  - a value read twice in a function is a variable, once it is written in place; a
+    texture's sample is always a variable;
+  - the saved build writes unnamed numbers as literals, the editing build reads them as
+    parameters named `_<node>`; named numbers and textures are parameters in both,
+    textures first, then by name (a struct with none holds `float _unused`);
+  - parameter names start with a letter, are not Slang's words, and are taken once;
+  - the alpha cutoff (`alpha_cutoff(Params p)`, no fragment) refuses a node that reads
+    the surface, at that node;
+  - the normal map's function is a member of the type, so modules of several graphs can
+    be read together.
+- **Tests:** the parameters and the surface's lines; literals in the saved build and
+  parameters in the editing one; a variable for a value read twice; conversions and
+  dynamic widths; a dot of scalars; a model's terms after the common ones; errors at their
+  nodes (a loop, a kind, a port or a node that is not there, a parameter named twice or
+  wrongly, not a number, a second surface or none, a type name); the alpha cutoff; the
+  normal map's function once. With Slang (`ENGINE_REQUIRE_SLANG` in the gate): 73 types,
+  every kind with its dynamic inputs scalar and then vector, every model and the editing
+  build, generated into one module and checked inside `forward.slang`; a misspelt
+  function in a kind fails it at its line; the editing build's parameters as Slang lays
+  them out (`albedo`, `_m`, `roughness`).
+- **Next:** the `.graph` file (E10-3b-2, the shape proposed above); the player and the
+  cook (E10-3c), where the material inspector also skips fields starting with `_` (the
+  editing build's numbers, `_unused`).
+
 ## Questions for the team
 
 1. **The graph file's name.** A material graph is a file of its own, as a Slang module is.
