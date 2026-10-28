@@ -3,6 +3,9 @@
 //! and the engine's built-in glTF types (`shaders/materials/gltf.slang`: glTF's unlit, clear
 //! coat and sheen), compiled and made as a frame would ask for them. `ENGINE_PIPELINE_STATS=1
 //! ENGINE_ADAPTER=radeon cargo run --release -p engine_render --example material_registers`.
+//!
+//! `-- --module <file.slang> --types A,B` measures those types instead (ADR 0123's
+//! measurement: `bench/graph-numbers/graph_numbers.slang`).
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -54,22 +57,48 @@ fn main() {
         ShadowSettings::default(),
     )
     .unwrap();
-    let module =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/materials/models.slang");
-    let types = TYPES.map(|name| {
-        renderer.register_material_type(MaterialTypeDesc {
-            name: String::from(name),
-            module: module.clone(),
-            type_name: String::from(name),
+    // `--module <file> --types A,B`: those types instead of the shading models'.
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|k| args.get(k + 1))
+            .cloned()
+    };
+    let (module, names, gltf_names): (PathBuf, Vec<String>, Vec<String>) =
+        match (arg("--module"), arg("--types")) {
+            (Some(module), Some(types)) => (
+                std::fs::canonicalize(&module).unwrap(),
+                types.split(',').map(str::to_owned).collect(),
+                Vec::new(),
+            ),
+            _ => (
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/golden/materials/models.slang"),
+                TYPES.map(String::from).to_vec(),
+                GLTF_TYPES.map(String::from).to_vec(),
+            ),
+        };
+    let types: Vec<_> = names
+        .iter()
+        .map(|name| {
+            renderer.register_material_type(MaterialTypeDesc {
+                name: name.clone(),
+                module: module.clone(),
+                type_name: name.clone(),
+            })
         })
-    });
-    let gltf_types = GLTF_TYPES.map(|name| {
-        renderer.register_material_type(MaterialTypeDesc {
-            name: String::from(name),
-            module: PathBuf::from("materials/gltf.slang"),
-            type_name: String::from(name),
+        .collect();
+    let gltf_types: Vec<_> = gltf_names
+        .iter()
+        .map(|name| {
+            renderer.register_material_type(MaterialTypeDesc {
+                name: name.clone(),
+                module: PathBuf::from("materials/gltf.slang"),
+                type_name: name.clone(),
+            })
         })
-    });
+        .collect();
     // Ask for every type's shading, then make it.
     for &ty in types.iter().chain(&gltf_types) {
         let _ = renderer.material_type_statistics(&device, ty);
@@ -89,7 +118,12 @@ fn main() {
         }
         stats
             .iter()
-            .filter(|s| s.name.contains("numUsedVgprs") || s.name.contains("scratch"))
+            // AMD's vector registers and scratch; NVIDIA's registers.
+            .filter(|s| {
+                s.name.contains("numUsedVgprs")
+                    || s.name.contains("scratch")
+                    || s.name == "Register Count"
+            })
             .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
             .collect::<Vec<_>>()
             .join("; ")
@@ -103,9 +137,9 @@ fn main() {
     for (variant, stats) in variants.iter().zip(renderer.shading_statistics(&device)) {
         println!("engine, {variant}: {}", vgprs(&stats));
     }
-    for (name, &ty) in TYPES
+    for (name, &ty) in names
         .iter()
-        .chain(&GLTF_TYPES)
+        .chain(&gltf_names)
         .zip(types.iter().chain(&gltf_types))
     {
         for (variant, stats) in variants

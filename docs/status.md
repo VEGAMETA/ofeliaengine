@@ -868,6 +868,12 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3a, the material graph's design** (#419, ADR 0123 proposed; research
+    `docs/research/material-graph.md`): a graph is a material type in a `.graph` file of
+    the editor's grammar, generated into one Slang module by one crate for the editor, the
+    player and the cook. Question 3 measured: numbers read as parameters cost up to +12
+    registers on the RTX and +10 VGPRs on the Radeon (a toon's lit variant 63 → 72), so
+    unnamed numbers are compiled in at save. Two questions to the team (below).
   - **The RTX's `video_player` golden image re-taken** (#418): on `main` it read a mean FLIP
     of 0.0103–0.0108 (the limit 0.01) under NVIDIA 617.42, taken under 616.92; the
     Radeon's matched exactly, the picture's content the same (the error spread thinly over
@@ -879,8 +885,10 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3, the graph (question 3's register measurements first); then E10-4,
-       previews, stats and variants with a base.
+       2D): E10-3b, `engine_material_graph` (the node library and the code generator
+       first, which do not depend on ADR 0123's questions; the file once they are
+       answered), then E10-3c to E10-3g (ADR 0123's steps); then E10-4, previews, stats
+       and variants with a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
@@ -1049,9 +1057,10 @@ Last updated: 2026-10-28.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner:** E10's four on materials (one material file, variants
-  with a base, numbers on graph nodes, where generated Slang lives; E10-1 waits for the
-  first). Settled 2026-10-23 (team decision): ADR 0119's four, every recommendation.
+- **Questions open with the owner:** ADR 0123's two (the graph file's name: `.graph`
+  recommended; the design as a whole). Settled 2026-10-22 (team decision): E10's four on
+  materials (one material file, variants with a base, numbers on graph nodes, where
+  generated Slang lives). Settled 2026-10-23 (team decision): ADR 0119's four, every recommendation.
   Settled 2026-10-22 (team decisions): ADR 0114's seven, every recommendation; Luau (E7)
   comes in the queue's order (E5-5, material slots, E6, then E7), its public API drafted
   meanwhile for the owner to sign off; meshes of several materials get material slots on
