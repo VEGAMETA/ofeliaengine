@@ -486,9 +486,21 @@ editor's session (`.ofelia/`), never in the script, and follow their lines as yo
 - **Unsaved edits** move the marks, not the code that runs: the game keeps its breakpoints
   on its lines until you save, and one set on a line you just wrote waits for the save.
 
+**Changing a value at a stop:** F2 over a row of the Variables, or a second click on it,
+opens its value as Luau; Enter gives it (`dt * 4`, `vector.create(0, 1, 0)`, `"open"`),
+Escape drops it. The stop is read again, so what changed shows wherever it is.
+
+- A local or an upvalue changes as it is; so does a field of a table it holds.
+- `self`'s props and its entity's components (`self.speed`, `self.Transform.translation`)
+  are written through the script's own view, as one undo step: Ctrl+Z puts them back, and
+  Stop puts them back unless kept with Ctrl+K, as the inspector's edits in Play.
+- A value the compiler folded into a constant changes where it is kept, not in the code
+  that runs: a local never written anywhere (`local BASE = 10`), and a field of a local
+  table that is never written and never leaves its function. As in any compiled language.
+- A native frame's locals cannot be written (they are not shown either).
+
 Without breakpoints nothing is paid. A function with one runs Luau's interpreter instead of
 native code until its script runs again, and each hit costs a microsecond or so (below).
-Changing a value from the Variables (F2) comes next.
 
 ### Debugging from VS Code
 
@@ -504,8 +516,9 @@ breakpoints as the editor's gutter.
 - **What works:** breakpoints (conditions, hit counts, logpoints) set in either, the two
   error filters ("Errors the script does not catch", "Errors caught by pcall"), the stack,
   Locals and Upvalues (`self` opens into its props and its entity's components), hovers,
-  watches and the debug console (evaluated in the frame shown), F5, F10, F11, Shift+F11 and
-  Pause (the next line a script runs stops). Logpoints' messages come to the debug console.
+  watches and the debug console (evaluated in the frame shown), Set Value on a variable (as
+  F2 in the editor, `self`'s an undo step), F5, F10, F11, Shift+F11 and Pause (the next line
+  a script runs stops). Logpoints' messages come to the debug console.
 - **Safety:** the editor listens on 127.0.0.1 only, on a port it picks, and writes it with a
   token to `.ofelia/debug/editor.json`; the extension gives the token, and nothing without it
   attaches. One client at a time.

@@ -732,9 +732,12 @@ Last updated: 2026-10-28.
     the stopped tick and pauses; "Only Front door" limits a breakpoint to an entity (kept by
     scene id in the session). Fixed on the way: the player counted the steps a still world
     skips as ticks.
+  - **E9-4b, changing a value at a stop** (#PR, ADR 0119's as-built): F2 or a second click
+    on a Variables row gives it Luau; `self`'s props and components are an undo step; VS
+    Code's Set Value in the editor and the standalone player.
   - **Next, in this order:**
-    1. E9-4b, the debugger's last leftovers: F2 to change a value at a stop (and VS
-       Code's setVariable), the editor's breakpoints sent to VS Code.
+    1. E9-4c, the editor's breakpoints sent to VS Code (DAP breakpoint events), the
+       editor's options kept across VS Code's own list.
        Asked (2026-10-28): native code in the editor's Play, whose frames' locals Luau does
        not read at a stop. E10-1 waits for the answer on the material file.
     2. Scripts in the profiler (found missing 2026-10-25): ADR 0114 promises a Tracy zone
