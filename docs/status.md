@@ -806,7 +806,7 @@ Last updated: 2026-10-28.
     lights cleared by a click; M, S and Monitor kept in the session, on top of the game's
     mutes (a solo keeps its way to the master and what feeds it); the unsaved layout
     autosaved with the session.
-  - **E11-1b-3, the mixer's changes in Play** (#PR, ADR 0107's as-built): heard at once and
+  - **E11-1b-3, the mixer's changes in Play** (#405, ADR 0107's as-built): heard at once and
     kept after Stop, a dot on each strip changed since Play, one step "Mixer: changes in
     Play" after Stop, and a command taking them back. E11-1 is done.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
