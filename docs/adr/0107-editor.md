@@ -1961,3 +1961,26 @@ for the first answer. This step is the part of E11-4 that needs none.
 - **Tests:** the reach of each kind counted by kind (two rings of 48 pieces, a dashed ring
   of 24 a circle, a box of 12 edges, a dashed box of 48 pieces); the add menu's four kinds,
   their names and icons, undone one step each.
+
+## As built (E11-3a, 2026-10-28): sounds' waveforms in the FileSystem dock
+
+- **A sound's thumbnail is its waveform** (`docs/research/ux/sound.md`, previews): each of
+  the tile's 128 pixel columns from the lowest to the highest sample of its part of the
+  file, every channel together, about a faint middle line; a column at full scale (it may
+  clip) in a warning colour.
+- **`engine_app::waveform(file, columns)`** reads the file once, whole: a WAV as a clip, a
+  compressed one (Vorbis, Opus, FLAC) decoded as a stream into blocks of 256 frames (the
+  lowest and highest sample of each), joined into columns at the end, since an Ogg file
+  does not say its length. It also gives the rate, the channels, the length and the peak,
+  for the inspector's preview (E11-3c).
+- **On the thumbnail thread** (ADR 0112), cached in `.ofelia/thumbnails/` as images are,
+  made again when the file is written anew. A job says where its picture comes from: the
+  player, the image, or the sound.
+- **What it costs** (ref-1, release, the fastest of three reads, files made with ffmpeg):
+  a 10 s WAV 2.0 ms; 3 minutes of Ogg Vorbis 188 ms, of Opus 186 ms, of FLAC 85 ms. Once a
+  file, off the frame.
+- **Not done:** the length in a corner of the tile and a tooltip (with E11-3c's facts);
+  playing (E11-3b).
+- **Tests:** a WAV's columns (silence flat, a tone's swing, more columns than frames, not
+  a sound refused); a decoder that does not say its length joined from blocks; the tile
+  (silence a line, half scale shorter than full scale, full scale marked).

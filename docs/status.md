@@ -756,19 +756,32 @@ Last updated: 2026-10-28.
     questions (below). **E11-4a, sounds in the viewport** (#393, ADR 0107's as-built):
     icons, the add menu's Sound group, a selected source's two distances as rings (dashed
     where the sound holds beyond them), a selected reverb zone's box and its fade.
-  - **Next, in this order:**
-    1. E11-3, previews: waveform tiles, ▶ and Space and Auto Play in the dock, the
-       inspector's waveform with seeking, an editor bus for previews. Then E11-4b: radius
-       and zone handles, P to hear the selected sources in place, Listen to the Scene,
-       the falloff curve with the camera's distance, View: Sound Ranges. E11-1 (the mixer
-       file and panel) and E11-2 (effects and sends) wait for the first question.
-  - **Asked (2026-10-28):** native code in the editor's Play, whose frames' locals Luau does
-    not read at a stop. E10-1 waits for the answer on the material file. E11's four
-    (`docs/research/ux/sound.md`): where the bus layout is kept (recommended: a `.mixer`
-    file, `PlayerSettings::audio.buses` gone), snapshots (recommended: in that file, as
-    E11's last step), mixer edits made in Play (recommended: kept, marked, one command
-    takes them back), how components name a sound (recommended: the path string kept,
-    marked as a sound so renames follow).
+  - **E11-3a, sounds' waveforms in the dock** (#PR, ADR 0107's as-built): a sound's tile is
+    its waveform, read once on the thumbnail thread (`engine_app::waveform`) and cached;
+    3 minutes of Ogg in 188 ms, off the frame.
+  - **Next, in this order** (the team's answers of 2026-10-28 below):
+    1. E10-1, materials in the inspector: the one `.material` file (it takes what
+       `.material.ron` holds; the cook reads it; the six golden files converted), typed
+       materials made by the player, parameters in the inspector, New Material, Make
+       Variant (a copy), Apply to Selection.
+    2. The script debugger's "Full script debugging" switch (off: native code, as the
+       game runs; on: interpreted, every frame's locals at an error stop; from the next
+       Play; kept in the session).
+    3. E11-3b and E11-3c, previews: ▶, Space and Auto Play in the dock on an editor bus,
+       the inspector's waveform with seeking. Then E11-1, the mixer file (`main.mixer`)
+       and panel, E11-2, effects and sends, E11-4b, handles and hearing in place.
+  - **Settled (2026-10-28, team decisions, every recommendation):**
+    - E11's four (`docs/research/ux/sound.md`): the bus layout in a `.mixer` file named
+      by `PlayerSettings::audio.layout` (`buses` goes; the four built-in buses without a
+      file); snapshots in that file as E11's last step (scripts reaching them signed off
+      with the API); mixer edits made in Play kept, marked, one command takes them back;
+      sounds named by their path, the field marked as a sound so renames follow;
+    - native code in the editor's Play: a switch, off by default (native, as the game
+      runs), on for every frame's locals at an error stop;
+    - E10's four (`docs/research/ux/materials.md`): one `.material` file (`.material.ron`
+      retired); variants by a `base` field in E10-4, a copy first; a graph's numbers
+      parameters while it is open, compiled in at save; generated Slang only in the cache
+      and packs.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

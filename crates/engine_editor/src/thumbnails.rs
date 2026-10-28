@@ -1,9 +1,12 @@
-//! The FileSystem dock's thumbnails (ADR 0112): images made smaller on a thread of their
-//! own (E4-6a), models and materials drawn by the player (E4-6b), all cached in
-//! `.ofelia/thumbnails/`, then kept in an atlas the UI draws from.
+//! The FileSystem dock's thumbnails (ADR 0112): images made smaller and sounds' waveforms
+//! drawn on a thread of their own (E4-6a, E11-3a), models and materials drawn by the player
+//! (E4-6b), all cached in `.ofelia/thumbnails/`, then kept in an atlas the UI draws from.
 //!
 //! - **An image's thumbnail** is the image fitted into a square of [`SIZE`] (never
 //!   enlarged), its proportions kept, centred on transparency, averaged in sRGB.
+//! - **A sound's** is its waveform (`engine_app::waveform`): each pixel column's lowest and
+//!   highest sample over the whole file, every channel together, about a faint middle line;
+//!   a column that reaches full scale in a warning colour (it may clip).
 //! - **A model's or a material's** is a preview the player draws (`Player::request_preview`)
 //!   when the cache has none for the file as it is. So is a glTF file's mesh or material
 //!   (an inspector's field, [`Subject`]) and a built-in mesh.
@@ -80,17 +83,28 @@ enum Thumb {
     Without(Key),
 }
 
-/// What the thread did: for which asset and key, its pixels (none: not cached, and for an
-/// image, not one the editor reads), and whether it was an image.
+/// What the thread did: for which asset and key, its pixels (none: not cached, and for a
+/// file it reads, not one the editor can), and whether it read the file.
 type Made = (Subject, Key, Option<Vec<u8>>, bool);
 
+/// Where a thumbnail comes from when the cache has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum From {
+    /// The player draws it (a model, a material).
+    Player,
+    /// The thread fits the image.
+    Image,
+    /// The thread draws the sound's waveform.
+    Sound,
+}
+
 /// A thumbnail to make: `subject`'s, its file at `path` under the project, from the cache
-/// or (`image`) from the image itself; or pixels the player drew, to cache.
+/// or as `from` says; or pixels the player drew, to cache.
 struct Job {
     subject: Subject,
     path: PathBuf,
     key: Key,
-    image: bool,
+    from: From,
     save: Option<Vec<u8>>,
 }
 
@@ -203,7 +217,7 @@ impl Thumbnails {
                 subject: id,
                 path: PathBuf::new(),
                 key,
-                image: false,
+                from: From::Player,
                 save: Some(pixels.clone()),
             });
         }
@@ -226,10 +240,11 @@ impl Thumbnails {
         kind: AssetKind,
         key: Key,
     ) -> Option<UiImage> {
-        let image = match (id, kind) {
-            (Subject::File(_), AssetKind::Texture) => true,
+        let from = match (id, kind) {
+            (Subject::File(_), AssetKind::Texture) => From::Image,
+            (Subject::File(_), AssetKind::Sound) => From::Sound,
             (Subject::File(_), AssetKind::Model | AssetKind::Material)
-            | (Subject::Mesh(_) | Subject::Material(_), _) => false,
+            | (Subject::Mesh(_) | Subject::Material(_), _) => From::Player,
             (Subject::File(_), _) => return None,
         };
         let atlas = self.atlas?;
@@ -239,7 +254,7 @@ impl Thumbnails {
             None => false,
         };
         if !current {
-            self.make(id, path, key, image);
+            self.make(id, path, key, from);
             return None;
         }
         let held = match self.thumbs.get(&id) {
@@ -294,8 +309,8 @@ impl Thumbnails {
     }
 
     /// The thumbnail of `id` made on the thread (started the first time): from the cache,
-    /// else from the image (`image`) or by the player.
-    fn make(&mut self, id: Subject, path: &str, key: Key, image: bool) {
+    /// else as `from` says.
+    fn make(&mut self, id: Subject, path: &str, key: Key, from: From) {
         if self.jobs.is_none() {
             let (jobs, incoming) = mpsc::channel::<Job>();
             let (done, results) = mpsc::channel();
@@ -309,10 +324,8 @@ impl Thumbnails {
                             continue;
                         }
                         let pixels = made(&cache, &job);
-                        if done
-                            .send((job.subject, job.key, pixels, job.image))
-                            .is_err()
-                        {
+                        let read = job.from != From::Player;
+                        if done.send((job.subject, job.key, pixels, read)).is_err() {
                             break;
                         }
                     }
@@ -329,7 +342,7 @@ impl Thumbnails {
                 subject: id,
                 path: self.root.join(path),
                 key,
-                image,
+                from,
                 save: None,
             };
             let thumb = if jobs.send(job).is_ok() {
@@ -383,8 +396,8 @@ fn uv_of(c: usize) -> [f32; 4] {
 }
 
 /// A job's thumbnail: from the cache when it was made for the same file, else, for an
-/// image, made from it and cached. None when it has to be drawn (not an image) or the
-/// file is not an image the editor reads.
+/// image or a sound, made from it and cached. None when the player has to draw it, or the
+/// file is not one the editor reads.
 fn made(cache: &Path, job: &Job) -> Option<Vec<u8>> {
     let name = job.subject.cache_name();
     let png = cache.join(format!("{name}.png"));
@@ -397,14 +410,51 @@ fn made(cache: &Path, job: &Job) -> Option<Vec<u8>> {
     {
         return Some(image.rgba);
     }
-    if !job.image {
-        return None;
-    }
-    let bytes = std::fs::read(&job.path).ok()?;
-    let image = engine_assets::decode_image(&bytes).ok()?;
-    let pixels = fit(&image.rgba, image.width, image.height, SIZE);
+    let pixels = match job.from {
+        From::Player => return None,
+        From::Image => {
+            let bytes = std::fs::read(&job.path).ok()?;
+            let image = engine_assets::decode_image(&bytes).ok()?;
+            fit(&image.rgba, image.width, image.height, SIZE)
+        }
+        From::Sound => waveform_tile(&engine_app::waveform(&job.path, SIZE as usize).ok()?),
+    };
     save(cache, job.subject, job.key, &pixels);
     Some(pixels)
+}
+
+/// A sound's waveform drawn into a [`SIZE`] square on transparency: a faint middle line,
+/// each column from its lowest to its highest sample in the sounds' colour (the dock's), a
+/// column at full scale (it may clip) in a warning colour.
+pub(crate) fn waveform_tile(waveform: &engine_app::Waveform) -> Vec<u8> {
+    const WAVE: [u8; 4] = [180, 130, 220, 255];
+    const CLIPS: [u8; 4] = [240, 110, 90, 255];
+    const MIDDLE: [u8; 4] = [180, 130, 220, 90];
+    let side = SIZE as usize;
+    let mut out = vec![0u8; side * side * 4];
+    let middle = side / 2;
+    // Room above and below, so the loudest column does not touch the tile's edge.
+    let half = (side / 2 - 10) as f32;
+    let mut put = |x: usize, y: usize, color: [u8; 4]| {
+        let o = (y * side + x) * 4;
+        out[o..o + 4].copy_from_slice(&color);
+    };
+    for x in 0..side {
+        put(x, middle, MIDDLE);
+    }
+    for (x, &[low, high]) in waveform.columns.iter().take(side).enumerate() {
+        let color = if high >= 0.999 || low <= -0.999 {
+            CLIPS
+        } else {
+            WAVE
+        };
+        let row = |v: f32| (middle as f32 - v.clamp(-1.0, 1.0) * half).round() as usize;
+        let (top, bottom) = (row(high), row(low));
+        for y in top.min(bottom)..=bottom.max(top) {
+            put(x, y.min(side - 1), color);
+        }
+    }
+    out
 }
 
 /// A thumbnail's pixels cached for the file as `key` says it is.
@@ -482,6 +532,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_sounds_thumbnail_is_its_waveform() {
+        // Silence, then half scale, then full scale (it may clip).
+        let columns: Vec<[f32; 2]> = (0..SIZE as usize)
+            .map(|x| match x {
+                0..43 => [0.0, 0.0],
+                43..86 => [-0.5, 0.5],
+                _ => [-1.0, 1.0],
+            })
+            .collect();
+        let waveform = engine_app::Waveform {
+            columns,
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 48_000,
+            peak: 1.0,
+        };
+        let tile = waveform_tile(&waveform);
+        assert_eq!(tile.len(), (SIZE * SIZE * 4) as usize);
+        // A column's height in drawn pixels, and its colour where it is drawn.
+        let column = |x: usize| {
+            let drawn: Vec<[u8; 4]> = (0..SIZE as usize)
+                .map(|y| {
+                    let o = (y * SIZE as usize + x) * 4;
+                    [tile[o], tile[o + 1], tile[o + 2], tile[o + 3]]
+                })
+                .filter(|p| p[3] == 255)
+                .collect();
+            (drawn.len(), drawn.first().copied())
+        };
+        let (silent, _) = column(10);
+        let (half, half_color) = column(60);
+        let (full, full_color) = column(100);
+        assert!(silent <= 1, "{silent}");
+        assert!(half > 40 && full > half + 40, "{half} {full}");
+        assert_ne!(half_color, full_color, "full scale is marked");
+        // The middle line runs under silence, faint.
+        let o = ((SIZE as usize / 2) * SIZE as usize + 10) * 4;
+        assert!(tile[o + 3] > 0);
+    }
+
+    #[test]
     fn an_image_is_fitted_centred_and_never_enlarged() {
         // 8 × 4, left half red, right half blue: into 4 × 4, two rows, centred.
         let rgba: Vec<u8> = (0..4)
@@ -535,7 +626,7 @@ mod tests {
                 bytes: 1,
                 modified: 2,
             },
-            image: true,
+            from: From::Image,
             save: None,
         };
         let first = made(&cache, &job).unwrap();
