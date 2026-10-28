@@ -23,6 +23,8 @@ engine_app.workspace = true
 engine_assets.workspace = true
 # Brushes' planes, solids and faces, for editing them (ADR 0110 E2b-5).
 engine_brush.workspace = true
+# Material graphs opened in tabs of their own and edited on a canvas (ADR 0123 E10-3d).
+engine_material_graph.workspace = true
 engine_core.workspace = true
 # Logging and crash reports of the editor application (ADR 0061).
 engine_crash.workspace = true

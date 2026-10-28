@@ -283,6 +283,51 @@ has graphs).
 - **Not yet:** a cook test of a graph's material (the cook takes the same path); the
   canvas (E10-3d).
 
+## As built (E10-3d-1, 2026-10-28): the canvas in a tab of its own
+
+- **`engine_editor::graph`:** the graph's document (`GraphDoc`: the file held, its text
+  before and after each edit for the history, its view, its selection, its boxes laid
+  out), and what the canvas does with the pointer (`GraphDoc::pointer`), apart from the
+  drawing, so its rules are tested without a window.
+- **The view:** a pan and a zoom by steps (25 % to 300 %, eleven of them, so the glyph
+  atlas holds a few sizes of text); the wheel zooms about the pointer, the middle or the
+  right button pans; F frames the selection or every node, as a graph opens.
+- **Boxes:** a title (its parameter's name after its kind's), the inputs down the left,
+  the outputs down the right, as wide as their texts; a constant's value (a colour's
+  swatch) where inputs would be; the surface shows its model's inputs and any other
+  linked. The title's colour is the node's group, a port's what it carries (scalar grey,
+  2 green, 3 yellow, 4 pink, dynamic blue: Unreal's and Shader Graph's habit), their names
+  saying it too. Links are cubic curves leaving and arriving level, those of the selection
+  brighter.
+- **The pointer:** from an output to an input or back, a link (an input's old one
+  replaced); a linked input's end lifted, moved to another input or dropped on the
+  canvas (taken out); a click selects (Shift toggles), a drag moves the selection and ends
+  on whole units; a box on the empty canvas selects what it meets; Escape takes a move
+  back. A link that would loop back is refused, said in the status bar.
+- **Keys:** Delete, F, Escape on the canvas (the tree's and the dock's keys stay theirs
+  after a press in them); Ctrl+S, Ctrl+W, Ctrl+Tab, undo; the scene's tools are off while
+  a graph shows (the code tabs' rule).
+- **History:** each edit a file step (`History::change_file`), its text put back by undo
+  into its tab, or into the file opened again where the tab was closed.
+- **Session:** the open graphs' tabs and the shown one come back; unsaved ones are
+  autosaved as material files are (`.ofelia/autosave/<name>-<hash>.mgraph`).
+- **Drawing:** under the panels (layer −1), after the viewport's overlays, which its
+  background covers; nothing allocated in a steady frame (240 frames measured, the pointer
+  going over boxes, ports and links).
+- **Fixed with it:** Ctrl+Tab moved the panels' focus to their first field (the UI's focus
+  order took the Tab), so the editor took it for typing and the tabs did not change.
+- **Tests:** the view (zoom about the pointer, pans, framing), the layout (widths from the
+  texts, the surface's inputs by model), hits (ports before boxes, the selected box on
+  top), links and loops, the pointer's links, lifts, moves, clicks, boxes and Escape,
+  deletes and undo, the file and the session read back; in the editor, a graph opened, its
+  canvas framed, a link made by the mouse, undone and redone, a box moved, deleted with
+  Delete (the scene's cube staying), the wheel and the middle button, F, Ctrl+S, Ctrl+W and
+  an undo opening the closed graph again; on both GPUs, the canvas drawn (its title bars
+  and links in their colours) and gone behind the scene's tab; and the zero allocations.
+- **Next (E10-3d-2):** "Material: New Graph" (wired with the selected object's own
+  textures), duplicates (Ctrl+D), Ctrl+drag yanking a port's links; then the node search
+  (E10-3e).
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,

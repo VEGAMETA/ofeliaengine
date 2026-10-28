@@ -627,6 +627,8 @@ struct FrameLists {
     folders: Vec<TreeItem<'static>>,
     files: Vec<FileItem<'static>>,
     scenes: Vec<&'static str>,
+    /// The material graphs' tabs (ADR 0123 E10-3d).
+    graphs: Vec<&'static str>,
     /// The inspector's shown values, each property's range of them, its fields and
     /// sections (an asset's too).
     values: Vec<&'static str>,
@@ -2236,6 +2238,20 @@ struct Editor {
     /// where the viewport is.
     scripts: Vec<Script>,
     active_script: Option<usize>,
+    /// Material graphs open in tabs after the scripts' (ADR 0123 E10-3d), and the one
+    /// shown, if any: its canvas where the viewport is.
+    graphs: Vec<crate::graph::GraphDoc>,
+    active_graph: Option<usize>,
+    /// The drag under way on the shown graph's canvas.
+    graph_drag: Option<crate::graph::Drag>,
+    /// The canvas as the last frame placed it (logical pixels: x, y, width, height), and
+    /// in pixels, for the overlay hook to draw it.
+    graph_area: Option<[f32; 4]>,
+    graph_rect: Option<[u32; 4]>,
+    /// The graph bar's status, and a constant's value while the canvas draws it: written
+    /// into the same room every frame.
+    graph_status: String,
+    graph_scratch: String,
     /// The keys go to the shown script's code: its tab was shown, or a press landed in it.
     /// A press anywhere else gives them back to the editor.
     code_focus: bool,
@@ -3246,6 +3262,13 @@ impl Editor {
             tab_labels: Vec::new(),
             scripts: Vec::new(),
             active_script: None,
+            graphs: Vec::new(),
+            active_graph: None,
+            graph_drag: None,
+            graph_area: None,
+            graph_rect: None,
+            graph_status: String::new(),
+            graph_scratch: String::new(),
             code_focus: false,
             code_rect: None,
             code_advance: 0.0,
@@ -3808,6 +3831,7 @@ impl Editor {
         self.tick_checker(world);
         self.keep_script_autosaves(world, false);
         self.keep_material_autosaves(world, false);
+        self.keep_graph_autosaves(world, false);
         self.keep_mixer_autosave(world, false);
         if !playing {
             self.ensure_prefab_bases(world);
@@ -4020,6 +4044,7 @@ impl Editor {
         // A script shown: its keys, clicks and scroll before the UI is built, so a key
         // shows in this frame.
         let coding = self.code_frame();
+        self.graph_status_frame();
         // The Debugger panel's texts, while it is open (ADR 0119 E9-1b-3).
         if self.bottom == Some(DEBUGGER_TAB) {
             self.debug_text_frame(world);
@@ -5203,6 +5228,15 @@ impl Editor {
         };
         let script_labels: Vec<String> = self.scripts.iter().map(Script::label).collect();
         let script_tabs: Vec<&str> = script_labels.iter().map(String::as_str).collect();
+        let mut graph_tabs: Vec<&str> = recycle(std::mem::take(&mut self.lists.graphs));
+        graph_tabs.extend(self.graphs.iter().map(|d| d.tab.as_str()));
+        let graph_bar =
+            self.active_graph
+                .and_then(|g| self.graphs.get(g))
+                .map(|d| crate::shell::GraphBar {
+                    path: &d.path,
+                    status: &self.graph_status,
+                });
         // The shown script's lines in view, their numbers, its selections and carets.
         let shown = &self.code_shown;
         let code_script = self.active_script.and_then(|k| self.scripts.get(k));
@@ -5467,6 +5501,9 @@ impl Editor {
             scripts: &script_tabs,
             active_script: self.active_script,
             code,
+            graphs: &graph_tabs,
+            active_graph: self.active_graph,
+            graph: graph_bar,
             tools: &tools,
             active_tool: self.active_tool,
             tree: &items,
@@ -5580,6 +5617,7 @@ impl Editor {
         self.lists.bus_options = recycle(bus_options);
         self.joined = joined;
         self.lists.scenes = recycle(scenes);
+        self.lists.graphs = recycle(graph_tabs);
         self.listing = self
             .ui
             .rect_of(response.listing)
@@ -5746,6 +5784,9 @@ impl Editor {
                         )) if double => {
                             self.open_script(world, &path, None);
                         }
+                        Some((engine_scene::AssetKind::Graph, path)) if double => {
+                            self.open_graph(world, &path);
+                        }
                         _ => {}
                     }
                 }
@@ -5776,6 +5817,11 @@ impl Editor {
             self.close_script(world, k);
         } else if let Some(k) = response.script_tab {
             self.show_script(world, k);
+        }
+        if let Some(g) = response.close_graph {
+            self.close_graph(world, g);
+        } else if let Some(g) = response.graph_tab {
+            self.show_graph(world, g);
         }
         self.find_focus = None;
         self.find_frame(&response);
@@ -6326,9 +6372,17 @@ impl Editor {
                         ]
                         .contains(&id)))
                 && (!coding || self.editor_command(id))
+                && (self.active_graph.is_none() || self.graph_command(id))
             {
                 self.run(world, id);
             }
+        }
+        // A graph's canvas covers the viewport (ADR 0123): its pointer, none of the
+        // viewport's tools.
+        if self.active_graph.is_some() {
+            self.graph_frame(world, response.graph_canvas, scale);
+            self.input.next_frame();
+            return;
         }
         // A script's code covers the viewport: none of the viewport's tools this frame.
         if self.active_script.is_some() {
@@ -9257,6 +9311,7 @@ impl Editor {
     /// Selects `e` and opens its parents' rows, so the tree shows it.
     fn show(&mut self, world: &World, e: Entity) {
         self.active_script = None;
+        self.active_graph = None;
         self.select_only(e);
         let mut at = world.parent(e);
         while let Some(p) = at {
@@ -11268,6 +11323,7 @@ impl Editor {
     /// Shows scene tab `index` (a click on it, Ctrl+Tab): a script shown goes behind.
     fn show_scene_tab(&mut self, world: &mut World, index: usize) {
         self.active_script = None;
+        self.active_graph = None;
         self.show_tab(world, index);
         self.write_session(world);
     }
@@ -11278,9 +11334,214 @@ impl Editor {
             return;
         }
         self.active_script = Some(k);
+        self.active_graph = None;
         self.code_focus = true;
         self.caret_since = Instant::now();
         self.write_session(world);
+    }
+
+    /// "Open" on a material graph (a double click in the dock, ADR 0123 E10-3d): the graph
+    /// at `path` (relative to the project) in a tab of its own after the others, or its
+    /// tab shown.
+    fn open_graph(&mut self, world: &World, path: &Path) {
+        let path = path.to_string_lossy().replace('\\', "/");
+        let g = match self.graphs.iter().position(|d| d.path == path) {
+            Some(g) => g,
+            None => match crate::graph::GraphDoc::open(&self.root, &path) {
+                Ok(doc) => {
+                    self.graphs.push(doc);
+                    self.graphs.len() - 1
+                }
+                Err(e) => {
+                    self.say(e);
+                    return;
+                }
+            },
+        };
+        self.show_graph(world, g);
+    }
+
+    /// Shows graph tab `g`: its canvas where the viewport is.
+    fn show_graph(&mut self, world: &World, g: usize) {
+        if g >= self.graphs.len() {
+            return;
+        }
+        self.active_script = None;
+        self.active_graph = Some(g);
+        self.code_focus = false;
+        self.graph_drag = None;
+        self.write_session(world);
+    }
+
+    /// Closes graph tab `g`, the graph before it shown if it was (the scene before the
+    /// first). With unsaved changes it closes only when asked again: the first time tells,
+    /// as nothing keeps them after.
+    fn close_graph(&mut self, world: &World, g: usize) {
+        let Some(doc) = self.graphs.get_mut(g) else {
+            return;
+        };
+        if doc.dirty() && !doc.closing {
+            doc.closing = true;
+            let message = format!(
+                "{} has unsaved changes: close it again to drop them, or Ctrl+S saves them",
+                doc.path
+            );
+            self.say(message);
+            return;
+        }
+        let doc = self.graphs.remove(g);
+        if doc.autosaved.is_some()
+            && let Some(session) = &self.session
+        {
+            let name = session::graph_autosave_name(Path::new(&doc.path));
+            session.writer.remove(vec![session.dir.join(name)]);
+        }
+        self.active_graph = match self.active_graph {
+            Some(a) if a == g => g.checked_sub(1),
+            Some(a) if a > g => Some(a - 1),
+            other => other,
+        };
+        self.graph_drag = None;
+        self.write_session(world);
+    }
+
+    /// Ctrl+S on a graph's tab: its text into its file (the player's materials that name
+    /// it follow, ADR 0123 E10-3c).
+    fn save_graph(&mut self, g: usize) {
+        let Some(doc) = self.graphs.get_mut(g) else {
+            return;
+        };
+        match std::fs::write(self.root.join(&doc.path), &doc.text) {
+            Ok(()) => {
+                doc.saved_now();
+                let message = format!("Saved {}", doc.path);
+                self.say(message);
+            }
+            Err(e) => self.say(format!("Not saved: {e}")),
+        }
+    }
+
+    /// What the canvas did (ADR 0123 E10-3d): an edit a step of the one history, a refusal
+    /// said.
+    fn graph_outcome(
+        &mut self,
+        world: &mut World,
+        g: usize,
+        outcome: Option<crate::graph::Outcome>,
+    ) {
+        match outcome {
+            Some(crate::graph::Outcome::Edited {
+                name,
+                before,
+                after,
+            }) => {
+                let id = self.graphs[g].id;
+                self.history.begin(name, None);
+                self.history.change_file(id, &before, &after);
+                self.history.commit(world);
+            }
+            Some(crate::graph::Outcome::Refused(why)) => self.say(why.to_owned()),
+            None => {}
+        }
+    }
+
+    /// F on a graph's tab: its selected nodes framed, or all of them.
+    fn frame_graph(&mut self, g: usize) {
+        let size = self
+            .graph_area
+            .map_or([800.0, 600.0], |[_, _, w, h]| [w, h]);
+        if let Some(doc) = self.graphs.get_mut(g) {
+            doc.frame(size);
+        }
+    }
+
+    /// The editor's commands whose keys work while a graph's canvas is shown: those that
+    /// work while code has the keys (saving, the tabs, the palette, playing), undoing, and
+    /// the canvas's own (Delete, F). The scene's tools are off.
+    fn graph_command(&self, id: CommandId) -> bool {
+        let ids = &self.ids;
+        self.editor_command(id) || [ids.undo, ids.redo, ids.delete, ids.frame].contains(&id)
+    }
+
+    /// The shown graph's bar: its nodes, its selection and the zoom, in the same room
+    /// every frame.
+    fn graph_status_frame(&mut self) {
+        use std::fmt::Write as _;
+        for doc in &mut self.graphs {
+            doc.refresh_tab();
+        }
+        self.graph_status.clear();
+        let Some(doc) = self.active_graph.and_then(|g| self.graphs.get(g)) else {
+            return;
+        };
+        let n = doc.graph.nodes.len();
+        let s = if n == 1 { "" } else { "s" };
+        let _ = write!(self.graph_status, "{n} node{s}");
+        if !doc.selected.is_empty() {
+            let _ = write!(self.graph_status, " · {} selected", doc.selected.len());
+        }
+        let _ = write!(self.graph_status, " · {:.0} %", doc.view.zoom() * 100.0);
+    }
+
+    /// The shown graph's frame, after the UI's (ADR 0123 E10-3d): the canvas's place, its
+    /// boxes laid out where the graph changed, then the pointer's presses, drags and wheel
+    /// on it, an edit a step.
+    fn graph_frame(&mut self, world: &mut World, canvas: u64, scale: f32) {
+        use engine_ui::TextMeasure as _;
+        let Some(g) = self.active_graph.filter(|&g| g < self.graphs.len()) else {
+            self.active_graph = None;
+            return;
+        };
+        let Some(r) = self.ui.rect_of(canvas) else {
+            return;
+        };
+        let ([x, y], [w, h]) = (r.pos, r.size);
+        self.graph_area = Some([x, y, w, h]);
+        self.graph_rect = Some([
+            (x * scale).round() as u32,
+            (y * scale).round() as u32,
+            ((w * scale).round() as u32).max(1),
+            ((h * scale).round() as u32).max(1),
+        ]);
+        {
+            let text = &mut self.text;
+            let doc = &mut self.graphs[g];
+            doc.relayout(&mut |s, size| text.measure(s, size, None)[0]);
+            if !doc.framed {
+                doc.framed = true;
+                doc.frame([w, h]);
+            }
+        }
+        let cursor = self.input.cursor().map(|[cx, cy]| [cx / scale, cy / scale]);
+        let free = self.command_palette.is_none()
+            && !self.add_open
+            && !self.view_menu_open
+            && self.open_choice.is_none()
+            && self.renaming.is_none()
+            && self.renaming_file.is_none()
+            && self.ui.editing().is_none();
+        let over =
+            free && cursor.is_some_and(|[cx, cy]| cx >= x && cy >= y && cx < x + w && cy < y + h);
+        let [dx, dy] = self.input.drag();
+        let pointer = crate::graph::Pointer {
+            at: cursor,
+            over,
+            press: self.input.pressed(Button::Left),
+            held: self.input.held(Button::Left),
+            pan_press: self.input.pressed(Button::Middle) || self.input.pressed(Button::Right),
+            pan_held: self.input.held(Button::Middle) || self.input.held(Button::Right),
+            moved: [dx / scale, dy / scale],
+            wheel: self.input.wheel_notches(),
+            shift: self.input.shift(),
+            escape: free && self.ui.input().keys.contains(&UiKey::Escape),
+        };
+        let outcome = self.graphs[g].pointer(&pointer, [x, y], &mut self.graph_drag);
+        // Laid out again at once: this frame draws the boxes where they went.
+        {
+            let text = &mut self.text;
+            self.graphs[g].relayout(&mut |s, size| text.measure(s, size, None)[0]);
+        }
+        self.graph_outcome(world, g, outcome);
     }
 
     /// "File: Open Script…" (a double click in the dock, a click on an error at one's
@@ -12622,6 +12883,7 @@ impl Editor {
     /// shown when it is open; one closed with unsaved changes comes back with them.
     fn open_scene(&mut self, world: &mut World, path: &Path) {
         self.active_script = None;
+        self.active_graph = None;
         if self.scene_path.as_deref() == Some(path) {
             return;
         }
@@ -12696,6 +12958,7 @@ impl Editor {
     /// "File: New Scene" (Ctrl+N): an empty untitled scene in a new tab; Ctrl+S names it.
     fn new_scene(&mut self, world: &mut World) {
         self.active_script = None;
+        self.active_graph = None;
         if self.play.is_some() {
             self.say(String::from(
                 "Stop first: the scene that plays stays in front",
@@ -12774,6 +13037,7 @@ impl Editor {
     /// with its unsaved changes.
     fn reopen_scene(&mut self, world: &mut World) {
         self.active_script = None;
+        self.active_graph = None;
         if self.play.is_some() {
             self.say(String::from(
                 "Stop first: the scene that plays stays in front",
@@ -13718,6 +13982,28 @@ impl Editor {
     fn run(&mut self, world: &mut World, id: CommandId) {
         self.commands.ran(id);
         let ids = self.ids;
+        // A graph's tab (ADR 0123 E10-3d): Ctrl+S saves the graph, Ctrl+W closes it; Delete
+        // and F are its canvas's, unless the tree or the dock has the keys.
+        if let Some(g) = self.active_graph.filter(|&g| g < self.graphs.len()) {
+            let canvas = !self.tree_focus && !self.dock_focus;
+            if id == ids.save {
+                self.save_graph(g);
+                return;
+            }
+            if id == ids.close_scene {
+                self.close_graph(world, g);
+                return;
+            }
+            if id == ids.delete && canvas {
+                let outcome = self.graphs[g].delete_selected();
+                self.graph_outcome(world, g, outcome);
+                return;
+            }
+            if id == ids.frame && canvas {
+                self.frame_graph(g);
+                return;
+            }
+        }
         // Ctrl+S on a script's tab saves the script, the game playing or not.
         if id == ids.save
             && let Some(k) = self.active_script
@@ -13889,12 +14175,15 @@ impl Editor {
         } else if id == ids.reopen_scene {
             self.reopen_scene(world);
         } else if id == ids.next_tab || id == ids.previous_tab {
-            // The scenes' tabs, then the scripts'.
+            // The scenes' tabs, then the scripts', then the graphs'.
             let scenes = self.tabs.len();
-            let n = scenes + self.scripts.len();
-            let at = self
-                .active_script
-                .map_or_else(|| self.active_tab(), |k| scenes + k);
+            let scripts = self.scripts.len();
+            let n = scenes + scripts + self.graphs.len();
+            let at = match (self.active_script, self.active_graph) {
+                (Some(k), _) => scenes + k,
+                (None, Some(g)) => scenes + scripts + g,
+                (None, None) => self.active_tab(),
+            };
             let to = if id == ids.next_tab {
                 (at + 1) % n
             } else {
@@ -13902,8 +14191,10 @@ impl Editor {
             };
             if to < scenes {
                 self.show_scene_tab(world, to);
-            } else {
+            } else if to < scenes + scripts {
                 self.show_script(world, to - scenes);
+            } else {
+                self.show_graph(world, to - scenes - scripts);
             }
         } else if id == ids.save || id == ids.save_over_disk {
             let conflict = self.session.as_ref().is_some_and(|s| s.conflict);
@@ -15138,6 +15429,72 @@ impl Editor {
         }
     }
 
+    /// The open graphs' unsaved texts kept in `.ofelia/` (ADR 0123 E10-3d), as material
+    /// files' are: written once the edits are quiet (at once with `now`), deleted once
+    /// saved.
+    fn keep_graph_autosaves(&mut self, world: &World, now: bool) {
+        let gesture = self.gesture();
+        let Some(s) = &mut self.session else {
+            return;
+        };
+        let at = Instant::now();
+        let mut changed = false;
+        for doc in &mut self.graphs {
+            let file = || {
+                s.dir
+                    .join(session::graph_autosave_name(Path::new(&doc.path)))
+            };
+            if !doc.dirty() {
+                doc.due = None;
+                if doc.autosaved.take().is_some() {
+                    s.writer.remove(vec![file()]);
+                    changed = true;
+                }
+                continue;
+            }
+            if doc.autosaved == Some(doc.revision) {
+                doc.due = None;
+                continue;
+            }
+            let due = *doc.due.get_or_insert(at + session::AUTOSAVE_AFTER);
+            if now || session::autosave_now(at, due, s.last_input, gesture) {
+                s.writer.write(file(), doc.text.clone(), 0, Duration::ZERO);
+                doc.autosaved = Some(doc.revision);
+                doc.due = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.write_session(world);
+        }
+    }
+
+    /// A graph tab from the session (ADR 0123 E10-3d): its file, its unsaved text from its
+    /// autosave where it has one.
+    fn restore_graph(&mut self, m: session::MaterialEntry) {
+        let Some(dir) = self.session.as_ref().map(|s| s.dir.clone()) else {
+            return;
+        };
+        let path = m.path.to_string_lossy().replace('\\', "/");
+        let mut doc = match crate::graph::GraphDoc::open(&self.root, &path) {
+            Ok(doc) => doc,
+            Err(e) => {
+                log::warn!(target: "engine_editor", "{e}");
+                return;
+            }
+        };
+        if let Some(text) = m
+            .autosave
+            .and_then(|a| std::fs::read_to_string(dir.join(a)).ok())
+        {
+            match doc.put_text(&text) {
+                Ok(()) => doc.autosaved = Some(doc.revision),
+                Err(e) => log::warn!(target: "engine_editor", "{e}"),
+            }
+        }
+        self.graphs.push(doc);
+    }
+
     /// The mixer's unsaved layout kept in `.ofelia/` (E11-1b-2), as material files' are:
     /// written once the edits are quiet (at once with `now`), deleted once it is saved.
     fn keep_mixer_autosave(&mut self, world: &World, now: bool) {
@@ -15372,6 +15729,26 @@ impl Editor {
             }
             // The mixer's layout (E11-1b).
             if let Some(doc) = self.mixer.as_mut().filter(|d| d.id == id)
+                && let Err(e) = doc.put_text(&text)
+            {
+                log::warn!(target: "engine_editor", "{e}");
+            }
+            // A material graph's (ADR 0123 E10-3d): its tab's, opened again where it was
+            // closed (its step's text is not lost with the tab).
+            let graph_path = self
+                .asset_db
+                .get(id)
+                .filter(|e| e.kind == engine_scene::AssetKind::Graph)
+                .map(|e| e.path.clone());
+            if !self.graphs.iter().any(|d| d.id == id)
+                && let Some(path) = graph_path
+            {
+                match crate::graph::GraphDoc::open(&self.root, &path) {
+                    Ok(doc) => self.graphs.push(doc),
+                    Err(e) => log::warn!(target: "engine_editor", "{e}"),
+                }
+            }
+            if let Some(doc) = self.graphs.iter_mut().find(|d| d.id == id)
                 && let Err(e) = doc.put_text(&text)
             {
                 log::warn!(target: "engine_editor", "{e}");
@@ -18938,6 +19315,7 @@ impl Editor {
         let mut others = Vec::new();
         let mut script_docs = Vec::new();
         let mut material_entries = Vec::new();
+        let mut graph_entries = Vec::new();
         let mut mixer_entry = None;
         let mut break_docs = Vec::new();
         let mut at = 0;
@@ -18949,6 +19327,7 @@ impl Editor {
                     others = f.documents;
                     script_docs = f.scripts;
                     material_entries = f.materials;
+                    graph_entries = f.graphs;
                     mixer_entry = f.mixer;
                     break_docs = f.breakpoints;
                     let found = others.iter().position(|d| d.path == self.scene_path);
@@ -19077,6 +19456,10 @@ impl Editor {
         if let Some(m) = mixer_entry {
             self.restore_mixer(m);
         }
+        // The graphs' tabs (ADR 0123 E10-3d), their unsaved edits with them.
+        for m in graph_entries {
+            self.restore_graph(m);
+        }
         // Their breakpoints (ADR 0119), on the lines of the text as the session left it.
         for (file, mark) in break_docs {
             self.breakpoints.put(&file, mark);
@@ -19086,6 +19469,10 @@ impl Editor {
             .and_then(|s| s.script)
             .filter(|&k| k < self.scripts.len());
         self.code_focus = self.active_script.is_some();
+        self.active_graph = editor_state
+            .as_ref()
+            .and_then(|s| s.graph)
+            .filter(|&g| g < self.graphs.len() && self.active_script.is_none());
         self.write_session(world);
         if let Some(note) = note {
             self.say(note);
@@ -19293,7 +19680,18 @@ impl Editor {
             game_window: self.game_window,
             active: Some(self.active_tab()),
             script: self.active_script,
+            graph: self.active_graph,
         };
+        let graphs = self
+            .graphs
+            .iter()
+            .map(|d| session::MaterialEntry {
+                path: PathBuf::from(&d.path),
+                autosave: d
+                    .autosaved
+                    .map(|_| session::graph_autosave_name(Path::new(&d.path))),
+            })
+            .collect();
         let scripts = self
             .scripts
             .iter()
@@ -19364,6 +19762,7 @@ impl Editor {
             breakpoints,
             materials,
             mixer,
+            graphs,
         };
         let text = file.to_text();
         if text != s.last_text {
@@ -19494,6 +19893,7 @@ impl Editor {
         self.keep_autosave(world, true);
         self.keep_script_autosaves(world, true);
         self.keep_material_autosaves(world, true);
+        self.keep_graph_autosaves(world, true);
         self.keep_mixer_autosave(world, true);
         if let Some(s) = &self.session {
             s.writer.flush();
@@ -19510,6 +19910,7 @@ impl Editor {
         self.keep_autosave(world, true);
         self.keep_script_autosaves(world, true);
         self.keep_material_autosaves(world, true);
+        self.keep_graph_autosaves(world, true);
         self.keep_mixer_autosave(world, true);
         self.write_session(world);
         if let Some(mut s) = self.session.take() {
@@ -23405,6 +23806,25 @@ impl Overlay for EditorOverlay {
                     rect,
                     editor.scale.max(0.5),
                     &mut self.canvas,
+                );
+            }
+            // The shown graph's canvas (ADR 0123 E10-3d), over the viewport's overlays.
+            if let (Some(g), Some(rect)) = (editor.active_graph, editor.graph_rect)
+                && let Some(doc) = editor.graphs.get(g)
+            {
+                let look = crate::graph::Look {
+                    rect,
+                    scale: editor.scale.max(0.5),
+                    palette: &editor.palette,
+                    glyphs: &self.glyphs,
+                };
+                crate::graph::draw(
+                    doc,
+                    editor.graph_drag.as_ref(),
+                    &look,
+                    &mut editor.text,
+                    &mut self.canvas,
+                    &mut editor.graph_scratch,
                 );
             }
             paint(
@@ -31782,6 +32202,175 @@ return Coin
         assert_eq!(ed.active_script, None, "the scene shown again");
         ed.update(&mut world);
         assert!(ed.code_rect.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0123 E10-3d: a material graph opens in a tab of its own; its canvas links,
+    /// moves and deletes as steps of the one history, pans and zooms, saves with Ctrl+S
+    /// and closes with Ctrl+W; a step of a closed graph undone opens it again.
+    #[test]
+    fn a_graph_opens_in_a_tab_and_its_canvas_edits_as_steps() {
+        use engine_material_graph::PortRef;
+        const F_KEY: (u16, u16) = (0x46, 0x21);
+        let dir = project("graph-tab");
+        std::fs::create_dir_all(dir.join("materials")).unwrap();
+        let id = AssetId::new();
+        let file = dir.join("materials/glow.mgraph");
+        std::fs::write(
+            &file,
+            format!(
+                "[mgraph version=1 id={id}]\n\nmodel = \"unlit\"\n\
+                 nodes[\"c\"].kind = \"color\"\nnodes[\"c\"].value = [0.9, 0.1, 0.1, 1]\n\
+                 nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [300, 0]\n"
+            ),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        // The asset database, as the editor's binary opens it: the graph's id is known.
+        ed.open_assets();
+        ed.update(&mut world);
+        let cube = engine_scene::find_named(&mut world, "Cube").unwrap();
+        ed.select_only(cube);
+        ed.open_graph(&world, Path::new("materials/glow.mgraph"));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(ed.active_graph, Some(0));
+        assert!(!texts(&ed, "glow.mgraph").is_empty(), "its tab");
+        assert!(!texts(&ed, "materials/glow.mgraph").is_empty(), "its bar");
+        assert!(!texts(&ed, "2 nodes · 100 %").is_empty(), "its status");
+        // Ctrl+Tab goes to the scene's tab and back.
+        chord(&mut ed, &mut world, &[CTRL, TAB]);
+        assert_eq!(ed.active_graph, None);
+        chord(&mut ed, &mut world, &[CTRL, TAB]);
+        assert_eq!(ed.active_graph, Some(0));
+        ed.update(&mut world);
+        assert!(ed.graph_rect.is_some());
+        let [x, y, w, h] = ed.graph_area.unwrap();
+        let origin = [x, y];
+        let panel = |ed: &Editor, c: [f32; 2]| ed.graphs[0].view.panel_point(c, origin);
+        // Opened framed: its two boxes in view.
+        let (c, out) = (
+            ed.graphs[0].box_of("c").unwrap(),
+            ed.graphs[0].box_of("out").unwrap(),
+        );
+        for k in [c, out] {
+            let b = &ed.graphs[0].boxes[k];
+            let [px, py] = panel(&ed, b.at);
+            assert!(px >= x && py >= y && px < x + w && py < y + h, "{px} {py}");
+        }
+        // From the colour's output onto the surface's base: a link, a step.
+        let rgba = panel(&ed, ed.graphs[0].boxes[c].output_at(0));
+        let base = panel(&ed, ed.graphs[0].boxes[out].input_at(0));
+        mouse(&mut ed, rgba, None);
+        ed.update(&mut world);
+        mouse(&mut ed, rgba, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, base, None);
+        ed.update(&mut world);
+        mouse(&mut ed, base, Some(false));
+        ed.update(&mut world);
+        let linked = PortRef::new("out", "base");
+        assert_eq!(
+            ed.graphs[0].graph.links.get(&linked),
+            Some(&PortRef::new("c", "rgba"))
+        );
+        ed.update(&mut world);
+        assert!(!texts(&ed, "glow.mgraph *").is_empty(), "unsaved");
+        // Ctrl+Z takes it back, Ctrl+Y makes it again.
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        assert!(ed.graphs[0].graph.links.is_empty());
+        chord(&mut ed, &mut world, &[CTRL, Y]);
+        assert!(ed.graphs[0].graph.links.contains_key(&linked));
+        // A drag on the colour's box selects and moves it, to whole units.
+        let grab = panel(&ed, [10.0, 6.0]);
+        let to = [grab[0] + 37.0, grab[1] + 23.0];
+        mouse(&mut ed, grab, None);
+        ed.update(&mut world);
+        mouse(&mut ed, grab, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, to, None);
+        ed.update(&mut world);
+        mouse(&mut ed, to, Some(false));
+        ed.update(&mut world);
+        let at = ed.graphs[0].graph.nodes["c"].at;
+        assert!(
+            at[0] > 0.0 && at[1] > 0.0 && at == at.map(f32::round),
+            "{at:?}"
+        );
+        assert_eq!(ed.graphs[0].selected.iter().collect::<Vec<_>>(), ["c"]);
+        // Delete is the canvas's: the node and its link go, the scene's cube stays.
+        // Delete is an extended key (scan code 0x53 alone is the keypad's point).
+        for pressed in [true, false] {
+            event(
+                &mut ed,
+                WindowEventKind::Key {
+                    virtual_key: 0x2E,
+                    scancode: 0x53,
+                    extended: true,
+                    pressed,
+                    repeat: false,
+                },
+            );
+            ed.update(&mut world);
+        }
+        assert!(!ed.graphs[0].graph.nodes.contains_key("c"));
+        assert!(ed.graphs[0].graph.links.is_empty());
+        assert_eq!(row_names(&ed, &world), ["Cube"]);
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        assert!(
+            ed.graphs[0].graph.links.contains_key(&linked),
+            "back with its link"
+        );
+        // The wheel zooms a step about the pointer; the middle button pans.
+        let zoom = ed.graphs[0].view.zoom();
+        let middle = [x + w * 0.5, y + h * 0.5];
+        mouse(&mut ed, middle, None);
+        ed.update(&mut world);
+        event(&mut ed, WindowEventKind::Wheel { x: 0.0, y: 1.0 });
+        ed.update(&mut world);
+        assert!(ed.graphs[0].view.zoom() > zoom);
+        let pan = ed.graphs[0].view.pan;
+        event(
+            &mut ed,
+            WindowEventKind::MouseButton {
+                button: MouseButton::Middle,
+                pressed: true,
+            },
+        );
+        ed.update(&mut world);
+        mouse(&mut ed, [middle[0] + 30.0, middle[1]], None);
+        ed.update(&mut world);
+        event(
+            &mut ed,
+            WindowEventKind::MouseButton {
+                button: MouseButton::Middle,
+                pressed: false,
+            },
+        );
+        ed.update(&mut world);
+        let z = ed.graphs[0].view.zoom();
+        assert!((ed.graphs[0].view.pan[0] - (pan[0] - 30.0 / z)).abs() < 0.01);
+        // F frames them again.
+        chord(&mut ed, &mut world, &[F_KEY]);
+        assert!(ed.graphs[0].view.zoom() <= 1.0);
+        // Ctrl+S writes the file; it reads back as the canvas holds it.
+        chord(&mut ed, &mut world, &[CTRL, S]);
+        assert!(!ed.graphs[0].dirty());
+        let again = crate::graph::GraphDoc::open(&dir, "materials/glow.mgraph").unwrap();
+        assert_eq!(again.graph, ed.graphs[0].graph);
+        assert!(
+            message(&ed).contains("Saved materials/glow.mgraph"),
+            "{}",
+            message(&ed)
+        );
+        // Ctrl+W closes it, the scene shown again; the move undone opens it again,
+        // unsaved, its tab behind the scene.
+        chord(&mut ed, &mut world, &[CTRL, W]);
+        assert!(ed.graphs.is_empty() && ed.active_graph.is_none());
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        assert_eq!(ed.graphs.len(), 1, "opened again by the undo");
+        assert!(ed.graphs[0].dirty() && ed.active_graph.is_none());
+        assert_eq!(ed.graphs[0].graph.nodes["c"].at, [0.0, 0.0]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

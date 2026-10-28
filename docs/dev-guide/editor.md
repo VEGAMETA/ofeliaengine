@@ -1096,7 +1096,7 @@ Tabs:
   - "File: Open Script…" in the palette;
   - a click on an error at a script's line in the Output, which opens it at that line.
 - **A scene's tab** brings the scene back in front; Ctrl+Tab goes through the scenes'
-  tabs, then the scripts'.
+  tabs, then the scripts', then the material graphs'.
 - **The keys are VS Code's:**
   - Ctrl+D selects the word, then its next match, each with a caret of its own;
     Alt+click and Ctrl+Alt+Up or Down add carets; Escape leaves one;
@@ -1182,6 +1182,46 @@ watch).
   - without `slangd`, Slang's tabs only check, and the Output says so once.
 - **Ctrl+Shift+F** finds text in the Slang modules too.
 
+## Material graphs
+
+A material graph (a `.mgraph` file, ADR 0123) opens in a tab of its own after the scripts',
+its canvas where the viewport is: a double click on it in the FileSystem dock. The bar over
+the canvas names the file, its nodes, the selection and the zoom.
+
+- **The canvas:**
+  - each node is a box: its title (a parameter's name after its kind's, `Number ·
+    roughness`), its inputs down the left edge and its outputs down the right. A colour
+    shows its swatch, a number its value;
+  - the title bar's colour is the node's group (inputs teal, maths blue, vectors purple,
+    the surface red); a port's colour is what it carries (a number grey, two components
+    green, three yellow, four pink, as wide as what is linked blue). The ports' names say
+    it too;
+  - the surface shows the inputs its shading model reads, and any other that is linked.
+- **The mouse:**
+  - **drag from an output to an input** (or from an input to an output): a link. A link
+    dropped on an input replaces the one it had. A link that would feed a node from
+    itself is refused, and the status bar says why;
+  - **drag a linked input's end**: its link comes off; drop it on another input to move
+    it, or on the canvas to take it out;
+  - **click a box** to select it, Shift+click to add it or take it out, and drag it (the
+    selection moves with it, to whole units);
+  - **drag on the empty canvas**: a box selects what it meets (Shift adds); a click there
+    lets the selection go;
+  - **the middle or the right button** pans, **the wheel** zooms about the pointer (25 %
+    to 300 %, by steps).
+- **The keys:** Delete deletes the selected nodes (the surface stays), F frames them (all
+  of them, none selected), Escape takes a drag back or lets the selection go, Ctrl+S
+  writes the file, Ctrl+W closes the tab (asked twice with unsaved changes), Ctrl+Z and
+  Ctrl+Y undo and redo. The scene's keys (the tools' letters, H, B) do nothing while a
+  graph is shown.
+- **Every edit is one step** of the editor's one history: a link, a move, a delete. A
+  step of a graph whose tab was closed, undone, opens it again (behind the scene, unsaved).
+- **Saving** writes the file; the materials that name the graph draw it again (ADR 0123
+  E10-3c). Unsaved graphs are autosaved as scenes are, and the session brings the tabs
+  back, with their unsaved edits.
+- **Not yet:** adding nodes (the node search, E10-3e), duplicating, "Material: New Graph",
+  editing a node's values, errors on nodes (E10-3f).
+
 ## Autosave and the session
 
 The editor keeps its own files in the project's `.ofelia/` folder (ADR 0107 §4). They are
@@ -1264,7 +1304,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E10 | materials: the material file, the graph, previews (the team's questions are open); Slang in the code editor is done |
+| E10 | materials: the graph's node search, values on nodes, errors and functions (its canvas is in), previews; the material file and Slang in the code editor are done |
 
 The whole plan is ADR 0107 §7.
 

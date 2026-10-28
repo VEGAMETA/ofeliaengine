@@ -168,6 +168,14 @@ fn tab_and_enter_work_without_a_mouse() {
         |ui| build(ui, &mut r),
     );
     assert!(r[1].focused, "shift+tab wraps around");
+    // Ctrl+Tab is the application's (its tabs): the focus stays.
+    let ctrl_tab = UiInput {
+        keys: vec![UiKey::Tab],
+        ctrl: true,
+        ..UiInput::default()
+    };
+    frame(&mut ui, &ctrl_tab, |ui| build(ui, &mut r));
+    assert!(r[1].focused, "ctrl+tab leaves the focus");
     let cmds = frame(&mut ui, &keys(vec![UiKey::Escape], false), |ui| {
         build(ui, &mut r)
     });
