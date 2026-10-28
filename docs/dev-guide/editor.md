@@ -940,6 +940,23 @@ change something.
   with the scene. The header says when it is unsaved, or not written yet. Unsaved changes
   are kept in `.ofelia/` with the session, as a scene's are, and come back at the next
   start.
+- **Effects and sends** (ADR 0121's version 2): pick a strip, and the inspector shows a
+  section for each of its effects after the Bus section, in the order the sound goes
+  through them:
+  - **Add:** "add effect" lists the twelve built-in kinds (the filters, compressor,
+    limiter, delay, reverb), "add send" the buses it can send into without looping the
+    sound back;
+  - **an effect's section:** its parameters in their units (drag them; a frequency moves
+    an octave per 120 px; click to type, expressions too), bypass, a filter's shape, and a
+    compressor's sidechain (only the buses that would not loop); ↑ and ↓ move it in the
+    chain, × takes it away; a compressor's or a limiter's title says how far it is lowering
+    the gain now;
+  - **a send's section:** its level in dB and whether it is taken before the fader;
+  - **on the strip:** the effect's short name ("Comp"), or how many ("3 fx"), with the
+    most gain reduction now, and **B** to bypass them all (again to bring them back); a
+    send shows as `+1` after the output;
+  - renaming or removing a bus carries its sends and sidechains along, or takes them away;
+  - every change is a step of the one history, heard at once.
 - **While the game plays,** mix it: every change is heard at once, and a dot marks each
   strip changed since Play (the header counts them). The changes stay after Stop, as one
   undo step, "Mixer: changes in Play"; undo it, or run "Audio: Take Back Play's Mixer

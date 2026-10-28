@@ -8,10 +8,14 @@
 //! - **The fader's travel** gives more room near 0 dB, as consoles do: +6 dB at the top,
 //!   0 dB at four fifths, −10, −24 and −48 dB below, −80 dB (silence) at the bottom.
 //! - **Edits** keep the layout whole: a bus never feeds itself or one of its own (the
-//!   output list leaves those out), a rename carries its children along, a removed bus
-//!   hands its children to the bus it fed.
+//!   output list leaves those out), a rename carries its children, the sends into it and
+//!   the sidechains it keys along, a removed bus hands its children to the bus it fed.
+//! - **Effects and sends** (E11-2b, ADR 0121's version 2): a bus's chain edited effect by
+//!   effect; the lists offer only the sends and sidechains that would not loop the sound
+//!   back.
 
-use engine_app::{BusLayout, MixerFile};
+use engine_app::effects::{EFFECTS, EffectInfo, ParamInfo, Unit, effect_info};
+use engine_app::{BusLayout, EffectLayout, MixerFile};
 use engine_scene::AssetId;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -179,8 +183,13 @@ pub(crate) struct Strip {
     /// Its gain in dB, and as text.
     pub(crate) gain: f32,
     pub(crate) gain_text: String,
-    /// Where it goes: "→ master", "→ world"; the master's "→ speakers".
+    /// Where it goes: "→ master", "→ world"; the master's "→ speakers"; with its sends'
+    /// count ("→ master +1").
     pub(crate) output: String,
+    /// Its effects: the one's label, or how many ("3 fx"); empty for none.
+    pub(crate) effects: String,
+    /// Every one of them bypassed (B lit).
+    pub(crate) bypassed: bool,
 }
 
 /// A bus's rows in the inspector (E11-1b).
@@ -345,8 +354,11 @@ impl MixerDoc {
             gain: self.layout.master.gain,
             gain_text: String::new(),
             output: String::from("\u{2192} speakers"),
+            effects: String::new(),
+            bypassed: false,
         };
         gain_text(&mut master.gain_text, master.gain);
+        master.bypassed = effects_text(&mut master.effects, &self.layout.master.effects);
         self.strips.push(master);
         let order = self.layout.order();
         let mut depths: Vec<(&str, u8)> = Vec::with_capacity(order.len());
@@ -356,14 +368,21 @@ impl MixerDoc {
                 .and_then(|p| depths.iter().find(|(n, _)| *n == p))
                 .map_or(1, |&(_, d)| d.saturating_add(1));
             depths.push((placed.name, depth));
+            let mut output = format!("\u{2192} {}", placed.parent.unwrap_or(MASTER));
+            if !placed.layout.sends.is_empty() {
+                let _ = write!(output, " +{}", placed.layout.sends.len());
+            }
             let mut strip = Strip {
                 name: placed.name.to_owned(),
                 depth,
                 gain: placed.layout.gain,
                 gain_text: String::new(),
-                output: format!("\u{2192} {}", placed.parent.unwrap_or(MASTER)),
+                output,
+                effects: String::new(),
+                bypassed: false,
             };
             gain_text(&mut strip.gain_text, strip.gain);
+            strip.bypassed = effects_text(&mut strip.effects, &placed.layout.effects);
             self.strips.push(strip);
         }
     }
@@ -379,6 +398,315 @@ impl MixerDoc {
             return Some(self.layout.master.gain);
         }
         self.layout.buses.get(bus).map(|b| b.gain)
+    }
+}
+
+/// What a strip says of `chain`: the one effect's short name, or how many ("3 fx");
+/// nothing for none. Whether every one of them is bypassed.
+fn effects_text(out: &mut String, chain: &[EffectLayout]) -> bool {
+    out.clear();
+    match chain {
+        [] => return false,
+        [one] => out.push_str(short_name(&one.kind)),
+        many => {
+            let _ = write!(out, "{} fx", many.len());
+        }
+    }
+    chain.iter().all(|e| e.bypass)
+}
+
+/// An effect kind's name as a strip, 84 px wide, has room for beside its gain reduction
+/// and B (a desk's scribble strip; the inspector shows the whole name).
+pub(crate) fn short_name(kind: &str) -> &str {
+    match kind {
+        "compressor" => "Comp",
+        "limiter" => "Limit",
+        "low_pass" => "LP",
+        "high_pass" => "HP",
+        "band_pass" => "BP",
+        "notch" => "Notch",
+        "peak" => "EQ",
+        "low_shelf" => "LS",
+        "high_shelf" => "HS",
+        "all_pass" => "AP",
+        "delay" => "Delay",
+        "reverb" => "Reverb",
+        other => other,
+    }
+}
+
+/// A row of an effect's section in the inspector (E11-2b).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum EffectRow {
+    /// A filter's shape: another of the filter kinds.
+    Shape,
+    /// Left out of the mix.
+    Bypass,
+    /// The bus keying it (the kinds a sidechain keys).
+    Sidechain,
+    /// One of its parameters.
+    Param(&'static ParamInfo),
+    /// A kind the engine does not have: its name.
+    Unknown,
+}
+
+impl EffectRow {
+    /// The rows of an effect of `kind`, in order.
+    pub(crate) fn of(kind: &str) -> impl Iterator<Item = Self> {
+        let info = effect_info(kind);
+        let head = match info {
+            None => [Some(Self::Unknown), None, None],
+            Some(i) => [
+                i.filter.then_some(Self::Shape),
+                Some(Self::Bypass),
+                i.sidechain.then_some(Self::Sidechain),
+            ],
+        };
+        head.into_iter().flatten().chain(
+            info.into_iter()
+                .flat_map(|i| i.params.iter().map(Self::Param)),
+        )
+    }
+
+    /// Row `i` of an effect of `kind`.
+    pub(crate) fn at(kind: &str, i: usize) -> Option<Self> {
+        Self::of(kind).nth(i)
+    }
+}
+
+/// The filter kinds, in [`EFFECTS`]'s order: what a filter's shape row offers.
+pub(crate) fn filters() -> impl Iterator<Item = &'static EffectInfo> {
+    EFFECTS.iter().filter(|e| e.filter)
+}
+
+/// A parameter's value as the inspector shows it: a share as a percentage.
+pub(crate) fn shown(p: &ParamInfo, value: f32) -> f32 {
+    if p.unit == Unit::Share {
+        value * 100.0
+    } else {
+        value
+    }
+}
+
+/// A value the inspector was given back in the parameter's own unit.
+pub(crate) fn stored(p: &ParamInfo, value: f32) -> f32 {
+    if p.unit == Unit::Share {
+        value / 100.0
+    } else {
+        value
+    }
+}
+
+/// A parameter's value as text, with as many decimals as its unit needs.
+pub(crate) fn param_text(out: &mut String, p: &ParamInfo, value: f32) {
+    let v = shown(p, value);
+    let _ = match p.unit {
+        Unit::Hz | Unit::Share => write!(out, "{v:.0}"),
+        Unit::Ms if v >= 100.0 => write!(out, "{v:.0}"),
+        Unit::Seconds | Unit::Number => write!(out, "{v:.2}"),
+        Unit::Db | Unit::Ms | Unit::Ratio => write!(out, "{v:.1}"),
+    };
+}
+
+/// A parameter's name as the inspector shows it: its label and unit ("attack ms").
+pub(crate) fn param_name(out: &mut String, p: &ParamInfo) {
+    out.clear();
+    out.extend(p.label.chars().flat_map(char::to_lowercase));
+    let unit = match p.unit {
+        Unit::Db => " dB",
+        Unit::Hz => " Hz",
+        Unit::Ms => " ms",
+        Unit::Seconds => " s",
+        Unit::Share => " %",
+        Unit::Ratio | Unit::Number => "",
+    };
+    out.push_str(unit);
+}
+
+/// Bus `bus`'s chain (the master's for [`MASTER`]); empty for a bus the layout lacks.
+pub(crate) fn chain<'a>(layout: &'a MixerFile, bus: &str) -> &'a [EffectLayout] {
+    layout.effects(bus).unwrap_or(&[])
+}
+
+fn chain_mut<'a>(layout: &'a mut MixerFile, bus: &str) -> Option<&'a mut Vec<EffectLayout>> {
+    if bus == MASTER {
+        Some(&mut layout.master.effects)
+    } else {
+        layout.buses.get_mut(bus).map(|b| &mut b.effects)
+    }
+}
+
+fn effect_mut<'a>(layout: &'a mut MixerFile, bus: &str, k: usize) -> Option<&'a mut EffectLayout> {
+    chain_mut(layout, bus)?.get_mut(k)
+}
+
+/// An effect of `kind` at the end of bus `bus`'s chain, every parameter at its default,
+/// written out: its place.
+pub(crate) fn add_effect(layout: &mut MixerFile, bus: &str, kind: &str) -> Option<usize> {
+    let chain = chain_mut(layout, bus)?;
+    chain.push(EffectLayout::new(kind));
+    Some(chain.len() - 1)
+}
+
+/// Effect `k` of bus `bus` taken away.
+pub(crate) fn remove_effect(layout: &mut MixerFile, bus: &str, k: usize) {
+    if let Some(chain) = chain_mut(layout, bus)
+        && k < chain.len()
+    {
+        chain.remove(k);
+    }
+}
+
+/// Effect `k` of bus `bus` moved to place `to` (past the end: last): its place now.
+pub(crate) fn move_effect(layout: &mut MixerFile, bus: &str, k: usize, to: usize) -> Option<usize> {
+    let chain = chain_mut(layout, bus)?;
+    if k >= chain.len() {
+        return None;
+    }
+    let to = to.min(chain.len() - 1);
+    let effect = chain.remove(k);
+    chain.insert(to, effect);
+    Some(to)
+}
+
+/// Parameter `name` of effect `k` of bus `bus` set to `value` (in its unit), within its
+/// range.
+pub(crate) fn set_param(layout: &mut MixerFile, bus: &str, k: usize, name: &str, value: f32) {
+    if let Some(e) = effect_mut(layout, bus, k)
+        && let Some(p) = effect_info(&e.kind).and_then(|i| i.param(name))
+    {
+        e.params.insert(name.to_owned(), p.clamp(value));
+    }
+}
+
+/// Effect `k` of bus `bus` bypassed, or back.
+pub(crate) fn toggle_bypass(layout: &mut MixerFile, bus: &str, k: usize) {
+    if let Some(e) = effect_mut(layout, bus, k) {
+        e.bypass = !e.bypass;
+    }
+}
+
+/// B: every effect of bus `bus` bypassed, or (when every one is) every one back.
+pub(crate) fn bypass_all(layout: &mut MixerFile, bus: &str) {
+    if let Some(chain) = chain_mut(layout, bus) {
+        let off = !chain.iter().all(|e| e.bypass);
+        for e in chain {
+            e.bypass = off;
+        }
+    }
+}
+
+/// Filter `k` of bus `bus` given the shape `kind`: the frequency, Q and gain it has kept
+/// where the new shape has them, the new shape's defaults for the rest.
+pub(crate) fn set_shape(layout: &mut MixerFile, bus: &str, k: usize, kind: &str) {
+    let Some(info) = effect_info(kind).filter(|i| i.filter) else {
+        return;
+    };
+    if let Some(e) = effect_mut(layout, bus, k)
+        && effect_info(&e.kind).is_some_and(|i| i.filter)
+    {
+        let mut shaped = EffectLayout::new(kind);
+        for p in info.params {
+            if let Some(v) = e.param(p.name) {
+                shaped.params.insert(p.name.to_owned(), v);
+            }
+        }
+        shaped.bypass = e.bypass;
+        *e = shaped;
+    }
+}
+
+/// The buses that can key effect `k` of bus `bus` without looping the sound back, in the
+/// layout's order.
+pub(crate) fn sidechain_sources<'a>(layout: &'a MixerFile, bus: &str, k: usize) -> Vec<&'a str> {
+    if chain(layout, bus).get(k).is_none() {
+        return Vec::new();
+    }
+    // The layout without this sidechain: a source is offered when it is made and every
+    // other route stays.
+    let mut trial = layout.clone();
+    set_sidechain(&mut trial, bus, k, "");
+    let base = trial.routes();
+    let (sends, sidechains) = (base.sends.len(), base.sidechains.len());
+    layout
+        .order()
+        .into_iter()
+        .map(|b| b.name)
+        .filter(|&source| {
+            if source == bus {
+                return false;
+            }
+            set_sidechain(&mut trial, bus, k, source);
+            let routes = trial.routes();
+            routes.sidechains.contains(&(bus, k, source))
+                && routes.sends.len() == sends
+                && routes.sidechains.len() == sidechains + 1
+        })
+        .collect()
+}
+
+/// Effect `k` of bus `bus` keyed by bus `source` (empty: its own sound).
+pub(crate) fn set_sidechain(layout: &mut MixerFile, bus: &str, k: usize, source: &str) {
+    if let Some(e) = effect_mut(layout, bus, k) {
+        source.clone_into(&mut e.sidechain);
+    }
+}
+
+/// The buses bus `bus` can send into: not itself, not one it sends into already, none
+/// that would loop the sound back; in the layout's order.
+pub(crate) fn send_targets<'a>(layout: &'a MixerFile, bus: &str) -> Vec<&'a str> {
+    let Some(sends) = layout.buses.get(bus).map(|b| &b.sends) else {
+        return Vec::new();
+    };
+    // A target is offered when its send is made and every other route stays.
+    let base = layout.routes();
+    let (made, sidechains) = (base.sends.len(), base.sidechains.len());
+    let mut trial = layout.clone();
+    layout
+        .order()
+        .into_iter()
+        .map(|b| b.name)
+        .filter(|&to| {
+            if to == bus || sends.contains_key(to) {
+                return false;
+            }
+            add_send(&mut trial, bus, to);
+            let routes = trial.routes();
+            let fits = routes.sends.iter().any(|s| s.0 == bus && s.1 == to)
+                && routes.sends.len() == made + 1
+                && routes.sidechains.len() == sidechains;
+            drop(routes);
+            remove_send(&mut trial, bus, to);
+            fits
+        })
+        .collect()
+}
+
+/// A send from bus `bus` into `to` at 0 dB, after the fader.
+pub(crate) fn add_send(layout: &mut MixerFile, bus: &str, to: &str) {
+    if let Some(b) = layout.buses.get_mut(bus) {
+        b.sends.entry(to.to_owned()).or_default();
+    }
+}
+
+/// Bus `bus`'s send into `to` taken away.
+pub(crate) fn remove_send(layout: &mut MixerFile, bus: &str, to: &str) {
+    if let Some(b) = layout.buses.get_mut(bus) {
+        b.sends.remove(to);
+    }
+}
+
+/// Bus `bus`'s send into `to` at `db`, within a fader's travel.
+pub(crate) fn set_send_gain(layout: &mut MixerFile, bus: &str, to: &str, db: f32) {
+    if let Some(send) = layout.buses.get_mut(bus).and_then(|b| b.sends.get_mut(to)) {
+        send.gain = db.clamp(FLOOR, CEILING);
+    }
+}
+
+/// Bus `bus`'s send into `to` taken before its fader, or after.
+pub(crate) fn toggle_send_tap(layout: &mut MixerFile, bus: &str, to: &str) {
+    if let Some(send) = layout.buses.get_mut(bus).and_then(|b| b.sends.get_mut(to)) {
+        send.pre_fader = !send.pre_fader;
     }
 }
 
@@ -515,7 +843,22 @@ pub(crate) fn remove_bus(layout: &mut MixerFile, bus: &str) {
         if b.parent == bus {
             b.parent.clone_from(&gone.parent);
         }
+        b.sends.remove(bus);
     }
+    for e in every_effect(layout) {
+        if e.sidechain == bus {
+            e.sidechain.clear();
+        }
+    }
+}
+
+/// Every effect of the layout, the master's among them.
+fn every_effect(layout: &mut MixerFile) -> impl Iterator<Item = &mut EffectLayout> {
+    layout
+        .master
+        .effects
+        .iter_mut()
+        .chain(layout.buses.values_mut().flat_map(|b| b.effects.iter_mut()))
 }
 
 /// Bus `from` called `to`, the buses it is fed by following.
@@ -543,6 +886,14 @@ pub(crate) fn rename_bus(layout: &mut MixerFile, from: &str, to: &str) -> Result
     for b in layout.buses.values_mut() {
         if b.parent == from {
             to.clone_into(&mut b.parent);
+        }
+        if let Some(send) = b.sends.remove(from) {
+            b.sends.insert(to.to_owned(), send);
+        }
+    }
+    for e in every_effect(layout) {
+        if e.sidechain == from {
+            to.clone_into(&mut e.sidechain);
         }
     }
     Ok(())
@@ -650,6 +1001,132 @@ mod tests {
         assert!(on(&[], &["steps"], "effects"), "what it feeds");
         assert!(on(&["master"], &["music"], MASTER), "the master never");
         assert!(!on(&["voice"], &[], "voice"));
+    }
+
+    #[test]
+    fn a_chain_is_edited_effect_by_effect() {
+        let mut layout = MixerFile::builtin();
+        assert_eq!(add_effect(&mut layout, "music", "compressor"), Some(0));
+        assert_eq!(add_effect(&mut layout, "music", "low_pass"), Some(1));
+        assert_eq!(add_effect(&mut layout, MASTER, "limiter"), Some(0));
+        assert_eq!(add_effect(&mut layout, "nowhere", "delay"), None);
+        // Every parameter written out at its default.
+        let comp = &chain(&layout, "music")[0];
+        assert_eq!(comp.params.len(), 6);
+        assert_eq!(comp.params["ratio"], 4.0);
+        // A parameter within its range; the filter moved first, then given a shelf's shape:
+        // its frequency kept, a gain at its default.
+        set_param(&mut layout, "music", 0, "ratio", 50.0);
+        assert_eq!(chain(&layout, "music")[0].params["ratio"], 20.0);
+        set_param(&mut layout, "music", 1, "frequency_hz", 500.0);
+        assert_eq!(move_effect(&mut layout, "music", 1, 0), Some(0));
+        set_shape(&mut layout, "music", 0, "low_shelf");
+        let shelf = &chain(&layout, "music")[0];
+        assert_eq!(shelf.kind, "low_shelf");
+        assert_eq!(shelf.params["frequency_hz"], 500.0);
+        assert_eq!(shelf.params["gain_db"], 0.0);
+        set_shape(&mut layout, "music", 1, "peak");
+        assert_eq!(
+            chain(&layout, "music")[1].kind,
+            "compressor",
+            "not a filter"
+        );
+        // B: all off, then all back; one alone.
+        bypass_all(&mut layout, "music");
+        assert!(chain(&layout, "music").iter().all(|e| e.bypass));
+        bypass_all(&mut layout, "music");
+        assert!(chain(&layout, "music").iter().all(|e| !e.bypass));
+        toggle_bypass(&mut layout, "music", 1);
+        assert!(chain(&layout, "music")[1].bypass);
+        remove_effect(&mut layout, "music", 0);
+        assert_eq!(chain(&layout, "music").len(), 1);
+        assert_eq!(chain(&layout, "music")[0].kind, "compressor");
+        // The strips say so.
+        let doc = MixerDoc::new(AssetId::new(), "main.mixer", layout);
+        let music = &doc.strips[doc.strip("music").unwrap()];
+        assert_eq!(music.effects, "Comp");
+        assert!(music.bypassed);
+        assert_eq!(doc.strips[0].effects, "Limit");
+        // Every built-in kind has a short name.
+        for info in EFFECTS {
+            assert_ne!(short_name(info.kind), info.kind, "{}", info.kind);
+        }
+        assert!(doc.strips[doc.strip("ui").unwrap()].effects.is_empty());
+    }
+
+    #[test]
+    fn sends_and_sidechains_are_offered_only_where_they_would_not_loop() {
+        let mut layout = MixerFile::builtin();
+        layout
+            .buses
+            .insert(String::from("steps"), BusLayout::new().under("effects"));
+        // Effects can send anywhere but itself and steps (which feeds it).
+        let targets = send_targets(&layout, "effects");
+        assert_eq!(targets, ["music", "ui", "voice"]);
+        add_send(&mut layout, "effects", "music");
+        set_send_gain(&mut layout, "effects", "music", -120.0);
+        assert_eq!(layout.buses["effects"].sends["music"].gain, FLOOR);
+        toggle_send_tap(&mut layout, "effects", "music");
+        assert!(layout.buses["effects"].sends["music"].pre_fader);
+        // Music cannot send back into effects (effects sends into it), nor into steps
+        // (which feeds effects); nor twice into one bus.
+        let targets = send_targets(&layout, "music");
+        assert!(!targets.contains(&"effects") && !targets.contains(&"steps"));
+        assert!(targets.contains(&"ui"));
+        add_send(&mut layout, "music", "ui");
+        assert!(!send_targets(&layout, "music").contains(&"ui"));
+        // A compressor on music: voice or effects can key it; ui, which music sends into,
+        // would loop the sound back.
+        add_effect(&mut layout, "music", "compressor");
+        let sources = sidechain_sources(&layout, "music", 0);
+        assert!(sources.contains(&"voice") && sources.contains(&"effects"));
+        assert!(!sources.contains(&"ui") && !sources.contains(&"music"));
+        set_sidechain(&mut layout, "music", 0, "voice");
+        assert_eq!(chain(&layout, "music")[0].sidechain, "voice");
+        // A rename follows into sends and sidechains; a removal takes them away.
+        rename_bus(&mut layout, "voice", "dialogue").unwrap();
+        assert_eq!(chain(&layout, "music")[0].sidechain, "dialogue");
+        rename_bus(&mut layout, "music", "score").unwrap();
+        assert!(layout.buses["effects"].sends.contains_key("score"));
+        remove_bus(&mut layout, "dialogue");
+        assert!(chain(&layout, "score")[0].sidechain.is_empty());
+        remove_bus(&mut layout, "score");
+        assert!(layout.buses["effects"].sends.is_empty());
+        assert!(layout.buses["ui"].sends.is_empty());
+        remove_send(&mut layout, "effects", "nowhere");
+        let doc = MixerDoc::new(AssetId::new(), "main.mixer", {
+            add_send(&mut layout, "effects", "ui");
+            layout
+        });
+        assert_eq!(
+            doc.strips[doc.strip("effects").unwrap()].output,
+            "\u{2192} master +1"
+        );
+    }
+
+    #[test]
+    fn parameters_are_shown_in_their_units() {
+        let comp = effect_info("compressor").unwrap();
+        let delay = effect_info("delay").unwrap();
+        let (mut name, mut text) = (String::new(), String::new());
+        param_name(&mut name, comp.param("attack_ms").unwrap());
+        assert_eq!(name, "attack ms");
+        param_name(&mut name, delay.param("mix").unwrap());
+        assert_eq!(name, "mix %");
+        let mix = delay.param("mix").unwrap();
+        param_text(&mut text, mix, 0.35);
+        assert_eq!(text, "35");
+        assert_eq!(stored(mix, 50.0), 0.5);
+        let rows: Vec<EffectRow> = EffectRow::of("peak").collect();
+        assert_eq!(rows[0], EffectRow::Shape);
+        assert_eq!(rows[1], EffectRow::Bypass);
+        assert_eq!(rows.len(), 2 + 3, "shape, bypass, frequency, q, gain");
+        assert_eq!(EffectRow::at("compressor", 1), Some(EffectRow::Sidechain));
+        assert_eq!(
+            EffectRow::of("chorus").collect::<Vec<_>>(),
+            [EffectRow::Unknown]
+        );
+        assert_eq!(filters().count(), 8);
     }
 
     #[test]

@@ -864,6 +864,9 @@ pub struct ShellModel<'a> {
     pub prefab: bool,
     /// Inspector sections.
     pub inspector: &'a [Section<'a>],
+    /// The sections from the first to before the second have ↑ and ↓ in their headers:
+    /// a bus's effects, in the order of their chain (E11-2b).
+    pub movable: [usize; 2],
     /// A sound file's waveform and its controls, under one of them (E11-3c).
     pub sound: Option<SoundPanel<'a>>,
     /// The inspector shows entities: its Add Component button after the sections.
@@ -1012,6 +1015,8 @@ pub struct ShellResponse {
     pub section_script: Option<usize>,
     /// A section's × was clicked: its component is taken away.
     pub remove_section: Option<usize>,
+    /// A section's ↑ (`true`) or ↓ was clicked: it moves in its list (E11-2b).
+    pub move_section: Option<(usize, bool)>,
     /// The inspector's sound (E11-3c): ▶ or ■ was clicked.
     pub sound_play: bool,
     /// Its loop was toggled.
@@ -1034,6 +1039,8 @@ pub struct ShellResponse {
     pub mixer_held: Option<usize>,
     /// Monitor was clicked: the solos and mutes left aside, or back.
     pub mixer_monitor: bool,
+    /// A strip's B was clicked (E11-2b): its effects bypassed, or back.
+    pub mixer_bypass: Option<usize>,
     /// The inspector field under the mouse (section, field): Backspace resets it, Ctrl+C
     /// and Ctrl+V copy and paste its value.
     pub hovered_field: Option<(usize, usize)>,
@@ -3648,8 +3655,36 @@ fn inspector_dock(
                         |ui| {
                             text(ui, "arrow", icons::EXPANDED, ICON, p.text_dim);
                             text(ui, "title", section.title, TEXT, p.text);
-                            if section.removable {
+                            if (model.movable[0]..model.movable[1]).contains(&s) {
                                 ui.spacer("fill");
+                                for (key, icon, up) in [
+                                    ("up", icons::MOVE_UP, true),
+                                    ("down", icons::MOVE_DOWN, false),
+                                ] {
+                                    let hovered = ui.is_hovered(ui.id(key));
+                                    let id = ui.container(
+                                        key,
+                                        Style {
+                                            size: [Size::Fixed(18.0), Size::Fixed(18.0)],
+                                            radius: 3.0,
+                                            background: hovered.then_some(p.field_hover),
+                                            align_main: Align::Center,
+                                            align_cross: Align::Center,
+                                            ..Style::default()
+                                        },
+                                        |ui| {
+                                            text(ui, "icon", icon, 13.0, p.text_dim);
+                                        },
+                                    );
+                                    if ui.sense(id, false).clicked {
+                                        out.move_section = Some((s, up));
+                                    }
+                                }
+                            }
+                            if section.removable {
+                                if !(model.movable[0]..model.movable[1]).contains(&s) {
+                                    ui.spacer("fill");
+                                }
                                 let hovered = ui.is_hovered(ui.id("remove"));
                                 let id = ui.container(
                                     "remove",
@@ -4011,9 +4046,11 @@ fn output_panel(ui: &mut Ui, view: &OutputView<'_>, p: &Palette, out: &mut Shell
 }
 
 /// A strip's fader: its height, its thumb's, and the strips' width.
-const FADER_HEIGHT: f32 = 104.0;
+const FADER_HEIGHT: f32 = 92.0;
 /// The held peak's row above it.
 const HELD_ROW: f32 = 14.0;
+/// The effects' row above that (E11-2b).
+const FX_ROW: f32 = 16.0;
 const THUMB: f32 = 8.0;
 const STRIP_WIDTH: f32 = 84.0;
 
@@ -4058,6 +4095,11 @@ pub struct StripView<'a> {
     pub silenced: bool,
     /// Changed since Play began (E11-1b-3): a dot before its name while the game plays.
     pub changed: bool,
+    /// Its effects (E11-2b): the one's label or how many, and the most gain reduction now
+    /// ("Compressor −3.1"); empty for none.
+    pub effects: &'a str,
+    /// Every one of them bypassed: B lit.
+    pub bypassed: bool,
 }
 
 /// A strip's fader pressed, dragged or let go this frame (E11-1b): the strip and the
@@ -4212,6 +4254,26 @@ fn mixer_strip(ui: &mut Ui, i: usize, strip: &StripView<'_>, p: &Palette, out: &
                 },
             );
             text(ui, "output", strip.output, SMALL, p.text_dim);
+            // Its effects, and B to bypass them all (E11-2b).
+            ui.row(
+                "fx",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(FX_ROW)],
+                    gap: 3.0,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    let color = if strip.bypassed { p.text_dim } else { p.text };
+                    text(ui, "effects", strip.effects, SMALL, color);
+                    if !strip.effects.is_empty() {
+                        ui.spacer("fill");
+                        if listen_button(ui, "bypass", "B", strip.bypassed, p.warning, p) {
+                            out.mixer_bypass = Some(i);
+                        }
+                    }
+                },
+            );
             // The loudest peak since it was cleared, and the clip light with its sign: a
             // click clears them (Ctrl: every strip's).
             let held = ui.row(

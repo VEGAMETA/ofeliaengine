@@ -249,6 +249,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         selection: "Player  ·  CharacterBody",
         prefab: false,
         inspector: &sections,
+        movable: [0, 0],
         add_component: true,
         add_at: None,
         view_mode: "Lit",
