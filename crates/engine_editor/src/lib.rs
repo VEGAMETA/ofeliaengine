@@ -20,6 +20,7 @@ pub mod expr;
 mod faces;
 mod find;
 mod gizmo;
+mod graph;
 mod handles;
 mod highlight;
 pub mod icons;

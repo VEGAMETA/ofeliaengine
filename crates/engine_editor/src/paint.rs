@@ -82,6 +82,40 @@ impl UiText {
 }
 
 impl UiText {
+    /// Draws `s` at `size` pixels from `left`, its laid-out box's left edge at `left.x`
+    /// and its middle at `left.y` (a graph's labels, ADR 0123): the glyphs drawn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_left(
+        &mut self,
+        canvas: &mut Canvas,
+        texture: &GlyphTexture,
+        s: &str,
+        size: f32,
+        left: Vec2,
+        color: Vec4,
+        order: Order,
+    ) -> usize {
+        let laid_out = self.cache.get(
+            (&mut self.fonts, &self.stack, &mut self.layout),
+            s,
+            size,
+            None,
+            false,
+        );
+        let origin = left - Vec2::new(0.0, laid_out.extent[1] * 0.5);
+        draw_glyphs(
+            canvas,
+            &laid_out.glyphs,
+            &self.fonts,
+            &mut self.atlas,
+            texture,
+            origin,
+            size,
+            color,
+            order,
+        )
+    }
+
     /// A character's width in the monospace face at `size` pixels, not rounded: what a
     /// code view's columns are placed by.
     pub fn mono_advance(&mut self, size: f32) -> f32 {

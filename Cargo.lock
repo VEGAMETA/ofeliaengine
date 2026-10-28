@@ -462,6 +462,7 @@ dependencies = [
  "engine_latency",
  "engine_log",
  "engine_luau_analysis",
+ "engine_material_graph",
  "engine_nav",
  "engine_net_transport",
  "engine_physics",

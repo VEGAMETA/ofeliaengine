@@ -2424,8 +2424,9 @@ double_sided = false
   `shader = asset("materials/moss.mgraph", …)` with `type = "GraphMaterial"`. Its module is
   generated into `.ofelia/cache/graphs/` and compiled as a module is (written again only
   when the graph changes); the graph's named numbers and its texture nodes' images are the
-  material's values where the file gives none. The editor's canvas for graphs comes next
-  (until then a graph is written by hand or by code, `engine_material_graph`).
+  material's values where the file gives none. The editor opens a graph on a canvas in a
+  tab of its own (`docs/dev-guide/editor.md`, Material graphs); adding nodes there comes
+  next (until then new nodes are written by hand or by code, `engine_material_graph`).
 - To put material files on a glTF scene's meshes, write `<scene>.materials.ron` next to
   it: `{ "glTF material name": "materials/red_velvet.material" }` (`"#14"` for an unnamed
   glTF material, by index). `ofeliaengine cook` applies it (or `--materials <MAP>`; the

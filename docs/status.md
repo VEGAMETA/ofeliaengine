@@ -868,6 +868,12 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-3d-1, the graph canvas** (#PR, ADR 0123's as-built): a `.mgraph` opens in a tab of
+    its own (a double click in the dock), its canvas where the viewport is: boxes with
+    their ports and values, links as curves, pan, zoom by steps, F; links made, lifted,
+    moved and taken out by the mouse (loops refused), selection by click and box, moves,
+    Delete, each a step of the one history; Ctrl+S, Ctrl+W, the session and autosaves;
+    no allocation in a steady frame. Ctrl+Tab no longer moves the panels' focus.
   - **ADR 0123 accepted** (#423; the owner's answers, 2026-10-28): graph files are `.mgraph`
     (header `[mgraph version=1 id=…]`); graphs and shaders open as files in tabs of their
     own, as code does, not in a panel under the viewport; the bottom bar's Shader
@@ -905,10 +911,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-3d, the canvas (a `.mgraph` opened in the Shader panel, nodes, ports,
-       links, pan, zoom, selection, moves, deletes, undo; Material: New Graph), then
-       E10-3e to E10-3g (ADR 0123's steps); then E10-4, previews, stats and variants with
-       a base.
+       2D): E10-3d-2 (Material: New Graph with the object's own textures, duplicates,
+       Ctrl+drag yanking links), then E10-3e to E10-3g (ADR 0123's steps); then E10-4,
+       previews, stats and variants with a base.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

@@ -778,6 +778,16 @@ pub struct BreakOptionsView<'a> {
     pub error: &'a str,
 }
 
+/// The bar over a material graph's canvas (ADR 0123 E10-3d), in the center instead of the
+/// viewport; the app draws the canvas under the panels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphBar<'a> {
+    /// The graph's file.
+    pub path: &'a str,
+    /// Its nodes, its selection and the zoom.
+    pub status: &'a str,
+}
+
 /// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
 /// the carets among them, by line and column; the shell puts them on the monospace grid.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -859,6 +869,12 @@ pub struct ShellModel<'a> {
     pub active_script: Option<usize>,
     /// The shown script's code.
     pub code: Option<CodeView<'a>>,
+    /// Open material graphs (tabs after the scripts'); an unsaved one ends with `*`.
+    pub graphs: &'a [&'a str],
+    /// The graph tab shown, if one is: its canvas instead of the viewport.
+    pub active_graph: Option<usize>,
+    /// The shown graph's bar.
+    pub graph: Option<GraphBar<'a>>,
     /// Tools in the tool bar, and the active one.
     pub tools: &'a [&'a str],
     /// The active tool.
@@ -976,6 +992,12 @@ pub struct ShellResponse {
     pub close_script: Option<usize>,
     /// Id of the code area while a script is shown; its rectangle from [`Ui::rect_of`].
     pub code: u64,
+    /// A graph tab was clicked.
+    pub graph_tab: Option<usize>,
+    /// A graph tab's close mark was clicked.
+    pub close_graph: Option<usize>,
+    /// Id of the canvas while a graph is shown; its rectangle from [`Ui::rect_of`].
+    pub graph_canvas: u64,
     /// The find bar's query field was used (`Ui::edited_text` while it changes).
     pub find_query: Option<TextFieldResponse>,
     /// Its replace field was.
@@ -1358,9 +1380,29 @@ fn center(
         ui.row("scene tabs", bar(p, 30.0), |ui| {
             scene_tabs(ui, model, p, out);
             script_tabs(ui, model, p, out);
+            graph_tabs(ui, model, p, out);
             ui.spacer("fill");
             play_controls(ui, model.playing, model.paused, p, out);
         });
+        // A graph's tab (ADR 0123): its bar, and its canvas where the tool bar and the
+        // viewport are (the app draws it, under the panels).
+        if let Some(graph) = &model.graph {
+            ui.row("graph bar", bar(p, 30.0).background(p.dock), |ui| {
+                text(ui, "path", graph.path, TEXT, p.text_dim);
+                ui.spacer("fill");
+                text(ui, "status", graph.status, TEXT, p.text_dim);
+            });
+            out.graph_canvas = ui.container(
+                "graph",
+                Style {
+                    clip: true,
+                    ..Style::fill()
+                },
+                |_| {},
+            );
+            file_browser(ui, model, p, out);
+            return;
+        }
         // A script's tab: its code where the tool bar and the viewport are.
         if let Some(view) = &model.code {
             ui.row("code bar", bar(p, 30.0).background(p.dock), |ui| {
@@ -1603,7 +1645,9 @@ fn scene_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellR
     let closable = model.scenes.len() > 1;
     for (i, label) in model.scenes.iter().enumerate() {
         ui.push_id(i as u64);
-        let on = model.active_scene == i && model.active_script.is_none();
+        let on = model.active_scene == i
+            && model.active_script.is_none()
+            && model.active_graph.is_none();
         let mut close = None;
         let id = ui.container(
             "tab",
@@ -1677,6 +1721,47 @@ fn script_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shell
             out.close_script = Some(i);
         } else if ui.sense(id, false).clicked {
             out.script_tab = Some(i);
+        }
+        ui.pop_id();
+    }
+}
+
+/// The open material graphs' tabs, after the scripts' (ADR 0123 E10-3d).
+fn graph_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellResponse) {
+    for (i, label) in model.graphs.iter().enumerate() {
+        ui.push_id(i as u64);
+        let on = model.active_graph == Some(i);
+        let mut close = 0;
+        let id = ui.container(
+            "graph tab",
+            Style {
+                padding: [8.0, 5.0, 8.0, 5.0],
+                gap: 6.0,
+                radius: 3.0,
+                background: on.then_some(p.dock),
+                align_cross: Align::Center,
+                ..Style::default()
+            },
+            |ui| {
+                text(ui, "icon", icons::SHADER, ICON, srgb(120, 196, 222));
+                let color = if on { p.text } else { p.text_dim };
+                text(ui, "label", label, TEXT, color);
+                close = ui.container(
+                    "close",
+                    Style {
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        text(ui, "icon", icons::CLOSE, ICON, p.text_dim);
+                    },
+                );
+            },
+        );
+        if ui.sense(close, false).clicked {
+            out.close_graph = Some(i);
+        } else if ui.sense(id, false).clicked {
+            out.graph_tab = Some(i);
         }
         ui.pop_id();
     }

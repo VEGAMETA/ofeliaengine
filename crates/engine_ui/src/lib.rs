@@ -606,7 +606,8 @@ impl Ui {
     fn handle_keys(&mut self) {
         for i in 0..self.input.keys.len() {
             match self.input.keys[i] {
-                UiKey::Tab if !self.focus_order.is_empty() => {
+                // Ctrl+Tab is the application's (its tabs), not the focus's.
+                UiKey::Tab if !self.focus_order.is_empty() && !self.input.ctrl => {
                     let n = self.focus_order.len();
                     let pos = self.focus_order.iter().position(|&f| f == self.focused);
                     let next = match (pos, self.input.shift) {

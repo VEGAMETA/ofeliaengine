@@ -291,6 +291,8 @@ pub(crate) struct EditorState {
     pub(crate) active: Option<usize>,
     /// The script tab shown over it, among the scripts (E8-1b).
     pub(crate) script: Option<usize>,
+    /// The graph tab shown over it, among the graphs (ADR 0123 E10-3d).
+    pub(crate) graph: Option<usize>,
 }
 
 /// `.ofelia/session`: what the editor brings back at its next start.
@@ -306,6 +308,9 @@ pub(crate) struct SessionFile {
     pub(crate) materials: Vec<MaterialEntry>,
     /// The mixer's layout with unsaved edits (E11-1b-2), a `[mixer]` block.
     pub(crate) mixer: Option<MaterialEntry>,
+    /// The material graphs open in tabs (ADR 0123 E10-3d), in their order, a `[graph]`
+    /// block each: its file, and its unsaved text where it has some.
+    pub(crate) graphs: Vec<MaterialEntry>,
 }
 
 /// The session file's version. Keys and sections it does not know are skipped, so a
@@ -398,6 +403,9 @@ impl SessionFile {
         if let Some(script) = self.editor.script {
             let _ = writeln!(out, "script = {script}");
         }
+        if let Some(graph) = self.editor.graph {
+            let _ = writeln!(out, "graph = {graph}");
+        }
         for (key, placement) in [
             ("window", self.editor.window),
             ("game_window", self.editor.game_window),
@@ -477,14 +485,18 @@ impl SessionFile {
                 out.push('\n');
             }
         }
-        for m in &self.materials {
-            out.push_str("\n[material]\npath = ");
-            quote_into(&mut out, &slashes(&m.path));
-            out.push('\n');
-            if let Some(path) = &m.autosave {
-                out.push_str("autosave = ");
-                quote_into(&mut out, &slashes(path));
+        for (block, list) in [("[material]", &self.materials), ("[graph]", &self.graphs)] {
+            for m in list {
                 out.push('\n');
+                out.push_str(block);
+                out.push_str("\npath = ");
+                quote_into(&mut out, &slashes(&m.path));
+                out.push('\n');
+                if let Some(path) = &m.autosave {
+                    out.push_str("autosave = ");
+                    quote_into(&mut out, &slashes(path));
+                    out.push('\n');
+                }
             }
         }
         // Lines as people read them, from 1.
@@ -538,6 +550,7 @@ impl SessionFile {
             Script,
             Material,
             Mixer,
+            Graph,
             Breakpoint,
             /// A section of a later editor: skipped.
             Other,
@@ -594,6 +607,13 @@ impl SessionFile {
                             autosave: None,
                         });
                         Section::Mixer
+                    }
+                    "[graph]" => {
+                        file.graphs.push(MaterialEntry {
+                            path: PathBuf::new(),
+                            autosave: None,
+                        });
+                        Section::Graph
                     }
                     "[breakpoint]" => {
                         // No line until its `line` key: a block without one is dropped.
@@ -682,16 +702,16 @@ impl SessionFile {
                         file.editor.error_stops = Some((truth(uncaught)?, truth(caught)?));
                     }
                     "fly" => file.editor.fly = Some(parse_number(value).map_err(at)?),
-                    "active" | "script" => {
+                    "active" | "script" | "graph" => {
                         let tab = Some(
                             value
                                 .parse()
                                 .map_err(|_| at(format!("`{value}` is not a tab's number")))?,
                         );
-                        if key == "active" {
-                            file.editor.active = tab;
-                        } else {
-                            file.editor.script = tab;
+                        match key {
+                            "active" => file.editor.active = tab,
+                            "script" => file.editor.script = tab,
+                            _ => file.editor.graph = tab,
                         }
                     }
                     "pick_transparent" => {
@@ -741,11 +761,11 @@ impl SessionFile {
                     };
                     read_script_key(s, key, value).map_err(at)?;
                 }
-                Section::Material | Section::Mixer => {
-                    let m = if matches!(section, Section::Mixer) {
-                        file.mixer.as_mut()
-                    } else {
-                        file.materials.last_mut()
+                Section::Material | Section::Mixer | Section::Graph => {
+                    let m = match section {
+                        Section::Mixer => file.mixer.as_mut(),
+                        Section::Graph => file.graphs.last_mut(),
+                        _ => file.materials.last_mut(),
                     };
                     let Some(m) = m else {
                         continue;
@@ -966,6 +986,16 @@ pub(crate) fn mixer_autosave_name(layout: &Path) -> PathBuf {
         .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
     let hash = engine_core::hash::state_hash64(slashes(layout).as_bytes());
     PathBuf::from(format!("autosave/{stem}-{hash:016x}.mixer"))
+}
+
+/// Where a material graph's unsaved text goes, relative to `.ofelia/` (ADR 0123 E10-3d):
+/// by its file's stem and a hash of its path, as a material file's.
+pub(crate) fn graph_autosave_name(graph: &Path) -> PathBuf {
+    let stem = graph
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let hash = engine_core::hash::state_hash64(slashes(graph).as_bytes());
+    PathBuf::from(format!("autosave/{stem}-{hash:016x}.mgraph"))
 }
 
 /// Where a material file's unsaved text goes, relative to `.ofelia/` (E10-1c): by its file's
@@ -1318,7 +1348,18 @@ mod tests {
                 }),
                 active: Some(1),
                 script: Some(0),
+                graph: Some(1),
             },
+            graphs: vec![
+                MaterialEntry {
+                    path: PathBuf::from("materials/moss.mgraph"),
+                    autosave: None,
+                },
+                MaterialEntry {
+                    path: PathBuf::from("materials/glow.mgraph"),
+                    autosave: Some(graph_autosave_name(Path::new("materials/glow.mgraph"))),
+                },
+            ],
             materials: vec![MaterialEntry {
                 path: PathBuf::from("materials/red.material"),
                 autosave: Some(material_autosave_name(Path::new("materials/red.material"))),
