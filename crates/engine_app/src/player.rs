@@ -1616,6 +1616,24 @@ impl Player {
         }
     }
 
+    /// Runs the game's scripts interpreted (`true`) or as Luau's native code (ADR 0119's
+    /// full script debugging; the editor's Play sets it as its switch says): interpreted, a
+    /// stop at an error reads every frame's locals, and the scripts run slower (8-33 % on
+    /// ADR 0114's scenes). Loaded modules run again when the choice changes, in the order
+    /// they require each other, their instances going on with their state; a host made
+    /// later follows it. Not while a script is stopped: the next call switches them. How
+    /// many modules ran again.
+    pub fn set_interpreted_scripts(&mut self, on: bool) -> usize {
+        self.settings.interpreted_scripts = on;
+        if self.script_held() {
+            return 0;
+        }
+        match self.scripts.as_deref_mut() {
+            Some(scripts) => scripts.set_native(&mut self.runtime.world, !on),
+            None => 0,
+        }
+    }
+
     /// Where a script stopped, while a stage is stopped halfway.
     pub fn script_stop(&self) -> Option<&engine_script::Stopped> {
         let held = self.script_debug.as_ref()?.held.as_ref()?;

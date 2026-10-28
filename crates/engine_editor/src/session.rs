@@ -265,6 +265,8 @@ pub(crate) struct EditorState {
     /// Which errors stop a script in Play (ADR 0119 E9-1b-4): those it does not catch,
     /// those a `pcall` catches.
     pub(crate) error_stops: Option<(bool, bool)>,
+    /// Full script debugging (ADR 0119): the scripts interpreted in Play.
+    pub(crate) full_debugging: Option<bool>,
     /// The Debugger's watches (E9-1b-5c), Luau expressions in their order.
     pub(crate) watches: Vec<String>,
     /// Where the editor's window was.
@@ -342,6 +344,9 @@ impl SessionFile {
         }
         if let Some((uncaught, caught)) = self.editor.error_stops {
             let _ = writeln!(out, "error_stops = ({uncaught}, {caught})");
+        }
+        if let Some(on) = self.editor.full_debugging {
+            let _ = writeln!(out, "full_debugging = {on}");
         }
         if !self.editor.watches.is_empty() {
             out.push_str("watches = [");
@@ -575,6 +580,13 @@ impl SessionFile {
                     "pivot" => file.editor.pivot = Some(unquote(value).map_err(at)?),
                     "overlays" => {
                         file.editor.overlays = Some(match value {
+                            "true" => true,
+                            "false" => false,
+                            other => return Err(at(format!("`{other}` is not true or false"))),
+                        });
+                    }
+                    "full_debugging" => {
+                        file.editor.full_debugging = Some(match value {
                             "true" => true,
                             "false" => false,
                             other => return Err(at(format!("`{other}` is not true or false"))),
@@ -1170,6 +1182,7 @@ mod tests {
                 pivot: Some(String::from("origins")),
                 overlays: Some(false),
                 error_stops: Some((true, false)),
+                full_debugging: Some(true),
                 watches: vec![String::from("self.speed"), String::from("#\"a, b\"")],
                 window: Some(WindowPlacement {
                     left: -7,

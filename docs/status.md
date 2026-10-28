@@ -763,14 +763,14 @@ Last updated: 2026-10-28.
     instance (its shader and type, numbers, vectors and textures by field name, its look);
     the cook (`--project`) and the run time read it with the project's root; the six golden
     files converted; `.material.ron` retired.
+  - **Full script debugging** (#PR, ADR 0119's as-built): the Debugger's switch runs the
+    scripts interpreted from the next Play, so a stop shows every frame's locals; off by
+    default (native code, as the game runs them); kept in the session.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10-1b and E10-1c: typed materials made by the player (the type registered, its
        entry points compiled off the frame, the look meanwhile), parameters in the
        inspector, New Material, Make Variant (a copy), Apply to Selection.
-    2. The script debugger's "Full script debugging" switch (off: native code, as the
-       game runs; on: interpreted, every frame's locals at an error stop; from the next
-       Play; kept in the session).
-    3. E11-3b and E11-3c, previews: ▶, Space and Auto Play in the dock on an editor bus,
+    2. E11-3b and E11-3c, previews: ▶, Space and Auto Play in the dock on an editor bus,
        the inspector's waveform with seeking. Then E11-1, the mixer file (`main.mixer`)
        and panel, E11-2, effects and sends, E11-4b, handles and hearing in place.
   - **Settled (2026-10-28, team decisions, every recommendation):**

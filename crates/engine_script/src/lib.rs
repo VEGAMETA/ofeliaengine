@@ -784,9 +784,17 @@ impl ScriptVm {
         self.lua.used_memory()
     }
 
-    /// Settings the VM was created with.
+    /// Settings the VM was created with, [`Self::set_native`]'s choice in them.
     pub fn settings(&self) -> &ScriptSettings {
         &self.settings
+    }
+
+    /// Compiles the chunks loaded from now on to native code (`true`) or leaves them to the
+    /// interpreter, whose frames' locals a stop reads (ADR 0119's full script debugging).
+    /// A module loaded before keeps the code it was loaded with until it loads again.
+    pub fn set_native(&mut self, on: bool) {
+        self.settings.native = on;
+        self.lua.enable_jit(on);
     }
 
     fn module_env(&self) -> mlua::Result<Table> {

@@ -1308,6 +1308,31 @@ impl Scripts {
         PROFILING.set(on);
     }
 
+    /// Compiles the scripts to native code (`true`, the default) or leaves them to the
+    /// interpreter, whose frames' locals a stop reads (ADR 0119's full script debugging):
+    /// every module that ran runs again, in the order they require each other, its
+    /// instances going on with their state as after a reload (its stopped ones start
+    /// again). How many modules ran again: none when they are compiled so already.
+    pub fn set_native(&mut self, world: &mut World, on: bool) -> usize {
+        if self.vm.settings().native == on {
+            return 0;
+        }
+        engine_profiler::zone!("scripts::set_native");
+        self.vm.set_native(on);
+        let (order, _) = script_require::order(&self.needs);
+        let mut ran = 0;
+        for module in order {
+            let Some(text) = self.texts.get(&module).cloned() else {
+                continue;
+            };
+            match self.run_again(world, &module, &text) {
+                Ok(_) => ran += 1,
+                Err(why) => log::error!(target: "script", "{why}"),
+            }
+        }
+        ran
+    }
+
     /// Each component's and system's profile since the last taken, components first, in
     /// `into` (its rows' texts reused: nothing allocated in steady state). Their counts
     /// start again.
@@ -4805,6 +4830,70 @@ return NoColon
         ] {
             assert!(reported.contains(&line), "{line} in {reported:?}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scripts_left_to_the_interpreter_run_again_their_instances_going_on() {
+        let dir = project(
+            "interpreted",
+            &[
+                ("door.luau", DOOR),
+                (
+                    "counter.luau",
+                    r#"local Rules = require("./rules")
+local Counter = component("Counter", { ticks = 0, starts = 0, step = 0 })
+function Counter.on_start(self)
+    self.starts += 1
+end
+function Counter.on_tick(self, dt)
+    for _ = 1, 2 do
+        self.ticks += 0.5
+    end
+    self.step = Rules.step
+end
+return Counter
+"#,
+                ),
+                ("rules.luau", "return { step = 3 }\n"),
+            ],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        world.spawn((Name::new("Player"), Transform::from_xyz(1.0, 0.0, 0.0)));
+        let e = world.spawn((Transform::IDENTITY,));
+        assert!(scripts.add(&mut world, e, "Counter"));
+        assert!(scripts.add(&mut world, e, "Door"));
+        for _ in 0..10 {
+            scripts.tick(&mut world, 0.1);
+        }
+        let risen = world.get::<Transform>(e).unwrap().translation.y;
+        assert!(risen > 0.0, "the door rises");
+        assert!(scripts.vm.settings().native, "native code by default");
+        let started = Instant::now();
+        assert_eq!(
+            scripts.set_native(&mut world, false),
+            3,
+            "every module ran again"
+        );
+        let took = started.elapsed();
+        assert!(!scripts.vm.settings().native);
+        assert_eq!(
+            scripts.set_native(&mut world, false),
+            0,
+            "interpreted already"
+        );
+        scripts.tick(&mut world, 0.1);
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        // The instances went on: started once, their ticks counted on, the door higher.
+        assert_eq!(read_f32(&world, &scripts, e, "Counter", "starts"), 1.0);
+        assert_eq!(read_f32(&world, &scripts, e, "Counter", "ticks"), 11.0);
+        assert_eq!(read_f32(&world, &scripts, e, "Counter", "step"), 3.0);
+        assert!(world.get::<Transform>(e).unwrap().translation.y > risen);
+        // And back.
+        assert_eq!(scripts.set_native(&mut world, true), 3);
+        assert!(scripts.vm.settings().native);
+        println!("3 modules ran again in {:.2} ms", took.as_secs_f64() * 1e3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

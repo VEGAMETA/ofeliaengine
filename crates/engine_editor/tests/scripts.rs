@@ -967,6 +967,82 @@ fn an_error_stops_play_at_its_line_once_and_f5_lets_it_take_its_course() {
 }
 
 #[test]
+fn full_script_debugging_shows_a_native_frames_locals_from_the_next_play() {
+    let dir = temp_dir("full-debugging");
+    write_project(&dir, "Front door", true);
+    std::fs::write(dir.join("scripts/faulty.luau"), FAULTY).unwrap();
+    let Some((mut player, settings)) = player(&dir) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let (mut game, mut overlay) = engine_editor::editor(&mut player, &settings, start).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let door = find_named(player.world_mut(), "Front door").unwrap();
+    assert!(player.add_script(door, "Faulty"));
+    frame(&mut player, &mut game, &mut overlay);
+    // Native code, as the game runs: the erring frame shows no locals, and says why.
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..6 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let stop = player.script_stop().cloned().unwrap();
+    assert!(stop.stack[0].native && stop.locals.is_empty(), "{stop:?}");
+    assert!(
+        game.text_at(
+            "LOCALS · not readable: the function runs as native code (a breakpoint in it, or \
+             full script debugging from the next Play, shows them)"
+        )
+        .is_some(),
+        "the Variables say why"
+    );
+    // Stopped, the Debugger's row turns full script debugging on: from the next Play.
+    tap(&mut game, 0x77, 0x42);
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(!game.playing());
+    click_text(
+        &mut player,
+        &mut game,
+        &mut overlay,
+        "Full script debugging: every frame's locals, slower",
+    );
+    let said = game.message().unwrap_or_default();
+    assert!(
+        said.starts_with("Full script debugging from the next Play"),
+        "{said}"
+    );
+    // The palette's command is the same switch.
+    assert!(game.run_command(player.world_mut(), "debug.full_debugging"));
+    let said = game.message().unwrap_or_default();
+    assert!(said.starts_with("The scripts run as native code"), "{said}");
+    assert!(game.run_command(player.world_mut(), "debug.full_debugging"));
+    assert!(game.run_command(player.world_mut(), "play.play"));
+    for _ in 0..6 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let stop = player.script_stop().cloned().unwrap();
+    assert!(stop.stack.iter().all(|f| !f.native), "{stop:?}");
+    let names: Vec<&str> = stop.locals.iter().map(|v| v.name.as_str()).collect();
+    assert!(
+        names.contains(&"target"),
+        "the erring frame's locals: {names:?}"
+    );
+    tap(&mut game, 0x77, 0x42);
+    frame(&mut player, &mut game, &mut overlay);
+    // Kept in the session.
+    game.end_session(player.world_mut());
+    let session = std::fs::read_to_string(dir.join(".ofelia/session")).unwrap();
+    assert!(session.contains("full_debugging = true"), "{session}");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_script_changed_on_disk_runs_again_its_values_kept_by_name() {
     let dir = temp_dir("reload");
     write_project(&dir, "Front door", true);
