@@ -870,7 +870,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3g-2b, the editor's functions** (#PR, ADR 0123's as-built): `.mfunc` files in
+  - **E10-3g-2b, the editor's functions** (#436, ADR 0123's as-built): `.mfunc` files in
     graph tabs (ports named in the inspector, an input's value now written to the file),
     previewed by their first output with unsaved edits; the project's functions in the
     node search (ranked best first while typing); calls following their functions' names
