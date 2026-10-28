@@ -868,7 +868,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-3g-2a, functions in the engine** (#PR, ADR 0123's as-built; the team's `.mfunc`):
+  - **E10-3g-2a, functions in the engine** (#435, ADR 0123's as-built; the team's `.mfunc`):
     a function's file is the graph's grammar, its input and output nodes its ports; a call
     keeps the function's file and ports; before writing, calls are made their functions'
     nodes (Unreal's inlining), what they write and what is wrong with them the call's; the
