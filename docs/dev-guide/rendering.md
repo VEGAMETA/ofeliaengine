@@ -2420,8 +2420,8 @@ double_sided = false
   GI's rays: its own `base_color`, `metallic`, `roughness` and `emissive` (`Own`, the default), or the
   glTF material it replaces in a scene's map (`Replaced`).
 - `alpha` is `Opaque`, `Mask` (cut below `alpha_cutoff`) or `Blend`.
-- **A material graph** (a `.graph` file, ADR 0123) is named where a module is:
-  `shader = asset("materials/moss.graph", …)` with `type = "GraphMaterial"`. Its module is
+- **A material graph** (a `.mgraph` file, ADR 0123) is named where a module is:
+  `shader = asset("materials/moss.mgraph", …)` with `type = "GraphMaterial"`. Its module is
   generated into `.ofelia/cache/graphs/` and compiled as a module is (written again only
   when the graph changes); the graph's named numbers and its texture nodes' images are the
   material's values where the file gives none. The editor's canvas for graphs comes next

@@ -424,16 +424,16 @@ fn a_material_naming_a_graph_draws_the_graph_and_follows_its_edits() {
     let (graph_id, material_id) = (AssetId::new(), AssetId::new());
     let glow = |color: &str| {
         format!(
-            "[graph version=1 id={graph_id}]\n\nmodel = \"unlit\"\n\
+            "[mgraph version=1 id={graph_id}]\n\nmodel = \"unlit\"\n\
              nodes[\"c\"].kind = \"color\"\nnodes[\"c\"].value = [{color}, 1]\n\
              nodes[\"out\"].kind = \"output\"\nlinks[\"out.base\"] = \"c.rgba\"\n"
         )
     };
-    std::fs::write(dir.join("materials/glow.graph"), glow("0.9, 0.05, 0.05")).unwrap();
+    std::fs::write(dir.join("materials/glow.mgraph"), glow("0.9, 0.05, 0.05")).unwrap();
     std::fs::write(
         dir.join("materials/glow.material"),
         format!(
-            "[material version=2 id={material_id}]\n\nshader = asset(\"materials/glow.graph\", \
+            "[material version=2 id={material_id}]\n\nshader = asset(\"materials/glow.mgraph\", \
              {graph_id})\ntype = \"GraphMaterial\"\nlook = Own\n\
              base_color = [0.05, 0.8, 0.05, 1]\n"
         ),
@@ -528,8 +528,8 @@ fn a_material_naming_a_graph_draws_the_graph_and_follows_its_edits() {
     assert_eq!(player.assets().problem(glow_ref), None);
     println!("the graph drawn after {:.2} s", took.as_secs_f64());
     // The graph written anew: read again, its module made anew and compiled again.
-    std::fs::write(dir.join("materials/glow.graph"), glow("0.05, 0.05, 0.9")).unwrap();
-    player.asset_changed(graph_id, "materials/glow.graph");
+    std::fs::write(dir.join("materials/glow.mgraph"), glow("0.05, 0.05, 0.9")).unwrap();
+    player.asset_changed(graph_id, "materials/glow.mgraph");
     let took = until(&mut player, &mut game, 2);
     println!("the graph's edit drawn after {:.2} s", took.as_secs_f64());
     let module = dir

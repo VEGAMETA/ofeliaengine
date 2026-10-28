@@ -77,7 +77,8 @@ undoable, immediate feedback, errors next to their cause. ADR 0107's E10: "graph
    and slots unfold their parameters, with how many objects and scenes use the material
    (E4-7's references). Make Variant copies it beside the file and gives the copy to the
    selection in one step. Nothing shared changes silently (`inspector.md`).
-6. **Shader code and graphs open in the Shader panel** under the viewport (the team's
+6. (Replaced on 2026-10-28, ADR 0123: shader code and graphs open as files in tabs of
+   their own, the team's decision.) **Shader code and graphs open in the Shader panel** under the viewport (the team's
    layout), so the scene stays in sight; the panel can be maximised or moved like any dock.
    Code uses E8's core with Slang highlighting. Slang's front end checks the text after a
    pause (0.12 s for `forward.slang` with a type, ADR 0092), Ctrl+S compiles, and errors

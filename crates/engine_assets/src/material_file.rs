@@ -357,7 +357,7 @@ impl MaterialFile {
     /// as `paths` has them (those it was written with), from the project's `root` (an
     /// absolute path as it is). `None` for the standard material.
     ///
-    /// A shader that is a material graph (`.graph`, ADR 0123) is its generated module
+    /// A shader that is a material graph (`.mgraph`, ADR 0123) is its generated module
     /// ([`crate::graph_module::graph_module`], in the project's cache), its type
     /// [`crate::graph_module::GRAPH_TYPE`], the graph's own values under the file's.
     ///

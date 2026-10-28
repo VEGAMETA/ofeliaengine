@@ -1780,7 +1780,7 @@ impl Assets {
             images.push((full.clone(), key));
         }
         // A graph's file: read again when it changes, its module made anew.
-        if let Some(at) = written.get(file.shader).filter(|p| p.ends_with(".graph")) {
+        if let Some(at) = written.get(file.shader).filter(|p| p.ends_with(".mgraph")) {
             users_of.push(if Path::new(at).is_absolute() {
                 PathBuf::from(at)
             } else {

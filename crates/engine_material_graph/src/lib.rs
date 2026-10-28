@@ -5,7 +5,7 @@
 //! - [`graph`]: a graph in memory: its shading model, its nodes by id, its links by the
 //!   input they feed;
 //! - [`generate`]: the module a graph makes, each line with the node that made it;
-//! - [`file`]: the `.graph` file in the editor's grammar.
+//! - [`file`]: the `.mgraph` file in the editor's grammar.
 //!
 //! ```
 //! use engine_material_graph::{Build, Graph, Model, Node, PortRef, generate, graph::OUTPUT};
