@@ -870,7 +870,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-4c, what a material costs** (#PR, ADR 0120's as-built): the editor's device
+  - **E10-4c, what a material costs** (#439, ADR 0120's as-built): the editor's device
     captures the driver's pipeline statistics (measured free: cold material pipelines
     532 vs 542 ms Radeon, 758 vs 768 ms RTX); a typed material's **cost** row gives its
     fragment registers per shading variant made beside the engine's own, spills and
