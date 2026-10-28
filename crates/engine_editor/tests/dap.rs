@@ -399,8 +399,32 @@ fn vs_code_attaches_over_dap_and_debugs_a_stop() {
     );
     let r = client.request(p, g, o, "disconnect", json!({}));
     assert_eq!(r["success"], true);
+    // Attach and Play: the open scene plays, and the session's end stops it.
+    g.stop_playing(p);
+    for _ in 0..2 {
+        frame(p, g, o);
+    }
+    assert!(!g.playing());
+    let mut client = Client::connect(port);
+    client.request(
+        p,
+        g,
+        o,
+        "initialize",
+        json!({ "adapterID": "ofeliaengine" }),
+    );
+    let r = client.request(p, g, o, "attach", json!({ "token": token, "play": true }));
+    assert_eq!(r["success"], true, "{r}");
+    for _ in 0..3 {
+        frame(p, g, o);
+    }
+    assert!(g.playing(), "attached and playing");
+    client.request(p, g, o, "disconnect", json!({}));
+    for _ in 0..3 {
+        frame(p, g, o);
+    }
+    assert!(!g.playing(), "the session's end stopped Play");
     // The session's end takes the endpoint away.
-    game.stop_playing(&mut player);
     game.end_session(player.world_mut());
     assert!(!endpoint.exists());
     overlay.destroy(&mut player).unwrap();

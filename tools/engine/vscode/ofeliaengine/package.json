@@ -1,0 +1,89 @@
+{
+    "name": "ofeliaengine",
+    "displayName": "ofeliaengine",
+    "description": "Debug an ofeliaengine game's Luau scripts: attach to the editor's Play, with breakpoints, steps, the stack, variables and evaluation.",
+    "version": "0.1.0",
+    "publisher": "ofeliaengine",
+    "license": "MIT",
+    "engines": {
+        "vscode": "^1.80.0"
+    },
+    "categories": [
+        "Debuggers"
+    ],
+    "main": "./extension.js",
+    "activationEvents": [
+        "onDebugResolve:ofeliaengine",
+        "onDebugInitialConfigurations"
+    ],
+    "contributes": {
+        "breakpoints": [
+            {
+                "language": "luau"
+            },
+            {
+                "language": "lua"
+            }
+        ],
+        "debuggers": [
+            {
+                "type": "ofeliaengine",
+                "label": "ofeliaengine",
+                "languages": [
+                    "luau",
+                    "lua"
+                ],
+                "configurationAttributes": {
+                    "attach": {
+                        "properties": {
+                            "play": {
+                                "type": "boolean",
+                                "description": "Play the open scene in the editor when attached, and stop it when the session ends.",
+                                "default": false
+                            },
+                            "endpoint": {
+                                "type": "string",
+                                "description": "The file the editor writes its port and token to.",
+                                "default": "${workspaceFolder}/.ofelia/debug/editor.json"
+                            }
+                        }
+                    }
+                },
+                "initialConfigurations": [
+                    {
+                        "type": "ofeliaengine",
+                        "request": "attach",
+                        "name": "Attach to the editor"
+                    },
+                    {
+                        "type": "ofeliaengine",
+                        "request": "attach",
+                        "name": "Attach and Play",
+                        "play": true
+                    }
+                ],
+                "configurationSnippets": [
+                    {
+                        "label": "ofeliaengine: Attach to the editor",
+                        "description": "Debug the scripts the editor plays",
+                        "body": {
+                            "type": "ofeliaengine",
+                            "request": "attach",
+                            "name": "Attach to the editor"
+                        }
+                    },
+                    {
+                        "label": "ofeliaengine: Attach and Play",
+                        "description": "Play the scene in the editor and debug its scripts",
+                        "body": {
+                            "type": "ofeliaengine",
+                            "request": "attach",
+                            "name": "Attach and Play",
+                            "play": true
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+}

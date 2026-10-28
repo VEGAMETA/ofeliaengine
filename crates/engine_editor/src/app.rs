@@ -2014,6 +2014,8 @@ struct Editor {
     dap_refs: Vec<(usize, u8, Vec<usize>)>,
     dap_values: Vec<engine_app::scripts::Variable>,
     stop_reason: Option<&'static str>,
+    /// An attached client asked to play ("Attach and Play"): its end stops Play.
+    dap_played: bool,
     /// The game's crate when the editor runs inside the game's build (`run_game`).
     game_crate: Option<GameCrate>,
     /// Builds of the game's code (E1-5c): none until `begin_builds`, nor while the
@@ -2787,6 +2789,7 @@ impl Editor {
             dap_refs: Vec::new(),
             dap_values: Vec::new(),
             stop_reason: None,
+            dap_played: false,
             game_crate: None,
             builds: None,
             problems: Vec::new(),
@@ -10107,8 +10110,18 @@ impl Editor {
             dap.respond(r.seq, &r.command, body);
             match r.command.as_str() {
                 "initialize" => dap.event("initialized", serde_json::json!({})),
-                "disconnect" => dap.drop_client(),
+                "disconnect" => {
+                    dap.drop_client();
+                    if std::mem::take(&mut self.dap_played) && self.play.is_some() {
+                        self.play_request = Some(PlayRequest::Stop);
+                    }
+                }
                 "attach" if !dap.attached() => dap.drop_client(),
+                "attach" if r.arguments["play"] == true && self.play.is_none() => {
+                    // Attach and Play: the open scene plays; the session's end stops it.
+                    self.play_request = Some(PlayRequest::Play { from_here: false });
+                    self.dap_played = true;
+                }
                 "attach" => {
                     // A stop already waiting: VS Code sees it at once.
                     if let Some(stop) = &self.stop {
