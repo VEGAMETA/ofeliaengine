@@ -872,7 +872,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-4g-2, node previews on the canvas** (#PR, ADR 0123's as-built): each node with an
+  - **E10-4g-2, node previews on the canvas** (#444, ADR 0123's as-built): each node with an
     output shows its value in a 64-unit tile under its ports (a flat square, or a sphere
     where it reads the surface's place), drawn from the preview's build: in 0.84–0.88 s
     from opening the tab on both GPUs, a typed value on its tile in 5 frames, no compile.
