@@ -872,6 +872,13 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E12-1a, skinned models drawn skinned** (#448, ADR 0124's as-built): a scene's model
+    whose mesh a skinned node of its glTF draws gets its skin made in the background
+    (parts with their influences, the rig with the rest pose and the file's clips
+    compressed: CesiumMan's in 36–41 ms), an instance per part, and its rest pose;
+    `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
+    (0 allocations posing every frame, both GPUs). Material slots make a skin a
+    primitive. `engine_anim` is now a dependency of `engine_app`.
   - **E12's research and ADR 0124, proposed** (#447): the runtime of state machines and
     blend graphs read in Godot 4.7.2, Bevy 0.20.1, Fyrox 1.0 and ozz-animation 0.17 (ideas
     only; Unreal and Unity from their documentation), in
@@ -1046,8 +1053,8 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next** (the owner's order: materials first of the tools, then animation and 2D;
     E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (proposed,
-    nine questions to the team). First the steps no answer changes: E12-1a, skinned models
-    drawn skinned by the player with their clips; E12-1b, clips seen in the dock and the
+    nine questions to the team). First the steps no answer changes: E12-1a (skinned models
+    drawn skinned with their clips) is done; next E12-1b, clips seen in the dock and the
     inspector with the engine's preview, and P in place. Then E12-1c to E12-5 as the
     answers come.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
@@ -2232,6 +2239,11 @@ grown, divide and conquer); the old labels stay in parentheses.
       compensation, the plugins' state and windows, an effect baked in the editor.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
+
+- **A scene with no model draws the clear colour, not its sky** (found 2026-10-29 by
+  E12-1a's test, not looked into): with its only model removed, CesiumMan's test scene
+  drew a uniform dark blue; with a floor beside him, the sky drew. Something skips the
+  view when no instance is drawn.
 
 - **Fixed (2026-10-29): a material type's reload compiled two or three times** (found
   with E10-3f-2, 2026-10-28; #446): the entry points, the node previews' apart with their

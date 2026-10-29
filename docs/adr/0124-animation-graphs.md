@@ -187,6 +187,52 @@ allocation with transitions and events every tick; the same events at the same t
 60, 144 and 240 fps; a save and load in the middle of a transition; the panels within ADR
 0107's 1 ms of UI.
 
+## As built (E12-1a, 2026-10-29): skinned models drawn skinned
+
+- **`engine_app::skins`:**
+  - `skinned_node` finds the node that draws a mesh with a skin; the first in the file
+    wins.
+  - `build` makes the mesh's parts (the whole mesh, or a part per primitive with material
+    slots) with their influences, padded to the most sets a primitive has, and the `Rig`.
+  - The rig holds the skeleton (`skin_skeleton`), the skin joints' skeleton joints, the
+    inverse bind matrices times `S⁻¹`, the root `S · node⁻¹` (`node_world` walks the
+    file's parents; `node_parents` is now public in `engine_assets`), the rest pose's
+    palette, and the file's clips compressed within ADR 0068's default error, each with
+    its name, bytes and largest error.
+  - `Posing` samples a clip at a moment into scratch sized for the largest rig.
+- **The loader:** `Job::Skin`, on the loading thread, returns the parts and the rig.
+- **`Assets`:**
+  - `give_renderer` checks first whether a model's mesh is skinned (its file read once).
+    A skinned model gets `give_skinned`: its skin made per (mesh, split), an instance per
+    part (`Skinning::add_instance`) owned by the entity, drawn by its `MeshRenderer` and
+    `SkinnedMesh`, and, past the first, by derived parts.
+  - Each sync releases the instances of entities that went, poses anew those whose pose
+    changed, and lets go the skins of files read again once no model draws them.
+  - The skinning instances keep their palette, so a still pose costs nothing on the CPU.
+- **The player:** `model_rig(entity)`, and `pose_model(entity, Option<(clip, time)>)` for
+  the editor's previews (E12-1b).
+- **Measured** (ref-1): CesiumMan's skin and clip ready 36–41 ms after the scene loads; a
+  model posed anew every frame makes 0 allocations, 1,030 frames on the Radeon and 1,472
+  on the RTX (`zero_alloc_skins`).
+- **Tests:**
+  - the rig, on CesiumMan, RiggedSimple and Fox: the rest pose's vertices near the mesh;
+    the import scale scaling the skinned vertices as it scales the mesh; a clip moving
+    them; no clip or a wrong one giving the rest pose;
+  - a plain mesh found not skinned;
+  - on both GPUs, CesiumMan drawn (5,700 pixels against the scene without him), posed
+    halfway through his walk (9,100 pixels changed), drawn the same with a material slot
+    (its skin made anew), and gone with his `Model`.
+- **Left:**
+  - a dropped model still makes an entity per glTF node, joints included (E12-1c,
+    question 6);
+  - a file read again leaves its skinned models undrawn until their new skins are made;
+  - a mesh drawn by several skinned nodes takes the first's skin;
+  - the clips are compressed at every load, not kept in the derived data cache as the
+    step's row says;
+  - the compression's error and shell distance are taken in the file's units, not the
+    model's: a file scaled down on import (the Fox's centimetres) is compressed finer than
+    it needs (E12-1b corrects it).
+
 ## Consequences
 
 - New source files: `.agraph` and `.anim`, and a section in models' `.meta`; a new component

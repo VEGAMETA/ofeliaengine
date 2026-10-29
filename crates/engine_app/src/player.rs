@@ -1368,6 +1368,20 @@ impl Player {
         self.previews.take_nodes(out);
     }
 
+    /// The rig of entity `e`'s skinned model (ADR 0124's E12-1a): its skeleton and its
+    /// file's clips that move it. `None` for a model drawn without a skin, or before its
+    /// skin is made (a frame or a few after its scene loads).
+    pub fn model_rig(&self, e: Entity) -> Option<&crate::Rig> {
+        self.assets.model_rig(e)
+    }
+
+    /// Poses entity `e`'s skinned model at clip `clip`'s moment `time` (held at the clip's
+    /// ends) or, with `None`, in its rest pose: what the editor shows while it edits (ADR
+    /// 0124's E12-1b). The scene does not change. False for a model drawn without a skin.
+    pub fn pose_model(&mut self, e: Entity, pose: Option<(usize, f32)>) -> bool {
+        self.assets.pose_model(e, pose)
+    }
+
     /// Makes the next frame wait until every asset its models use is made: what the frame
     /// after [`Self::load_scene`] does. Assets are otherwise made in the background, and a
     /// model draws once its own are (ADR 0108's E4-4).
@@ -3174,6 +3188,7 @@ impl Player {
             let blockout = &mut self.blockout;
             let geometry = &mut self.geometry;
             let materials = &mut self.materials;
+            let skinning = &mut self.skinning;
             let frame_number = frame.number;
             let wait_for_assets = self.wait_for_assets;
             // Whether the scene was extracted this frame before its presentation (every
@@ -3223,6 +3238,7 @@ impl Player {
                     world,
                     geometry,
                     materials,
+                    skinning,
                     frame_number,
                     wait_for_assets,
                     extracted.get(),

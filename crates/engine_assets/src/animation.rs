@@ -27,7 +27,7 @@ pub struct SkinSkeleton {
 }
 
 /// Each node's parent (the first that lists it as a child).
-fn parents(scene: &ImportedScene) -> Vec<Option<usize>> {
+pub fn node_parents(scene: &ImportedScene) -> Vec<Option<usize>> {
     let mut parent = vec![None; scene.nodes.len()];
     for (p, node) in scene.nodes.iter().enumerate() {
         for &c in &node.children {
@@ -48,7 +48,7 @@ pub fn skin_skeleton(scene: &ImportedScene, skin: usize) -> Result<SkinSkeleton,
         .skins
         .get(skin)
         .ok_or_else(|| ImportError::Invalid(format!("no skin {skin}")))?;
-    let parent = parents(scene);
+    let parent = node_parents(scene);
     // The joints and their ancestors, each once.
     let mut index_of = vec![None; scene.nodes.len()];
     let mut nodes = Vec::new();

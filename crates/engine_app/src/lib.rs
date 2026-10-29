@@ -82,6 +82,7 @@ pub mod script_types;
 mod script_views;
 pub mod scripts;
 mod settings;
+mod skins;
 mod sound;
 mod text;
 mod videos;
@@ -124,6 +125,7 @@ pub use previews::{
 pub use report::{FrameReport, Startup, StartupPipelines};
 pub use saves::{Autosave, QUICK_SLOT, SaveSettings, Saves};
 pub use settings::{DebuggerSettings, FrameCap, PlayerSettings, Window};
+pub use skins::{Rig, RigClip};
 pub use sound::{
     AcousticSettings, AudioListener, AudioSettings, AudioSource, AudioSource3D, BusLayout,
     EffectLayout, Falloff, MIXER_FILE_EXTENSION, MasterLayout, Mixer, MixerFile, PlacedBus,
