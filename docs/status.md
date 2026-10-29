@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-1c-1, a dropped character is one entity** (#PR, ADR 0124's as-built): a file
+  - **E12-1c-1, a dropped character is one entity** (#451, ADR 0124's as-built): a file
     that draws a mesh skinned drops as one entity, its first skinned mesh's, turned and
     scaled as the file stands it; its other meshes go under it at their places in the
     file; its joints and empty nodes are not entities (CesiumMan: 1 entity, not 23). The
