@@ -1507,22 +1507,25 @@ impl ClipsView {
         if d > 0.0 { self.time / d } else { 0.0 }
     }
 
-    /// Its time's text, written again when the time moved (in place: no allocation once its
-    /// room has grown).
+    /// Its time's text, by the chosen clip's frame (so a looping clip's texts repeat, and
+    /// the text layouts with them), written again when that frame changed: in place, no
+    /// allocation once its room has grown.
     fn refresh_time(&mut self) {
-        if self.shown == self.time {
+        let Some(c) = self.clips.get(self.chosen) else {
+            return;
+        };
+        let frame = ((self.time * c.rate).round() as u32).min(c.frames);
+        let at = frame as f32 / c.rate.max(1e-6);
+        if self.shown == at {
             return;
         }
-        self.shown = self.time;
+        self.shown = at;
         self.time_text.clear();
-        if let Some(c) = self.clips.get(self.chosen) {
-            let frame = ((self.time * c.rate).round() as u32).min(c.frames);
-            let _ = write!(
-                self.time_text,
-                "frame {frame} / {} \u{b7} {:.2} s",
-                c.frames, self.time
-            );
-        }
+        let _ = write!(
+            self.time_text,
+            "frame {frame} / {} \u{b7} {at:.2} s",
+            c.frames
+        );
     }
 }
 

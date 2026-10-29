@@ -1078,7 +1078,10 @@ fn a_selected_characters_clips_show_and_p_plays_it_in_place() {
     frame(&mut player, &mut game, &mut overlay);
     assert_eq!(game.playing_in_place(), 1);
     let first = shot(&mut player, &mut game, &mut overlay);
-    std::thread::sleep(Duration::from_millis(300));
+    let later = Instant::now();
+    while later.elapsed() < Duration::from_millis(300) {
+        frame(&mut player, &mut game, &mut overlay);
+    }
     let second = shot(&mut player, &mut game, &mut overlay);
     let (moved, walked) = (differ(&rest, &first), differ(&first, &second));
     println!("in place: {moved} pixels off his rest pose, {walked} between two moments");
