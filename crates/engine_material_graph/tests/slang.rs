@@ -335,7 +335,7 @@ fn a_call_of_a_node_function_compiles_and_its_signature_is_slangs() {
 #[test]
 fn a_call_of_a_function_calling_a_function_compiles() {
     use engine_material_graph::function::{FUNCTION_KIND, input_kind, output_kind};
-    use engine_material_graph::{Sources, generate_with, signature_of};
+    use engine_material_graph::{Shown, Sources, generate_shown, generate_with, signature_of};
     use engine_scene::{AssetId, AssetRef};
     let Some(mut compiler) = compiler() else {
         return;
@@ -425,5 +425,32 @@ fn a_call_of_a_function_calling_a_function_compiles() {
         let errors: Vec<_> = found.iter().filter(|f| f.error).collect();
         assert!(errors.is_empty(), "{build:?}: {errors:#?}\n{}", out.text);
     }
+    // E10-4g-3: `glow`'s tab, its own nodes previewed through its preview's call of it (its
+    // input, its two calls, the length and its two outputs).
+    let mut tab = Graph::new(Model::Unlit);
+    let mut call_glow = Node::new(FUNCTION_KIND, [0.0, 0.0])
+        .with_call("glow", &signature_of(&glow).unwrap().to_string());
+    call_glow.module = glow_file;
+    tab.add("function", call_glow).link(
+        PortRef::new("function", "lit"),
+        PortRef::new(OUTPUT, "base"),
+    );
+    let out = generate_shown(
+        &tab,
+        "GlowTab",
+        Build::Editing,
+        &sources,
+        Shown::Function("function"),
+    )
+    .unwrap();
+    let mut shown: Vec<&str> = out.previews.iter().map(|p| p.node.as_str()).collect();
+    shown.sort_unstable();
+    assert_eq!(shown, ["b", "c", "l", "o", "s1", "s2"]);
+    let file = dir.join("glowtab.slang");
+    std::fs::write(&file, &out.text).unwrap();
+    let options = material_type_options(&shaders, &file, "GlowTab");
+    let found = compiler.check_file(&shaders.join("forward.slang"), &options);
+    let errors: Vec<_> = found.iter().filter(|f| f.error).collect();
+    assert!(errors.is_empty(), "the tab: {errors:#?}\n{}", out.text);
     let _ = std::fs::remove_dir_all(&dir);
 }

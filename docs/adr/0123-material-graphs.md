@@ -948,7 +948,42 @@ The materials UX note's item 11: each node's value on the canvas, drawn by the e
 - **Tests:** the layout (a tile under the ports, none on the surface or a reroute, none
   with previews off); on both GPUs, a graph's tiles drawn (red, green, the normal on a
   sphere), a typed value reaching its tile, and the switch taking them off.
-- **Not yet:** a function call's own preview, and previews in a `.mfunc` tab.
+- **Not yet:** a function call's own preview, and previews in a `.mfunc` tab (E10-4g-3,
+  below).
+
+## As built (E10-4g-3, 2026-10-29): previews of function calls and in a function's tab
+
+- **Where a call's outputs come from:** `expand` returns an `Expansion`: the graph made,
+  each node's origin, and `outputs` (`CallOutputs`).
+  - For every call, by its id in the graph made, `outputs` gives each output's port there.
+    A call inside a function is under its id in the graph made (`f__d`), its ports read
+    through the function's inputs.
+  - A port that names a call made later (calls are made in their ids' order, so `a` fed by
+    `b`) is resolved through that call's outputs once every call is made.
+- **What is previewed:** the editing build's previews are points, each a canvas id and
+  the port whose value it shows, at a width (`generate_shown`, `Shown`).
+  - `Shown::Graph`: every node with an output but a reroute and the surface. A call is
+    previewed by its first output's port, at the call's width, so a `float3` output fed by
+    a `float4` shows what the call gives, not its source.
+  - `Shown::Function(call)`, for a function's tab: the nodes of the function its
+    preview's call calls, under their own ids. An input shows the constant the call makes
+    of its value, an output what it is given (at its width), and a call inside it that
+    call's first output.
+  - `node_preview` numbers the points in the order their values are written. Several
+    points on one port (an input passed through to an output) each get their own return.
+- **The editor:** a call's box and a function's ports have tiles (an output has none of
+  its own outputs, but shows what it is given), and a function's tab asks for its previews
+  as a graph's tab does.
+- **Measured** (ref-1, both GPUs): a call's tile 0.90–0.91 s after opening the tab, a
+  function tab's tiles 0.77–0.78 s after switching to it; a graph tab's steady frames
+  still allocate nothing.
+- **Tests:**
+  - the outputs: through a later call, and inside a function;
+  - the points: a call after its function's nodes, at its width; a function's input,
+    number, One Minus and output;
+  - Slang checks a function tab's editing build (`glow`, two calls inside);
+  - on both GPUs, a call's tile and a function tab's three.
+- **Left:** none of E10-4g. The ports are still `float` to `float4`.
 
 ## The team's answers (2026-10-28)
 

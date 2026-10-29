@@ -176,6 +176,17 @@ impl Sources<'static> {
     }
 }
 
+/// Whose nodes the editing build previews (E10-4g).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shown<'a> {
+    /// The graph's own nodes, its function calls among them.
+    #[default]
+    Graph,
+    /// The nodes of the function that the call of this id calls, by their ids in the
+    /// function: a function's tab, whose preview is a graph calling it (E10-4g-3).
+    Function(&'a str),
+}
+
 /// The module `graph` makes, its type named `type_name`. A graph with calls (E10-3g-2,
 /// E10-3g-3) needs [`generate_with`]: here what they call is not found.
 pub fn generate(graph: &Graph, type_name: &str, build: Build) -> Result<Generated, GraphError> {
@@ -191,11 +202,34 @@ pub fn generate_with(
     build: Build,
     sources: &Sources<'_>,
 ) -> Result<Generated, GraphError> {
+    generate_shown(graph, type_name, build, sources, Shown::Graph)
+}
+
+/// [`generate_with`], the editing build's previews of `shown`'s nodes (E10-4g-3).
+///
+/// # Errors
+///
+/// As [`generate_with`].
+pub fn generate_shown(
+    graph: &Graph,
+    type_name: &str,
+    build: Build,
+    sources: &Sources<'_>,
+    shown: Shown<'_>,
+) -> Result<Generated, GraphError> {
     engine_profiler::zone!("material_graph::generate");
-    let (expanded, origin) = crate::function::expand(graph, sources.functions)?;
-    // Previews for the canvas's nodes, not the nodes of the functions they call.
-    let shown = |n: &str| graph.nodes.contains_key(n);
-    match write_module(&expanded, type_name, build, sources.modules, &shown) {
+    let expansion = crate::function::expand(graph, sources.functions)?;
+    let points = if build == Build::Editing {
+        preview_points(graph, &expansion, shown, sources.functions)
+    } else {
+        Vec::new()
+    };
+    let crate::function::Expansion {
+        graph: expanded,
+        origin,
+        ..
+    } = expansion;
+    match write_module(&expanded, type_name, build, sources.modules, &points) {
         Ok(mut generated) => {
             for line in generated.lines.iter_mut().flatten() {
                 if let Some(top) = origin.get(line.as_str()) {
@@ -219,14 +253,113 @@ pub fn generate_with(
     }
 }
 
+/// A node the editing build previews (E10-4g): its id on the canvas, the port of the graph
+/// written whose value it shows, and the width it gives that value at (a call's or a
+/// function's output's; `None`, the port's own).
+struct Point {
+    id: String,
+    port: PortRef,
+    width: Option<u8>,
+}
+
+/// The nodes of `shown` the editing build previews, each with the port of `expansion`'s
+/// graph whose value it shows: every node with an output but a reroute and the surface, a
+/// function call by its first output's; in a function's tab its inputs (the values the
+/// call gives) and outputs (what they are given) too.
+fn preview_points(
+    graph: &Graph,
+    expansion: &crate::function::Expansion,
+    shown: Shown<'_>,
+    functions: &dyn Fn(AssetRef) -> Option<Graph>,
+) -> Vec<Point> {
+    let width_of = |ty: PortType| match ty {
+        PortType::Float(w) => Some(w),
+        PortType::Dynamic => None,
+    };
+    let given = |call: &str, output: &str| {
+        expansion
+            .outputs
+            .get(call)
+            .and_then(|o| o.get(output))
+            .cloned()
+    };
+    let mut points = Vec::new();
+    match shown {
+        Shown::Graph => {
+            for (id, node) in &graph.nodes {
+                let Ok(kind) = node_kind(node) else {
+                    continue;
+                };
+                let Some(first) = kind.outputs.first() else {
+                    continue;
+                };
+                if kind.name == REROUTE_KIND || kind.name == OUTPUT_KIND {
+                    continue;
+                }
+                let point = if matches!(kind.body, Body::FunctionCall(_)) {
+                    given(id, first.name).map(|port| (port, width_of(first.ty)))
+                } else {
+                    Some((PortRef::new(id, first.name), None))
+                };
+                if let Some((port, width)) = point {
+                    points.push(Point {
+                        id: id.clone(),
+                        port,
+                        width,
+                    });
+                }
+            }
+        }
+        Shown::Function(call) => {
+            let function = graph
+                .nodes
+                .get(call)
+                .filter(|n| n.kind == crate::function::FUNCTION_KIND)
+                .and_then(|n| functions(n.module));
+            let Some(function) = function else {
+                return points;
+            };
+            let inner = |id: &str| format!("{call}__{id}");
+            for (id, node) in &function.nodes {
+                let Ok(kind) = node_kind(node) else {
+                    continue;
+                };
+                if kind.name == REROUTE_KIND {
+                    continue;
+                }
+                let point = match kind.body {
+                    Body::FunctionInput(_) => Some((PortRef::new(&inner(id), "value"), None)),
+                    Body::FunctionOutput(w) => given(call, &node.param).map(|p| (p, Some(w))),
+                    Body::FunctionCall(_) => kind
+                        .outputs
+                        .first()
+                        .and_then(|o| given(&inner(id), o.name).map(|p| (p, width_of(o.ty)))),
+                    _ => kind
+                        .outputs
+                        .first()
+                        .map(|o| (PortRef::new(&inner(id), o.name), None)),
+                };
+                if let Some((port, width)) = point {
+                    points.push(Point {
+                        id: id.clone(),
+                        port,
+                        width,
+                    });
+                }
+            }
+        }
+    }
+    points
+}
+
 /// The module of `graph` (its calls of functions made their nodes), its `[Node]` calls'
-/// modules from `modules`.
+/// modules from `modules`; the editing build's previews of `points`.
 fn write_module(
     graph: &Graph,
     type_name: &str,
     build: Build,
     modules: &dyn Fn(AssetRef) -> Option<String>,
-    shown: &dyn Fn(&str) -> bool,
+    points: &[Point],
 ) -> Result<Generated, GraphError> {
     if !identifier(type_name) {
         return Err(GraphError::graph(format!(
@@ -453,7 +586,7 @@ fn write_module(
     let previews = if previewed.is_empty() {
         Vec::new()
     } else {
-        write_previews(&mut out, &context, &previewed, type_name, shown)?
+        write_previews(&mut out, &context, &previewed, type_name, points)?
     };
     out.line("}", None);
     Ok(Generated {
@@ -467,28 +600,17 @@ fn write_module(
 }
 
 /// The editing build's `node_preview` (E10-4g): the nodes of `order` written in it, each
-/// shown one followed by a return of its first output when it is the one asked for, as a
-/// colour (a scalar grey, a pair red and green). Which nodes it numbers, and how each is
-/// drawn.
+/// followed by a return of the value a point shows when it is the one asked for, as a
+/// colour (a scalar grey, a pair red and green). Which points it numbers (in the order
+/// their values are written), and how each is drawn.
 fn write_previews(
     out: &mut Writer,
     context: &Context<'_, '_>,
     order: &[&str],
     type_name: &str,
-    shown: &dyn Fn(&str) -> bool,
+    points: &[Point],
 ) -> Result<Vec<NodePreview>, GraphError> {
     let kinds = context.kinds;
-    let numbered: Vec<&str> = order
-        .iter()
-        .copied()
-        .filter(|&n| {
-            let kind = kinds[n];
-            shown(n)
-                && !kind.outputs.is_empty()
-                && kind.name != REROUTE_KIND
-                && kind.name != OUTPUT_KIND
-        })
-        .collect();
     // Round where it reads the surface's place, normal or tangent, or code that may.
     let mut round: HashMap<&str, bool> = HashMap::new();
     for &n in order {
@@ -505,10 +627,8 @@ fn write_previews(
         });
         round.insert(n, own || read);
     }
-    let read: Vec<PortRef> = numbered
-        .iter()
-        .map(|&n| PortRef::new(n, kinds[n].outputs[0].name))
-        .collect();
+    let read: Vec<PortRef> = points.iter().map(|p| p.port.clone()).collect();
+    let mut numbered: Vec<NodePreview> = Vec::new();
     out.line("", None);
     out.line(
         &format!(
@@ -518,32 +638,30 @@ fn write_previews(
     );
     out.line("    {", None);
     context.write_with(out, order, &[], &read, &mut |out, id, values| {
-        let Some(k) = numbered.iter().position(|&n| n == id) else {
-            return Ok(());
-        };
-        let port = &read[k];
-        let value = values
-            .get(port)
-            .ok_or_else(|| GraphError::at(id, "its value is not written"))?;
-        let width = output_width(kinds, context.widths, id, &port.port);
-        out.line(
-            &format!(
-                "        if (node == {k}) return {};",
-                convert(value, width, 4)
-            ),
-            Some(id),
-        );
+        for point in points.iter().filter(|p| p.port.node == id) {
+            let value = values
+                .get(&point.port)
+                .ok_or_else(|| GraphError::at(id, "its value is not written"))?;
+            let from = output_width(kinds, context.widths, id, &point.port.port);
+            let width = point.width.unwrap_or(from);
+            let k = numbered.len();
+            out.line(
+                &format!(
+                    "        if (node == {k}) return {};",
+                    convert(&convert(value, from, width), width, 4)
+                ),
+                Some(&point.id),
+            );
+            numbered.push(NodePreview {
+                node: point.id.clone(),
+                sphere: round.get(id).copied().unwrap_or(false),
+            });
+        }
         Ok(())
     })?;
     out.line("        return float4(0.0, 0.0, 0.0, 0.0);", None);
     out.line("    }", None);
-    Ok(numbered
-        .iter()
-        .map(|&n| NodePreview {
-            node: n.to_owned(),
-            sphere: round.get(n).copied().unwrap_or(false),
-        })
-        .collect())
+    Ok(numbered)
 }
 
 /// `graph`'s nodes' kinds once its nodes, links and values are checked.
@@ -1533,5 +1651,106 @@ mod tests {
         let looped = generate(&g, "Previewed", Build::Editing).unwrap();
         assert!(looped.previews.is_empty());
         assert!(!looped.text.contains("node_preview"));
+    }
+
+    /// E10-4g-3: a function call is previewed by what its first output gives, once that is
+    /// written; a function's tab (its preview's graph a call of it) previews the function's
+    /// own nodes by their ids: an input by the value the call gives it, an output by what it
+    /// is given, at the output's width.
+    #[test]
+    fn calls_and_a_functions_nodes_are_previewed() {
+        use crate::function::{FUNCTION_KIND, input_kind, output_kind, signature_of};
+        use engine_scene::{AssetId, AssetRef};
+        let mut tint = Graph::new(Model::Lit);
+        tint.nodes.clear();
+        tint.add(
+            "c",
+            Node::new(input_kind(3), [0.0, 0.0])
+                .named("color")
+                .with_value([1.0, 0.0, 0.0, 0.0]),
+        )
+        .add("h", Node::new("number", [0.0, 100.0]).with_value([0.5; 4]))
+        .add("m", Node::new("multiply", [150.0, 0.0]))
+        .add("o", Node::new(output_kind(3), [300.0, 0.0]).named("tinted"))
+        .link(port("c", "value"), port("m", "a"))
+        .link(port("h", "value"), port("m", "b"))
+        .link(port("m", "out"), port("o", "value"));
+        let file = AssetRef::file(AssetId::from_u128(9));
+        let signature = signature_of(&tint).unwrap().to_string();
+        let call = || {
+            let mut n = Node::new(FUNCTION_KIND, [200.0, 0.0]).with_call("tint", &signature);
+            n.module = file;
+            n
+        };
+        let functions = |r: AssetRef| (r == file).then(|| tint.clone());
+        let sources = Sources {
+            modules: &|_| None,
+            functions: &functions,
+        };
+        let shown =
+            |g: &Generated| -> Vec<String> { g.previews.iter().map(|p| p.node.clone()).collect() };
+        // On a graph: the colour, then the call once its multiply is written.
+        let mut g = Graph::new(Model::Lit);
+        g.add(
+            "col",
+            Node::new("color", [0.0; 2]).with_value([0.8, 0.6, 0.4, 1.0]),
+        )
+        .add("t", call())
+        .link(port("col", "rgba"), port("t", "color"))
+        .link(port("t", "tinted"), port(OUTPUT, "base"));
+        let editing = generate_with(&g, "Tinted", Build::Editing, &sources).unwrap();
+        assert_eq!(shown(&editing), ["col", "t"]);
+        // The call's value: the colour times the function's number, at the call's float3.
+        assert!(
+            editing
+                .text
+                .contains("if (node == 1) return float4(((p._col * float4(p._t__h))).xyz, 1.0);"),
+            "{}",
+            editing.text
+        );
+        // A function's tab: its input, its number, its multiply and its output.
+        let mut wrapper = Graph::new(Model::Unlit);
+        wrapper
+            .add("function", call())
+            .link(port("function", "tinted"), port(OUTPUT, "base"));
+        let tab = generate_shown(
+            &wrapper,
+            "Tinting",
+            Build::Editing,
+            &sources,
+            Shown::Function("function"),
+        )
+        .unwrap();
+        assert_eq!(shown(&tab), ["c", "h", "m", "o"]);
+        // The output at its own width (a float3 made a colour), the input the call's value.
+        assert!(
+            tab.text.contains("if (node == 3) return float4("),
+            "{}",
+            tab.text
+        );
+        assert!(
+            tab.lines.iter().flatten().any(|n| n == "o"),
+            "the output's line is its own: {:?}",
+            tab.lines
+        );
+        // Neither build previews in a saved build, nor a call the tab does not hold.
+        let saved = generate_shown(
+            &wrapper,
+            "Tinting",
+            Build::Saved,
+            &sources,
+            Shown::Function("function"),
+        )
+        .unwrap();
+        assert!(saved.previews.is_empty());
+        let none = generate_shown(
+            &wrapper,
+            "Tinting",
+            Build::Editing,
+            &sources,
+            Shown::Function("x"),
+        )
+        .unwrap();
+        assert!(none.previews.is_empty());
     }
 }

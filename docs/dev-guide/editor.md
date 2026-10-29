@@ -1320,8 +1320,10 @@ Until its shaders are made, the material draws its colour.
     is compiled first, with the sphere's. A dark square stands in until a tile is drawn.
   - **Graph: Node Previews** (the palette) turns them off and on, and the boxes shorten.
     The choice is kept in the session.
-  - The surface, reroutes and function calls have none, and a function's tab shows none
-    yet.
+  - A function call shows what its first output gives. In a function's own tab, every node
+    shows its value as the function's preview computes it. An input shows the value it
+    gives where nothing is linked to it; an output shows what it is given.
+  - The surface and reroutes have none.
 - **Errors on nodes:** a node that stops the graph from generating is framed in red, with
   why under it: a loop, or a kind or a port that is not there (a file merged from another
   branch, or written by a newer engine). It goes as soon as its cause does.
@@ -1492,7 +1494,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E10 | materials: node previews of function calls and in a function's tab (everything else is done) |
+| E12 | animation |
 
 The whole plan is ADR 0107 §7.
 
