@@ -599,7 +599,9 @@ impl PhysicalResources {
                     let len = placement.alias_ranges.len();
                     placement.alias_ranges.reserve(grown.1.saturating_sub(len));
                     let len = placement.alias_resources.len();
-                    placement.alias_resources.reserve(grown.2.saturating_sub(len));
+                    placement
+                        .alias_resources
+                        .reserve(grown.2.saturating_sub(len));
                 }
             }
 
