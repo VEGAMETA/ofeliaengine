@@ -872,7 +872,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E12-1a, skinned models drawn skinned** (#PR, ADR 0124's as-built): a scene's model
+  - **E12-1a, skinned models drawn skinned** (#448, ADR 0124's as-built): a scene's model
     whose mesh a skinned node of its glTF draws gets its skin made in the background
     (parts with their influences, the rig with the rest pose and the file's clips
     compressed: CesiumMan's in 36–41 ms), an instance per part, and its rest pose;
