@@ -439,6 +439,15 @@ fn write_module(
         "// Generated from a material graph (ADR 0123): edits here are lost; edit the graph.",
         None,
     );
+    // The editing build's node previews (E10-4g): `forward.slang`'s `nodePreviewFragment`
+    // calls `node_preview` where the module says it has one, so the type's every entry
+    // point compiles in one request. A compile reads one type's module; the guard keeps
+    // several editing builds read together quiet.
+    if !previewed.is_empty() {
+        out.line("#ifndef MATERIAL_NODE_PREVIEWS", None);
+        out.line("#define MATERIAL_NODE_PREVIEWS 1", None);
+        out.line("#endif", None);
+    }
     // The modules its calls' functions are in (E10-3g-3), after the mark they use; each
     // line its first call's, so a module not found is that node's.
     let mut included: Vec<AssetRef> = Vec::new();
@@ -1639,9 +1648,11 @@ mod tests {
             "{:?}",
             editing.params
         );
+        assert!(text.contains("#define MATERIAL_NODE_PREVIEWS 1"), "{text}");
         let saved = generate(&g, "Previewed", Build::Saved).unwrap();
         assert!(saved.previews.is_empty());
         assert!(!saved.text.contains("node_preview"));
+        assert!(!saved.text.contains("MATERIAL_NODE_PREVIEWS"));
         assert!(!saved.params.iter().any(|p| p.node == "t"));
         // A loop among nodes nothing reaches: no previews, the material as it was.
         g.add("x", Node::new("add", [0.0; 2]))

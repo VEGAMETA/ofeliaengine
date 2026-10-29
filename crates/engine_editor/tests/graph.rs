@@ -774,6 +774,31 @@ fn a_graphs_nodes_show_their_previews_under_their_ports() {
         "a value typed: on its tile after {took:.3} s, {frames} frames ({} red pixels)",
         red(&shot)
     );
+    // A change of code: the normal linked into the sum in the green's place, by a drag from
+    // its port; the sum's tile and the sphere no longer yellow once the module is compiled
+    // again (the positions are this graph's at its framing, the first test's way).
+    let yellow = |rgba: &[u8]| count(rgba, &|r, g, b| r > 150.0 && g > 150.0 && b < 90.0);
+    let before = yellow(&shot);
+    pointer(&mut game, 398, 341);
+    button(&mut game, true);
+    player
+        .frame_overlaid(&mut game, Some(&mut overlay))
+        .unwrap();
+    for (x, y) in [(340, 260), (289, 183)] {
+        pointer(&mut game, x, y);
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
+            .unwrap();
+    }
+    button(&mut game, false);
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        yellow(shot) < before - 6_000
+    });
+    println!(
+        "a link changing the code: on the sphere and its tile after {took:.3} s, {frames} \
+         frames ({before} -> {} yellow pixels)",
+        yellow(&shot)
+    );
     // Off: no tiles, the colours' swatches alone.
     assert!(game.run_command(player.world_mut(), "graph.node_previews"));
     let (shot, ..) = until(&mut player, &mut game, &mut overlay, &|shot| {
