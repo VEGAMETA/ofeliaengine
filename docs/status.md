@@ -872,6 +872,14 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E12's research and ADR 0124, proposed** (#447): the runtime of state machines and
+    blend graphs read in Godot 4.7.2, Bevy 0.20.1, Fyrox 1.0 and ozz-animation 0.17 (ideas
+    only; Unreal and Unity from their documentation), in
+    [animation-graphs.md](research/animation-graphs.md); the tools of Godot, Unity, Unreal,
+    Blender and Figma, with scenarios counted, in
+    [ux/animation.md](research/ux/animation.md). ADR 0124 proposes an `Animator` playing a
+    clip, a cross-fade or a `.agraph` graph, decisions in ticks and poses in frames, graphs
+    cooked to flat arrays over a pose stack, and E12's steps; nine questions to the team.
   - **A material type's reload in one compile** (#446, ADR 0123's as-built): the entry
     points, the node previews' and the parameters' layout from one Slang request
     (`Compiler::compile_file_reflecting`; the editing build's module defines
@@ -1037,7 +1045,11 @@ Last updated: 2026-10-28.
     no taskbar button, shown without being activated; uncloaking and bringing it to the
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next** (the owner's order: materials first of the tools, then animation and 2D;
-    E10 is done): E12, animation.
+    E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (proposed,
+    nine questions to the team). First the steps no answer changes: E12-1a, skinned models
+    drawn skinned by the player with their clips; E12-1b, clips seen in the dock and the
+    inspector with the engine's preview, and P in place. Then E12-1c to E12-5 as the
+    answers come.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
     the later in the file's list winning where they meet; scripts blend one in and out
@@ -1361,7 +1373,7 @@ Left in the core: recording on the job system.
 | **Sound in the player**: `AudioSource`, `AudioSource3D`, `AudioListener` and `ReverbZone` components, positions saved; walls muffling and the room's reverb from rays through the physics world; one mixer for sources and videos; sounds from a live folder while developing, a sound pack in a release | done | ADR 0105 |
 | Audio, text, 2D, basic UI | solid / basic | §11, ADR 0015 |
 | Tests: golden images (FLIP, per vendor), per-pass perf gate, determinism, zero-allocation tests | solid | ADR 0062 |
-| Editor | E1 to E9 done (E8, the code editor, but for rename across the project); E10, materials, done (the graph, ADR 0123); E11, sound, done; E12 to E14 ahead | ADR 0107 |
+| Editor | E1 to E9 done (E8, the code editor, but for rename across the project); E10, materials, done (the graph, ADR 0123); E11, sound, done; E12, animation, designed (ADR 0124, proposed); E13 and E14 ahead | ADR 0107 |
 | Luau | scripting v1 done: components and hooks, queries and systems, physics, input, messages and timers, saves, networking, reload on save, types; the debugger begun | §10, ADRs 0114, 0119 |
 
 ## 4. In flight
