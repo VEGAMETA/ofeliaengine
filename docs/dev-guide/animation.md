@@ -67,6 +67,32 @@ world.spawn((Model::new(mesh, material), Animator::new("Walk")));
 
 In the editor its `clip` is a list of the character's clips.
 
+### Sockets: things that follow a joint
+
+A `JointAttachment` on an entity right under a character makes it a socket on one of the
+character's joints (ADR 0124's E12-1c, as Godot's `BoneAttachment3D`). What hangs under the
+socket follows that joint:
+
+```rust
+use engine_app::prelude::*;
+
+let hand = world.spawn((JointAttachment::new("Hand.R"), Transform::IDENTITY));
+world.set_parent(hand, Some(character))?;
+let sword = world.spawn((Model::new(sword_mesh, steel), Transform::from_xyz(0.0, 0.1, 0.0)));
+world.set_parent(sword, Some(hand))?;
+```
+
+- Each tick, before transforms propagate, the player sets the socket's `Transform` to where
+  its joint is in the character's pose then: the editor's held pose, else the animator's at
+  its time, else the rest pose. Gameplay in the tick sees the sword where the hand is, and
+  frames between ticks draw it smoothly, as every transform is drawn.
+- The things under the socket keep their own transforms, in the joint's space: the sword
+  a tenth of a metre along the hand.
+- While the editor edits, sockets follow the pose it shows: P in place, the Clips'
+  playhead, the animator's `time`.
+- A joint name the skeleton lacks leaves the socket where it is.
+- Sockets are saved like any entity; the joint is looked up by name once per rig.
+
 A game that poses its characters itself still can: set the palettes in `Game::animate`,
 as below. Cross-fades, layers, root motion and graphs come with the rest of E12-2 and
 E12-5.

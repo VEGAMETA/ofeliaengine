@@ -66,7 +66,7 @@ use engine_render::mesh::{GeometryPool, MeshId, OwnedMeshData};
 use engine_render::skinning::{SkinId, SkinnedId, SkinnedMeshData, Skinning};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_rhi::{Allocator, Bindless, Device, Wrap};
-use engine_runtime::{Animator, Derived, MeshRenderer, SkinnedMesh};
+use engine_runtime::{Animator, Derived, JointAttachment, MeshRenderer, SkinnedMesh};
 use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -736,6 +736,7 @@ type Orphans = QueryState<Entity, (With<FromModel>, Without<Model>)>;
 type SlotChanges = QueryState<(Entity, &'static Model), Changed<MaterialSlots>>;
 type Unsplit = QueryState<(Entity, &'static Model), (With<Split>, Without<MaterialSlots>)>;
 type Parts = QueryState<Entity, With<ModelPart>>;
+type Sockets = QueryState<(Entity, &'static engine_ecs::Parent), With<JointAttachment>>;
 
 /// The assets the player's scenes use, made on first use (ADR 0108): built-in meshes and
 /// the built-in material, material files and glTF files' meshes and materials under the
@@ -820,6 +821,10 @@ pub struct Assets {
     slot_changes: Option<SlotChanges>,
     unsplit: Option<Unsplit>,
     parts: Option<Parts>,
+    /// The characters' sockets (ADR 0124's E12-1c): each with its character, sorted by
+    /// character, kept between ticks.
+    sockets: Option<Sockets>,
+    socket_list: Vec<(Entity, Entity)>,
     /// Models' colliders (ADR 0117): each glTF file's once cooked (or why not), the files
     /// being cooked, the built-in meshes' as made, and how many times any was made or
     /// forgotten.
@@ -953,6 +958,8 @@ impl Assets {
             slot_changes: None,
             unsplit: None,
             parts: None,
+            sockets: None,
+            socket_list: Vec::new(),
             colliders: HashMap::new(),
             cooking: HashSet::new(),
             read_to_cook: HashSet::new(),
@@ -2692,6 +2699,80 @@ impl Assets {
     /// The skinned models each frame (ADR 0124's E12-1a): those gone let their instances go;
     /// those whose pose changed are posed again; the skins of files read again that no model
     /// draws any more are let go. Allocates nothing when nothing changed.
+    /// The characters' sockets this tick (ADR 0124's E12-1c): each [`JointAttachment`] right
+    /// under a skinned model placed where its joint is in the model's pose now (the editor's
+    /// held one, else its animator's at its time, else its rest pose), in the model's space.
+    /// Called in each tick before transforms propagate, so what hangs under a socket follows
+    /// its joint; a socket already there is not written.
+    pub(crate) fn place_sockets(&mut self, world: &mut World) {
+        if self.owned.is_empty() {
+            return;
+        }
+        engine_profiler::zone!("app::Assets::place_sockets");
+        let sockets = self.sockets.get_or_insert_with(|| QueryState::new(world));
+        self.socket_list.clear();
+        self.socket_list.extend(
+            sockets
+                .iter_readonly(world)
+                .map(|(e, parent)| (parent.get(), e)),
+        );
+        self.socket_list.sort_unstable();
+        let mut k = 0;
+        while k < self.socket_list.len() {
+            let character = self.socket_list[k].0;
+            let end = k + self.socket_list[k..]
+                .iter()
+                .take_while(|(c, _)| *c == character)
+                .count();
+            if let Some(owned) = self.owned.get(&character) {
+                let pose = if owned.held {
+                    owned.pose
+                } else {
+                    world.get::<Animator>(character).and_then(|animator| {
+                        let clips = owned.rig.clips();
+                        let c = named_clip(clips.iter().map(crate::RigClip::name), &animator.clip);
+                        let length = clips.get(c)?.duration();
+                        Some((c, animator.at(1.0, length)))
+                    })
+                };
+                let rig_id = Arc::as_ptr(&owned.rig) as usize as u64;
+                let joints = self.posing.joints(&owned.rig, pose);
+                let skeleton = owned.rig.skeleton();
+                for &(_, socket) in &self.socket_list[k..end] {
+                    let Some(attachment) = world.get::<JointAttachment>(socket) else {
+                        continue;
+                    };
+                    // The joint looked up by name once per rig.
+                    let j = if attachment.found_rig == rig_id {
+                        Some(usize::from(attachment.found_joint))
+                    } else {
+                        let j = skeleton
+                            .find(&attachment.joint)
+                            .and_then(|j| u16::try_from(j).ok());
+                        if let Some(a) = world.get_mut::<JointAttachment>(socket) {
+                            a.found_joint = j.unwrap_or(u16::MAX);
+                            a.found_rig = rig_id;
+                        }
+                        j.map(usize::from)
+                    };
+                    let Some(at) = j.and_then(|j| joints.get(j)) else {
+                        continue;
+                    };
+                    let (scale, rotation, translation) = at.to_scale_rotation_translation();
+                    let placed = Transform::from_translation(translation)
+                        .with_rotation(rotation)
+                        .with_scale(scale);
+                    if world.get::<Transform>(socket) != Some(&placed)
+                        && let Some(t) = world.get_mut::<Transform>(socket)
+                    {
+                        *t = placed;
+                    }
+                }
+            }
+            k = end;
+        }
+    }
+
     /// The skinned models' [`Animator`]s' poses this frame (ADR 0124's E12-2): each one's
     /// clip at the frame's moment `alpha` of the way from the last tick to the next, but
     /// where the editor holds the pose; a model without one rests. The clip's length goes

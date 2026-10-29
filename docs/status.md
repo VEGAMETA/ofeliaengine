@@ -879,6 +879,11 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-1c-3a, sockets follow their joints** (#455, ADR 0124's as-built): a
+    `JointAttachment` right under a character is a socket on one of its joints; each tick
+    the player places it there (held pose, else the animator's, else rest) before
+    transforms propagate, and what hangs under it follows (a cube in CesiumMan's hand, on
+    the joint to 0 m). 0 allocations with a socket placed every tick, both GPUs.
   - **E12-2a, the `Animator` plays a clip** (#454, ADR 0124's as-built): an `Animator` on a
     character plays its clip, looped: its `time` moves on each tick (saved, so loads go on),
     each frame poses between the last two ticks, and the world standing still holds it. The
@@ -1091,8 +1096,8 @@ Last updated: 2026-10-28.
   - **Next** (the owner's order: materials first of the tools, then animation and 2D;
     E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (accepted
     2026-10-29, every question as recommended). E12-1a, E12-1b-1, E12-1b-2, E12-1c-1 and
-    E12-1c-2 and E12-2a are done; next E12-1c-3 (attachments, on the frame stage E12-2a
-    made: an attachment follows the pose the Animator makes each frame), the rest of E12-2 (cross-fades, layers, root motion, saves,
+    E12-1c-2, E12-2a and E12-1c-3a are done; next E12-1c-3b (attaching by a drop onto a
+    joint, a file's meshes under joints dropped as sockets), the rest of E12-2 (cross-fades, layers, root motion, saves,
     scripts), E12-1b-3 (↑/↓ through clips, two side by side, the floor under root motion and
     the root's path), E12-3 (the Animation tab), E12-4 (keys) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine

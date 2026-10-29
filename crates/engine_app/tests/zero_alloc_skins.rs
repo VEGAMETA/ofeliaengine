@@ -62,6 +62,17 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         Model::new(mesh, material),
         engine_runtime::Animator::new(""),
     ));
+    // A socket in his hand, a cube in it (E12-1c): placed every tick.
+    let hand = player.world_mut().spawn((
+        Transform::IDENTITY,
+        engine_runtime::JointAttachment::new("Skeleton_arm_joint_R__3_"),
+    ));
+    player.world_mut().set_parent(hand, Some(walker)).unwrap();
+    let cube = player.world_mut().spawn((
+        Transform::from_xyz(0.0, 0.1, 0.0),
+        Model::new(engine_app::builtin::CUBE, engine_app::builtin::MATERIAL),
+    ));
+    player.world_mut().set_parent(cube, Some(hand)).unwrap();
     let started = Instant::now();
     while player.model_rig(man).is_none() || player.model_rig(walker).is_none() {
         assert!(started.elapsed() < Duration::from_secs(30), "no skin");

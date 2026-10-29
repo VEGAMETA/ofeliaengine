@@ -1791,6 +1791,163 @@ fn an_animator_plays_its_clip_on_the_ticks_and_poses_each_frame() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR 0124's E12-1c: a socket under a character (`JointAttachment`) follows its joint:
+/// where the joint is in the pose held, through the animator's clip as it plays, and what
+/// hangs under the socket with it; standing still, it stands; a joint the skeleton lacks
+/// leaves its socket alone.
+#[test]
+fn a_socket_follows_its_joint_and_carries_what_hangs_under_it() {
+    let source =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/CesiumMan");
+    if !source.join("CesiumMan.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ofelia-sockets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for file in ["CesiumMan.gltf", "CesiumMan_data.bin", "CesiumMan_img0.jpg"] {
+        std::fs::copy(source.join(file), dir.join(file)).unwrap();
+    }
+    let id = AssetMeta::ensure(&dir.join("CesiumMan.gltf")).unwrap();
+    let (mesh, material) = (
+        AssetRef::part(id, "Cesium_Man"),
+        AssetRef::part(id, "Cesium_Man-effect"),
+    );
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(mesh, "CesiumMan.gltf#Cesium_Man");
+    paths.insert(material, "CesiumMan.gltf#Cesium_Man-effect");
+    let mut world = World::new();
+    let man = world.spawn((
+        SceneId::new(),
+        Name::new("Man"),
+        Transform::from_xyz(1.0, 0.0, 0.0)
+            .with_rotation(Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2)),
+        Model::new(mesh, material),
+        Animator::new(""),
+    ));
+    let hand = world.spawn((
+        SceneId::new(),
+        Name::new("Hand"),
+        Transform::IDENTITY,
+        JointAttachment::new("Skeleton_arm_joint_R__3_"),
+    ));
+    world.set_parent(hand, Some(man)).unwrap();
+    let held = world.spawn((
+        SceneId::new(),
+        Name::new("Held"),
+        Transform::from_xyz(0.0, 0.1, 0.0),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    world.set_parent(held, Some(hand)).unwrap();
+    let lost = world.spawn((
+        SceneId::new(),
+        Name::new("Lost"),
+        Transform::from_xyz(0.5, 0.5, 0.5),
+        JointAttachment::new("Tail"),
+    ));
+    world.set_parent(lost, Some(man)).unwrap();
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    assert!(text.contains("JointAttachment"), "saved with the scene");
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("sockets test"),
+        window: Window::Offscreen {
+            width: 128,
+            height: 128,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let world = player.world_mut();
+    let (man, hand, held, lost) = (
+        find_named(world, "Man").unwrap(),
+        find_named(world, "Hand").unwrap(),
+        find_named(world, "Held").unwrap(),
+        find_named(world, "Lost").unwrap(),
+    );
+    let started = Instant::now();
+    while player.model_rig(man).is_none() {
+        assert!(started.elapsed() < Duration::from_secs(30), "no skin");
+        player.frame(&mut game).unwrap();
+    }
+    let rig = player.model_rig(man).unwrap();
+    let joint = rig.skeleton().find("Skeleton_arm_joint_R__3_").unwrap();
+    let length = rig.clips()[0].duration();
+    // Held halfway through the walk: the socket where the joint is then.
+    assert!(player.pose_model(man, Some((0, length * 0.5))));
+    for _ in 0..3 {
+        player.frame(&mut game).unwrap();
+    }
+    let mut joints = Vec::new();
+    assert!(player.model_joints(man, &mut joints));
+    let at = |player: &mut Player, e| *player.world_mut().get::<Transform>(e).unwrap();
+    let socket = at(&mut player, hand);
+    let off = (socket.translation - Vec3::from(joints[joint].translation)).length();
+    println!("the hand's socket {off} m off its joint");
+    assert!(off < 1e-5, "{off}");
+    // What hangs under it is carried: the cube a tenth of a meter along the hand's y.
+    let world_at = |player: &mut Player, e| player.world_mut().get::<GlobalTransform>(e).unwrap().0;
+    let expected = world_at(&mut player, man)
+        * joints[joint]
+        * Affine3A::from_translation(Vec3::new(0.0, 0.1, 0.0));
+    let got = world_at(&mut player, held);
+    let carried = (Vec3::from(got.translation) - Vec3::from(expected.translation)).length();
+    assert!(carried < 1e-4, "the cube in his hand: {carried} m off");
+    // A joint he has not: its socket stays where it was put.
+    assert_eq!(at(&mut player, lost).translation, Vec3::new(0.5, 0.5, 0.5));
+    // Let go: the animator plays, the socket goes with the hand.
+    assert!(player.pose_model(man, None));
+    let mut path = Vec::new();
+    for _ in 0..30 {
+        player.frame(&mut game).unwrap();
+        path.push(at(&mut player, hand).translation);
+    }
+    let went = path.windows(2).map(|w| (w[1] - w[0]).length()).sum::<f32>();
+    println!("the hand went {went:.3} m in 30 frames");
+    assert!(went > 0.05, "the socket follows the walk: {went} m");
+    // The world standing still: so does the socket.
+    player.set_simulating(false);
+    player.frame(&mut game).unwrap();
+    let still = at(&mut player, hand);
+    for _ in 0..10 {
+        player.frame(&mut game).unwrap();
+    }
+    assert_eq!(at(&mut player, hand), still, "standing still");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ADR 0124's E12-1b: the editor's live model preview draws a skinned model of no scene
 /// alone, its skin made in the background; it draws again only when its pose or its turn
 /// changed, a clip's moment and a quarter turn each giving another picture, and nothing once

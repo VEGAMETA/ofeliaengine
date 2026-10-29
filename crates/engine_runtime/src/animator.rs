@@ -1,7 +1,8 @@
 //! What a character plays (ADR 0124's E12-2): the [`Animator`], saved with its entity, and
 //! [`Animators::advance`], which moves every animator on each tick (the player calls it
 //! after the scripts' tick and before `Game::tick`). Each rendered frame then poses the
-//! character at the frame's moment between the last two ticks ([`Animator::at`]).
+//! character at the frame's moment between the last two ticks ([`Animator::at`]). A
+//! [`JointAttachment`] under a character follows one of its joints (E12-1c).
 
 use engine_ecs::{QueryState, World, reflect_component};
 use engine_reflect::Reflect;
@@ -96,6 +97,43 @@ impl Animator {
             t.rem_euclid(length)
         } else {
             0.0
+        }
+    }
+}
+
+/// A socket on a character (ADR 0124's E12-1c): an entity right under a skinned model that
+/// follows one of its joints, as Godot's `BoneAttachment3D`. Each tick, before transforms
+/// propagate, the player sets its `Transform` (in its parent's space, the character's) to
+/// where the joint is in the character's pose then: what hangs under it (a sword in a hand)
+/// follows the joint, its own transform its place in the joint's space. While the editor
+/// edits, it follows the pose the editor shows. A joint the skeleton lacks leaves it where
+/// it is.
+///
+/// ```ignore
+/// let hand = world.spawn((JointAttachment::new("Hand.R"), Transform::IDENTITY));
+/// world.set_parent(hand, Some(character))?;
+/// world.set_parent(sword, Some(hand))?;
+/// ```
+#[derive(Debug, Clone, PartialEq, Default, Reflect)]
+pub struct JointAttachment {
+    /// The joint, by its name in the skeleton.
+    pub joint: String,
+    /// The joint's index in the skeleton, as the player found it.
+    #[reflect(skip)]
+    pub found_joint: u16,
+    /// Which of the player's rigs it was found in; 0 before.
+    #[reflect(skip)]
+    pub found_rig: u64,
+}
+
+reflect_component!(JointAttachment);
+
+impl JointAttachment {
+    /// Following joint `joint`.
+    pub fn new(joint: &str) -> Self {
+        Self {
+            joint: joint.to_owned(),
+            ..Self::default()
         }
     }
 }
