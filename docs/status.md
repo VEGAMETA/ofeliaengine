@@ -879,6 +879,10 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-1c-2a, a character's joints in the viewport** (#452, ADR 0124's as-built): the
+    selected characters' skeletons as white sticks in front of everything, moving with
+    their clips (`Player::model_joints`, `Player::skinned_models`); View: Skeletons shows
+    every character's in grey. 0 allocations while one plays in place, both GPUs.
   - **E12-1c-1, a dropped character is one entity** (#451, ADR 0124's as-built): a file
     that draws a mesh skinned drops as one entity, its first skinned mesh's, turned and
     scaled as the file stands it; its other meshes go under it at their places in the
@@ -1076,9 +1080,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next** (the owner's order: materials first of the tools, then animation and 2D;
     E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (accepted
-    2026-10-29, every question as recommended). E12-1a, E12-1b-1, E12-1b-2 and E12-1c-1
-    are done; next E12-1c-2 (a character's joints in the viewport and the inspector's
-    tree) and E12-1c-3 (attachments), which the `Animator` stands on, then E12-1b-3 (↑/↓
+    2026-10-29, every question as recommended). E12-1a, E12-1b-1, E12-1b-2, E12-1c-1 and
+    E12-1c-2a are done; next E12-1c-2b (Tab's joint mode and the inspector's joint tree)
+    and E12-1c-3 (attachments), which the `Animator` stands on, then E12-1b-3 (↑/↓
     through clips, two side by side, the floor under root motion and the root's path),
     E12-2 (the `Animator`), E12-3 (the Animation tab), E12-4 (keys) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine

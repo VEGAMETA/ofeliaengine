@@ -2813,6 +2813,24 @@ impl Assets {
         self.owned.get(&e).map(|o| &*o.rig)
     }
 
+    /// Entity `e`'s skinned model's joints where its pose puts them (ADR 0124's E12-1c), in
+    /// the entity's space, into `out` (its room kept). False for a model drawn without a
+    /// skin, or before its skin is made.
+    pub(crate) fn model_joints(&mut self, e: Entity, out: &mut Vec<Affine3A>) -> bool {
+        let Some(owned) = self.owned.get(&e) else {
+            return false;
+        };
+        out.clear();
+        out.extend_from_slice(self.posing.joints(&owned.rig, owned.pose));
+        true
+    }
+
+    /// The entities whose models are drawn skinned (ADR 0124's E12-1c), once their skins are
+    /// made, in no order.
+    pub(crate) fn skinned_models(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.owned.keys().copied()
+    }
+
     /// Poses entity `e`'s skinned model at a clip's moment, or in its rest pose (ADR 0124's
     /// E12-1a): set by the next sync. False for a model drawn without a skin.
     pub(crate) fn pose_model(&mut self, e: Entity, pose: Option<(usize, f32)>) -> bool {

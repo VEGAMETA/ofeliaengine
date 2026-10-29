@@ -353,6 +353,25 @@ allocation with transitions and events every tick; the same events at the same t
   a node other than the first skinned one keeps its own place under the root (two
   characters in one file are two entities, the second under the first).
 
+## As built (E12-1c-2a, 2026-10-30): a character's joints in the viewport
+
+- **The player:** `Player::model_joints(e, &mut Vec<Affine3A>)` gives a skinned model's
+  joints where its pose puts them: in the entity's space (the entity's transform places
+  them as it places the skinned mesh), in the skeleton's order, into the caller's room.
+  `Player::skinned_models()` lists the entities drawn skinned. The rig's `Posing::joints`
+  samples the pose as the palette does: its joints skin as the palette does, now a check
+  of the rig test.
+- **The editor:** the selected characters' skeletons are drawn as sticks from each joint
+  to its parent, white and in front of everything (Blender's Stick, In Front), made each
+  frame from the pose the player draws. **View: Skeletons** (`view.skeletons`) adds every
+  other character's, in grey. No allocation while a selected character plays in place,
+  on both GPUs and with Tracy.
+- **Tests:** CesiumMan selected shows 20 sticks of his 21 joints, within his height, that
+  follow his walk (joints 0.37–0.44 m apart between two moments 0.3 s apart) and go with
+  the selection; View: Skeletons switches.
+- **Left:** Tab's joint mode (a click picks a joint) and the inspector's joint tree
+  (E12-1c-2b); the sticks are one pixel wide.
+
 ## Consequences
 
 - New source files: `.agraph` and `.anim`, and a section in models' `.meta`; a new component

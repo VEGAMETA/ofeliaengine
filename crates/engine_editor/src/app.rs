@@ -897,6 +897,9 @@ struct CommandIds {
     overlays: CommandId,
     /// The blockout's colliders over the viewport (ADR 0110 E2b-4).
     colliders: CommandId,
+    /// Every character's skeleton over the viewport, not only the selected ones' (ADR
+    /// 0124's E12-1c).
+    skeletons: CommandId,
     /// View: Sound Ranges (E11-4c): every source's reach and every zone, dim.
     sound_ranges: CommandId,
     docks_beside_code: CommandId,
@@ -1090,6 +1093,7 @@ fn commands() -> (Commands, CommandIds) {
         pivot: c.register("transform.pivot", "Transform", "Next Pivot"),
         overlays: c.register("view.overlays", "View", "Overlays"),
         colliders: c.register("view.colliders", "View", "Colliders"),
+        skeletons: c.register("view.skeletons", "View", "Skeletons"),
         sound_ranges: c.register("view.sound_ranges", "View", "Sound Ranges"),
         docks_beside_code: c.register("view.docks_beside_code", "View", "Scene Docks Beside Code"),
         navigation: c.register("view.navigation", "View", "Navigation"),
@@ -3158,6 +3162,13 @@ struct Editor {
     /// the world as the player last evaluated them, and what those were made from (each
     /// group's epoch and place) to make them again only when that changes.
     show_colliders: bool,
+    /// The characters' skeletons (ADR 0124's E12-1c): every one's with View: Skeletons
+    /// (else the selected ones' only); their sticks in the world, the selected ones' and
+    /// the others', made each frame from the joints and the entities they are made for.
+    show_skeletons: bool,
+    skeleton_lines: [Vec<[Vec3; 2]>; 2],
+    skeleton_joints: Vec<Affine3A>,
+    skeleton_of: Vec<Entity>,
     /// View: Sound Ranges (E11-4c).
     show_sound_ranges: bool,
     /// The active entity's 3D sound's falloff for the inspector (E11-4c): its bars, and
@@ -4037,6 +4048,10 @@ impl Editor {
             guides: Vec::new(),
             hint: String::new(),
             show_colliders: false,
+            show_skeletons: false,
+            skeleton_lines: Default::default(),
+            skeleton_joints: Vec::new(),
+            skeleton_of: Vec::new(),
             show_sound_ranges: false,
             falloff_bars: [0.0; FALLOFF_BARS],
             falloff_texts: Default::default(),
@@ -16166,6 +16181,13 @@ impl Editor {
             } else {
                 "Sound ranges hidden"
             }));
+        } else if id == ids.skeletons {
+            self.show_skeletons = !self.show_skeletons;
+            self.say(String::from(if self.show_skeletons {
+                "Skeletons shown: every character's joints"
+            } else {
+                "Skeletons hidden: only the selected characters' joints show"
+            }));
         } else if id == ids.colliders {
             self.show_colliders = !self.show_colliders;
             self.collider_key.clear();
@@ -19097,6 +19119,48 @@ impl Editor {
             }
         }
         std::mem::swap(&mut self.posed, &mut self.posing);
+    }
+
+    /// The characters' skeletons (ADR 0124's E12-1c): a stick from each joint to its
+    /// parent, where the pose the player draws puts them; the selected characters' in front
+    /// of everything, and with View: Skeletons every other character's, dimmer.
+    fn skeletons_frame(&mut self, player: &mut Player) {
+        let [selected, others] = &mut self.skeleton_lines;
+        selected.clear();
+        others.clear();
+        self.skeleton_of.clear();
+        self.skeleton_of.extend_from_slice(&self.selection);
+        let chosen = self.skeleton_of.len();
+        if self.show_skeletons {
+            let selection = &self.selection;
+            self.skeleton_of
+                .extend(player.skinned_models().filter(|e| !selection.contains(e)));
+        }
+        for (k, &e) in self.skeleton_of.iter().enumerate() {
+            let Some(at) = player.world_mut().get::<GlobalTransform>(e).map(|g| g.0) else {
+                continue;
+            };
+            if !player.model_joints(e, &mut self.skeleton_joints) {
+                continue;
+            }
+            let Some(rig) = player.model_rig(e) else {
+                continue;
+            };
+            let skeleton = rig.skeleton();
+            let lines = if k < chosen {
+                &mut *selected
+            } else {
+                &mut *others
+            };
+            let joints = &self.skeleton_joints;
+            lines.extend(joints.iter().enumerate().filter_map(|(j, m)| {
+                let parent = joints.get(skeleton.parent(j)?)?;
+                Some([
+                    at.transform_point3(Vec3::from(parent.translation)),
+                    at.transform_point3(Vec3::from(m.translation)),
+                ])
+            }));
+        }
     }
 
     /// The selected sources heard where they are, looping, from the editor's camera (E11-4b),
@@ -23956,8 +24020,10 @@ impl<G> EditorGame<G> {
                 shared.hearing_given = true;
             }
         }
-        // Characters in place (ADR 0124's E12-1b): their clips, poses and rest.
+        // Characters in place (ADR 0124's E12-1b): their clips, poses and rest; then their
+        // skeletons where those poses put them (E12-1c).
         shared.clips_frame(player);
+        shared.skeletons_frame(player);
         // Sound previews (E11-3b): what the editor asked, then the preview as it plays.
         match shared.preview_ask.take() {
             Some(PreviewAsk::Play {
@@ -24378,6 +24444,12 @@ impl<G> EditorGame<G> {
             .shown_model
             .as_ref()
             .map_or((false, false), |m| (m.shown, m.playing))
+    }
+
+    /// The characters' skeletons' sticks now (ADR 0124's E12-1c), the selected ones' and
+    /// the others': for tests.
+    pub fn skeleton_lines(&self) -> [Vec<[Vec3; 2]>; 2] {
+        self.shared.borrow().skeleton_lines.clone()
     }
 
     /// How many characters play in place now (ADR 0124's E12-1b): for tests.
@@ -25058,6 +25130,10 @@ fn motion_batch(collider: &ModelCollider) -> usize {
         (false, Motion::Kinematic) => 2,
     }
 }
+
+/// The characters' skeletons' colors (ADR 0124's E12-1c; linear, straight alpha): the
+/// selected ones' white, every other one's (View: Skeletons) a dim grey.
+const SKELETON_COLORS: [[f32; 4]; 2] = [[0.95, 0.95, 0.95, 0.95], [0.7, 0.7, 0.7, 0.45]];
 
 /// The models' colliders' colors by [`motion_batch`] (linear, straight alpha): static cyan
 /// as the blockout's, dynamic orange, kinematic violet, sensors yellow.
@@ -26678,6 +26754,7 @@ impl Overlay for EditorOverlay {
                     // Empty when hidden.
                     let [boundary, inner] = &editor.nav_lines;
                     let [statics, dynamics, kinematics, sensors] = &editor.model_lines;
+                    let [selected_bones, other_bones] = &editor.skeleton_lines;
                     let models = |lines, motion: usize| LineBatch {
                         lines,
                         color: MOTION_COLORS[motion],
@@ -26702,6 +26779,17 @@ impl Overlay for EditorOverlay {
                             lines: inner,
                             color: [0.35, 1.0, 0.45, 0.3],
                             hidden: 0.1,
+                        },
+                        // The characters' skeletons, in front of their meshes (E12-1c).
+                        LineBatch {
+                            lines: other_bones,
+                            color: SKELETON_COLORS[1],
+                            hidden: 1.0,
+                        },
+                        LineBatch {
+                            lines: selected_bones,
+                            color: SKELETON_COLORS[0],
+                            hidden: 1.0,
                         },
                     ];
                     self.line_lists.add_passes(
@@ -32869,6 +32957,23 @@ return Coin
             "{found:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_skeletons_switches_every_characters_skeleton() {
+        let mut world = World::new();
+        let mut ed = draw_editor("skeletons", &mut world);
+        assert!(!ed.show_skeletons, "the selected characters' only at first");
+        let id = ed.ids.skeletons;
+        ed.run(&mut world, id);
+        assert!(ed.show_skeletons);
+        assert!(
+            ed.message
+                .as_ref()
+                .is_some_and(|m| m.0.starts_with("Skeletons shown"))
+        );
+        ed.run(&mut world, id);
+        assert!(!ed.show_skeletons);
     }
 
     #[test]

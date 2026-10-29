@@ -1401,6 +1401,21 @@ impl Player {
         self.assets.model_rig(e)
     }
 
+    /// Entity `e`'s skinned model's joints where its pose puts them (ADR 0124's E12-1c): in
+    /// the entity's space (its transform places them as it places the skinned mesh), in its
+    /// skeleton's order (the rig's [`crate::Rig::skeleton`] gives their parents), into
+    /// `out`, its room kept. False for a model drawn without a skin, or before its skin is
+    /// made.
+    pub fn model_joints(&mut self, e: Entity, out: &mut Vec<Affine3A>) -> bool {
+        self.assets.model_joints(e, out)
+    }
+
+    /// The entities whose models are drawn skinned, once their skins are made (ADR 0124's
+    /// E12-1c), in no order.
+    pub fn skinned_models(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.assets.skinned_models()
+    }
+
     /// Poses entity `e`'s skinned model at clip `clip`'s moment `time` (held at the clip's
     /// ends) or, with `None`, in its rest pose: what the editor shows while it edits (ADR
     /// 0124's E12-1b). The scene does not change. False for a model drawn without a skin.
