@@ -150,6 +150,9 @@ pub enum Hint {
     Sound,
     /// A mixer bus, by name: the editor's list of the mixer's buses.
     Bus,
+    /// A clip of the entity's skinned model, by its name in the model's file (ADR 0124's
+    /// E12-2): the editor's list of the model's clips.
+    Clip,
 }
 
 /// Attributes of a field (or type), shared by the four users of reflection.

@@ -1,9 +1,10 @@
 //! CLAUDE.md §5: zero heap allocations per frame in steady state with a skinned model (ADR
 //! 0124's E12-1a) posed anew every frame, as the editor poses one playing in place: the
 //! clip sampled, the skeleton's model transforms and the palette made, the instance's
-//! palette set; and the editor's live model preview of it playing too (E12-1b), drawn and
-//! read back every frame. Khronos' CesiumMan (`tools/fetch-test-assets.ps1`); skipped
-//! without it.
+//! palette set; the editor's live model preview of it playing too (E12-1b), drawn and read
+//! back every frame; and a second character played by its `Animator` (E12-2a), its clip on
+//! the ticks and its pose each frame. Khronos' CesiumMan (`tools/fetch-test-assets.ps1`);
+//! skipped without it.
 //! One test per file, so nothing else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
@@ -56,8 +57,13 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         Transform::from_xyz(0.0, -1.0, -3.0),
         Model::new(mesh, material),
     ));
+    let walker = player.world_mut().spawn((
+        Transform::from_xyz(1.0, -1.0, -3.0),
+        Model::new(mesh, material),
+        engine_runtime::Animator::new(""),
+    ));
     let started = Instant::now();
-    while player.model_rig(man).is_none() {
+    while player.model_rig(man).is_none() || player.model_rig(walker).is_none() {
         assert!(started.elapsed() < Duration::from_secs(30), "no skin");
         player.frame(&mut game).unwrap();
     }
@@ -85,9 +91,15 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
     );
     println!("{taken} model previews taken");
     assert!(taken > 100, "the live preview drawn as it played: {taken}");
-    // Still skinned: the same entity drawn by its instance.
+    let walked = player
+        .world_mut()
+        .get::<engine_runtime::Animator>(walker)
+        .unwrap()
+        .time;
+    println!("the animator's clip at {walked:.3} s");
+    // Still skinned: the same entities drawn by their instances.
     let world = player.world_mut();
     let mut skinned = QueryState::<(Entity, &engine_runtime::SkinnedMesh)>::new(world);
-    assert_eq!(skinned.iter_readonly(world).count(), 1);
+    assert_eq!(skinned.iter_readonly(world).count(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }

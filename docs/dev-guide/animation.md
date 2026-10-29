@@ -24,9 +24,13 @@ player, with nothing to write (ADR 0124's E12-1a):
 - `Player::model_rig(entity)` gives the rig: `rig.clips()` lists each clip's name, length,
   samples, bytes and largest compression error. It is `None` for a model drawn without a
   skin.
-- `Player::pose_model(entity, Some((clip, seconds)))` shows the clip at that moment, held
-  at its ends; `None` goes back to the rest pose. Nothing in the scene changes. This is
-  what the editor uses to show a clip in place. Posing anew every frame allocates nothing.
+- `Player::pose_model(entity, Some((clip, seconds)))` holds the clip at that moment, held
+  at its ends; `None` lets it go, back to its `Animator`'s pose (its rest pose without
+  one). Nothing in the scene changes. This is what the editor uses to show a clip in
+  place. Posing anew every frame allocates nothing.
+- `Player::model_joints(entity, &mut joints)` gives the joints where the pose puts them,
+  in the entity's space and the skeleton's order (`rig.skeleton()` names them and their
+  parents).
 - The skinned vertices land where the plain mesh would: the node's place in the file and
   the file's import scale are taken into account, so the entity's transform places the
   character.
@@ -35,9 +39,37 @@ player, with nothing to write (ADR 0124's E12-1a):
 - A file read again makes its skins again; the model is not drawn until the new skin is
   made.
 
+### The `Animator`
+
+An `Animator` on a skinned model's entity plays one of its clips, looped (ADR 0124's
+E12-2a):
+
+```rust
+use engine_app::prelude::*;
+
+world.spawn((Model::new(mesh, material), Animator::new("Walk")));
+```
+
+- `clip` names the clip as its file does. An unnamed clip goes by the name the editor
+  shows it by (`Clip 2`). Empty, or a name the file lacks, plays the first.
+- `time` is where the clip is, in seconds. Each tick moves it on by the tick's length times
+  `speed` (1 by default; negative plays backwards), and it wraps at the clip's end.
+  `paused` holds it.
+- Each rendered frame poses the character between its last two ticks, as transforms are
+  drawn, so a 64 Hz clock still moves smoothly at any frame rate.
+- `time` is saved with the entity: a load goes on from there, and setting it moves the
+  clip there.
+- While the world stands still (the editor editing, the game paused), the character
+  stands at `time`: its clip's first frame unless set.
+- A pose the editor holds (`Player::pose_model`) wins until it lets go.
+- Scripts reach it as any component: `self.Animator.speed = 2`. Its own calls come with
+  the rest of E12-2.
+
+In the editor its `clip` is a list of the character's clips.
+
 A game that poses its characters itself still can: set the palettes in `Game::animate`,
-as below. The `Animator` component that plays clips and graphs comes next (ADR 0124,
-E12-2).
+as below. Cross-fades, layers, root motion and graphs come with the rest of E12-2 and
+E12-5.
 
 ## 1. Importing and cooking
 

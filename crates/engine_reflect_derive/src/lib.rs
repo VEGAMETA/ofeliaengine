@@ -91,10 +91,11 @@ fn attrs_tokens(a: &Attrs) -> syn::Result<Tokens> {
         Some("multiline") => quote!(::engine_reflect::Hint::Multiline),
         Some("sound") => quote!(::engine_reflect::Hint::Sound),
         Some("bus") => quote!(::engine_reflect::Hint::Bus),
+        Some("clip") => quote!(::engine_reflect::Hint::Clip),
         Some(_) => {
             return Err(syn::Error::new_spanned(
                 a.hint.as_ref(),
-                "hint must be \"color\", \"degrees\", \"multiline\", \"sound\" or \"bus\"",
+                "hint must be \"color\", \"degrees\", \"multiline\", \"sound\", \"bus\" or \"clip\"",
             ));
         }
     };

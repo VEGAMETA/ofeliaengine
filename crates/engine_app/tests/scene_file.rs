@@ -1629,6 +1629,168 @@ fn a_skinned_model_is_drawn_skinned_and_posed_at_a_clips_moment() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR 0124's E12-2a: a character's `Animator` plays its clip on the game's clock: its time
+/// moves on each tick and wraps at the clip's end, each frame poses the model between the
+/// last two ticks, a pose the editor holds wins until it lets go, and while the world stands
+/// still (as the editor edits) the character stands at its clip's `time`.
+#[test]
+fn an_animator_plays_its_clip_on_the_ticks_and_poses_each_frame() {
+    let source =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/CesiumMan");
+    if !source.join("CesiumMan.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ofelia-animator-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    for file in ["CesiumMan.gltf", "CesiumMan_data.bin", "CesiumMan_img0.jpg"] {
+        std::fs::copy(source.join(file), dir.join("models").join(file)).unwrap();
+    }
+    let id = AssetMeta::ensure(&dir.join("models/CesiumMan.gltf")).unwrap();
+    let (mesh, material) = (
+        AssetRef::part(id, "Cesium_Man"),
+        AssetRef::part(id, "Cesium_Man-effect"),
+    );
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(mesh, "models/CesiumMan.gltf#Cesium_Man");
+    paths.insert(material, "models/CesiumMan.gltf#Cesium_Man-effect");
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Man"),
+        Transform::from_rotation(Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2)),
+        Model::new(mesh, material),
+        // A name his file has not: his first clip.
+        Animator::new("Stroll"),
+    ));
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    assert!(text.contains("Animator"), "saved with the scene: {text}");
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("animator test"),
+        window: Window::Offscreen {
+            width: 128,
+            height: 128,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let man = find_named(player.world_mut(), "Man").unwrap();
+    let started = Instant::now();
+    while player.model_rig(man).is_none() {
+        assert!(started.elapsed() < Duration::from_secs(30), "no skin");
+        player.frame(&mut game).unwrap();
+    }
+    let length = player.model_rig(man).unwrap().clips()[0].duration();
+    let animator = |player: &mut Player| player.world_mut().get::<Animator>(man).unwrap().clone();
+    // On the ticks: a sixtieth of a second each, wrapped at the clip's end.
+    player.frame(&mut game).unwrap();
+    let before = animator(&mut player).time;
+    for _ in 0..30 {
+        player.frame(&mut game).unwrap();
+    }
+    let after = animator(&mut player);
+    let moved = (after.time - before).rem_euclid(length);
+    println!(
+        "the clip ({length:.2} s) moved {moved:.4} s in 30 frames, now at {:.4}",
+        after.time
+    );
+    let dt = player.runtime().clock.dt();
+    assert!(
+        (moved - 0.5).abs() <= dt + 1e-4,
+        "half a second, to a tick: {moved}"
+    );
+    assert_eq!(after.length, length, "its length known to its ticks");
+    assert!((0.0..length).contains(&after.time));
+    // Each frame: the pose between the last two ticks, as far between them as the frame.
+    let mut drawn = Vec::new();
+    assert!(player.model_joints(man, &mut drawn));
+    let expected = after.at(player.runtime().clock.alpha(), length);
+    assert!(player.pose_model(man, Some((0, expected))));
+    let mut held = Vec::new();
+    assert!(player.model_joints(man, &mut held));
+    let off = drawn
+        .iter()
+        .zip(&held)
+        .map(|(a, b)| (Vec3::from(a.translation) - Vec3::from(b.translation)).length())
+        .fold(0.0f32, f32::max);
+    assert!(
+        off < 1e-5,
+        "the frame's pose is the clip at {expected}: {off} m off"
+    );
+    // Held by the editor: the pose stays while the clip goes on; let go, the animator's.
+    assert!(player.pose_model(man, Some((0, 0.0))));
+    for _ in 0..10 {
+        player.frame(&mut game).unwrap();
+    }
+    let mut still = Vec::new();
+    player.model_joints(man, &mut still);
+    let mut first = Vec::new();
+    assert!(player.pose_model(man, Some((0, 0.0))));
+    player.model_joints(man, &mut first);
+    assert_eq!(still, first, "held at the clip's start");
+    assert!(player.pose_model(man, None));
+    player.frame(&mut game).unwrap();
+    let mut back = Vec::new();
+    player.model_joints(man, &mut back);
+    assert_ne!(back, first, "let go: the animator's pose again");
+    // The world standing still, as while the editor edits: so does he.
+    player.set_simulating(false);
+    player.frame(&mut game).unwrap();
+    let time = animator(&mut player).time;
+    let mut a = Vec::new();
+    player.model_joints(man, &mut a);
+    for _ in 0..10 {
+        player.frame(&mut game).unwrap();
+    }
+    let mut b = Vec::new();
+    player.model_joints(man, &mut b);
+    assert_eq!(animator(&mut player).time, time, "the clock stopped");
+    assert_eq!(a, b, "and the pose with it");
+    // Paused while the world goes on: held too.
+    player.set_simulating(true);
+    player.world_mut().get_mut::<Animator>(man).unwrap().paused = true;
+    player.frame(&mut game).unwrap();
+    let time = animator(&mut player).time;
+    for _ in 0..10 {
+        player.frame(&mut game).unwrap();
+    }
+    assert_eq!(animator(&mut player).time, time, "paused");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ADR 0124's E12-1b: the editor's live model preview draws a skinned model of no scene
 /// alone, its skin made in the background; it draws again only when its pose or its turn
 /// changed, a clip's moment and a quarter turn each giving another picture, and nothing once

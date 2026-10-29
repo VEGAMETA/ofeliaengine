@@ -570,6 +570,8 @@ pub struct Player {
     saves: SaveState,
     /// The world's timers and tweens, moved before every tick (ADR 0104).
     timing: engine_runtime::Timing,
+    /// The characters' animators, moved on each tick (ADR 0124's E12-2).
+    animators: engine_runtime::Animators,
     /// The world's time runs ([`Player::set_simulating`]).
     simulating: bool,
     /// The next frame waits until the assets its models use are made (ADR 0108's E4-4):
@@ -1081,6 +1083,7 @@ impl Player {
         scene.set_jobs(jobs.clone());
         // Timers and tweens on the game's clock (ADR 0104), moved before each tick.
         let timing = engine_runtime::Timing::new(&mut world);
+        let animators = engine_runtime::Animators::new(&mut world);
         let mut runtime = Runtime::<InstanceId>::new(world, settings.tick_hz);
         runtime.set_jobs(jobs.clone());
         let ring = UploadRing::new(&device, &mut allocator, in_flight, 32 << 20)
@@ -1218,6 +1221,7 @@ impl Player {
             closing: false,
             first_present_ms: None,
             timing,
+            animators,
             simulating: true,
             wait_for_assets: true,
             previews: crate::previews::Previews::new(settings.frames_in_flight),
@@ -1416,9 +1420,10 @@ impl Player {
         self.assets.skinned_models()
     }
 
-    /// Poses entity `e`'s skinned model at clip `clip`'s moment `time` (held at the clip's
-    /// ends) or, with `None`, in its rest pose: what the editor shows while it edits (ADR
-    /// 0124's E12-1b). The scene does not change. False for a model drawn without a skin.
+    /// Holds entity `e`'s skinned model at clip `clip`'s moment `time` (held at the clip's
+    /// ends), what the editor shows while it edits (ADR 0124's E12-1b), or with `None` lets
+    /// it go: back to its [`engine_runtime::Animator`]'s pose, its rest pose without one. The
+    /// scene does not change. False for a model drawn without a skin.
     pub fn pose_model(&mut self, e: Entity, pose: Option<(usize, f32)>) -> bool {
         self.assets.pose_model(e, pose)
     }
@@ -3224,6 +3229,7 @@ impl Player {
             let physics_error = &mut self.physics_error;
             let frame_dt = elapsed as f32;
             let timing = &mut self.timing;
+            let animators = &mut self.animators;
             let mut net = self.net.as_deref_mut();
             let assets = &mut self.assets;
             let blockout = &mut self.blockout;
@@ -3283,6 +3289,9 @@ impl Player {
                     frame_number,
                     wait_for_assets,
                     extracted.get(),
+                    // A world standing still (the editor's, a pause) poses its characters
+                    // at their animators' time, not between two ticks that no longer come.
+                    if simulating { alpha } else { 1.0 },
                 );
                 // Brushes (ADR 0110): their groups evaluated again where they changed.
                 blockout.sync(world, geometry, materials, frame_number, extracted.get());
@@ -3367,6 +3376,9 @@ impl Player {
                                 paused_by_script.set(true);
                             }
                         }
+                        // The characters' clips move on, after the scripts' tick and before
+                        // the game's (ADR 0124's E12-2).
+                        animators.advance(world, dt);
                         game_cell.borrow_mut().tick(world, dt);
                         if let Some(own) = own_physics.borrow_mut().as_mut()
                             && let Err(e) = own.step(world, dt)

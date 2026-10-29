@@ -699,6 +699,8 @@ struct FrameLists {
     part_options: Vec<&'static str>,
     /// A bus field's open list (E11-3d).
     bus_options: Vec<&'static str>,
+    /// An animator's clip field's list: the active character's clips (ADR 0124's E12-2).
+    clip_options: Vec<&'static str>,
     /// The active character's clips (ADR 0124's E12-1b).
     clip_rows: Vec<crate::shell::ClipRow<'static>>,
     /// The active character's joints (E12-1c).
@@ -4724,6 +4726,15 @@ impl Editor {
         let mut fields: Vec<Field<'_>> = recycle(std::mem::take(&mut self.lists.fields));
         let mut bus_options: Vec<&str> = recycle(std::mem::take(&mut self.lists.bus_options));
         bus_options.extend(self.bus_choices.iter().map(String::as_str));
+        // An animator's clip field (ADR 0124's E12-2): the active character's clips.
+        let mut clip_options: Vec<&str> = recycle(std::mem::take(&mut self.lists.clip_options));
+        if let Some(view) = self
+            .clips
+            .as_ref()
+            .filter(|v| matches!(v.of, ClipsOf::Entity(_)))
+        {
+            clip_options.extend(view.clips.iter().map(|c| c.name.as_str()));
+        }
         // A sound field's file and ▶ (E11-3d): its path joined in a string kept across
         // frames, and the sound the preview plays.
         let mut joined = std::mem::take(&mut self.joined);
@@ -4805,6 +4816,27 @@ impl Editor {
                         missing: p.mixed == 0
                             && first != crate::mixer::MASTER
                             && bus_layout.is_some_and(|l| !l.buses.contains_key(first)),
+                    }
+                }
+                // A clip field (ADR 0124's E12-2): one of the character's clips, its first
+                // where the field is empty.
+                Kind::Text
+                    if matches!(p.ty.kind, engine_reflect::TypeKind::String)
+                        && p.attrs.hint == engine_reflect::Hint::Clip =>
+                {
+                    Widget::Choice {
+                        current: if first.is_empty() {
+                            clip_options.first().copied().unwrap_or("")
+                        } else {
+                            first
+                        },
+                        open: (open == Some((p.component, p.offset)))
+                            .then_some(clip_options.as_slice()),
+                        // A name its model's file lacks plays the first clip: marked.
+                        missing: p.mixed == 0
+                            && !first.is_empty()
+                            && !clip_options.is_empty()
+                            && !clip_options.contains(&first),
                     }
                 }
                 Kind::Text if matches!(p.ty.kind, engine_reflect::TypeKind::String) => {
@@ -6434,6 +6466,7 @@ impl Editor {
         self.lists.part_values = recycle(part_values);
         self.lists.part_options = recycle(part_options);
         self.lists.bus_options = recycle(bus_options);
+        self.lists.clip_options = recycle(clip_options);
         self.lists.clip_rows = recycle(clip_rows);
         self.lists.joint_rows = recycle(joint_rows);
         self.joined = joined;
@@ -7594,6 +7627,23 @@ impl Editor {
                     self.fill_bus_choices();
                 }
                 self.open_choice = (self.open_choice != Some(key)).then_some(key);
+            }
+            FieldAction::Choose(i) if p.attrs.hint == engine_reflect::Hint::Clip => {
+                self.open_choice = None;
+                let Some(clip) = self
+                    .clips
+                    .as_ref()
+                    .and_then(|v| v.clips.get(i))
+                    .map(|c| c.name.clone())
+                else {
+                    return;
+                };
+                let path = self.path_of(&p, component);
+                if let Err(reason) =
+                    self.set_on(world, &targets, &path, &engine_scene::text::quote(&clip))
+                {
+                    self.say(format!("{path}: {reason}"));
+                }
             }
             FieldAction::Choose(i) if p.attrs.hint == engine_reflect::Hint::Bus => {
                 self.open_choice = None;
@@ -32619,6 +32669,65 @@ mod tests {
     /// under its components, a pick holds a clip's first frame, P plays the selection's
     /// characters in place until P, Escape, another selection or Play, and ▶ and ■ play and
     /// stop the inspected one where it is.
+    /// ADR 0124's E12-2a: an animator's clip field lists the active character's clips: a
+    /// pick writes the clip's name (an unnamed one's as shown), one step each.
+    #[test]
+    fn an_animators_clip_field_lists_the_characters_clips() {
+        let mut world = World::new();
+        let mut ed = draw_editor("animator-clips", &mut world);
+        let man = world.spawn((
+            SceneId::new(),
+            Name::new("Man"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            Model::new(builtin::CUBE, AssetRef::NONE),
+            engine_runtime::Animator::default(),
+        ));
+        ed.select_only(man);
+        ed.clips = Some(ClipsView::new(
+            ClipsOf::Entity(man),
+            1,
+            vec![
+                ClipFacts::new(0, "Walk", 1.0, 31, 30.0, 3000, 1e-4, 1.5, (2e-4, "hips")),
+                ClipFacts::new(1, "", 2.0, 49, 24.0, 612, 9.9e-5, 0.0, (0.031, "leg")),
+            ],
+        ));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let mut at = None;
+        for s in 0..ed.shown_sections.len() {
+            let (start, end, _) = ed.shown_sections[s];
+            for f in 0..end - start {
+                if let Some((p, c)) = ed.shown_property(s, f)
+                    && ed.path_of(&p, c) == "Animator.clip"
+                {
+                    at = Some((s, f));
+                }
+            }
+        }
+        let (section, field) = at.expect("the animator's clip field");
+        let event = |action| FieldEvent {
+            section,
+            field,
+            action,
+        };
+        let clip = |world: &World| {
+            world
+                .get::<engine_runtime::Animator>(man)
+                .unwrap()
+                .clip
+                .clone()
+        };
+        let steps = ed.history.steps().count();
+        ed.edit(&mut world, event(FieldAction::Open));
+        ed.edit(&mut world, event(FieldAction::Choose(1)));
+        assert_eq!(clip(&world), "Clip 2", "the unnamed clip by its shown name");
+        ed.edit(&mut world, event(FieldAction::Open));
+        ed.edit(&mut world, event(FieldAction::Choose(0)));
+        assert_eq!(clip(&world), "Walk");
+        assert_eq!(ed.history.steps().count(), steps + 2, "a step each");
+    }
+
     #[test]
     fn a_characters_clips_are_shown_held_and_played_in_place() {
         let mut world = World::new();
