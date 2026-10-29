@@ -872,7 +872,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-4g-3, previews of function calls and in a function's tab** (#PR, ADR 0123's
+  - **E10-4g-3, previews of function calls and in a function's tab** (#445, ADR 0123's
     as-built): `expand` gives where every call's outputs come from (`CallOutputs`,
     through later calls and inside functions); the editing build previews points (a canvas
     id, a port, a width), so a call shows what its first output gives at its width, and a
