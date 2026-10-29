@@ -64,6 +64,9 @@ const NODE_BYTES: u64 =
 pub struct NodePreviewRequest {
     /// Whose previews they are.
     pub key: u64,
+    /// The asker's own number for this request, handed back with its atlas (which of its
+    /// requests, and so which order of nodes, it is).
+    pub tag: u64,
     /// The material whose type's `node_preview` they draw.
     pub material: AssetRef,
     /// Per value, drawn on a sphere (else over a flat square).
@@ -78,6 +81,8 @@ pub struct NodePreviewRequest {
 pub struct NodePreviews {
     /// Whose previews they are.
     pub key: u64,
+    /// The request's tag.
+    pub tag: u64,
     /// Tiles across.
     pub columns: u32,
     /// Tiles drawn.
@@ -96,12 +101,12 @@ pub(crate) struct NodeDrawing {
     slot: usize,
 }
 
-/// A node previews' read back: the frame that writes it, its key, its tiles across and
-/// their count.
+/// A node previews' read back: the frame that writes it, its key and tag, its tiles across
+/// and their count.
 struct NodeReadback {
     buffer: vk::Buffer,
     allocation: Option<Allocation>,
-    written: Option<(u64, u64, u32, u32)>,
+    written: Option<(u64, [u64; 2], u32, u32)>,
 }
 
 /// A preview to draw: what asks for it (`key`: the editor gives an asset's id) and its
@@ -214,6 +219,7 @@ impl Previews {
             if assets.problem(request.material).is_some() || request.spheres.is_empty() {
                 self.nodes_done.push(NodePreviews {
                     key: request.key,
+                    tag: request.tag,
                     columns: 0,
                     count: 0,
                     pixels: Vec::new(),
@@ -289,7 +295,12 @@ impl Previews {
             return;
         }
         let readback = &mut self.node_readbacks[drawing.slot];
-        readback.written = Some((frame, drawing.request.key, drawing.columns, count));
+        readback.written = Some((
+            frame,
+            [drawing.request.key, drawing.request.tag],
+            drawing.columns,
+            count,
+        ));
         let bytes = u64::from(width) * u64::from(height) * 4;
         let buffer = fg.import_buffer(
             "node previews readback",
@@ -398,7 +409,8 @@ impl Previews {
             self.done.push(Preview { key, pixels });
         }
         for r in &mut self.node_readbacks {
-            let Some((_, key, columns, count)) = r.written.filter(|&(f, ..)| f <= completed) else {
+            let Some((_, [key, tag], columns, count)) = r.written.filter(|&(f, ..)| f <= completed)
+            else {
                 continue;
             };
             r.written = None;
@@ -417,6 +429,7 @@ impl Previews {
                 .unwrap_or_default();
             self.nodes_done.push(NodePreviews {
                 key,
+                tag,
                 columns,
                 count,
                 pixels,

@@ -141,7 +141,7 @@ fn a_graphs_tab_draws_its_canvas_where_the_viewport_is() {
     // The last session left the graph's tab shown.
     std::fs::write(
         dir.join(".ofelia/session"),
-        "[session version=1]\n\n[editor]\ngraph = 0\n\n[graph]\npath = \
+        "[session version=1]\n\n[editor]\ngraph = 0\nnode_previews = false\n\n[graph]\npath = \
          \"materials/moss.mgraph\"\n",
     )
     .unwrap();
@@ -351,7 +351,7 @@ fn an_expressions_slang_error_is_framed_at_its_node() {
     .unwrap();
     std::fs::write(
         dir.join(".ofelia/session"),
-        "[session version=1]\n\n[editor]\ngraph = 0\n\n[graph]\npath = \
+        "[session version=1]\n\n[editor]\ngraph = 0\nnode_previews = false\n\n[graph]\npath = \
          \"materials/glow.mgraph\"\n",
     )
     .unwrap();
@@ -510,7 +510,7 @@ fn a_calls_signature_follows_its_function_and_the_preview_draws_it() {
     .unwrap();
     std::fs::write(
         dir.join(".ofelia/session"),
-        "[session version=1]\n\n[editor]\ngraph = 0\n\n[graph]\npath = \
+        "[session version=1]\n\n[editor]\ngraph = 0\nnode_previews = false\n\n[graph]\npath = \
          \"materials/tinted.mgraph\"\n",
     )
     .unwrap();
@@ -653,6 +653,137 @@ fn a_functions_tab_previews_it_as_the_tab_holds_it() {
         .unwrap();
         std::fs::write(path, png).unwrap();
     }
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// E10-4g: a material graph's nodes show their values under their ports, drawn by the
+/// engine from the graph's editing build: a red and a green colour as squares of their
+/// colours (each far larger than its swatch), the surface's normal on a sphere; Graph: Node
+/// Previews turns them off, the boxes shorter again.
+#[test]
+fn a_graphs_nodes_show_their_previews_under_their_ports() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-tiles-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("materials")).unwrap();
+    std::fs::create_dir_all(dir.join(".ofelia")).unwrap();
+    std::fs::write(dir.join("main.scene"), "[scene version=4]\n").unwrap();
+    let id = AssetId::new();
+    std::fs::write(
+        dir.join("materials/tiles.mgraph"),
+        format!(
+            "[mgraph version=2 id={id}]\n\nmodel = \"unlit\"\n\
+             nodes[\"a\"].kind = \"color\"\nnodes[\"a\"].at = [0, 0]\n\
+             nodes[\"a\"].value = [0.9, 0.04, 0.04, 1]\n\
+             nodes[\"b\"].kind = \"color\"\nnodes[\"b\"].at = [0, 180]\n\
+             nodes[\"b\"].value = [0.04, 0.9, 0.04, 1]\n\
+             nodes[\"n\"].kind = \"normal\"\nnodes[\"n\"].at = [200, 180]\n\
+             nodes[\"s\"].kind = \"add\"\nnodes[\"s\"].at = [200, 0]\n\
+             nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [400, 0]\n\
+             links[\"s.a\"] = \"a.rgba\"\nlinks[\"s.b\"] = \"b.rgba\"\n\
+             links[\"out.base\"] = \"s.out\"\n"
+        ),
+    )
+    .unwrap();
+    // The last session left the graph's tab shown (previews on, as by default).
+    std::fs::write(
+        dir.join(".ofelia/session"),
+        "[session version=1]\n\n[editor]\ngraph = 0\n\n[graph]\npath = \
+         \"materials/tiles.mgraph\"\n",
+    )
+    .unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor node previews test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..4 {
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
+            .unwrap();
+        player.set_view_rect(game.view_rect());
+    }
+    let count = |rgba: &[u8], test: &dyn Fn(f32, f32, f32) -> bool| {
+        rgba.chunks_exact(4)
+            .filter(|p| test(f32::from(p[0]), f32::from(p[1]), f32::from(p[2])))
+            .count()
+    };
+    let red = |rgba: &[u8]| count(rgba, &|r, g, b| r > 150.0 && g < 90.0 && b < 90.0);
+    let green = |rgba: &[u8]| count(rgba, &|r, g, b| g > 150.0 && r < 90.0 && b < 90.0);
+    let blue = |rgba: &[u8]| count(rgba, &|r, g, b| b > 150.0 && r < 90.0 && g < 90.0);
+    // Their tiles, each far more than a colour's swatch (28 by 14 points); the normal as
+    // it is, so blue alone where it points away from x and y (a quarter of the sphere).
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        red(shot) > 2_000 && green(shot) > 2_000 && blue(shot) > 600
+    });
+    println!(
+        "the nodes' previews drawn {took:.2} s ({frames} frames) after the tab: red {}, green \
+         {}, blue {}",
+        red(&shot),
+        green(&shot),
+        blue(&shot)
+    );
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_TILES_PNG") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &shot,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    // Numbers live: the red colour selected by its title, its green typed in the inspector
+    // (as the first test does), its tile and its swatch yellow with no code compiled.
+    pointer(&mut game, 140, 138);
+    click(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, 1140, 155);
+    click(&mut player, &mut game, &mut overlay);
+    for c in "0.9".chars() {
+        send(&mut game, WindowEventKind::Char(c));
+    }
+    player
+        .frame_overlaid(&mut game, Some(&mut overlay))
+        .unwrap();
+    key(&mut game, 0x0D, 0x1C, true);
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        red(shot) < 1_000
+    });
+    key(&mut game, 0x0D, 0x1C, false);
+    println!(
+        "a value typed: on its tile after {took:.3} s, {frames} frames ({} red pixels)",
+        red(&shot)
+    );
+    // Off: no tiles, the colours' swatches alone.
+    assert!(game.run_command(player.world_mut(), "graph.node_previews"));
+    let (shot, ..) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        red(shot) < 1_000 && green(shot) < 1_000
+    });
+    assert!(
+        blue(&shot) < 100,
+        "the normal's sphere gone: {}",
+        blue(&shot)
+    );
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

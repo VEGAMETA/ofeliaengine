@@ -167,8 +167,17 @@ fn a_graph_tabs_frames_do_not_allocate() {
             "material types still on their way"
         );
     }
-    for n in 0..120 {
-        frame(n);
+    // Its nodes' previews (E10-4g) ask for their own pipeline once the type is made: rounds
+    // of frames until one has none on its way (their atlas drawn, read back and shown).
+    loop {
+        let most = (0..120).map(&mut frame).max().unwrap_or(0);
+        if most == 0 {
+            break;
+        }
+        assert!(
+            started.elapsed().as_secs() < 90,
+            "the nodes' previews' pipeline still on its way"
+        );
     }
     COUNTING.with(|c| c.set(true));
     for n in 0..240 {

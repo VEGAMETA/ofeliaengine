@@ -278,6 +278,8 @@ pub(crate) struct EditorState {
     pub(crate) full_debugging: Option<bool>,
     /// Picking a sound in the dock plays it (E11-3b).
     pub(crate) auto_play: Option<bool>,
+    /// A material graph's nodes show their previews on the canvas (E10-4g).
+    pub(crate) node_previews: Option<bool>,
     /// The Debugger's watches (E9-1b-5c), Luau expressions in their order.
     pub(crate) watches: Vec<String>,
     /// The mixer's listening aids (E11-1b-2): buses muted and soloed, never in its file.
@@ -373,6 +375,9 @@ impl SessionFile {
         }
         if let Some(on) = self.editor.auto_play {
             let _ = writeln!(out, "auto_play = {on}");
+        }
+        if let Some(on) = self.editor.node_previews {
+            let _ = writeln!(out, "node_previews = {on}");
         }
         for (key, list) in [
             ("watches", &self.editor.watches),
@@ -677,6 +682,13 @@ impl SessionFile {
                     }
                     "auto_play" => {
                         file.editor.auto_play = Some(match value {
+                            "true" => true,
+                            "false" => false,
+                            other => return Err(at(format!("`{other}` is not true or false"))),
+                        });
+                    }
+                    "node_previews" => {
+                        file.editor.node_previews = Some(match value {
                             "true" => true,
                             "false" => false,
                             other => return Err(at(format!("`{other}` is not true or false"))),
@@ -1329,6 +1341,7 @@ mod tests {
                 error_stops: Some((true, false)),
                 full_debugging: Some(true),
                 auto_play: Some(true),
+                node_previews: Some(false),
                 watches: vec![String::from("self.speed"), String::from("#\"a, b\"")],
                 mixer_muted: vec![String::from("music")],
                 mixer_soloed: vec![String::from("voice"), String::from("ui")],

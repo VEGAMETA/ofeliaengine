@@ -1309,6 +1309,19 @@ Until its shaders are made, the material draws its colour.
     every number a parameter, so nothing is compiled.
   - A link or a node that changes the code is compiled first (about half a second).
   - When the graph cannot be drawn, its bar says why ("not drawn: …").
+- **Node previews:** under its ports, each node shows its value, as the material computes
+  it at that node, drawn by the engine from the preview's build (ADR 0123 E10-4g).
+  - The tile is a flat square of texture coordinates (0 to 1 across, the first at the top
+    left). It is a sphere where the node reads the surface's place, normal or tangent, or
+    may (an Expression, or a `[Node]` function given the fragment), as Unity's previews
+    are.
+  - The value is shown as it is: what is below 0 is black, what is above 1 is white.
+  - Numbers reach the tiles as they reach the sphere, within a few frames; a change of code
+    is compiled first, with the sphere's. A dark square stands in until a tile is drawn.
+  - **Graph: Node Previews** (the palette) turns them off and on, and the boxes shorten.
+    The choice is kept in the session.
+  - The surface, reroutes and function calls have none, and a function's tab shows none
+    yet.
 - **Errors on nodes:** a node that stops the graph from generating is framed in red, with
   why under it: a loop, or a kind or a port that is not there (a file merged from another
   branch, or written by a newer engine). It goes as soon as its cause does.
@@ -1479,7 +1492,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E10 | materials: per-node previews on graphs (E10-4); the graph (its canvas, node search, values, preview sphere, errors on nodes, Show Slang, reroutes, frames, Slang functions and `.mfunc` functions), the material file, variants with a base, costs (registers, code, Draw as Fallback), the inspector's preview, materials shown while dragged and Slang in the code editor are done |
+| E10 | materials: node previews of function calls and in a function's tab (everything else is done) |
 
 The whole plan is ADR 0107 §7.
 
