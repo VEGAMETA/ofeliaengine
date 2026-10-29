@@ -2948,6 +2948,9 @@ struct Editor {
     /// The entity under the pointer as the newest pick saw it (none: nothing), and that
     /// pick's pixel.
     hovered: Option<(PickRequest, Option<Entity>)>,
+    /// The hovered entity's own instance, as the frame after its pick found it: a material
+    /// tried on it is picked as opaque from the frame it shows (E10-4e).
+    hovered_slot: Option<u32>,
     /// What the last hover pick saw: the pixel, the camera, the history's head (when none
     /// of them changes, the pick is not made again).
     last_pick: Option<(PickRequest, [f32; 6], u64)>,
@@ -3771,6 +3774,7 @@ impl Editor {
             frame_seen: 0,
             picked: None,
             hovered: None,
+            hovered_slot: None,
             last_pick: None,
             press_at: None,
             pending_click: None,
@@ -10065,6 +10069,7 @@ impl Editor {
         self.mixer_at_play = self.mixer.as_ref().map(|d| d.layout.clone());
         if let Some(mut drag) = self.asset_drag.take() {
             self.take_back_placed(world, &mut drag);
+            drag.take_back_tried(world);
         }
         self.key_transform = None;
         self.draw = None;
@@ -10400,6 +10405,7 @@ impl Editor {
     fn forget_scene(&mut self, world: &mut World) {
         if let Some(mut drag) = self.asset_drag.take() {
             self.take_back_placed(world, &mut drag);
+            drag.take_back_tried(world);
         }
         self.key_transform = None;
         self.draw = None;
@@ -10426,6 +10432,7 @@ impl Editor {
         self.export_group = None;
         self.bake_groups.clear();
         self.hovered = None;
+        self.hovered_slot = None;
         self.hovered_side = None;
         self.hovered_handle = None;
         self.pick_request = None;
@@ -18922,7 +18929,8 @@ impl Editor {
 
     /// A file dragged out of the browser (ADR 0107 E4-3): started by a file of the listing
     /// held and moved; over the view a model rests on the surface under the pointer, in an
-    /// undo step; the release drops it where the pointer is, Escape takes it back. The
+    /// undo step, and a material shows on the object under the pointer (or the row's), in
+    /// none (E10-4e); the release drops it where the pointer is, Escape takes it back. The
     /// keys are the drag's while it lasts.
     fn asset_drag_frame(&mut self, world: &mut World, response: &ShellResponse, game_view: bool) {
         if self.asset_drag.is_none()
@@ -18943,6 +18951,7 @@ impl Editor {
                 selection: self.selection.clone(),
                 over: DropTarget::Nowhere,
                 point: None,
+                tried: None,
             });
             self.browser.selected = Some(id);
             // The surface under the pointer is asked for anew.
@@ -19000,6 +19009,7 @@ impl Editor {
         // The button let go outside the window: no drop.
         if escape || !(released || self.input.held(Button::Left)) {
             self.take_back_placed(world, &mut drag);
+            drag.take_back_tried(world);
             return;
         }
         match (drag.kind, drag.over, cursor) {
@@ -19013,9 +19023,21 @@ impl Editor {
             (engine_scene::AssetKind::Sound, DropTarget::View, Some(at)) => {
                 drag.point = self.point_under(at);
             }
-            _ => self.take_back_placed(world, &mut drag),
+            (engine_scene::AssetKind::Material, DropTarget::View, Some(_)) => {
+                let hovered = self.hovered.and_then(|(_, e)| e);
+                drag.try_material(world, hovered, self.hovered_slot);
+            }
+            (engine_scene::AssetKind::Material, DropTarget::Row(e), _) => {
+                drag.try_material(world, Some(e), None);
+            }
+            _ => {
+                self.take_back_placed(world, &mut drag);
+                drag.take_back_tried(world);
+            }
         }
         if released {
+            // A material is given from the object's own, as one undo step.
+            drag.take_back_tried(world);
             self.drop_asset(world, drag);
             return;
         }
@@ -20876,6 +20898,7 @@ impl Editor {
             selection: Vec::new(),
             over: DropTarget::Field(section, field),
             point: None,
+            tried: None,
         };
         self.drop_on_field(world, section, field, &mut drag);
     }
@@ -20891,14 +20914,23 @@ impl Editor {
                 _ => format!("{name}: let go to place it  ·  Esc takes it back"),
             },
             (DropTarget::View, K::Material) => match self.hovered.and_then(|(_, e)| e) {
-                Some(e) if world.get::<Model>(e).is_some() => format!("{name} → {}", named(e)),
+                Some(e) if world.get::<Model>(e).is_some() => format!(
+                    "{name} → {}: let go to give it  ·  Esc takes it back",
+                    named(e)
+                ),
                 Some(e) => format!("{} has no model to take {name}", named(e)),
                 None => format!("{name}: onto an object"),
             },
             (DropTarget::Row(e), K::Model) => {
                 format!("{name}: let go to add it under {}", named(e))
             }
-            (DropTarget::Row(e), K::Material) => format!("{name} → {}", named(e)),
+            (DropTarget::Row(e), K::Material) if world.get::<Model>(e).is_some() => format!(
+                "{name} → {}: let go to give it  ·  Esc takes it back",
+                named(e)
+            ),
+            (DropTarget::Row(e), K::Material) => {
+                format!("{} has no model to take {name}", named(e))
+            }
             (DropTarget::View, K::Sound) => match self.sound_target() {
                 Some(e) => format!(
                     "{name} \u{2192} {}  \u{b7}  Alt: a sound of its own",
@@ -23197,6 +23229,11 @@ impl<G> EditorGame<G> {
         let extract = runtime.extract();
         let slot_of = |e: Entity| extract.instance(e).map(|i| i.slot());
         shared.resolve_pick(&runtime.world, slot_of);
+        // What a dragged material is tried on is picked as opaque (E10-4e).
+        shared.hovered_slot = shared.hovered.and_then(|(_, e)| e).and_then(slot_of);
+        if let Some(t) = shared.asset_drag.as_mut().and_then(|d| d.tried.as_mut()) {
+            t.slot = slot_of(t.entity);
+        }
         shared.resolve_list(&runtime.world, slot_of);
         shared.outline(&runtime.world, slot_of);
         // End: the instances of the entity being dropped, with its children's.
@@ -24215,6 +24252,56 @@ struct AssetDrag {
     over: DropTarget,
     /// A dragged sound's place in the view: the surface under the pointer (E11-3d).
     point: Option<Vec3>,
+    /// The object a dragged material shows on (E10-4e).
+    tried: Option<Tried>,
+}
+
+impl AssetDrag {
+    /// The dragged material tried on `target`'s model (E10-4e): shown at once, in no undo
+    /// step, and the object it was on before given its own back. `slot` is `target`'s
+    /// instance: picked as opaque while the material shows on it, so that the object stays
+    /// under the pointer as it was (a blended or masked material would let the pick
+    /// through it, and the material flicker between it and what is behind).
+    fn try_material(&mut self, world: &mut World, target: Option<Entity>, slot: Option<u32>) {
+        let target = target.filter(|&e| world.get::<Model>(e).is_some());
+        if self.tried.map(|t| t.entity) == target {
+            return;
+        }
+        self.take_back_tried(world);
+        let tried = AssetRef::file(self.asset);
+        let Some((e, own)) = target
+            .and_then(|e| Some((e, world.get::<Model>(e)?.material)))
+            .filter(|&(_, own)| own != tried)
+        else {
+            return;
+        };
+        if let Some(model) = world.get_mut::<Model>(e) {
+            model.material = tried;
+            self.tried = Some(Tried {
+                entity: e,
+                own,
+                slot,
+            });
+        }
+    }
+
+    /// The material tried on an object taken off it: its own back.
+    fn take_back_tried(&mut self, world: &mut World) {
+        if let Some(t) = self.tried.take()
+            && let Some(model) = world.get_mut::<Model>(t.entity)
+        {
+            model.material = t.own;
+        }
+    }
+}
+
+/// A dragged material shown on an object (E10-4e): the object, its model's own material,
+/// and its instance (picked as opaque meanwhile), as the frame after found it.
+#[derive(Debug, Clone, Copy)]
+struct Tried {
+    entity: Entity,
+    own: AssetRef,
+    slot: Option<u32>,
 }
 
 /// A dragged model placed in the view: its undo step and its root.
@@ -25527,6 +25614,12 @@ impl Overlay for EditorOverlay {
                 // The square under the pointer last: drawn from the view's commands, it holds
                 // the picker for the frame.
                 if let Some(request) = editor.pick_request.take() {
+                    // The object a dragged material shows on, as it was (E10-4e).
+                    let solid = editor
+                        .asset_drag
+                        .as_ref()
+                        .and_then(|d| d.tried)
+                        .and_then(|t| t.slot);
                     let declared = match view.scene {
                         Some(scene) => self.picker.add_scene_pass(
                             pass.fg,
@@ -25537,6 +25630,7 @@ impl Overlay for EditorOverlay {
                             scene,
                             &pick_view,
                             request,
+                            solid.as_slice(),
                             view.frame_number,
                         ),
                         None => self.picker.add_pass(
@@ -27011,6 +27105,99 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// E10-4e: a material dragged over an object shows on it, in no undo step, and the
+    /// object is picked as opaque meanwhile; over another object, nothing or its row, the
+    /// first has its own back; Escape gives it back too. Let go, it is given from the
+    /// object's own as one step: undo gives the own back.
+    #[test]
+    fn a_material_dragged_over_an_object_shows_on_it_until_it_is_let_go() {
+        let (dir, mut world, mut ed, boxed) = drop_project("try-material");
+        let tried = AssetRef::file(ed.asset_db.find("props/red.material").unwrap().id);
+        let ball = world.spawn((
+            SceneId::new(),
+            Name::new("Ball"),
+            Transform::from_xyz(2.0, 0.0, -3.0),
+            GlobalTransform::default(),
+            Model::new(builtin::SPHERE, builtin::MATERIAL),
+            RootOrder(2 * RootOrder::STEP),
+        ));
+        ed.update(&mut world);
+        let material = |world: &World, e| world.get::<Model>(e).unwrap().material;
+        let solid = |ed: &Editor| {
+            ed.asset_drag
+                .as_ref()
+                .and_then(|d| d.tried)
+                .and_then(|t| t.slot)
+        };
+        let request = PickRequest {
+            x: 0,
+            y: 0,
+            transparent: false,
+        };
+        let at = view_middle(&ed);
+        // Over the box: shown, in no step, the box's instance picked as opaque.
+        drag_file(&mut ed, &mut world, "red.material");
+        ed.hovered = Some((request, Some(boxed)));
+        ed.hovered_slot = Some(4);
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        assert_eq!(material(&world, boxed), tried);
+        assert_eq!(ed.history.steps().count(), 0);
+        assert_eq!(solid(&ed), Some(4));
+        assert_eq!(
+            ed.hint,
+            "red.material → Box: let go to give it  ·  Esc takes it back"
+        );
+        // Over the ball: the box has its own back; over nothing, the ball too.
+        ed.hovered = Some((request, Some(ball)));
+        ed.hovered_slot = Some(5);
+        mouse(&mut ed, [at[0] + 1.0, at[1]], None);
+        ed.update(&mut world);
+        assert_eq!(material(&world, boxed), builtin::MATERIAL);
+        assert_eq!(material(&world, ball), tried);
+        assert_eq!(solid(&ed), Some(5));
+        ed.hovered = Some((request, None));
+        mouse(&mut ed, [at[0] + 2.0, at[1]], None);
+        ed.update(&mut world);
+        assert_eq!(material(&world, ball), builtin::MATERIAL);
+        assert_eq!(solid(&ed), None);
+        // Over the ball's row in the tree: shown on it; Escape gives its own back, the
+        // drag over.
+        let row = texts(&ed, "Ball")[0];
+        mouse(
+            &mut ed,
+            [row.pos[0] + 4.0, row.pos[1] + row.size[1] / 2.0],
+            None,
+        );
+        ed.update(&mut world);
+        assert_eq!(material(&world, ball), tried);
+        key(&mut ed, 0x1B, 0x01, true); // Escape
+        ed.update(&mut world);
+        assert!(ed.asset_drag.is_none());
+        assert_eq!(material(&world, ball), builtin::MATERIAL);
+        assert_eq!(ed.history.steps().count(), 0);
+        key(&mut ed, 0x1B, 0x01, false);
+        mouse(&mut ed, at, Some(false));
+        ed.update(&mut world);
+        // Again over the box, let go: given as one step from its own.
+        drag_file(&mut ed, &mut world, "red.material");
+        ed.hovered = Some((request, Some(boxed)));
+        mouse(&mut ed, at, None);
+        ed.update(&mut world);
+        assert_eq!(material(&world, boxed), tried);
+        ed.hovered = Some((request, Some(boxed)));
+        mouse(&mut ed, at, Some(false));
+        ed.update(&mut world);
+        assert!(ed.asset_drag.is_none());
+        assert_eq!(material(&world, boxed), tried);
+        assert_eq!(ed.history.steps().count(), 1);
+        ed.history.undo(&mut world);
+        assert_eq!(material(&world, boxed), builtin::MATERIAL, "its own back");
+        ed.history.redo(&mut world);
+        assert_eq!(material(&world, boxed), tried);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_sound_dropped_on_an_object_plays_on_it_and_one_dropped_on_the_floor_on_its_own() {
         let (dir, mut world, mut ed, boxed) = drop_project("drop-sound");
@@ -27084,6 +27271,7 @@ mod tests {
             selection: Vec::new(),
             over,
             point: None,
+            tried: None,
         };
         ed.drop_asset(
             &mut world,
@@ -28281,6 +28469,7 @@ mod tests {
             selection: Vec::new(),
             over: DropTarget::Tree,
             point: None,
+            tried: None,
         };
         let steps = ed.history.steps().count();
         ed.drop_asset(&mut world, drag(lamp, "props/lamp.scene"));
@@ -28386,6 +28575,7 @@ mod tests {
             selection: Vec::new(),
             over: DropTarget::Tree,
             point: None,
+            tried: None,
         };
         ed.drop_asset(&mut world, drag);
         let root = engine_scene::find_named(&mut world, "Lamp").unwrap();
@@ -28486,6 +28676,7 @@ mod tests {
                 selection: Vec::new(),
                 over: DropTarget::Tree,
                 point: None,
+                tried: None,
             };
             ed.drop_asset(world, drag);
         };
@@ -28625,6 +28816,7 @@ mod tests {
             selection: Vec::new(),
             over: DropTarget::Tree,
             point: None,
+            tried: None,
         };
         ed.drop_asset(&mut world, drag);
         let mut q = QueryState::<(Entity, &PrefabInstance)>::new(&mut world);
@@ -28683,6 +28875,7 @@ mod tests {
                 selection: Vec::new(),
                 over: DropTarget::Tree,
                 point: None,
+                tried: None,
             };
             ed.drop_asset(&mut world, drag);
         }
@@ -28795,6 +28988,7 @@ mod tests {
                 selection: Vec::new(),
                 over: DropTarget::Tree,
                 point: None,
+                tried: None,
             };
             ed.drop_asset(&mut world, drag);
         }

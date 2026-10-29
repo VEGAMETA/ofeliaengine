@@ -6,7 +6,10 @@
 //! invisible (its alpha is zero), C opaque and largest; E opaque to the side. At the view's
 //! middle the square picks D while transparent surfaces count and A otherwise; the list
 //! holds D, A, C front to back (A and C without D when transparent surfaces do not count),
-//! never B or E; a pixel outside the view picks nothing.
+//! never B or E; a pixel outside the view picks nothing. Told D is solid, the square picks
+//! it while transparent surfaces do not count; beside A, where only B and C are, it picks
+//! C, and B once told B is solid (E10-4e: an object a material is tried on stays under the
+//! pointer).
 //!
 //! Boxes: over the whole view, what shows is D, C and E while transparent surfaces count
 //! (D covers A on the screen and hides it), A, C and E otherwise; every surface there is D,
@@ -150,6 +153,11 @@ fn scene_picks_draw_the_candidates_under_the_pixel() {
         transparent,
     };
     let list = |transparent| ListRequest::around(middle, middle, 3, transparent);
+    // Beside A and D, where only B's (invisible) quad and C's show.
+    let beside = PickRequest {
+        x: middle + 27,
+        ..square(false)
+    };
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
     // SAFETY: plain object creation.
@@ -186,7 +194,7 @@ fn scene_picks_draw_the_candidates_under_the_pixel() {
         visible: true,
         transparent: true,
     };
-    for frame_number in 1..=8u64 {
+    for frame_number in 1..=11u64 {
         if let Some(r) = picker.poll(frame_number) {
             squares.push((r.request, r.nearest(0)));
         }
@@ -263,16 +271,20 @@ fn scene_picks_draw_the_candidates_under_the_pixel() {
                 x: SIZE + 10,
                 ..square(true)
             };
-            let (pick, listed) = match frame_number {
-                1 => (square(true), list(true)),
-                2 => (square(false), list(false)),
-                3 => (outside, ListRequest::around(SIZE + 10, middle, 3, true)),
-                4 => (outside, whole(true, true)),
-                5 => (outside, whole(true, false)),
-                6 => (outside, whole(false, true)),
-                7 => (outside, around_e),
+            let nothing = ListRequest::around(SIZE + 10, middle, 3, true);
+            let (pick, solid, listed) = match frame_number {
+                1 => (square(true), None, list(true)),
+                2 => (square(false), None, list(false)),
+                3 => (outside, None, nothing),
+                4 => (outside, None, whole(true, true)),
+                5 => (outside, None, whole(true, false)),
+                6 => (outside, None, whole(false, true)),
+                7 => (outside, None, around_e),
+                8 => (square(false), Some(dd), nothing),
+                9 => (beside, None, nothing),
+                10 => (beside, Some(b), nothing),
                 // The last frame only takes the one before's.
-                _ => (outside, ListRequest::around(SIZE + 10, middle, 3, true)),
+                _ => (outside, None, nothing),
             };
             let picked = picker.add_scene_pass(
                 &mut fg,
@@ -283,6 +295,7 @@ fn scene_picks_draw_the_candidates_under_the_pixel() {
                 &frame,
                 &view,
                 pick,
+                solid.as_slice(),
                 frame_number,
             );
             let listed = picker.add_list_pass(
@@ -306,8 +319,8 @@ fn scene_picks_draw_the_candidates_under_the_pixel() {
             assert_eq!(
                 (picked, listed),
                 (
-                    declared(frame_number <= 2),
-                    declared(frame_number != 3 && frame_number < 8)
+                    declared(frame_number <= 2 || (8..=10).contains(&frame_number)),
+                    declared((1..=7).contains(&frame_number) && frame_number != 3)
                 ),
                 "frame {frame_number}"
             );
@@ -331,8 +344,15 @@ fn scene_picks_draw_the_candidates_under_the_pixel() {
     println!("lists {lists:?}");
     assert_eq!(
         squares,
-        [(square(true), Some(dd)), (square(false), Some(a))],
-        "the nearest surface, the blended one only while it counts"
+        [
+            (square(true), Some(dd)),
+            (square(false), Some(a)),
+            (square(false), Some(dd)),
+            (beside, Some(c)),
+            (beside, Some(b)),
+        ],
+        "the nearest surface, the blended one only while it counts or it is solid, the \
+         invisible one only when it is solid"
     );
     assert_eq!(
         lists[..2],
