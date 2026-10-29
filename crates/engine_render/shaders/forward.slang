@@ -4290,6 +4290,48 @@ float2 backgroundMotion(Background input) : SV_Target0
     return uv - (previous.xy / previous.w * 0.5 + 0.5);
 }
 
+// A material graph's node previews (ADR 0123's E10-4g), a tile of the atlas a draw, its
+// viewport the tile: the node's value over a flat square (texture coordinates 0 to 1, the
+// first at the top left, facing the camera), or on a unit sphere seen from +Z, transparent
+// around it. `push.phase` is the node's number in the graph's `node_preview`,
+// `push.texture` 1 for the sphere, `push.instance_count` the material's slot; the frame
+// holds the material table's parameters and the camera. Only a graph's editing build has
+// nodes (`-D MATERIAL_NODE_PREVIEWS`): the engine's own material draws nothing.
+[shader("fragment")]
+float4 nodePreviewFragment(Background input) : SV_Target0
+{
+#ifdef MATERIAL_NODE_PREVIEWS
+    float2 at = float2(input.ndc.x, -input.ndc.y);
+    MaterialContext ctx;
+    ctx.side = 1.0;
+    ctx.material = push.instance_count;
+    if (push.texture != 0)
+    {
+        float r2 = dot(at, at);
+        if (r2 > 1.0)
+            return float4(0.0, 0.0, 0.0, 0.0);
+        float3 n = float3(at, sqrt(1.0 - r2));
+        ctx.world_position = n;
+        ctx.normal = n;
+        // Longitude and latitude: the texture once around the sphere.
+        ctx.uv = float2(atan2(n.x, n.z) / (2.0 * PI) + 0.5, acos(clamp(n.y, -1.0, 1.0)) / PI);
+        ctx.tangent = float4(normalize(cross(float3(0.0, 1.0, 0.0), n) + float3(1e-5, 0.0, 0.0)), 1.0);
+    }
+    else
+    {
+        ctx.uv = input.ndc * 0.5 + 0.5;
+        ctx.world_position = float3(at, 0.0);
+        ctx.normal = float3(0.0, 0.0, 1.0);
+        ctx.tangent = float4(1.0, 0.0, 0.0, 1.0);
+    }
+    MATERIAL.Params p = MATERIAL::load(ctx);
+    float4 v = MATERIAL::node_preview(ctx, p, push.phase);
+    return float4(v.rgb, 1.0);
+#else
+    return float4(0.0, 0.0, 0.0, 0.0);
+#endif
+}
+
 // The environment's sky along this pixel's ray, and the sun's disk (0.27° in radius: the
 // light's illuminance spread over its solid angle; none over a panorama, which shows its
 // own sun).

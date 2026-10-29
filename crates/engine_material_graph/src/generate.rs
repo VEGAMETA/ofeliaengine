@@ -12,10 +12,15 @@
 //! - **Numbers** ([`Build`]): in the saved build an unnamed number is a literal; in the
 //!   editing build every number is a parameter (`_<node>`), so a drag compiles nothing (the
 //!   team's 3a, measured in ADR 0123). A named number is a parameter in both.
+//! - **Node previews** (the editing build, E10-4g): `node_preview(ctx, p, node)` writes
+//!   every node shown on the canvas in the order they are read, each followed by a return
+//!   of its value when it is the one asked for ([`Generated::previews`] gives the order).
+//!   One function for every node: an edit of the graph's code compiles once, however many
+//!   nodes it shows.
 
 use crate::call::{Direction, node_kind};
 use crate::graph::{Graph, OUTPUT, PortRef, SURFACE_TERMS};
-use crate::library::{Body, Fill, Kind, OUTPUT_KIND, PortType};
+use crate::library::{Body, Fill, Kind, OUTPUT_KIND, PortType, REROUTE_KIND};
 use engine_scene::AssetRef;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
@@ -66,7 +71,31 @@ pub struct Generated {
     /// The graph written: the one given, its function calls made their functions' nodes
     /// (`<call>__<node>`, which the parameters' `node` may name).
     pub expanded: Graph,
+    /// The editing build's node previews (E10-4g), in the order `node_preview` numbers
+    /// them; none in the saved build.
+    pub previews: Vec<NodePreview>,
 }
+
+/// A node's preview on the canvas (E10-4g): its value, drawn on a sphere when it reads the
+/// surface's place, normal or tangent (or code that may), else over a flat square whose
+/// texture coordinates run from 0 to 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePreview {
+    /// The node.
+    pub node: String,
+    /// Drawn on a sphere.
+    pub sphere: bool,
+}
+
+/// The kinds whose values differ over a sphere, not over a square of texture coordinates.
+const ROUND: &[&str] = &[
+    "world_position",
+    "normal",
+    "tangent",
+    "view_direction",
+    "normal_map",
+    "fresnel",
+];
 
 impl Generated {
     /// The node that made line `line` (0-based).
@@ -164,7 +193,9 @@ pub fn generate_with(
 ) -> Result<Generated, GraphError> {
     engine_profiler::zone!("material_graph::generate");
     let (expanded, origin) = crate::function::expand(graph, sources.functions)?;
-    match write_module(&expanded, type_name, build, sources.modules) {
+    // Previews for the canvas's nodes, not the nodes of the functions they call.
+    let shown = |n: &str| graph.nodes.contains_key(n);
+    match write_module(&expanded, type_name, build, sources.modules, &shown) {
         Ok(mut generated) => {
             for line in generated.lines.iter_mut().flatten() {
                 if let Some(top) = origin.get(line.as_str()) {
@@ -195,6 +226,7 @@ fn write_module(
     type_name: &str,
     build: Build,
     modules: &dyn Fn(AssetRef) -> Option<String>,
+    shown: &dyn Fn(&str) -> bool,
 ) -> Result<Generated, GraphError> {
     if !identifier(type_name) {
         return Err(GraphError::graph(format!(
@@ -229,8 +261,41 @@ fn write_module(
             }
         }
     }
-    let widths = widths(graph, &kinds, &every);
-    let params = params(graph, &kinds, &every, build)?;
+    // The editing build's previews: every node the canvas shows, each after what it reads;
+    // the images of those nothing reaches yet parameters too, so a dropped image shows.
+    let previewed: Vec<&str> = if build == Build::Editing {
+        let mut state = HashMap::new();
+        let mut order = Vec::new();
+        let mut ids: Vec<&str> = graph.nodes.keys().map(String::as_str).collect();
+        ids.sort_unstable();
+        let mut whole = true;
+        for id in ids.into_iter().filter(|&n| n != OUTPUT) {
+            // A loop among nodes nothing reaches: no previews, the rest as it was.
+            if visit(graph, &kinds, id, &mut state, &mut order).is_err() {
+                whole = false;
+                break;
+            }
+        }
+        if whole { order } else { Vec::new() }
+    } else {
+        Vec::new()
+    };
+    let mut written = every.clone();
+    for &n in &previewed {
+        if kinds[n].body == Body::Texture && !written.contains(&n) {
+            written.push(n);
+        }
+    }
+    let widths = widths(
+        graph,
+        &kinds,
+        if previewed.is_empty() {
+            &every
+        } else {
+            &previewed
+        },
+    );
+    let params = params(graph, &kinds, &written, build)?;
     let param_of: HashMap<&str, &str> = params
         .iter()
         .map(|p| (p.node.as_str(), p.name.as_str()))
@@ -385,6 +450,11 @@ fn write_module(
         out.line(&format!("        return {value};"), Some(OUTPUT));
         out.line("    }", None);
     }
+    let previews = if previewed.is_empty() {
+        Vec::new()
+    } else {
+        write_previews(&mut out, &context, &previewed, type_name, shown)?
+    };
     out.line("}", None);
     Ok(Generated {
         text: out.text,
@@ -392,7 +462,88 @@ fn write_module(
         params,
         lines: out.lines,
         expanded: Graph::new(graph.model),
+        previews,
     })
+}
+
+/// The editing build's `node_preview` (E10-4g): the nodes of `order` written in it, each
+/// shown one followed by a return of its first output when it is the one asked for, as a
+/// colour (a scalar grey, a pair red and green). Which nodes it numbers, and how each is
+/// drawn.
+fn write_previews(
+    out: &mut Writer,
+    context: &Context<'_, '_>,
+    order: &[&str],
+    type_name: &str,
+    shown: &dyn Fn(&str) -> bool,
+) -> Result<Vec<NodePreview>, GraphError> {
+    let kinds = context.kinds;
+    let numbered: Vec<&str> = order
+        .iter()
+        .copied()
+        .filter(|&n| {
+            let kind = kinds[n];
+            shown(n)
+                && !kind.outputs.is_empty()
+                && kind.name != REROUTE_KIND
+                && kind.name != OUTPUT_KIND
+        })
+        .collect();
+    // Round where it reads the surface's place, normal or tangent, or code that may.
+    let mut round: HashMap<&str, bool> = HashMap::new();
+    for &n in order {
+        let kind = kinds[n];
+        let own = ROUND.contains(&kind.name)
+            || kind.body == Body::Expression
+            || matches!(kind.body, Body::Call(call) if call.context);
+        let read = kind.inputs.iter().any(|input| {
+            context
+                .graph
+                .links
+                .get(&PortRef::new(n, input.name))
+                .is_some_and(|from| round.get(from.node.as_str()).copied().unwrap_or(false))
+        });
+        round.insert(n, own || read);
+    }
+    let read: Vec<PortRef> = numbered
+        .iter()
+        .map(|&n| PortRef::new(n, kinds[n].outputs[0].name))
+        .collect();
+    out.line("", None);
+    out.line(
+        &format!(
+            "    static float4 node_preview(MaterialContext ctx, {type_name}Params p, uint node)"
+        ),
+        None,
+    );
+    out.line("    {", None);
+    context.write_with(out, order, &[], &read, &mut |out, id, values| {
+        let Some(k) = numbered.iter().position(|&n| n == id) else {
+            return Ok(());
+        };
+        let port = &read[k];
+        let value = values
+            .get(port)
+            .ok_or_else(|| GraphError::at(id, "its value is not written"))?;
+        let width = output_width(kinds, context.widths, id, &port.port);
+        out.line(
+            &format!(
+                "        if (node == {k}) return {};",
+                convert(value, width, 4)
+            ),
+            Some(id),
+        );
+        Ok(())
+    })?;
+    out.line("        return float4(0.0, 0.0, 0.0, 0.0);", None);
+    out.line("    }", None);
+    Ok(numbered
+        .iter()
+        .map(|&n| NodePreview {
+            node: n.to_owned(),
+            sphere: round.get(n).copied().unwrap_or(false),
+        })
+        .collect())
 }
 
 /// `graph`'s nodes' kinds once its nodes, links and values are checked.
@@ -603,6 +754,11 @@ fn params(
     Ok(by_name.into_values().collect())
 }
 
+/// What [`Context::write_with`] gives each node once written: the writer, the node, and
+/// the values written so far.
+type AfterNode<'f> =
+    dyn FnMut(&mut Writer, &str, &HashMap<PortRef, String>) -> Result<(), GraphError> + 'f;
+
 /// What writing a function's nodes needs.
 struct Context<'a, 'g> {
     graph: &'g Graph,
@@ -620,8 +776,25 @@ impl Context<'_, '_> {
         nodes: &[&str],
         terms: &[&str],
     ) -> Result<HashMap<PortRef, String>, GraphError> {
+        self.write_with(out, nodes, terms, &[], &mut |_, _, _| Ok(()))
+    }
+
+    /// [`Self::write`], the outputs `also` read once more each (written once into a
+    /// variable when anything else reads them too), and `after` given each node as soon as
+    /// it is written.
+    fn write_with(
+        &self,
+        out: &mut Writer,
+        nodes: &[&str],
+        terms: &[&str],
+        also: &[PortRef],
+        after: &mut AfterNode<'_>,
+    ) -> Result<HashMap<PortRef, String>, GraphError> {
         // How often each output is read here.
         let mut reads: HashMap<PortRef, usize> = HashMap::new();
+        for port in also {
+            *reads.entry(port.clone()).or_default() += 1;
+        }
         let mut count = |to: PortRef| {
             if let Some(from) = self.graph.links.get(&to) {
                 *reads.entry(from.clone()).or_default() += 1;
@@ -744,6 +917,7 @@ impl Context<'_, '_> {
                 }
                 Body::Output => {}
             }
+            after(out, id, &values)?;
         }
         Ok(values)
     }
@@ -1292,5 +1466,72 @@ mod tests {
             "{}",
             out.text
         );
+    }
+
+    /// E10-4g: the editing build previews every node the canvas shows (not the surface,
+    /// not a reroute), each after what it reads, numbered as `node_preview` returns them;
+    /// round where it reads the surface's normal, flat otherwise. An image nothing reaches
+    /// is a parameter there, so it shows; the saved build has none of it.
+    #[test]
+    fn the_editing_build_previews_every_shown_node() {
+        let mut g = Graph::new(Model::Lit);
+        g.add("a", Node::new("uv", [0.0; 2]))
+            .add("b", Node::new("normal", [0.0; 2]))
+            .add("c", Node::new("add", [0.0; 2]))
+            .add("d", Node::new("number", [0.0; 2]).with_value([0.5; 4]))
+            .add("r", Node::new("reroute", [0.0; 2]))
+            .add("t", Node::new("texture", [0.0; 2]))
+            .link(port("a", "uv"), port("c", "a"))
+            .link(port("d", "value"), port("c", "b"))
+            .link(port("c", "out"), port("r", "in"))
+            .link(port("r", "out"), port(OUTPUT, "roughness"));
+        let editing = generate(&g, "Previewed", Build::Editing).unwrap();
+        let shown: Vec<(&str, bool)> = editing
+            .previews
+            .iter()
+            .map(|p| (p.node.as_str(), p.sphere))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("a", false),
+                ("b", true),
+                ("d", false),
+                ("c", false),
+                ("t", false)
+            ],
+            "each after what it reads; the normal round"
+        );
+        let text = &editing.text;
+        assert!(
+            text.contains(
+                "static float4 node_preview(MaterialContext ctx, PreviewedParams p, uint node)"
+            ),
+            "{text}"
+        );
+        for k in 0..shown.len() {
+            assert!(
+                text.contains(&format!("if (node == {k}) return ")),
+                "{text}"
+            );
+        }
+        // The image nothing reaches yet: a parameter, sampled for its preview.
+        assert!(
+            editing.params.iter().any(|p| p.node == "t"),
+            "{:?}",
+            editing.params
+        );
+        let saved = generate(&g, "Previewed", Build::Saved).unwrap();
+        assert!(saved.previews.is_empty());
+        assert!(!saved.text.contains("node_preview"));
+        assert!(!saved.params.iter().any(|p| p.node == "t"));
+        // A loop among nodes nothing reaches: no previews, the material as it was.
+        g.add("x", Node::new("add", [0.0; 2]))
+            .add("y", Node::new("add", [0.0; 2]))
+            .link(port("x", "out"), port("y", "a"))
+            .link(port("y", "out"), port("x", "a"));
+        let looped = generate(&g, "Previewed", Build::Editing).unwrap();
+        assert!(looped.previews.is_empty());
+        assert!(!looped.text.contains("node_preview"));
     }
 }

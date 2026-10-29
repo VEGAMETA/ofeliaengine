@@ -81,7 +81,7 @@ use crate::subsurface::{
     SubsurfaceSettings,
 };
 use crate::upload::UploadRing;
-use core::cell::{Cell, RefCell};
+use core::cell::{Cell, OnceCell, RefCell};
 use engine_core::math::{Mat4, Vec3, Vec4};
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -109,6 +109,13 @@ const FRAGMENT_MASKED_MOTION: &[u8] =
 const BACKGROUND_VERTEX: &[u8] = include_bytes!("../../shaders/forward.backgroundVertex.spv");
 const BACKGROUND_MOTION: &[u8] = include_bytes!("../../shaders/forward.backgroundMotion.spv");
 const SKY_FRAGMENT: &[u8] = include_bytes!("../../shaders/forward.skyFragment.spv");
+/// A material graph's node previews (ADR 0123's E10-4g); the engine's own material draws
+/// nothing with it.
+const NODE_PREVIEW_FRAGMENT: &[u8] =
+    include_bytes!("../../shaders/forward.nodePreviewFragment.spv");
+
+/// The format of a graph's node previews' atlas (ADR 0123's E10-4g).
+pub const NODE_PREVIEW_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 const FRAGMENT_SUBSURFACE: &[u8] = include_bytes!("../../shaders/forward.fragmentSubsurface.spv");
 const SCATTER_FRAGMENT: &[u8] = include_bytes!("../../shaders/forward.scatterFragment.spv");
 // Local lights' shadows (ADR 0071): culling and drawing the views, and the shading that
@@ -1591,6 +1598,10 @@ pub struct ForwardRenderer {
     material_types: material_types::MaterialTypes,
     /// The shading's variants that read ambient occlusion's bent normal (ADR 0058).
     bent_twins: bent::BentTwins,
+    /// A graph's node previews' pipeline as the engine's material has it (ADR 0123's
+    /// E10-4g): what a graph's own is derived from, described the first time it is asked
+    /// for (a game never does).
+    node_preview: OnceCell<LazyPipeline>,
 }
 
 /// The meshlet path's compute shaders (ADR 0085).
@@ -1899,6 +1910,118 @@ impl ForwardRenderer {
             });
         }
         cost.variants.iter().any(Option::is_some).then_some(cost)
+    }
+
+    /// A material graph's node previews (ADR 0123's E10-4g) declared into `fg`: tile `k` of
+    /// `target` (`columns` tiles across, `side` pixels each, cleared) draws value `k` of
+    /// the graph's `node_preview`, of material slot `material` of type `ty`, on a sphere
+    /// where `spheres[k]`, else over a flat square. `false`, nothing declared, while the
+    /// type's pipeline for them is not made: asking makes it, off the frame's thread.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_node_previews<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        device: &Device,
+        bindless: &'g Bindless,
+        materials: &MaterialFrame<'g>,
+        target: Texture,
+        ty: MaterialTypeId,
+        material: u32,
+        spheres: &[bool],
+        [side, columns]: [u32; 2],
+    ) -> bool {
+        engine_profiler::zone!("render::forward::add_node_previews");
+        let Some(role) = self.node_preview_role(device, bindless) else {
+            return false;
+        };
+        let Some(pipeline) = self.material_types.resolve(ty, role) else {
+            return false;
+        };
+        // SAFETY: `FrameData` holds numbers and arrays of them alone: all zero is one.
+        let mut frame: FrameData = unsafe { core::mem::zeroed() };
+        (frame.material_data, frame.material_stride) = materials.params();
+        frame.camera_position = [0.0, 0.0, 3.0, 1.0];
+        let Some(frame) = ring.push(&[frame]) else {
+            return false;
+        };
+        let base = Push {
+            frame,
+            instance_count: material,
+            ..bytemuck::Zeroable::zeroed()
+        };
+        let columns = columns.max(1);
+        let tiles: Vec<(vk::Rect2D, u32, bool)> = spheres
+            .iter()
+            .enumerate()
+            .map(|(k, &sphere)| {
+                let k = k as u32;
+                let area = vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: ((k % columns) * side) as i32,
+                        y: ((k / columns) * side) as i32,
+                    },
+                    extent: vk::Extent2D {
+                        width: side,
+                        height: side,
+                    },
+                };
+                (area, k, sphere)
+            })
+            .collect();
+        materials
+            .read(fg.add_pass("node previews"))
+            .color(target, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+            .execute(move |ctx| {
+                // SAFETY: recording inside the pass's rendering scope; the frame constants
+                // are in the ring, each tile within the target.
+                unsafe {
+                    pipeline.bind(ctx.cmd);
+                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
+                    for &(area, node, sphere) in &tiles {
+                        set_viewport(ctx.device, ctx.cmd, area);
+                        let push = Push {
+                            phase: node,
+                            texture: u32::from(sphere),
+                            ..base
+                        };
+                        bindless.push_constants(ctx.cmd, push_bytes(&push));
+                        ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
+                    }
+                }
+            });
+        true
+    }
+
+    /// The node previews' pipeline of the engine's material, described the first time.
+    fn node_preview_role(&self, device: &Device, bindless: &Bindless) -> Option<&LazyPipeline> {
+        if self.node_preview.get().is_none() {
+            let vertex = spirv_words(BACKGROUND_VERTEX)?;
+            let fragment = spirv_words(NODE_PREVIEW_FRAGMENT)?;
+            let formats = [NODE_PREVIEW_FORMAT];
+            let desc = GraphicsPipelineDesc {
+                color_formats: &formats,
+                cull_mode: vk::CullModeFlags::NONE,
+                depth_test: false,
+                depth_write: false,
+                ..GraphicsPipelineDesc::new(
+                    ShaderStageDesc {
+                        spirv: &vertex,
+                        entry: c"backgroundVertex",
+                    },
+                    Some(ShaderStageDesc {
+                        spirv: &fragment,
+                        entry: c"nodePreviewFragment",
+                    }),
+                )
+            };
+            let _ = self.node_preview.set(LazyPipeline::describe(
+                device,
+                bindless.shared_pipeline_layout(),
+                &PipelineDesc::Graphics(desc),
+            ));
+        }
+        self.node_preview.get()
     }
 
     /// Each typed range's pipelines for a pass whose engine pipelines are `roles`
@@ -2308,6 +2431,7 @@ impl ForwardRenderer {
             },
             scratch: RefCell::new(Scratch::default()),
             material_types: material_types::MaterialTypes::new(),
+            node_preview: OnceCell::new(),
             bent_twins: bent::BentTwins::default(),
         })
     }

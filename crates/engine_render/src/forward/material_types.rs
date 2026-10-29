@@ -225,7 +225,13 @@ struct CompilerThread {
     _thread: std::thread::JoinHandle<()>,
 }
 
-/// `entries` of `type_name` in `module` compiled in one request.
+/// A material graph's node previews' entry point (ADR 0123's E10-4g): compiled with
+/// `MATERIAL_NODE_PREVIEWS`, which only a graph's editing build can be.
+const NODE_PREVIEWS: &[u8] = b"nodePreviewFragment";
+
+/// `entries` of `type_name` in `module` compiled in one request; a graph's node previews'
+/// apart, with their define, so that a type without them compiles its other entry points
+/// all the same.
 fn compile(
     compiler: Option<&mut Compiler>,
     shader_dir: &Path,
@@ -234,14 +240,50 @@ fn compile(
     entries: &[CString],
 ) -> Result<Compiled, String> {
     let compiler = compiler.ok_or_else(|| String::from("no Slang compiler"))?;
-    let options =
+    let (previews, shading): (Vec<CString>, Vec<CString>) = entries
+        .iter()
+        .cloned()
+        .partition(|e| e.as_bytes() == NODE_PREVIEWS);
+    let mut options =
         engine_shader::material_types::material_type_options(shader_dir, module, type_name);
+    let mut spirv = Vec::new();
+    let mut dependencies = Vec::new();
+    if !shading.is_empty() {
+        (spirv, dependencies) = compile_entries(compiler, shader_dir, &shading, &options)?;
+    }
+    if !previews.is_empty() {
+        options
+            .defines
+            .push((String::from("MATERIAL_NODE_PREVIEWS"), String::from("1")));
+        match compile_entries(compiler, shader_dir, &previews, &options) {
+            Ok((more, read)) => {
+                spirv.extend(more);
+                for d in read {
+                    if !dependencies.contains(&d) {
+                        dependencies.push(d);
+                    }
+                }
+            }
+            Err(e) if shading.is_empty() => return Err(e),
+            Err(e) => log::warn!("material type {type_name}: its node previews: {e}"),
+        }
+    }
+    Ok((spirv, dependencies))
+}
+
+/// `entries` of `forward.slang` compiled with `options`.
+fn compile_entries(
+    compiler: &mut Compiler,
+    shader_dir: &Path,
+    entries: &[CString],
+    options: &CompileOptions,
+) -> Result<Compiled, String> {
     let points: Vec<EntryPoint> = entries
         .iter()
         .map(|e| EntryPoint::new(&e.to_string_lossy(), Stage::Fragment))
         .collect();
     let out = compiler
-        .compile_file(&shader_dir.join("forward.slang"), &points, &options)
+        .compile_file(&shader_dir.join("forward.slang"), &points, options)
         .map_err(|e| e.to_string())?;
     if out.entries.len() != entries.len() {
         return Err(String::from("not every entry point compiled"));

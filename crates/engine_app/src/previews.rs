@@ -14,6 +14,10 @@
 //!   down (four samples a pixel, edges and shading alike), its alpha kept.
 //! - **Framing:** the parts' box seen from the front, turned 22.5° about Y and looking
 //!   22.5° down (Godot's previews), as near as the box's corners allow.
+//! - **A material graph's node previews** (ADR 0123's E10-4g): an atlas of [`NODE_TILE`]
+//!   square tiles, one a node, drawn from the graph's editing build's `node_preview` by
+//!   the forward renderer, one atlas a frame at most, once no material type is on its way
+//!   (so never the old code, nor the old parameters' layout).
 
 use crate::AppError;
 use crate::assets::Assets;
@@ -22,10 +26,14 @@ use engine_frame::{
     Antialiasing, Exposure, FrameContext, FrameRenderer, Msaa, PostAntialiasing, PrepareContext,
     SceneDraws, SceneInput, Upscale, View, ViewCamera, ViewSettings, ViewTarget,
 };
-use engine_render::forward::{DirectionalLight, DrawItem, ViewFeatures};
+use engine_render::forward::{
+    DirectionalLight, DrawItem, ForwardRenderer, NODE_PREVIEW_FORMAT, ViewFeatures,
+};
 use engine_render::graph::{Access, BufferState, FrameGraph, ImportedBuffer, LoadOp, TextureDesc};
 use engine_render::material::{MaterialFrame, MaterialTable, MaterialTypeId};
 use engine_render::mesh::{GeometryFrame, GeometryPool};
+use engine_render::upload::UploadRing;
+use engine_rhi::Device;
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, MemoryLocation};
 use engine_scene::AssetRef;
@@ -39,6 +47,62 @@ const DRAWN: u32 = PREVIEW_SIZE * 2;
 const BYTES: u64 = (DRAWN * DRAWN * 4) as u64;
 /// The previews' camera: a narrow lens, little perspective.
 const FOV_Y: f32 = 0.35;
+
+/// A node preview's side, in pixels (ADR 0123's E10-4g).
+pub const NODE_TILE: u32 = 64;
+/// Node previews across their atlas.
+pub const NODE_COLUMNS: u32 = 8;
+/// The node previews an atlas holds at most: the rest are not drawn.
+pub const MAX_NODE_TILES: u32 = 128;
+const NODE_BYTES: u64 =
+    (NODE_TILE * NODE_COLUMNS * NODE_TILE * (MAX_NODE_TILES / NODE_COLUMNS) * 4) as u64;
+
+/// A material graph's node previews to draw (ADR 0123's E10-4g): what asks for them
+/// (`key`), the material of the graph's editing build, and for each value of its
+/// `node_preview`, in that order, whether it is drawn on a sphere.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodePreviewRequest {
+    /// Whose previews they are.
+    pub key: u64,
+    /// The material whose type's `node_preview` they draw.
+    pub material: AssetRef,
+    /// Per value, drawn on a sphere (else over a flat square).
+    pub spheres: Vec<bool>,
+}
+
+/// Node previews drawn: their key, the tiles across the atlas and how many there are, and
+/// its pixels (RGBA8 sRGB, rows top to bottom; tile `k` [`NODE_TILE`] square at column
+/// `k % columns`, row `k / columns`; transparent around a sphere), empty when the material
+/// could not be made.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodePreviews {
+    /// Whose previews they are.
+    pub key: u64,
+    /// Tiles across.
+    pub columns: u32,
+    /// Tiles drawn.
+    pub count: u32,
+    /// The atlas's pixels.
+    pub pixels: Vec<u8>,
+}
+
+/// The node previews a frame draws: what asked, the material and its type, the tiles.
+pub(crate) struct NodeDrawing {
+    request: NodePreviewRequest,
+    /// The material's slot in the table.
+    material: u32,
+    ty: MaterialTypeId,
+    columns: u32,
+    slot: usize,
+}
+
+/// A node previews' read back: the frame that writes it, its key, its tiles across and
+/// their count.
+struct NodeReadback {
+    buffer: vk::Buffer,
+    allocation: Option<Allocation>,
+    written: Option<(u64, u64, u32, u32)>,
+}
 
 /// A preview to draw: what asks for it (`key`: the editor gives an asset's id) and its
 /// parts, each a mesh, its material, and where it is in the preview's space.
@@ -93,6 +157,10 @@ pub(crate) struct Previews {
     /// The read back of this frame's drawing of a request whose code was unchanged: answered
     /// if the frame asks for no pipeline ([`Self::recorded`]).
     checking: Option<usize>,
+    /// Node previews asked for, their read backs, and those drawn (ADR 0123's E10-4g).
+    nodes_asked: VecDeque<NodePreviewRequest>,
+    node_readbacks: Vec<NodeReadback>,
+    nodes_done: Vec<NodePreviews>,
 }
 
 impl Previews {
@@ -105,7 +173,187 @@ impl Previews {
             frames_in_flight: frames_in_flight.max(1) as u64,
             warmed: Vec::new(),
             checking: None,
+            nodes_asked: VecDeque::new(),
+            node_readbacks: Vec::new(),
+            nodes_done: Vec::new(),
         }
+    }
+
+    /// Asks for `request`'s node previews, in place of a request of the same key not
+    /// drawn yet.
+    pub(crate) fn ask_nodes(&mut self, request: NodePreviewRequest) {
+        match self.nodes_asked.iter_mut().find(|r| r.key == request.key) {
+            Some(r) => *r = request,
+            None => self.nodes_asked.push_back(request),
+        }
+    }
+
+    /// The node previews drawn since the last call.
+    pub(crate) fn take_nodes(&mut self, out: &mut Vec<NodePreviews>) {
+        out.append(&mut self.nodes_done);
+    }
+
+    /// The node previews this frame draws: the first asked for whose material is made with
+    /// its type and its textures, once no material type is on its way (`types_pending`,
+    /// as [`Self::pick`] counts them); its read back's slot taken. One whose material
+    /// cannot be made is answered with no pixels.
+    pub(crate) fn pick_nodes(
+        &mut self,
+        assets: &mut Assets,
+        materials: &mut MaterialTable,
+        allocator: &mut Allocator,
+        types_pending: usize,
+    ) -> Option<NodeDrawing> {
+        if self.nodes_asked.is_empty() || types_pending > 0 {
+            return None;
+        }
+        let slot = self.free_node_slot(allocator)?;
+        for _ in 0..self.nodes_asked.len() {
+            let mut request = self.nodes_asked.pop_front()?;
+            let made = assets.material(request.material, materials);
+            if assets.problem(request.material).is_some() || request.spheres.is_empty() {
+                self.nodes_done.push(NodePreviews {
+                    key: request.key,
+                    columns: 0,
+                    count: 0,
+                    pixels: Vec::new(),
+                });
+                continue;
+            }
+            let typed = made.and_then(|m| {
+                let ty = materials.material_type(m)?;
+                let slot = materials.slot_of(m)?;
+                (ty != MaterialTypeId::GLTF && assets.settled(m)).then_some((slot, ty))
+            });
+            let Some((material, ty)) = typed else {
+                self.nodes_asked.push_back(request);
+                continue;
+            };
+            request.spheres.truncate(MAX_NODE_TILES as usize);
+            let columns = (request.spheres.len() as u32).min(NODE_COLUMNS);
+            return Some(NodeDrawing {
+                request,
+                material,
+                ty,
+                columns,
+                slot,
+            });
+        }
+        None
+    }
+
+    /// `drawing`'s atlas and its read back declared into `fg` (frame `frame`); asked for
+    /// again when the type's pipeline for it is not made yet.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn declare_nodes<'g>(
+        &mut self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        device: &Device,
+        bindless: &'g Bindless,
+        forward: &'g ForwardRenderer,
+        materials: &MaterialFrame<'g>,
+        drawing: NodeDrawing,
+        frame: u64,
+    ) {
+        let count = drawing.request.spheres.len() as u32;
+        let (width, height) = (
+            drawing.columns * NODE_TILE,
+            count.div_ceil(drawing.columns) * NODE_TILE,
+        );
+        let atlas = fg.create_texture(
+            "node previews",
+            TextureDesc::new_2d(NODE_PREVIEW_FORMAT, width, height),
+        );
+        let drawn = forward.add_node_previews(
+            fg,
+            ring,
+            device,
+            bindless,
+            materials,
+            atlas,
+            drawing.ty,
+            drawing.material,
+            &drawing.request.spheres,
+            [NODE_TILE, drawing.columns],
+        );
+        if !drawn {
+            // Its pipeline asked for: again once it is made, unless asked for anew.
+            if !self
+                .nodes_asked
+                .iter()
+                .any(|r| r.key == drawing.request.key)
+            {
+                self.nodes_asked.push_front(drawing.request);
+            }
+            return;
+        }
+        let readback = &mut self.node_readbacks[drawing.slot];
+        readback.written = Some((frame, drawing.request.key, drawing.columns, count));
+        let bytes = u64::from(width) * u64::from(height) * 4;
+        let buffer = fg.import_buffer(
+            "node previews readback",
+            ImportedBuffer {
+                buffer: readback.buffer,
+                size: bytes,
+                address: 0,
+                initial: BufferState::idle(),
+                final_state: Some(BufferState::host_read()),
+            },
+        );
+        fg.add_pass("node previews copy")
+            .read(atlas, Access::TransferRead)
+            .write(buffer, Access::TransferWrite)
+            .execute(move |ctx| {
+                let region = vk::BufferImageCopy {
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_extent: vk::Extent3D {
+                        width,
+                        height,
+                        depth: 1,
+                    },
+                    ..Default::default()
+                };
+                // SAFETY: recording outside a rendering scope; the graph put the atlas in
+                // TRANSFER_SRC layout for this pass, and the buffer holds it.
+                unsafe {
+                    ctx.device.cmd_copy_image_to_buffer(
+                        ctx.cmd,
+                        ctx.image(atlas),
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        ctx.buffer(buffer),
+                        &[region],
+                    );
+                }
+            });
+    }
+
+    /// A node previews' read back not in flight, made the first time (one more than the
+    /// frames in flight, each for the largest atlas).
+    fn free_node_slot(&mut self, allocator: &mut Allocator) -> Option<usize> {
+        if self.node_readbacks.is_empty() {
+            for _ in 0..=self.frames_in_flight {
+                let (buffer, allocation) = allocator
+                    .create_buffer(
+                        &vk::BufferCreateInfo::default()
+                            .size(NODE_BYTES)
+                            .usage(vk::BufferUsageFlags::TRANSFER_DST),
+                        MemoryLocation::Readback,
+                    )
+                    .ok()?;
+                self.node_readbacks.push(NodeReadback {
+                    buffer,
+                    allocation: Some(allocation),
+                    written: None,
+                });
+            }
+        }
+        self.node_readbacks.iter().position(|r| r.written.is_none())
     }
 
     /// Asks for `request`, in place of one of the same key not drawn yet.
@@ -148,6 +396,31 @@ impl Previews {
                 })
                 .unwrap_or_default();
             self.done.push(Preview { key, pixels });
+        }
+        for r in &mut self.node_readbacks {
+            let Some((_, key, columns, count)) = r.written.filter(|&(f, ..)| f <= completed) else {
+                continue;
+            };
+            r.written = None;
+            let bytes = (columns * NODE_TILE) as usize
+                * (count.div_ceil(columns.max(1)) * NODE_TILE) as usize
+                * 4;
+            let pixels = r
+                .allocation
+                .as_ref()
+                .and_then(Allocation::mapped_ptr)
+                .map(|ptr| {
+                    // SAFETY: the frame that wrote it has finished (its graph made the copy
+                    // visible to the host); the mapping holds the atlas's rows.
+                    unsafe { core::slice::from_raw_parts(ptr.as_ptr(), bytes) }.to_vec()
+                })
+                .unwrap_or_default();
+            self.nodes_done.push(NodePreviews {
+                key,
+                columns,
+                count,
+                pixels,
+            });
         }
     }
 
@@ -375,6 +648,11 @@ impl Previews {
                 view.destroy(allocator, bindless);
             }
             for r in &mut self.readbacks {
+                if let Some(allocation) = r.allocation.take() {
+                    allocator.destroy_buffer(r.buffer, allocation);
+                }
+            }
+            for r in &mut self.node_readbacks {
                 if let Some(allocation) = r.allocation.take() {
                     allocator.destroy_buffer(r.buffer, allocation);
                 }

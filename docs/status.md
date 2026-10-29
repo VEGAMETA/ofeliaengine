@@ -872,6 +872,13 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-4g-1, node previews in the engine** (#PR, ADR 0123's as-built): the editing
+    build's `node_preview` writes every shown node with an early return each (one compile
+    a change of code, however many nodes); `nodePreviewFragment` (compiled for a graph's
+    type with `MATERIAL_NODE_PREVIEWS`) draws them into an atlas of 64-pixel tiles, round
+    where a node reads the surface's normal or place; `Player::request_node_previews`,
+    drawn once no type is on its way (0.58 s Radeon, 0.60 s RTX from the request, the
+    type's compile included). The editor's tiles next (E10-4g-2).
   - **E10-4f, a type's code and Draw as Fallback** (#442, ADR 0120's as-built): a typed
     material's **code** row gives the instructions and image samples its fragment shaders
     reach beside the engine's (`engine_rhi::spirv::code_size`; stripes: 805 and 3 against
