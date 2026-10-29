@@ -45,6 +45,7 @@
 //! under [`Runtime`], leave it out, or physics bodies would be blended twice.
 
 mod activity;
+mod animator;
 mod camera;
 mod extract;
 mod lights;
@@ -54,6 +55,7 @@ mod skinned;
 mod timing;
 
 pub use activity::{ActivityEpoch, ActivityPropagation, Disabled, Inactive, is_inactive};
+pub use animator::{Animator, Animators};
 pub use camera::{Camera, CameraView, MainCamera, look_rotation};
 pub use engine_physics::ecs::FixedStep;
 pub use extract::{Derived, ExtractStats, MeshRenderer, RenderExtract, SceneSink};

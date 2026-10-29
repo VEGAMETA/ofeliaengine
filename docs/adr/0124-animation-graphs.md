@@ -398,6 +398,47 @@ allocation with transitions and events every tick; the same events at the same t
   - F frames a character by its origin, not its skinned box;
   - the tree has no filter yet.
 
+## As built (E12-2a, 2026-10-30): the `Animator` plays a clip
+
+- **`engine_runtime::Animator`** (reflected, saved):
+  - `clip`: a name, with the new `Hint::Clip` so the editor lists the model's clips. An
+    unnamed clip goes by its shown name `Clip N`; an unknown name plays the first.
+  - `speed` and `paused`.
+  - `time`: seconds into the clip, saved, so a load goes on from there.
+  - Not saved: `length` (the clip's, written back by the player for the ticks to wrap
+    at), `previous` (the time before the last tick, shifted alike across a wrap) and
+    `ticked`.
+- **Ticks** (`Animators::advance`, after the scripts' `on_tick` and before `Game::tick`):
+  `time += dt × speed`, wrapped into the clip once its length is known.
+- **Frames** (`Assets::animate`, before the palettes are set): the clip at
+  `previous + (time − previous) × alpha`, wrapped. While the world stands still the frame
+  poses at `time` itself: alpha moves on without ticks, and no pose should.
+- **The editor's holds win:** a skinned instance keeps whether the editor holds its pose
+  (`Player::pose_model(e, Some(..))`). `None` lets it go to the animator's pose, or to the
+  rest pose without one. P in place and the Clips' playhead hold; stopping lets go.
+- **The editor:** the `clip` field is a choice of the active character's clips; a pick is
+  one undo step.
+- **Tests:**
+  - an animator's ticks and frames: the wraps forward and backward, the seam, paused, an
+    unknown length;
+  - several animators moving together;
+  - the clip found by name (`Clip 2` for an unnamed one);
+  - on both GPUs, CesiumMan with an `Animator` (the scene saved with it):
+    - half a second of clip in 30 frames;
+    - the frame's pose is the clip at the frame's moment between the two ticks, to
+      0.01 mm;
+    - a held pose stays while the clip goes on, and letting go returns to the animator;
+    - a still world and a paused animator hold;
+  - the editor's clip field: a pick writes the name, a step each;
+  - 0 allocations while a second character plays through its animator beside the posed
+    one (both GPUs).
+- **Left:**
+  - the `Animator`'s own script calls (`play` with a fade, `set`, `trigger`), cross-fades,
+    layers, root motion, graphs (the rest of E12-2, E12-5);
+  - a joined network client's animators do not move yet (its ticks are its prediction's);
+  - scenes made before keep no animator: characters stand in their rest pose until one is
+    added.
+
 ## Consequences
 
 - New source files: `.agraph` and `.anim`, and a section in models' `.meta`; a new component

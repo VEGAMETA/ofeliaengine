@@ -390,6 +390,8 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   - a click on a row shows its first frame; ▶ plays it in place from the playhead, ■
     stops it there and holds that pose; the loop, the speed (0.25 to 2×) and the time,
     and a bar under them that scrubs it. Escape lets a held pose go.
+  - **Its `Animator`** (Add Component: Animator) plays a clip in Play. Its `clip` field is
+    a list of the character's clips (empty: its first clip, which is what plays). While you edit, the character stands at the animator's `time`.
   - **Its skeleton:** while it is selected, its joints show as thin white sticks in front
     of its mesh, one from each joint to its parent, moving with the clip it plays.
     **View: Skeletons** shows every character's too, in grey.

@@ -66,7 +66,7 @@ use engine_render::mesh::{GeometryPool, MeshId, OwnedMeshData};
 use engine_render::skinning::{SkinId, SkinnedId, SkinnedMeshData, Skinning};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_rhi::{Allocator, Bindless, Device, Wrap};
-use engine_runtime::{Derived, MeshRenderer, SkinnedMesh};
+use engine_runtime::{Animator, Derived, MeshRenderer, SkinnedMesh};
 use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -849,14 +849,16 @@ struct SkinnedAsset {
 }
 
 /// A skinned model's own instances of its skin (ADR 0124's E12-1a), one per part (the
-/// entity's first, its parts' after), with their meshes; its rig, its pose, and whether its
-/// palette was set for that pose.
+/// entity's first, its parts' after), with their meshes; its rig, its pose, whether the
+/// editor holds that pose (else its [`Animator`]'s, its rest pose without one), and whether
+/// its palette was set for that pose.
 struct Owned {
     skins: Vec<SkinId>,
     instances: Vec<SkinnedId>,
     meshes: Vec<MeshId>,
     rig: Arc<crate::skins::Rig>,
     pose: Option<(usize, f32)>,
+    held: bool,
     posed: bool,
 }
 
@@ -871,6 +873,24 @@ struct PreviewSkin {
     rig: Option<Arc<crate::skins::Rig>>,
     pose: Option<(usize, f32)>,
     posed: bool,
+}
+
+/// The clip an animator names among a rig's clip names (ADR 0124's E12-2): by its name in
+/// the file, an unnamed one by the name the editor shows it by (`Clip 2` for the second);
+/// the first for a name none has.
+fn named_clip<'a>(names: impl Iterator<Item = &'a str> + Clone, name: &str) -> usize {
+    names
+        .clone()
+        .position(|n| n == name)
+        .or_else(|| {
+            let k = name
+                .strip_prefix("Clip ")?
+                .parse::<usize>()
+                .ok()?
+                .checked_sub(1)?;
+            names.clone().nth(k).filter(|n| n.is_empty()).map(|_| k)
+        })
+        .unwrap_or(0)
 }
 
 /// What a model's mesh is to skinning: drawn skinned (the file and the mesh's index), or
@@ -2143,6 +2163,7 @@ impl Assets {
         frame: u64,
         wait: bool,
         extracted: bool,
+        alpha: f32,
     ) {
         self.frame = frame;
         if extracted {
@@ -2227,6 +2248,7 @@ impl Assets {
             world.remove::<Split>(e);
             self.waiting.remove(&e);
         }
+        self.animate(world, alpha);
         self.sync_skins(world, skinning, geometry);
         // Parts whose model went or draws whole again (a model despawned alone leaves its
         // children a dead parent): gone.
@@ -2556,6 +2578,7 @@ impl Assets {
                     meshes,
                     rig,
                     pose: None,
+                    held: false,
                     posed: false,
                 },
             );
@@ -2669,6 +2692,39 @@ impl Assets {
     /// The skinned models each frame (ADR 0124's E12-1a): those gone let their instances go;
     /// those whose pose changed are posed again; the skins of files read again that no model
     /// draws any more are let go. Allocates nothing when nothing changed.
+    /// The skinned models' [`Animator`]s' poses this frame (ADR 0124's E12-2): each one's
+    /// clip at the frame's moment `alpha` of the way from the last tick to the next, but
+    /// where the editor holds the pose; a model without one rests. The clip's length goes
+    /// back to the animator for the ticks to wrap its time at.
+    fn animate(&mut self, world: &mut World, alpha: f32) {
+        engine_profiler::zone!("app::Assets::animate");
+        for (&e, owned) in &mut self.owned {
+            if owned.held {
+                continue;
+            }
+            let mut length = None;
+            let pose = world.get::<Animator>(e).and_then(|animator| {
+                let clips = owned.rig.clips();
+                let k = named_clip(clips.iter().map(crate::RigClip::name), &animator.clip);
+                let clip = clips.get(k)?;
+                let d = clip.duration();
+                if animator.length != d {
+                    length = Some(d);
+                }
+                Some((k, animator.at(alpha, d)))
+            });
+            if let Some(d) = length
+                && let Some(animator) = world.get_mut::<Animator>(e)
+            {
+                animator.length = d;
+            }
+            if owned.pose != pose {
+                owned.pose = pose;
+                owned.posed = false;
+            }
+        }
+    }
+
     fn sync_skins(&mut self, world: &World, skinning: &mut Skinning, geometry: &mut GeometryPool) {
         self.sync_preview_skin(skinning, geometry);
         if self.owned.is_empty() && self.retired_skins.is_empty() {
@@ -2831,12 +2887,14 @@ impl Assets {
         self.owned.keys().copied()
     }
 
-    /// Poses entity `e`'s skinned model at a clip's moment, or in its rest pose (ADR 0124's
-    /// E12-1a): set by the next sync. False for a model drawn without a skin.
+    /// Holds entity `e`'s skinned model at a clip's moment (ADR 0124's E12-1a), or with
+    /// `None` lets it go: back to its [`Animator`]'s pose, its rest pose without one. Set by
+    /// the next sync. False for a model drawn without a skin.
     pub(crate) fn pose_model(&mut self, e: Entity, pose: Option<(usize, f32)>) -> bool {
         let Some(owned) = self.owned.get_mut(&e) else {
             return false;
         };
+        owned.held = pose.is_some();
         if owned.pose != pose {
             owned.pose = pose;
             owned.posed = false;
@@ -2945,6 +3003,20 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    /// ADR 0124's E12-2a: an animator names its clip as the file does, an unnamed one as
+    /// the editor shows it; any other name plays the first.
+    #[test]
+    fn an_animator_finds_its_clip_by_name() {
+        let names = ["Walk", "", "Run"];
+        let find = |name: &str| named_clip(names.iter().copied(), name);
+        assert_eq!(find("Run"), 2);
+        assert_eq!(find("Clip 2"), 1, "the unnamed second");
+        assert_eq!(find("Clip 3"), 0, "the third has a name of its own");
+        assert_eq!(find("Clip 0"), 0);
+        assert_eq!(find(""), 1, "the unnamed one by its empty name");
+        assert_eq!(find("Fly"), 0, "none: the first");
+    }
 
     #[test]
     fn material_files_round_trip() {
