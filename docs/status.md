@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-1b-2, the engine's preview of a model picked in the dock** (#PR, ADR 0124's
+  - **E12-1b-2, the engine's preview of a model picked in the dock** (#450, ADR 0124's
     as-built): `Player::set_model_preview` draws a skinned model alone, posed at a clip's
     moment and turned, each frame either changes (77 µs a frame on the RTX, 227 µs on the
     Radeon while it plays, nothing while it stands); a skinned model file picked in the
