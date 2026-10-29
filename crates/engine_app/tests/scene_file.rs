@@ -454,6 +454,37 @@ fn a_typed_material_file_draws_its_look_then_its_type() {
         plain.spill,
         started.elapsed().as_secs_f64()
     );
+    // Its code (E10-4f): the instructions and image samples its entry point reaches,
+    // beside the engine's own shading's, and its last compile.
+    let code = plain.code.expect("its code read");
+    let engine_code = plain.engine_code.expect("the engine's code read");
+    assert!(
+        code.instructions > 0 && engine_code.instructions > 0,
+        "{cost:?}"
+    );
+    let (took, entries) = cost.compiled.expect("its last compile");
+    assert!(took > Duration::ZERO && entries > 0, "{cost:?}");
+    println!(
+        "the stripes' code {code:?} (the engine's {engine_code:?}), compiled in {:.2} s ({entries})",
+        took.as_secs_f64()
+    );
+    // Drawn as its fallback (E10-4f): its look (green) until that ends, then itself
+    // (the held yellow) again.
+    player.draw_as_fallback(stripes_ref, true);
+    for _ in 0..3 {
+        player.frame(&mut game).unwrap();
+    }
+    let [r, g, b] = middle(&player.capture(&mut game).unwrap().unwrap());
+    assert!(
+        g > 1.5 * r && g > 1.5 * b,
+        "drawn as its fallback: {r} {g} {b}"
+    );
+    player.draw_as_fallback(stripes_ref, false);
+    for _ in 0..3 {
+        player.frame(&mut game).unwrap();
+    }
+    let [r, g, b] = middle(&player.capture(&mut game).unwrap().unwrap());
+    assert!(r > 1.5 * b && g > 1.5 * b, "itself again: {r} {g} {b}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

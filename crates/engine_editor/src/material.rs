@@ -28,6 +28,12 @@ pub(crate) enum Row {
     Type,
     /// What the type's shading costs this GPU (E10-4c): its registers beside the engine's.
     Cost,
+    /// The code its type's shading reaches (E10-4f): instructions and image samples beside
+    /// the engine's, and how long its last compile took.
+    Code,
+    /// Whether the view draws it as its fallback, its look (E10-4f's Draw as Fallback):
+    /// the editor's, not the file's.
+    Fallback,
     /// A field of the type's `Params`: its path, what it holds, its elements.
     Param {
         name: String,
@@ -88,6 +94,8 @@ impl Row {
         match self {
             Self::Base => "base",
             Self::Cost => "cost",
+            Self::Code => "code",
+            Self::Fallback => "draw as fallback",
             Self::Type => "type",
             Self::Param { name, .. } => name,
             Self::Encoding { .. } => "  encoding",
@@ -111,7 +119,8 @@ impl Row {
         };
         match self {
             Self::Base => Shown::Image,
-            Self::Cost => Shown::Text,
+            Self::Cost | Self::Code => Shown::Text,
+            Self::Fallback => Shown::Check,
             Self::Type => Shown::Text,
             Self::Param { count, .. } if *count != 1 => Shown::Text,
             Self::Param { name, kind, .. } => match *kind {
@@ -405,7 +414,7 @@ pub(crate) fn changed(file: &MaterialFile, row: &Row, base: Option<&MaterialFile
     let plain = MaterialFile::default();
     let d = base.unwrap_or(&plain);
     match row {
-        Row::Base | Row::Type | Row::Cost => false,
+        Row::Base | Row::Type | Row::Cost | Row::Code | Row::Fallback => false,
         Row::Param { name, .. } => match base {
             Some(b) => {
                 file.numbers.get(name) != b.numbers.get(name)
@@ -443,7 +452,7 @@ pub(crate) fn reset(file: &mut MaterialFile, row: &Row, base: Option<&MaterialFi
     let plain = MaterialFile::default();
     let d = base.unwrap_or(&plain);
     match row {
-        Row::Base | Row::Type | Row::Cost => {}
+        Row::Base | Row::Type | Row::Cost | Row::Code | Row::Fallback => {}
         Row::Param { name, .. } => {
             let key = name.clone();
             match d.numbers.get(name) {
@@ -502,6 +511,17 @@ pub(crate) fn set_image(
         .insert(name.to_owned(), MaterialTexture { image, encoding });
 }
 
+/// Values over a type's shading variants as a row says them: `35` or `35–40`; `None` for
+/// none.
+fn spread(values: impl Iterator<Item = u32>) -> Option<String> {
+    let (lo, hi) = values.fold((u32::MAX, 0), |(lo, hi), v| (lo.min(v), hi.max(v)));
+    match (lo, hi) {
+        (u32::MAX, _) => None,
+        (lo, hi) if lo == hi => Some(format!("{lo}")),
+        (lo, hi) => Some(format!("{lo}–{hi}")),
+    }
+}
+
 /// A material type's cost as its row says it (E10-4c): the fragment stage's registers over
 /// its shading variants made (`35–40 registers`), the engine's own beside them, what spills,
 /// and its parameters' bytes (`params`).
@@ -510,20 +530,12 @@ pub(crate) fn cost_text(
     params: Option<u32>,
 ) -> String {
     use std::fmt::Write;
-    let range = |values: &mut dyn Iterator<Item = u32>| {
-        let (lo, hi) = values.fold((u32::MAX, 0), |(lo, hi), v| (lo.min(v), hi.max(v)));
-        match (lo, hi) {
-            (u32::MAX, _) => None,
-            (lo, hi) if lo == hi => Some(format!("{lo}")),
-            (lo, hi) => Some(format!("{lo}–{hi}")),
-        }
-    };
     let made = || cost.variants.iter().flatten();
     let mut text = String::new();
-    if let Some(r) = range(&mut made().map(|v| v.registers)) {
+    if let Some(r) = spread(made().map(|v| v.registers)) {
         let _ = write!(text, "{r} registers");
     }
-    if let Some(e) = range(&mut made().filter_map(|v| v.engine)) {
+    if let Some(e) = spread(made().filter_map(|v| v.engine)) {
         let _ = write!(text, " (the engine's {e})");
     }
     let spill = made().map(|v| v.spill).max().unwrap_or(0);
@@ -532,6 +544,42 @@ pub(crate) fn cost_text(
     }
     if let Some(bytes) = params {
         let _ = write!(text, " · {bytes} B of parameters");
+    }
+    text
+}
+
+/// A material type's code as its row says it (E10-4f): the instructions and image samples
+/// its fragment entry points reach over its shading variants made, the engine's own beside
+/// them, and how long its last compile took; empty when nothing is known.
+pub(crate) fn code_text(cost: &engine_render::forward::MaterialCost) -> String {
+    use std::fmt::Write;
+    let made = || cost.variants.iter().flatten();
+    let code = || made().filter_map(|v| v.code);
+    let engine = || made().filter_map(|v| v.engine_code);
+    let mut text = String::new();
+    if let Some(i) = spread(code().map(|c| c.instructions)) {
+        let _ = write!(text, "{i} instructions");
+        if let Some(e) = spread(engine().map(|c| c.instructions)) {
+            let _ = write!(text, " (the engine's {e})");
+        }
+    }
+    if let Some(s) = spread(code().map(|c| c.samples)) {
+        let word = if s == "1" { "sample" } else { "samples" };
+        let _ = write!(text, ", {s} {word}");
+        if let Some(e) = spread(engine().map(|c| c.samples)) {
+            let _ = write!(text, " (the engine's {e})");
+        }
+    }
+    if let Some((took, entries)) = cost.compiled {
+        if !text.is_empty() {
+            text.push_str(" · ");
+        }
+        let s = if entries == 1 { "" } else { "s" };
+        let _ = write!(
+            text,
+            "compiled in {:.2} s, {entries} entry point{s}",
+            took.as_secs_f64()
+        );
     }
     text
 }
@@ -550,7 +598,7 @@ fn file_name(written: &AssetPaths, asset: AssetRef) -> &str {
 fn texts(
     file: &MaterialFile,
     written: &AssetPaths,
-    cost: &str,
+    [cost, code]: [&str; 2],
     rows: &[Row],
     texts: &mut Vec<String>,
     spans: &mut Vec<(usize, usize)>,
@@ -603,6 +651,7 @@ fn texts(
                         let _ = write!(texts[k], "{count} values (an array)");
                     }
                     Row::Cost => texts[k].push_str(cost),
+                    Row::Code => texts[k].push_str(code),
                     _ => {}
                 }
             }
@@ -647,6 +696,8 @@ pub(crate) struct MaterialDoc {
     /// and its row's text.
     pub(crate) cost: Option<(u32, engine_render::forward::MaterialCost)>,
     pub(crate) cost_text: String,
+    /// Its code row's text (E10-4f): empty until known.
+    pub(crate) code_text: String,
 }
 
 impl MaterialDoc {
@@ -689,6 +740,7 @@ impl MaterialDoc {
             base,
             cost: None,
             cost_text: String::new(),
+            code_text: String::new(),
             saved: text.clone(),
             text,
             revision: 0,
@@ -799,16 +851,24 @@ impl MaterialDoc {
             .and_then(|(_, l)| l.as_ref().ok())
             .cloned();
         rows(&self.file, layout.as_ref(), &mut self.rows);
-        // Its cost after its type, once the type's shading has been made (E10-4c).
-        if self.cost.is_some()
-            && let Some(k) = self.rows.iter().position(|r| *r == Row::Type)
-        {
-            self.rows.insert(k + 1, Row::Cost);
+        // After its type: its cost once the type's shading has been made (E10-4c), its code
+        // (E10-4f), and whether it is drawn as its fallback.
+        if let Some(k) = self.rows.iter().position(|r| *r == Row::Type) {
+            let mut at = k + 1;
+            if self.cost.is_some() {
+                self.rows.insert(at, Row::Cost);
+                at += 1;
+                if !self.code_text.is_empty() {
+                    self.rows.insert(at, Row::Code);
+                    at += 1;
+                }
+            }
+            self.rows.insert(at, Row::Fallback);
         }
         texts(
             &self.file,
             &self.written,
-            &self.cost_text,
+            [&self.cost_text, &self.code_text],
             &self.rows,
             &mut self.texts,
             &mut self.spans,
@@ -824,6 +884,7 @@ impl MaterialDoc {
             .and_then(|(_, l)| l.as_ref().ok())
             .map(|l| l.size);
         self.cost_text = cost_text(&cost, params);
+        self.code_text = code_text(&cost);
         self.cost = Some((revision, cost));
         self.refresh();
     }
@@ -1107,10 +1168,13 @@ mod tests {
                 registers,
                 spill,
                 engine,
+                code: None,
+                engine_code: None,
             })
         };
         let cost = MaterialCost {
             variants: [v(35, 0, Some(47)), None, v(40, 0, Some(56)), None],
+            compiled: None,
         };
         assert_eq!(
             cost_text(&cost, Some(48)),
@@ -1118,7 +1182,54 @@ mod tests {
         );
         let one = MaterialCost {
             variants: [v(64, 256, None), None, None, None],
+            compiled: None,
         };
         assert_eq!(cost_text(&one, None), "64 registers, 256 B spilled");
+    }
+
+    /// E10-4f: a type's code says the instructions and image samples its variants reach,
+    /// the engine's beside them, and its last compile.
+    #[test]
+    fn a_types_code_says_its_instructions_and_samples_beside_the_engines() {
+        use engine_render::forward::{MaterialCost, VariantCost};
+        use engine_rhi::spirv::CodeSize;
+        let size = |instructions, samples| {
+            Some(CodeSize {
+                instructions,
+                samples,
+            })
+        };
+        let v = |code, engine_code| {
+            Some(VariantCost {
+                registers: 40,
+                spill: 0,
+                engine: None,
+                code,
+                engine_code,
+            })
+        };
+        let cost = MaterialCost {
+            variants: [
+                v(size(1240, 6), size(1180, 9)),
+                None,
+                v(size(1400, 6), size(1300, 9)),
+                None,
+            ],
+            compiled: Some((std::time::Duration::from_millis(420), 3)),
+        };
+        assert_eq!(
+            code_text(&cost),
+            "1240–1400 instructions (the engine's 1180–1300), 6 samples (the engine's 9) · \
+             compiled in 0.42 s, 3 entry points"
+        );
+        let one = MaterialCost {
+            variants: [v(size(800, 1), None), None, None, None],
+            compiled: Some((std::time::Duration::from_millis(250), 1)),
+        };
+        assert_eq!(
+            code_text(&one),
+            "800 instructions, 1 sample · compiled in 0.25 s, 1 entry point"
+        );
+        assert_eq!(code_text(&MaterialCost::default()), "");
     }
 }

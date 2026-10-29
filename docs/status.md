@@ -34,9 +34,9 @@ Last updated: 2026-10-28.
       the code editor (`slangd`, Material: New Type), and E10-3, the material graph (ADR
       0123: canvas, search, values, preview, errors, reroutes, frames, `[Node]` and
       `.mfunc` functions), are done; E10-4 is under way: variants that follow their base
-      (E10-4a, E10-4b), costs (E10-4c), the inspector's preview (E10-4d) and a material
-      shown on an object while dragged over it (E10-4e) are in; per-node previews and
-      Draw as Fallback ahead.
+      (E10-4a, E10-4b), costs (E10-4c, E10-4f: registers, code, Draw as Fallback), the
+      inspector's preview (E10-4d) and a material shown on an object while dragged over it
+      (E10-4e) are in; per-node previews ahead.
     - E11, sound, is done: the mixer file and panel (meters, effects, sends, the room's
       strip, snapshots, ADRs 0121 and 0122), previews and fields, the viewport's gizmos
       and hearing in place, the falloff curve.
@@ -872,6 +872,12 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-4f, a type's code and Draw as Fallback** (#442, ADR 0120's as-built): a typed
+    material's **code** row gives the instructions and image samples its fragment shaders
+    reach beside the engine's (`engine_rhi::spirv::code_size`; stripes: 805 and 3 against
+    936 and 8, the same on both GPUs) and its last compile (0.40–0.54 s, one entry point);
+    **draw as fallback** (a checkbox, and in the palette) draws it with its look, so the
+    profiler's forward pass shows its type's cost over plain shading.
   - **E10-4e, a material shown while dragged** (#441, ADR 0120's and ADR 0109's
     as-built): a material dragged from the dock shows on the object under the pointer (or
     the row's) in no undo step, the own back when the pointer leaves it or on Escape; the
@@ -1005,8 +1011,7 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-4's rest: per-node previews on graphs, Draw as Fallback (and the
-       cost's samples and compile time).
+       2D): E10-4's rest: per-node previews on graphs.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

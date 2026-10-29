@@ -824,6 +824,16 @@ A click on a folder opens it, a click on a file picks it.
     engine's 47) · 48 B of parameters`. Registers come first: on an integrated GPU they
     decide how many pixels shade at once. A graph's bar says the same of its preview (the
     editing build, its numbers parameters until saved);
+  - **its code** row, after the cost: the instructions and image samples its fragment
+    shader reaches, beside the engine's own shading's, and how long its last compile took:
+    `805 instructions (the engine's 936), 3 samples (the engine's 8) · compiled in 0.40 s,
+    1 entry point`. These count the code, not what runs: a loop runs its body more often,
+    a branch less;
+  - **draw as fallback** (the checkbox after them, or Material: Draw as Fallback in the
+    palette) draws the material with its look, the plain material its type falls back to,
+    so the profiler's forward pass shows what the type's shading costs over the engine's
+    own, in this view on this GPU. It is the editor's, not the file's (nothing to undo),
+    and the section's title says "drawn as its fallback" until you turn it off;
   - **Apply to Selection** gives the material picked in the dock to the selected objects;
   - **New Type** writes your own material type from a template, named after the active
     object (`Water`: `water.slang` declaring `WaterMaterial`; `Custom` with none), and a
@@ -1469,7 +1479,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E10 | materials: per-node previews on graphs, Draw as Fallback, a type's samples and compile time (E10-4); the graph (its canvas, node search, values, preview sphere, errors on nodes, Show Slang, reroutes, frames, Slang functions and `.mfunc` functions), the material file, variants with a base, costs, the inspector's preview, materials shown while dragged and Slang in the code editor are done |
+| E10 | materials: per-node previews on graphs (E10-4); the graph (its canvas, node search, values, preview sphere, errors on nodes, Show Slang, reroutes, frames, Slang functions and `.mfunc` functions), the material file, variants with a base, costs (registers, code, Draw as Fallback), the inspector's preview, materials shown while dragged and Slang in the code editor are done |
 
 The whole plan is ADR 0107 §7.
 

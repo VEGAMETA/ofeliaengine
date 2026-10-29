@@ -256,6 +256,15 @@ impl LazyPipeline {
         }
     }
 
+    /// The SPIR-V module of its fragment stage, if it has one (it may hold other entry
+    /// points: [`Self::fragment_entry`] names its own).
+    pub fn fragment_spirv(&self) -> Option<&[u32]> {
+        match &self.0.recipe {
+            Recipe::Graphics { fragment, .. } => fragment.as_ref().map(|f| &*f.spirv),
+            Recipe::Compute { .. } => None,
+        }
+    }
+
     /// The same pipeline with another fragment module (`spirv`, the same entry point):
     /// described, not created, and queued for `device`'s warm-up thread, which creates it
     /// in the background (a material type's variant of an engine pipeline, ADR 0092).

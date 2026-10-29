@@ -678,6 +678,8 @@ struct TypedState {
     bytes: Option<Vec<u8>>,
     slots: Vec<(u32, TextureKey)>,
     given: usize,
+    /// Drawn as its look while the editor compares what its type costs (E10-4f).
+    as_look: bool,
 }
 
 impl TypedState {
@@ -769,6 +771,8 @@ pub struct Assets {
     pending_materials: Vec<PendingMaterial>,
     /// Typed material files' materials (ADR 0120's E10-1b).
     typed: Vec<TypedState>,
+    /// Typed material files drawn as their looks ([`Self::draw_as_fallback`]).
+    as_fallback: HashSet<AssetRef>,
     /// Models waiting for their meshes and materials, given renderers once those are made.
     waiting: HashSet<Entity>,
     retry: Vec<Entity>,
@@ -852,6 +856,7 @@ impl Assets {
             compressed_textures: HashSet::new(),
             pending_materials: Vec::new(),
             typed: Vec::new(),
+            as_fallback: HashSet::new(),
             waiting: HashSet::new(),
             retry: Vec::new(),
             frame: 0,
@@ -1864,7 +1869,18 @@ impl Assets {
             bytes: None,
             slots: Vec::new(),
             given: 0,
+            as_look: false,
         })
+    }
+
+    /// Draws typed material file `material` with its look instead of its type, or with its
+    /// type again (E10-4f's Draw as Fallback).
+    pub(crate) fn draw_as_fallback(&mut self, material: AssetRef, on: bool) {
+        if on {
+            self.as_fallback.insert(material);
+        } else {
+            self.as_fallback.remove(&material);
+        }
     }
 
     /// Typed material files' materials made of their type (ADR 0120's E10-1b), where the
@@ -1887,6 +1903,7 @@ impl Assets {
             .retain(|t| materials.material_type(t.material).is_some());
         let Self {
             typed,
+            as_fallback,
             textures,
             decoding,
             loader,
@@ -1956,6 +1973,18 @@ impl Assets {
             }
             if !was && t.settled() {
                 *retry_waiting = true;
+            }
+            // Its look while the editor compares what its type costs (E10-4f); its
+            // parameters given again once that ends.
+            if as_fallback.contains(&t.asset) {
+                if !t.as_look {
+                    t.as_look = true;
+                    materials.set(t.material, t.look);
+                }
+                continue;
+            }
+            if core::mem::take(&mut t.as_look) {
+                t.given = usize::MAX;
             }
             // The parameters with the images made so far, given again as more are made.
             let Some(bytes) = &t.bytes else {

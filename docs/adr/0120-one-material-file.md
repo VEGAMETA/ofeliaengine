@@ -478,3 +478,36 @@ seen before it.
   moving pointer; the scene pick's solid slots under the validation layer.
 - Not yet: a try over an inspector field (every selected object), a model's further
   material slots (the drop gives `Model.material`, as before).
+
+### As built (E10-4f, 2026-10-29): a type's code and Draw as Fallback
+
+The rest of the materials UX note's item 12 (cost from measurements).
+
+- **Code:** `engine_rhi::spirv::code_size(words, entry)` counts the instructions of the
+  functions an entry point reaches, each once (debug lines and non-semantic instructions
+  left out), and the image samples, fetches and gathers among them.
+  `material_type_cost` reads it for each shading variant from the type's SPIR-V of the
+  role's entry point (kept by `MaterialTypes`) and from the engine's own role
+  (`LazyPipeline::fragment_spirv`). It also reports the type's latest compile that worked:
+  its time on the compiler thread and how many entry points it compiled.
+- **The row:** `code` after `cost`: `805 instructions (the engine's 936), 3 samples (the
+  engine's 8) · compiled in 0.40 s, 1 entry point` for the stripes type. The numbers are
+  the same on both GPUs, since they come from Slang's SPIR-V. These are counts in the code,
+  not of what runs.
+- **Draw as Fallback:** `Player::draw_as_fallback(material, on)` makes the player draw a
+  typed material file with its look, through the material table as it does while a type
+  compiles, and give its parameters again when that ends. The cost is a set lookup per
+  typed file per frame; with no typed file nothing changes.
+  - The editor's checkbox row (after the cost rows, typed materials only) and Material:
+    Draw as Fallback toggle it. It is the editor's, not the file's, so no undo step; the
+    section's title says "drawn as its fallback" meanwhile.
+  - The profiler's forward pass then shows what the type's shading costs over the engine's
+    own in this view on this GPU.
+- **Tests:** the code of a hand-made module (reached functions once, debug and
+  non-semantic instructions out, the other entry point's code apart); the row texts
+  (ranges, one sample, a compile of one entry point); the checkbox and the command (no
+  step, the player told, the title, none for an untyped material); on both GPUs, the
+  stripes' code read beside the engine's, its compile timed, and the cube drawn green (its
+  look) as its fallback, then yellow (itself) again.
+- Not yet: the forward pass's time beside the checkbox, measured on and off by the editor
+  itself.

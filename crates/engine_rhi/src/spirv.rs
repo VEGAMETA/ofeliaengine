@@ -1,6 +1,8 @@
 //! What a compute shader expects from the code that dispatches it, read from its SPIR-V
 //! (ADR 0052): the workgroup size and the size of its push constant block. Only the few
 //! instructions that decide these are decoded; everything else is skipped by word count.
+//! And how much code an entry point reaches ([`code_size`], a material's cost in the
+//! editor, E10-4f).
 
 use std::collections::HashMap;
 
@@ -35,6 +37,16 @@ const OP_VARIABLE: u32 = 59;
 const OP_DECORATE: u32 = 71;
 const OP_MEMBER_DECORATE: u32 = 72;
 const OP_EXECUTION_MODE_ID: u32 = 331;
+const OP_LINE: u32 = 8;
+const OP_EXT_INST_IMPORT: u32 = 11;
+const OP_EXT_INST: u32 = 12;
+const OP_ENTRY_POINT: u32 = 15;
+const OP_FUNCTION: u32 = 54;
+const OP_FUNCTION_PARAMETER: u32 = 55;
+const OP_FUNCTION_END: u32 = 56;
+const OP_FUNCTION_CALL: u32 = 57;
+const OP_LABEL: u32 = 248;
+const OP_NO_LINE: u32 = 317;
 
 // Operands.
 const MODE_LOCAL_SIZE: u32 = 17;
@@ -213,6 +225,97 @@ pub fn reflect(words: &[u32]) -> Option<ShaderInterface> {
     })
 }
 
+/// How much code an entry point reaches, as its SPIR-V says (E10-4f, a material's cost):
+/// the instructions of the functions it reaches, each counted once (debug lines and
+/// non-semantic information left out), and the image reads among them. Counts in the
+/// code, not of what runs: a loop runs its body more often, a branch less.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CodeSize {
+    /// Instructions in the bodies of the functions reached.
+    pub instructions: u32,
+    /// Image samples, fetches and gathers among them (sparse ones too).
+    pub samples: u32,
+}
+
+/// Whether instruction `op` reads an image: a sample, a fetch or a gather.
+fn reads_image(op: u32) -> bool {
+    (87..=97).contains(&op) || (305..=315).contains(&op)
+}
+
+/// The bytes of the literal string the words start with (up to its nul).
+fn literal(words: &[u32]) -> Vec<u8> {
+    words
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .take_while(|&b| b != 0)
+        .collect()
+}
+
+/// The code entry point `entry` of a SPIR-V module reaches ([`CodeSize`]); `None` if the
+/// module is malformed or has no such entry point.
+pub fn code_size(words: &[u32], entry: &str) -> Option<CodeSize> {
+    if words.len() < 5 || words[0] != MAGIC {
+        return None;
+    }
+    let mut root = None;
+    let mut non_semantic = Vec::new();
+    // By function: its instructions, its image reads, the functions it calls.
+    let mut functions: HashMap<u32, (u32, u32, Vec<u32>)> = HashMap::new();
+    let mut current = None;
+    let mut i = 5;
+    while i < words.len() {
+        let count = (words[i] >> 16) as usize;
+        let op = words[i] & 0xFFFF;
+        if count == 0 || i + count > words.len() {
+            return None;
+        }
+        let w = &words[i + 1..i + count];
+        match op {
+            OP_ENTRY_POINT if w.len() > 2 && literal(&w[2..]) == entry.as_bytes() => {
+                root = Some(w[1]);
+            }
+            OP_EXT_INST_IMPORT if w.len() > 1 && literal(&w[1..]).starts_with(b"NonSemantic.") => {
+                non_semantic.push(w[0]);
+            }
+            OP_FUNCTION => {
+                let id = *w.get(1)?;
+                functions.entry(id).or_default();
+                current = Some(id);
+            }
+            OP_FUNCTION_END => current = None,
+            OP_FUNCTION_PARAMETER | OP_LABEL | OP_LINE | OP_NO_LINE => {}
+            OP_EXT_INST if w.get(2).is_some_and(|set| non_semantic.contains(set)) => {}
+            _ => {
+                if let Some(f) = current.and_then(|id| functions.get_mut(&id)) {
+                    f.0 += 1;
+                    f.1 += u32::from(reads_image(op));
+                    if op == OP_FUNCTION_CALL {
+                        f.2.push(*w.get(2)?);
+                    }
+                }
+            }
+        }
+        i += count;
+    }
+    let mut reached = vec![root?];
+    let mut size = CodeSize::default();
+    let mut k = 0;
+    while let Some(&id) = reached.get(k) {
+        k += 1;
+        let Some((instructions, samples, calls)) = functions.get(&id) else {
+            continue;
+        };
+        size.instructions += instructions;
+        size.samples += samples;
+        for &callee in calls {
+            if !reached.contains(&callee) {
+                reached.push(callee);
+            }
+        }
+    }
+    Some(size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +383,81 @@ mod tests {
         ]);
         let size = reflect(&builtin).and_then(|i| i.local_size);
         assert_eq!(size, Some([16, 16, 2]));
+    }
+
+    /// A literal string's words (nul-terminated, padded).
+    fn string(s: &str) -> Vec<u32> {
+        let mut bytes = s.as_bytes().to_vec();
+        bytes.push(0);
+        while !bytes.len().is_multiple_of(4) {
+            bytes.push(0);
+        }
+        bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    /// E10-4f: an entry point's code is the functions it reaches, each once, without debug
+    /// lines and non-semantic instructions; image samples and fetches counted among them.
+    #[test]
+    fn an_entry_points_code_is_what_it_reaches() {
+        const OP_RETURN: u32 = 253;
+        const OP_SAMPLE: u32 = 87;
+        const OP_FETCH: u32 = 95;
+        const OP_FADD: u32 = 129;
+        let with = |head: &[u32], tail: Vec<u32>| [head, &tail[..]].concat();
+        let debug = with(&[1], string("NonSemantic.Shader.DebugInfo.100"));
+        let glsl = with(&[2], string("GLSL.std.450"));
+        let main = with(&[4, 10], string("main"));
+        let other = with(&[4, 30], string("other"));
+        let words = module(&[
+            (OP_EXT_INST_IMPORT, &debug),
+            (OP_EXT_INST_IMPORT, &glsl),
+            (OP_ENTRY_POINT, &main),
+            (OP_ENTRY_POINT, &other),
+            // main: a sample, a GLSL instruction, a debug one (left out), a call, twice.
+            (OP_FUNCTION, &[3, 10, 0, 5]),
+            (OP_LABEL, &[11]),
+            (OP_LINE, &[40, 1, 1]),
+            (OP_SAMPLE, &[6, 12, 13, 14]),
+            (OP_EXT_INST, &[7, 15, 2, 4, 12]),
+            (OP_EXT_INST, &[3, 16, 1, 1]),
+            (OP_FUNCTION_CALL, &[3, 17, 20]),
+            (OP_FUNCTION_CALL, &[3, 18, 20]),
+            (OP_RETURN, &[]),
+            (OP_FUNCTION_END, &[]),
+            // A helper: a parameter, a fetch.
+            (OP_FUNCTION, &[3, 20, 0, 5]),
+            (OP_FUNCTION_PARAMETER, &[6, 21]),
+            (OP_LABEL, &[22]),
+            (OP_FETCH, &[6, 23, 21, 24]),
+            (OP_RETURN, &[]),
+            (OP_FUNCTION_END, &[]),
+            // The other entry point's: not main's.
+            (OP_FUNCTION, &[3, 30, 0, 5]),
+            (OP_LABEL, &[31]),
+            (OP_FADD, &[6, 32, 33, 34]),
+            (OP_FADD, &[6, 35, 32, 34]),
+            (OP_RETURN, &[]),
+            (OP_FUNCTION_END, &[]),
+        ]);
+        assert_eq!(
+            code_size(&words, "main"),
+            Some(CodeSize {
+                instructions: 7,
+                samples: 2,
+            })
+        );
+        assert_eq!(
+            code_size(&words, "other"),
+            Some(CodeSize {
+                instructions: 3,
+                samples: 0,
+            })
+        );
+        assert_eq!(code_size(&words, "none"), None);
+        assert_eq!(code_size(&words[..20], "main"), None, "cut short");
     }
 
     #[test]
