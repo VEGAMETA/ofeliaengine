@@ -129,6 +129,18 @@ pub fn assert_steady_state_once(
     game: &mut crate::common::Cubes,
     settled: impl Fn(&engine_app::Player) -> bool,
 ) {
+    assert_steady_state_each(player, game, settled, |_| {});
+}
+
+/// [`assert_steady_state_once`], `each` run on the player before every frame (a pose moved,
+/// as the editor moves it).
+#[allow(dead_code)]
+pub fn assert_steady_state_each(
+    player: &mut engine_app::Player,
+    game: &mut crate::common::Cubes,
+    settled: impl Fn(&engine_app::Player) -> bool,
+    mut each: impl FnMut(&mut engine_app::Player),
+) {
     // Warm-up, 120 frames and at least 1.5 s: pipelines, the view's state, the graph's
     // buffers and heaps, the window thread's first display checks (once a second). And
     // half a second past the last slow frame, 20 s at most: with a cold driver cache the
@@ -144,6 +156,7 @@ pub fn assert_steady_state_once(
         && started.elapsed() < Duration::from_secs(20)
     {
         let frame = Instant::now();
+        each(player);
         player.frame(game).unwrap();
         if frame.elapsed() > Duration::from_millis(50) {
             last_slow = Instant::now();
@@ -162,6 +175,7 @@ pub fn assert_steady_state_once(
     let measured = Instant::now();
     let mut rendered = 0;
     while rendered < 240 || measured.elapsed() < Duration::from_millis(1200) {
+        each(player);
         if player.frame(game).unwrap().is_some() {
             rendered += 1;
         }

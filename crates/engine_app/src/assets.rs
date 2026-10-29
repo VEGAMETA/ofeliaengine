@@ -63,9 +63,10 @@ use engine_render::material::{
     PARAMS_BYTES, TextureRef,
 };
 use engine_render::mesh::{GeometryPool, MeshId, OwnedMeshData};
+use engine_render::skinning::{SkinId, SkinnedId, SkinnedMeshData, Skinning};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_rhi::{Allocator, Bindless, Device, Wrap};
-use engine_runtime::{Derived, MeshRenderer};
+use engine_runtime::{Derived, MeshRenderer, SkinnedMesh};
 use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -828,6 +829,41 @@ pub struct Assets {
     read_to_cook: HashSet<AssetId>,
     builtin_colliders: HashMap<AssetRef, Option<Arc<ModelCollider>>>,
     collider_epoch: u64,
+    /// Skinned meshes (ADR 0124's E12-1a): made, by mesh and whether a part per primitive,
+    /// with their parts' skins and their rig; being made; and the skins of files read again,
+    /// let go once no model draws them.
+    skinned: HashMap<(AssetRef, bool), SkinnedAsset>,
+    building_skins: HashSet<(AssetRef, bool)>,
+    retired_skins: Vec<SkinId>,
+    /// Each skinned model's instances of its skin.
+    owned: HashMap<Entity, Owned>,
+    posing: crate::skins::Posing,
+}
+
+/// A skinned mesh made (ADR 0124's E12-1a): a skin per part in `Skinning`, and its rig.
+struct SkinnedAsset {
+    skins: Vec<SkinId>,
+    rig: Arc<crate::skins::Rig>,
+}
+
+/// A skinned model's own instances of its skin (ADR 0124's E12-1a), one per part (the
+/// entity's first, its parts' after), with their meshes; its rig, its pose, and whether its
+/// palette was set for that pose.
+struct Owned {
+    skins: Vec<SkinId>,
+    instances: Vec<SkinnedId>,
+    meshes: Vec<MeshId>,
+    rig: Arc<crate::skins::Rig>,
+    pose: Option<(usize, f32)>,
+    posed: bool,
+}
+
+/// What a model's mesh is to skinning: drawn skinned (the file and the mesh's index), or
+/// plain, or not known while its file is read.
+enum SkinCheck {
+    Skinned(Arc<GltfFile>, usize),
+    Plain,
+    Reading,
 }
 
 impl Assets {
@@ -887,6 +923,11 @@ impl Assets {
             read_to_cook: HashSet::new(),
             builtin_colliders: HashMap::new(),
             collider_epoch: 0,
+            skinned: HashMap::new(),
+            building_skins: HashSet::new(),
+            retired_skins: Vec::new(),
+            owned: HashMap::new(),
+            posing: crate::skins::Posing::default(),
         }
     }
 
@@ -1012,6 +1053,16 @@ impl Assets {
             keep
         });
         self.building_split.retain(|a| a.file != file);
+        // Its skins: let go once no model draws them (its models make theirs again).
+        let retired = &mut self.retired_skins;
+        self.skinned.retain(|(asset, _), made| {
+            let keep = asset.file != file;
+            if !keep {
+                retired.append(&mut made.skins);
+            }
+            keep
+        });
+        self.building_skins.retain(|(a, _)| a.file != file);
         let (meshes, materials) = (&mut self.stale_meshes, &mut self.stale_materials);
         self.meshes.retain(|asset, &mut mesh| {
             let keep = asset.file != file;
@@ -1443,7 +1494,12 @@ impl Assets {
 
     /// The loader's results taken: files read, meshes made, textures decoded (made in
     /// [`Self::make_textures`]). Waits a moment for one with `wait`. Whether any came.
-    fn take_done(&mut self, geometry: &mut GeometryPool, wait: bool) -> bool {
+    fn take_done(
+        &mut self,
+        geometry: &mut GeometryPool,
+        skinning: &mut Skinning,
+        wait: bool,
+    ) -> bool {
         let mut done = core::mem::take(&mut self.done);
         if wait {
             self.loader.wait(&mut done);
@@ -1524,6 +1580,42 @@ impl Assets {
                     match made {
                         Ok(meshes) => {
                             self.split.insert(asset, meshes);
+                        }
+                        Err(why) => self.fail(asset, why),
+                    }
+                }
+                Done::Skin {
+                    asset,
+                    split,
+                    generation,
+                    result,
+                } if generation == self.generation(asset.file) => {
+                    self.building_skins.remove(&(asset, split));
+                    let frame = self.frame;
+                    let made = result.and_then(|(parts, rig)| {
+                        let mut skins = Vec::with_capacity(parts.len());
+                        for p in &parts {
+                            let data = SkinnedMeshData {
+                                mesh: p.mesh.as_data(),
+                                joints: &p.joints,
+                                weights: &p.weights,
+                                joint_count: rig.joint_count() as u16,
+                            };
+                            match skinning.add_skin(&data) {
+                                Ok(skin) => skins.push(skin),
+                                Err(e) => {
+                                    for skin in skins {
+                                        skinning.remove_skin(skin, geometry, frame);
+                                    }
+                                    return Err(e.to_string());
+                                }
+                            }
+                        }
+                        Ok(SkinnedAsset { skins, rig })
+                    });
+                    match made {
+                        Ok(made) => {
+                            self.skinned.insert((asset, split), made);
                         }
                         Err(why) => self.fail(asset, why),
                     }
@@ -2025,11 +2117,13 @@ impl Assets {
     /// GPU in this frame. `extracted`: the scene was extracted this frame, so the parts
     /// renderers let go of before are drawn no more and are freed. Visits only chunks where
     /// models were written.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn sync(
         &mut self,
         world: &mut World,
         geometry: &mut GeometryPool,
         materials: &mut MaterialTable,
+        skinning: &mut Skinning,
         frame: u64,
         wait: bool,
         extracted: bool,
@@ -2044,7 +2138,7 @@ impl Assets {
             }
             self.retired_textures.append(&mut self.retiring_textures);
         }
-        let mut came = self.take_done(geometry, false);
+        let mut came = self.take_done(geometry, skinning, false);
         let changes = self.changes.get_or_insert_with(|| QueryState::new(world));
         self.changed.clear();
         self.changed
@@ -2068,7 +2162,7 @@ impl Assets {
         }
         for i in 0..self.changed.len() {
             let (e, model) = self.changed[i];
-            if self.give_renderer(world, e, model, geometry, materials) {
+            if self.give_renderer(world, e, model, geometry, materials, skinning) {
                 self.waiting.remove(&e);
             } else {
                 self.waiting.insert(e);
@@ -2086,7 +2180,7 @@ impl Assets {
                 for i in 0..self.retry.len() {
                     let e = self.retry[i];
                     if let Some(model) = world.get::<Model>(e).copied()
-                        && !self.give_renderer(world, e, model, geometry, materials)
+                        && !self.give_renderer(world, e, model, geometry, materials, skinning)
                     {
                         self.waiting.insert(e);
                     }
@@ -2104,17 +2198,20 @@ impl Assets {
                 );
                 break;
             }
-            came = self.take_done(geometry, true);
+            came = self.take_done(geometry, skinning, true);
         }
         let orphans = self.orphans.get_or_insert_with(|| QueryState::new(world));
         self.gone.clear();
         self.gone.extend(orphans.iter_readonly(world));
-        for &e in &self.gone {
+        for i in 0..self.gone.len() {
+            let e = self.gone[i];
+            self.release_skin(world, e, skinning, geometry);
             world.remove::<FromModel>(e);
             world.remove::<MeshRenderer>(e);
             world.remove::<Split>(e);
             self.waiting.remove(&e);
         }
+        self.sync_skins(world, skinning, geometry);
         // Parts whose model went or draws whole again (a model despawned alone leaves its
         // children a dead parent): gone.
         let parts = self.parts.get_or_insert_with(|| QueryState::new(world));
@@ -2155,7 +2252,21 @@ impl Assets {
         model: Model,
         geometry: &mut GeometryPool,
         materials: &mut MaterialTable,
+        skinning: &mut Skinning,
     ) -> bool {
+        // Drawn skinned where a node of its file draws its mesh with a skin (ADR 0124's
+        // E12-1a); a model that was is drawn plain again without its instances.
+        match self.skin_check(model.mesh) {
+            SkinCheck::Skinned(file, mesh) => {
+                return self
+                    .give_skinned(world, e, model, &file, mesh, geometry, materials, skinning);
+            }
+            SkinCheck::Reading => {
+                self.release_skin(world, e, skinning, geometry);
+                return false;
+            }
+            SkinCheck::Plain => self.release_skin(world, e, skinning, geometry),
+        }
         // Material slots on a glTF mesh: a mesh per primitive, each with its own material.
         let slots = world
             .get::<MaterialSlots>(e)
@@ -2315,6 +2426,283 @@ impl Assets {
             (None, Some(old)) => (Some(old.clone()), true),
             (None, None) => (None, false),
         }
+    }
+
+    /// Whether mesh `asset` is drawn skinned (ADR 0124's E12-1a): a node of its glTF file
+    /// draws it with a skin. Its file read on first use.
+    fn skin_check(&mut self, asset: AssetRef) -> SkinCheck {
+        if asset.is_none() || asset.file == builtin::LIBRARY {
+            return SkinCheck::Plain;
+        }
+        let Some(path) = file_path(&self.paths, asset)
+            .filter(|p| is_gltf(p))
+            .map(str::to_owned)
+        else {
+            return SkinCheck::Plain;
+        };
+        match self.gltf(asset.file, &path) {
+            Ok(Some(file)) => match mesh_part(&file.scene, asset.part) {
+                Ok(mesh) if crate::skins::skinned_node(&file.scene, mesh).is_some() => {
+                    SkinCheck::Skinned(file, mesh)
+                }
+                // A mesh that is not there is the plain path's to report.
+                _ => SkinCheck::Plain,
+            },
+            Ok(None) => SkinCheck::Reading,
+            Err(_) => SkinCheck::Plain,
+        }
+    }
+
+    /// [`Self::give_renderer`] for a skinned mesh (ADR 0124's E12-1a): its skin made in the
+    /// background on first use (a part per primitive with material slots), then an instance
+    /// of it per part for this model, drawn by the entity and, past the first, by derived
+    /// parts as plain split models are; posed in the rest pose until asked otherwise. False
+    /// while the skin or a material is still being made.
+    #[allow(clippy::too_many_arguments)]
+    fn give_skinned(
+        &mut self,
+        world: &mut World,
+        e: Entity,
+        model: Model,
+        file: &Arc<GltfFile>,
+        mesh: usize,
+        geometry: &mut GeometryPool,
+        materials: &mut MaterialTable,
+        skinning: &mut Skinning,
+    ) -> bool {
+        let slots = world
+            .get::<MaterialSlots>(e)
+            .filter(|s| !s.0.is_empty())
+            .map(|s| s.0.clone());
+        let split = slots.is_some();
+        let key = (model.mesh, split);
+        let Some(made) = self.skinned.get(&key) else {
+            self.release_skin(world, e, skinning, geometry);
+            if self.problems.contains_key(&model.mesh) {
+                return true;
+            }
+            if self.building_skins.insert(key) {
+                let generation = self.generation(model.mesh.file);
+                self.loader.give(Job::Skin {
+                    asset: model.mesh,
+                    split,
+                    file: Arc::clone(file),
+                    mesh,
+                    generation,
+                });
+            }
+            return false;
+        };
+        let (skins, rig) = (made.skins.clone(), Arc::clone(&made.rig));
+        let slot = |i: usize| match (&slots, i) {
+            (_, 0) | (None, _) => model.material,
+            (Some(slots), i) => slots.get(i - 1).copied().unwrap_or(model.material),
+        };
+        let mut drawn = Vec::with_capacity(skins.len());
+        let (mut stale, mut missing) = (false, Vec::new());
+        for i in 0..skins.len() {
+            let (material, s) = self.drawn_material(slot(i), materials);
+            stale |= s;
+            match material {
+                Some(m) => drawn.push(m),
+                None => missing.push(slot(i)),
+            }
+        }
+        if !missing.is_empty() {
+            let coming = |asset: &AssetRef| !asset.is_none() && !self.problems.contains_key(asset);
+            return !missing.iter().any(coming);
+        }
+        // Its instances: kept while they are this skin's, else made anew.
+        if self.owned.get(&e).is_none_or(|o| o.skins != skins) {
+            self.release_skin(world, e, skinning, geometry);
+            let mut instances = Vec::with_capacity(skins.len());
+            let mut meshes = Vec::with_capacity(skins.len());
+            for &skin in &skins {
+                match skinning.add_instance(skin, geometry) {
+                    Ok((id, mesh)) => {
+                        instances.push(id);
+                        meshes.push(mesh);
+                    }
+                    Err(why) => {
+                        for id in instances {
+                            skinning.remove_instance(id, geometry, self.frame);
+                        }
+                        self.fail(model.mesh, why.to_string());
+                        return true;
+                    }
+                }
+            }
+            self.owned.insert(
+                e,
+                Owned {
+                    skins,
+                    instances,
+                    meshes,
+                    rig,
+                    pose: None,
+                    posed: false,
+                },
+            );
+        }
+        let Some(owned) = self.owned.get(&e) else {
+            return true;
+        };
+        let visible = u32::from(!model.hidden);
+        let first = MeshRenderer {
+            mesh: owned.meshes[0],
+            material: drawn[0],
+            visible,
+        };
+        if world.get::<MeshRenderer>(e) != Some(&first) {
+            world.insert(e, first);
+        }
+        let skinned = SkinnedMesh {
+            id: owned.instances[0],
+        };
+        if world.get::<SkinnedMesh>(e) != Some(&skinned) {
+            world.insert(e, skinned);
+        }
+        if world.get::<FromModel>(e).is_none() {
+            world.insert(e, FromModel);
+            if world.get::<GlobalTransform>(e).is_none() {
+                world.insert(e, GlobalTransform::IDENTITY);
+            }
+        }
+        if !split {
+            // Drawn whole: parts left from a split go with the sync's sweep.
+            world.remove::<Split>(e);
+            return !stale;
+        }
+        if world.get::<Split>(e).is_none() {
+            world.insert(e, Split);
+        }
+        let mut have: Vec<(u32, Entity)> = world
+            .children(e)
+            .filter_map(|c| world.get::<ModelPart>(c).map(|p| (p.0, c)))
+            .collect();
+        let rest = owned.instances.iter().zip(&owned.meshes).zip(&drawn);
+        for (i, ((&id, &mesh), &material)) in rest.enumerate().skip(1) {
+            let renderer = MeshRenderer {
+                mesh,
+                material,
+                visible,
+            };
+            let skinned = SkinnedMesh { id };
+            match have.iter().position(|&(k, _)| k as usize == i) {
+                Some(at) => {
+                    let (_, part) = have.swap_remove(at);
+                    if world.get::<MeshRenderer>(part) != Some(&renderer) {
+                        world.insert(part, renderer);
+                    }
+                    if world.get::<SkinnedMesh>(part) != Some(&skinned) {
+                        world.insert(part, skinned);
+                    }
+                }
+                None => {
+                    let part = world.spawn((
+                        Derived,
+                        ModelPart(i as u32),
+                        Transform::IDENTITY,
+                        GlobalTransform::IDENTITY,
+                        renderer,
+                        skinned,
+                    ));
+                    let _ = world.set_parent(part, Some(e));
+                }
+            }
+        }
+        for (_, part) in have {
+            world.despawn(part);
+        }
+        !stale
+    }
+
+    /// Entity `e`'s instances of its skin let go (ADR 0124's E12-1a), with the components
+    /// that drew them.
+    fn release_skin(
+        &mut self,
+        world: &mut World,
+        e: Entity,
+        skinning: &mut Skinning,
+        geometry: &mut GeometryPool,
+    ) {
+        let Some(owned) = self.owned.remove(&e) else {
+            return;
+        };
+        for id in owned.instances {
+            skinning.remove_instance(id, geometry, self.frame);
+        }
+        if !world.contains(e) {
+            return;
+        }
+        world.remove::<SkinnedMesh>(e);
+        if world.remove::<FromModel>(e).is_some() {
+            world.remove::<MeshRenderer>(e);
+        }
+        // Its skinned parts go with it.
+        let parts: Vec<Entity> = world
+            .children(e)
+            .filter(|&c| world.get::<ModelPart>(c).is_some())
+            .collect();
+        for part in parts {
+            world.despawn(part);
+        }
+        world.remove::<Split>(e);
+    }
+
+    /// The skinned models each frame (ADR 0124's E12-1a): those gone let their instances go;
+    /// those whose pose changed are posed again; the skins of files read again that no model
+    /// draws any more are let go. Allocates nothing when nothing changed.
+    fn sync_skins(&mut self, world: &World, skinning: &mut Skinning, geometry: &mut GeometryPool) {
+        if self.owned.is_empty() && self.retired_skins.is_empty() {
+            return;
+        }
+        let frame = self.frame;
+        self.owned.retain(|&e, owned| {
+            let alive = world.contains(e);
+            if !alive {
+                for &id in &owned.instances {
+                    skinning.remove_instance(id, geometry, frame);
+                }
+            }
+            alive
+        });
+        let posing = &mut self.posing;
+        for owned in self.owned.values_mut().filter(|o| !o.posed) {
+            let palette = posing.palette(&owned.rig, owned.pose);
+            for &id in &owned.instances {
+                skinning.set_palette(id, palette);
+            }
+            owned.posed = true;
+        }
+        if !self.retired_skins.is_empty() {
+            let owned = &self.owned;
+            self.retired_skins.retain(|skin| {
+                let drawn = owned.values().any(|o| o.skins.contains(skin));
+                if !drawn {
+                    skinning.remove_skin(*skin, geometry, frame);
+                }
+                drawn
+            });
+        }
+    }
+
+    /// The rig of entity `e`'s skinned model (ADR 0124's E12-1a), once its skin is made.
+    pub(crate) fn model_rig(&self, e: Entity) -> Option<&crate::skins::Rig> {
+        self.owned.get(&e).map(|o| &*o.rig)
+    }
+
+    /// Poses entity `e`'s skinned model at a clip's moment, or in its rest pose (ADR 0124's
+    /// E12-1a): set by the next sync. False for a model drawn without a skin.
+    pub(crate) fn pose_model(&mut self, e: Entity, pose: Option<(usize, f32)>) -> bool {
+        let Some(owned) = self.owned.get_mut(&e) else {
+            return false;
+        };
+        if owned.pose != pose {
+            owned.pose = pose;
+            owned.posed = false;
+        }
+        true
     }
 
     /// [`Self::give_renderer`] for a model with material slots (ADR 0115): its mesh made a

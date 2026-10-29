@@ -12,6 +12,33 @@ Characters are animated in three steps each frame:
 
 The design and the measurements are in ADR 0068.
 
+## Skinned models in scenes
+
+A scene's `Model` whose mesh a skinned node of its glTF file draws is drawn skinned by the
+player, with nothing to write (ADR 0124's E12-1a):
+
+- The player makes the skin in the background when the model is first drawn. That means
+  the mesh's vertices with their joints and weights, and the skin's rig: its skeleton, its
+  rest pose, and the file's clips that move it, compressed. The model then draws in its
+  rest pose. CesiumMan's took 36–41 ms.
+- `Player::model_rig(entity)` gives the rig: `rig.clips()` lists each clip's name, length,
+  samples, bytes and largest compression error. It is `None` for a model drawn without a
+  skin.
+- `Player::pose_model(entity, Some((clip, seconds)))` shows the clip at that moment, held
+  at its ends; `None` goes back to the rest pose. Nothing in the scene changes. This is
+  what the editor uses to show a clip in place. Posing anew every frame allocates nothing.
+- The skinned vertices land where the plain mesh would: the node's place in the file and
+  the file's import scale are taken into account, so the entity's transform places the
+  character.
+- With material slots (`MaterialSlots`), each primitive is a skin of its own, drawn by the
+  model's derived parts, all posed together.
+- A file read again makes its skins again; the model is not drawn until the new skin is
+  made.
+
+A game that poses its characters itself still can: set the palettes in `Game::animate`,
+as below. The `Animator` component that plays clips and graphs comes next (ADR 0124,
+E12-2).
+
 ## 1. Importing and cooking
 
 glTF skins and animations are imported with the scene (`import_gltf`): joints, inverse

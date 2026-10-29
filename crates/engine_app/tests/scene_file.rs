@@ -15,6 +15,7 @@
 use engine_app::prelude::*;
 use engine_app::{AssetMeta, Assets, BakedBrush, PREVIEW_SIZE, PreviewRequest};
 use engine_render::material::MaterialTypeId;
+use engine_runtime::SkinnedMesh;
 use engine_scene::{AssetPaths, SaveOptions, SceneRegistry, save_with};
 use std::time::{Duration, Instant};
 
@@ -1421,5 +1422,209 @@ fn a_graphs_node_previews_draw_each_nodes_value() {
     assert!(a < 1.0, "around the sphere: {a}");
     let [.., a] = at(0, 1, 1);
     assert!(a > 250.0, "a flat square to its corners: {a}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR 0124's E12-1a: a scene's model of a skinned glTF mesh (Khronos' CesiumMan, from
+/// `tools/fetch-test-assets.ps1`; skipped without it) is drawn skinned: its rig comes with
+/// the file's clip, a clip's moment poses it elsewhere than its rest pose, and a model that
+/// goes lets its skin's instance go. `ENGINE_SKINNED_PNG=<dir>` writes both frames.
+#[test]
+fn a_skinned_model_is_drawn_skinned_and_posed_at_a_clips_moment() {
+    let source =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/CesiumMan");
+    if !source.join("CesiumMan.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ofelia-skinned-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    std::fs::create_dir_all(dir.join("scenes")).unwrap();
+    for file in ["CesiumMan.gltf", "CesiumMan_data.bin", "CesiumMan_img0.jpg"] {
+        std::fs::copy(source.join(file), dir.join("models").join(file)).unwrap();
+    }
+    let id = AssetMeta::ensure(&dir.join("models/CesiumMan.gltf")).unwrap();
+    let (mesh, material) = (
+        AssetRef::part(id, "Cesium_Man"),
+        AssetRef::part(id, "Cesium_Man-effect"),
+    );
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(mesh, "models/CesiumMan.gltf#Cesium_Man");
+    paths.insert(material, "models/CesiumMan.gltf#Cesium_Man-effect");
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Man"),
+        Transform::from_rotation(Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2)),
+        Model::new(mesh, material),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Floor"),
+        Transform::from_xyz(0.0, -0.05, 0.0).with_scale(Vec3::new(6.0, 0.1, 6.0)),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(Quat::from_rotation_x(-1.0)),
+        Sun {
+            color: Vec3::splat(1.5),
+            ambient: Vec3::splat(0.2),
+        },
+    ));
+    let eye = Vec3::new(0.0, 0.8, 2.6);
+    world.spawn((
+        SceneId::new(),
+        Name::new("Camera"),
+        Transform::from_translation(eye).with_rotation(look_rotation(
+            eye,
+            Vec3::new(0.0, 0.7, 0.0),
+            Vec3::Y,
+        )),
+        Camera::perspective(1.0, 0.05, 100.0),
+    ));
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("scenes/main.scene"), &text).unwrap();
+
+    let (width, height) = (480u32, 480u32);
+    let settings = PlayerSettings {
+        title: String::from("skinned model test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("scenes/main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let world = player.world_mut();
+    let mut names = QueryState::<(Entity, &Name)>::new(world);
+    let man = names
+        .iter_readonly(world)
+        .find(|(_, name)| name.as_str() == "Man")
+        .map(|(e, _)| e)
+        .unwrap();
+    // Its skin made in the background, its rig with the file's clip.
+    let started = Instant::now();
+    while player.model_rig(man).is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "no skin: {:?}",
+            player.assets().problem(mesh)
+        );
+        player.frame(&mut game).unwrap();
+    }
+    let made = started.elapsed();
+    let rig = player.model_rig(man).unwrap();
+    let clip = (
+        rig.clips().len(),
+        rig.clips()[0].duration(),
+        rig.joint_count(),
+    );
+    println!(
+        "skinned after {:.0} ms: {} joints, {} clip(s), the first {:.2} s",
+        made.as_secs_f64() * 1e3,
+        clip.2,
+        clip.0,
+        clip.1
+    );
+    assert!(clip.0 >= 1 && clip.1 > 0.0);
+    assert!(player.world_mut().get::<SkinnedMesh>(man).is_some());
+    for _ in 0..4 {
+        player.frame(&mut game).unwrap();
+    }
+    let rest = player.capture(&mut game).unwrap().unwrap();
+    // Halfway through its walk.
+    assert!(player.pose_model(man, Some((0, clip.1 * 0.5))));
+    for _ in 0..4 {
+        player.frame(&mut game).unwrap();
+    }
+    let walking = player.capture(&mut game).unwrap().unwrap();
+    if let Ok(out) = std::env::var("ENGINE_SKINNED_PNG") {
+        for (name, shot) in [("rest.png", &rest), ("walking.png", &walking)] {
+            let png = engine_render::png::encode_png(
+                width,
+                height,
+                engine_render::png::PngFormat::Rgba,
+                shot,
+            )
+            .unwrap();
+            std::fs::write(std::path::Path::new(&out).join(name), png).unwrap();
+        }
+    }
+    let changed = |a: &[u8], b: &[u8]| {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .filter(|(a, b)| (0..3).any(|c| a[c].abs_diff(b[c]) > 40))
+            .count()
+    };
+    // Material slots: a skin a primitive (one here), made anew, its instance replacing the
+    // first; drawn in the rest pose again.
+    player
+        .world_mut()
+        .insert(man, engine_app::MaterialSlots(vec![material]));
+    player.frame(&mut game).unwrap();
+    let started = Instant::now();
+    while player.world_mut().get::<SkinnedMesh>(man).is_none() || player.model_rig(man).is_none() {
+        assert!(started.elapsed() < Duration::from_secs(30), "no skin again");
+        player.frame(&mut game).unwrap();
+    }
+    for _ in 0..4 {
+        player.frame(&mut game).unwrap();
+    }
+    let slotted = player.capture(&mut game).unwrap().unwrap();
+    let again = changed(&rest, &slotted);
+    assert!(again < 200, "the rest pose again: {again} pixels differ");
+    // A model that goes takes its skin's instance with it.
+    player.world_mut().remove::<Model>(man);
+    player.frame(&mut game).unwrap();
+    assert!(player.world_mut().get::<SkinnedMesh>(man).is_none());
+    assert!(player.world_mut().get::<MeshRenderer>(man).is_none());
+    assert!(player.model_rig(man).is_none());
+    assert!(!player.pose_model(man, None));
+    let gone = player.capture(&mut game).unwrap().unwrap();
+    if let Ok(out) = std::env::var("ENGINE_SKINNED_PNG") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &gone,
+        )
+        .unwrap();
+        std::fs::write(std::path::Path::new(&out).join("gone.png"), png).unwrap();
+    }
+    let (drawn, moved) = (changed(&rest, &gone), changed(&rest, &walking));
+    println!("the man covers {drawn} pixels; the pose moved {moved}");
+    assert!(drawn > 2_000, "the man drawn: {drawn}");
+    assert!(moved > 500, "the pose moved him: {moved}");
     let _ = std::fs::remove_dir_all(&dir);
 }

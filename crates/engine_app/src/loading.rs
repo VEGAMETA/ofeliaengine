@@ -21,6 +21,7 @@ use crate::assets::{
     CookedColliders, GltfFile, TextureKey, cook_model_colliders, gltf_mesh, gltf_primitives,
     open_gltf,
 };
+use crate::skins::{Rig, SkinPart};
 use engine_assets::{
     DerivedDataCache, EncodedTexture, TextureImage, TextureSource, build_mips, cached_texture,
     decode_image, import_texture, read_texture,
@@ -60,6 +61,15 @@ pub(crate) enum Job {
     /// slots, ADR 0115).
     Primitives {
         asset: AssetRef,
+        file: Arc<GltfFile>,
+        mesh: usize,
+        generation: u32,
+    },
+    /// Mesh `mesh` of an imported file skinned (ADR 0124's E12-1a): its parts (the whole
+    /// mesh, or a part per primitive with `split`) with their influences, and its rig.
+    Skin {
+        asset: AssetRef,
+        split: bool,
         file: Arc<GltfFile>,
         mesh: usize,
         generation: u32,
@@ -135,6 +145,13 @@ pub(crate) enum Done {
         asset: AssetRef,
         generation: u32,
         result: Result<Vec<(OwnedMeshData, Vec<VertexAttributes>)>, String>,
+    },
+    /// A skinned mesh's parts and rig.
+    Skin {
+        asset: AssetRef,
+        split: bool,
+        generation: u32,
+        result: Result<(Vec<SkinPart>, Arc<Rig>), String>,
     },
     Texture {
         key: TextureKey,
@@ -447,6 +464,17 @@ fn failed(job: &Job, why: &str) -> Done {
             generation: *generation,
             result: Err(why),
         },
+        Job::Skin {
+            asset,
+            split,
+            generation,
+            ..
+        } => Done::Skin {
+            asset: *asset,
+            split: *split,
+            generation: *generation,
+            result: Err(why),
+        },
         Job::Texture {
             key, generation, ..
         } => Done::Texture {
@@ -556,6 +584,26 @@ fn run(job: Job, root: &Path, pool: Option<&ThreadPool>) -> Done {
                 .ok_or_else(|| String::from("the file has no such mesh"));
             Done::Primitives {
                 asset,
+                generation,
+                result,
+            }
+        }
+        Job::Skin {
+            asset,
+            split,
+            file,
+            mesh,
+            generation,
+        } => {
+            engine_profiler::zone!("assets::load::skin");
+            let result = crate::skins::build(&file, mesh, split).and_then(|built| {
+                built
+                    .map(|(parts, rig)| (parts, Arc::new(rig)))
+                    .ok_or_else(|| String::from("no node draws the mesh with a skin"))
+            });
+            Done::Skin {
+                asset,
+                split,
                 generation,
                 result,
             }

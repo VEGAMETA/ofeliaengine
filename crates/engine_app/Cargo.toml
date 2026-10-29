@@ -57,12 +57,13 @@ log = "0.4"
 engine_log.workspace = true
 # A baked blockout group's glTF (ADR 0110 E2b-6): the file's JSON chunk.
 serde_json = "1"
+# Skinned models posed by the player and their clips (ADR 0124's E12-1a).
+engine_anim.workspace = true
 
 [dev-dependencies]
 # The flight example: skinned characters (glTF Fox) cooked through the derived data cache,
 # its PSO record.
 bytemuck = { version = "1.25", features = ["derive"] }
-engine_anim.workspace = true
 engine_assets.workspace = true
 # A material graph's editing build, for its node previews' test (ADR 0123's E10-4g).
 engine_material_graph.workspace = true
