@@ -872,6 +872,14 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-4g-2, node previews on the canvas** (#PR, ADR 0123's as-built): each node with an
+    output shows its value in a 64-unit tile under its ports (a flat square, or a sphere
+    where it reads the surface's place), drawn from the preview's build: in 0.84–0.88 s
+    from opening the tab on both GPUs, a typed value on its tile in 5 frames, no compile.
+    Requests are tagged, so an atlas is shown only under the nodes it was drawn for. Graph:
+    Node Previews turns them off (kept in the session); 0 allocations in a graph tab's
+    steady frames with them on. Left: function calls' previews and a function tab's
+    (E10-4g-3).
   - **E10-4g-1, node previews in the engine** (#443, ADR 0123's as-built): the editing
     build's `node_preview` writes every shown node with an early return each (one compile
     a change of code, however many nodes); `nodePreviewFragment` (compiled for a graph's
@@ -1018,7 +1026,7 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-4's rest: per-node previews on graphs.
+       2D): E10-4g-3, the node previews of function calls and in a function's tab.
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
@@ -1343,7 +1351,7 @@ Left in the core: recording on the job system.
 | **Sound in the player**: `AudioSource`, `AudioSource3D`, `AudioListener` and `ReverbZone` components, positions saved; walls muffling and the room's reverb from rays through the physics world; one mixer for sources and videos; sounds from a live folder while developing, a sound pack in a release | done | ADR 0105 |
 | Audio, text, 2D, basic UI | solid / basic | §11, ADR 0015 |
 | Tests: golden images (FLIP, per vendor), per-pass perf gate, determinism, zero-allocation tests | solid | ADR 0062 |
-| Editor | E1 to E9 done (E8, the code editor, but for rename across the project); E10-1 to E10-3 (the graph, ADR 0123) done, E10-4 ahead; E11, sound, done; E12 to E14 ahead | ADR 0107 |
+| Editor | E1 to E9 done (E8, the code editor, but for rename across the project); E10-1 to E10-4 done (the graph, ADR 0123) but the node previews of function calls (E10-4g-3); E11, sound, done; E12 to E14 ahead | ADR 0107 |
 | Luau | scripting v1 done: components and hooks, queries and systems, physics, input, messages and timers, saves, networking, reload on save, types; the debugger begun | §10, ADRs 0114, 0119 |
 
 ## 4. In flight

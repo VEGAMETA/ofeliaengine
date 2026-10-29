@@ -1371,6 +1371,7 @@ fn a_graphs_node_previews_draw_each_nodes_value() {
     let mut game = Still;
     player.request_node_previews(NodePreviewRequest {
         key: 9,
+        tag: 4,
         material,
         spheres: generated.previews.iter().map(|p| p.sphere).collect(),
     });
@@ -1389,7 +1390,10 @@ fn a_graphs_node_previews_draw_each_nodes_value() {
         started.elapsed().as_secs_f64()
     );
     let atlas = &atlases[0];
-    assert_eq!((atlas.key, atlas.columns, atlas.count), (9, 4, 4));
+    assert_eq!(
+        (atlas.key, atlas.tag, atlas.columns, atlas.count),
+        (9, 4, 4, 4)
+    );
     let width = (atlas.columns * NODE_TILE) as usize;
     assert_eq!(atlas.pixels.len(), width * NODE_TILE as usize * 4);
     let at = |tile: u32, x: u32, y: u32| {

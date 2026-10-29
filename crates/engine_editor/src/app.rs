@@ -582,6 +582,16 @@ pub fn editor<G: Game>(
         engine_app::PREVIEW_SIZE,
     )?;
     editor.preview_texture = Some(preview.sampled_index());
+    // The shown graph's nodes' previews (E10-4g): their atlas, as large as the player's.
+    let tiles = engine_render::texture::GpuTexture::new(
+        setup.device,
+        setup.allocator,
+        setup.bindless,
+        engine_rhi::ash::vk::Format::R8G8B8A8_SRGB,
+        TILES_SIZE[0],
+        TILES_SIZE[1],
+    )?;
+    editor.tiles_texture = Some(tiles.sampled_index());
     // The shown material's preview (E10-4d): one picture at a time.
     let material = engine_render::texture::GpuTexture::new(
         setup.device,
@@ -640,6 +650,7 @@ pub fn editor<G: Game>(
             wave,
             preview,
             material,
+            tiles,
         },
     ))
 }
@@ -846,6 +857,8 @@ struct CommandIds {
     /// Sound previews (E11-3b): the picked sound played or stopped, Auto Play.
     preview_sound: CommandId,
     auto_play: CommandId,
+    /// A material graph's nodes' previews on its canvas, or not (E10-4g).
+    node_previews: CommandId,
     /// Prefabs (E5-2): the selection made a prefab's instance, an instance unpacked.
     make_prefab: CommandId,
     unpack_prefab: CommandId,
@@ -1040,6 +1053,7 @@ fn commands() -> (Commands, CommandIds) {
         find_references: c.register("assets.references", "Assets", "Find References"),
         preview_sound: c.register("assets.preview", "Assets", "Play or Stop the Picked Sound"),
         auto_play: c.register("assets.auto_play", "Assets", "Auto Play Sounds"),
+        node_previews: c.register("graph.node_previews", "Graph", "Node Previews"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
         unpack_prefab: c.register("scene.unpack_prefab", "Scene", "Unpack Prefab"),
         revert_prefab: c.register("prefab.revert", "Prefab", "Revert Overrides"),
@@ -1512,6 +1526,15 @@ struct Choice {
 /// The preview's key among the player's previews (the dock's thumbnails have the others).
 const GRAPH_PREVIEW_KEY: u64 = 0x6772_6170_685f_7076;
 
+/// The shown graph's nodes' previews' key among the player's atlases (E10-4g).
+const NODE_PREVIEWS_KEY: u64 = 0x6e6f_6465_5f70_7276;
+
+/// The nodes' previews' atlas's size in pixels: as many tiles as the player draws.
+const TILES_SIZE: [u32; 2] = [
+    engine_app::NODE_COLUMNS * engine_app::NODE_TILE,
+    engine_app::MAX_NODE_TILES / engine_app::NODE_COLUMNS * engine_app::NODE_TILE,
+];
+
 /// The shown material's preview's key (E10-4d), apart from the thumbnails' and the graph's.
 const MATERIAL_PREVIEW_KEY: u64 = 0x6d61_7465_7269_616c;
 
@@ -1582,6 +1605,18 @@ struct GraphPreview {
     cost: String,
     /// Its material type, as the player registered it (asked once).
     ty: Option<engine_render::material::MaterialTypeId>,
+    /// Its nodes' previews (E10-4g): the editing build's nodes in its `node_preview`'s
+    /// order and which are round, an atlas to ask for, the last tag asked with the orders
+    /// of those on their way, an atlas drawn to upload (its order, tiles across, count,
+    /// pixels), and the order the texture holds with its tiles across.
+    tiles: Vec<String>,
+    spheres: Vec<bool>,
+    tiles_ask: bool,
+    tag: u64,
+    tiles_asked: Vec<(u64, Vec<String>)>,
+    tiles_upload: Option<(Vec<String>, u32, u32, Vec<u8>)>,
+    tiles_shown: Vec<String>,
+    tiles_columns: u32,
 }
 
 /// A number of a graph node's row dragged in the inspector (ADR 0123 E10-3f-1): the row,
@@ -2447,6 +2482,10 @@ struct Editor {
     /// The shown graph's preview (ADR 0123 E10-3f-2), and its texture's bindless index.
     graph_preview: Option<GraphPreview>,
     preview_texture: Option<u32>,
+    /// A material graph's nodes show their previews (E10-4g, kept in the session), and
+    /// their atlas's texture's bindless index.
+    node_previews: bool,
+    tiles_texture: Option<u32>,
     /// The inspector's rows for the shown graph (ADR 0123 E10-3f-1), their shown texts and
     /// where each row's start (and how many), and its section's title: made every frame
     /// into the same room.
@@ -3506,6 +3545,8 @@ impl Editor {
             graph_add: None,
             graph_preview: None,
             preview_texture: None,
+            node_previews: true,
+            tiles_texture: None,
             graph_rows: Vec::new(),
             graph_texts: Vec::new(),
             graph_spans: Vec::new(),
@@ -12673,6 +12714,7 @@ impl Editor {
                 .find(|d| d.function && AssetRef::file(d.id) == r)
                 .map(|d| (d.graph.clone(), d.paths.clone()))
         };
+        let function = doc.function;
         match crate::graph::preview_material(
             doc,
             &self.root,
@@ -12680,7 +12722,12 @@ impl Editor {
             preview.module,
             &preview.module_path,
         ) {
-            Ok((generated, file, paths)) => {
+            Ok((mut generated, file, paths)) => {
+                // Its nodes' previews (E10-4g), a material's graph's: asked for after it.
+                let previews = core::mem::take(&mut generated.previews);
+                preview.spheres = previews.iter().map(|p| p.sphere).collect();
+                preview.tiles = previews.into_iter().map(|p| p.node).collect();
+                preview.tiles_ask = !function;
                 let text = generated.text;
                 preview.lines = generated.lines;
                 preview.same_code = text == preview.text;
@@ -12808,6 +12855,8 @@ impl Editor {
         {
             let text = &mut self.text;
             let doc = &mut self.graphs[g];
+            // Its nodes' previews' tiles (E10-4g): a material's graph's, while they show.
+            doc.tiles = self.node_previews && !doc.function;
             doc.relayout(&mut |s, size| text.measure(s, size, None)[0]);
             if !doc.framed {
                 doc.framed = true;
@@ -15796,6 +15845,18 @@ impl Editor {
                 Some(file) if self.is_sound(file) => self.toggle_preview(file),
                 _ => self.say(String::from("Pick a sound file in the FileSystem dock")),
             }
+        } else if id == ids.node_previews {
+            self.node_previews = !self.node_previews;
+            self.write_session(world);
+            // On again: the shown graph's asked for anew.
+            if let Some(p) = self.graph_preview.as_mut() {
+                p.tiles_ask = self.node_previews;
+            }
+            self.say(String::from(if self.node_previews {
+                "Node previews: each node's value under it"
+            } else {
+                "Node previews off"
+            }));
         } else if id == ids.auto_play {
             self.auto_play = !self.auto_play;
             self.write_session(world);
@@ -21282,6 +21343,9 @@ impl Editor {
         if let Some(on) = state.auto_play {
             self.auto_play = on;
         }
+        if let Some(on) = state.node_previews {
+            self.node_previews = on;
+        }
         // The mixer's listening aids (E11-1b-2).
         self.mixer_muted.clone_from(&state.mixer_muted);
         self.mixer_soloed.clone_from(&state.mixer_soloed);
@@ -21438,6 +21502,7 @@ impl Editor {
             error_stops: Some((self.error_stops.uncaught, self.error_stops.caught)),
             full_debugging: Some(self.full_debugging),
             auto_play: Some(self.auto_play),
+            node_previews: Some(self.node_previews),
             mixer_muted: self.mixer_muted.clone(),
             mixer_soloed: self.mixer_soloed.clone(),
             watches: self.watches.clone(),
@@ -22821,6 +22886,7 @@ impl<G> EditorGame<G> {
         }
         // The shown graph's preview (ADR 0123 E10-3f-2): its material held by the player,
         // a sphere of it asked for.
+        let node_previews = shared.node_previews;
         if let Some(preview) = shared.graph_preview.as_mut() {
             if let Some(path) = preview.written.take() {
                 player.material_source_written(&path);
@@ -22841,6 +22907,46 @@ impl<G> EditorGame<G> {
                     )],
                     same_code: preview.same_code,
                 });
+            }
+            // Its nodes' previews (E10-4g), one atlas of them, tagged with their order.
+            if preview.tiles_ask && node_previews {
+                preview.tiles_ask = false;
+                preview.tag += 1;
+                if preview.tiles_asked.len() >= 4 {
+                    preview.tiles_asked.remove(0);
+                }
+                preview
+                    .tiles_asked
+                    .push((preview.tag, preview.tiles.clone()));
+                player.request_node_previews(engine_app::NodePreviewRequest {
+                    key: NODE_PREVIEWS_KEY,
+                    tag: preview.tag,
+                    material: AssetRef::file(preview.material),
+                    spheres: preview.spheres.clone(),
+                });
+            }
+        }
+        // The atlas drawn, with the order it was asked for in.
+        let mut atlases = Vec::new();
+        player.take_node_previews(&mut atlases);
+        for atlas in atlases {
+            let Some(p) = shared
+                .graph_preview
+                .as_mut()
+                .filter(|_| atlas.key == NODE_PREVIEWS_KEY)
+            else {
+                continue;
+            };
+            let Some(k) = p.tiles_asked.iter().position(|(t, _)| *t == atlas.tag) else {
+                continue;
+            };
+            let Some((_, order)) = p.tiles_asked.drain(..=k).next_back() else {
+                continue;
+            };
+            if atlas.pixels.is_empty() {
+                p.tiles_shown.clear();
+            } else {
+                p.tiles_upload = Some((order, atlas.columns, atlas.count, atlas.pixels));
             }
         }
         // The shown graph's cost once a drawing of its code came back (E10-4c); a wait
@@ -25464,6 +25570,8 @@ pub struct EditorOverlay {
     preview: engine_render::texture::GpuTexture,
     /// The shown material's preview (E10-4d).
     material: engine_render::texture::GpuTexture,
+    /// The shown graph's nodes' previews' atlas (E10-4g).
+    tiles: engine_render::texture::GpuTexture,
 }
 
 impl EditorOverlay {
@@ -25488,6 +25596,8 @@ impl EditorOverlay {
             self.preview
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
             self.material
+                .destroy(setup.device, setup.allocator, setup.bindless, 0);
+            self.tiles
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
             self.picker.destroy(setup.allocator);
         }
@@ -25899,11 +26009,23 @@ impl Overlay for EditorOverlay {
             if let (Some(g), Some(rect)) = (editor.active_graph, editor.graph_rect)
                 && let Some(doc) = editor.graphs.get(g)
             {
+                let tiles = editor
+                    .graph_preview
+                    .as_ref()
+                    .filter(|p| p.graph == doc.id && doc.tiles && !p.tiles_shown.is_empty())
+                    .zip(editor.tiles_texture)
+                    .map(|(p, texture)| crate::graph::Tiles {
+                        texture,
+                        size: TILES_SIZE.map(|v| v as f32),
+                        columns: p.tiles_columns,
+                        nodes: &p.tiles_shown,
+                    });
                 let look = crate::graph::Look {
                     rect,
                     scale: editor.scale.max(0.5),
                     palette: &editor.palette,
                     glyphs: &self.glyphs,
+                    tiles,
                 };
                 crate::graph::draw(
                     doc,
@@ -25936,6 +26058,30 @@ impl Overlay for EditorOverlay {
                 self.atlas
                     .upload_region(pass.fg, pass.ring, (x, y, side, side), pixels)
                     .map_err(AppError::at("a thumbnail"))?;
+            }
+            // The shown graph's nodes' previews, once drawn (E10-4g): their tiles at the
+            // atlas's top left, the order they hold kept for the canvas.
+            if let Some((order, columns, count, pixels)) = editor
+                .graph_preview
+                .as_mut()
+                .and_then(|p| p.tiles_upload.take())
+            {
+                if !self.tiles.is_initialized() {
+                    let clear = vec![0u8; (TILES_SIZE[0] * TILES_SIZE[1] * 4) as usize];
+                    self.tiles
+                        .upload(pass.fg, pass.ring, &clear)
+                        .map_err(AppError::at("the nodes' previews"))?;
+                }
+                let side = engine_app::NODE_TILE;
+                let columns = columns.max(1);
+                let region = (0, 0, columns * side, count.div_ceil(columns) * side);
+                self.tiles
+                    .upload_region(pass.fg, pass.ring, region, &pixels)
+                    .map_err(AppError::at("the nodes' previews"))?;
+                if let Some(p) = editor.graph_preview.as_mut() {
+                    p.tiles_shown = order;
+                    p.tiles_columns = columns;
+                }
             }
             // The shown graph's preview, once drawn (ADR 0123 E10-3f-2).
             if let Some(pixels) = editor.graph_preview.as_mut().and_then(|p| p.upload.take()) {

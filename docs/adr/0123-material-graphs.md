@@ -916,8 +916,39 @@ The materials UX note's item 11: each node's value on the canvas, drawn by the e
     sphere, blue facing the camera and transparent around it. From the request to the
     pixels took 0.58 s on the Radeon and 0.60 s on the RTX, its type's compile included.
 - **Not yet:**
-  - the editor's tiles on the canvas (E10-4g-2);
+  - the editor's tiles on the canvas (E10-4g-2, below);
   - a function call's own preview, and previews in a `.mfunc` tab.
+
+## As built (E10-4g-2, 2026-10-29): node previews on the canvas
+
+- **The tile:** 64 canvas units square (the atlas's pixels at zoom 1), centred under the
+  ports, with 8 units of room above and below. A box with a tile is at least as wide as
+  the tile and its padding. These nodes have one: every node with an output but the
+  surface, reroutes, function calls and a function's ports, as the editing build numbers
+  them. A dark square stands in until the tile is drawn, and stays around a round one.
+- **The request:** made once the preview's module is made again (its code or its values
+  changed: the graph's revision with its functions' stamp), from its `Generated::previews`.
+  - Each request carries a tag (`NodePreviewRequest::tag`, given back with the atlas). The
+    editor keeps the order of nodes each of its last four requests was made with, so an
+    atlas is always shown under the nodes it was drawn for, never under a newer order.
+  - The player keeps one request per key, so a value dragged asks for one atlas a frame and
+    the player draws the latest.
+- **The texture:** 512 by 1024 RGBA8 sRGB, 8 by 16 tiles (as many as the player draws). It
+  is cleared the first time and each atlas goes into its top left (`upload_region`), drawn
+  as sprites with texture coordinates.
+- **The switch:** Graph: Node Previews (the palette), on by default, kept in the session
+  (`node_previews`). A function's tab shows none.
+- **Measured** (ref-1, both GPUs):
+  - from opening the tab to the tiles on the canvas: 0.88 s (72 frames) on the Radeon,
+    0.84–0.88 s (65–75 frames) on the RTX, the type's compile and the previews' own
+    included;
+  - a typed value on its tile in 5 frames (35–60 ms), with no compile;
+  - a graph tab's steady frames: 0 allocations with the previews on
+    (`graph_zero_alloc`).
+- **Tests:** the layout (a tile under the ports, none on the surface or a reroute, none
+  with previews off); on both GPUs, a graph's tiles drawn (red, green, the normal on a
+  sphere), a typed value reaching its tile, and the switch taking them off.
+- **Not yet:** a function call's own preview, and previews in a `.mfunc` tab.
 
 ## The team's answers (2026-10-28)
 

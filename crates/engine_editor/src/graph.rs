@@ -78,6 +78,10 @@ const TITLE_TEXT: f32 = 13.0;
 const PORT_TEXT: f32 = 12.0;
 /// Around the nodes framed (F), in panel pixels.
 const FRAME_MARGIN: f32 = 40.0;
+/// A node's preview's tile (E10-4g), in canvas units: the atlas's pixels at zoom 1.
+pub(crate) const TILE: f32 = 64.0;
+/// Room above and below a tile.
+const TILE_ROOM: f32 = 8.0;
 /// A box's corners.
 const RADIUS: f32 = 5.0;
 /// The grid's small and large squares.
@@ -202,9 +206,21 @@ pub(crate) struct NodeBox {
     pub(crate) inputs: Vec<&'static str>,
     /// Its outputs, top to bottom.
     pub(crate) outputs: Vec<&'static str>,
+    /// Its node's preview shows under its ports (E10-4g).
+    pub(crate) tile: bool,
 }
 
 impl NodeBox {
+    /// Its preview's tile (E10-4g): its low and high corners in canvas units, centred
+    /// under its ports.
+    pub(crate) fn tile_rect(&self) -> Option<[[f32; 2]; 2]> {
+        self.tile.then(|| {
+            let x = self.at[0] + (self.size[0] - TILE) * 0.5;
+            let y = self.at[1] + self.size[1] - TILE - TILE_ROOM;
+            [[x, y], [x + TILE, y + TILE]]
+        })
+    }
+
     /// Where input `k`'s dot is.
     pub(crate) fn input_at(&self, k: usize) -> [f32; 2] {
         [self.at[0], self.row(k)]
@@ -277,12 +293,26 @@ fn value_width(kind: &Kind) -> f32 {
     }
 }
 
+/// Whether a node of `kind` has a preview (E10-4g), as the editing build numbers them: one
+/// with an output, but a reroute, the surface, a function call and a function's ports.
+fn previewed(kind: &Kind) -> bool {
+    !kind.outputs.is_empty()
+        && kind.name != REROUTE_KIND
+        && kind.name != OUTPUT_KIND
+        && !matches!(
+            kind.body,
+            Body::FunctionCall(_) | Body::FunctionInput(_) | Body::FunctionOutput(_)
+        )
+}
+
 /// `graph`'s nodes laid out into `out` in their ids' order, each as wide as its texts need
 /// (`measure`: a text's width at a size, at zoom 1); a call titled by its function's mark
-/// where `titles` knows it (module, function, title; E10-3g-3b).
+/// where `titles` knows it (module, function, title; E10-3g-3b); with `tiles`, room under
+/// the ports of each node with a preview for its tile (E10-4g).
 pub(crate) fn layout(
     graph: &Graph,
     titles: &[(AssetRef, String, String)],
+    tiles: bool,
     measure: &mut dyn FnMut(&str, f32) -> f32,
     out: &mut Vec<NodeBox>,
 ) {
@@ -298,6 +328,7 @@ pub(crate) fn layout(
                 size: REROUTE,
                 inputs: vec!["in"],
                 outputs: vec!["out"],
+                tile: false,
             });
             continue;
         }
@@ -339,20 +370,24 @@ pub(crate) fn layout(
         for name in &outputs {
             right = right.max(measure(name, PORT_TEXT));
         }
+        let tile = tiles && kind.is_some_and(previewed);
         let width = (left + right + 2.0 * PAD + GAP)
             .max(measure(&title, TITLE_TEXT) + 2.0 * PAD)
             .max(MIN_WIDTH)
+            .max(if tile { TILE + 2.0 * PAD } else { 0.0 })
             .ceil();
         let valued = kind.is_some_and(|k| value_width(k) > 0.0);
         let rows = inputs.len().max(outputs.len()).max(usize::from(valued));
+        let room = if tile { TILE + 2.0 * TILE_ROOM } else { 0.0 };
         out.push(NodeBox {
             id: id.clone(),
             kind,
             title,
             at: node.at,
-            size: [width, TITLE + ROW * rows as f32 + PAD * 0.5],
+            size: [width, TITLE + ROW * rows as f32 + PAD * 0.5 + room],
             inputs,
             outputs,
+            tile,
         });
     }
 }
@@ -1243,8 +1278,11 @@ pub(crate) struct GraphDoc {
     pub(crate) boxes: Vec<NodeBox>,
     /// Its calls' titles, from their functions' marks (module, function, title; E10-3g-3b).
     pub(crate) call_titles: Vec<(AssetRef, String, String)>,
-    /// The revision they were laid out at.
-    laid_out: Option<u64>,
+    /// The revision they were laid out at, and whether with tiles.
+    laid_out: Option<(u64, bool)>,
+    /// Its nodes' previews show on the canvas (E10-4g): the editor's choice, for a
+    /// material's graph.
+    pub(crate) tiles: bool,
     /// What the pointer is over, and the canvas point under it.
     pub(crate) hover: Hit,
     pub(crate) cursor: Option<[f32; 2]>,
@@ -1309,6 +1347,7 @@ impl GraphDoc {
             boxes: Vec::new(),
             call_titles: Vec::new(),
             laid_out: None,
+            tiles: false,
             hover: Hit::Canvas,
             cursor: None,
             closing: false,
@@ -1388,9 +1427,16 @@ impl GraphDoc {
     /// Its boxes laid out again where the graph changed since (`measure`: a text's width
     /// at a size).
     pub(crate) fn relayout(&mut self, measure: &mut dyn FnMut(&str, f32) -> f32) {
-        if self.laid_out != Some(self.revision) {
-            layout(&self.graph, &self.call_titles, measure, &mut self.boxes);
-            self.laid_out = Some(self.revision);
+        let key = (self.revision, self.tiles);
+        if self.laid_out != Some(key) {
+            layout(
+                &self.graph,
+                &self.call_titles,
+                self.tiles,
+                measure,
+                &mut self.boxes,
+            );
+            self.laid_out = Some(key);
         }
     }
 
@@ -2981,7 +3027,23 @@ pub(crate) struct Look<'a> {
     pub(crate) palette: &'a Palette,
     /// The glyphs' texture.
     pub(crate) glyphs: &'a GlyphTexture,
+    /// The node previews' atlas, once one is drawn (E10-4g).
+    pub(crate) tiles: Option<Tiles<'a>>,
 }
+
+/// The node previews' atlas the canvas draws its tiles from (E10-4g).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Tiles<'a> {
+    /// Its texture's bindless index, and the texture's size in pixels.
+    pub(crate) texture: u32,
+    pub(crate) size: [f32; 2],
+    /// Tiles across, and their nodes in their order.
+    pub(crate) columns: u32,
+    pub(crate) nodes: &'a [String],
+}
+
+/// Under a tile until its picture comes (E10-4g), and around a round one.
+const TILE_BACK: Vec4 = Vec4::new(0.02, 0.02, 0.025, 1.0);
 
 /// Draws `doc`'s canvas under the panels (layer −1, after the viewport's overlays, which
 /// its background covers): the grid, the links, the boxes with their ports, then the link
@@ -3266,6 +3328,30 @@ pub(crate) fn draw(
                 let width = text.measure(name, port_size, None)[0];
                 let left = at - Vec2::new(dot + 5.0 * z + width, 0.0);
                 text.draw_left(canvas, look.glyphs, name, port_size, left, dim, order);
+            }
+        }
+        // Its preview (E10-4g): its tile of the atlas, over a dark square that shows until
+        // it is drawn and around a round one.
+        if let Some([tile_lo, tile_hi]) = b.tile_rect() {
+            let (tile_lo, tile_hi) = (to(tile_lo), to(tile_hi));
+            solid(canvas, tile_lo, tile_hi, TILE_BACK);
+            if let Some(t) = &look.tiles
+                && let Some(n) = t.nodes.iter().position(|id| *id == b.id)
+            {
+                let (n, side) = (n as u32, engine_app::NODE_TILE as f32);
+                let columns = t.columns.max(1);
+                let x = (n % columns) as f32 * side;
+                let y = (n / columns) as f32 * side;
+                canvas.draw(
+                    &Quad::sprite(t.texture, (tile_lo + tile_hi) * 0.5, tile_hi - tile_lo)
+                        .uv([
+                            x / t.size[0],
+                            y / t.size[1],
+                            (x + side) / t.size[0],
+                            (y + side) / t.size[1],
+                        ])
+                        .order(order),
+                );
             }
         }
         // Its node stops the graph (E10-3f-3): a red frame, why under the box.
@@ -3903,10 +3989,42 @@ mod tests {
         g.model = Model::Clearcoat;
         g.link(PortRef::new("r", "value"), PortRef::new(OUTPUT, "rim"));
         let mut boxes = Vec::new();
-        layout(&g, &[], &mut measure, &mut boxes);
+        layout(&g, &[], false, &mut measure, &mut boxes);
         let out = boxes.iter().find(|b| b.id == OUTPUT).unwrap();
         assert!(out.inputs.contains(&"clearcoat") && out.inputs.contains(&"rim"));
         assert!(!out.inputs.contains(&"sheen"));
+    }
+
+    /// E10-4g: with previews, a node with an output has a tile under its ports, its box
+    /// taller by the tile and its room, at least as wide; the surface and a reroute have
+    /// none; without previews, no node has one.
+    #[test]
+    fn previews_give_nodes_a_tile_under_their_ports() {
+        let mut g = Graph::new(Model::Lit);
+        g.add("c", Node::new("color", [0.0, 0.0]))
+            .add("r", Node::new("reroute", [200.0, 0.0]));
+        let mut measure = |s: &str, size: f32| s.len() as f32 * size * 0.5;
+        let (mut plain, mut tiled) = (Vec::new(), Vec::new());
+        layout(&g, &[], false, &mut measure, &mut plain);
+        layout(&g, &[], true, &mut measure, &mut tiled);
+        let find = |boxes: &[NodeBox], id: &str| boxes.iter().find(|b| b.id == id).cloned();
+        let (c0, c1) = (find(&plain, "c").unwrap(), find(&tiled, "c").unwrap());
+        assert!(c0.tile_rect().is_none());
+        let [lo, hi] = c1.tile_rect().unwrap();
+        assert_eq!([hi[0] - lo[0], hi[1] - lo[1]], [TILE, TILE]);
+        assert!(lo[1] >= c1.at[1] + TITLE + ROW, "under its ports");
+        assert!(hi[1] < c1.at[1] + c1.size[1] && lo[0] > c1.at[0]);
+        assert_eq!(c1.size[1], c0.size[1] + TILE + 2.0 * TILE_ROOM);
+        assert!(c1.size[0] >= TILE + 2.0 * PAD);
+        assert!(
+            find(&tiled, "r").unwrap().tile_rect().is_none(),
+            "a reroute"
+        );
+        assert!(
+            find(&tiled, OUTPUT).unwrap().tile_rect().is_none(),
+            "the surface"
+        );
+        assert!(plain.iter().all(|b| b.tile_rect().is_none()));
     }
 
     #[test]
