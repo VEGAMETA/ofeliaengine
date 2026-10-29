@@ -439,6 +439,37 @@ allocation with transitions and events every tick; the same events at the same t
   - scenes made before keep no animator: characters stand in their rest pose until one is
     added.
 
+## As built (E12-1c-3a, 2026-10-30): sockets follow their joints
+
+- **`engine_runtime::JointAttachment { joint }`** (reflected, saved; the found joint index
+  and rig are not): an entity right under a skinned model is a socket on that joint, as
+  Godot's `BoneAttachment3D`. Its children are the attachments, in the joint's space. This
+  is the ADR's "child entity naming a joint", made a socket so an attachment keeps a
+  transform of its own.
+- **Placed in the tick, not the frame** (`Assets::place_sockets`, after the animators move
+  and before `Game::tick`; in a world standing still, at the tick's early return): the
+  socket's `Transform` becomes the joint in the character's pose then (the editor's held
+  pose, else the animator's at its time, else rest). Transforms then propagate as for any
+  entity, so the tick's gameplay sees the sword where the hand is. The frames between two
+  ticks draw it as every transform is drawn, between the two tick poses: at 64 Hz that
+  stays within the skinned hand, with no second, frame-time path into the extraction.
+- **Cost:** sockets are grouped by character; each character with sockets has its
+  skeleton's joints made once per tick; a socket already in place is not written, so the
+  propagation's incremental pass skips still characters. The player's `assets` is shared
+  by the tick and the frame's closures through a `RefCell`.
+- **Tests:**
+  - on both GPUs, CesiumMan with an animator, a socket on his right hand and a cube under
+    it:
+    - held halfway, the socket is on the joint (0 m off) and the cube in his hand (within
+      0.1 mm);
+    - let go, the socket goes with the walk (0.52 m in 30 frames);
+    - standing still, it stands;
+    - a socket on a joint he lacks stays put;
+  - 0 allocations with the socket and its cube placed every tick (both GPUs, Tracy).
+- **Left:** attaching by a drop onto a joint (the viewport's joint mode, a Skeleton row)
+  and a file's meshes under joints dropped as sockets (E12-1c-3b); a socket deeper than
+  right under its character.
+
 ## Consequences
 
 - New source files: `.agraph` and `.anim`, and a section in models' `.meta`; a new component

@@ -3231,7 +3231,9 @@ impl Player {
             let timing = &mut self.timing;
             let animators = &mut self.animators;
             let mut net = self.net.as_deref_mut();
-            let assets = &mut self.assets;
+            // The frame's presentation syncs the assets; each tick places the characters'
+            // sockets (ADR 0124's E12-1c) before transforms propagate.
+            let assets = RefCell::new(&mut self.assets);
             let blockout = &mut self.blockout;
             let geometry = &mut self.geometry;
             let materials = &mut self.materials;
@@ -3281,7 +3283,7 @@ impl Player {
                 game_cell.borrow_mut().present(world, alpha);
                 // Models (ADR 0108): their meshes and materials reach the GPU this frame,
                 // the pools beginning theirs after the simulation.
-                assets.sync(
+                assets.borrow_mut().sync(
                     world,
                     geometry,
                     materials,
@@ -3334,12 +3336,15 @@ impl Player {
                             input.sample_tick(Instant::now());
                         }
                         // Kept still: the tick only places and extracts what is there, but
-                        // for a step asked for (`Player::step_tick`).
+                        // for a step asked for (`Player::step_tick`). The characters' sockets
+                        // follow the pose they show meanwhile.
                         if paused_by_script.get() || held.get() {
+                            assets.borrow_mut().place_sockets(world);
                             return;
                         }
                         if !simulating {
                             if steps == 0 {
+                                assets.borrow_mut().place_sockets(world);
                                 return;
                             }
                             steps -= 1;
@@ -3377,8 +3382,9 @@ impl Player {
                             }
                         }
                         // The characters' clips move on, after the scripts' tick and before
-                        // the game's (ADR 0124's E12-2).
+                        // the game's (ADR 0124's E12-2), their sockets with them.
                         animators.advance(world, dt);
+                        assets.borrow_mut().place_sockets(world);
                         game_cell.borrow_mut().tick(world, dt);
                         if let Some(own) = own_physics.borrow_mut().as_mut()
                             && let Err(e) = own.step(world, dt)
