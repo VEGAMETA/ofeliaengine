@@ -6,6 +6,7 @@ use engine_assets::GltfOutline;
 use engine_core::math::{Affine3A, Quat, Vec3};
 use engine_ecs::Transform;
 use engine_scene::{AssetId, AssetRef};
+use std::collections::HashSet;
 
 /// A model file's entities as a drop makes them: one per node of the file's scene under a
 /// root named after the file, or, for a file of one node, that node as the root. A skinned
@@ -38,6 +39,9 @@ pub(crate) struct PlannedNode {
     /// The materials of its mesh's further primitives, for a mesh of several
     /// (`engine_app::MaterialSlots`, ADR 0115); empty for one of a single material.
     pub(crate) slots: Vec<AssetRef>,
+    /// For a socket on the character (ADR 0124's E12-1c), its joint's name: the file's
+    /// meshes under that joint hang under it and follow the joint.
+    pub(crate) socket: Option<String>,
 }
 
 impl ModelPlan {
@@ -66,6 +70,7 @@ impl ModelPlan {
                 parent: None,
                 model: None,
                 slots: Vec::new(),
+                socket: None,
             }],
             paths: Vec::new(),
             meshes,
@@ -100,6 +105,7 @@ impl ModelPlan {
                 parent: Some(parent),
                 model,
                 slots,
+                socket: None,
             });
             mesh_of.push(mesh);
             for &c in n.children.iter().rev() {
@@ -129,9 +135,10 @@ impl ModelPlan {
     /// mesh skinned is the root, turned and scaled as the file has it (its place is where it
     /// is dropped, as for a file of one node); the file's other meshes go under the nearest
     /// node above them that is an entity (the root when none is), at their places in the
-    /// file, a mesh under a joint where the skeleton's rest pose holds it. Each entity's
-    /// mesh, parents first; none for a file that draws nothing skinned, which keeps an
-    /// entity per node.
+    /// file. A mesh with a joint between it and that node hangs under a socket on the joint
+    /// nearest it, made right under the root where the rest pose holds the joint, so it
+    /// follows the joint. Each entity's mesh, parents first; none for a file that draws
+    /// nothing skinned, which keeps an entity per node.
     fn skinned(
         &mut self,
         file: AssetId,
@@ -178,40 +185,74 @@ impl ModelPlan {
         root.model = Some(model);
         root.slots = slots;
         let mut mesh_of = vec![Some(mesh)];
-        // The entity of each visit that is one.
+        // The entity of each visit that is one, and the socket made on each joint's visit.
         let mut entity: Vec<Option<usize>> = vec![None; visits.len()];
+        let mut socket: Vec<Option<usize>> = vec![None; visits.len()];
         entity[first] = Some(0);
-        for (v, &(i, parent, at)) in visits.iter().enumerate() {
-            let Some(m) = drawn(outline, i).filter(|_| v != first) else {
-                continue;
-            };
-            let mut above = parent;
-            let (p, p_at) = loop {
-                match above {
-                    Some(a) => match entity[a] {
-                        Some(e) => break (e, visits[a].2),
-                        None => above = visits[a].1,
-                    },
-                    None => break (0, root_at),
-                }
-            };
+        let joints: HashSet<usize> = outline.skins.iter().flatten().copied().collect();
+        let place = |of: Affine3A, at: Affine3A| {
             // Under a parent scaled to nothing it is nowhere: kept where the file has it.
-            let local = if p_at.matrix3.determinant() != 0.0 {
-                p_at.inverse() * at
+            let local = if of.matrix3.determinant() != 0.0 {
+                of.inverse() * at
             } else {
                 at
             };
             let (s, r, t) = local.to_scale_rotation_translation();
+            Transform::from_translation(t)
+                .with_rotation(r)
+                .with_scale(s)
+        };
+        for (v, &(i, parent, at)) in visits.iter().enumerate() {
+            let Some(m) = drawn(outline, i).filter(|_| v != first) else {
+                continue;
+            };
+            // The nearest entity above it, and the nearest joint on the way there.
+            let mut above = parent;
+            let mut joint = None;
+            let (mut p, mut p_at) = loop {
+                match above {
+                    Some(a) => match entity[a] {
+                        Some(e) => break (e, visits[a].2),
+                        None => {
+                            if joint.is_none() && joints.contains(&visits[a].0) {
+                                joint = Some(a);
+                            }
+                            above = visits[a].1;
+                        }
+                    },
+                    None => break (0, root_at),
+                }
+            };
+            if let Some(a) = joint {
+                p = match socket[a] {
+                    Some(s) => s,
+                    None => {
+                        let index = self.nodes.len();
+                        let name = node_name(outline, visits[a].0, None);
+                        self.nodes.push(PlannedNode {
+                            name: name.clone(),
+                            transform: place(root_at, visits[a].2),
+                            parent: Some(0),
+                            model: None,
+                            slots: Vec::new(),
+                            socket: Some(name),
+                        });
+                        mesh_of.push(None);
+                        socket[a] = Some(index);
+                        index
+                    }
+                };
+                p_at = visits[a].2;
+            }
             let (model, slots) = self.model(file, path, outline, m);
             entity[v] = Some(self.nodes.len());
             self.nodes.push(PlannedNode {
                 name: node_name(outline, i, Some(m)),
-                transform: Transform::from_translation(t)
-                    .with_rotation(r)
-                    .with_scale(s),
+                transform: place(p_at, at),
                 parent: Some(p),
                 model: Some(model),
                 slots,
+                socket: None,
             });
             mesh_of.push(Some(m));
         }
@@ -418,6 +459,7 @@ mod tests {
             meshes: vec![mesh("Crate", &[Some(0)])],
             materials: vec![String::from("Wood")],
             maps: Vec::new(),
+            skins: Vec::new(),
         };
         let plan = ModelPlan::new(file(), "props/crate.glb", "crate", &outline, 1.0).unwrap();
         assert_eq!(plan.nodes.len(), 1);
@@ -459,6 +501,7 @@ mod tests {
             meshes: vec![mesh("Part", &[Some(0), Some(1)]), mesh("Part", &[None])],
             materials: vec![String::from("Wood"), String::new()],
             maps: Vec::new(),
+            skins: Vec::new(),
         };
         let plan = ModelPlan::new(file(), "chair.glb", "chair", &outline, 1.0).unwrap();
         let names: Vec<&str> = plan.nodes.iter().map(|n| n.name.as_str()).collect();
@@ -519,6 +562,7 @@ mod tests {
             meshes: vec![mesh("Body", &[Some(0)])],
             materials: vec![String::from("Skin")],
             maps: Vec::new(),
+            skins: Vec::new(),
         };
         let plan = ModelPlan::new(file(), "man.gltf", "man", &outline, 1.0).unwrap();
         assert_eq!(names(&plan), ["man"], "one entity");
@@ -548,6 +592,7 @@ mod tests {
             meshes: vec![mesh("fox1", &[Some(0)])],
             materials: vec![String::from("fox_material")],
             maps: Vec::new(),
+            skins: Vec::new(),
         };
         let plan = ModelPlan::new(file(), "Fox.gltf", "Fox", &outline, 0.01).unwrap();
         assert_eq!(names(&plan), ["Fox"]);
@@ -565,8 +610,8 @@ mod tests {
     }
 
     /// E12-1c: the file's other meshes stay, at their places in the file, under the nearest
-    /// node above them that is an entity: a sword in the hand's joint where the rest pose
-    /// holds it, a gem on the sword, a hat on the skinned body.
+    /// node above them that is an entity: a sword in the hand's joint under a socket on the
+    /// hand, where the rest pose holds it; a gem on the sword; a hat on the skinned body.
     #[test]
     fn a_skinned_models_other_meshes_stay_where_the_file_has_them() {
         let mut hand = node("Hand", None, vec![2]);
@@ -596,29 +641,35 @@ mod tests {
             ],
             materials: vec![String::from("Skin"), String::from("Steel")],
             maps: Vec::new(),
+            skins: vec![vec![1]],
         };
         for scale in [1.0, 0.5] {
             let plan = ModelPlan::new(file(), "knight.glb", "knight", &outline, scale).unwrap();
-            assert_eq!(names(&plan), ["knight", "Sword", "Gem", "Hat"]);
+            assert_eq!(names(&plan), ["knight", "Hand", "Sword", "Gem", "Hat"]);
             let parents: Vec<Option<usize>> = plan.nodes.iter().map(|n| n.parent).collect();
-            assert_eq!(parents, [None, Some(0), Some(1), Some(0)]);
+            assert_eq!(parents, [None, Some(0), Some(1), Some(2), Some(0)]);
+            assert_eq!(plan.nodes[1].socket.as_deref(), Some("Hand"), "a socket");
+            assert!(plan.nodes[1].model.is_none());
+            assert!(plan.nodes.iter().filter(|n| n.socket.is_some()).count() == 1);
             let at: Vec<Vec3> = plan.nodes.iter().map(|n| n.transform.translation).collect();
-            // The sword's place against the body's (a meter up): the hand's and its own.
+            // The socket where the hand is against the body (a meter up), the sword half a
+            // meter along it.
             assert_eq!(
                 at,
                 [
                     Vec3::ZERO,
-                    Vec3::new(1.0, 1.5, 0.0) * scale,
+                    Vec3::new(1.0, 1.0, 0.0) * scale,
+                    Vec3::new(0.0, 0.5, 0.0) * scale,
                     Vec3::new(0.0, 0.25, 0.0) * scale,
                     Vec3::new(0.0, 1.0, 0.0) * scale,
                 ]
             );
             assert_eq!(
-                plan.nodes[1].model.unwrap().mesh,
+                plan.nodes[2].model.unwrap().mesh,
                 AssetRef::part(file(), "Prop")
             );
             assert_eq!(
-                plan.nodes[3].model.unwrap().material,
+                plan.nodes[4].model.unwrap().material,
                 AssetRef::part(file(), "Steel")
             );
             assert!(plan.paths.contains(&(

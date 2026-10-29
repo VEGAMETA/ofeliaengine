@@ -470,6 +470,34 @@ allocation with transitions and events every tick; the same events at the same t
   and a file's meshes under joints dropped as sockets (E12-1c-3b); a socket deeper than
   right under its character.
 
+## As built (E12-1c-3b, 2026-10-30): attaching in the editor
+
+- **A row dropped on a joint** (`RowPlace::Joint`): with a character's joints showing
+  (Tab), dragging a tree row carries that row alone. The character stays selected, so its
+  joints stay in view and in the inspector's Skeleton.
+  - The drop targets are a joint's square in the view, or its row in the Skeleton (the
+    shell reports the row under the pointer).
+  - On release the rows go into the joint's socket, made where the character has none: a
+    `JointAttachment` named after the joint, right under the character, starting where the
+    joint is in the pose last drawn.
+  - Each keeps its place in the world (Alt its local placement), in one undo step;
+    `move_rows`' move is shared as `place_rows`.
+  - Neither the character nor what carries it can go onto its own joint.
+- **A dropped file's meshes under joints come in sockets:** `GltfOutline::skins` lists
+  each skin's joints. In a skinned file's plan, a mesh with a joint between it and its
+  nearest entity hangs under a socket on the joint nearest it. One socket per joint,
+  right under the root, where the rest pose holds the joint; the mesh is at its place
+  against the joint.
+- **Tests:**
+  - a sword's row dragged onto the hand's Skeleton row: the man stays selected, the hint
+    reads "Sword onto Man's hand", one step makes the socket at the joint, the sword
+    keeps its place in the world, a shield onto the same joint shares the socket, and
+    undoing takes the socket away with the sword's move;
+  - the knight's plan with a socket on the hand (two import scales);
+  - a dropped plan's socket made with its `JointAttachment` and the sword under it.
+- **Left:** a socket deeper than right under its character; the drag's highlight of the
+  joint under the pointer is the joint mode's own (no tree line).
+
 ## Consequences
 
 - New source files: `.agraph` and `.anim`, and a section in models' `.meta`; a new component

@@ -401,6 +401,12 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
     the status bar), and the selection stays the character. A click on a row of the
     Skeleton picks that joint too. Tab, Escape, or a click in the view on no joint ends
     it.
+  - **Attach something to a joint:** with its joints showing (Tab), drag a row of the
+    scene tree onto a joint's square in the view or onto its row in the Skeleton. The
+    row is dragged alone and the character stays selected. On release the thing goes
+    into the joint's socket, a `JointAttachment` named after the joint, made right under
+    the character where it has none. It keeps its place in the world (Alt keeps its
+    local placement) and follows the joint from then on. One undo step.
   - Pick a skinned model's file in the FileSystem dock and its Clips show the same way,
     under the engine's own drawing of it (drag it to turn it): ▶ plays the chosen clip
     there, and with the dock's **Auto Play** on its first clip plays as soon as its clips
@@ -910,8 +916,9 @@ will do:
   - a character (a file whose mesh is drawn skinned) is one entity too, named after the
     file and turned and scaled as its file stands it. Its skeleton's joints, and nodes
     that draw nothing, become no entities (ADR 0124). The file's other meshes become
-    entities under it, at their places in the file; a sword in a hand stays where the
-    skeleton's rest pose holds it;
+    entities under it, at their places in the file. A mesh under a joint (a sword in a
+    hand) comes in a socket on that joint, so it follows the hand as the character
+    plays;
   - otherwise a root named after the file, with an entity for each node of the file's
     scene (its transform, and a model of its mesh and material).
 - **Fields:** a model's `mesh` takes a model file of one mesh, its `material` a material

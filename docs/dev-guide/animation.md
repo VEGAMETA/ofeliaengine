@@ -92,6 +92,9 @@ world.set_parent(sword, Some(hand))?;
   playhead, the animator's `time`.
 - A joint name the skeleton lacks leaves the socket where it is.
 - Sockets are saved like any entity; the joint is looked up by name once per rig.
+- In the editor, a row dropped on a joint (Tab shows them) goes into that joint's
+  socket, one made for it where the character has none; a dropped character file's meshes
+  that hang under a joint come in sockets of their own.
 
 A game that poses its characters itself still can: set the palettes in `Game::animate`,
 as below. Cross-fades, layers, root motion and graphs come with the rest of E12-2 and
