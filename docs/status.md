@@ -872,7 +872,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E12's research and ADR 0124, proposed** (#PR): the runtime of state machines and
+  - **E12's research and ADR 0124, proposed** (#447): the runtime of state machines and
     blend graphs read in Godot 4.7.2, Bevy 0.20.1, Fyrox 1.0 and ozz-animation 0.17 (ideas
     only; Unreal and Unity from their documentation), in
     [animation-graphs.md](research/animation-graphs.md); the tools of Godot, Unity, Unreal,
