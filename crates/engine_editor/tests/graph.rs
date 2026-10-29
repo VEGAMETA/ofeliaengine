@@ -787,3 +787,128 @@ fn a_graphs_nodes_show_their_previews_under_their_ports() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// E10-4g-3: a function call shows what it gives (green inverted to magenta, its output
+/// read by nothing, so only its tile is magenta); in the function's own tab, its nodes show
+/// theirs: the input the value its preview's call gives it (red), the One Minus and the
+/// output what they make of it (cyan).
+#[test]
+fn a_calls_and_a_functions_nodes_show_their_previews() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-call-tiles-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("materials")).unwrap();
+    std::fs::create_dir_all(dir.join(".ofelia")).unwrap();
+    std::fs::write(dir.join("main.scene"), "[scene version=4]\n").unwrap();
+    let function = AssetId::new();
+    std::fs::write(
+        dir.join("materials/invert.mfunc"),
+        format!(
+            "[mfunc version=1 id={function}]\n\n\
+             nodes[\"c\"].kind = \"input_float3\"\nnodes[\"c\"].param = \"color\"\n\
+             nodes[\"c\"].value = [0.9, 0.04, 0.04, 1]\n\
+             nodes[\"s\"].kind = \"one_minus\"\nnodes[\"s\"].at = [200, 0]\n\
+             nodes[\"o\"].kind = \"output_float3\"\nnodes[\"o\"].at = [400, 0]\n\
+             nodes[\"o\"].param = \"inverted\"\n\
+             links[\"s.in\"] = \"c.value\"\nlinks[\"o.value\"] = \"s.out\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("materials/uses.mgraph"),
+        format!(
+            "[mgraph version=3 id={}]\n\nmodel = \"unlit\"\n\
+             nodes[\"g\"].kind = \"color\"\nnodes[\"g\"].value = [0.04, 0.9, 0.04, 1]\n\
+             nodes[\"f\"].kind = \"function\"\nnodes[\"f\"].at = [200, 0]\n\
+             nodes[\"f\"].function = \"invert\"\n\
+             nodes[\"f\"].module = asset(\"materials/invert.mfunc\", {function})\n\
+             nodes[\"f\"].signature = \"void(float3 color, out float3 inverted)\"\n\
+             nodes[\"out\"].kind = \"output\"\nnodes[\"out\"].at = [460, 0]\n\
+             links[\"f.color\"] = \"g.rgba\"\nlinks[\"out.base\"] = \"g.rgba\"\n",
+            AssetId::new()
+        ),
+    )
+    .unwrap();
+    // Both open, the graph's tab shown.
+    std::fs::write(
+        dir.join(".ofelia/session"),
+        "[session version=1]\n\n[editor]\ngraph = 0\n\n[graph]\npath = \
+         \"materials/uses.mgraph\"\n\n[graph]\npath = \"materials/invert.mfunc\"\n",
+    )
+    .unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor call previews test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    let count = |rgba: &[u8], test: &dyn Fn(f32, f32, f32) -> bool| {
+        rgba.chunks_exact(4)
+            .filter(|p| test(f32::from(p[0]), f32::from(p[1]), f32::from(p[2])))
+            .count()
+    };
+    let red = |rgba: &[u8]| count(rgba, &|r, g, b| r > 150.0 && g < 90.0 && b < 90.0);
+    let green = |rgba: &[u8]| count(rgba, &|r, g, b| g > 150.0 && r < 90.0 && b < 90.0);
+    let magenta = |rgba: &[u8]| count(rgba, &|r, g, b| r > 150.0 && b > 150.0 && g < 90.0);
+    let cyan = |rgba: &[u8]| count(rgba, &|r, g, b| g > 150.0 && b > 150.0 && r < 90.0);
+    let png = |name: &str, shot: &[u8]| {
+        if let Ok(dir) = std::env::var("ENGINE_EDITOR_TILES_DIR") {
+            let png = engine_render::png::encode_png(
+                width,
+                height,
+                engine_render::png::PngFormat::Rgba,
+                shot,
+            )
+            .unwrap();
+            std::fs::write(std::path::Path::new(&dir).join(name), png).unwrap();
+        }
+    };
+    // The call's tile (a tile's 4,096 pixels, nothing else magenta).
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        magenta(shot) > 3_000 && green(shot) > 3_000
+    });
+    println!(
+        "the call's preview drawn {took:.2} s ({frames} frames) after the tab: magenta {}, \
+         green {}",
+        magenta(&shot),
+        green(&shot)
+    );
+    png("call.png", &shot);
+    // The function's tab: its input red, its One Minus and its output cyan, the sphere too.
+    assert!(game.run_command(player.world_mut(), "file.next_tab"));
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        red(shot) > 3_000 && cyan(shot) > 2 * 4_096 + 2_000
+    });
+    println!(
+        "the function's previews drawn {took:.2} s ({frames} frames) after its tab: red {}, \
+         cyan {}",
+        red(&shot),
+        cyan(&shot)
+    );
+    png("function.png", &shot);
+    assert!(
+        magenta(&shot) < 500,
+        "the graph's tiles gone: {}",
+        magenta(&shot)
+    );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

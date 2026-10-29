@@ -122,9 +122,26 @@ pub fn signature_of(function: &Graph) -> Result<Signature, String> {
     Signature::parse(&signature.to_string())
 }
 
+/// Where each call's outputs come from once calls are made their functions' nodes
+/// (E10-4g-3): by the call's id in the graph made (a call inside a function by its id
+/// there, `tint__inner`), each output's name and the port that gives it.
+pub type CallOutputs = BTreeMap<String, BTreeMap<String, PortRef>>;
+
+/// A graph with its function calls made their functions' nodes ([`expand`]).
+#[derive(Debug, Clone)]
+pub struct Expansion {
+    /// The graph made.
+    pub graph: Graph,
+    /// For every node of it, the node of the graph it was made from that it came from
+    /// (itself, or the call it was made for).
+    pub origin: BTreeMap<String, String>,
+    /// Where every call's outputs come from in it, the calls inside its functions too.
+    pub outputs: CallOutputs,
+}
+
 /// `graph` with its function calls made their functions' nodes (see the module), the
-/// functions read by `functions` (`None`: not found); and for every node of it, the node
-/// of `graph` it came from (itself, or the call it was made for).
+/// functions read by `functions` (`None`: not found); for every node of it, the node of
+/// `graph` it came from; and where every call's outputs come from.
 ///
 /// # Errors
 ///
@@ -133,7 +150,7 @@ pub fn signature_of(function: &Graph) -> Result<Signature, String> {
 pub fn expand(
     graph: &Graph,
     functions: &dyn Fn(AssetRef) -> Option<Graph>,
-) -> Result<(Graph, BTreeMap<String, String>), GraphError> {
+) -> Result<Expansion, GraphError> {
     let mut stack = Vec::new();
     expand_in(graph, functions, &mut stack)
 }
@@ -142,10 +159,11 @@ fn expand_in(
     graph: &Graph,
     functions: &dyn Fn(AssetRef) -> Option<Graph>,
     stack: &mut Vec<AssetId>,
-) -> Result<(Graph, BTreeMap<String, String>), GraphError> {
+) -> Result<Expansion, GraphError> {
     let mut out = graph.clone();
     let mut origin: BTreeMap<String, String> =
         graph.nodes.keys().map(|k| (k.clone(), k.clone())).collect();
+    let mut outputs = CallOutputs::new();
     for (call_id, call) in graph.nodes.iter().filter(|(_, n)| n.kind == FUNCTION_KIND) {
         let at = |message: String| GraphError::at(call_id, message);
         let file = call.module.file;
@@ -160,15 +178,45 @@ fn expand_in(
         stack.push(file);
         let expanded = expand_in(&function, functions, stack);
         stack.pop();
-        let (inner, _) =
-            expanded.map_err(|e| at(format!("in {}: {}", call.function, e.message)))?;
+        let inner = expanded.map_err(|e| at(format!("in {}: {}", call.function, e.message)))?;
         let prefix = |id: &str| format!("{call_id}__{id}");
-        for id in inline_into(&mut out, call_id, &inner, &prefix).map_err(at)? {
+        let made =
+            inline_into(&mut out, call_id, &inner.graph, &prefix, &inner.outputs).map_err(at)?;
+        for id in made.added {
             origin.insert(id, call_id.clone());
         }
+        outputs.insert(call_id.clone(), made.gives);
+        outputs.extend(made.nested);
         origin.remove(call_id);
     }
-    Ok((out, origin))
+    resolve(&out, &mut outputs);
+    Ok(Expansion {
+        graph: out,
+        origin,
+        outputs,
+    })
+}
+
+/// `outputs`' ports that name a call made since (gone from `graph`: a call fed by one
+/// after it), each made the port that call's output comes from, through as many calls as
+/// it takes.
+fn resolve(graph: &Graph, outputs: &mut CallOutputs) {
+    for _ in 0..=outputs.len() {
+        let before = outputs.clone();
+        let mut changed = false;
+        for port in outputs.values_mut().flat_map(BTreeMap::values_mut) {
+            if graph.nodes.contains_key(&port.node) {
+                continue;
+            }
+            if let Some(from) = before.get(&port.node).and_then(|o| o.get(&port.port)) {
+                from.clone_into(port);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// `graph` with its call `call_id` made the nodes of `function`, the function it calls (its
@@ -185,18 +233,28 @@ pub fn inline(
     id_for: &dyn Fn(&str) -> String,
 ) -> Result<(Graph, Vec<String>), String> {
     let mut out = graph.clone();
-    let made = inline_into(&mut out, call_id, function, id_for)?;
-    Ok((out, made))
+    let made = inline_into(&mut out, call_id, function, id_for, &CallOutputs::new())?;
+    Ok((out, made.added))
+}
+
+/// What a call made its function's nodes made: the ids added, the port each of its outputs
+/// comes from, and the function's own calls' outputs (`nested`) under their ids here.
+struct Inlined {
+    added: Vec<String>,
+    gives: BTreeMap<String, PortRef>,
+    nested: CallOutputs,
 }
 
 /// Call `call_id` of `out` made `function`'s nodes in `out` (see the module), each under
-/// the id `id_for` gives its own: the ids added.
+/// the id `id_for` gives its own; `nested`, where `function`'s own calls' outputs come from
+/// in it.
 fn inline_into(
     out: &mut Graph,
     call_id: &str,
     function: &Graph,
     id_for: &dyn Fn(&str) -> String,
-) -> Result<Vec<String>, String> {
+    nested: &CallOutputs,
+) -> Result<Inlined, String> {
     let call = out
         .nodes
         .get(call_id)
@@ -284,7 +342,21 @@ fn inline_into(
         })?;
     }
     out.nodes.remove(call_id);
-    Ok(added)
+    let nested = nested
+        .iter()
+        .map(|(id, ports)| {
+            let ports = ports
+                .iter()
+                .map(|(name, from)| (name.clone(), through(from)))
+                .collect();
+            (id_for(id), ports)
+        })
+        .collect();
+    Ok(Inlined {
+        added,
+        gives,
+        nested,
+    })
 }
 
 /// A constant node of width `width` holding `value`, at `at`.
@@ -384,8 +456,14 @@ mod tests {
         .link(port("d", "darkened"), port(OUTPUT, "base"))
         .link(port("d", "amount_out"), port(OUTPUT, "roughness"));
         let functions = |r: AssetRef| (r == file).then(darken);
-        let (out, origin) = expand(&g, &functions).unwrap();
+        let Expansion {
+            graph: out,
+            origin,
+            outputs,
+        } = expand(&g, &functions).unwrap();
         assert!(!out.nodes.contains_key("d"));
+        assert_eq!(outputs["d"]["darkened"], port("d__m", "out"));
+        assert_eq!(outputs["d"]["amount_out"], port("d__a", "value"));
         assert_eq!(out.nodes["d__m"].kind, "multiply");
         assert_eq!(out.links[&port("d__m", "a")], port("col", "rgba"));
         assert_eq!(out.nodes["d__a"].kind, "number");
@@ -420,6 +498,73 @@ mod tests {
             error.message
         );
     }
+
+    /// E10-4g-3: where each call's outputs come from in the graph made: a call fed by a call
+    /// made after it (`a` by `b`, made in their ids' order) reads through to that call's
+    /// nodes, and a function's own call is there under its id in the graph made, its
+    /// outputs read through the function's inputs.
+    #[test]
+    fn each_calls_outputs_are_found_in_the_graph_made() {
+        let darken_file = AssetRef::file(AssetId::from_u128(5));
+        let outer_file = AssetRef::file(AssetId::from_u128(6));
+        let signature = signature_of(&darken()).unwrap().to_string();
+        let darken_call = |at: f32| {
+            let mut call = Node::new(FUNCTION_KIND, [at, 0.0]).with_call("darken", &signature);
+            call.module = darken_file;
+            call
+        };
+        // `a`'s amount is `b`'s amount out, which is `b`'s own amount: a constant of `b`'s.
+        let mut g = Graph::new(Model::Lit);
+        g.add("col", Node::new("color", [0.0; 2]))
+            .add("a", darken_call(400.0))
+            .add("b", darken_call(200.0))
+            .link(port("col", "rgba"), port("b", "color"))
+            .link(port("b", "amount_out"), port("a", "amount"))
+            .link(port("b", "darkened"), port("a", "color"))
+            .link(port("a", "amount_out"), port(OUTPUT, "roughness"))
+            .link(port("a", "darkened"), port(OUTPUT, "base"));
+        let functions = |r: AssetRef| {
+            if r == darken_file {
+                return Some(darken());
+            }
+            (r == outer_file).then(|| {
+                let mut outer = Graph::new(Model::Lit);
+                outer.nodes.clear();
+                outer
+                    .add("i", Node::new(input_kind(3), [0.0, 0.0]).named("base"))
+                    .add("d", darken_call(100.0))
+                    .add("o", Node::new(output_kind(3), [200.0, 0.0]).named("result"))
+                    .link(port("i", "value"), port("d", "color"))
+                    .link(port("d", "darkened"), port("o", "value"));
+                outer
+            })
+        };
+        let made = expand(&g, &functions).unwrap();
+        assert_eq!(made.outputs["a"]["amount_out"], port("b__a", "value"));
+        assert_eq!(made.outputs["a"]["darkened"], port("a__m", "out"));
+        assert_eq!(made.outputs["b"]["darkened"], port("b__m", "out"));
+        assert!(made.graph.nodes.contains_key("b__a"));
+        // A function's own call: under its id in the graph made.
+        let outer_signature = signature_of(&functions(outer_file).unwrap())
+            .unwrap()
+            .to_string();
+        let mut f = Node::new(FUNCTION_KIND, [0.0, 0.0]).with_call("outer", &outer_signature);
+        f.module = outer_file;
+        let mut g = Graph::new(Model::Lit);
+        g.add("tex", Node::new("vector3", [-200.0, 0.0]))
+            .add("f", f)
+            .link(port("tex", "value"), port("f", "base"))
+            .link(port("f", "result"), port(OUTPUT, "base"));
+        let made = expand(&g, &functions).unwrap();
+        assert_eq!(made.outputs["f"]["result"], port("f__d__m", "out"));
+        assert_eq!(made.outputs["f__d"]["darkened"], port("f__d__m", "out"));
+        assert_eq!(made.outputs["f__d"]["amount_out"], port("f__d__a", "value"));
+        assert_eq!(
+            made.graph.links[&port("f__d__m", "a")],
+            port("tex", "value")
+        );
+    }
+
     /// E10-3g-2b: a call taken apart one level (Ungroup) is its function's nodes under the
     /// ids asked for, the call's links read through them, a call inside the function kept a
     /// call; a link of the call to a port the function has not is refused.

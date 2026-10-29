@@ -12714,7 +12714,6 @@ impl Editor {
                 .find(|d| d.function && AssetRef::file(d.id) == r)
                 .map(|d| (d.graph.clone(), d.paths.clone()))
         };
-        let function = doc.function;
         match crate::graph::preview_material(
             doc,
             &self.root,
@@ -12723,11 +12722,11 @@ impl Editor {
             &preview.module_path,
         ) {
             Ok((mut generated, file, paths)) => {
-                // Its nodes' previews (E10-4g), a material's graph's: asked for after it.
+                // Its nodes' previews (E10-4g; a function's own, E10-4g-3): asked for after it.
                 let previews = core::mem::take(&mut generated.previews);
                 preview.spheres = previews.iter().map(|p| p.sphere).collect();
                 preview.tiles = previews.into_iter().map(|p| p.node).collect();
-                preview.tiles_ask = !function;
+                preview.tiles_ask = true;
                 let text = generated.text;
                 preview.lines = generated.lines;
                 preview.same_code = text == preview.text;
@@ -12855,8 +12854,8 @@ impl Editor {
         {
             let text = &mut self.text;
             let doc = &mut self.graphs[g];
-            // Its nodes' previews' tiles (E10-4g): a material's graph's, while they show.
-            doc.tiles = self.node_previews && !doc.function;
+            // Its nodes' previews' tiles (E10-4g), while they show.
+            doc.tiles = self.node_previews;
             doc.relayout(&mut |s, size| text.measure(s, size, None)[0]);
             if !doc.framed {
                 doc.framed = true;

@@ -31,9 +31,12 @@ pub mod library;
 
 pub use call::{CALL_KIND, Signature, call_kind, node_kind};
 pub use file::GraphFile;
-pub use function::{FUNCTION_KIND, expand, function_call_kind, inline, signature_of};
+pub use function::{
+    CallOutputs, Expansion, FUNCTION_KIND, expand, function_call_kind, inline, signature_of,
+};
 pub use generate::{
-    Build, Generated, GraphError, NodePreview, Param, ParamType, Sources, generate, generate_with,
+    Build, Generated, GraphError, NodePreview, Param, ParamType, Shown, Sources, generate,
+    generate_shown, generate_with,
 };
 pub use graph::{Frame, Graph, Model, Node, PortRef};
 pub use library::{Kind, PortType, kind};

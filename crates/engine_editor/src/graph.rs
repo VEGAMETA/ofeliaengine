@@ -294,15 +294,12 @@ fn value_width(kind: &Kind) -> f32 {
 }
 
 /// Whether a node of `kind` has a preview (E10-4g), as the editing build numbers them: one
-/// with an output, but a reroute, the surface, a function call and a function's ports.
+/// with an output (a function call by its first) but a reroute and the surface, and a
+/// function's output (what it is given, E10-4g-3).
 fn previewed(kind: &Kind) -> bool {
-    !kind.outputs.is_empty()
-        && kind.name != REROUTE_KIND
+    kind.name != REROUTE_KIND
         && kind.name != OUTPUT_KIND
-        && !matches!(
-            kind.body,
-            Body::FunctionCall(_) | Body::FunctionInput(_) | Body::FunctionOutput(_)
-        )
+        && (!kind.outputs.is_empty() || matches!(kind.body, Body::FunctionOutput(_)))
 }
 
 /// `graph`'s nodes laid out into `out` in their ids' order, each as wide as its texts need
@@ -1022,7 +1019,14 @@ pub(crate) fn generated(
         modules: &modules,
         functions: &found,
     };
-    let generated = engine_material_graph::generate_with(graph, GRAPH_TYPE, build, &sources)?;
+    // A function's tab previews its own nodes, as its preview's call makes them (E10-4g-3).
+    let shown = if doc.function {
+        engine_material_graph::Shown::Function(PREVIEW_CALL)
+    } else {
+        engine_material_graph::Shown::Graph
+    };
+    let generated =
+        engine_material_graph::generate_shown(graph, GRAPH_TYPE, build, &sources, shown)?;
     Ok((generated, functions))
 }
 
@@ -1041,6 +1045,9 @@ pub(crate) fn function_name(path: &str) -> &str {
     file.rsplit_once('.').map_or(file, |(stem, _)| stem)
 }
 
+/// The call of the function in the graph its tab previews.
+const PREVIEW_CALL: &str = "function";
+
 /// The graph a function's tab previews (E10-3g-2b): unlit, a call of the function (its own
 /// file's, as its tab holds it) whose first output is the surface.
 fn function_preview(doc: &GraphDoc) -> Result<Graph, GraphError> {
@@ -1058,8 +1065,8 @@ fn function_preview(doc: &GraphDoc) -> Result<Graph, GraphError> {
         .with_call(function_name(&doc.path), &signature.to_string());
     call.module = AssetRef::file(doc.id);
     let mut g = Graph::new(Model::Unlit);
-    g.add("function", call).link(
-        PortRef::new("function", &first.name),
+    g.add(PREVIEW_CALL, call).link(
+        PortRef::new(PREVIEW_CALL, &first.name),
         PortRef::new(OUTPUT, "base"),
     );
     Ok(g)
@@ -1280,8 +1287,7 @@ pub(crate) struct GraphDoc {
     pub(crate) call_titles: Vec<(AssetRef, String, String)>,
     /// The revision they were laid out at, and whether with tiles.
     laid_out: Option<(u64, bool)>,
-    /// Its nodes' previews show on the canvas (E10-4g): the editor's choice, for a
-    /// material's graph.
+    /// Its nodes' previews show on the canvas (E10-4g): the editor's choice.
     pub(crate) tiles: bool,
     /// What the pointer is over, and the canvas point under it.
     pub(crate) hover: Hit,
@@ -3719,7 +3725,9 @@ mod tests {
         );
         assert!(d.text.contains(path), "{}", d.text);
         let functions = |r: AssetRef| (r == module).then(|| made.function.clone());
-        let (expanded, _) = engine_material_graph::expand(&d.graph, &functions).unwrap();
+        let expanded = engine_material_graph::expand(&d.graph, &functions)
+            .unwrap()
+            .graph;
         assert_eq!(
             expanded.links[&PortRef::new(OUTPUT, "base")],
             PortRef::new(&format!("{call}__m"), "out")
@@ -3997,12 +4005,24 @@ mod tests {
 
     /// E10-4g: with previews, a node with an output has a tile under its ports, its box
     /// taller by the tile and its room, at least as wide; the surface and a reroute have
-    /// none; without previews, no node has one.
+    /// none; without previews, no node has one. A function call has one, and so do a
+    /// function's input and output (E10-4g-3).
     #[test]
     fn previews_give_nodes_a_tile_under_their_ports() {
+        use engine_material_graph::function::{input_kind, output_kind};
         let mut g = Graph::new(Model::Lit);
         g.add("c", Node::new("color", [0.0, 0.0]))
-            .add("r", Node::new("reroute", [200.0, 0.0]));
+            .add("r", Node::new("reroute", [200.0, 0.0]))
+            .add(
+                "f",
+                Node::new(FUNCTION_KIND, [0.0, 200.0])
+                    .with_call("tint", "void(float3 color, out float3 tinted)"),
+            )
+            .add("i", Node::new(input_kind(3), [0.0, 400.0]).named("color"))
+            .add(
+                "o",
+                Node::new(output_kind(3), [200.0, 400.0]).named("tinted"),
+            );
         let mut measure = |s: &str, size: f32| s.len() as f32 * size * 0.5;
         let (mut plain, mut tiled) = (Vec::new(), Vec::new());
         layout(&g, &[], false, &mut measure, &mut plain);
@@ -4024,6 +4044,9 @@ mod tests {
             find(&tiled, OUTPUT).unwrap().tile_rect().is_none(),
             "the surface"
         );
+        for id in ["f", "i", "o"] {
+            assert!(find(&tiled, id).unwrap().tile_rect().is_some(), "{id}");
+        }
         assert!(plain.iter().all(|b| b.tile_rect().is_none()));
     }
 
