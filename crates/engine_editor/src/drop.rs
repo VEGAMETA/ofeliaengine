@@ -8,7 +8,9 @@ use engine_ecs::Transform;
 use engine_scene::{AssetId, AssetRef};
 
 /// A model file's entities as a drop makes them: one per node of the file's scene under a
-/// root named after the file, or, for a file of one node, that node as the root.
+/// root named after the file, or, for a file of one node, that node as the root. A skinned
+/// model is one entity, its joints none (ADR 0124's E12-1c, question 6a; see
+/// [`ModelPlan::skinned`]).
 #[derive(Debug, Clone)]
 pub(crate) struct ModelPlan {
     /// The entities, parents before children; the first is the root.
@@ -70,6 +72,10 @@ impl ModelPlan {
             materials,
             bounds: None,
         };
+        if let Some(mesh_of) = plan.skinned(file, path, outline, scale) {
+            plan.bounds = bounds(&plan, &mesh_of, outline, scale);
+            return Ok(plan);
+        }
         // The scene's nodes under the root, parents first; each node once (a malformed
         // file's cycles are cut).
         let mut mesh_of: Vec<Option<usize>> = vec![None];
@@ -80,23 +86,14 @@ impl ModelPlan {
                 continue;
             }
             let n = &outline.nodes[i];
-            let mesh = n.mesh.filter(|&m| {
-                outline
-                    .meshes
-                    .get(m)
-                    .is_some_and(|m| !m.primitives.is_empty())
-            });
+            let mesh = drawn(outline, i);
             let (model, slots) = match mesh.map(|m| plan.model(file, path, outline, m)) {
                 Some((model, slots)) => (Some(model), slots),
                 None => (None, Vec::new()),
             };
-            let named = |s: &str| (!s.is_empty()).then(|| s.to_owned());
-            let node_name = named(&n.name)
-                .or_else(|| mesh.and_then(|m| named(&outline.meshes[m].name)))
-                .unwrap_or_else(|| format!("Node {i}"));
             let index = plan.nodes.len();
             plan.nodes.push(PlannedNode {
-                name: node_name,
+                name: node_name(outline, i, mesh),
                 transform: Transform::from_translation(Vec3::from(n.translation) * scale)
                     .with_rotation(Quat::from_array(n.rotation))
                     .with_scale(Vec3::from(n.scale)),
@@ -125,6 +122,100 @@ impl ModelPlan {
         }
         plan.bounds = bounds(&plan, &mesh_of, outline, scale);
         Ok(plan)
+    }
+
+    /// A skinned model's entities (ADR 0124's E12-1c, question 6a): its skeleton's joints
+    /// are not entities, nor are the nodes that draw nothing. The first node that draws its
+    /// mesh skinned is the root, turned and scaled as the file has it (its place is where it
+    /// is dropped, as for a file of one node); the file's other meshes go under the nearest
+    /// node above them that is an entity (the root when none is), at their places in the
+    /// file, a mesh under a joint where the skeleton's rest pose holds it. Each entity's
+    /// mesh, parents first; none for a file that draws nothing skinned, which keeps an
+    /// entity per node.
+    fn skinned(
+        &mut self,
+        file: AssetId,
+        path: &str,
+        outline: &GltfOutline,
+        scale: f32,
+    ) -> Option<Vec<Option<usize>>> {
+        if outline.nodes.iter().all(|n| n.skin.is_none()) {
+            return None;
+        }
+        // The scene's nodes, parents first, each once (a malformed file's cycles are cut),
+        // with its parent's visit and its place in the file (translations scaled as the
+        // meshes are).
+        let mut visits: Vec<(usize, Option<usize>, Affine3A)> = Vec::new();
+        let mut seen = vec![false; outline.nodes.len()];
+        let mut stack: Vec<(usize, Option<usize>)> =
+            outline.roots.iter().rev().map(|&r| (r, None)).collect();
+        while let Some((i, parent)) = stack.pop() {
+            if i >= outline.nodes.len() || core::mem::replace(&mut seen[i], true) {
+                continue;
+            }
+            let n = &outline.nodes[i];
+            let local = Affine3A::from_scale_rotation_translation(
+                Vec3::from(n.scale),
+                Quat::from_array(n.rotation),
+                Vec3::from(n.translation) * scale,
+            );
+            let at = parent.map_or(local, |p| visits[p].2 * local);
+            let index = visits.len();
+            visits.push((i, parent, at));
+            for &c in n.children.iter().rev() {
+                stack.push((c, Some(index)));
+            }
+        }
+        let first = visits.iter().position(|&(i, _, _)| {
+            outline.nodes[i].skin.is_some() && drawn(outline, i).is_some()
+        })?;
+        let (i, _, root_at) = visits[first];
+        let mesh = drawn(outline, i)?;
+        let (model, slots) = self.model(file, path, outline, mesh);
+        let (s, r, _) = root_at.to_scale_rotation_translation();
+        let root = &mut self.nodes[0];
+        root.transform = Transform::IDENTITY.with_rotation(r).with_scale(s);
+        root.model = Some(model);
+        root.slots = slots;
+        let mut mesh_of = vec![Some(mesh)];
+        // The entity of each visit that is one.
+        let mut entity: Vec<Option<usize>> = vec![None; visits.len()];
+        entity[first] = Some(0);
+        for (v, &(i, parent, at)) in visits.iter().enumerate() {
+            let Some(m) = drawn(outline, i).filter(|_| v != first) else {
+                continue;
+            };
+            let mut above = parent;
+            let (p, p_at) = loop {
+                match above {
+                    Some(a) => match entity[a] {
+                        Some(e) => break (e, visits[a].2),
+                        None => above = visits[a].1,
+                    },
+                    None => break (0, root_at),
+                }
+            };
+            // Under a parent scaled to nothing it is nowhere: kept where the file has it.
+            let local = if p_at.matrix3.determinant() != 0.0 {
+                p_at.inverse() * at
+            } else {
+                at
+            };
+            let (s, r, t) = local.to_scale_rotation_translation();
+            let (model, slots) = self.model(file, path, outline, m);
+            entity[v] = Some(self.nodes.len());
+            self.nodes.push(PlannedNode {
+                name: node_name(outline, i, Some(m)),
+                transform: Transform::from_translation(t)
+                    .with_rotation(r)
+                    .with_scale(s),
+                parent: Some(p),
+                model: Some(model),
+                slots,
+            });
+            mesh_of.push(Some(m));
+        }
+        Some(mesh_of)
     }
 
     /// The model of mesh `m`: its part with the first primitive's material (the default
@@ -168,6 +259,24 @@ impl ModelPlan {
             self.paths.push((asset, path));
         }
     }
+}
+
+/// The mesh node `i` draws, for one with primitives.
+fn drawn(outline: &GltfOutline, i: usize) -> Option<usize> {
+    outline.nodes[i].mesh.filter(|&m| {
+        outline
+            .meshes
+            .get(m)
+            .is_some_and(|m| !m.primitives.is_empty())
+    })
+}
+
+/// Node `i`'s entity's name: its own, else its mesh's (`mesh`), else `Node i`.
+fn node_name(outline: &GltfOutline, i: usize, mesh: Option<usize>) -> String {
+    let named = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+    named(&outline.nodes[i].name)
+        .or_else(|| mesh.and_then(|m| named(&outline.meshes[m].name)))
+        .unwrap_or_else(|| format!("Node {i}"))
 }
 
 /// The part that names thing `i` of `names`: its name when nothing else has it, else
@@ -264,8 +373,21 @@ mod tests {
             rotation: [0.0, 0.0, 0.0, 1.0],
             scale: [1.0; 3],
             mesh,
+            skin: None,
             children,
         }
+    }
+
+    /// A node drawing mesh `mesh` skinned.
+    fn skinned(name: &str, mesh: usize, children: Vec<usize>) -> OutlineNode {
+        OutlineNode {
+            skin: Some(0),
+            ..node(name, Some(mesh), children)
+        }
+    }
+
+    fn names(plan: &ModelPlan) -> Vec<&str> {
+        plan.nodes.iter().map(|n| n.name.as_str()).collect()
     }
 
     fn mesh(name: &str, materials: &[Option<usize>]) -> OutlineMesh {
@@ -373,6 +495,167 @@ mod tests {
         );
         let (lo, hi) = half.bounds.unwrap();
         assert_eq!((lo.y, hi.y), (-0.5, 0.5));
+    }
+
+    /// ADR 0124's E12-1c (question 6a): a character as CesiumMan's file has it, a turned
+    /// node above the skeleton and the skinned mesh beside the joints, is one entity.
+    #[test]
+    fn a_skinned_model_is_one_entity_without_its_joints_and_empty_nodes() {
+        let mut up = node("Z_UP", None, vec![1]);
+        up.rotation = Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2).to_array();
+        let mut armature = node("Armature", None, vec![2, 4]);
+        armature.translation = [0.0, 0.0, 1.0];
+        let mut torso = node("Torso", None, vec![3]);
+        torso.translation = [0.0, 0.0, 1.0];
+        let outline = GltfOutline {
+            nodes: vec![
+                up,
+                armature,
+                torso,
+                node("Arm", None, Vec::new()),
+                skinned("Body", 0, Vec::new()),
+            ],
+            roots: vec![0],
+            meshes: vec![mesh("Body", &[Some(0)])],
+            materials: vec![String::from("Skin")],
+            maps: Vec::new(),
+        };
+        let plan = ModelPlan::new(file(), "man.gltf", "man", &outline, 1.0).unwrap();
+        assert_eq!(names(&plan), ["man"], "one entity");
+        let root = &plan.nodes[0];
+        let model = root.model.unwrap();
+        assert_eq!(model.mesh, AssetRef::part(file(), "Body"));
+        assert_eq!(model.material, AssetRef::part(file(), "Skin"));
+        // Turned as the file has it (its z up), where it is dropped.
+        assert_eq!(root.transform.translation, Vec3::ZERO);
+        let turn = Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2);
+        assert!(root.transform.rotation.dot(turn).abs() > 1.0 - 1e-6);
+        assert!((root.transform.scale - Vec3::ONE).abs().max_element() < 1e-6);
+        // Its box turned with it: the mesh's height (its y) along -z.
+        let (lo, hi) = plan.bounds.unwrap();
+        let near = |a: Vec3, b: Vec3| (a - b).abs().max_element() < 1e-6;
+        assert!(near(lo, Vec3::new(-0.5, -0.5, -1.0)), "{lo}");
+        assert!(near(hi, Vec3::new(0.5, 0.5, 0.0)), "{hi}");
+        // The Fox's file: its skeleton under a node of its own beside the mesh, in
+        // centimetres imported at a hundredth.
+        let outline = GltfOutline {
+            nodes: vec![
+                node("root", None, vec![2]),
+                skinned("fox", 0, Vec::new()),
+                node("_rootJoint", None, Vec::new()),
+            ],
+            roots: vec![0, 1],
+            meshes: vec![mesh("fox1", &[Some(0)])],
+            materials: vec![String::from("fox_material")],
+            maps: Vec::new(),
+        };
+        let plan = ModelPlan::new(file(), "Fox.gltf", "Fox", &outline, 0.01).unwrap();
+        assert_eq!(names(&plan), ["Fox"]);
+        assert_eq!(plan.nodes[0].transform, Transform::IDENTITY);
+        let (lo, hi) = plan.bounds.unwrap();
+        assert!(near(lo, Vec3::new(-0.005, 0.0, -0.005)), "{lo}");
+        assert!(near(hi, Vec3::new(0.005, 0.01, 0.005)), "{hi}");
+        // A file whose skin no node draws keeps an entity per node.
+        let mut outline = outline;
+        outline.nodes[1].mesh = None;
+        outline.nodes.push(node("Rock", Some(0), Vec::new()));
+        outline.roots.push(3);
+        let plan = ModelPlan::new(file(), "Fox.gltf", "Fox", &outline, 1.0).unwrap();
+        assert_eq!(names(&plan), ["Fox", "root", "_rootJoint", "fox", "Rock"]);
+    }
+
+    /// E12-1c: the file's other meshes stay, at their places in the file, under the nearest
+    /// node above them that is an entity: a sword in the hand's joint where the rest pose
+    /// holds it, a gem on the sword, a hat on the skinned body.
+    #[test]
+    fn a_skinned_models_other_meshes_stay_where_the_file_has_them() {
+        let mut hand = node("Hand", None, vec![2]);
+        hand.translation = [1.0, 2.0, 0.0];
+        let mut sword = node("Sword", Some(1), vec![5]);
+        sword.translation = [0.0, 0.5, 0.0];
+        let mut body = skinned("Body", 0, vec![4]);
+        body.translation = [0.0, 1.0, 0.0];
+        let mut hat = node("Hat", Some(1), Vec::new());
+        hat.translation = [0.0, 1.0, 0.0];
+        let mut gem = node("", Some(2), Vec::new());
+        gem.translation = [0.0, 0.25, 0.0];
+        let outline = GltfOutline {
+            nodes: vec![
+                node("Armature", None, vec![1, 3]),
+                hand,
+                sword,
+                body,
+                hat,
+                gem,
+            ],
+            roots: vec![0],
+            meshes: vec![
+                mesh("Body", &[Some(0)]),
+                mesh("Prop", &[Some(1)]),
+                mesh("Gem", &[Some(1)]),
+            ],
+            materials: vec![String::from("Skin"), String::from("Steel")],
+            maps: Vec::new(),
+        };
+        for scale in [1.0, 0.5] {
+            let plan = ModelPlan::new(file(), "knight.glb", "knight", &outline, scale).unwrap();
+            assert_eq!(names(&plan), ["knight", "Sword", "Gem", "Hat"]);
+            let parents: Vec<Option<usize>> = plan.nodes.iter().map(|n| n.parent).collect();
+            assert_eq!(parents, [None, Some(0), Some(1), Some(0)]);
+            let at: Vec<Vec3> = plan.nodes.iter().map(|n| n.transform.translation).collect();
+            // The sword's place against the body's (a meter up): the hand's and its own.
+            assert_eq!(
+                at,
+                [
+                    Vec3::ZERO,
+                    Vec3::new(1.0, 1.5, 0.0) * scale,
+                    Vec3::new(0.0, 0.25, 0.0) * scale,
+                    Vec3::new(0.0, 1.0, 0.0) * scale,
+                ]
+            );
+            assert_eq!(
+                plan.nodes[1].model.unwrap().mesh,
+                AssetRef::part(file(), "Prop")
+            );
+            assert_eq!(
+                plan.nodes[3].model.unwrap().material,
+                AssetRef::part(file(), "Steel")
+            );
+            assert!(plan.paths.contains(&(
+                AssetRef::part(file(), "Gem"),
+                String::from("knight.glb#Gem")
+            )));
+            // The box from the body's feet (the root) to the sword's tip.
+            let (lo, hi) = plan.bounds.unwrap();
+            assert_eq!((lo.y, hi.y), (0.0, 2.75 * scale));
+        }
+    }
+
+    /// E12-1c: the drop's plan of the real files (where tools/fetch-test-assets.ps1 put
+    /// them): each character one entity, drawing its skinned mesh.
+    #[test]
+    fn the_test_characters_drop_as_one_entity() {
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets");
+        for (path, mesh) in [
+            ("CesiumMan/CesiumMan.gltf", "Cesium_Man"),
+            ("Fox/Fox.gltf", "fox1"),
+            ("RiggedSimple/RiggedSimple.gltf", "Cylinder"),
+        ] {
+            if !assets.join(path).exists() {
+                println!("skipped: {path} missing");
+                continue;
+            }
+            let outline = GltfOutline::read(&assets.join(path)).unwrap();
+            let plan = ModelPlan::new(file(), path, "character", &outline, 1.0).unwrap();
+            assert_eq!(names(&plan), ["character"], "{path}");
+            assert_eq!(
+                plan.nodes[0].model.unwrap().mesh,
+                AssetRef::part(file(), mesh),
+                "{path}"
+            );
+            let (lo, hi) = plan.bounds.unwrap();
+            println!("{path}: {:?}, box {lo}..{hi}", plan.nodes[0].transform);
+        }
     }
 
     #[test]

@@ -879,6 +879,12 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-1c-1, a dropped character is one entity** (#PR, ADR 0124's as-built): a file
+    that draws a mesh skinned drops as one entity, its first skinned mesh's, turned and
+    scaled as the file stands it; its other meshes go under it at their places in the
+    file; its joints and empty nodes are not entities (CesiumMan: 1 entity, not 23). The
+    rest poses of the test characters fill their positions' boxes to the micrometre, so
+    the drop stands them on the floor (checked on both GPUs).
   - **E12-1b-2, the engine's preview of a model picked in the dock** (#450, ADR 0124's
     as-built): `Player::set_model_preview` draws a skinned model alone, posed at a clip's
     moment and turned, each frame either changes (77 µs a frame on the RTX, 227 µs on the
@@ -1070,11 +1076,11 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next** (the owner's order: materials first of the tools, then animation and 2D;
     E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (accepted
-    2026-10-29, every question as recommended). E12-1a, E12-1b-1 and E12-1b-2 are done;
-    next E12-1b-3 (↑/↓ through clips, two side by side, the floor under root motion and the
-    root's path), then E12-1c (one entity per character, its
-    joints in the viewport and the tree, attachments), E12-2 (the `Animator`), E12-3 (the
-    Animation tab), E12-4 (keys) and E12-5 (graphs).
+    2026-10-29, every question as recommended). E12-1a, E12-1b-1, E12-1b-2 and E12-1c-1
+    are done; next E12-1c-2 (a character's joints in the viewport and the inspector's
+    tree) and E12-1c-3 (attachments), which the `Animator` stands on, then E12-1b-3 (↑/↓
+    through clips, two side by side, the floor under root motion and the root's path),
+    E12-2 (the `Animator`), E12-3 (the Animation tab), E12-4 (keys) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
     questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a
     (decisions in ticks, poses every frame), 3c (cross-fade or inertialization per
