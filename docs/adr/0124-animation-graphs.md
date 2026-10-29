@@ -230,7 +230,7 @@ allocation with transitions and events every tick; the same events at the same t
     (its skin made anew), and gone with his `Model`.
 - **Left:**
   - a dropped model still makes an entity per glTF node, joints included (E12-1c,
-    question 6);
+    question 6; done in E12-1c-1);
   - a file read again leaves its skinned models undrawn until their new skins are made;
   - a mesh drawn by several skinned nodes takes the first's skin;
   - the clips are compressed at every load, not kept in the derived data cache as the
@@ -321,6 +321,37 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left:** ↑ and ↓ through the clips, two clips side by side, the floor under root motion
   and the root's path (E12-1b-3); a file whose first part is not the skinned one shows no
   clips; one picture of 128 px, drawn at twice that.
+
+## As built (E12-1c-1, 2026-10-30): a dropped character is one entity
+
+- **The drop's plan** (`engine_editor` `ModelPlan`) for a file one of whose nodes draws its
+  mesh skinned (`engine_assets` `OutlineNode::skin`, from the JSON alone):
+  - the first such node (in the scene's order) is the root, named after the file, with
+    that mesh's model and slots, turned and scaled as the file places that node (its
+    place is where it is dropped, as for a file of one node);
+  - every other node that draws a mesh is an entity under the nearest entity above it (the
+    root when none is), at its place against that one in the file: a mesh under a joint
+    sits where the skeleton's rest pose holds it, until attachments make it follow
+    (E12-1c-3);
+  - the joints and every node that draws nothing are not entities;
+  - files that draw nothing skinned keep an entity per node, unchanged.
+- **Resting on the floor:** the outline's boxes are the rest pose's. CesiumMan, the Fox
+  and RiggedSimple's rest poses fill their positions' boxes to the micrometre, now a
+  check of the rig test, so the drop stands a character's feet on the surface.
+- **Tests:**
+  - plans of a CesiumMan-like file (a turned node above the skeleton: one entity, turned
+    from z up to y up, its box turned with it), of a Fox-like one (the skeleton under a
+    node of its own beside the mesh, imported at a hundredth: one entity), and of a file
+    whose skin no node draws (an entity per node);
+  - a knight whose sword sits in the hand's joint, a gem on the sword and a hat on the
+    skinned body: four entities, each at its place in the file at two import scales;
+  - the real files (each one entity drawing its skinned mesh);
+  - on both GPUs, CesiumMan dragged from the dock onto a floor: one new entity without
+    children, upright, his feet on the floor's top (within 0.06 mm), drawn skinned with
+    his Clips once selected.
+- **Left:** scenes saved with a character's joints as entities keep them; a skin drawn by
+  a node other than the first skinned one keeps its own place under the root (two
+  characters in one file are two entities, the second under the first).
 
 ## Consequences
 

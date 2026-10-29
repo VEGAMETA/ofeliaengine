@@ -65,7 +65,8 @@ impl Default for OutlineMaps {
     }
 }
 
-/// A node: its name, its transform in its parent's space, its mesh and its children.
+/// A node: its name, its transform in its parent's space, its mesh (and whether it draws it
+/// skinned) and its children.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutlineNode {
     /// Its name (empty when the file gives none).
@@ -78,6 +79,9 @@ pub struct OutlineNode {
     pub scale: [f32; 3],
     /// Index into [`GltfOutline::meshes`].
     pub mesh: Option<usize>,
+    /// The skin its mesh is drawn with, an index into the file's skins (ADR 0124's E12-1c);
+    /// none for a mesh drawn as it is.
+    pub skin: Option<usize>,
     /// Indices into [`GltfOutline::nodes`].
     pub children: Vec<usize>,
 }
@@ -201,6 +205,7 @@ impl GltfOutline {
             })
             .collect();
         let count = document.nodes().count();
+        let skins = json.skins.len();
         let nodes: Vec<OutlineNode> = document
             .nodes()
             .map(|node| {
@@ -211,6 +216,12 @@ impl GltfOutline {
                     rotation,
                     scale,
                     mesh: node.mesh().map(|m| m.index()),
+                    skin: json
+                        .nodes
+                        .get(node.index())
+                        .and_then(|n| n.skin)
+                        .map(|s| s.value())
+                        .filter(|&s| s < skins),
                     children: node
                         .children()
                         .map(|c| c.index())
@@ -372,6 +383,19 @@ mod tests {
         std::fs::write(&path, &glb).unwrap();
         assert!(GltfOutline::read(&path).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_node_drawing_its_mesh_skinned_names_its_skin() {
+        let json = r#"{"asset": {"version": "2.0"},
+            "nodes": [{"children": [1]}, {}, {"mesh": 0, "skin": 0}, {"mesh": 0, "skin": 3}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+            "skins": [{"joints": [1]}],
+            "accessors": [{"componentType": 5126, "count": 3, "type": "VEC3"}]}"#;
+        let outline = GltfOutline::from_json(json.as_bytes()).unwrap();
+        assert_eq!(outline.nodes[2].skin, Some(0));
+        assert_eq!(outline.nodes[3].skin, None, "no skin 3");
+        assert_eq!(outline.nodes[0].skin, None);
     }
 
     #[test]

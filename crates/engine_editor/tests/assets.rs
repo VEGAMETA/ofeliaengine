@@ -1261,3 +1261,150 @@ fn a_skinned_model_picked_in_the_dock_shows_its_clips_under_its_preview() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR 0124's E12-1c (question 6a): a character dragged from the dock into the view is one
+/// entity, its skeleton's joints none: CesiumMan stands upright on the floor (his file's z
+/// up turned to the scene's y, his feet on the floor's top), drawn skinned, his Clips shown
+/// once he is selected. `ENGINE_EDITOR_CHARACTER_PNG=<file>` writes the window then.
+#[test]
+fn a_character_dragged_from_the_dock_is_one_entity_standing_on_the_floor() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/CesiumMan");
+    if !source.join("CesiumMan.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "ofelia-editor-character-drop-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for file in ["CesiumMan.gltf", "CesiumMan_data.bin", "CesiumMan_img0.jpg"] {
+        std::fs::copy(source.join(file), dir.join(file)).unwrap();
+    }
+    let id = AssetMeta::ensure(&dir.join("CesiumMan.gltf")).unwrap();
+    // A floor whose top is at y = -0.5, and the sun.
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Floor"),
+        Transform::from_xyz(0.0, -0.55, 0.0).with_scale(Vec3::new(20.0, 0.1, 20.0)),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(engine_core::math::Quat::from_rotation_x(-1.0)),
+        engine_app::prelude::Sun {
+            color: Vec3::splat(1.5),
+            ambient: Vec3::splat(0.25),
+        },
+    ));
+    let options = engine_scene::SaveOptions {
+        id: Some(AssetId::new()),
+        assets: None,
+        prefabs: None,
+    };
+    let mut text = String::new();
+    engine_scene::save_with(
+        &mut world,
+        &engine_scene::SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor character drop test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let entities = player.world_mut().len();
+    // His file pressed in the dock, dragged a little, then held over the view's middle
+    // until he rests on the floor, and let go there.
+    let file = game.text_at("CesiumMan.gltf").expect("his file listed");
+    pointer(&mut game, file, None);
+    frame(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, file, Some(true));
+    frame(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, [file[0] + 12.0, file[1]], None);
+    frame(&mut player, &mut game, &mut overlay);
+    let [x, y, w, h] = game.view_rect().unwrap();
+    let middle = [(x + w / 2) as f32, (y + h / 2) as f32];
+    pointer(&mut game, middle, None);
+    for _ in 0..30 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    pointer(&mut game, middle, Some(false));
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    let world = player.world_mut();
+    assert_eq!(world.len(), entities + 1, "one entity, his joints none");
+    let man = engine_scene::find_named(world, "CesiumMan").expect("kept");
+    assert_eq!(world.children(man).count(), 0);
+    assert_eq!(
+        world.get::<Model>(man).unwrap().mesh,
+        AssetRef::part(id, "Cesium_Man")
+    );
+    let t = *world.get::<Transform>(man).unwrap();
+    let up = t.rotation * Vec3::Z;
+    println!(
+        "placed at {} turned {:?}, his z up along {up}",
+        t.translation, t.rotation
+    );
+    assert!(up.dot(Vec3::Y) > 0.999, "upright: {up}");
+    assert!((t.translation.y + 0.5).abs() < 1e-3, "on the floor: {t:?}");
+    assert_eq!(game.selection(), [man]);
+    // Drawn skinned: his skin made in the background, then his Clips show.
+    let started = Instant::now();
+    while game.clips().0.is_empty() && started.elapsed() < Duration::from_secs(20) {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let (rows, _) = game.clips();
+    assert_eq!(rows.len(), 1, "his walk: {rows:?}");
+    assert!(player.model_rig(man).is_some(), "drawn skinned");
+    if let Ok(out) = std::env::var("ENGINE_EDITOR_CHARACTER_PNG") {
+        for _ in 0..30 {
+            frame(&mut player, &mut game, &mut overlay);
+        }
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(out, png).unwrap();
+    }
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

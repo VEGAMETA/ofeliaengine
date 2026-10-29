@@ -524,6 +524,21 @@ mod tests {
                 |(lo, hi), &p| (lo.min(Vec3::from(p)), hi.max(Vec3::from(p))),
             );
             let reach = (hi - lo).length().max(1e-3) * 2.0;
+            // The rest pose is where the file's positions are: its box theirs, which a drop
+            // rests on the floor (ADR 0124's E12-1c).
+            let (rest_lo, rest_hi) = (0..part.mesh.positions.len()).fold(
+                (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+                |(lo, hi), v| {
+                    let p = skinned(part, &rig.rest, v);
+                    (lo.min(p), hi.max(p))
+                },
+            );
+            println!("{path}: rest pose {rest_lo}..{rest_hi}, positions {lo}..{hi}");
+            assert!(
+                (rest_lo - lo).abs().max_element() < 5e-4 * reach
+                    && (rest_hi - hi).abs().max_element() < 5e-4 * reach,
+                "{path}: the rest pose's box {rest_lo}..{rest_hi}, the positions' {lo}..{hi}"
+            );
             let step = (part.mesh.positions.len() / 50).max(1);
             for v in (0..part.mesh.positions.len()).step_by(step) {
                 let rest = skinned(part, &rig.rest, v);

@@ -895,6 +895,11 @@ will do:
   pointer moves instead of letting the pointer through to what is behind.
 - **What a model becomes:**
   - a file of one node is one entity, named after the file;
+  - a character (a file whose mesh is drawn skinned) is one entity too, named after the
+    file and turned and scaled as its file stands it. Its skeleton's joints, and nodes
+    that draw nothing, become no entities (ADR 0124). The file's other meshes become
+    entities under it, at their places in the file; a sword in a hand stays where the
+    skeleton's rest pose holds it;
   - otherwise a root named after the file, with an entity for each node of the file's
     scene (its transform, and a model of its mesh and material).
 - **Fields:** a model's `mesh` takes a model file of one mesh, its `material` a material
@@ -1511,7 +1516,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E12 | animation: ↑/↓ through clips, two side by side and the floor under root motion (E12-1b-3), then one entity per character with its joints (E12-1c), the `Animator` (E12-2), the Animation tab (E12-3), keys (E12-4) and graphs (E12-5), as ADR 0124 decided |
+| E12 | animation: a character's joints in the viewport and the tree, and attachments (E12-1c), ↑/↓ through clips, two side by side and the floor under root motion (E12-1b-3), the `Animator` (E12-2), the Animation tab (E12-3), keys (E12-4) and graphs (E12-5), as ADR 0124 decided |
 
 The whole plan is ADR 0107 §7.
 
