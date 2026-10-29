@@ -866,6 +866,59 @@ What was built:
   are. A function calling a function that calls it is refused only when the preview is
   made, not in the search.
 
+## As built (E10-4g-1, 2026-10-29): node previews in the engine
+
+The materials UX note's item 11: each node's value on the canvas, drawn by the engine.
+
+- **Options weighed:**
+  - **a. One function and one entry point for every node** (chosen). The editing build's
+    `node_preview(ctx, p, node)` writes the nodes in the order they are read, each followed
+    by `if (node == k) return <its value>;`, so a preview computes what its node reads and
+    no more. A change of the graph's code is one compile, however many nodes it shows.
+  - **b. An entry point per node.** Every change of code would be a compile per node, at
+    0.3–0.5 s each: seconds for a graph of ten.
+  - **c. The values computed on the CPU.** Impossible for Expression nodes, `[Node]`
+    functions and textures.
+- **The tile's shape:** a sphere where the node reads the surface's place, normal or
+  tangent (or code that may: an Expression, a `[Node]` call taking `ctx`); otherwise a
+  flat square of texture coordinates (0 to 1, the first at the top left). This is Unity's
+  rule: 2D unless a 3D input is upstream. Unreal draws every node preview flat, and
+  Blender draws none.
+- **The editing build:**
+  - previews for every node the canvas shows: not the surface, not reroutes, not the
+    nodes of the functions a call makes (`Generated::previews`: the node and its shape,
+    in `node_preview`'s order);
+  - an image nothing reaches yet is a parameter, so a dropped image shows at once;
+  - a number nothing reaches stays a literal, keeping the 256 bytes of parameters for the
+    material's own;
+  - a loop among nodes nothing reaches: no previews, the material as it was;
+  - the saved build has none of it.
+- **How they are drawn:** `nodePreviewFragment(Background)` in `forward.slang`.
+  - It is compiled for a type with `-D MATERIAL_NODE_PREVIEWS`, only for that entry point
+    and in a compile of its own. A type without previews (written by hand) still compiles
+    its other entry points, and the engine's own version draws nothing.
+  - The pipeline is the background vertex shader with it (RGBA8 sRGB, no depth). The
+    engine's is described the first time it is asked for (a game never does), and a
+    graph's is derived from it as any type's is.
+  - One draw per tile, its viewport the tile. The push constants carry the node's number,
+    its shape and the material's slot; the frame carries the material table's parameters
+    and a camera at +Z (for the view direction and Fresnel).
+- **The player:** `request_node_previews(NodePreviewRequest { key, material, spheres })`
+  and `take_node_previews`.
+  - One atlas a frame at most, drawn only once no material type is on its way, so never
+    from the old code nor with the old parameters' layout.
+  - Tiles of 64 pixels, 8 across, 128 at most.
+  - Each read back is 2 MiB, frames in flight + 1 of them, made the first time.
+- **Tests:**
+  - the generator's order, shapes, parameters and loop;
+  - every node kind's editing build checked by Slang inside `forward.slang`;
+  - on both GPUs, a graph's atlas: red, green, their sum yellow, and the normal on a
+    sphere, blue facing the camera and transparent around it. From the request to the
+    pixels took 0.58 s on the Radeon and 0.60 s on the RTX, its type's compile included.
+- **Not yet:**
+  - the editor's tiles on the canvas (E10-4g-2);
+  - a function call's own preview, and previews in a `.mfunc` tab.
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,

@@ -1282,3 +1282,140 @@ fn a_variant_draws_its_base_and_follows_it() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A material graph's node previews (ADR 0123's E10-4g): from its editing build, an atlas
+/// of its nodes' values, a tile each in the order `node_preview` numbers them: a red and a
+/// green colour over flat squares, their sum yellow, and the surface's normal on a sphere,
+/// blue where it faces the camera and transparent around it.
+#[test]
+fn a_graphs_node_previews_draw_each_nodes_value() {
+    use engine_app::{NODE_TILE, NodePreviewRequest};
+    use engine_material_graph::graph::OUTPUT;
+    use engine_material_graph::{Build, Graph, Model, Node, ParamType, PortRef, generate};
+    let dir = std::env::temp_dir().join(format!("ofelia-node-previews-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("materials")).unwrap();
+    let mut graph = Graph::new(Model::Unlit);
+    graph
+        .add(
+            "a",
+            Node::new("color", [0.0; 2]).with_value([0.9, 0.05, 0.05, 1.0]),
+        )
+        .add(
+            "b",
+            Node::new("color", [0.0; 2]).with_value([0.05, 0.9, 0.05, 1.0]),
+        )
+        .add("c", Node::new("add", [0.0; 2]))
+        .add("n", Node::new("normal", [0.0; 2]))
+        .link(PortRef::new("a", "rgba"), PortRef::new("c", "a"))
+        .link(PortRef::new("b", "rgba"), PortRef::new("c", "b"))
+        .link(PortRef::new("c", "out"), PortRef::new(OUTPUT, "base"));
+    let generated = generate(&graph, "Previewed", Build::Editing).unwrap();
+    let order: Vec<&str> = generated.previews.iter().map(|p| p.node.as_str()).collect();
+    assert_eq!(order, ["a", "b", "c", "n"]);
+    // Its module and a material of it, each parameter its node's value: what the editor's
+    // graph preview holds.
+    std::fs::write(dir.join("materials/previewed.slang"), &generated.text).unwrap();
+    let (material_id, module_id) = (AssetId::new(), AssetId::new());
+    let mut text = format!(
+        "[material version=2 id={material_id}]\n\nshader = asset(\"materials/previewed.slang\", \
+         {module_id})\ntype = \"Previewed\"\nlook = Own\n"
+    );
+    for p in &generated.params {
+        match p.ty {
+            ParamType::Float(1) => {
+                text.push_str(&format!("numbers[\"{}\"] = {}\n", p.name, p.value[0]))
+            }
+            ParamType::Float(w) => {
+                let parts: Vec<String> = p.value[..usize::from(w)]
+                    .iter()
+                    .map(f32::to_string)
+                    .collect();
+                text.push_str(&format!(
+                    "vectors[\"{}\"] = [{}]\n",
+                    p.name,
+                    parts.join(", ")
+                ));
+            }
+            ParamType::Texture => {}
+        }
+    }
+    std::fs::write(dir.join("materials/previewed.material"), text).unwrap();
+    let material = AssetRef::file(material_id);
+    let mut paths = AssetPaths::new();
+    paths.insert(material, "materials/previewed.material");
+
+    let settings = PlayerSettings {
+        title: String::from("node previews test"),
+        window: Window::Offscreen {
+            width: 64,
+            height: 64,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    player.assets_mut().add_paths(&paths);
+    let mut game = Still;
+    player.request_node_previews(NodePreviewRequest {
+        key: 9,
+        material,
+        spheres: generated.previews.iter().map(|p| p.sphere).collect(),
+    });
+    let started = Instant::now();
+    let mut atlases = Vec::new();
+    while atlases.is_empty() {
+        player.frame(&mut game).unwrap();
+        player.take_node_previews(&mut atlases);
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "no node previews"
+        );
+    }
+    println!(
+        "node previews drawn after {:.2} s",
+        started.elapsed().as_secs_f64()
+    );
+    let atlas = &atlases[0];
+    assert_eq!((atlas.key, atlas.columns, atlas.count), (9, 4, 4));
+    let width = (atlas.columns * NODE_TILE) as usize;
+    assert_eq!(atlas.pixels.len(), width * NODE_TILE as usize * 4);
+    let at = |tile: u32, x: u32, y: u32| {
+        let px = ((tile % atlas.columns) * NODE_TILE + x) as usize;
+        let py = ((tile / atlas.columns) * NODE_TILE + y) as usize;
+        let i = (py * width + px) * 4;
+        [0, 1, 2, 3].map(|c| f32::from(atlas.pixels[i + c]))
+    };
+    let middle = NODE_TILE / 2;
+    let [r, g, b, a] = at(0, middle, middle);
+    assert!(
+        r > 1.5 * g && r > 1.5 * b && a > 250.0,
+        "red: {r} {g} {b} {a}"
+    );
+    let [r, g, b, _] = at(1, middle, middle);
+    assert!(g > 1.5 * r && g > 1.5 * b, "green: {r} {g} {b}");
+    let [r, g, b, _] = at(2, middle, middle);
+    assert!(r > 1.5 * b && g > 1.5 * b, "their sum, yellow: {r} {g} {b}");
+    let [r, g, b, a] = at(3, middle, middle);
+    assert!(
+        b > 1.5 * r && b > 1.5 * g && a > 250.0,
+        "the normal, facing: {r} {g} {b} {a}"
+    );
+    let [.., a] = at(3, 1, 1);
+    assert!(a < 1.0, "around the sphere: {a}");
+    let [.., a] = at(0, 1, 1);
+    assert!(a > 250.0, "a flat square to its corners: {a}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

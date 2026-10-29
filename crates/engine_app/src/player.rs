@@ -1355,6 +1355,19 @@ impl Player {
         self.previews.take(out);
     }
 
+    /// Asks for a material graph's node previews (ADR 0123's E10-4g): an atlas drawn in a
+    /// later frame from `request.material`'s type (a graph's editing build), once it is
+    /// made and no material type is on its way, handed out by [`Self::take_node_previews`].
+    /// It replaces a request of the same key not drawn yet.
+    pub fn request_node_previews(&mut self, request: crate::NodePreviewRequest) {
+        self.previews.ask_nodes(request);
+    }
+
+    /// The node previews drawn since the last call, appended to `out`.
+    pub fn take_node_previews(&mut self, out: &mut Vec<crate::NodePreviews>) {
+        self.previews.take_nodes(out);
+    }
+
     /// Makes the next frame wait until every asset its models use is made: what the frame
     /// after [`Self::load_scene`] does. Assets are otherwise made in the background, and a
     /// model draws once its own are (ADR 0108's E4-4).
@@ -3528,6 +3541,13 @@ impl Player {
             frame.number,
             types_pending,
         );
+        // A graph's node previews (ADR 0123's E10-4g): one atlas a frame.
+        let node_previews = self.previews.pick_nodes(
+            &mut self.assets,
+            &mut self.materials,
+            &mut self.allocator,
+            types_pending,
+        );
         if preview.is_some() {
             self.previews.prepare(
                 &mut self.renderer,
@@ -3831,6 +3851,18 @@ impl Player {
                     )
                     .map_err(AppError::at("the view's passes"))?,
             };
+            if let Some(drawing) = node_previews {
+                self.previews.declare_nodes(
+                    &mut fg,
+                    context.ring,
+                    &self.device,
+                    &self.bindless,
+                    self.renderer.forward(),
+                    &mats,
+                    drawing,
+                    frame.number,
+                );
+            }
             if let Some(drawing) = &preview {
                 self.previews.declare(
                     &mut fg,

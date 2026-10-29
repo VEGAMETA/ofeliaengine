@@ -134,6 +134,12 @@ fn every_kind_and_model_compiles_inside_forward_slang() {
             &format!("K_{}_scalar", kind.name),
             Build::Saved,
         );
+        // Its node previews too (E10-4g).
+        add(
+            &one(kind, false),
+            &format!("E_{}_scalar", kind.name),
+            Build::Editing,
+        );
         if kind.inputs.iter().any(|i| i.ty == PortType::Dynamic) {
             add(
                 &one(kind, true),
