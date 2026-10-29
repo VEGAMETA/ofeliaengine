@@ -985,6 +985,25 @@ The materials UX note's item 11: each node's value on the canvas, drawn by the e
   - on both GPUs, a call's tile and a function tab's three.
 - **Left:** none of E10-4g. The ports are still `float` to `float4`.
 
+## As built (2026-10-29): a reload in one compile
+
+E10-4g-1 compiled `nodePreviewFragment` in a request of its own, with
+`-D MATERIAL_NODE_PREVIEWS`, so that a hand-written type still compiled its other entry
+points. A reload also reflected the parameters in a third request of the same module.
+Three front ends for one edit made a graph's code edit reach the sphere in 0.62–0.77 s
+(over CLAUDE.md §5's 500 ms).
+
+- The editing build's module defines `MATERIAL_NODE_PREVIEWS` itself (behind
+  `#ifndef`), and only when it writes `node_preview`. `forward.slang` includes the module
+  before `nodePreviewFragment`, so the entry point sees the define. A type without the
+  define still compiles that entry point; it draws nothing.
+- A reload compiles every entry point it draws in one request and reads `<type>.Params`
+  from the same request (`Compiler::compile_file_reflecting`). When the compile fails, the
+  layout fails with it, and the layout the type had stays.
+- Measured (ref-1, the editor's `graph` tests): a link changing the code, with previews
+  on, 0.73–0.77 → 0.39–0.43 s; a link bringing a new parameter, previews off,
+  0.62–0.68 → 0.43–0.48 s, on both GPUs.
+
 ## The team's answers (2026-10-28)
 
 1. **The graph file's name:** `.mgraph` (the owner's own choice over the two proposed,

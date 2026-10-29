@@ -872,6 +872,12 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **A material type's reload in one compile** (#PR, ADR 0123's as-built): the entry
+    points, the node previews' and the parameters' layout from one Slang request
+    (`Compiler::compile_file_reflecting`; the editing build's module defines
+    `MATERIAL_NODE_PREVIEWS`). A graph's code edit reaches the sphere and its tiles in
+    0.39–0.43 s with previews on (0.73–0.77 s before), a new parameter in 0.43–0.48 s
+    (0.62–0.68 s), on both GPUs: within the 500 ms budget.
   - **E10-4g-3, previews of function calls and in a function's tab** (#445, ADR 0123's
     as-built): `expand` gives where every call's outputs come from (`CallOutputs`,
     through later calls and inside functions); the editing build previews points (a canvas
@@ -2215,12 +2221,13 @@ grown, divide and conquer); the old labels stay in parentheses.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
-- **A material type's reload compiles twice** (E10-3f-2, 2026-10-28): a graph's link
-  that brings a new parameter reaches the preview's sphere in 0.56–0.77 s. On the
-  Radeon about 340 ms go to compiling the type's entry points again and about 180 ms to
-  reflecting its parameters in a second compile of the same module; reflecting them from
-  the reload's own compile would take the second away. The editor's own writes also wait
-  out the 30 ms of quiet kept for other editors' saves.
+- **Fixed (2026-10-29): a material type's reload compiled two or three times** (found
+  with E10-3f-2, 2026-10-28; #PR): the entry points, the node previews' apart with their
+  define, and the parameters' layout in a compile of its own. Now one Slang request does
+  all three (the editing build's module defines `MATERIAL_NODE_PREVIEWS` itself), and a
+  graph's code edit reaches the sphere in 0.39–0.48 s on both GPUs (0.62–0.77 s before),
+  within the 500 ms budget. Left: the editor's own writes still wait out the 30 ms of
+  quiet kept for other editors' saves.
 
 - **The colliders' overlay in heavy scenes** (ADR 0117, 2026-10-22): with 10,000 models
   shown it checks every model's place each frame (99 µs of the editor's frame) and copies

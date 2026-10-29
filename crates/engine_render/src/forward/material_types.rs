@@ -161,6 +161,28 @@ struct TypeEntry {
     compiled: Option<(Duration, u32)>,
 }
 
+impl TypeEntry {
+    /// A reflection of its parameters that arrived for generation `generation` (passed
+    /// over when a newer one was sent): its layout, or why there is none, a reload's
+    /// failure keeping the layout it had.
+    fn take_params(&mut self, generation: u32, result: Result<StructLayout, String>) {
+        if self.params_generation != generation {
+            return;
+        }
+        match result {
+            Ok(layout) => self.params = Params::Ready(layout),
+            Err(e) => {
+                log::error!("material type {}: its parameters: {e}", self.desc.name);
+                if matches!(self.params, Params::Ready(_)) {
+                    return;
+                }
+                self.params = Params::Failed(e);
+            }
+        }
+        self.params_revision = self.params_revision.wrapping_add(1);
+    }
+}
+
 /// Where a type's parameters' layout stands.
 enum Params {
     NotAsked,
@@ -181,13 +203,15 @@ enum Job {
         module: PathBuf,
         type_name: String,
     },
-    /// The entry points a type is drawn with, again after a change.
+    /// The entry points a type is drawn with, again after a change; its parameters'
+    /// layout from the same compile, for the reflection of this generation if asked.
     Reload {
         ty: MaterialTypeId,
         generation: u32,
         entries: Vec<CString>,
         module: PathBuf,
         type_name: String,
+        params: Option<u32>,
     },
     /// A type's parameters' layout (`<type>.Params`).
     Params {
@@ -210,6 +234,7 @@ enum Done {
         generation: u32,
         result: Result<Compiled, String>,
         took: Duration,
+        params: Option<(u32, Result<StructLayout, String>)>,
     },
     Params {
         ty: MaterialTypeId,
@@ -225,75 +250,57 @@ struct CompilerThread {
     _thread: std::thread::JoinHandle<()>,
 }
 
-/// A material graph's node previews' entry point (ADR 0123's E10-4g): compiled with
-/// `MATERIAL_NODE_PREVIEWS`, which only a graph's editing build can be.
-const NODE_PREVIEWS: &[u8] = b"nodePreviewFragment";
-
-/// `entries` of `type_name` in `module` compiled in one request; a graph's node previews'
-/// apart, with their define, so that a type without them compiles its other entry points
-/// all the same.
+/// `entries` of `type_name` in `module` compiled in one request, a graph's node previews
+/// among them (its editing build's module defines `MATERIAL_NODE_PREVIEWS`; another type's
+/// draws nothing); with `params`, its parameters' layout read from the same request
+/// (ADR 0123's E10-4g: one front end for a reload, not three).
 fn compile(
     compiler: Option<&mut Compiler>,
     shader_dir: &Path,
     module: &Path,
     type_name: &str,
     entries: &[CString],
-) -> Result<Compiled, String> {
-    let compiler = compiler.ok_or_else(|| String::from("no Slang compiler"))?;
-    let (previews, shading): (Vec<CString>, Vec<CString>) = entries
-        .iter()
-        .cloned()
-        .partition(|e| e.as_bytes() == NODE_PREVIEWS);
-    let mut options =
+    params: bool,
+) -> (
+    Result<Compiled, String>,
+    Option<Result<StructLayout, String>>,
+) {
+    let Some(compiler) = compiler else {
+        let none = String::from("no Slang compiler");
+        return (Err(none.clone()), params.then_some(Err(none)));
+    };
+    let options =
         engine_shader::material_types::material_type_options(shader_dir, module, type_name);
-    let mut spirv = Vec::new();
-    let mut dependencies = Vec::new();
-    if !shading.is_empty() {
-        (spirv, dependencies) = compile_entries(compiler, shader_dir, &shading, &options)?;
-    }
-    if !previews.is_empty() {
-        options
-            .defines
-            .push((String::from("MATERIAL_NODE_PREVIEWS"), String::from("1")));
-        match compile_entries(compiler, shader_dir, &previews, &options) {
-            Ok((more, read)) => {
-                spirv.extend(more);
-                for d in read {
-                    if !dependencies.contains(&d) {
-                        dependencies.push(d);
-                    }
-                }
-            }
-            Err(e) if shading.is_empty() => return Err(e),
-            Err(e) => log::warn!("material type {type_name}: its node previews: {e}"),
-        }
-    }
-    Ok((spirv, dependencies))
-}
-
-/// `entries` of `forward.slang` compiled with `options`.
-fn compile_entries(
-    compiler: &mut Compiler,
-    shader_dir: &Path,
-    entries: &[CString],
-    options: &CompileOptions,
-) -> Result<Compiled, String> {
     let points: Vec<EntryPoint> = entries
         .iter()
         .map(|e| EntryPoint::new(&e.to_string_lossy(), Stage::Fragment))
         .collect();
-    let out = compiler
-        .compile_file(&shader_dir.join("forward.slang"), &points, options)
-        .map_err(|e| e.to_string())?;
-    if out.entries.len() != entries.len() {
-        return Err(String::from("not every entry point compiled"));
-    }
-    let spirv = entries
-        .iter()
-        .cloned()
-        .zip(out.entries.into_iter().map(|e| Arc::from(e.spirv)))
-        .collect();
-    Ok((spirv, out.dependencies))
+    let path = shader_dir.join("forward.slang");
+    let (out, layout) = if params {
+        let name = format!("{type_name}.Params");
+        match compiler.compile_file_reflecting(&path, &points, &options, &name) {
+            Ok((out, layout)) => (Ok(out), Some(layout.map_err(|e| e.to_string()))),
+            Err(e) => {
+                let e = e.to_string();
+                (Err(e.clone()), Some(Err(e)))
+            }
+        }
+    } else {
+        let out = compiler.compile_file(&path, &points, &options);
+        (out.map_err(|e| e.to_string()), None)
+    };
+    let compiled = out.and_then(|out| {
+        if out.entries.len() != entries.len() {
+            return Err(String::from("not every entry point compiled"));
+        }
+        let spirv = entries
+            .iter()
+            .cloned()
+            .zip(out.entries.into_iter().map(|e| Arc::from(e.spirv)))
+            .collect();
+        Ok((spirv, out.dependencies))
+    });
+    (compiled, layout)
 }
 
 impl CompilerThread {
@@ -328,7 +335,9 @@ impl CompilerThread {
                                 &module,
                                 &type_name,
                                 core::slice::from_ref(&entry),
-                            ),
+                                false,
+                            )
+                            .0,
                             took: started.elapsed(),
                             ty,
                             entry,
@@ -339,18 +348,24 @@ impl CompilerThread {
                             entries,
                             module,
                             type_name,
-                        } => Done::Reload {
-                            result: compile(
+                            params,
+                        } => {
+                            let (result, layout) = compile(
                                 compiler.as_mut(),
                                 &shader_dir,
                                 &module,
                                 &type_name,
                                 &entries,
-                            ),
-                            took: started.elapsed(),
-                            ty,
-                            generation,
-                        },
+                                params.is_some(),
+                            );
+                            Done::Reload {
+                                result,
+                                took: started.elapsed(),
+                                ty,
+                                generation,
+                                params: params.zip(layout),
+                            }
+                        }
                         Job::Params {
                             ty,
                             generation,
@@ -849,6 +864,10 @@ impl MaterialTypes {
                 self.compiler = CompilerThread::start(self.shader_dir.clone());
             }
             let generation = t.generation.wrapping_add(1);
+            // Its parameters may have changed too: reflected again from the same compile,
+            // if they were asked for (the previous layout stands until the new one arrives).
+            let asked = !matches!(t.params, Params::NotAsked);
+            let params = asked.then(|| t.params_generation.wrapping_add(1));
             let sent = self.compiler.as_ref().is_some_and(|c| {
                 c.jobs
                     .send(Job::Reload {
@@ -857,6 +876,7 @@ impl MaterialTypes {
                         entries,
                         module: t.desc.module.clone(),
                         type_name: t.desc.type_name.clone(),
+                        params,
                     })
                     .is_ok()
             });
@@ -867,10 +887,11 @@ impl MaterialTypes {
                     again: false,
                 };
                 self.compiling += 1;
-                // Its parameters may have changed too: reflected again, if they were asked
-                // for (the previous layout stands until the new one arrives).
-                if !matches!(t.params, Params::NotAsked) {
-                    reflect.push(MaterialTypeId(k as u16 + 1));
+                if let Some(p) = params {
+                    t.params_generation = p;
+                    if matches!(t.params, Params::Failed(_)) {
+                        t.params = Params::Asked;
+                    }
                 }
             } else {
                 t.reload = Reload::Idle;
@@ -964,12 +985,18 @@ impl MaterialTypes {
                 generation,
                 result,
                 took,
+                params,
             } => {
                 let index = usize::from(ty.0) - 1;
                 let hot = self.hot_reload.is_some();
                 let Some(t) = self.types.get_mut(index) else {
                     return;
                 };
+                // Its parameters' layout, read from the same compile (whatever became of
+                // the entry points: a newer reload answers for those).
+                if let Some((asked, layout)) = params {
+                    t.take_params(asked, layout);
+                }
                 if t.generation != generation {
                     return;
                 }
@@ -1038,24 +1065,9 @@ impl MaterialTypes {
                 generation,
                 result,
             } => {
-                let Some(t) = self.types.get_mut(usize::from(ty.0) - 1) else {
-                    return;
-                };
-                if t.params_generation != generation {
-                    return;
+                if let Some(t) = self.types.get_mut(usize::from(ty.0) - 1) {
+                    t.take_params(generation, result);
                 }
-                match result {
-                    Ok(layout) => t.params = Params::Ready(layout),
-                    Err(e) => {
-                        log::error!("material type {}: its parameters: {e}", t.desc.name);
-                        // A reload's failure keeps the layout the type had.
-                        if matches!(t.params, Params::Ready(_)) {
-                            return;
-                        }
-                        t.params = Params::Failed(e);
-                    }
-                }
-                t.params_revision = t.params_revision.wrapping_add(1);
             }
         }
     }

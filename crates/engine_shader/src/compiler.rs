@@ -306,6 +306,38 @@ impl Compiler {
         options: &CompileOptions,
     ) -> Result<CompileOutput, ShaderError> {
         engine_profiler::zone!("shader::Compiler::compile");
+        let (request, out) = self.compile_request(path, source, entries, options)?;
+        drop(request);
+        Ok(out)
+    }
+
+    /// [`Self::compile_file`], and the layout of the struct `type_name` read from the same
+    /// compile's reflection, as [`Self::reflect_struct`] reads it: one front end for both
+    /// (a material type's reload and its parameters, ADR 0123's E10-4g). The layout's own
+    /// failure does not fail the compile.
+    pub fn compile_file_reflecting(
+        &mut self,
+        path: &Path,
+        entries: &[EntryPoint],
+        options: &CompileOptions,
+        type_name: &str,
+    ) -> Result<(CompileOutput, Result<StructLayout, ShaderError>), ShaderError> {
+        engine_profiler::zone!("shader::Compiler::compile_reflecting");
+        let source = std::fs::read_to_string(path)?;
+        let (request, out) = self.compile_request(path, &source, entries, options)?;
+        let layout = self.struct_layout(&request, path, type_name);
+        drop(request);
+        Ok((out, layout))
+    }
+
+    /// A compile of `source` and its output, the request kept (its reflection readable).
+    fn compile_request(
+        &self,
+        path: &Path,
+        source: &str,
+        entries: &[EntryPoint],
+        options: &CompileOptions,
+    ) -> Result<(RequestGuard<'_>, CompileOutput), ShaderError> {
         let (request, entry_indices, diagnostics) =
             self.run(path, source, entries, options, Mode::Code)?;
         let f = &self.library.functions;
@@ -365,13 +397,14 @@ impl Compiler {
                 })
                 .collect()
         };
-        drop(request);
-
-        Ok(CompileOutput {
-            entries: compiled,
-            dependencies,
-            diagnostics,
-        })
+        Ok((
+            request,
+            CompileOutput {
+                entries: compiled,
+                dependencies,
+                diagnostics,
+            },
+        ))
     }
 
     /// The layout of the struct `type_name` (for example `VelvetMaterial.Params`, an
@@ -387,6 +420,19 @@ impl Compiler {
         engine_profiler::zone!("shader::Compiler::reflect_struct");
         let source = std::fs::read_to_string(path)?;
         let (request, _, _) = self.run(path, &source, &[], options, Mode::Check)?;
+        let layout = self.struct_layout(&request, path, type_name);
+        drop(request);
+        layout
+    }
+
+    /// The layout of the struct `type_name` in `request`'s reflection (a request of `path`
+    /// that compiled).
+    fn struct_layout(
+        &self,
+        request: &RequestGuard<'_>,
+        path: &Path,
+        type_name: &str,
+    ) -> Result<StructLayout, ShaderError> {
         let f = &self.library.functions;
         let error = |diagnostics: String| ShaderError::Compile {
             path: path.to_owned(),
@@ -418,7 +464,6 @@ impl Compiler {
                 natural_layout(f, layout, "").map_err(|e| error(format!("`{type_name}`: {e}")))?;
             (struct_name, parts)
         };
-        drop(request);
         Ok(StructLayout {
             name: struct_name,
             size: parts.size,

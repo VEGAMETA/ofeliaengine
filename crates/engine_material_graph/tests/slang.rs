@@ -186,7 +186,9 @@ fn every_kind_and_model_compiles_inside_forward_slang() {
     let file = dir.join("graphs.slang");
     std::fs::write(&file, &module).unwrap();
     let shaders = shader_dir();
-    let options = material_type_options(&shaders, &file, &types[0]);
+    // The editing build's type as the one drawn: its module (among the others) turns on
+    // `nodePreviewFragment`, which calls the drawn type's `node_preview` (E10-4g).
+    let options = material_type_options(&shaders, &file, "Editing");
     let found = compiler.check_file(&shaders.join("forward.slang"), &options);
     let lines: Vec<&str> = module.lines().collect();
     let errors: Vec<String> = found
