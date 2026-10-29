@@ -688,6 +688,8 @@ struct FrameLists {
     part_options: Vec<&'static str>,
     /// A bus field's open list (E11-3d).
     bus_options: Vec<&'static str>,
+    /// The active character's clips (ADR 0124's E12-1b).
+    clip_rows: Vec<crate::shell::ClipRow<'static>>,
 }
 
 /// What the tree's rows are collected with, kept between frames.
@@ -954,7 +956,7 @@ fn commands() -> (Commands, CommandIds) {
             "Audio",
             "Take Back Play's Mixer Changes",
         ),
-        hear: c.register("sound.hear", "Sound", "Hear Selection in Place"),
+        hear: c.register("scene.in_place", "Scene", "Play Selection in Place"),
         listen_scene: c.register("sound.listen_scene", "Sound", "Listen to the Scene"),
         debugger: c.register("view.debugger", "View", "Debugger"),
         find: c.register("scene.find", "Scene", "Go to Object"),
@@ -1351,6 +1353,195 @@ struct MixerDrag {
 struct Hearing {
     entities: Vec<Entity>,
     selection: Option<Vec<Entity>>,
+}
+
+/// The Clips' speeds (ADR 0124's E12-1b), and as they are shown.
+const CLIP_SPEEDS: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
+const CLIP_SPEED_TEXTS: [&str; 4] = ["0.25\u{d7}", "0.5\u{d7}", "1\u{d7}", "2\u{d7}"];
+/// A loop's seam from which it is shown jumping (ADR 0124's E12-1b): a centimetre, where a
+/// pop is seen at a few metres.
+const SEAM_JUMPS: f32 = 0.01;
+
+/// A length in meters as the Clips show it: millimetres, centimetres or meters.
+fn length_text(m: f32) -> String {
+    if m < 0.01 {
+        format!("{:.1} mm", m * 1000.0)
+    } else if m < 1.0 {
+        format!("{:.1} cm", m * 100.0)
+    } else {
+        format!("{m:.2} m")
+    }
+}
+
+/// A clip of the inspector's character as the Clips show it (ADR 0124's E12-1b), its texts
+/// made once.
+#[derive(Debug, Clone, PartialEq)]
+struct ClipFacts {
+    /// Its name in its file (what another character's clip is matched by), and as shown
+    /// ("Clip 2" for one without).
+    key: String,
+    name: String,
+    duration: f32,
+    frames: u32,
+    rate: f32,
+    length: String,
+    facts: String,
+    seam: String,
+    jumps: bool,
+}
+
+impl ClipFacts {
+    /// Clip `k` of a character: its name, length in seconds, samples and their rate, bytes,
+    /// largest error, root speed (units a second) and loop seam with the joint jumping most.
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        k: usize,
+        name: &str,
+        duration: f32,
+        samples: u32,
+        rate: f32,
+        bytes: usize,
+        error: f32,
+        speed: f32,
+        (seam, joint): (f32, &str),
+    ) -> Self {
+        let frames = samples.saturating_sub(1).max(1);
+        let moves = if speed < 0.01 {
+            String::from("in place")
+        } else {
+            format!("{speed:.2} m/s")
+        };
+        let size = if bytes < 1000 {
+            format!("{bytes} B")
+        } else {
+            format!("{:.1} kB", bytes as f32 / 1000.0)
+        };
+        let jumps = seam >= SEAM_JUMPS;
+        Self {
+            key: name.to_owned(),
+            name: if name.is_empty() {
+                format!("Clip {}", k + 1)
+            } else {
+                name.to_owned()
+            },
+            duration,
+            frames,
+            rate,
+            length: format!("{duration:.2} s"),
+            facts: format!(
+                "{frames} frames \u{b7} {moves} \u{b7} {size} \u{b7} \u{2264} {}",
+                length_text(error)
+            ),
+            seam: if jumps {
+                format!("jumps {} at {joint}", length_text(seam))
+            } else {
+                format!("loops within {}", length_text(seam))
+            },
+            jumps,
+        }
+    }
+
+    /// A rig's clips.
+    fn of(rig: &engine_app::Rig) -> Vec<Self> {
+        let names = rig.skeleton().names();
+        rig.clips()
+            .iter()
+            .enumerate()
+            .map(|(k, c)| {
+                let (seam, joint) = c.seam();
+                Self::new(
+                    k,
+                    c.name(),
+                    c.duration(),
+                    c.sample_count(),
+                    c.sample_rate(),
+                    c.bytes().0,
+                    c.max_error(),
+                    c.root_speed(),
+                    (seam, names.get(joint).map_or("", String::as_str)),
+                )
+            })
+            .collect()
+    }
+}
+
+/// The active character's Clips (ADR 0124's E12-1b): the entity whose model is drawn skinned,
+/// its rig's place (made anew when its file is read again), its clips, the chosen one and the
+/// playhead along it, and whether the character holds the playhead's pose while nothing
+/// plays (after a pick, a scrub or ■; Escape lets it go).
+#[derive(Debug)]
+struct ClipsView {
+    entity: Entity,
+    rig: usize,
+    clips: Vec<ClipFacts>,
+    chosen: usize,
+    time: f32,
+    held: bool,
+    /// The time its text shows, and the text ("frame 18 / 48 · 0.75 s").
+    shown: f32,
+    time_text: String,
+}
+
+impl ClipsView {
+    fn new(entity: Entity, rig: usize, clips: Vec<ClipFacts>) -> Self {
+        Self {
+            entity,
+            rig,
+            clips,
+            chosen: 0,
+            time: 0.0,
+            held: false,
+            shown: f32::NAN,
+            time_text: String::with_capacity(48),
+        }
+    }
+
+    /// The chosen clip's length.
+    fn length(&self) -> f32 {
+        self.clips.get(self.chosen).map_or(0.0, |c| c.duration)
+    }
+
+    /// The playhead, 0 to 1 along the chosen clip.
+    fn playhead(&self) -> f32 {
+        let d = self.length();
+        if d > 0.0 { self.time / d } else { 0.0 }
+    }
+
+    /// Its time's text, by the chosen clip's frame (so a looping clip's texts repeat, and
+    /// the text layouts with them), written again when that frame changed: in place, no
+    /// allocation once its room has grown.
+    fn refresh_time(&mut self) {
+        let Some(c) = self.clips.get(self.chosen) else {
+            return;
+        };
+        let frame = ((self.time * c.rate).round() as u32).min(c.frames);
+        let at = frame as f32 / c.rate.max(1e-6);
+        if self.shown == at {
+            return;
+        }
+        self.shown = at;
+        self.time_text.clear();
+        let _ = write!(
+            self.time_text,
+            "frame {frame} / {} \u{b7} {at:.2} s",
+            c.frames
+        );
+    }
+}
+
+/// Characters playing in place (ADR 0124's E12-1b: P, or ▶ in the Clips): each entity and
+/// the clip it plays (found with the first frame: the chosen clip's name, else its first),
+/// the selection it was started for (another ends it), the clip's name, the playhead it
+/// started at and the seconds played since (the speed applied), and when the last frame was.
+/// Nothing is written into the scene.
+#[derive(Debug)]
+struct InPlace {
+    entities: Vec<(Entity, Option<usize>)>,
+    selection: Vec<Entity>,
+    clip: Option<String>,
+    start: f32,
+    played: f32,
+    at: Option<Instant>,
 }
 
 /// A section of the picked bus after its Bus section (E11-2b).
@@ -2755,6 +2946,16 @@ struct Editor {
     /// Sounds heard in place (E11-4b), and whether the player has been told.
     hearing: Option<Hearing>,
     hearing_given: bool,
+    /// The active character's Clips and the section they show under (ADR 0124's E12-1b),
+    /// the characters playing in place, those the player was told to pose last frame and
+    /// this one's, the speed's place in [`CLIP_SPEEDS`], and whether clips loop.
+    clips: Option<ClipsView>,
+    clips_section: Option<usize>,
+    in_place: Option<InPlace>,
+    posed: Vec<Entity>,
+    posing: Vec<Entity>,
+    clip_speed: usize,
+    clip_loop: bool,
     mixer_muted: Vec<String>,
     mixer_soloed: Vec<String>,
     monitor: bool,
@@ -3058,6 +3259,8 @@ struct Editor {
     /// What the overlay outlines (ADR 0109): the GPU scene's slots of the selection, its
     /// children and the hovered entity, as [`Editor::outline`] last found them.
     outline_items: Vec<OutlineItem>,
+    /// The selection's instances this frame (the outline's items but the hovered one).
+    selected_slots: Vec<u32>,
     tools: [String; 4],
     active_tool: usize,
     status: String,
@@ -3689,6 +3892,13 @@ impl Editor {
             mixer_at_play: None,
             hearing: None,
             hearing_given: true,
+            clips: None,
+            clips_section: None,
+            in_place: None,
+            posed: Vec::new(),
+            posing: Vec::new(),
+            clip_speed: 2,
+            clip_loop: true,
             mixer_muted: Vec::new(),
             mixer_soloed: Vec::new(),
             monitor: false,
@@ -3861,6 +4071,7 @@ impl Editor {
             },
             step_menu: None,
             outline_items: Vec::new(),
+            selected_slots: Vec::new(),
             tools: [
                 format!("{} Select", icons::TOOL_SELECT),
                 format!("{} Move", icons::TOOL_MOVE),
@@ -4566,6 +4777,7 @@ impl Editor {
         let mut material_values: Vec<&str> =
             recycle(std::mem::take(&mut self.lists.material_values));
         self.material_section = None;
+        self.clips_section = None;
         let mut sound_section = None;
         let scale_value: [&str; 1];
         let bus_values: [&str; 3];
@@ -5010,6 +5222,20 @@ impl Editor {
                 sections.push(Section {
                     title: self.material_title.as_str(),
                     fields: &asset_fields[..],
+                    script: "",
+                    removable: false,
+                });
+            }
+            // The active character's clips after its components (ADR 0124's E12-1b).
+            if self
+                .clips
+                .as_ref()
+                .is_some_and(|c| Some(c.entity) == self.selection.last().copied())
+            {
+                self.clips_section = Some(sections.len());
+                sections.push(Section {
+                    title: "Clips",
+                    fields: &[],
                     script: "",
                     removable: false,
                 });
@@ -5878,6 +6104,17 @@ impl Editor {
             snapshot,
             snapshots: self.snapshot_menu.then_some(snapshot_items.as_slice()),
         });
+        let mut clip_rows: Vec<crate::shell::ClipRow<'_>> =
+            recycle(std::mem::take(&mut self.lists.clip_rows));
+        if let Some(view) = &self.clips {
+            clip_rows.extend(view.clips.iter().map(|c| crate::shell::ClipRow {
+                name: &c.name,
+                length: &c.length,
+                facts: &c.facts,
+                seam: &c.seam,
+                jumps: c.jumps,
+            }));
+        }
         let model = ShellModel {
             scenes: &scenes,
             active_scene: active_tab,
@@ -5930,6 +6167,20 @@ impl Editor {
                             uv: [0.0, 0.0, 1.0, 1.0],
                         }),
                     note: "Drawing…",
+                })
+            }),
+            clips: self.clips_section.and_then(|section| {
+                let view = self.clips.as_ref()?;
+                Some(crate::shell::ClipsPanel {
+                    section,
+                    rows: &clip_rows,
+                    chosen: view.chosen,
+                    note: "No clips in its file",
+                    playing: self.in_place.is_some(),
+                    looping: self.clip_loop,
+                    speed: CLIP_SPEED_TEXTS[self.clip_speed],
+                    playhead: view.playhead(),
+                    time: &view.time_text,
                 })
             }),
             tile: self.tile,
@@ -6018,6 +6269,7 @@ impl Editor {
         self.lists.part_values = recycle(part_values);
         self.lists.part_options = recycle(part_options);
         self.lists.bus_options = recycle(bus_options);
+        self.lists.clip_rows = recycle(clip_rows);
         self.joined = joined;
         self.lists.scenes = recycle(scenes);
         self.lists.graphs = recycle(graph_tabs);
@@ -6135,6 +6387,22 @@ impl Editor {
         if let Some(turn) = response.material_turn {
             let pointer = self.input.cursor();
             self.turn_material_preview(turn, pointer);
+        }
+        // The Clips (ADR 0124's E12-1b): a clip chosen, ▶ or ■, the loop, the speed, the bar.
+        if let Some(i) = response.clip_pick {
+            self.choose_clip(i);
+        }
+        if response.clip_play {
+            self.toggle_clip_play();
+        }
+        if response.clip_loop {
+            self.clip_loop = !self.clip_loop;
+        }
+        if response.clip_speed {
+            self.clip_speed = (self.clip_speed + 1) % CLIP_SPEEDS.len();
+        }
+        if let Some(bar) = response.clip_scrub {
+            self.scrub_clip(bar);
         }
         // Sound previews (E11-3b): ▶ on a tile, a click along a playing one, Auto Play.
         if let Some(i) = response.file_play
@@ -6688,6 +6956,21 @@ impl Editor {
             if escape || moved_on {
                 self.stop_hearing();
             }
+        }
+        // So does playing in place (ADR 0124's E12-1b); Escape lets a held pose go too.
+        let escape = self.ui.input().keys.contains(&UiKey::Escape)
+            && self.command_palette.is_none()
+            && self.ui.editing().is_none()
+            && self.drag.is_none();
+        let engaged = self.in_place.is_some() || self.clips.as_ref().is_some_and(|v| v.held);
+        if escape && engaged {
+            self.stop_in_place();
+        } else if self
+            .in_place
+            .as_ref()
+            .is_some_and(|p| p.selection != self.selection)
+        {
+            self.in_place = None;
         }
         // Escape stops a sound's preview (E11-3b), when nothing else takes it.
         if self.ui.input().keys.contains(&UiKey::Escape)
@@ -10114,8 +10397,12 @@ impl Editor {
     /// entities, its resources, the history's place and the selection.
     fn prepare_play(&mut self, world: &mut World, from_here: bool) -> Playing {
         let started = Instant::now();
-        // Hearing in place ends: the game's own sound begins.
+        // Hearing and playing in place end: the game's own sound and animation begin.
         self.stop_hearing();
+        self.in_place = None;
+        if let Some(view) = self.clips.as_mut() {
+            view.held = false;
+        }
         // The mixer as Play begins (E11-1b-3): what its changes in Play are measured from.
         self.open_mixer();
         self.mixer_at_play = self.mixer.as_ref().map(|d| d.layout.clone());
@@ -15476,7 +15763,7 @@ impl Editor {
         } else if id == ids.take_back_mixer {
             self.take_back_mixer(world);
         } else if id == ids.hear {
-            self.hear_selection(world);
+            self.play_selection_in_place(world);
         } else if id == ids.listen_scene {
             self.listen_to_scene(world);
         } else if id == ids.debugger {
@@ -18355,8 +18642,240 @@ impl Editor {
         self.say(message);
     }
 
-    /// P (E11-4b): the selected sources heard where they are, looping, from the editor's
-    /// camera, until P again, Escape or another selection; nothing written back.
+    /// P (E11-4b, ADR 0124's E12-1b): the selection's sounds heard and its characters played
+    /// where they are, until P again, Escape or another selection; nothing written back.
+    fn play_selection_in_place(&mut self, world: &World) {
+        let hearing = self.hearing.as_ref().is_some_and(|h| h.selection.is_some());
+        if hearing || self.in_place.is_some() {
+            self.stop_hearing();
+            self.stop_in_place();
+            return;
+        }
+        if self.play.is_some() {
+            self.say(String::from(
+                "The game is playing: its own sound and animation play",
+            ));
+            return;
+        }
+        let models: Vec<(Entity, Option<usize>)> = self
+            .selection
+            .iter()
+            .filter(|&&e| world.get::<Model>(e).is_some())
+            .map(|&e| {
+                let chosen = self
+                    .clips
+                    .as_ref()
+                    .filter(|v| v.entity == e)
+                    .map(|v| v.chosen);
+                (e, chosen)
+            })
+            .collect();
+        let sounds = self.selection.iter().any(|&e| {
+            world.get::<AudioSource>(e).is_some() || world.get::<AudioSource3D>(e).is_some()
+        });
+        if models.is_empty() && !sounds {
+            self.say(String::from(
+                "Nothing selected plays a sound or a clip (Sound: Listen to the Scene hears \
+                 every sound)",
+            ));
+            return;
+        }
+        if sounds {
+            self.hear_selection(world);
+        }
+        if !models.is_empty() {
+            let n = models.len();
+            self.start_in_place(models);
+            self.say(if n == 1 {
+                String::from("Playing in place (P or Escape stops)")
+            } else {
+                format!("Playing {n} in place (P or Escape stops)")
+            });
+        }
+    }
+
+    /// Playing in place ends (ADR 0124's E12-1b), and a held pose is let go: the characters
+    /// stand in their rest pose again with the next frame, the playhead at the start.
+    fn stop_in_place(&mut self) {
+        self.in_place = None;
+        if let Some(view) = self.clips.as_mut() {
+            view.held = false;
+            view.time = 0.0;
+        }
+    }
+
+    /// Characters `entities` begin to play in place (ADR 0124's E12-1b), from the playhead
+    /// (from the start when it stands at the end of a clip that does not loop).
+    fn start_in_place(&mut self, entities: Vec<(Entity, Option<usize>)>) {
+        let (start, clip) = match &self.clips {
+            Some(v) => {
+                let at_end = !self.clip_loop && v.time >= v.length();
+                let start = if at_end { 0.0 } else { v.time };
+                (start, v.clips.get(v.chosen).map(|c| c.key.clone()))
+            }
+            None => (0.0, None),
+        };
+        self.in_place = Some(InPlace {
+            entities,
+            selection: self.selection.clone(),
+            clip,
+            start,
+            played: 0.0,
+            at: None,
+        });
+    }
+
+    /// The Clips' ▶ or ■ (ADR 0124's E12-1b): the character plays in place from the
+    /// playhead, or stops there, holding that pose.
+    fn toggle_clip_play(&mut self) {
+        if self.in_place.take().is_some() {
+            if let Some(view) = self.clips.as_mut() {
+                view.held = true;
+            }
+            return;
+        }
+        let Some(view) = &self.clips else {
+            return;
+        };
+        let one = vec![(view.entity, Some(view.chosen))];
+        self.start_in_place(one);
+    }
+
+    /// Clip `i` chosen in the Clips (ADR 0124's E12-1b): its first frame shown, held; or, while
+    /// it plays, played from its start.
+    fn choose_clip(&mut self, i: usize) {
+        let Some(view) = self.clips.as_mut().filter(|v| i < v.clips.len()) else {
+            return;
+        };
+        view.chosen = i;
+        view.time = 0.0;
+        match self.in_place.as_mut() {
+            Some(play) => {
+                play.start = 0.0;
+                play.played = 0.0;
+                play.clip = Some(view.clips[i].key.clone());
+                for (e, clip) in &mut play.entities {
+                    *clip = (*e == view.entity).then_some(i);
+                }
+            }
+            None => view.held = true,
+        }
+    }
+
+    /// The Clips' bar pressed or dragged along (ADR 0124's E12-1b): the playhead there, the
+    /// character posed there (and played on from there while it plays).
+    fn scrub_clip(&mut self, bar: crate::shell::WaveUse) {
+        let (Some(r), Some([x, _])) = (self.ui.rect_of(bar.node), self.ui.input().mouse) else {
+            return;
+        };
+        let Some(view) = self.clips.as_mut() else {
+            return;
+        };
+        if !(bar.pressed || bar.held) {
+            return;
+        }
+        let along = ((x - r.pos[0]) / r.size[0].max(1.0)).clamp(0.0, 1.0);
+        view.time = along * view.length();
+        view.held = true;
+        if let Some(play) = self.in_place.as_mut() {
+            play.start = view.time;
+            play.played = 0.0;
+        }
+    }
+
+    /// The characters in place, with the player (ADR 0124's E12-1b): the active entity's Clips
+    /// made when it or its rig changed (once its skin is made); those playing in place moved
+    /// on by the frame's time and posed (each one's clip found once); the active one posed at
+    /// the playhead while it holds it; those posed last frame and not now let go back to
+    /// their rest pose. A steady frame poses nothing anew and allocates nothing.
+    fn clips_frame(&mut self, player: &mut Player) {
+        let active = self
+            .selection
+            .last()
+            .copied()
+            .filter(|_| self.play.is_none());
+        match active.and_then(|e| Some((e, player.model_rig(e)?))) {
+            Some((e, rig)) => {
+                let at = std::ptr::from_ref(rig) as usize;
+                if self
+                    .clips
+                    .as_ref()
+                    .is_none_or(|v| v.entity != e || v.rig != at)
+                {
+                    self.clips = Some(ClipsView::new(e, at, ClipFacts::of(rig)));
+                }
+            }
+            None => self.clips = None,
+        }
+        if self.play.is_some() {
+            self.in_place = None;
+        }
+        self.posing.clear();
+        let looping = self.clip_loop;
+        if let Some(play) = self.in_place.as_mut() {
+            let now = Instant::now();
+            let dt = play.at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+            play.at = Some(now);
+            play.played += dt * CLIP_SPEEDS[self.clip_speed];
+            let time = play.start + play.played;
+            let wanted = play.clip.as_deref();
+            let (posing, view) = (&mut self.posing, &mut self.clips);
+            let mut going = false;
+            play.entities.retain_mut(|(e, clip)| {
+                let Some(rig) = player.model_rig(*e) else {
+                    return false;
+                };
+                let k = *clip.get_or_insert_with(|| {
+                    wanted
+                        .and_then(|n| rig.clips().iter().position(|c| c.name() == n))
+                        .unwrap_or(0)
+                });
+                let Some(length) = rig.clips().get(k).map(engine_app::RigClip::duration) else {
+                    return false;
+                };
+                let t = if looping {
+                    time.rem_euclid(length.max(1e-6))
+                } else {
+                    time.min(length)
+                };
+                going |= looping || time < length;
+                player.pose_model(*e, Some((k, t)));
+                posing.push(*e);
+                if let Some(v) = view.as_mut().filter(|v| v.entity == *e && v.chosen == k) {
+                    v.time = t;
+                }
+                true
+            });
+            if play.entities.is_empty() || !going {
+                // None of them has clips: nothing held; or each clip played to its end:
+                // held there.
+                let ended = !play.entities.is_empty();
+                self.in_place = None;
+                if let Some(v) = self.clips.as_mut() {
+                    v.held = ended;
+                }
+            }
+        }
+        if self.in_place.is_none()
+            && let Some(view) = self.clips.as_ref().filter(|v| v.held)
+        {
+            player.pose_model(view.entity, Some((view.chosen, view.time)));
+            self.posing.push(view.entity);
+        }
+        if let Some(view) = self.clips.as_mut() {
+            view.refresh_time();
+        }
+        self.posing.sort_unstable();
+        for &e in &self.posed {
+            if self.posing.binary_search(&e).is_err() {
+                player.pose_model(e, None);
+            }
+        }
+        std::mem::swap(&mut self.posed, &mut self.posing);
+    }
+
+    /// The selected sources heard where they are, looping, from the editor's camera (E11-4b),
+    /// until P again, Escape or another selection; nothing written back.
     fn hear_selection(&mut self, world: &World) {
         if self.hearing.as_ref().is_some_and(|h| h.selection.is_some()) {
             self.stop_hearing();
@@ -23212,6 +23731,8 @@ impl<G> EditorGame<G> {
                 shared.hearing_given = true;
             }
         }
+        // Characters in place (ADR 0124's E12-1b): their clips, poses and rest.
+        shared.clips_frame(player);
         // Sound previews (E11-3b): what the editor asked, then the preview as it plays.
         match shared.preview_ask.take() {
             Some(PreviewAsk::Play {
@@ -23598,6 +24119,29 @@ impl<G> EditorGame<G> {
             }
             _ => None,
         })
+    }
+
+    /// The active character's Clips (ADR 0124's E12-1b), each row's name, length, facts and
+    /// seam, and the time shown: for tests.
+    pub fn clips(&self) -> (Vec<String>, String) {
+        let shared = self.shared.borrow();
+        shared.clips.as_ref().map_or_else(Default::default, |v| {
+            let rows = v
+                .clips
+                .iter()
+                .map(|c| format!("{} {} {} {}", c.name, c.length, c.facts, c.seam))
+                .collect();
+            (rows, v.time_text.clone())
+        })
+    }
+
+    /// How many characters play in place now (ADR 0124's E12-1b): for tests.
+    pub fn playing_in_place(&self) -> usize {
+        self.shared
+            .borrow()
+            .in_place
+            .as_ref()
+            .map_or(0, |p| p.entities.len())
     }
 
     /// Whether the asset at `path` (under the project) has its thumbnail made (ADR 0112):
@@ -25660,13 +26204,16 @@ impl Overlay for EditorOverlay {
                     }
                 }
                 // The selection's instances (its outline's items but the hovered one): its
-                // world box, and what surface picks leave out.
-                let selected: Vec<u32> = editor
-                    .outline_items
-                    .iter()
-                    .filter(|i| i.class != OutlineClass::Hovered)
-                    .map(|i| i.slot)
-                    .collect();
+                // world box, and what surface picks leave out (their list's room kept).
+                let mut selected = std::mem::take(&mut editor.selected_slots);
+                selected.clear();
+                selected.extend(
+                    editor
+                        .outline_items
+                        .iter()
+                        .filter(|i| i.class != OutlineClass::Hovered)
+                        .map(|i| i.slot),
+                );
                 if let Some(scene) = view.scene {
                     editor.selection_box = selected
                         .iter()
@@ -25749,6 +26296,7 @@ impl Overlay for EditorOverlay {
                         }
                     }
                 }
+                editor.selected_slots = selected;
                 // Framing (F): the selection's world boxes (its outline's items but the
                 // hovered one) with its places, or the scene's bounds.
                 if let Some(points) = editor.frame_asked.take() {
@@ -31415,6 +31963,111 @@ mod tests {
         assert!(ed.hearing.is_some());
         let _ = ed.prepare_play(&mut world, false);
         assert!(ed.hearing.is_none(), "the game's own sound plays");
+    }
+
+    /// ADR 0124's E12-1b: a character's Clips (as the player's rig gives them) are shown
+    /// under its components, a pick holds a clip's first frame, P plays the selection's
+    /// characters in place until P, Escape, another selection or Play, and ▶ and ■ play and
+    /// stop the inspected one where it is.
+    #[test]
+    fn a_characters_clips_are_shown_held_and_played_in_place() {
+        let mut world = World::new();
+        let mut ed = draw_editor("clips-in-place", &mut world);
+        let man = world.spawn((
+            SceneId::new(),
+            Name::new("Man"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            Model::new(builtin::CUBE, AssetRef::NONE),
+        ));
+        let rock = world.spawn((
+            SceneId::new(),
+            Name::new("Rock"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        ed.select_only(man);
+        // The player made the man's rig: its clips, as `clips_frame` makes them.
+        ed.clips = Some(ClipsView::new(
+            man,
+            1,
+            vec![
+                ClipFacts::new(0, "Walk", 1.0, 31, 30.0, 3000, 1e-4, 1.5, (2e-4, "hips")),
+                ClipFacts::new(1, "", 2.0, 49, 24.0, 612, 9.9e-5, 0.0, (0.031, "leg")),
+            ],
+        ));
+        ed.update(&mut world);
+        assert!(ed.clips_section.is_some(), "the Clips under its components");
+        {
+            let view = ed.clips.as_ref().unwrap();
+            assert_eq!(view.clips[0].length, "1.00 s");
+            assert_eq!(
+                view.clips[0].facts,
+                "30 frames \u{b7} 1.50 m/s \u{b7} 3.0 kB \u{b7} \u{2264} 0.1 mm"
+            );
+            assert_eq!(view.clips[0].seam, "loops within 0.2 mm");
+            assert!(!view.clips[0].jumps);
+            assert_eq!(view.clips[1].name, "Clip 2");
+            assert_eq!(
+                view.clips[1].facts,
+                "48 frames \u{b7} in place \u{b7} 612 B \u{b7} \u{2264} 0.1 mm"
+            );
+            assert_eq!(view.clips[1].seam, "jumps 3.1 cm at leg");
+            assert!(view.clips[1].jumps);
+        }
+        // Another object's inspector has none.
+        ed.select_only(rock);
+        ed.update(&mut world);
+        assert!(ed.clips_section.is_none());
+        ed.select_only(man);
+        ed.update(&mut world);
+        // A pick: its first frame held.
+        ed.choose_clip(1);
+        assert!(ed.clips.as_ref().unwrap().held);
+        assert_eq!(ed.clips.as_ref().unwrap().chosen, 1);
+        // P plays the selection's characters, the inspected one its chosen clip; P again
+        // stops them and lets the pose go.
+        chord(&mut ed, &mut world, &[P]);
+        assert_eq!(
+            ed.in_place.as_ref().map(|p| p.entities.clone()),
+            Some(vec![(man, Some(1))])
+        );
+        chord(&mut ed, &mut world, &[P]);
+        assert!(ed.in_place.is_none());
+        assert!(!ed.clips.as_ref().unwrap().held);
+        // Another selection ends it; so does Escape.
+        chord(&mut ed, &mut world, &[P]);
+        ed.select_only(rock);
+        ed.update(&mut world);
+        assert!(ed.in_place.is_none(), "another selection");
+        ed.select_only(man);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[P]);
+        assert!(ed.in_place.is_some());
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert!(ed.in_place.is_none(), "Escape");
+        // ▶ and ■ in the Clips: it plays, then stops where it is, holding that pose; Escape
+        // lets it go.
+        ed.toggle_clip_play();
+        assert_eq!(
+            ed.in_place.as_ref().map(|p| p.entities.clone()),
+            Some(vec![(man, Some(1))])
+        );
+        ed.toggle_clip_play();
+        assert!(ed.in_place.is_none() && ed.clips.as_ref().unwrap().held);
+        chord(&mut ed, &mut world, &[ESCAPE]);
+        assert!(!ed.clips.as_ref().unwrap().held);
+        // The time's text, frames at the clip's rate.
+        let view = ed.clips.as_mut().unwrap();
+        view.time = 1.0;
+        view.refresh_time();
+        assert_eq!(view.time_text, "frame 24 / 48 \u{b7} 1.00 s");
+        assert!((view.playhead() - 0.5).abs() < 1e-6);
+        // Play ends it.
+        chord(&mut ed, &mut world, &[P]);
+        assert!(ed.in_place.is_some());
+        let _ = ed.prepare_play(&mut world, false);
+        assert!(ed.in_place.is_none(), "the game's own animation plays");
     }
 
     #[test]

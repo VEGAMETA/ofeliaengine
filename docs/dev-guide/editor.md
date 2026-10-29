@@ -370,12 +370,25 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   (drag it: the opposite side stays, as a brush's does; its label says the size) and one
   on top of its fade (how far out its room fades). One undo step a drag; Escape takes it
   back.
-- **Hearing in place** (E11-4b): **P** plays the selected sources where they are,
-  looping, heard from the editor's camera as you move it; the reverb zones answer (walls
-  and the room from the geometry need the game's physics, so they come with Play). P again,
-  Escape or another selection stops it. **Sound: Listen to the Scene** plays every source
-  set to play while you fly through the level; Escape stops it. Neither changes the scene:
+- **Playing in place** (E11-4b, ADR 0124's E12-1b): **P** (Scene: Play Selection in
+  Place) plays the selected sources where they are, looping, heard from the editor's camera
+  as you move it; the reverb zones answer (walls and the room from the geometry need the
+  game's physics, so they come with Play). It plays the selected characters too, each its
+  clip where it stands (below). P again, Escape or another selection stops it, the
+  characters back in their rest pose. **Sound: Listen to the Scene** plays every source set
+  to play while you fly through the level; Escape stops it. Neither changes the scene:
   nothing is written back, nothing despawns, and Play ends either.
+- **A character's clips** (ADR 0124's E12-1b): select an object whose model is skinned (a
+  glTF mesh a skinned node draws) and its **Clips** show under its components, once its
+  skin is made (a few tens of milliseconds):
+  - a row a clip: its name and length; its frames, how fast its root crosses the ground
+    ("in place" for a walk made on the spot), its size and its largest compression error;
+    and its loop's seam: "loops within 0.2 mm", or "jumps 3.1 cm at leg_joint_R_1" in the
+    warning colour when the skin jumps a centimetre or more from the last frame back to
+    the first (the root's crossing and turn taken out, as root motion will take them);
+  - a click on a row shows its first frame; ▶ plays it in place from the playhead, ■
+    stops it there and holds that pose; the loop, the speed (0.25 to 2×) and the time,
+    and a bar under them that scrubs it. Escape lets a held pose go.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.
@@ -1494,7 +1507,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E12 | animation |
+| E12 | animation: the engine's preview of a model picked in the dock (E12-1b-2), then one entity per character with its joints (E12-1c), the `Animator` (E12-2), the Animation tab (E12-3), keys (E12-4) and graphs (E12-5), as ADR 0124 decided |
 
 The whole plan is ADR 0107 §7.
 

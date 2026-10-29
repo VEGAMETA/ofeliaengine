@@ -606,6 +606,47 @@ pub struct MaterialPanel<'a> {
     pub note: &'a str,
 }
 
+/// A clip of the inspector's character (ADR 0124's E12-1b): its name and length, then what
+/// else is known of it in one line (frames, root speed, size, error, loop seam).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipRow<'a> {
+    /// Its name in its file.
+    pub name: &'a str,
+    /// Its length: "2.00 s".
+    pub length: &'a str,
+    /// The rest: "48 frames · in place · 6.0 kB · ≤ 0.1 mm".
+    pub facts: &'a str,
+    /// Its loop's seam: "loops within 0.2 mm", or how far it jumps and where.
+    pub seam: &'a str,
+    /// The seam jumps visibly: shown as a warning.
+    pub jumps: bool,
+}
+
+/// The inspector's character's clips under their section's header (ADR 0124's E12-1b): a
+/// row each, the chosen one lit; then ▶ or ■ (it plays in place), the loop, the speed, the
+/// time, and a bar along the chosen clip that scrubs it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipsPanel<'a> {
+    /// The section it shows under.
+    pub section: usize,
+    /// The clips.
+    pub rows: &'a [ClipRow<'a>],
+    /// The chosen clip.
+    pub chosen: usize,
+    /// Shown instead of the rows: that the skin is being made, or that it has no clip.
+    pub note: &'a str,
+    /// It plays in place now.
+    pub playing: bool,
+    /// It plays looped.
+    pub looping: bool,
+    /// Its speed: "1×".
+    pub speed: &'a str,
+    /// The playhead, 0 to 1 along the chosen clip.
+    pub playhead: f32,
+    /// Where it is: "18 / 48 · 0.75 s".
+    pub time: &'a str,
+}
+
 /// The material preview's side, at scale 1 (the engine's preview size).
 pub(crate) const MATERIAL_PREVIEW: f32 = 128.0;
 
@@ -918,6 +959,8 @@ pub struct ShellModel<'a> {
     pub sound: Option<SoundPanel<'a>>,
     /// The shown material's preview, under its section's header (E10-4d).
     pub material_preview: Option<MaterialPanel<'a>>,
+    /// The active character's clips, under their section's header (ADR 0124's E12-1b).
+    pub clips: Option<ClipsPanel<'a>>,
     /// The active entity's 3D sound's level over distance, the camera's distance marked
     /// (E11-4c, Unity's red line).
     pub falloff: Option<FalloffView<'a>>,
@@ -1087,6 +1130,16 @@ pub struct ShellResponse {
     pub sound_wave: Option<WaveUse>,
     /// The material preview was pressed, dragged or let go (E10-4d): it turns.
     pub material_turn: Option<WaveUse>,
+    /// The Clips (ADR 0124's E12-1b): a clip's row was clicked.
+    pub clip_pick: Option<usize>,
+    /// Their ▶ or ■ was clicked.
+    pub clip_play: bool,
+    /// Their loop was toggled.
+    pub clip_loop: bool,
+    /// Their speed was clicked: the next one.
+    pub clip_speed: bool,
+    /// Their bar was pressed, dragged along or let go.
+    pub clip_scrub: Option<WaveUse>,
     /// The mixer (E11-1): + Bus was clicked.
     pub mixer_add: bool,
     /// A strip was clicked: its bus is picked.
@@ -2658,6 +2711,164 @@ fn material_panel(ui: &mut Ui, panel: &MaterialPanel<'_>, p: &Palette, out: &mut
     );
 }
 
+/// The clips' bar's height.
+pub(crate) const CLIP_BAR: f32 = 14.0;
+
+/// A character's clips (ADR 0124's E12-1b): a row each, two lines (its name and length, then
+/// its facts and seam, the seam in the warning colour when it jumps), the chosen one lit and
+/// a click choosing another; then ▶ or ■, the loop, the speed and the time; then the bar
+/// along the chosen clip, its playhead over it, that a press or drag scrubs.
+fn clips_panel(ui: &mut Ui, panel: &ClipsPanel<'_>, p: &Palette, out: &mut ShellResponse) {
+    ui.column(
+        "clips",
+        Style {
+            size: [Size::Grow(1.0), Size::Fit],
+            padding: [SOUND_PAD, 4.0, SOUND_PAD, 4.0],
+            gap: 2.0,
+            ..Style::default()
+        },
+        |ui| {
+            if panel.rows.is_empty() {
+                text(ui, "note", panel.note, SMALL, p.text_dim);
+                return;
+            }
+            for (i, row) in panel.rows.iter().enumerate() {
+                ui.push_id(i as u64);
+                let chosen = i == panel.chosen;
+                let hovered = ui.is_hovered(ui.id("clip"));
+                let id = ui.column(
+                    "clip",
+                    Style {
+                        size: [Size::Grow(1.0), Size::Fit],
+                        padding: [6.0, 3.0, 6.0, 3.0],
+                        radius: 3.0,
+                        background: if chosen {
+                            Some(p.selection)
+                        } else {
+                            hovered.then_some(p.field_hover)
+                        },
+                        ..Style::default()
+                    },
+                    |ui| {
+                        ui.row(
+                            "head",
+                            Style {
+                                size: [Size::Grow(1.0), Size::Fit],
+                                gap: 6.0,
+                                align_cross: Align::Center,
+                                ..Style::default()
+                            },
+                            |ui| {
+                                if chosen && panel.playing {
+                                    text(ui, "playing", icons::PLAY, SMALL, p.playing);
+                                }
+                                text(ui, "name", row.name, TEXT, p.text);
+                                ui.spacer("fill");
+                                text(ui, "length", row.length, SMALL, p.text_dim);
+                            },
+                        );
+                        text(ui, "facts", row.facts, SMALL, p.text_dim);
+                        ui.row(
+                            "loop",
+                            Style {
+                                size: [Size::Grow(1.0), Size::Fit],
+                                gap: 4.0,
+                                align_cross: Align::Center,
+                                ..Style::default()
+                            },
+                            |ui| {
+                                let seam = if row.jumps { p.warning } else { p.text_dim };
+                                if row.jumps {
+                                    text(ui, "alert", icons::ALERT, SMALL, seam);
+                                }
+                                text(ui, "seam", row.seam, SMALL, seam);
+                            },
+                        );
+                    },
+                );
+                if ui.sense(id, false).clicked {
+                    out.clip_pick = Some(i);
+                }
+                ui.pop_id();
+            }
+            ui.row(
+                "controls",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(24.0)],
+                    gap: 4.0,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    let glyph = if panel.playing {
+                        icons::STOP
+                    } else {
+                        icons::PLAY
+                    };
+                    if panel_button(ui, "play", glyph, false, p) {
+                        out.clip_play = true;
+                    }
+                    if panel_button(ui, "loop", icons::REPEAT, panel.looping, p) {
+                        out.clip_loop = true;
+                    }
+                    let hovered = ui.is_hovered(ui.id("speed"));
+                    let speed = ui.container(
+                        "speed",
+                        Style {
+                            size: [Size::Fit, Size::Fixed(22.0)],
+                            padding: [6.0, 0.0, 6.0, 0.0],
+                            radius: 3.0,
+                            background: hovered.then_some(p.field_hover),
+                            align_cross: Align::Center,
+                            ..Style::default()
+                        },
+                        |ui| {
+                            text(ui, "text", panel.speed, SMALL, p.text);
+                        },
+                    );
+                    if ui.sense(speed, false).clicked {
+                        out.clip_speed = true;
+                    }
+                    ui.spacer("fill");
+                    text(ui, "time", panel.time, SMALL, p.text_dim);
+                },
+            );
+            let bar = ui.container(
+                "bar",
+                Style {
+                    size: [Size::Fixed(SOUND_WIDTH), Size::Fixed(CLIP_BAR)],
+                    radius: 3.0,
+                    clip: true,
+                    background: Some(p.field),
+                    ..Style::default()
+                },
+                |ui| {
+                    let x = (panel.playhead.clamp(0.0, 1.0) * SOUND_WIDTH).round();
+                    ui.container(
+                        "playhead",
+                        Style {
+                            size: [Size::Fixed(2.0), Size::Fixed(CLIP_BAR)],
+                            background: Some(p.accent),
+                            placed: Some([(x - 1.0).clamp(0.0, SOUND_WIDTH - 2.0), 0.0]),
+                            ..Style::default()
+                        },
+                        |_| {},
+                    );
+                },
+            );
+            let used = ui.sense(bar, false);
+            if used.pressed || used.active || used.released {
+                out.clip_scrub = Some(WaveUse {
+                    node: bar,
+                    pressed: used.pressed,
+                    held: used.active,
+                    released: used.released,
+                });
+            }
+        },
+    );
+}
+
 fn sound_panel(ui: &mut Ui, panel: &SoundPanel<'_>, p: &Palette, out: &mut ShellResponse) {
     let bands = f32::from(panel.channels.clamp(1, 2));
     let height = SOUND_BAND * bands;
@@ -4058,6 +4269,10 @@ fn inspector_dock(
                     // The material's preview under its section's header (E10-4d).
                     if let Some(panel) = model.material_preview.filter(|panel| panel.section == s) {
                         material_panel(ui, &panel, p, out);
+                    }
+                    // A character's clips under theirs (ADR 0124's E12-1b).
+                    if let Some(panel) = model.clips.filter(|panel| panel.section == s) {
+                        clips_panel(ui, &panel, p, out);
                     }
                     // A script's component: its file, as Godot's Script property.
                     if !section.script.is_empty() {

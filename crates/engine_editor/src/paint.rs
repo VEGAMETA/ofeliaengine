@@ -31,6 +31,8 @@ const CACHE_SOFT_LIMIT: usize = 4096;
 /// A layout unused for this many frames (two seconds at 60 Hz) is laid out into again by
 /// the next new text, its buffers reused; one used more lately waits for its text.
 const STALE_FRAMES: u64 = 120;
+/// The text bytes and glyphs a layout has room for at least.
+const LAYOUT_ROOM: usize = 32;
 
 /// Fonts, laid-out strings and the glyph atlas of the UI.
 pub struct UiText {
@@ -233,9 +235,13 @@ impl LayoutCache {
                 ..TextStyle::default()
             };
             layout.layout(fonts, stack, text, &style);
-            // Room to the next power of two: a text a little longer fits the next time.
+            // Room to the next power of two, and for a short text at least: a text a little
+            // longer fits the next time, and a layout taken out of use fits any short text
+            // (a clip's time, a frame's numbers) without growing.
             entry.text.clear();
-            entry.text.reserve(text.len().next_power_of_two());
+            entry
+                .text
+                .reserve(text.len().next_power_of_two().max(LAYOUT_ROOM));
             entry.text.push_str(text);
             entry.mono = mono;
             entry.size = size_bits;
@@ -243,7 +249,7 @@ impl LayoutCache {
             entry.glyphs.clear();
             entry
                 .glyphs
-                .reserve(layout.glyphs().len().next_power_of_two());
+                .reserve(layout.glyphs().len().next_power_of_two().max(LAYOUT_ROOM));
             entry.glyphs.extend_from_slice(layout.glyphs());
             entry.extent = [layout.width(), layout.height()];
         }

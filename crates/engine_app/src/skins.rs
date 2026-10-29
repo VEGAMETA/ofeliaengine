@@ -14,7 +14,8 @@
 
 use crate::assets::{GltfFile, gltf_primitives};
 use engine_anim::{
-    CompressSettings, CompressedClip, Pose, Skeleton, compress, local_to_model, skinning_matrices,
+    CompressSettings, CompressedClip, Pose, Skeleton, compress, local_to_model, rotation_angle,
+    skinning_matrices, yaw_of,
 };
 use engine_assets::ImportedScene;
 use engine_assets::animation::{node_parents, raw_clip, shell_distances, skin_skeleton};
@@ -36,13 +37,17 @@ pub struct Rig {
     clips: Vec<RigClip>,
 }
 
-/// One of a skinned mesh's clips: an animation of its file that moves its skeleton.
+/// One of a skinned mesh's clips: an animation of its file that moves its skeleton, with
+/// what the editor's Clips show of it (ADR 0124's E12-1b). Lengths are in the model's units:
+/// the file's with its import scale applied.
 #[derive(Debug)]
 pub struct RigClip {
     name: String,
     clip: CompressedClip,
     source_bytes: usize,
     max_error: f32,
+    root_speed: f32,
+    seam: (f32, usize),
 }
 
 impl RigClip {
@@ -71,9 +76,24 @@ impl RigClip {
         (self.clip.size_bytes(), self.source_bytes)
     }
 
-    /// The largest error compression made, in the file's units (ADR 0068).
+    /// The largest error compression made where the skin is (ADR 0068's virtual vertices),
+    /// in the model's units.
     pub fn max_error(&self) -> f32 {
         self.max_error
+    }
+
+    /// How fast its root joint crosses the ground from its first moment to its last, in the
+    /// model's units a second: what its root motion would move a character at, near zero
+    /// for a clip made in place.
+    pub fn root_speed(&self) -> f32 {
+        self.root_speed
+    }
+
+    /// Its loop's seam: how far its skin jumps from its last moment back to its first, the
+    /// root's crossing of the ground and its turn about +Y taken out (as root motion takes
+    /// them), in the model's units; and the skeleton joint that jumps most.
+    pub fn seam(&self) -> (f32, usize) {
+        self.seam
     }
 }
 
@@ -232,21 +252,39 @@ pub(crate) fn build(
     );
     let mut rest = vec![[0.0; 12]; joints];
     skinning_matrices(&model, &skeleton.skin_joints, &inverse_bind, &mut rest);
-    // The file's clips that move this skeleton.
+    // The file's clips that move this skeleton, within ADR 0068's error where the skin is
+    // drawn: its lengths are the model's, so in the file's units they are divided by the
+    // import scale.
     let shells = shell_distances(scene, skin, &skeleton);
+    let defaults = CompressSettings::default();
     let settings = CompressSettings {
+        error_threshold: defaults.error_threshold / scale,
+        shell_distance: defaults.shell_distance / scale,
         joint_shell_distances: shells,
-        ..CompressSettings::default()
+        ..defaults
     };
+    let top = skeleton
+        .skin_joints
+        .iter()
+        .min()
+        .map_or(0, |&j| usize::from(j));
     let clips = (0..scene.animations.len())
         .filter_map(|a| raw_clip(scene, a, &skeleton))
         .map(|raw| {
             let (clip, stats) = compress(&raw, &skeleton.skeleton, &settings);
+            let (speed, seam, joint) = ends(
+                &clip,
+                &skeleton.skeleton,
+                &settings.joint_shell_distances,
+                top,
+            );
             RigClip {
                 name: raw.name.clone(),
                 clip,
                 source_bytes: stats.source_bytes,
-                max_error: stats.max_error,
+                max_error: stats.max_error * scale,
+                root_speed: speed * scale,
+                seam: (seam * scale, joint),
             }
         })
         .collect();
@@ -261,6 +299,52 @@ pub(crate) fn build(
             clips,
         },
     )))
+}
+
+/// `clip`'s ends compared (see [`RigClip::root_speed`] and [`RigClip::seam`]), in the file's
+/// units: its first and last moments posed in the glTF scene's space (+Y up), the last one
+/// brought back so that its root joint `root` stands where and as the first one's does on
+/// the ground, then each joint's virtual vertices (ADR 0068's shell distances) compared.
+fn ends(
+    clip: &CompressedClip,
+    skeleton: &Skeleton,
+    shells: &[f32],
+    root: usize,
+) -> (f32, f32, usize) {
+    let n = skeleton.joint_count();
+    if root >= n {
+        return (0.0, 0.0, 0);
+    }
+    let mut pose = Pose::identity(n);
+    let mut first = vec![Affine3A::IDENTITY; n];
+    let mut last = vec![Affine3A::IDENTITY; n];
+    let length = clip.duration();
+    clip.sample(0.0, skeleton.rest(), &mut pose);
+    local_to_model(skeleton, &pose, &Affine3A::IDENTITY, &mut first);
+    clip.sample(length, skeleton.rest(), &mut pose);
+    local_to_model(skeleton, &pose, &Affine3A::IDENTITY, &mut last);
+    let ground = |m: &Affine3A| Vec3::new(m.translation.x, 0.0, m.translation.z);
+    let facing = |m: &Affine3A| yaw_of(m.to_scale_rotation_translation().1);
+    let (a, b) = (first[root], last[root]);
+    let speed = if length > 0.0 {
+        (ground(&b) - ground(&a)).length() / length
+    } else {
+        0.0
+    };
+    let back = Affine3A::from_translation(ground(&a))
+        * Affine3A::from_quat((facing(&a) * facing(&b).conjugate()).normalize())
+        * Affine3A::from_translation(-ground(&b));
+    let mut seam = (0.0f32, root);
+    for j in 0..n {
+        let (_, r0, t0) = first[j].to_scale_rotation_translation();
+        let (_, r1, t1) = (back * last[j]).to_scale_rotation_translation();
+        let shell = shells.get(j).copied().unwrap_or(0.0);
+        let jump = (t1 - t0).length() + 2.0 * shell * (0.5 * rotation_angle(r0, r1)).sin();
+        if jump > seam.0 {
+            seam = (jump, j);
+        }
+    }
+    (speed, seam.0, seam.1)
 }
 
 /// Where poses are made, kept between frames: sized for the largest rig posed, so posing
@@ -361,14 +445,15 @@ mod tests {
     /// E12-1a: a skinned sample's mesh is found skinned, its rest pose skins its vertices
     /// to finite places near the mesh, its clips come with it; and its import scale scales
     /// the skinned vertices as it scales the mesh (the palette conjugated by the scale).
+    /// Each at its scale in meters (the Fox is made in centimetres), and at twice it.
     #[test]
     fn a_skinned_mesh_has_a_rig_whose_rest_pose_and_scale_hold() {
-        for path in [
-            "CesiumMan/CesiumMan.gltf",
-            "RiggedSimple/RiggedSimple.gltf",
-            "Fox/Fox.gltf",
+        for (path, scale) in [
+            ("CesiumMan/CesiumMan.gltf", 1.0),
+            ("RiggedSimple/RiggedSimple.gltf", 1.0),
+            ("Fox/Fox.gltf", 0.01),
         ] {
-            let (Some(one), Some(two)) = (sample(path, 1.0), sample(path, 2.0)) else {
+            let (Some(one), Some(two)) = (sample(path, scale), sample(path, 2.0 * scale)) else {
                 continue;
             };
             let mesh = (0..one.scene.meshes.len())
@@ -382,11 +467,51 @@ mod tests {
                 parts[0].mesh.positions.len(),
                 rig.clips()
                     .iter()
-                    .map(|c| (c.name(), c.duration(), c.bytes().0))
+                    .map(|c| (
+                        c.name(),
+                        c.duration(),
+                        c.bytes().0,
+                        c.max_error(),
+                        c.root_speed(),
+                        c.seam().0,
+                        rig.skeleton().names()[c.seam().1].as_str()
+                    ))
                     .collect::<Vec<_>>()
             );
             assert!(!rig.clips().is_empty(), "{path}: its clips");
             assert!(rig.clips().iter().all(|c| c.duration() > 0.0));
+            // Within ADR 0068's error where the skin is, in the model's units; and the
+            // lengths a clip shows double with the import scale.
+            for (c, c2) in rig.clips().iter().zip(rig2.clips()) {
+                assert!(
+                    c.max_error() <= 1.01e-4,
+                    "{path} {}: {}",
+                    c.name(),
+                    c.max_error()
+                );
+                assert!(
+                    c2.max_error() <= 1.01e-4,
+                    "{path} {}: {}",
+                    c.name(),
+                    c2.max_error()
+                );
+                assert!(c.root_speed().is_finite() && c.seam().0.is_finite());
+                let near = |a: f32, b: f32| (a - b).abs() <= 2e-3 * b.abs().max(1.0);
+                assert!(
+                    near(c2.root_speed(), 2.0 * c.root_speed()),
+                    "{path} {}: {} against twice {}",
+                    c.name(),
+                    c2.root_speed(),
+                    c.root_speed()
+                );
+                assert!(
+                    near(c2.seam().0, 2.0 * c.seam().0),
+                    "{path} {}: seam {} against twice {}",
+                    c.name(),
+                    c2.seam().0,
+                    c.seam().0
+                );
+            }
             let part = &parts[0];
             let (lo, hi) = part.mesh.positions.iter().fold(
                 (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
@@ -421,6 +546,103 @@ mod tests {
             assert_eq!(posing.palette(&rig, None), &rig.rest[..]);
             assert_eq!(posing.palette(&rig, Some((99, 0.0))), &rig.rest[..]);
         }
+    }
+
+    /// E12-1b: a clip's ends: its root's speed across the ground, and its loop's seam with
+    /// the root's crossing and turn taken out (a walk forward and a turn on the spot loop;
+    /// an arm raised and not lowered jumps, at the arm).
+    #[test]
+    fn a_clips_ends_give_its_root_speed_and_its_loops_seam() {
+        use engine_anim::{Interpolation, JointDesc, RawClip, RawJointTracks, RawTrack, Transform};
+        let joints = [
+            ("hips", None, Vec3::new(0.0, 1.0, 0.0)),
+            ("spine", Some(0), Vec3::new(0.0, 0.5, 0.0)),
+            ("arm", Some(1), Vec3::new(0.3, 0.3, 0.0)),
+        ]
+        .map(|(name, parent, at)| JointDesc {
+            name: name.into(),
+            parent,
+            rest: Transform::new(at, Quat::IDENTITY, Vec3::ONE),
+        });
+        let (skeleton, _) = Skeleton::new(&joints).unwrap();
+        let times: Vec<f32> = (0..=30).map(|k| k as f32 / 30.0).collect();
+        let track = |f: &dyn Fn(f32) -> Quat| RawTrack {
+            interpolation: Interpolation::Linear,
+            times: times.clone(),
+            values: times.iter().map(|&t| f(t)).collect(),
+        };
+        let clip = |hips: RawJointTracks, arm: Option<RawTrack<Quat>>| {
+            let raw = RawClip {
+                name: String::from("clip"),
+                duration: 1.0,
+                joints: vec![
+                    hips,
+                    RawJointTracks {
+                        // A sway that comes back: the same at both ends.
+                        rotation: Some(track(&|t| {
+                            Quat::from_rotation_x(0.3 * (core::f32::consts::TAU * t).sin())
+                        })),
+                        ..RawJointTracks::default()
+                    },
+                    RawJointTracks {
+                        rotation: arm,
+                        ..RawJointTracks::default()
+                    },
+                ],
+            };
+            compress(&raw, &skeleton, &CompressSettings::default()).0
+        };
+        let shells = [0.2, 0.2, 0.4];
+        // Forward 1.5 m in a second, bobbing: 1.5 m/s, and it loops.
+        let walk = clip(
+            RawJointTracks {
+                translation: Some(RawTrack {
+                    interpolation: Interpolation::Linear,
+                    times: times.clone(),
+                    values: times
+                        .iter()
+                        .map(|&t| {
+                            Vec3::new(
+                                0.0,
+                                1.0 + 0.05 * (core::f32::consts::TAU * t).cos(),
+                                1.5 * t,
+                            )
+                        })
+                        .collect(),
+                }),
+                ..RawJointTracks::default()
+            },
+            None,
+        );
+        let (speed, seam, _) = ends(&walk, &skeleton, &shells, 0);
+        assert!((speed - 1.5).abs() < 1e-3, "walk: {speed} m/s");
+        assert!(seam < 1e-3, "walk: seam {seam}");
+        // A quarter turn on the spot: no speed, and it loops (the turn is the root's).
+        let turn = clip(
+            RawJointTracks {
+                rotation: Some(track(&|t| {
+                    Quat::from_rotation_y(core::f32::consts::FRAC_PI_2 * t)
+                })),
+                ..RawJointTracks::default()
+            },
+            None,
+        );
+        let (speed, seam, _) = ends(&turn, &skeleton, &shells, 0);
+        assert!(speed < 1e-3, "turn: {speed} m/s");
+        assert!(seam < 1e-3, "turn: seam {seam}");
+        // The arm raised half a radian and left there: about 2 · 0.4 · sin(0.25) at the arm.
+        let raise = clip(
+            RawJointTracks::default(),
+            Some(track(&|t| Quat::from_rotation_z(0.5 * t))),
+        );
+        let (speed, seam, joint) = ends(&raise, &skeleton, &shells, 0);
+        assert!(speed < 1e-3, "raise: {speed} m/s");
+        let expected = 2.0 * 0.4 * 0.25f32.sin();
+        assert!(
+            (seam - expected).abs() < 2e-3,
+            "raise: seam {seam} against {expected}"
+        );
+        assert_eq!(skeleton.names()[joint], "arm");
     }
 
     /// A plain mesh is not skinned.

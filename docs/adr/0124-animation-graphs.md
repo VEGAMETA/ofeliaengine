@@ -1,7 +1,13 @@
 # ADR 0124: Animation in scenes, graphs, and the editor's animation tools (E12)
 
-- Status: **proposed** (2026-10-29): the questions at the end go to the team; the steps
-  that do not depend on them start now.
+- Status: **Accepted (team decision, 2026-10-29):** every question at the end answered as
+  recommended: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a (decisions in
+  ticks, poses drawn every frame), 3c (cross-fade or inertialization per transition,
+  inertialization when interrupted), 4a (sync by the cycle's fraction now, markers with
+  the timeline), 5b (joints, events and number fields of components), 6a (one entity per
+  skinned model, its joints in its tree), 7a (imported clips' settings in the model's
+  `.meta`, `.anim` and `.agraph` files), 8a (no record mode) and 9b (the last 10 s of
+  states and inputs kept while the editor plays, in E12-6).
 - Research: [the runtime of state machines and blend graphs](../research/animation-graphs.md)
   (Godot, Bevy, Fyrox and ozz-animation read as code; Unreal and Unity from their
   documentation) and [the animation tools' UX](../research/ux/animation.md) (Godot, Unity,
@@ -232,6 +238,50 @@ allocation with transitions and events every tick; the same events at the same t
   - the compression's error and shell distance are taken in the file's units, not the
     model's: a file scaled down on import (the Fox's centimetres) is compressed finer than
     it needs (E12-1b corrects it).
+
+## As built (E12-1b-1, 2026-10-29): a character's clips, and P in place
+
+- **The engine (`engine_app::skins`):**
+  - Clips are compressed within ADR 0068's 0.1 mm in the model's units: the error threshold
+    and the smallest shell distance are divided by the import scale. The Fox (made in
+    centimetres, imported at 0.01) was compressed a hundred times finer than it needed:
+    Survey 29,674 → 5,322 B, Walk 4,290 → 2,890 B, Run 19,359 → 11,290 B, as ADR 0068's
+    table at its bound.
+  - Each `RigClip` gives its largest error in the model's units (`max_error`), its root's
+    speed across the ground (`root_speed`), and its loop's seam (`seam`). The seam is how
+    far the skin jumps from the last moment back to the first: the end pose is brought back
+    so the topmost skin joint stands where the first one's does on the ground, its turn
+    about +Y taken out too, then each joint's virtual vertices are compared. The result is
+    a length and the joint that jumps most.
+  - CesiumMan's walk shows a real seam: its first key is at 1/24 s and its right leg is
+    2.6° off at the ends, so it jumps 3.1 cm at `leg_joint_R_1`. The Fox's three clips
+    loop within 0.1–0.2 mm.
+- **The inspector's Clips** (under the active character's components, once the player made
+  its rig; `ClipFacts`, `ClipsView`):
+  - a row each: its name ("Clip 2" without one) and length, then its frames, root speed
+    ("in place" under 1 cm/s), size and error, then its seam: "loops within 0.2 mm", or
+    "jumps 3.1 cm at leg_joint_R_1" with a warning icon from 1 cm;
+  - a click on a row shows its first frame, held; ▶ plays the character in place from the
+    playhead, ■ stops it there, holding that pose; the loop, the speed (0.25, 0.5, 1 or
+    2×), the time ("frame 24 / 48 · 1.00 s") and a bar that scrubs the clip.
+- **P** ("Scene: Play Selection in Place"; it was "Sound: Hear Selection in Place") hears
+  the selection's sounds and plays its characters where they stand, each its clip (the
+  inspected one's chosen clip, the others the clip of that name or their first), until P,
+  Escape, another selection or Play. P and Escape put them back in their rest pose. Nothing
+  is written into the scene: the editor poses them through `Player::pose_model` each frame
+  (`clips_frame`), and a held pose costs nothing (the player poses only what changed).
+- **Found and fixed on the way** (the new allocation test showed them):
+  - selecting a model allocated a list every frame (the selection's instances for picks);
+    it keeps its room now;
+  - the outline's mask and depth took the selection's size on screen, so a selection that
+    moved, animated or was dragged made new images in the frame graph for each new size.
+    Its sizes are whole steps of 64 pixels now.
+- **Measured** (ref-1): 0 allocations in 240 editor frames while CesiumMan plays in place,
+  on both GPUs (`editor_clips_zero_alloc`). In place, he leaves his rest pose by about
+  25,000 pixels and moves about 30,000 between two moments 0.3 s apart; after P he is
+  back within 20 pixels (RTX) and 4 (Radeon).
+- **Left for E12-1b-2:** the engine's preview of a model picked in the dock, ↑ and ↓
+  through the clips, Auto Play, two clips side by side, the floor moving under root motion.
 
 ## Consequences
 
