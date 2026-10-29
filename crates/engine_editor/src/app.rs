@@ -3180,6 +3180,9 @@ struct Editor {
     /// 0124's E12-1c), and the section it shows under.
     skeleton_view: Option<SkeletonView>,
     skeleton_section: Option<usize>,
+    /// The active character's joints in its own space as the last frame posed them (E12-1c):
+    /// where a socket made at a drop starts.
+    joint_places: Vec<Affine3A>,
     /// Tab's joint mode on the active character (E12-1c), and that character's joints in
     /// the world as the last frame put them, to pick from.
     joint_edit: Option<JointEdit>,
@@ -4069,6 +4072,7 @@ impl Editor {
             skeleton_of: Vec::new(),
             skeleton_view: None,
             skeleton_section: None,
+            joint_places: Vec::new(),
             joint_edit: None,
             joint_points: Vec::new(),
             show_sound_ranges: false,
@@ -19376,6 +19380,10 @@ impl Editor {
                 &mut *others
             };
             let joints = &self.skeleton_joints;
+            if self.skeleton_view.as_ref().is_some_and(|v| v.entity == e) {
+                self.joint_places.clear();
+                self.joint_places.extend_from_slice(joints);
+            }
             if self.joint_edit.is_some_and(|j| j.entity == e) {
                 self.joint_points.clear();
                 self.joint_points.extend(
@@ -19820,10 +19828,16 @@ impl Editor {
             && self.key_transform.is_none()
             && let Some(row) = response.tree_drag.and_then(|i| self.rows.get(i).copied())
         {
-            if !self.selection.contains(&row.entity) {
-                self.select_only(row.entity);
-            }
-            let entities = self.dragged_rows(world);
+            // With a character's joints showing (Tab, ADR 0124's E12-1c), a row is dragged
+            // alone, the character staying selected: its joints are where it can go.
+            let entities = if self.joint_edit.is_some() {
+                vec![row.entity]
+            } else {
+                if !self.selection.contains(&row.entity) {
+                    self.select_only(row.entity);
+                }
+                self.dragged_rows(world)
+            };
             // An instance's parts keep the places its prefab gives them.
             let refused = entities
                 .iter()
@@ -19853,6 +19867,24 @@ impl Editor {
             Some(_) => None,
             None => self.row_place(world, &drag.entities, response),
         };
+        // Onto a character's joint (E12-1c): its row in the Skeleton, its square in the view.
+        let joint = response
+            .joint_hovered
+            .and_then(|j| Some((self.skeleton_view.as_ref()?.entity, j)))
+            .or_else(|| self.joint_edit.and_then(|j| Some((j.entity, j.hovered?))));
+        if drag.refused.is_none()
+            && let Some((character, j)) = joint
+            && let Ok(j) = u16::try_from(j)
+        {
+            // Not the character onto its own joint, nor what carries it.
+            let mut carried = false;
+            let mut at = Some(character);
+            while let Some(x) = at {
+                carried |= drag.entities.contains(&x);
+                at = world.parent(x);
+            }
+            drag.to = (!carried).then_some(RowPlace::Joint(character, j));
+        }
         // Held over a collapsed row's middle a moment: it opens.
         match drag.to {
             Some(RowPlace::Into(e)) if self.collapsed.contains(&e) => match drag.hover {
@@ -19867,10 +19899,16 @@ impl Editor {
             _ => drag.hover = None,
         }
         if released {
-            if let Some(to) = drag.to {
-                self.move_rows(world, &drag.entities, to, self.input.alt());
-            } else if let Some(why) = drag.refused {
-                self.say(why);
+            match drag.to {
+                Some(RowPlace::Joint(character, j)) => {
+                    self.attach_rows(world, &drag.entities, character, j, self.input.alt());
+                }
+                Some(to) => self.move_rows(world, &drag.entities, to, self.input.alt()),
+                None => {
+                    if let Some(why) = drag.refused {
+                        self.say(why);
+                    }
+                }
             }
             return;
         }
@@ -19940,7 +19978,7 @@ impl Editor {
             false
         };
         let allowed = match place {
-            RowPlace::Into(p) => !below_dragged(p),
+            RowPlace::Into(p) | RowPlace::Joint(p, _) => !below_dragged(p),
             RowPlace::Before(r) | RowPlace::After(r) => {
                 !dragged.contains(&r) && scene_parent(world, r).is_none_or(|p| !below_dragged(p))
             }
@@ -19969,6 +20007,14 @@ impl Editor {
             Some(RowPlace::Before(r)) => format!("{what} before {}  ·  {keep}", named(r)),
             Some(RowPlace::After(r)) => format!("{what} after {}  ·  {keep}", named(r)),
             Some(RowPlace::End) => format!("{what} last among the roots  ·  {keep}"),
+            Some(RowPlace::Joint(c, j)) => {
+                let joint = self
+                    .skeleton_view
+                    .as_ref()
+                    .and_then(|v| v.names.get(usize::from(j)))
+                    .map_or("a joint", String::as_str);
+                format!("{what} onto {}'s {joint}  ·  {keep}", named(c))
+            }
             None => String::from("Not into itself  ·  Esc takes it back"),
         }
     }
@@ -19985,7 +20031,7 @@ impl Editor {
         keep_local: bool,
     ) {
         let parent = match to {
-            RowPlace::Into(p) => Some(p),
+            RowPlace::Into(p) | RowPlace::Joint(p, _) => Some(p),
             RowPlace::Before(r) | RowPlace::After(r) => scene_parent(world, r),
             RowPlace::End => None,
         };
@@ -20005,6 +20051,94 @@ impl Editor {
             (n, _) => format!("Move {n} entities"),
         };
         self.history.begin(&label, None);
+        self.place_rows(world, entities, to, parent, keep_local);
+        self.history.commit(world);
+        let before = self.active();
+        self.selection = entities.to_vec();
+        self.anchor = self.active();
+        self.selection_changed(before);
+    }
+
+    /// Rows dropped on a character's joint (ADR 0124's E12-1c): into the joint's socket,
+    /// made for it (named after the joint, where the joint is now) where the character has
+    /// none; each keeps where it is in the world (its local placement with `keep_local`),
+    /// in one undo step. The character stays selected.
+    fn attach_rows(
+        &mut self,
+        world: &mut World,
+        entities: &[Entity],
+        character: Entity,
+        j: u16,
+        keep_local: bool,
+    ) {
+        let Some(name) = self
+            .skeleton_view
+            .as_ref()
+            .filter(|v| v.entity == character)
+            .and_then(|v| v.names.get(usize::from(j)))
+            .cloned()
+        else {
+            return;
+        };
+        let socket = world.children(character).find(|&c| {
+            world
+                .get::<engine_runtime::JointAttachment>(c)
+                .is_some_and(|a| a.joint == name)
+        });
+        let what = match entities {
+            [one] => world
+                .get::<Name>(*one)
+                .map_or("the entity", Name::as_str)
+                .to_owned(),
+            many => format!("{} entities", many.len()),
+        };
+        self.history
+            .begin(&format!("Attach {what} to {name}"), None);
+        let socket = match socket {
+            Some(s) => s,
+            None => {
+                let place = self
+                    .joint_places
+                    .get(usize::from(j))
+                    .copied()
+                    .unwrap_or(Affine3A::IDENTITY);
+                let (scale, rotation, translation) = place.to_scale_rotation_translation();
+                let s = world.spawn((
+                    SceneId::new(),
+                    Name::new(&name),
+                    Transform::from_translation(translation)
+                        .with_rotation(rotation.normalize())
+                        .with_scale(scale),
+                    GlobalTransform::default(),
+                    engine_runtime::JointAttachment::new(&name),
+                ));
+                let _ = world.set_parent(s, Some(character));
+                self.history.touch_new(world, s);
+                s
+            }
+        };
+        self.place_rows(
+            world,
+            entities,
+            RowPlace::Into(socket),
+            Some(socket),
+            keep_local,
+        );
+        self.history.commit(world);
+        self.collapsed.remove(&character);
+        self.say(format!("{what} attached to {name}: it follows the joint"));
+    }
+
+    /// The move of [`Self::move_rows`] in the open undo step: `entities` under `parent` at
+    /// `to`.
+    fn place_rows(
+        &mut self,
+        world: &mut World,
+        entities: &[Entity],
+        to: RowPlace,
+        parent: Option<Entity>,
+        keep_local: bool,
+    ) {
         // Where each is in the world, before it moves.
         let placed: Vec<Affine3A> = entities.iter().map(|&e| world_affine(world, e)).collect();
         let roots_before = self.roots(world, None);
@@ -20075,11 +20209,6 @@ impl Editor {
                 }
             }
         }
-        self.history.commit(world);
-        let before = self.active();
-        self.selection = entities.to_vec();
-        self.anchor = self.active();
-        self.selection_changed(before);
     }
 
     /// A file dragged out of the browser (ADR 0107 E4-3): started by a file of the listing
@@ -20487,6 +20616,10 @@ impl Editor {
             }
             if !node.slots.is_empty() {
                 world.insert(e, engine_app::MaterialSlots(node.slots.clone()));
+            }
+            // A socket on the character's joint (ADR 0124's E12-1c).
+            if let Some(joint) = &node.socket {
+                world.insert(e, engine_runtime::JointAttachment::new(joint));
             }
             match (above, order) {
                 (Some(p), _) => {
@@ -25578,6 +25711,9 @@ enum RowPlace {
     After(Entity),
     /// Last among the roots.
     End,
+    /// Onto joint `.1` of character `.0` (ADR 0124's E12-1c): into the joint's socket, one
+    /// made for it where the character has none.
+    Joint(Entity, u16),
 }
 
 /// The parent of `e` that the tree shows (a scene entity); none for a root.
@@ -33371,6 +33507,174 @@ return Coin
             "{found:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E12-1c: with the character's joints showing, a row dropped on a joint's row of its
+    /// Skeleton goes into the joint's socket, made for it and kept for the next, each thing
+    /// keeping its place in the world; the character stays selected; one undo step each.
+    #[test]
+    fn a_row_dropped_on_a_joint_goes_into_its_socket() {
+        let mut world = World::new();
+        let mut ed = draw_editor("attach", &mut world);
+        let man = world.spawn((
+            SceneId::new(),
+            Name::new("Man"),
+            Transform::from_xyz(1.0, 0.0, 0.0),
+            GlobalTransform::default(),
+            Model::new(builtin::CUBE, AssetRef::NONE),
+        ));
+        let sword = world.spawn((
+            SceneId::new(),
+            Name::new("Sword"),
+            Transform::from_xyz(2.0, 1.5, 0.0),
+            GlobalTransform::default(),
+        ));
+        ed.select_only(man);
+        let names = ["hips", "hand"].map(String::from);
+        ed.skeleton_view = Some(SkeletonView::new(
+            man,
+            1,
+            &names,
+            [None, Some(0)].into_iter(),
+        ));
+        ed.joint_places = vec![
+            Affine3A::IDENTITY,
+            Affine3A::from_translation(Vec3::new(0.5, 1.0, 0.0)),
+        ];
+        ed.toggle_joint_edit();
+        assert!(ed.joint_edit.is_some());
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let center = |ed: &Editor, name: &str, column: bool| {
+            let r = texts(ed, name)
+                .into_iter()
+                .filter(|r| (r.pos[0] > 900.0) == column)
+                .min_by(|p, q| p.pos[0].total_cmp(&q.pos[0]))
+                .unwrap_or_else(|| panic!("{name} shown"));
+            [r.pos[0] + r.size[0] / 2.0, r.pos[1] + r.size[1] / 2.0]
+        };
+        // The sword's row, dragged onto the hand's row in the Skeleton.
+        let from = center(&ed, "Sword", false);
+        mouse(&mut ed, from, None);
+        ed.update(&mut world);
+        mouse(&mut ed, from, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, [from[0] + 2.0, from[1] + 12.0], None);
+        ed.update(&mut world);
+        assert!(ed.row_drag.is_some(), "dragging the sword");
+        assert_eq!(ed.selection, [man], "the man stays selected");
+        let onto = center(&ed, "hand", true);
+        mouse(&mut ed, onto, None);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(
+            ed.row_drag.as_ref().unwrap().to,
+            Some(RowPlace::Joint(man, 1))
+        );
+        assert!(ed.hint.starts_with("Sword onto Man's hand"), "{}", ed.hint);
+        let steps = ed.history.steps().count();
+        mouse(&mut ed, onto, Some(false));
+        ed.update(&mut world);
+        let socket = world.parent(sword).expect("the sword in a socket");
+        assert_eq!(world.parent(socket), Some(man));
+        assert_eq!(
+            world
+                .get::<engine_runtime::JointAttachment>(socket)
+                .map(|a| a.joint.as_str()),
+            Some("hand")
+        );
+        assert_eq!(world.get::<Name>(socket).map(Name::as_str), Some("hand"));
+        // The socket where the joint is, the sword where it was in the world.
+        let close = |a: Vec3, b: Vec3| (a - b).length() < 1e-5;
+        assert!(close(
+            world.get::<Transform>(socket).unwrap().translation,
+            Vec3::new(0.5, 1.0, 0.0)
+        ));
+        assert!(close(
+            Vec3::from(world_affine(&world, sword).translation),
+            Vec3::new(2.0, 1.5, 0.0)
+        ));
+        assert_eq!(ed.history.steps().count(), steps + 1, "one step");
+        assert_eq!(ed.selection, [man]);
+        // A second thing onto the same joint: the same socket.
+        let shield = world.spawn((
+            SceneId::new(),
+            Name::new("Shield"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+        ));
+        ed.attach_rows(&mut world, &[shield], man, 1, false);
+        assert_eq!(world.parent(shield), Some(socket));
+        // Undone: the sword back where it was, the socket gone with it.
+        ed.run(&mut world, ed.ids.undo);
+        ed.run(&mut world, ed.ids.undo);
+        assert_eq!(world.parent(sword), None);
+        assert!(!world.contains(socket), "the socket made for it undone");
+        assert!(close(
+            world.get::<Transform>(sword).unwrap().translation,
+            Vec3::new(2.0, 1.5, 0.0)
+        ));
+    }
+
+    /// E12-1c: a dropped character's mesh that hangs under a joint in its file comes with a
+    /// socket on that joint, right under the character, the mesh under the socket.
+    #[test]
+    fn a_dropped_files_mesh_under_a_joint_comes_in_a_socket() {
+        use engine_assets::{GltfOutline, OutlineMesh, OutlineNode, OutlinePrimitive};
+        let node = |name: &str, mesh: Option<usize>, skin: Option<usize>, children: Vec<usize>| {
+            OutlineNode {
+                name: name.to_owned(),
+                translation: [0.0, 1.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0; 3],
+                mesh,
+                skin,
+                children,
+            }
+        };
+        let mesh = |name: &str| OutlineMesh {
+            name: name.to_owned(),
+            primitives: vec![OutlinePrimitive {
+                material: None,
+                bounds: Some(([-0.5, 0.0, -0.5], [0.5, 1.0, 0.5])),
+            }],
+        };
+        let outline = GltfOutline {
+            nodes: vec![
+                node("Armature", None, None, vec![1, 3]),
+                node("Hand", None, None, vec![2]),
+                node("Sword", Some(1), None, Vec::new()),
+                node("Body", Some(0), Some(0), Vec::new()),
+            ],
+            roots: vec![0],
+            meshes: vec![mesh("Body"), mesh("Sword")],
+            materials: Vec::new(),
+            maps: Vec::new(),
+            skins: vec![vec![1]],
+        };
+        let file = AssetId::new();
+        let plan =
+            crate::drop::ModelPlan::new(file, "knight.glb", "knight", &outline, 1.0).unwrap();
+        let mut world = World::new();
+        let mut ed = draw_editor("file-sockets", &mut world);
+        ed.history.begin("Add knight", None);
+        let knight = ed.spawn_plan(&mut world, &plan, None, Vec3::ZERO);
+        ed.history.commit(&mut world);
+        let hand = world.children(knight).next().expect("the hand's socket");
+        assert_eq!(world.get::<Name>(hand).map(Name::as_str), Some("Hand"));
+        assert_eq!(
+            world
+                .get::<engine_runtime::JointAttachment>(hand)
+                .map(|a| a.joint.as_str()),
+            Some("Hand")
+        );
+        let sword = world.children(hand).next().expect("the sword in it");
+        assert_eq!(world.get::<Name>(sword).map(Name::as_str), Some("Sword"));
+        assert!(world.get::<Model>(sword).is_some());
+        assert!(
+            world.get::<Model>(hand).is_none(),
+            "the socket draws nothing"
+        );
     }
 
     /// E12-1c: a skeleton's joints listed with their depths, parents first.

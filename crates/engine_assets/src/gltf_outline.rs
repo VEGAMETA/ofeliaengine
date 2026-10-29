@@ -22,6 +22,9 @@ pub struct GltfOutline {
     pub materials: Vec<String>,
     /// The materials' own looks, in the same order.
     pub maps: Vec<OutlineMaps>,
+    /// Each skin's joints, as nodes (ADR 0124's E12-1c): what its skeleton moves (ones past
+    /// the nodes left out).
+    pub skins: Vec<Vec<usize>>,
 }
 
 /// A material's own look as its JSON gives it: its factors, and its maps' images where they
@@ -205,7 +208,17 @@ impl GltfOutline {
             })
             .collect();
         let count = document.nodes().count();
-        let skins = json.skins.len();
+        let skins: Vec<Vec<usize>> = json
+            .skins
+            .iter()
+            .map(|s| {
+                s.joints
+                    .iter()
+                    .map(|j| j.value())
+                    .filter(|&j| j < count)
+                    .collect()
+            })
+            .collect();
         let nodes: Vec<OutlineNode> = document
             .nodes()
             .map(|node| {
@@ -221,7 +234,7 @@ impl GltfOutline {
                         .get(node.index())
                         .and_then(|n| n.skin)
                         .map(|s| s.value())
-                        .filter(|&s| s < skins),
+                        .filter(|&s| s < skins.len()),
                     children: node
                         .children()
                         .map(|c| c.index())
@@ -255,6 +268,7 @@ impl GltfOutline {
             meshes,
             materials,
             maps,
+            skins,
         })
     }
 }
@@ -396,6 +410,7 @@ mod tests {
         assert_eq!(outline.nodes[2].skin, Some(0));
         assert_eq!(outline.nodes[3].skin, None, "no skin 3");
         assert_eq!(outline.nodes[0].skin, None);
+        assert_eq!(outline.skins, [vec![1]], "its joints");
     }
 
     #[test]

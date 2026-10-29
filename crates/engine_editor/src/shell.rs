@@ -1172,6 +1172,8 @@ pub struct ShellResponse {
     pub clip_turn: Option<WaveUse>,
     /// The Skeleton (ADR 0124's E12-1c): a joint's row was clicked.
     pub joint_pick: Option<usize>,
+    /// The joint whose row the pointer is over (what a dragged row would attach to).
+    pub joint_hovered: Option<usize>,
     /// The mixer (E11-1): + Bus was clicked.
     pub mixer_add: bool,
     /// A strip was clicked: its bus is picked.
@@ -2764,6 +2766,9 @@ fn joints_panel(ui: &mut Ui, panel: &JointsPanel<'_>, p: &Palette, out: &mut She
                 ui.push_id(i as u64);
                 let picked = panel.picked == Some(i);
                 let hovered = ui.is_hovered(ui.id("joint"));
+                if hovered {
+                    out.joint_hovered = Some(i);
+                }
                 let indent = 6.0 + 12.0 * f32::from(row.depth.min(12));
                 let id = ui.row(
                     "joint",
