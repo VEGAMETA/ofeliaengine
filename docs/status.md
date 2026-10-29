@@ -872,7 +872,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-4e, a material shown while dragged** (#PR, ADR 0120's and ADR 0109's
+  - **E10-4e, a material shown while dragged** (#441, ADR 0120's and ADR 0109's
     as-built): a material dragged from the dock shows on the object under the pointer (or
     the row's) in no undo step, the own back when the pointer leaves it or on Escape; the
     drop gives it from the own as one step. The scene pick takes that object as opaque
