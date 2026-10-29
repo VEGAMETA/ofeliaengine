@@ -872,7 +872,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-4f, a type's code and Draw as Fallback** (#PR, ADR 0120's as-built): a typed
+  - **E10-4f, a type's code and Draw as Fallback** (#442, ADR 0120's as-built): a typed
     material's **code** row gives the instructions and image samples its fragment shaders
     reach beside the engine's (`engine_rhi::spirv::code_size`; stripes: 805 and 3 against
     936 and 8, the same on both GPUs) and its last compile (0.40–0.54 s, one entry point);
