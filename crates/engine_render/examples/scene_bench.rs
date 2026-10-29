@@ -1787,6 +1787,7 @@ fn main() {
                                 scene_frame,
                                 &pick_view,
                                 request,
+                                &[],
                                 number,
                             );
                             pick_cpu.push(start.elapsed().as_secs_f64() * 1e6);

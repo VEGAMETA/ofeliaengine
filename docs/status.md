@@ -34,7 +34,9 @@ Last updated: 2026-10-28.
       the code editor (`slangd`, Material: New Type), and E10-3, the material graph (ADR
       0123: canvas, search, values, preview, errors, reroutes, frames, `[Node]` and
       `.mfunc` functions), are done; E10-4 is under way: variants that follow their base
-      (E10-4a, E10-4b) and costs (E10-4c) are in, previews ahead.
+      (E10-4a, E10-4b), costs (E10-4c), the inspector's preview (E10-4d) and a material
+      shown on an object while dragged over it (E10-4e) are in; per-node previews and
+      Draw as Fallback ahead.
     - E11, sound, is done: the mixer file and panel (meters, effects, sends, the room's
       strip, snapshots, ADRs 0121 and 0122), previews and fields, the viewport's gizmos
       and hearing in place, the falloff curve.
@@ -870,6 +872,12 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
+  - **E10-4e, a material shown while dragged** (#PR, ADR 0120's and ADR 0109's
+    as-built): a material dragged from the dock shows on the object under the pointer (or
+    the row's) in no undo step, the own back when the pointer leaves it or on Escape; the
+    drop gives it from the own as one step. The scene pick takes that object as opaque
+    (`add_scene_pass`'s `solid`): a cut-away material otherwise went off and on every four
+    frames as each pick saw through it.
   - **E10-4d, the material's preview** (#440, ADR 0120's as-built): at the top of its
     inspector section, drawn by the engine on the selected object's mesh (a sphere from the
     dock), redrawn on edits (values alone drawn once), turned by dragging.
@@ -997,9 +1005,8 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next, in this order** (the team's answers of 2026-10-28 below):
     1. E10's rest (the owner's order: materials first of the tools, then animation and
-       2D): E10-4's rest: per-node previews on graphs, Draw as Fallback, a material
-       shown on an object while dragged over it (and the cost's samples and compile
-       time).
+       2D): E10-4's rest: per-node previews on graphs, Draw as Fallback (and the
+       cost's samples and compile time).
     2. E12, animation.
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,

@@ -8,7 +8,9 @@
 //!   depth writes, unless the pick leaves them out. What is drawn:
 //!   - [`Picker::add_scene_pass`]: the persistent scene's candidates, the instances whose
 //!     world box reaches the square (the planes bounding its pixels), from commands written on the CPU
-//!     at each mesh's finest resident level, with the camera without jitter;
+//!     at each mesh's finest resident level, with the camera without jitter; instances it
+//!     is told are solid count as opaque whatever their materials (a material the editor
+//!     tries on an object while it is dragged over it, E10-4e);
 //!   - [`Picker::add_pass`]: the view's culled commands (the culling pass's visible lists,
 //!     early and late phases, with their detail levels), for a view that draws a list.
 //! - **What lies in pixels** ([`Picker::add_list_pass`]): the candidates of a rectangle
@@ -308,7 +310,9 @@ impl Candidates {
 
     /// Finds the instances of `scene` that `planes` reach and that can be drawn (a resident
     /// mesh; blended surfaces only with `transparent`), at most `limit` of them, but the
-    /// slots `exclude` holds.
+    /// slots `exclude` holds. The slots `solid` holds count as opaque whatever their
+    /// materials: taken when blended, drawn without their masks.
+    #[allow(clippy::too_many_arguments)]
     fn find(
         &mut self,
         scene: &SceneFrame<'_>,
@@ -317,6 +321,7 @@ impl Candidates {
         transparent: bool,
         limit: usize,
         exclude: &[u32],
+        solid: &[u32],
     ) {
         self.slots.clear();
         scene.candidates(planes, &mut self.slots);
@@ -331,6 +336,11 @@ impl Candidates {
             }
             let Some((mesh, state)) = scene.slot_draw(slot) else {
                 continue;
+            };
+            let state = if solid.contains(&slot) {
+                state & !((BLENDED | MASKED) as u8)
+            } else {
+                state
             };
             if usize::from(state) & BLENDED != 0 && !transparent {
                 continue;
@@ -949,8 +959,11 @@ impl Picker {
 
     /// Declares a pick of `request` in a view of the persistent scene drawn this frame,
     /// from its candidates: the instances whose world box reaches the square, drawn alone
-    /// through `view`'s camera. The picker must live until the frame has executed (its
-    /// pipelines are recorded).
+    /// through `view`'s camera. The slots `solid` holds are picked as opaque whatever their
+    /// materials, blended ones even where `request` leaves blended surfaces out and masked
+    /// ones without their masks: an object the editor tries a dragged material on stays
+    /// under the pointer as it was (E10-4e). The picker must live until the frame has
+    /// executed (its pipelines are recorded).
     #[allow(clippy::too_many_arguments)]
     pub fn add_scene_pass<'g>(
         &mut self,
@@ -962,6 +975,7 @@ impl Picker {
         scene: &SceneFrame<'g>,
         view: &PickView,
         request: PickRequest,
+        solid: &[u32],
         frame_number: u64,
     ) -> PickPass {
         engine_profiler::zone!("render::Picker::add_scene_pass");
@@ -982,6 +996,7 @@ impl Picker {
             request.transparent,
             usize::MAX,
             &[],
+            solid,
         );
         if self.candidates.commands.is_empty() {
             return PickPass::Empty;
@@ -1086,6 +1101,7 @@ impl Picker {
             &planes,
             request.transparent,
             MAX_LIST as usize,
+            &[],
             &[],
         );
         if self.candidates.commands.is_empty() {
@@ -1303,6 +1319,7 @@ impl Picker {
             request.transparent,
             usize::MAX,
             exclude,
+            &[],
         );
         if self.candidates.commands.is_empty() {
             return PickPass::Empty;

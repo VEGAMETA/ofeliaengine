@@ -847,7 +847,7 @@ will do:
 | a model (`.glb`, `.gltf`) | the viewport | it rests on the surface under the pointer while you move, and stays where you let go |
 | a model | a row of the scene tree | it goes under that entity, at its origin |
 | a model | the tree below its rows | a new root where the camera looks |
-| a material (`.material`) | an object in the viewport, or its row | the object's model takes it |
+| a material (`.material`) | an object in the viewport, or its row | the object shows it while the pointer is on it; letting go gives it to the object's model |
 | a sound (`.wav`, `.ogg`, `.flac`) | an object in the viewport, or its row | it plays the sound in the world: an `AudioSource3D`, or its source's sound replaced |
 | a sound | the viewport where no object is (or anywhere with Alt) | a new entity named after the file, on the surface under the pointer, playing it in the world |
 | a sound | the tree below its rows | a new entity playing it as it is (an `AudioSource`: music, ambience, the UI) |
@@ -860,6 +860,12 @@ will do:
     inverts it, as for drags).
 - **Escape**, or moving back out of the viewport, takes the model away again. Every drop
   is one undo step.
+- **A material shows before you let go** on the object under the pointer (or the row's
+  object), nothing recorded yet. Moving onto another object, off it, out of the view, or
+  Escape gives the object its own material back; letting go gives it as one undo step from
+  its own, so Ctrl+Z puts the own one back. The object stays the one under the pointer as
+  it was, so a see-through material (masked or blended) shows on it steadily as the
+  pointer moves instead of letting the pointer through to what is behind.
 - **What a model becomes:**
   - a file of one node is one entity, named after the file;
   - otherwise a root named after the file, with an entity for each node of the file's
@@ -1463,7 +1469,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E10 | materials: previews in the dock, a graph's statistics, variants with a base (E10-4); the graph (its canvas, node search, values, preview sphere, errors on nodes, Show Slang, reroutes, frames, Slang functions and `.mfunc` functions), the material file and Slang in the code editor are done |
+| E10 | materials: per-node previews on graphs, Draw as Fallback, a type's samples and compile time (E10-4); the graph (its canvas, node search, values, preview sphere, errors on nodes, Show Slang, reroutes, frames, Slang functions and `.mfunc` functions), the material file, variants with a base, costs, the inspector's preview, materials shown while dragged and Slang in the code editor are done |
 
 The whole plan is ADR 0107 §7.
 

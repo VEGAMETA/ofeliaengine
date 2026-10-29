@@ -452,3 +452,29 @@ The materials UX note's item 11: the engine's own preview (ADR 0112), orbited by
   view.
 - Not yet: a model dropped on the preview, its own light and turn kept per material, a
   larger picture.
+
+### As built (E10-4e, 2026-10-29): a material shown on an object while dragged over it
+
+The materials UX note's item 11, its last part (E4-3's left item): what a drop would do,
+seen before it.
+
+- **The try:** a material dragged from the dock over an object in the view (the one the
+  hover pick names) or over its row in the tree is put in the object's `Model.material`
+  at once, in no undo step; the drag keeps the object's own. Another object, nothing under
+  the pointer, leaving the view, Escape, Play or the scene let go give the own back. On
+  the release it is given back first, so that the drop records own → new as its one undo
+  step. An object that has the material already is left as it is.
+- **The pick stays on the object:** a masked or blended material on it would let the next
+  hover pick through it to what is behind, the try move there, the object's own come back,
+  the next pick find it again: on and off every four frames on the Radeon with a cut-away
+  material and the pointer moving (seen with the slot left out). So the scene pick is told
+  the object's instance (`Picker::add_scene_pass`'s `solid`, ADR 0109's as-built) and
+  draws it as opaque, without its mask; the editor knows the instance from the hover
+  pick's sync, the frame the material shows.
+- **Tests:** the try, the move to another object, off it, onto a row and Escape, all in
+  no step, then a drop as one step that undo takes back to the own; on the GPU, on both
+  GPUs, the box red in the view while the red material is over it and its own drawn once
+  the pointer is off it, then a cut-away material kept on the box over 60 frames of a
+  moving pointer; the scene pick's solid slots under the validation layer.
+- Not yet: a try over an inspector field (every selected object), a model's further
+  material slots (the drop gives `Model.material`, as before).

@@ -727,3 +727,208 @@ fn a_materials_preview_draws_in_its_inspector_section() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// File `file` of the listing pressed and dragged a little, then the pointer over `to`, a
+/// frame each.
+fn drag_over(
+    player: &mut Player,
+    game: &mut EditorGame<NoGame>,
+    overlay: &mut EditorOverlay,
+    file: [f32; 2],
+    to: [f32; 2],
+) {
+    pointer(game, file, None);
+    frame(player, game, overlay);
+    pointer(game, file, Some(true));
+    frame(player, game, overlay);
+    pointer(game, [file[0] + 12.0, file[1]], None);
+    frame(player, game, overlay);
+    pointer(game, to, None);
+}
+
+/// E10-4e: a material dragged over an object shows on it in the view before the drop, and
+/// the object has its own back once the pointer leaves it. One that cuts the object away
+/// entirely (masked, its alpha zero) stays on it while the pointer moves over it: the
+/// object is picked as it was, not through the material (otherwise each pick would see
+/// through it, and the material would go off and on as the pointer moves).
+#[test]
+fn a_material_dragged_over_an_object_shows_on_it_before_the_drop() {
+    let dir =
+        std::env::temp_dir().join(format!("ofelia-editor-try-material-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("props")).unwrap();
+    let red = engine_app::MaterialFile {
+        base_color: [0.85, 0.08, 0.06, 1.0],
+        roughness: 0.4,
+        ..engine_app::MaterialFile::default()
+    };
+    let hole = engine_app::MaterialFile {
+        base_color: [1.0, 1.0, 1.0, 0.0],
+        alpha: engine_app::Alpha::Mask,
+        alpha_cutoff: 0.5,
+        ..engine_app::MaterialFile::default()
+    };
+    let (red_id, hole_id) = (AssetId::new(), AssetId::new());
+    for (name, file, id) in [("red", &red, red_id), ("hole", &hole, hole_id)] {
+        let path = dir.join(format!("props/{name}.material"));
+        std::fs::write(&path, file.to_text(id)).unwrap();
+        AssetMeta::default().write(&path, id).unwrap();
+    }
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Box"),
+        Transform::default(),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        // Its icon away from the box.
+        Transform::from_xyz(4.0, 6.0, 4.0),
+        engine_runtime::Sun {
+            color: Vec3::splat(2.0),
+            ambient: Vec3::splat(0.4),
+        },
+    ));
+    let options = engine_scene::SaveOptions {
+        id: Some(AssetId::new()),
+        assets: None,
+        prefabs: None,
+    };
+    let mut text = String::new();
+    engine_scene::save_with(
+        &mut world,
+        &engine_scene::SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("editor material tried test"),
+        window: Window::Offscreen {
+            width: 1280,
+            height: 720,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let folder = game.text_at("props").expect("the props folder listed");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, folder, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    let boxed = engine_scene::find_named(player.world_mut(), "Box").expect("the box");
+    let material = |player: &mut Player| player.world_mut().get::<Model>(boxed).unwrap().material;
+    let [x, y, w, h] = game.view_rect().unwrap();
+    let middle = [(x + w / 2) as f32, (y + h / 2) as f32];
+    let corner = [(x + 24) as f32, (y + 24) as f32];
+    let width = player.extent().width as usize;
+    let red_at = |rgba: &[u8], [px, py]: [f32; 2]| {
+        let i = (py as usize * width + px as usize) * 4;
+        let [r, g, b] = [rgba[i], rgba[i + 1], rgba[i + 2]].map(u32::from);
+        r > 80 && r > 2 * g.max(b)
+    };
+    // Red over the box: it shows red in the view before the drop.
+    let file = game
+        .text_at("red.material")
+        .expect("the red material listed");
+    drag_over(&mut player, &mut game, &mut overlay, file, middle);
+    let started = Instant::now();
+    let mut shown = false;
+    let mut frames = 0;
+    while started.elapsed() < Duration::from_secs(10) {
+        frame(&mut player, &mut game, &mut overlay);
+        frames += 1;
+        if material(&mut player) == AssetRef::file(red_id) {
+            let shot = player
+                .capture_overlaid(&mut game, Some(&mut overlay))
+                .unwrap()
+                .unwrap();
+            if red_at(&shot, middle) {
+                shown = true;
+                break;
+            }
+        }
+    }
+    println!("red shown on the box {frames} frames after the pointer reached it");
+    assert!(shown, "red on the box in the view while dragged over it");
+    // Off the box (nothing there): its own back, not red.
+    pointer(&mut game, corner, None);
+    let started = Instant::now();
+    while material(&mut player) != builtin::MATERIAL {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "its own back off it"
+        );
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let shot = player
+        .capture_overlaid(&mut game, Some(&mut overlay))
+        .unwrap()
+        .unwrap();
+    assert!(!red_at(&shot, middle), "its own drawn again");
+    // Escape: the drag over, nothing given.
+    tap(&mut game, 0x1B, 0x01);
+    frame(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, corner, Some(false));
+    frame(&mut player, &mut game, &mut overlay);
+    assert_eq!(material(&mut player), builtin::MATERIAL);
+    // The material that cuts the box away: kept on it while the pointer moves over it,
+    // a pick under the moving pointer every frame.
+    let file = game
+        .text_at("hole.material")
+        .expect("the hole material listed");
+    drag_over(&mut player, &mut game, &mut overlay, file, middle);
+    let started = Instant::now();
+    while material(&mut player) != AssetRef::file(hole_id) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the hole material tried on the box"
+        );
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let mut kept = Vec::new();
+    for k in 0..60 {
+        let dx = [-2.0, 0.0, 2.0][k % 3];
+        pointer(&mut game, [middle[0] + dx, middle[1]], None);
+        frame(&mut player, &mut game, &mut overlay);
+        kept.push(material(&mut player) == AssetRef::file(hole_id));
+    }
+    assert!(
+        kept.iter().all(|&k| k),
+        "kept on the box as the pointer moves: {kept:?}"
+    );
+    // Let go over it: given.
+    pointer(&mut game, middle, Some(false));
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    assert_eq!(material(&mut player), AssetRef::file(hole_id));
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

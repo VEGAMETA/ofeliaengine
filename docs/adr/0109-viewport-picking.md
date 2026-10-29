@@ -350,6 +350,20 @@ occlusion culling dropped. So:
   sky's pixel's planes one by one, so it is drawn and covers no pixel).
 - **The editor** (ADR 0107 E2-5) places on surfaces with it: Ctrl+Shift drags and End.
 
+## As built (E10-4e, 2026-10-29): instances picked as solid
+
+- **`Picker::add_scene_pass(…, solid, …)`:** the slots `solid` holds are taken whatever
+  their materials: blended ones even when the request leaves blended surfaces out, masked
+  ones drawn by the unmasked entry points. Only the candidates' filter and their state key
+  change, on the CPU; no shader, no other pass.
+- **Why:** the editor shows a dragged material on the object under the pointer before the
+  drop (ADR 0120's as-built E10-4e). A see-through material would make the object vanish
+  from its own hover pick, and the material flicker between it and what is behind.
+- **Tested** on both GPUs, with synchronization validation: told the blended quad is
+  solid, the square picks it while blended surfaces do not count; beside the front quads,
+  where only the invisible masked one and the large one behind it show, it picks the large
+  one, and the masked one once told it is solid.
+
 ## Steps
 
 - **E2-3a:** front-most picks (hover, click, Shift); the player's extension.
