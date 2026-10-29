@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-1b-1, a character's clips and P in place** (#PR, ADR 0124's as-built): the
+  - **E12-1b-1, a character's clips and P in place** (#449, ADR 0124's as-built): the
     selected character's Clips in the inspector (frames, root speed, size, error, and the
     loop's seam: CesiumMan "jumps 3.1 cm at leg_joint_R_1", the Fox's within 0.2 mm), a
     clip held at a click, ▶/■, loop, speed and a scrubbing bar; P (now "Scene: Play
