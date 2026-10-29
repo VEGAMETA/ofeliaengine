@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-2a, the `Animator` plays a clip** (#PR, ADR 0124's as-built): an `Animator` on a
+  - **E12-2a, the `Animator` plays a clip** (#454, ADR 0124's as-built): an `Animator` on a
     character plays its clip, looped: its `time` moves on each tick (saved, so loads go on),
     each frame poses between the last two ticks, and the world standing still holds it. The
     editor's held poses win until let go. Its `clip` field lists the character's clips. 0
