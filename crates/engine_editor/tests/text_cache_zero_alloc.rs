@@ -265,6 +265,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         sound: None,
         material_preview: None,
         clips: None,
+        joints: None,
         falloff: None,
         tile: 64.0,
         columns: 4,

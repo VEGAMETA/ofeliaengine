@@ -879,6 +879,11 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-1c-2b, Tab's joint mode and the Skeleton section** (#PR, ADR 0124's as-built):
+    Tab over the viewport on a character shows its joints as squares; the one under the
+    pointer lights with its name, a click picks it (the selection stays). The inspector's
+    Skeleton lists the joints as a tree, and a row click picks too. 0 allocations while a
+    character plays in place with its Skeleton shown, both GPUs.
   - **E12-1c-2a, a character's joints in the viewport** (#452, ADR 0124's as-built): the
     selected characters' skeletons as white sticks in front of everything, moving with
     their clips (`Player::model_joints`, `Player::skinned_models`); View: Skeletons shows
@@ -1081,8 +1086,8 @@ Last updated: 2026-10-28.
   - **Next** (the owner's order: materials first of the tools, then animation and 2D;
     E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (accepted
     2026-10-29, every question as recommended). E12-1a, E12-1b-1, E12-1b-2, E12-1c-1 and
-    E12-1c-2a are done; next E12-1c-2b (Tab's joint mode and the inspector's joint tree)
-    and E12-1c-3 (attachments), which the `Animator` stands on, then E12-1b-3 (↑/↓
+    E12-1c-2 are done; next E12-1c-3 (attachments), which the `Animator` stands on, then
+    E12-1b-3 (↑/↓
     through clips, two side by side, the floor under root motion and the root's path),
     E12-2 (the `Animator`), E12-3 (the Animation tab), E12-4 (keys) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine

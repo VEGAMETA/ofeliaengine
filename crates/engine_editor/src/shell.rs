@@ -651,6 +651,28 @@ pub struct ClipsPanel<'a> {
     pub time: &'a str,
 }
 
+/// A joint of the inspector's Skeleton (ADR 0124's E12-1c): its name and how deep below
+/// the skeleton's root it is.
+#[derive(Debug, Clone, Copy)]
+pub struct JointRow<'a> {
+    /// Its name in its file.
+    pub name: &'a str,
+    /// Its depth: 0 for a root.
+    pub depth: u16,
+}
+
+/// The active character's skeleton under its section's header (ADR 0124's E12-1c): a row a
+/// joint, indented by its depth, the picked one lit; a click on one picks it.
+#[derive(Debug, Clone, Copy)]
+pub struct JointsPanel<'a> {
+    /// The section it shows under.
+    pub section: usize,
+    /// The joints, in the skeleton's order (parents first).
+    pub rows: &'a [JointRow<'a>],
+    /// The picked joint.
+    pub picked: Option<usize>,
+}
+
 /// The material preview's side, at scale 1 (the engine's preview size).
 pub(crate) const MATERIAL_PREVIEW: f32 = 128.0;
 
@@ -965,6 +987,8 @@ pub struct ShellModel<'a> {
     pub material_preview: Option<MaterialPanel<'a>>,
     /// The active character's clips, under their section's header (ADR 0124's E12-1b).
     pub clips: Option<ClipsPanel<'a>>,
+    /// The active character's joints, under their section's header (ADR 0124's E12-1c).
+    pub joints: Option<JointsPanel<'a>>,
     /// The active entity's 3D sound's level over distance, the camera's distance marked
     /// (E11-4c, Unity's red line).
     pub falloff: Option<FalloffView<'a>>,
@@ -1146,6 +1170,8 @@ pub struct ShellResponse {
     pub clip_scrub: Option<WaveUse>,
     /// Their model's preview was pressed, dragged or let go: it turns.
     pub clip_turn: Option<WaveUse>,
+    /// The Skeleton (ADR 0124's E12-1c): a joint's row was clicked.
+    pub joint_pick: Option<usize>,
     /// The mixer (E11-1): + Bus was clicked.
     pub mixer_add: bool,
     /// A strip was clicked: its bus is picked.
@@ -2724,6 +2750,54 @@ pub(crate) const CLIP_BAR: f32 = 14.0;
 /// its facts and seam, the seam in the warning colour when it jumps), the chosen one lit and
 /// a click choosing another; then ▶ or ■, the loop, the speed and the time; then the bar
 /// along the chosen clip, its playhead over it, that a press or drag scrubs.
+/// The inspector's Skeleton (ADR 0124's E12-1c): a row a joint, indented by its depth.
+fn joints_panel(ui: &mut Ui, panel: &JointsPanel<'_>, p: &Palette, out: &mut ShellResponse) {
+    ui.column(
+        "joints",
+        Style {
+            size: [Size::Grow(1.0), Size::Fit],
+            padding: [SOUND_PAD, 4.0, SOUND_PAD, 4.0],
+            ..Style::default()
+        },
+        |ui| {
+            for (i, row) in panel.rows.iter().enumerate() {
+                ui.push_id(i as u64);
+                let picked = panel.picked == Some(i);
+                let hovered = ui.is_hovered(ui.id("joint"));
+                let indent = 6.0 + 12.0 * f32::from(row.depth.min(12));
+                let id = ui.row(
+                    "joint",
+                    Style {
+                        size: [Size::Grow(1.0), Size::Fixed(20.0)],
+                        padding: [indent, 0.0, 6.0, 0.0],
+                        radius: 3.0,
+                        background: if picked {
+                            Some(p.selection)
+                        } else {
+                            hovered.then_some(p.field_hover)
+                        },
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        text(
+                            ui,
+                            "name",
+                            row.name,
+                            SMALL,
+                            if picked { p.text } else { p.text_dim },
+                        );
+                    },
+                );
+                if ui.sense(id, false).clicked {
+                    out.joint_pick = Some(i);
+                }
+                ui.pop_id();
+            }
+        },
+    );
+}
+
 fn clips_panel(ui: &mut Ui, panel: &ClipsPanel<'_>, p: &Palette, out: &mut ShellResponse) {
     ui.column(
         "clips",
@@ -4319,9 +4393,13 @@ fn inspector_dock(
                     if let Some(panel) = model.material_preview.filter(|panel| panel.section == s) {
                         material_panel(ui, &panel, p, out);
                     }
-                    // A character's clips under theirs (ADR 0124's E12-1b).
+                    // A character's clips under theirs (ADR 0124's E12-1b), its joints under
+                    // theirs (E12-1c).
                     if let Some(panel) = model.clips.filter(|panel| panel.section == s) {
                         clips_panel(ui, &panel, p, out);
+                    }
+                    if let Some(panel) = model.joints.filter(|panel| panel.section == s) {
+                        joints_panel(ui, &panel, p, out);
                     }
                     // A script's component: its file, as Godot's Script property.
                     if !section.script.is_empty() {

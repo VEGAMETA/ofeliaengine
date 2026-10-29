@@ -701,6 +701,8 @@ struct FrameLists {
     bus_options: Vec<&'static str>,
     /// The active character's clips (ADR 0124's E12-1b).
     clip_rows: Vec<crate::shell::ClipRow<'static>>,
+    /// The active character's joints (E12-1c).
+    joint_rows: Vec<crate::shell::JointRow<'static>>,
 }
 
 /// What the tree's rows are collected with, kept between frames.
@@ -900,6 +902,8 @@ struct CommandIds {
     /// Every character's skeleton over the viewport, not only the selected ones' (ADR
     /// 0124's E12-1c).
     skeletons: CommandId,
+    /// Tab on a character: its joints take the pointer (ADR 0124's E12-1c).
+    edit_joints: CommandId,
     /// View: Sound Ranges (E11-4c): every source's reach and every zone, dim.
     sound_ranges: CommandId,
     docks_beside_code: CommandId,
@@ -1094,6 +1098,7 @@ fn commands() -> (Commands, CommandIds) {
         overlays: c.register("view.overlays", "View", "Overlays"),
         colliders: c.register("view.colliders", "View", "Colliders"),
         skeletons: c.register("view.skeletons", "View", "Skeletons"),
+        edit_joints: c.register("anim.edit_joints", "Animation", "Edit Joints"),
         sound_ranges: c.register("view.sound_ranges", "View", "Sound Ranges"),
         docks_beside_code: c.register("view.docks_beside_code", "View", "Scene Docks Beside Code"),
         navigation: c.register("view.navigation", "View", "Navigation"),
@@ -3169,6 +3174,14 @@ struct Editor {
     skeleton_lines: [Vec<[Vec3; 2]>; 2],
     skeleton_joints: Vec<Affine3A>,
     skeleton_of: Vec<Entity>,
+    /// The active character's skeleton as the inspector lists it, its picked joint (ADR
+    /// 0124's E12-1c), and the section it shows under.
+    skeleton_view: Option<SkeletonView>,
+    skeleton_section: Option<usize>,
+    /// Tab's joint mode on the active character (E12-1c), and that character's joints in
+    /// the world as the last frame put them, to pick from.
+    joint_edit: Option<JointEdit>,
+    joint_points: Vec<Vec3>,
     /// View: Sound Ranges (E11-4c).
     show_sound_ranges: bool,
     /// The active entity's 3D sound's falloff for the inspector (E11-4c): its bars, and
@@ -4052,6 +4065,10 @@ impl Editor {
             skeleton_lines: Default::default(),
             skeleton_joints: Vec::new(),
             skeleton_of: Vec::new(),
+            skeleton_view: None,
+            skeleton_section: None,
+            joint_edit: None,
+            joint_points: Vec::new(),
             show_sound_ranges: false,
             falloff_bars: [0.0; FALLOFF_BARS],
             falloff_texts: Default::default(),
@@ -4462,8 +4479,14 @@ impl Editor {
                 cx >= x && cy >= y && cx < x + w && cy < y + h
             })
         });
+        let character = self
+            .skeleton_view
+            .as_ref()
+            .is_some_and(|v| self.selection.last() == Some(&v.entity));
         let tab = if self.active_graph.is_some() {
             over_graph.then_some(self.ids.enter_function)
+        } else if character {
+            over_view.then_some(self.ids.edit_joints)
         } else {
             over_view.then_some(self.ids.edit_faces)
         };
@@ -4843,6 +4866,7 @@ impl Editor {
             recycle(std::mem::take(&mut self.lists.material_values));
         self.material_section = None;
         self.clips_section = None;
+        self.skeleton_section = None;
         let mut sound_section = None;
         let scale_value: [&str; 1];
         let bus_values: [&str; 3];
@@ -5306,7 +5330,8 @@ impl Editor {
                     removable: false,
                 });
             }
-            // The active character's clips after its components (ADR 0124's E12-1b).
+            // The active character's clips after its components (ADR 0124's E12-1b), its
+            // skeleton after them (E12-1c).
             if self.clips.as_ref().is_some_and(|c| {
                 self.selection
                     .last()
@@ -5315,6 +5340,19 @@ impl Editor {
                 self.clips_section = Some(sections.len());
                 sections.push(Section {
                     title: "Clips",
+                    fields: &[],
+                    script: "",
+                    removable: false,
+                });
+            }
+            if self
+                .skeleton_view
+                .as_ref()
+                .is_some_and(|v| self.selection.last() == Some(&v.entity))
+            {
+                self.skeleton_section = Some(sections.len());
+                sections.push(Section {
+                    title: "Skeleton",
                     fields: &[],
                     script: "",
                     removable: false,
@@ -5475,6 +5513,20 @@ impl Editor {
         }
         if self.face_edit.is_some() {
             let _ = write!(self.status, "{FACES_HELP}  ·  ");
+        }
+        if self.joint_edit.is_some() {
+            let picked = self
+                .skeleton_view
+                .as_ref()
+                .and_then(|v| Some(v.names[v.picked?].as_str()));
+            match picked {
+                Some(name) => {
+                    let _ = write!(self.status, "{name}  ·  {JOINTS_HELP}  ·  ");
+                }
+                None => {
+                    let _ = write!(self.status, "{JOINTS_HELP}  ·  ");
+                }
+            }
         }
         if self.flying() {
             let _ = write!(
@@ -6184,6 +6236,20 @@ impl Editor {
             snapshot,
             snapshots: self.snapshot_menu.then_some(snapshot_items.as_slice()),
         });
+        let mut joint_rows: Vec<crate::shell::JointRow<'_>> =
+            recycle(std::mem::take(&mut self.lists.joint_rows));
+        if let Some(view) = self
+            .skeleton_view
+            .as_ref()
+            .filter(|_| self.skeleton_section.is_some())
+        {
+            joint_rows.extend(
+                view.names
+                    .iter()
+                    .zip(&view.depths)
+                    .map(|(name, &depth)| crate::shell::JointRow { name, depth }),
+            );
+        }
         let mut clip_rows: Vec<crate::shell::ClipRow<'_>> =
             recycle(std::mem::take(&mut self.lists.clip_rows));
         if let Some(view) = &self.clips {
@@ -6275,6 +6341,13 @@ impl Editor {
                     time: &view.time_text,
                 })
             }),
+            joints: self.skeleton_section.and_then(|section| {
+                Some(crate::shell::JointsPanel {
+                    section,
+                    rows: &joint_rows,
+                    picked: self.skeleton_view.as_ref()?.picked,
+                })
+            }),
             tile: self.tile,
             columns,
             bottom_tabs: &[
@@ -6362,6 +6435,7 @@ impl Editor {
         self.lists.part_options = recycle(part_options);
         self.lists.bus_options = recycle(bus_options);
         self.lists.clip_rows = recycle(clip_rows);
+        self.lists.joint_rows = recycle(joint_rows);
         self.joined = joined;
         self.lists.scenes = recycle(scenes);
         self.lists.graphs = recycle(graph_tabs);
@@ -6483,6 +6557,12 @@ impl Editor {
         // The Clips (ADR 0124's E12-1b): a clip chosen, ▶ or ■, the loop, the speed, the bar.
         if let Some(i) = response.clip_pick {
             self.choose_clip(i);
+        }
+        // The Skeleton (E12-1c): a joint picked, as a click on it in the joint mode picks it.
+        if let Some(j) = response.joint_pick
+            && let Some(v) = self.skeleton_view.as_mut()
+        {
+            v.picked = Some(j);
         }
         if response.clip_play {
             self.toggle_clip_play();
@@ -8231,7 +8311,8 @@ impl Editor {
             }
         });
         if self.input.pressed(Button::Left) {
-            let on_face = self.face_edit.as_ref().is_some_and(|f| f.hovered.is_some());
+            let on_face = self.face_edit.as_ref().is_some_and(|f| f.hovered.is_some())
+                || self.joint_edit.is_some_and(|j| j.hovered.is_some());
             self.press_at = cursor.filter(|_| {
                 request.is_some()
                     && self.hovered_handle.is_none()
@@ -9170,6 +9251,15 @@ impl Editor {
             self.hovered_side = None;
             return;
         }
+        // Picking a character's joints (Tab, ADR 0124's E12-1c): so do the joints.
+        if self.joint_edit.is_some() {
+            self.joints_frame(&view, cursor);
+            self.hovered_handle = None;
+            self.handles.clear();
+            self.sound_handles.clear();
+            self.hovered_side = None;
+            return;
+        }
         // The active brush's side handles take the pointer before the gizmo's; the gizmo
         // hides while a side is dragged.
         if self.sides_frame(world, &view, cursor, scale) {
@@ -9337,6 +9427,62 @@ impl Editor {
     }
 
     /// Tab: editing the selected brushes' faces, or the editing ended.
+    /// Tab on a character (ADR 0124's E12-1c): its joints take the pointer, or give it back.
+    fn toggle_joint_edit(&mut self) {
+        if self.joint_edit.take().is_some() {
+            return;
+        }
+        match self
+            .skeleton_view
+            .as_ref()
+            .filter(|v| self.selection.last() == Some(&v.entity))
+        {
+            Some(v) => {
+                self.joint_edit = Some(JointEdit {
+                    entity: v.entity,
+                    hovered: None,
+                });
+            }
+            None => self.say(String::from("Select a character to pick its joints (Tab)")),
+        }
+    }
+
+    /// Tab's joint mode's frame (ADR 0124's E12-1c): the character's joint nearest the
+    /// pointer within 8 pixels lit; a press on it picks it, a press in the view on no joint
+    /// ends the mode (the click selecting as clicks do), one on the panels keeps it (the
+    /// Skeleton's rows pick too); Escape ends it.
+    fn joints_frame(&mut self, view: &ViewProj, cursor: Option<Vec2>) {
+        let Some(mut edit) = self.joint_edit.take() else {
+            return;
+        };
+        if self.ui.input().keys.contains(&UiKey::Escape) {
+            return;
+        }
+        let free = !self.camera_drag && self.command_palette.is_none() && !self.add_open;
+        let reach = 8.0 * self.scale.max(0.5);
+        edit.hovered = cursor
+            .filter(|&at| free && view.contains(at))
+            .and_then(|at| {
+                self.joint_points
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(j, &p)| Some((j, view.screen(p)?.distance(at))))
+                    .filter(|&(_, d)| d <= reach)
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+            })
+            .map(|(j, _)| j);
+        if self.input.pressed(Button::Left) && cursor.is_some_and(|at| view.contains(at)) {
+            let Some(j) = edit.hovered else {
+                // A press in the view on no joint: the mode ends, the click selects.
+                return;
+            };
+            if let Some(v) = self.skeleton_view.as_mut() {
+                v.picked = Some(j);
+            }
+        }
+        self.joint_edit = Some(edit);
+    }
+
     fn toggle_face_edit(&mut self, world: &World) {
         if self.face_edit.take().is_some() {
             return;
@@ -16037,6 +16183,8 @@ impl Editor {
             self.toggle_rooms(world);
         } else if id == ids.edit_faces {
             self.toggle_face_edit(world);
+        } else if id == ids.edit_joints {
+            self.toggle_joint_edit();
         } else if id == ids.export {
             match self.brush_group(world) {
                 Some(group) => self.export_group = Some(group),
@@ -19047,8 +19195,33 @@ impl Editor {
                 {
                     self.clips = Some(ClipsView::new(of, at, ClipFacts::of(rig)));
                 }
+                // The active character's skeleton for the inspector (E12-1c).
+                if let ClipsOf::Entity(e) = of {
+                    if self
+                        .skeleton_view
+                        .as_ref()
+                        .is_none_or(|v| v.entity != e || v.rig != at)
+                    {
+                        let skeleton = rig.skeleton();
+                        let parents = (0..skeleton.joint_count()).map(|j| skeleton.parent(j));
+                        self.skeleton_view =
+                            Some(SkeletonView::new(e, at, skeleton.names(), parents));
+                    }
+                } else {
+                    self.skeleton_view = None;
+                }
             }
-            None => self.clips = None,
+            None => {
+                self.clips = None;
+                self.skeleton_view = None;
+            }
+        }
+        if self.joint_edit.is_some_and(|j| {
+            self.skeleton_view
+                .as_ref()
+                .is_none_or(|v| v.entity != j.entity)
+        }) {
+            self.joint_edit = None;
         }
         if self.play.is_some() {
             self.in_place = None;
@@ -19153,6 +19326,14 @@ impl Editor {
                 &mut *others
             };
             let joints = &self.skeleton_joints;
+            if self.joint_edit.is_some_and(|j| j.entity == e) {
+                self.joint_points.clear();
+                self.joint_points.extend(
+                    joints
+                        .iter()
+                        .map(|m| at.transform_point3(Vec3::from(m.translation))),
+                );
+            }
             lines.extend(joints.iter().enumerate().filter_map(|(j, m)| {
                 let parent = joints.get(skeleton.parent(j)?)?;
                 Some([
@@ -24452,6 +24633,34 @@ impl<G> EditorGame<G> {
         self.shared.borrow().skeleton_lines.clone()
     }
 
+    /// The picked joint of the active character's skeleton, and whether Tab's joint mode is
+    /// on (ADR 0124's E12-1c): for tests.
+    pub fn picked_joint(&self) -> (Option<String>, bool) {
+        let shared = self.shared.borrow();
+        let picked = shared
+            .skeleton_view
+            .as_ref()
+            .and_then(|v| v.names.get(v.picked?).cloned());
+        (picked, shared.joint_edit.is_some())
+    }
+
+    /// Where joint `name` of the character in Tab's joint mode is in the world (ADR 0124's
+    /// E12-1c): for tests.
+    pub fn joint_point(&self, name: &str) -> Option<Vec3> {
+        let shared = self.shared.borrow();
+        let view = shared.skeleton_view.as_ref()?;
+        let j = view.names.iter().position(|n| n == name)?;
+        shared.joint_points.get(j).copied()
+    }
+
+    /// The editor camera's picture of world point `p` (ADR 0124's E12-1c): where it is in
+    /// the window, for tests.
+    pub fn screen_point(&self, p: Vec3) -> Option<[f32; 2]> {
+        let shared = self.shared.borrow();
+        let view = ViewProj::new(&shared.orbit, shared.view_rect?);
+        view.screen(p).map(|v| [v.x, v.y])
+    }
+
     /// How many characters play in place now (ADR 0124's E12-1b): for tests.
     pub fn playing_in_place(&self) -> usize {
         self.shared
@@ -24941,6 +25150,54 @@ fn draw_drawing(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canv
 const FACES_HELP: &str = "drag a face, an edge or a corner: move it  ·  Alt+drag a face: pull a \
                           brush out of it (pushed in: a cut)  ·  Tab or Esc: done";
 
+/// The status bar's help while a character's joints are picked (ADR 0124's E12-1c).
+const JOINTS_HELP: &str = "click a joint: pick it  ·  Tab or Esc: done";
+
+/// Tab's joint mode (ADR 0124's E12-1c): the character, and the joint under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JointEdit {
+    entity: Entity,
+    hovered: Option<usize>,
+}
+
+/// The active character's skeleton as the inspector lists it (ADR 0124's E12-1c): whose it
+/// is and the rig it is of (made anew when its file is read again), each joint's name and
+/// depth below its root, and the picked joint.
+#[derive(Debug)]
+struct SkeletonView {
+    entity: Entity,
+    rig: usize,
+    names: Vec<String>,
+    depths: Vec<u16>,
+    picked: Option<usize>,
+}
+
+impl SkeletonView {
+    /// The skeleton of `names` whose joints' parents are `parents` (parents before their
+    /// children, as skeletons keep them).
+    fn new(
+        entity: Entity,
+        rig: usize,
+        names: &[String],
+        parents: impl Iterator<Item = Option<usize>>,
+    ) -> Self {
+        let mut depths: Vec<u16> = Vec::with_capacity(names.len());
+        for parent in parents {
+            let depth = parent
+                .and_then(|p| depths.get(p))
+                .map_or(0, |&d| d.saturating_add(1));
+            depths.push(depth);
+        }
+        Self {
+            entity,
+            rig,
+            names: names.to_vec(),
+            depths,
+            picked: None,
+        }
+    }
+}
+
 /// Editing brushes' faces, edges and corners (Tab, ADR 0110 E2b-5): the brushes; their faces
 /// and their parts' corners this frame, each with its brush; what is under the pointer; a
 /// face or corners being dragged.
@@ -25095,6 +25352,53 @@ fn draw_faces(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canvas
         text.push_str(&transform::short(d));
         text.push_str(" m");
         label(&mut editor.text, glyphs, canvas, at, &text, scale);
+    }
+    canvas.set_clip(None);
+}
+
+/// Tab's joint mode on a character (ADR 0124's E12-1c), under the panels: a small square
+/// at each joint, the one under the pointer light blue and the picked one orange, each of
+/// the two with its name beside it.
+fn draw_joints(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, canvas: &mut Canvas) {
+    let Some(edit) = editor.joint_edit else {
+        return;
+    };
+    let scale = editor.scale.max(0.5);
+    let view = ViewProj::new(&editor.orbit, rect);
+    let picked = editor.skeleton_view.as_ref().and_then(|v| v.picked);
+    canvas.set_clip(Some(clip_of(rect)));
+    let order = Order::layer(-1);
+    for (j, &p) in editor.joint_points.iter().enumerate() {
+        let Some(at) = view.screen(p) else {
+            continue;
+        };
+        let (size, color) = if picked == Some(j) {
+            (9.0, Vec4::new(1.0, 0.6, 0.15, 1.0))
+        } else if edit.hovered == Some(j) {
+            (9.0, Vec4::new(0.45, 0.85, 1.0, 1.0))
+        } else {
+            (6.0, Vec4::new(0.95, 0.97, 1.0, 1.0))
+        };
+        canvas.draw(
+            &Quad::solid(at, Vec2::splat((size + 3.0) * scale))
+                .color(Vec4::new(0.08, 0.08, 0.1, 0.85))
+                .order(order),
+        );
+        canvas.draw(
+            &Quad::solid(at, Vec2::splat(size * scale))
+                .color(color)
+                .order(order),
+        );
+    }
+    let hovered = edit.hovered.filter(|&h| Some(h) != picked);
+    for j in [hovered, picked].into_iter().flatten() {
+        let Some(name) = editor.skeleton_view.as_ref().and_then(|v| v.names.get(j)) else {
+            continue;
+        };
+        if let Some(at) = editor.joint_points.get(j).and_then(|&p| view.screen(p)) {
+            let beside = at + Vec2::new(14.0, -14.0) * scale;
+            label(&mut editor.text, glyphs, canvas, beside, name, scale);
+        }
     }
     canvas.set_clip(None);
 }
@@ -26873,6 +27177,7 @@ impl Overlay for EditorOverlay {
                 draw_sides(editor, rect, &self.glyphs, &mut self.canvas);
                 draw_sound_handles(editor, rect, &self.glyphs, &mut self.canvas);
                 draw_faces(editor, rect, &self.glyphs, &mut self.canvas);
+                draw_joints(editor, rect, &self.glyphs, &mut self.canvas);
                 if editor.draw.is_some() {
                     draw_drawing(editor, rect, &self.glyphs, &mut self.canvas);
                 }
@@ -32957,6 +33262,16 @@ return Coin
             "{found:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E12-1c: a skeleton's joints listed with their depths, parents first.
+    #[test]
+    fn a_skeleton_view_knows_each_joints_depth() {
+        let names = ["hips", "spine", "head", "leg"].map(String::from);
+        let parents = [None, Some(0), Some(1), Some(0)];
+        let view = SkeletonView::new(Entity::NULL, 0, &names, parents.into_iter());
+        assert_eq!(view.depths, [0, 1, 2, 1]);
+        assert_eq!(view.picked, None);
     }
 
     #[test]
