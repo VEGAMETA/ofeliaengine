@@ -1791,6 +1791,169 @@ fn an_animator_plays_its_clip_on_the_ticks_and_poses_each_frame() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR 0124's E12-2b: an animator fading from one clip into another. The frames of the
+/// fade show neither clip, nearer each than the two are to each other; a save keeps the
+/// fade; once it is over, the new clip alone.
+#[test]
+fn an_animator_fades_from_one_clip_into_another() {
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/Fox");
+    if !source.join("Fox.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ofelia-fade-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    for file in ["Fox.gltf", "Fox.bin", "Texture.png"] {
+        std::fs::copy(source.join(file), dir.join("models").join(file)).unwrap();
+    }
+    let id = AssetMeta::ensure(&dir.join("models/Fox.gltf")).unwrap();
+    let (mesh, material) = (
+        AssetRef::part(id, "fox1"),
+        AssetRef::part(id, "fox_material"),
+    );
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(mesh, "models/Fox.gltf#fox1");
+    paths.insert(material, "models/Fox.gltf#fox_material");
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Fox"),
+        Transform::from_scale(Vec3::splat(0.01)),
+        Model::new(mesh, material),
+        Animator::new("Survey"),
+    ));
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let registry = SceneRegistry::from_program();
+    let mut text = String::new();
+    save_with(&mut world, &registry, &options, &mut text).unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("fade test"),
+        window: Window::Offscreen {
+            width: 128,
+            height: 128,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let fox = find_named(player.world_mut(), "Fox").unwrap();
+    let started = Instant::now();
+    while player.model_rig(fox).is_none() {
+        assert!(started.elapsed() < Duration::from_secs(30), "no skin");
+        player.frame(&mut game).unwrap();
+    }
+    let clips: Vec<(String, f32)> = player
+        .model_rig(fox)
+        .unwrap()
+        .clips()
+        .iter()
+        .map(|c| (c.name().to_owned(), c.duration()))
+        .collect();
+    let clip = |name: &str| clips.iter().position(|(n, _)| n == name).unwrap();
+    let (survey, run) = (clip("Survey"), clip("Run"));
+    for _ in 0..10 {
+        player.frame(&mut game).unwrap();
+    }
+    let animator = |player: &mut Player| player.world_mut().get::<Animator>(fox).unwrap().clone();
+    let joints = |player: &mut Player| {
+        let mut joints = Vec::new();
+        assert!(player.model_joints(fox, &mut joints));
+        joints
+    };
+    // A clip's pose at a moment, as the editor holds one, then let go.
+    let held = |player: &mut Player, clip: usize, time: f32| {
+        assert!(player.pose_model(fox, Some((clip, time))));
+        let pose = joints(player);
+        assert!(player.pose_model(fox, None));
+        pose
+    };
+    let off = |a: &[Affine3A], b: &[Affine3A]| {
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| (Vec3::from(a.translation) - Vec3::from(b.translation)).length())
+            .fold(0.0f32, f32::max)
+    };
+    player
+        .world_mut()
+        .get_mut::<Animator>(fox)
+        .unwrap()
+        .play("Run", 0.5);
+    let mut midway = false;
+    for _ in 0..60 {
+        player.frame(&mut game).unwrap();
+        let a = animator(&mut player);
+        let alpha = player.runtime().clock.alpha();
+        let weight = a.weight(alpha);
+        if !(0.4..0.6).contains(&weight) {
+            continue;
+        }
+        let drawn = joints(&mut player);
+        let from = held(&mut player, survey, a.from_at(alpha, clips[survey].1));
+        let to = held(&mut player, run, a.at(alpha, clips[run].1));
+        let apart = off(&from, &to);
+        let (to_from, to_to) = (off(&drawn, &from), off(&drawn, &to));
+        println!(
+            "at weight {weight:.3}: {to_from:.2} from Survey, {to_to:.2} from Run, \
+             which are {apart:.2} apart (the model's units)"
+        );
+        assert!(
+            to_from > 0.1 * apart && to_to > 0.1 * apart,
+            "neither clip at weight {weight}: {to_from}, {to_to} of {apart}"
+        );
+        assert!(to_from < apart && to_to < apart, "between them");
+        // A save keeps the fade, to go on fading after a load.
+        let mut saved = String::new();
+        save_with(player.world_mut(), &registry, &options, &mut saved).unwrap();
+        assert!(
+            saved.contains("from_clip") && saved.contains("\"Survey\""),
+            "{saved}"
+        );
+        midway = true;
+        break;
+    }
+    assert!(midway, "the fade's middle shown");
+    let mut over = false;
+    for _ in 0..60 {
+        player.frame(&mut game).unwrap();
+        if animator(&mut player).fade == 0.0 {
+            over = true;
+            break;
+        }
+    }
+    assert!(over, "the fade ends");
+    let a = animator(&mut player);
+    assert_eq!((a.clip.as_str(), a.from_clip.as_str()), ("Run", ""));
+    let alpha = player.runtime().clock.alpha();
+    let drawn = joints(&mut player);
+    let pure = held(&mut player, run, a.at(alpha, clips[run].1));
+    assert!(off(&drawn, &pure) < 1e-5, "Run alone once the fade is over");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ADR 0124's E12-1c: a socket under a character (`JointAttachment`) follows its joint:
 /// where the joint is in the pose held, through the animator's clip as it plays, and what
 /// hangs under the socket with it; standing still, it stands; a joint the skeleton lacks

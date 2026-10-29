@@ -14,8 +14,8 @@
 
 use crate::assets::{GltfFile, gltf_primitives};
 use engine_anim::{
-    CompressSettings, CompressedClip, Pose, Skeleton, compress, local_to_model, rotation_angle,
-    skinning_matrices, yaw_of,
+    Blender, CompressSettings, CompressedClip, Layer, LayerMode, Pose, Skeleton, compress,
+    local_to_model, rotation_angle, skinning_matrices, yaw_of,
 };
 use engine_assets::ImportedScene;
 use engine_assets::animation::{node_parents, raw_clip, shell_distances, skin_skeleton};
@@ -353,31 +353,80 @@ fn ends(
     (speed, seam.0, seam.1)
 }
 
+/// A clip fading out under another (ADR 0124's E12-2b): it, its moment, and the other's
+/// weight (the rest is this one's).
+pub(crate) type Fade = Option<(usize, f32, f32)>;
+
 /// Where poses are made, kept between frames: sized for the largest rig posed, so posing
 /// allocates nothing after the first.
 #[derive(Debug, Default)]
 pub(crate) struct Posing {
     pose: Option<Pose>,
+    from: Option<Pose>,
+    blended: Option<Pose>,
+    blender: Blender,
+    blender_joints: usize,
     model: Vec<Affine3A>,
     palette: Vec<[f32; 12]>,
 }
 
 impl Posing {
-    /// `rig`'s skinning matrices at `pose` (a clip and a time in it, held at its ends), its
-    /// rest pose's without one or for a clip it has not.
+    /// `rig`'s local pose at `pose` (a clip and a time in it, held at its ends), faded from
+    /// `fade`, into `self.pose`: false for the rest pose (no clip, or one it has not).
+    fn local(&mut self, rig: &Rig, pose: Option<(usize, f32)>, fade: Fade) -> bool {
+        let Some((clip, time)) = pose.filter(|&(c, _)| c < rig.clips.len()) else {
+            return false;
+        };
+        let rest = rig.skeleton.rest();
+        let n = rest.len();
+        let sampled = self.pose.get_or_insert_with(|| Pose::identity(n));
+        rig.clips[clip].clip.sample(time, rest, sampled);
+        if let Some((from, from_time, weight)) =
+            fade.filter(|&(c, _, w)| c < rig.clips.len() && w < 1.0)
+        {
+            let other = self.from.get_or_insert_with(|| Pose::identity(n));
+            rig.clips[from].clip.sample(from_time, rest, other);
+            if self.blender_joints < n {
+                self.blender = Blender::new(n);
+                self.blender_joints = n;
+            }
+            let out = self.blended.get_or_insert_with(|| Pose::identity(n));
+            out.copy_from(rest);
+            let layers = [
+                Layer {
+                    pose: &*other,
+                    weight: 1.0 - weight,
+                    mask: None,
+                    mode: LayerMode::Normal,
+                },
+                Layer {
+                    pose: &*sampled,
+                    weight,
+                    mask: None,
+                    mode: LayerMode::Normal,
+                },
+            ];
+            self.blender.blend(rest, &layers, out);
+            core::mem::swap(sampled, out);
+        }
+        true
+    }
+
+    /// `rig`'s skinning matrices at `pose` faded from `fade` ([`Self::local`]), its rest
+    /// pose's without one or for a clip it has not.
     pub(crate) fn palette<'a>(
         &'a mut self,
         rig: &'a Rig,
         pose: Option<(usize, f32)>,
+        fade: Fade,
     ) -> &'a [[f32; 12]] {
-        let Some((clip, time)) = pose.filter(|&(c, _)| c < rig.clips.len()) else {
+        if !self.local(rig, pose, fade) {
+            return &rig.rest;
+        }
+        let Some(sampled) = self.pose.as_ref() else {
             return &rig.rest;
         };
         let n = rig.skeleton.joint_count();
-        let sampled = self.pose.get_or_insert_with(|| Pose::identity(n));
-        rig.clips[clip]
-            .clip
-            .sample(time, rig.skeleton.rest(), sampled);
         if self.model.len() < n {
             self.model.resize(n, Affine3A::IDENTITY);
         }
@@ -402,20 +451,16 @@ impl Posing {
         &'a mut self,
         rig: &Rig,
         pose: Option<(usize, f32)>,
+        fade: Fade,
     ) -> &'a [Affine3A] {
         let n = rig.skeleton.joint_count();
         if self.model.len() < n {
             self.model.resize(n, Affine3A::IDENTITY);
         }
-        let local = match pose.filter(|&(c, _)| c < rig.clips.len()) {
-            Some((clip, time)) => {
-                let sampled = self.pose.get_or_insert_with(|| Pose::identity(n));
-                rig.clips[clip]
-                    .clip
-                    .sample(time, rig.skeleton.rest(), sampled);
-                &*sampled
-            }
-            None => rig.skeleton.rest(),
+        let posed = self.local(rig, pose, fade);
+        let local = match (posed, self.pose.as_ref()) {
+            (true, Some(sampled)) => sampled,
+            _ => rig.skeleton.rest(),
         };
         local_to_model(&rig.skeleton, local, &rig.root, &mut self.model[..n]);
         &self.model[..n]
@@ -583,7 +628,7 @@ mod tests {
             let mut posing = Posing::default();
             let clip = &rig.clips()[0];
             let palette = posing
-                .palette(&rig, Some((0, clip.duration() * 0.5)))
+                .palette(&rig, Some((0, clip.duration() * 0.5)), None)
                 .to_vec();
             let moved = (0..part.mesh.positions.len()).step_by(step).any(|v| {
                 (skinned(part, &palette, v) - skinned(part, &rig.rest, v)).length() > 1e-4 * reach
@@ -593,10 +638,10 @@ mod tests {
             // E12-1c): each skin joint's place times its inverse bind matrix.
             let mut again = vec![[0.0f32; 12]; rig.joints.len()];
             for pose in [None, Some((0, clip.duration() * 0.5))] {
-                let joints = posing.joints(&rig, pose).to_vec();
+                let joints = posing.joints(&rig, pose, None).to_vec();
                 assert_eq!(joints.len(), rig.skeleton.joint_count());
                 skinning_matrices(&joints, &rig.joints, &rig.inverse_bind, &mut again);
-                let palette = posing.palette(&rig, pose);
+                let palette = posing.palette(&rig, pose, None);
                 let same = palette.iter().zip(&again).all(|(a, b)| {
                     a.iter()
                         .zip(b)
@@ -604,9 +649,38 @@ mod tests {
                 });
                 assert!(same, "{path} {pose:?}: the joints skin as the palette does");
             }
+            // A fade (E12-2b): at no weight the clip fading out, at full weight the other,
+            // between, between them; where the skin is.
+            let (early, late) = (clip.duration() * 0.1, clip.duration() * 0.5);
+            let posed = |posing: &mut Posing, fade: Fade| {
+                posing.palette(&rig, Some((0, late)), fade).to_vec()
+            };
+            let off = |a: &[[f32; 12]], b: &[[f32; 12]]| {
+                (0..part.mesh.positions.len())
+                    .step_by(step)
+                    .map(|v| (skinned(part, a, v) - skinned(part, b, v)).length())
+                    .fold(0.0f32, f32::max)
+            };
+            let at_early = posing.palette(&rig, Some((0, early)), None).to_vec();
+            let at_late = posed(&mut posing, None);
+            let apart = off(&at_early, &at_late);
+            assert!(
+                apart > 1e-3 * reach,
+                "{path}: {} moves between",
+                clip.name()
+            );
+            let faded_out = posed(&mut posing, Some((0, early, 0.0)));
+            assert!(off(&faded_out, &at_early) < 1e-4 * reach, "{path}");
+            assert_eq!(posed(&mut posing, Some((0, early, 1.0))), at_late);
+            let half = posed(&mut posing, Some((0, early, 0.5)));
+            let (to_early, to_late) = (off(&half, &at_early), off(&half, &at_late));
+            assert!(
+                to_early > 0.1 * apart && to_late > 0.1 * apart,
+                "{path}: halfway is neither ({to_early}, {to_late} of {apart})"
+            );
             // No clip, or one it has not: the rest pose.
-            assert_eq!(posing.palette(&rig, None), &rig.rest[..]);
-            assert_eq!(posing.palette(&rig, Some((99, 0.0))), &rig.rest[..]);
+            assert_eq!(posing.palette(&rig, None, None), &rig.rest[..]);
+            assert_eq!(posing.palette(&rig, Some((99, 0.0)), None), &rig.rest[..]);
         }
     }
 

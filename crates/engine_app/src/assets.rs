@@ -863,6 +863,8 @@ struct Owned {
     meshes: Vec<MeshId>,
     rig: Arc<crate::skins::Rig>,
     pose: Option<(usize, f32)>,
+    /// The clip fading out under it (an animator's fade, E12-2b).
+    fade: crate::skins::Fade,
     held: bool,
     posed: bool,
 }
@@ -878,6 +880,31 @@ struct PreviewSkin {
     rig: Option<Arc<crate::skins::Rig>>,
     pose: Option<(usize, f32)>,
     posed: bool,
+}
+
+/// What an animator shows a frame (ADR 0124's E12-2): its clip at its moment, the clip
+/// fading out under it (at its own moment, with the first's weight), and the two clips'
+/// lengths.
+type Shown = ((usize, f32), crate::skins::Fade, (f32, f32));
+
+/// What an animator shows a frame `alpha` of the way from its last tick to its next
+/// ([`Shown`]); None for a rig without clips.
+fn animator_pose(rig: &crate::skins::Rig, animator: &Animator, alpha: f32) -> Option<Shown> {
+    let clips = rig.clips();
+    let names = clips.iter().map(crate::RigClip::name);
+    let k = named_clip(names.clone(), &animator.clip);
+    let length = clips.get(k)?.duration();
+    let mut from_length = 0.0;
+    let fade = (animator.fade > 0.0).then(|| {
+        let f = named_clip(names, &animator.from_clip);
+        from_length = clips.get(f).map_or(0.0, crate::RigClip::duration);
+        (
+            f,
+            animator.from_at(alpha, from_length),
+            animator.weight(alpha),
+        )
+    });
+    Some(((k, animator.at(alpha, length)), fade, (length, from_length)))
 }
 
 /// The clip an animator names among a rig's clip names (ADR 0124's E12-2): by its name in
@@ -2585,6 +2612,7 @@ impl Assets {
                     meshes,
                     rig,
                     pose: None,
+                    fade: None,
                     held: false,
                     posed: false,
                 },
@@ -2725,18 +2753,16 @@ impl Assets {
                 .take_while(|(c, _)| *c == character)
                 .count();
             if let Some(owned) = self.owned.get(&character) {
-                let pose = if owned.held {
-                    owned.pose
+                let (pose, fade) = if owned.held {
+                    (owned.pose, None)
                 } else {
-                    world.get::<Animator>(character).and_then(|animator| {
-                        let clips = owned.rig.clips();
-                        let c = named_clip(clips.iter().map(crate::RigClip::name), &animator.clip);
-                        let length = clips.get(c)?.duration();
-                        Some((c, animator.at(1.0, length)))
-                    })
+                    world
+                        .get::<Animator>(character)
+                        .and_then(|animator| animator_pose(&owned.rig, animator, 1.0))
+                        .map_or((None, None), |(pose, fade, _)| (Some(pose), fade))
                 };
                 let rig_id = Arc::as_ptr(&owned.rig) as usize as u64;
-                let joints = self.posing.joints(&owned.rig, pose);
+                let joints = self.posing.joints(&owned.rig, pose, fade);
                 let skeleton = owned.rig.skeleton();
                 for &(_, socket) in &self.socket_list[k..end] {
                     let Some(attachment) = world.get::<JointAttachment>(socket) else {
@@ -2783,24 +2809,25 @@ impl Assets {
             if owned.held {
                 continue;
             }
-            let mut length = None;
-            let pose = world.get::<Animator>(e).and_then(|animator| {
-                let clips = owned.rig.clips();
-                let k = named_clip(clips.iter().map(crate::RigClip::name), &animator.clip);
-                let clip = clips.get(k)?;
-                let d = clip.duration();
-                if animator.length != d {
-                    length = Some(d);
-                }
-                Some((k, animator.at(alpha, d)))
-            });
-            if let Some(d) = length
+            let shown = world
+                .get::<Animator>(e)
+                .and_then(|animator| animator_pose(&owned.rig, animator, alpha));
+            // The clips' lengths back to the animator, for its ticks to wrap at.
+            if let Some((_, _, (length, from_length))) = shown
+                && world.get::<Animator>(e).is_some_and(|a| {
+                    a.length != length || (a.fade > 0.0 && a.from_length != from_length)
+                })
                 && let Some(animator) = world.get_mut::<Animator>(e)
             {
-                animator.length = d;
+                animator.length = length;
+                if animator.fade > 0.0 {
+                    animator.from_length = from_length;
+                }
             }
-            if owned.pose != pose {
+            let (pose, fade) = shown.map_or((None, None), |(pose, fade, _)| (Some(pose), fade));
+            if owned.pose != pose || owned.fade != fade {
                 owned.pose = pose;
+                owned.fade = fade;
                 owned.posed = false;
             }
         }
@@ -2823,7 +2850,7 @@ impl Assets {
         });
         let posing = &mut self.posing;
         for owned in self.owned.values_mut().filter(|o| !o.posed) {
-            let palette = posing.palette(&owned.rig, owned.pose);
+            let palette = posing.palette(&owned.rig, owned.pose, owned.fade);
             for &id in &owned.instances {
                 skinning.set_palette(id, palette);
             }
@@ -2940,7 +2967,7 @@ impl Assets {
         if !p.posed
             && let (Some((id, _)), Some(rig)) = (p.instance, p.rig.as_ref())
         {
-            skinning.set_palette(id, self.posing.palette(rig, p.pose));
+            skinning.set_palette(id, self.posing.palette(rig, p.pose, None));
             p.posed = true;
         }
     }
@@ -2958,7 +2985,7 @@ impl Assets {
             return false;
         };
         out.clear();
-        out.extend_from_slice(self.posing.joints(&owned.rig, owned.pose));
+        out.extend_from_slice(self.posing.joints(&owned.rig, owned.pose, owned.fade));
         true
     }
 
@@ -2976,8 +3003,9 @@ impl Assets {
             return false;
         };
         owned.held = pose.is_some();
-        if owned.pose != pose {
+        if owned.pose != pose || owned.fade.is_some() {
             owned.pose = pose;
+            owned.fade = None;
             owned.posed = false;
         }
         true

@@ -126,6 +126,12 @@ const TRANSFORM_METHODS: &str = r#"    -- Turns it by `angle` radians about `axi
     function up(self): vector
 "#;
 
+/// `Animator`'s methods on its views (ADR 0124's E12-2b).
+const ANIMATOR_METHODS: &str = r#"    -- Plays clip `clip` (its name in the model's file) from its start, fading from what
+    -- plays now over `fade` seconds (at once without one).
+    function play(self, clip: string, fade: number?): ()
+"#;
+
 /// The definitions' last part: the libraries.
 const LIBRARIES: &str = r#"
 -- `self` of a component of props `P`, for an annotation:
@@ -365,6 +371,9 @@ fn declare_struct(info: &'static TypeInfo, declared: &mut Vec<&'static str>, out
     if info.name == "Transform" {
         lines.push_str(TRANSFORM_METHODS);
     }
+    if info.name == "Animator" {
+        lines.push_str(ANIMATOR_METHODS);
+    }
     let _ = write!(
         out,
         "\ndeclare extern type {} with\n{lines}end\n",
@@ -446,5 +455,26 @@ mod tests {
             "{timer:?}"
         );
         assert!(text.contains("declare function component<P>(name: string, props: P)"));
+        // The animator's own method, and its saved fade hidden (E12-2b).
+        let animator = text
+            .split(
+                "declare extern type Animator with
+",
+            )
+            .nth(1)
+            .and_then(|rest| {
+                rest.split(
+                    "end
+",
+                )
+                .next()
+            })
+            .unwrap_or_default();
+        assert!(
+            animator.contains("clip: string")
+                && animator.contains("function play(self, clip: string, fade: number?): ()")
+                && !animator.contains("from_clip"),
+            "{animator:?}"
+        );
     }
 }

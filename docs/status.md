@@ -879,6 +879,11 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-2b, cross-fades and `animator:play`** (#PR, ADR 0124's as-built):
+    `Animator::play(clip, fade)` starts a clip and fades from what played. Both clips move
+    on in the ticks; each frame blends the two poses by the fade's weight between ticks;
+    the fade is saved. Scripts call `self.Animator:play("Run", 0.25)`. The Fox fades from
+    Survey into Run on both GPUs, with 0 allocations while a fade goes on.
   - **E12-1c-3b, attaching in the editor** (#456, ADR 0124's as-built): with a character's
     joints showing (Tab), a tree row dropped on a joint's square or Skeleton row goes into
     the joint's socket (made for it where none is), keeping its place in the world, one
@@ -1100,9 +1105,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next** (the owner's order: materials first of the tools, then animation and 2D;
     E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (accepted
-    2026-10-29, every question as recommended). E12-1a, E12-1b-1, E12-1b-2, E12-1c-1 and
-    E12-1c and E12-2a are done; next the rest of E12-2 (cross-fades, layers, root motion, saves,
-    scripts), E12-1b-3 (↑/↓ through clips, two side by side, the floor under root motion and
+    2026-10-29, every question as recommended). E12-1a, E12-1b-1, E12-1b-2, E12-1c, E12-2a
+    and E12-2b are done; next the rest of E12-2 (layers, root motion, the animator's other
+    script calls), E12-1b-3 (↑/↓ through clips, two side by side, the floor under root motion and
     the root's path), E12-3 (the Animation tab), E12-4 (keys) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
     questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a

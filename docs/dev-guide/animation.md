@@ -62,8 +62,18 @@ world.spawn((Model::new(mesh, material), Animator::new("Walk")));
 - While the world stands still (the editor editing, the game paused), the character
   stands at `time`: its clip's first frame unless set.
 - A pose the editor holds (`Player::pose_model`) wins until it lets go.
-- Scripts reach it as any component: `self.Animator.speed = 2`. Its own calls come with
-  the rest of E12-2.
+- **Fading into another clip** (E12-2b): `animator.play("Run", 0.25)` in Rust, or
+  `self.Animator:play("Run", 0.25)` in a script, starts `Run` from its beginning and
+  fades from what played over a quarter of a second. Without a fade (or with 0), it
+  switches at once.
+  - Both clips move on during the fade, at the animator's speed. Each frame blends the
+    two poses by how far the fade has gone, between the last two ticks as the clip is.
+  - A `play` during a fade drops the clip that was fading out. The clip that was fading
+    in fades out from where it is.
+  - The fade is saved with the entity, so a load goes on fading. The fields are hidden in
+    the editor.
+- Scripts reach it as any component: `self.Animator.speed = 2`. The rest of its calls
+  (`set`, `trigger`, `state`) come with the rest of E12-2.
 
 In the editor its `clip` is a list of the character's clips.
 
