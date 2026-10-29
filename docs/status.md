@@ -872,7 +872,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **A material type's reload in one compile** (#PR, ADR 0123's as-built): the entry
+  - **A material type's reload in one compile** (#446, ADR 0123's as-built): the entry
     points, the node previews' and the parameters' layout from one Slang request
     (`Compiler::compile_file_reflecting`; the editing build's module defines
     `MATERIAL_NODE_PREVIEWS`). A graph's code edit reaches the sphere and its tiles in
@@ -2222,7 +2222,7 @@ grown, divide and conquer); the old labels stay in parentheses.
 ## 6. Known gaps and leftovers (candidates for the queue)
 
 - **Fixed (2026-10-29): a material type's reload compiled two or three times** (found
-  with E10-3f-2, 2026-10-28; #PR): the entry points, the node previews' apart with their
+  with E10-3f-2, 2026-10-28; #446): the entry points, the node previews' apart with their
   define, and the parameters' layout in a compile of its own. Now one Slang request does
   all three (the editing build's module defines `MATERIAL_NODE_PREVIEWS` itself), and a
   graph's code edit reaches the sphere in 0.39–0.48 s on both GPUs (0.62–0.77 s before),
