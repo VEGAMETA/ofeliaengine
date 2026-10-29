@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-1c-2a, a character's joints in the viewport** (#PR, ADR 0124's as-built): the
+  - **E12-1c-2a, a character's joints in the viewport** (#452, ADR 0124's as-built): the
     selected characters' skeletons as white sticks in front of everything, moving with
     their clips (`Player::model_joints`, `Player::skinned_models`); View: Skeletons shows
     every character's in grey. 0 allocations while one plays in place, both GPUs.
