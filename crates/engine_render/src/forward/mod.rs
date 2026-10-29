@@ -1860,29 +1860,42 @@ impl ForwardRenderer {
     /// What material type `ty`'s shading costs this GPU (E10-4c, the materials UX note's
     /// item 12): for each shading variant (plain, local lights, environment, both), its
     /// fragment stage's registers and spill, beside the engine's own shading's where that is
-    /// made. Asks for the type's variants (made off the frame's thread); `None` while any
+    /// made, and the code each one's entry point reaches (E10-4f); its latest compile's
+    /// time. Asks for the type's variants (made off the frame's thread); `None` while any
     /// material type is still being made, when none of its variants is, or on a device that
     /// does not capture statistics. Reads; a steady wait reads nothing and allocates nothing.
     pub fn material_type_cost(&self, device: &Device, ty: MaterialTypeId) -> Option<MaterialCost> {
         if !device.pipeline_statistics_enabled() || self.material_types.pending() > 0 {
             return None;
         }
-        let mut cost = MaterialCost::default();
+        let mut cost = MaterialCost {
+            compiled: self.material_types.compiled(ty),
+            ..MaterialCost::default()
+        };
         for (k, variant) in cost.variants.iter_mut().enumerate() {
-            let Some(pipeline) = self.material_types.resolve(ty, &self.shading[k].main[0]) else {
+            let role = &self.shading[k].main[0];
+            let Some(pipeline) = self.material_types.resolve(ty, role) else {
                 continue;
             };
             let stats = pipeline.statistics(device);
             let Some(registers) = fragment_registers(&stats) else {
                 continue;
             };
-            let engine = self.shading[k].main[0]
+            let engine = role
                 .get()
                 .and_then(|p| fragment_registers(&p.statistics(device)));
+            // The code its entry point reaches, the type's and the engine's own.
+            let entry = role.fragment_entry();
+            let size = |words: Option<&[u32]>| {
+                let entry = entry?.to_str().ok()?;
+                engine_rhi::spirv::code_size(words?, entry)
+            };
             *variant = Some(VariantCost {
                 registers,
                 spill: fragment_spill(&stats),
                 engine,
+                code: size(entry.and_then(|e| self.material_types.code(ty, e))),
+                engine_code: size(role.fragment_spirv()),
             });
         }
         cost.variants.iter().any(Option::is_some).then_some(cost)
@@ -3779,6 +3792,9 @@ pub(crate) unsafe fn set_draw_area(
 pub struct MaterialCost {
     /// The variants' costs.
     pub variants: [Option<VariantCost>; 4],
+    /// Its latest compile that worked (E10-4f): how long it took, and how many entry
+    /// points it compiled.
+    pub compiled: Option<(core::time::Duration, u32)>,
 }
 
 /// A shading variant's cost ([`MaterialCost`]).
@@ -3791,6 +3807,10 @@ pub struct VariantCost {
     pub spill: u32,
     /// The engine's own shading's registers in the same variant, where made.
     pub engine: Option<u32>,
+    /// The code its fragment entry point reaches (E10-4f).
+    pub code: Option<engine_rhi::spirv::CodeSize>,
+    /// The engine's own shading's code in the same variant.
+    pub engine_code: Option<engine_rhi::spirv::CodeSize>,
 }
 
 /// Whether a driver statistic's executable is a fragment stage (AMD's `….ps`, NVIDIA's

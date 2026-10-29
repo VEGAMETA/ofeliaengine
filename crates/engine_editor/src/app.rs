@@ -839,6 +839,8 @@ struct CommandIds {
     /// A variant's own values written into its base (E10-4b).
     apply_to_base: CommandId,
     apply_material: CommandId,
+    /// The shown material drawn as its fallback, or as itself again (E10-4f).
+    draw_fallback: CommandId,
     break_next: CommandId,
     find_references: CommandId,
     /// Sound previews (E11-3b): the picked sound played or stopped, Auto Play.
@@ -1033,6 +1035,7 @@ fn commands() -> (Commands, CommandIds) {
         make_variant: c.register("material.variant", "Material", "Make Variant"),
         apply_to_base: c.register("material.apply_base", "Material", "Apply to Base"),
         apply_material: c.register("material.apply", "Material", "Apply to Selection"),
+        draw_fallback: c.register("material.draw_fallback", "Material", "Draw as Fallback"),
         break_next: c.register("debug.break_next", "Debug", "Break at the Next Script Line"),
         find_references: c.register("assets.references", "Assets", "Find References"),
         preview_sound: c.register("assets.preview", "Assets", "Play or Stop the Picked Sound"),
@@ -2724,6 +2727,10 @@ struct Editor {
     material_title: String,
     material_models: Option<QueryState<&'static Model>>,
     material_unreadable: HashSet<AssetId>,
+    /// Typed materials the view draws as their fallbacks (E10-4f), and the changes to give
+    /// the player.
+    as_fallback: Vec<AssetId>,
+    fallback_changes: Vec<(AssetId, bool)>,
     material_section: Option<usize>,
     material_drag: Option<MaterialDrag>,
     material_typing: Option<(usize, u8)>,
@@ -3649,6 +3656,8 @@ impl Editor {
             material_title: String::new(),
             material_models: None,
             material_unreadable: HashSet::new(),
+            as_fallback: Vec::new(),
+            fallback_changes: Vec::new(),
             material_section: None,
             material_drag: None,
             material_typing: None,
@@ -4895,6 +4904,7 @@ impl Editor {
                     &material_values,
                     self.material_typing,
                     self.material_choice,
+                    self.as_fallback.contains(&doc.id),
                     &mut asset_fields,
                 );
             }
@@ -4952,6 +4962,7 @@ impl Editor {
                     &material_values,
                     self.material_typing,
                     self.material_choice,
+                    self.as_fallback.contains(&doc.id),
                     &mut asset_fields,
                 );
                 self.material_section = Some(sections.len());
@@ -15686,6 +15697,8 @@ impl Editor {
             self.apply_to_base(world);
         } else if id == ids.apply_material {
             self.apply_material(world);
+        } else if id == ids.draw_fallback {
+            self.toggle_fallback();
         } else if id == ids.full_debugging {
             self.full_debugging = !self.full_debugging;
             self.write_session(world);
@@ -16569,9 +16582,51 @@ impl Editor {
             let s = if users == 1 { "" } else { "s" };
             let _ = write!(self.material_title, " · used by {users} object{s}");
         }
+        if self.as_fallback.contains(&id) {
+            self.material_title.push_str(" · drawn as its fallback");
+        }
         if dirty {
             self.material_title.push_str(" (unsaved: Ctrl+S)");
         }
+    }
+
+    /// "Material: Draw as Fallback" (E10-4f, the materials UX note's item 12): the shown
+    /// typed material drawn as its look, the glTF material its type falls back to, so the
+    /// profiler's forward pass shows what its type's shading costs over the engine's own in
+    /// this view on this GPU; again, drawn as itself. Not the file's: nothing to undo.
+    fn toggle_fallback(&mut self) {
+        let Some(id) = self.shown_material else {
+            self.say(String::from("No material shown to draw as its fallback"));
+            return;
+        };
+        let name = self.asset_db.get(id).map_or_else(
+            || String::from("The material"),
+            |e| e.path.rsplit('/').next().unwrap_or(&e.path).to_owned(),
+        );
+        let typed = self
+            .material_docs
+            .iter()
+            .find(|d| d.id == id)
+            .is_some_and(|d| d.file.is_typed());
+        if !typed {
+            self.say(format!("{name} has no type: it draws as its look already"));
+            return;
+        }
+        let on = !self.as_fallback.contains(&id);
+        if on {
+            self.as_fallback.push(id);
+        } else {
+            self.as_fallback.retain(|&m| m != id);
+        }
+        self.fallback_changes.push((id, on));
+        self.say(if on {
+            format!(
+                "{name} drawn as its fallback: the profiler's forward pass shows what its type \
+                 costs (again: as itself)"
+            )
+        } else {
+            format!("{name} drawn as itself")
+        });
     }
 
     /// Material file `path` (from the project's root) written with `text` and a `.meta` of
@@ -17315,6 +17370,7 @@ impl Editor {
                     m::set_numbers(f, &row, values);
                 });
             }
+            FieldAction::Toggle if row == m::Row::Fallback => self.toggle_fallback(),
             FieldAction::Toggle => {
                 self.material_step(world, d, &format!("Toggle {name}"), None, |f, _| {
                     m::toggle(f, &row);
@@ -23093,6 +23149,10 @@ impl<G> EditorGame<G> {
         // rows.
         let inspected = shared.shown_material;
         let shared = &mut *shared;
+        // Materials drawn as their fallbacks, or as themselves again (E10-4f).
+        for (id, on) in shared.fallback_changes.drain(..) {
+            player.draw_as_fallback(AssetRef::file(id), on);
+        }
         for doc in &mut shared.material_docs {
             if !doc.given {
                 player.set_material_file(doc.id, Some((doc.file.clone(), doc.written.clone())));
@@ -24422,12 +24482,13 @@ fn material_texts<'a>(doc: &'a crate::material::MaterialDoc, out: &mut Vec<&'a s
 
 /// A material file's rows as inspector fields (E10-1c), into `out`: `values` its shown
 /// values ([`material_texts`]), `typing` the row and part typed into, `choice` the row
-/// whose list is open.
+/// whose list is open, `as_fallback` whether the view draws it as its fallback (E10-4f).
 fn material_fields<'a>(
     doc: &'a crate::material::MaterialDoc,
     values: &'a [&'a str],
     typing: Option<(usize, u8)>,
     choice: Option<usize>,
+    as_fallback: bool,
     out: &mut Vec<Field<'a>>,
 ) {
     use crate::material::Shown;
@@ -24450,7 +24511,10 @@ fn material_fields<'a>(
                 open: (choice == Some(k)).then_some(names),
                 missing: false,
             },
-            Shown::Check => Widget::Check(Some(doc.file.double_sided)),
+            Shown::Check => Widget::Check(Some(match row {
+                crate::material::Row::Fallback => as_fallback,
+                _ => doc.file.double_sided,
+            })),
             Shown::Image => Widget::Asset {
                 preview: None,
                 icon: match row {
@@ -27788,6 +27852,133 @@ mod tests {
             "{text}"
         );
         assert!(!doc(&ed).1, "saved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E10-4f: a typed material's "draw as fallback" row is a checkbox that is the editor's,
+    /// not the file's: no step, the player told, the section's title saying it; "Material:
+    /// Draw as Fallback" turns it off again. A material without a type has no such row and is
+    /// not drawn as its fallback.
+    #[test]
+    fn a_typed_material_is_drawn_as_its_fallback_from_its_row_or_the_palette() {
+        let (dir, mut world, mut ed, _) = drop_project("draw-fallback");
+        std::fs::create_dir_all(dir.join("shaders")).unwrap();
+        std::fs::write(
+            dir.join("shaders/stripes.slang"),
+            include_str!("../../../tests/golden/materials/stripes.slang"),
+        )
+        .unwrap();
+        let (typed, module) = (AssetId::new(), AssetId::new());
+        std::fs::write(
+            dir.join("props/typed.material"),
+            format!(
+                "[material version=2 id={typed}]\n\nshader = asset(\"shaders/stripes.slang\", \
+                 {module})\ntype = \"StripesMaterial\"\n"
+            ),
+        )
+        .unwrap();
+        ed.open_assets();
+        ed.open_folder("props");
+        ed.update(&mut world);
+        let at = middle(texts(&ed, "typed.material")[0]);
+        click(&mut ed, &mut world, at);
+        ed.update(&mut world);
+        let typed = ed.asset_db.find("props/typed.material").unwrap().id;
+        assert_eq!(ed.inspected.as_ref().map(|i| i.id), Some(typed));
+        let rows = &ed
+            .material_docs
+            .iter()
+            .find(|d| d.id == typed)
+            .unwrap()
+            .rows;
+        let row = rows
+            .iter()
+            .position(|r| *r == crate::material::Row::Fallback)
+            .expect("its row, after its type");
+        assert_eq!(rows[row - 1], crate::material::Row::Type);
+        assert!(!texts(&ed, "draw as fallback").is_empty());
+        // Its cost read (E10-4c, E10-4f): its cost, its code, then the checkbox.
+        {
+            use crate::material::Row;
+            use engine_render::forward::{MaterialCost, VariantCost};
+            use engine_rhi::spirv::CodeSize;
+            let doc = ed.material_docs.iter_mut().find(|d| d.id == typed).unwrap();
+            doc.set_cost(
+                0,
+                MaterialCost {
+                    variants: [
+                        Some(VariantCost {
+                            registers: 39,
+                            spill: 0,
+                            engine: Some(47),
+                            code: Some(CodeSize {
+                                instructions: 805,
+                                samples: 3,
+                            }),
+                            engine_code: Some(CodeSize {
+                                instructions: 936,
+                                samples: 8,
+                            }),
+                        }),
+                        None,
+                        None,
+                        None,
+                    ],
+                    compiled: Some((Duration::from_millis(400), 1)),
+                },
+            );
+            let k = doc.rows.iter().position(|r| *r == Row::Type).unwrap();
+            assert_eq!(
+                doc.rows[k + 1..k + 4],
+                [Row::Cost, Row::Code, Row::Fallback]
+            );
+            assert_eq!(
+                doc.row_texts(k + 2),
+                [
+                    "805 instructions (the engine's 936), 3 samples (the engine's 8) · compiled \
+                  in 0.40 s, 1 entry point"
+                ]
+            );
+        }
+        let row = row + 2;
+        // Ticked: the editor's, no step; the player told; the title says it.
+        let section = ed.material_section.unwrap();
+        ed.edit_material(
+            &mut world,
+            FieldEvent {
+                section,
+                field: row,
+                action: FieldAction::Toggle,
+            },
+        );
+        assert_eq!(ed.as_fallback, [typed]);
+        assert_eq!(ed.fallback_changes, [(typed, true)]);
+        assert_eq!(ed.history.steps().count(), 0);
+        assert!(
+            !ed.material_docs.iter().any(|d| d.dirty()),
+            "not the file's"
+        );
+        ed.update(&mut world);
+        assert!(
+            ed.material_title.contains("drawn as its fallback"),
+            "{}",
+            ed.material_title
+        );
+        // From the palette: drawn as itself again.
+        ed.run(&mut world, ed.ids.draw_fallback);
+        assert!(ed.as_fallback.is_empty());
+        assert_eq!(ed.fallback_changes, [(typed, true), (typed, false)]);
+        ed.update(&mut world);
+        assert!(!ed.material_title.contains("fallback"));
+        // A material without a type: no row, not drawn as its fallback.
+        let at = middle(texts(&ed, "red.material")[0]);
+        click(&mut ed, &mut world, at);
+        ed.update(&mut world);
+        let red = ed.asset_db.find("props/red.material").unwrap().id;
+        assert_eq!(ed.inspected.as_ref().map(|i| i.id), Some(red));
+        assert!(texts(&ed, "draw as fallback").is_empty());
+        ed.run(&mut world, ed.ids.draw_fallback);
+        assert!(ed.as_fallback.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1740,6 +1740,14 @@ impl Player {
         self.assets.set_material(file, held, &mut self.materials);
     }
 
+    /// Draws material file `material` with its look, the glTF material its type falls back
+    /// to, instead of its type, or with its type again (E10-4f's Draw as Fallback): the
+    /// forward pass's time in the profiler then shows what its type's shading costs over the
+    /// engine's own. A material without a type draws its look anyway.
+    pub fn draw_as_fallback(&mut self, material: engine_scene::AssetRef, on: bool) {
+        self.assets.draw_as_fallback(material, on);
+    }
+
     /// A material type's module at `path` written anew by the caller (the editor's graph
     /// modules, ADR 0123 E10-3g-1): its reload due at once rather than when hot reload's
     /// watcher sees the file, so what waits for the material types sees it on its way.

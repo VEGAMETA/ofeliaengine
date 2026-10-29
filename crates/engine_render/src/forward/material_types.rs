@@ -156,6 +156,9 @@ struct TypeEntry {
     params: Params,
     params_revision: u32,
     params_generation: u32,
+    /// Its latest compile that worked (E10-4f): how long it took and how many entry points
+    /// it compiled.
+    compiled: Option<(Duration, u32)>,
 }
 
 /// Where a type's parameters' layout stands.
@@ -200,11 +203,13 @@ enum Done {
         ty: MaterialTypeId,
         entry: CString,
         result: Result<Compiled, String>,
+        took: Duration,
     },
     Reload {
         ty: MaterialTypeId,
         generation: u32,
         result: Result<Compiled, String>,
+        took: Duration,
     },
     Params {
         ty: MaterialTypeId,
@@ -267,6 +272,7 @@ impl CompilerThread {
                     }
                 };
                 while let Ok(job) = job_rx.recv() {
+                    let started = Instant::now();
                     let done = match job {
                         Job::Entry {
                             ty,
@@ -281,6 +287,7 @@ impl CompilerThread {
                                 &type_name,
                                 core::slice::from_ref(&entry),
                             ),
+                            took: started.elapsed(),
                             ty,
                             entry,
                         },
@@ -298,6 +305,7 @@ impl CompilerThread {
                                 &type_name,
                                 &entries,
                             ),
+                            took: started.elapsed(),
                             ty,
                             generation,
                         },
@@ -473,6 +481,7 @@ impl MaterialTypes {
             params: Params::NotAsked,
             params_revision: 0,
             params_generation: 0,
+            compiled: None,
         });
         MaterialTypeId(self.types.len() as u16)
     }
@@ -579,6 +588,21 @@ impl MaterialTypes {
     /// `ty`'s pipeline standing in for `role`, once created (or its previous version
     /// while a reload's is being made); otherwise `None` (the role's own pipeline draws,
     /// with the glTF fallback) and, the first time, a request.
+    /// Type `ty`'s SPIR-V of entry point `entry`, once compiled (E10-4f).
+    pub(crate) fn code(&self, ty: MaterialTypeId, entry: &core::ffi::CStr) -> Option<&[u32]> {
+        let t = self.types.get(usize::from(ty.0).checked_sub(1)?)?;
+        match t.spirv.get(entry)? {
+            Spirv::Ready(code) => Some(code),
+            Spirv::Compiling | Spirv::Failed => None,
+        }
+    }
+
+    /// Type `ty`'s latest compile that worked (E10-4f): how long it took, and how many
+    /// entry points it compiled.
+    pub(crate) fn compiled(&self, ty: MaterialTypeId) -> Option<(Duration, u32)> {
+        self.types.get(usize::from(ty.0).checked_sub(1)?)?.compiled
+    }
+
     pub(crate) fn resolve(&self, ty: MaterialTypeId, role: &LazyPipeline) -> Option<&Pipeline> {
         let index = usize::from(ty.0).checked_sub(1)?;
         let entry = self.types.get(index)?;
@@ -858,11 +882,19 @@ impl MaterialTypes {
     fn accept(&mut self, done: Done, device: &Device) {
         self.compiling = self.compiling.saturating_sub(1);
         match done {
-            Done::Entry { ty, entry, result } => {
+            Done::Entry {
+                ty,
+                entry,
+                result,
+                took,
+            } => {
                 let index = usize::from(ty.0) - 1;
                 let state = match result {
                     Ok((mut spirv, dependencies)) => {
                         self.add_dependencies(index, &dependencies);
+                        if let Some(t) = self.types.get_mut(index) {
+                            t.compiled = Some((took, 1));
+                        }
                         match spirv.pop() {
                             Some((_, code)) => Spirv::Ready(code),
                             None => Spirv::Failed,
@@ -889,6 +921,7 @@ impl MaterialTypes {
                 ty,
                 generation,
                 result,
+                took,
             } => {
                 let index = usize::from(ty.0) - 1;
                 let hot = self.hot_reload.is_some();
@@ -917,6 +950,7 @@ impl MaterialTypes {
                     }
                 };
                 t.error = None;
+                t.compiled = Some((took, spirv.len() as u32));
                 t.spirv.retain(|_, s| matches!(s, Spirv::Compiling));
                 for (name, code) in spirv {
                     t.spirv.insert(name, Spirv::Ready(code));
