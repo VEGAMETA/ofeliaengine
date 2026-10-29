@@ -226,7 +226,12 @@ allocation with transitions and events every tick; the same events at the same t
   - a dropped model still makes an entity per glTF node, joints included (E12-1c,
     question 6);
   - a file read again leaves its skinned models undrawn until their new skins are made;
-  - a mesh drawn by several skinned nodes takes the first's skin.
+  - a mesh drawn by several skinned nodes takes the first's skin;
+  - the clips are compressed at every load, not kept in the derived data cache as the
+    step's row says;
+  - the compression's error and shell distance are taken in the file's units, not the
+    model's: a file scaled down on import (the Fox's centimetres) is compressed finer than
+    it needs (E12-1b corrects it).
 
 ## Consequences
 
