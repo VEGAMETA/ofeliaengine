@@ -872,7 +872,7 @@ Last updated: 2026-10-28.
     file of it given to the selection in one step, the module open at its surface; a
     type's new fields reach the inspector after its save through the reflection's
     revision (now tested in the frame's hot reload test). E10-2 is done.
-  - **E10-4g-1, node previews in the engine** (#PR, ADR 0123's as-built): the editing
+  - **E10-4g-1, node previews in the engine** (#443, ADR 0123's as-built): the editing
     build's `node_preview` writes every shown node with an early return each (one compile
     a change of code, however many nodes); `nodePreviewFragment` (compiled for a graph's
     type with `MATERIAL_NODE_PREVIEWS`) draws them into an atlas of 64-pixel tiles, round
