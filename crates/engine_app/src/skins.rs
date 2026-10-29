@@ -112,6 +112,12 @@ impl Rig {
     pub fn clips(&self) -> &[RigClip] {
         &self.clips
     }
+
+    /// From the skeleton's space into the mesh node's, the import scale applied: its
+    /// inverse stands the skinned mesh as its file's scene does.
+    pub(crate) fn root(&self) -> Affine3A {
+        self.root
+    }
 }
 
 /// A part of a skinned mesh as the player draws it: its vertices (the import scale applied)

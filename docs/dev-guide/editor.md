@@ -389,6 +389,10 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   - a click on a row shows its first frame; ▶ plays it in place from the playhead, ■
     stops it there and holds that pose; the loop, the speed (0.25 to 2×) and the time,
     and a bar under them that scrubs it. Escape lets a held pose go.
+  - Pick a skinned model's file in the FileSystem dock and its Clips show the same way,
+    under the engine's own drawing of it (drag it to turn it): ▶ plays the chosen clip
+    there, and with the dock's **Auto Play** on its first clip plays as soon as its clips
+    are read. Nothing of the scene changes.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.
@@ -1507,7 +1511,7 @@ The editor rebuilds your game while it runs (ADR 0107 §1):
 | E3 | Play: the tree's marks on what changed (the rest of Play is done) |
 | E7 | Luau: props of text, prefabs from a release's packs, script components in the network schema (the rest of v1 is done, ADR 0114) |
 | E8 | the code editor: rename and references across the project (everything else is done) |
-| E12 | animation: the engine's preview of a model picked in the dock (E12-1b-2), then one entity per character with its joints (E12-1c), the `Animator` (E12-2), the Animation tab (E12-3), keys (E12-4) and graphs (E12-5), as ADR 0124 decided |
+| E12 | animation: ↑/↓ through clips, two side by side and the floor under root motion (E12-1b-3), then one entity per character with its joints (E12-1c), the `Animator` (E12-2), the Animation tab (E12-3), keys (E12-4) and graphs (E12-5), as ADR 0124 decided |
 
 The whole plan is ADR 0107 §7.
 

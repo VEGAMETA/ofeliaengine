@@ -1368,6 +1368,32 @@ impl Player {
         self.previews.take_nodes(out);
     }
 
+    /// The editor's live model preview (ADR 0124's E12-1b), or none: a skinned model's mesh
+    /// posed at a clip's moment and turned, drawn alone each frame that changes either (its
+    /// skin made in the background as a model's is, an instance of it the preview's own).
+    /// Asking every frame for the same model allocates nothing.
+    pub fn set_model_preview(&mut self, preview: Option<crate::ModelPreview>) {
+        self.assets.set_preview_skin(
+            preview.map(|p| (p.mesh, p.material)),
+            &mut self.skinning,
+            &mut self.geometry,
+        );
+        self.assets.pose_preview(preview.and_then(|p| p.pose));
+        self.previews.set_live(preview);
+    }
+
+    /// The live model preview's rig, once its skin is made.
+    pub fn model_preview_rig(&self) -> Option<&crate::Rig> {
+        self.assets.preview_rig()
+    }
+
+    /// The live model preview's newest drawing into `out` ([`crate::PREVIEW_SIZE`]², RGBA8
+    /// sRGB, rows top to bottom, transparent around it; its room kept), when one came back
+    /// since the last call.
+    pub fn take_model_preview(&mut self, out: &mut Vec<u8>) -> bool {
+        self.previews.take_live(out)
+    }
+
     /// The rig of entity `e`'s skinned model (ADR 0124's E12-1a): its skeleton and its
     /// file's clips that move it. `None` for a model drawn without a skin, or before its
     /// skin is made (a frame or a few after its scene loads).
@@ -3557,6 +3583,14 @@ impl Player {
             frame.number,
             types_pending,
         );
+        // The editor's live model preview (ADR 0124's E12-1b), when its pose or turn changed.
+        let live = self.previews.pick_live(
+            &mut self.assets,
+            &mut self.materials,
+            &self.geometry,
+            &mut self.allocator,
+            frame.number,
+        );
         // A graph's node previews (ADR 0123's E10-4g): one atlas a frame.
         let node_previews = self.previews.pick_nodes(
             &mut self.assets,
@@ -3566,6 +3600,19 @@ impl Player {
         );
         if preview.is_some() {
             self.previews.prepare(
+                &mut self.renderer,
+                PrepareContext {
+                    device: &self.device,
+                    allocator: &mut self.allocator,
+                    bindless: &self.bindless,
+                    materials: &mut self.materials,
+                    frame_number: frame.number,
+                    skinning: None,
+                },
+            )?;
+        }
+        if live.is_some() {
+            self.previews.prepare_live(
                 &mut self.renderer,
                 PrepareContext {
                     device: &self.device,
@@ -3879,14 +3926,15 @@ impl Player {
                     frame.number,
                 );
             }
-            if let Some(drawing) = &preview {
+            if preview.is_some() || live.is_some() {
                 self.previews.declare(
                     &mut fg,
                     &mut context,
                     &self.renderer,
                     &geo,
                     &mats,
-                    drawing,
+                    preview.as_ref(),
+                    live.as_ref(),
                 )?;
             }
             // The UI: on the real frame and on a generated one shown before it; with DLSS

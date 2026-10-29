@@ -283,6 +283,45 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left for E12-1b-2:** the engine's preview of a model picked in the dock, ↑ and ↓
   through the clips, Auto Play, two clips side by side, the floor moving under root motion.
 
+## As built (E12-1b-2, 2026-10-29): the engine's preview of a model picked in the dock
+
+- **The player's live model preview** (`Player::set_model_preview(Option<ModelPreview>)`,
+  `model_preview_rig`, `take_model_preview(&mut Vec<u8>)`):
+  - a skinned mesh, its material, a turn and a clip's moment (or the rest pose);
+  - its skin is made in the background as a model's is (drawn whole), and an instance of it
+    is the preview's own (`Assets::set_preview_skin`, posed by the next sync), counted as
+    drawn when a file read again retires skins;
+  - it is drawn alone as the previews are, with a view and read backs of its own, each
+    frame its pose or its turn changed, and nothing otherwise; asking for the same one
+    every frame allocates nothing;
+  - it stands as its file's scene stands it (the rig's root inverted), turned about its
+    middle, framed by the square inside the circle its rest pose's box turns in (with a
+    tenth's room), so it fits at every turn about the vertical;
+  - its newest pixels are halved into a kept room and copied into the caller's.
+- **The editor:** a model file picked in the dock gets Clips under its sections once the
+  player made its rig, with the engine's preview at their top (128 px, turned by
+  dragging). ▶ plays the chosen clip in the preview, ■ stops it there, the loop, the speed
+  and the bar work as for a character, and Auto Play (the dock's) plays its first clip
+  when its clips come. `ClipsView` shows a character's clips or a file's (`ClipsOf`).
+- **Found and fixed on the way:** frames that alternate between two shapes (the preview's
+  pixels coming back two at a time now and then, which leaves a frame without its upload)
+  made the frame graph place one of them again into a kept placement with less room, an
+  allocation; a placement that grows now gives every one kept the same room. The text
+  layout cache's spare layouts have room for as many as it can take out of use.
+- **Measured** (ref-1, release): drawing the preview anew each frame costs the GPU 77 µs
+  on the RTX (127 µs a frame against 50 µs without it) and 227 µs on the Radeon (469 against
+  242), and nothing while it stands still; it is drawn 53–86 ms after it is first asked for
+  (CesiumMan). 0 allocations in 240 editor frames while a picked file's clip plays, on both
+  GPUs, with and without Tracy; the player's frames with a model and a preview both posed
+  anew every frame, 0 in 1,011 (RTX) and 821 (Radeon).
+- **Tests:** the preview drawn alone, unchanged when asked the same again, another picture
+  posed mid-walk and turned a quarter, nothing once let go (both GPUs); the Fox picked in
+  the dock showing Survey, Walk and Run under its drawn preview, ▶ changing the picture
+  (about 870 pixels in 0.4 s), ■ holding it (0 pixels).
+- **Left:** ↑ and ↓ through the clips, two clips side by side, the floor under root motion
+  and the root's path (E12-1b-3); a file whose first part is not the skinned one shows no
+  clips; one picture of 128 px, drawn at twice that.
+
 ## Consequences
 
 - New source files: `.agraph` and `.anim`, and a section in models' `.meta`; a new component

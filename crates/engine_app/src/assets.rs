@@ -838,6 +838,8 @@ pub struct Assets {
     /// Each skinned model's instances of its skin.
     owned: HashMap<Entity, Owned>,
     posing: crate::skins::Posing,
+    /// The editor's model preview's skin (ADR 0124's E12-1b).
+    preview_skin: Option<PreviewSkin>,
 }
 
 /// A skinned mesh made (ADR 0124's E12-1a): a skin per part in `Skinning`, and its rig.
@@ -854,6 +856,19 @@ struct Owned {
     instances: Vec<SkinnedId>,
     meshes: Vec<MeshId>,
     rig: Arc<crate::skins::Rig>,
+    pose: Option<(usize, f32)>,
+    posed: bool,
+}
+
+/// The editor's model preview's skin (ADR 0124's E12-1b): the mesh and material it shows,
+/// the skins of its mesh drawn whole, its own instance of the first with that instance's
+/// mesh, its rig, the pose asked for and whether the palette is set for it.
+struct PreviewSkin {
+    mesh: AssetRef,
+    material: AssetRef,
+    skins: Vec<SkinId>,
+    instance: Option<(SkinnedId, MeshId)>,
+    rig: Option<Arc<crate::skins::Rig>>,
     pose: Option<(usize, f32)>,
     posed: bool,
 }
@@ -928,6 +943,7 @@ impl Assets {
             retired_skins: Vec::new(),
             owned: HashMap::new(),
             posing: crate::skins::Posing::default(),
+            preview_skin: None,
         }
     }
 
@@ -2654,6 +2670,7 @@ impl Assets {
     /// those whose pose changed are posed again; the skins of files read again that no model
     /// draws any more are let go. Allocates nothing when nothing changed.
     fn sync_skins(&mut self, world: &World, skinning: &mut Skinning, geometry: &mut GeometryPool) {
+        self.sync_preview_skin(skinning, geometry);
         if self.owned.is_empty() && self.retired_skins.is_empty() {
             return;
         }
@@ -2676,14 +2693,118 @@ impl Assets {
             owned.posed = true;
         }
         if !self.retired_skins.is_empty() {
-            let owned = &self.owned;
+            let (owned, preview) = (&self.owned, &self.preview_skin);
             self.retired_skins.retain(|skin| {
-                let drawn = owned.values().any(|o| o.skins.contains(skin));
+                let drawn = owned.values().any(|o| o.skins.contains(skin))
+                    || preview.as_ref().is_some_and(|p| p.skins.contains(skin));
                 if !drawn {
                     skinning.remove_skin(*skin, geometry, frame);
                 }
                 drawn
             });
+        }
+    }
+
+    /// The model the editor's live preview shows, or none (ADR 0124's E12-1b): another one
+    /// lets the last one's instance go; the same one asked again changes nothing.
+    pub(crate) fn set_preview_skin(
+        &mut self,
+        preview: Option<(AssetRef, AssetRef)>,
+        skinning: &mut Skinning,
+        geometry: &mut GeometryPool,
+    ) {
+        let shown = self.preview_skin.as_ref().map(|p| (p.mesh, p.material));
+        if shown == preview {
+            return;
+        }
+        if let Some((id, _)) = self.preview_skin.take().and_then(|p| p.instance) {
+            skinning.remove_instance(id, geometry, self.frame);
+        }
+        self.preview_skin = preview.map(|(mesh, material)| PreviewSkin {
+            mesh,
+            material,
+            skins: Vec::new(),
+            instance: None,
+            rig: None,
+            pose: None,
+            posed: false,
+        });
+    }
+
+    /// The live preview's model posed at a clip's moment, or in its rest pose: set by the
+    /// next sync.
+    pub(crate) fn pose_preview(&mut self, pose: Option<(usize, f32)>) {
+        if let Some(p) = self.preview_skin.as_mut().filter(|p| p.pose != pose) {
+            p.pose = pose;
+            p.posed = false;
+        }
+    }
+
+    /// The live preview's rig, once its skin is made.
+    pub(crate) fn preview_rig(&self) -> Option<&crate::skins::Rig> {
+        self.preview_skin.as_ref()?.rig.as_deref()
+    }
+
+    /// What the live preview draws, once made: its instance's mesh, its material and its
+    /// rig's root.
+    pub(crate) fn preview_draw(
+        &mut self,
+        materials: &mut MaterialTable,
+    ) -> Option<(MeshId, MaterialId, Affine3A)> {
+        let p = self.preview_skin.as_ref()?;
+        let (mesh, material, root) = (p.instance?.1, p.material, p.rig.as_ref()?.root());
+        let material = self.material(material, materials)?;
+        Some((mesh, material, root))
+    }
+
+    /// The live preview's skin each sync: asked for until it is made (as a model's is,
+    /// drawn whole), an instance of it made once it is (made anew with the skin, after its
+    /// file is read again), its palette set when its pose changed.
+    fn sync_preview_skin(&mut self, skinning: &mut Skinning, geometry: &mut GeometryPool) {
+        let Some(mesh) = self.preview_skin.as_ref().map(|p| p.mesh) else {
+            return;
+        };
+        let key = (mesh, false);
+        if !self.skinned.contains_key(&key) {
+            if self.building_skins.contains(&key) || self.problems.contains_key(&mesh) {
+                return;
+            }
+            if let SkinCheck::Skinned(file, index) = self.skin_check(mesh) {
+                self.building_skins.insert(key);
+                let generation = self.generation(mesh.file);
+                self.loader.give(Job::Skin {
+                    asset: mesh,
+                    split: false,
+                    file,
+                    mesh: index,
+                    generation,
+                });
+            }
+            return;
+        }
+        let frame = self.frame;
+        let (Some(made), Some(p)) = (self.skinned.get(&key), self.preview_skin.as_mut()) else {
+            return;
+        };
+        if p.skins != made.skins {
+            if let Some((id, _)) = p.instance.take() {
+                skinning.remove_instance(id, geometry, frame);
+            }
+            p.skins.clone_from(&made.skins);
+            p.rig = Some(Arc::clone(&made.rig));
+            p.posed = false;
+            if let Some(&skin) = p.skins.first() {
+                match skinning.add_instance(skin, geometry) {
+                    Ok(made) => p.instance = Some(made),
+                    Err(why) => log::warn!(target: "engine_app", "the model preview: {why}"),
+                }
+            }
+        }
+        if !p.posed
+            && let (Some((id, _)), Some(rig)) = (p.instance, p.rig.as_ref())
+        {
+            skinning.set_palette(id, self.posing.palette(rig, p.pose));
+            p.posed = true;
         }
     }
 

@@ -635,6 +635,10 @@ pub struct ClipsPanel<'a> {
     pub chosen: usize,
     /// Shown instead of the rows: that the skin is being made, or that it has no clip.
     pub note: &'a str,
+    /// The engine's preview of a model file at the panel's top (a drag turns it).
+    pub preview: bool,
+    /// The preview's picture, once drawn.
+    pub image: Option<UiImage>,
     /// It plays in place now.
     pub playing: bool,
     /// It plays looped.
@@ -1140,6 +1144,8 @@ pub struct ShellResponse {
     pub clip_speed: bool,
     /// Their bar was pressed, dragged along or let go.
     pub clip_scrub: Option<WaveUse>,
+    /// Their model's preview was pressed, dragged or let go: it turns.
+    pub clip_turn: Option<WaveUse>,
     /// The mixer (E11-1): + Bus was clicked.
     pub mixer_add: bool,
     /// A strip was clicked: its bus is picked.
@@ -2728,6 +2734,49 @@ fn clips_panel(ui: &mut Ui, panel: &ClipsPanel<'_>, p: &Palette, out: &mut Shell
             ..Style::default()
         },
         |ui| {
+            if panel.preview {
+                ui.row(
+                    "preview",
+                    Style {
+                        size: [Size::Grow(1.0), Size::Fit],
+                        padding: [0.0, 2.0, 0.0, 4.0],
+                        align_main: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        let id = ui.container(
+                            "picture",
+                            Style {
+                                size: [
+                                    Size::Fixed(MATERIAL_PREVIEW),
+                                    Size::Fixed(MATERIAL_PREVIEW),
+                                ],
+                                radius: 3.0,
+                                clip: true,
+                                background: Some(p.field),
+                                image: panel.image,
+                                align_main: Align::Center,
+                                align_cross: Align::Center,
+                                ..Style::default()
+                            },
+                            |ui| {
+                                if panel.image.is_none() {
+                                    text(ui, "note", "Drawing\u{2026}", SMALL, p.text_dim);
+                                }
+                            },
+                        );
+                        let used = ui.sense(id, false);
+                        if used.pressed || used.active || used.released {
+                            out.clip_turn = Some(WaveUse {
+                                node: id,
+                                pressed: used.pressed,
+                                held: used.active,
+                                released: used.released,
+                            });
+                        }
+                    },
+                );
+            }
             if panel.rows.is_empty() {
                 text(ui, "note", panel.note, SMALL, p.text_dim);
                 return;

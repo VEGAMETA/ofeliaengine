@@ -188,9 +188,13 @@ impl LayoutCache {
     /// entries [`Self::end_frame`] removes leave deleted slots behind, and with at most half
     /// its room in use the map rehashes them away in place when its room runs out, never by
     /// growing into a larger table (which allocates, at a frame the hash's seed decides).
+    /// The layouts out of use have room for as many as the map keeps before it drops them
+    /// (taken out of use only below that), so many going out of use at once allocate
+    /// nothing.
     fn new() -> Self {
         Self {
             map: HashMap::with_capacity(2 * CACHE_SOFT_LIMIT),
+            spare: Vec::with_capacity(CACHE_SOFT_LIMIT),
             ..Self::default()
         }
     }

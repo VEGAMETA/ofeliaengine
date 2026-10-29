@@ -142,6 +142,30 @@ struct Readback {
     again: Option<PreviewRequest>,
 }
 
+/// The editor's live model preview (ADR 0124's E12-1b): a skinned model's mesh posed at a
+/// clip's moment and turned, drawn alone as the previews are, at [`PREVIEW_SIZE`]², each
+/// frame its pose or its turn changed; its newest pixels kept for whoever takes them
+/// (`Player::take_model_preview`). It stands as its file's scene stands it, in the middle
+/// of a frame that fits it at every turn about the vertical.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelPreview {
+    /// The skinned mesh.
+    pub mesh: AssetRef,
+    /// Its material.
+    pub material: AssetRef,
+    /// Its turn about the vertical, then about the sideways axis, in radians.
+    pub turn: [f32; 2],
+    /// The clip and the moment in it shown, or the rest pose.
+    pub pose: Option<(usize, f32)>,
+}
+
+/// The live model preview a frame draws: its draw, its camera and its read back's slot.
+pub(crate) struct LiveDrawing {
+    draws: [DrawItem; 1],
+    camera: ViewCamera,
+    slot: usize,
+}
+
 /// The preview a frame draws: its draws, its camera and its read back's slot (which holds
 /// its key).
 pub(crate) struct Drawing {
@@ -166,6 +190,16 @@ pub(crate) struct Previews {
     nodes_asked: VecDeque<NodePreviewRequest>,
     node_readbacks: Vec<NodeReadback>,
     nodes_done: Vec<NodePreviews>,
+    /// The live model preview (ADR 0124's E12-1b): what is asked, its own view and read
+    /// backs, what it last drew (drawn again once that changes), and its newest pixels.
+    live: Option<ModelPreview>,
+    live_view: Option<View>,
+    live_readbacks: Vec<Readback>,
+    live_drawn: Option<ModelPreview>,
+    live_pixels: Vec<u8>,
+    live_new: bool,
+    /// The newest frame whose live drawing was read back.
+    live_frame: u64,
 }
 
 impl Previews {
@@ -181,7 +215,134 @@ impl Previews {
             nodes_asked: VecDeque::new(),
             node_readbacks: Vec::new(),
             nodes_done: Vec::new(),
+            live: None,
+            live_view: None,
+            live_readbacks: Vec::new(),
+            live_drawn: None,
+            live_pixels: Vec::new(),
+            live_new: false,
+            live_frame: 0,
         }
+    }
+
+    /// The live model preview asked for, or none (ADR 0124's E12-1b).
+    pub(crate) fn set_live(&mut self, preview: Option<ModelPreview>) {
+        self.live = preview;
+        if preview.is_none() {
+            self.live_drawn = None;
+            self.live_new = false;
+        }
+    }
+
+    /// The live preview's newest pixels into `out` ([`PREVIEW_SIZE`]², RGBA8 sRGB, its room
+    /// kept), when they are new since the last call.
+    pub(crate) fn take_live(&mut self, out: &mut Vec<u8>) -> bool {
+        if !self.live_new {
+            return false;
+        }
+        self.live_new = false;
+        out.clear();
+        out.extend_from_slice(&self.live_pixels);
+        true
+    }
+
+    /// The live preview this frame draws, when one is asked for that changed since it was
+    /// last drawn, once its skin, its instance and its material are made: its draw (the
+    /// posed instance placed as its file's scene places it, turned about its middle), the
+    /// camera that frames it at every turn about the vertical, and its read back's slot.
+    pub(crate) fn pick_live(
+        &mut self,
+        assets: &mut Assets,
+        materials: &mut MaterialTable,
+        geometry: &GeometryPool,
+        allocator: &mut Allocator,
+        frame: u64,
+    ) -> Option<LiveDrawing> {
+        let live = self.live?;
+        if self.live_drawn == Some(live) {
+            return None;
+        }
+        let (mesh, material, root) = assets.preview_draw(materials)?;
+        if !assets.settled(material) {
+            return None;
+        }
+        let (lo, hi) = geometry.mesh(mesh).map(|m| (m.min, m.max))?;
+        let slot = self.free_live_slot(allocator)?;
+        // The rest pose's box in its file's scene, and room for what a pose reaches past it.
+        let place = root.inverse();
+        let (lo, hi) = (0..8).fold(
+            (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
+            |(a, b), corner| {
+                let pick = |bit: usize, l: f32, h: f32| if corner & bit == 0 { l } else { h };
+                let c = place.transform_point3(Vec3::new(
+                    pick(1, lo.x, hi.x),
+                    pick(2, lo.y, hi.y),
+                    pick(4, lo.z, hi.z),
+                ));
+                (a.min(c), b.max(c))
+            },
+        );
+        let middle = (lo + hi) * 0.5;
+        let half = (hi - lo) * 0.5 * 1.1;
+        // Turned about the vertical, it stays within the circle of the box's corners; seen
+        // from the previews' slant, the square inside that circle frames it at every turn
+        // (with the room above), tighter than the square around it.
+        let across = half.x.hypot(half.z) * core::f32::consts::FRAC_1_SQRT_2;
+        let turn =
+            Affine3A::from_rotation_x(live.turn[1]) * Affine3A::from_rotation_y(live.turn[0]);
+        let world =
+            Affine3A::from_translation(middle) * turn * Affine3A::from_translation(-middle) * place;
+        let reach = Vec3::new(across, half.y, across);
+        self.live_readbacks[slot].written = Some((frame, 0));
+        self.live_drawn = Some(live);
+        Some(LiveDrawing {
+            draws: [DrawItem {
+                mesh,
+                material,
+                world_from_object: Mat4::from(world),
+            }],
+            camera: framing(middle - reach, middle + reach),
+            slot,
+        })
+    }
+
+    /// A live read back not in flight, made the first time (one more than the frames in
+    /// flight).
+    fn free_live_slot(&mut self, allocator: &mut Allocator) -> Option<usize> {
+        if self.live_readbacks.is_empty() {
+            for _ in 0..=self.frames_in_flight {
+                let (buffer, allocation) = allocator
+                    .create_buffer(
+                        &vk::BufferCreateInfo::default()
+                            .size(BYTES)
+                            .usage(vk::BufferUsageFlags::TRANSFER_DST),
+                        MemoryLocation::Readback,
+                    )
+                    .ok()?;
+                self.live_readbacks.push(Readback {
+                    buffer,
+                    allocation: Some(allocation),
+                    written: None,
+                    again: None,
+                });
+            }
+        }
+        self.live_readbacks.iter().position(|r| r.written.is_none())
+    }
+
+    /// The live preview's view, made the first time, prepared for this frame.
+    pub(crate) fn prepare_live(
+        &mut self,
+        renderer: &mut FrameRenderer,
+        ctx: PrepareContext<'_>,
+    ) -> Result<(), AppError> {
+        let view = self
+            .live_view
+            .get_or_insert_with(|| View::new(ctx.device, 64));
+        renderer
+            .prepare(view, &settings(), (DRAWN, DRAWN), ctx)
+            .map(|_| ())
+            .map_err(AppError::at("the model preview's view"))
     }
 
     /// Asks for `request`'s node previews, in place of a request of the same key not
@@ -383,6 +544,23 @@ impl Previews {
     /// The previews whose frames finished by `frame`, read back.
     pub(crate) fn collect(&mut self, frame: u64) {
         let completed = frame.saturating_sub(self.frames_in_flight);
+        for r in &mut self.live_readbacks {
+            let Some((drawn_at, _)) = r.written.filter(|&(f, _)| f <= completed) else {
+                continue;
+            };
+            r.written = None;
+            if drawn_at < self.live_frame {
+                continue;
+            }
+            if let Some(ptr) = r.allocation.as_ref().and_then(Allocation::mapped_ptr) {
+                // SAFETY: the frame that wrote it has finished (its graph made the copy
+                // visible to the host); the mapping holds a drawn preview's pixels.
+                let drawn = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), BYTES as usize) };
+                halve_into(drawn, DRAWN, &mut self.live_pixels);
+                self.live_frame = drawn_at;
+                self.live_new = self.live.is_some();
+            }
+        }
         for r in &mut self.readbacks {
             let Some((_, key)) = r.written.filter(|&(f, _)| f <= completed) else {
                 continue;
@@ -561,7 +739,8 @@ impl Previews {
             .map_err(AppError::at("a preview's view"))
     }
 
-    /// `drawing`'s view and its read back declared into `fg`.
+    /// This frame's previews declared into `fg`: the asked one's view and read back, and the
+    /// live model preview's (ADR 0124's E12-1b) with its own view.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn declare<'g>(
         &'g mut self,
@@ -570,82 +749,43 @@ impl Previews {
         renderer: &'g FrameRenderer,
         geometry: &GeometryFrame<'g>,
         materials: &MaterialFrame<'g>,
-        drawing: &'g Drawing,
+        drawing: Option<&'g Drawing>,
+        live: Option<&'g LiveDrawing>,
     ) -> Result<(), AppError> {
-        let Some(view) = self.view.as_mut() else {
-            return Ok(());
-        };
-        let image = fg.create_texture("preview", TextureDesc::new_2d(FORMAT, DRAWN, DRAWN));
-        let input = SceneInput {
-            geometry,
-            materials,
-            draws: SceneDraws::List(&drawing.draws),
-            skinning: None,
-            light: DirectionalLight {
-                direction: Vec3::new(0.45, -1.0, -0.55).normalize(),
-                color: Vec3::splat(2.6),
-                ambient: Vec3::splat(0.32),
-            },
-            lights: &[],
-            decals: &[],
-            environment: None,
-            reflection_probes: None,
-            gi: None,
-        };
-        renderer
-            .add_view(
+        if let (Some(drawing), Some(view)) = (drawing, self.view.as_mut()) {
+            let readback = self.readbacks[drawing.slot].buffer;
+            declare_drawing(
                 fg,
                 ctx,
+                renderer,
                 view,
-                &input,
+                geometry,
+                materials,
+                &drawing.draws,
                 &drawing.camera,
-                ViewTarget {
-                    texture: image,
-                    rect: None,
-                    load: LoadOp::DontCare,
-                },
-            )
-            .map_err(AppError::at("a preview"))?;
-        let buffer = fg.import_buffer(
-            "preview readback",
-            ImportedBuffer {
-                buffer: self.readbacks[drawing.slot].buffer,
-                size: BYTES,
-                address: 0,
-                initial: BufferState::idle(),
-                final_state: Some(BufferState::host_read()),
-            },
-        );
-        fg.add_pass("preview copy")
-            .read(image, Access::TransferRead)
-            .write(buffer, Access::TransferWrite)
-            .execute(move |ctx| {
-                let region = vk::BufferImageCopy {
-                    image_subresource: vk::ImageSubresourceLayers {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: 0,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    },
-                    image_extent: vk::Extent3D {
-                        width: DRAWN,
-                        height: DRAWN,
-                        depth: 1,
-                    },
-                    ..Default::default()
-                };
-                // SAFETY: recording outside a rendering scope; the graph put the image in
-                // TRANSFER_SRC layout for this pass, and the buffer holds a preview.
-                unsafe {
-                    ctx.device.cmd_copy_image_to_buffer(
-                        ctx.cmd,
-                        ctx.image(image),
-                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                        ctx.buffer(buffer),
-                        &[region],
-                    );
-                }
-            });
+                readback,
+                ["preview", "preview readback", "preview copy"],
+            )?;
+        }
+        if let (Some(live), Some(view)) = (live, self.live_view.as_mut()) {
+            let readback = self.live_readbacks[live.slot].buffer;
+            declare_drawing(
+                fg,
+                ctx,
+                renderer,
+                view,
+                geometry,
+                materials,
+                &live.draws,
+                &live.camera,
+                readback,
+                [
+                    "model preview",
+                    "model preview readback",
+                    "model preview copy",
+                ],
+            )?;
+        }
         Ok(())
     }
 
@@ -660,6 +800,14 @@ impl Previews {
             if let Some(mut view) = self.view.take() {
                 view.destroy(allocator, bindless);
             }
+            if let Some(mut view) = self.live_view.take() {
+                view.destroy(allocator, bindless);
+            }
+            for r in &mut self.live_readbacks {
+                if let Some(allocation) = r.allocation.take() {
+                    allocator.destroy_buffer(r.buffer, allocation);
+                }
+            }
             for r in &mut self.readbacks {
                 if let Some(allocation) = r.allocation.take() {
                     allocator.destroy_buffer(r.buffer, allocation);
@@ -672,6 +820,96 @@ impl Previews {
             }
         }
     }
+}
+
+/// A preview's view and its read back declared into `fg`: `draws` seen through `camera`,
+/// drawn at [`DRAWN`]² into its own image (`names`: the image's, the read back's and the
+/// copy's) and copied into `readback`.
+#[allow(clippy::too_many_arguments)]
+fn declare_drawing<'g>(
+    fg: &mut FrameGraph<'g>,
+    ctx: &mut FrameContext<'_, 'g>,
+    renderer: &'g FrameRenderer,
+    view: &'g mut View,
+    geometry: &GeometryFrame<'g>,
+    materials: &MaterialFrame<'g>,
+    draws: &'g [DrawItem],
+    camera: &'g ViewCamera,
+    readback: vk::Buffer,
+    names: [&'static str; 3],
+) -> Result<(), AppError> {
+    let image = fg.create_texture(names[0], TextureDesc::new_2d(FORMAT, DRAWN, DRAWN));
+    let input = SceneInput {
+        geometry,
+        materials,
+        draws: SceneDraws::List(draws),
+        skinning: None,
+        light: DirectionalLight {
+            direction: Vec3::new(0.45, -1.0, -0.55).normalize(),
+            color: Vec3::splat(2.6),
+            ambient: Vec3::splat(0.32),
+        },
+        lights: &[],
+        decals: &[],
+        environment: None,
+        reflection_probes: None,
+        gi: None,
+    };
+    renderer
+        .add_view(
+            fg,
+            ctx,
+            view,
+            &input,
+            camera,
+            ViewTarget {
+                texture: image,
+                rect: None,
+                load: LoadOp::DontCare,
+            },
+        )
+        .map_err(AppError::at("a preview"))?;
+    let buffer = fg.import_buffer(
+        names[1],
+        ImportedBuffer {
+            buffer: readback,
+            size: BYTES,
+            address: 0,
+            initial: BufferState::idle(),
+            final_state: Some(BufferState::host_read()),
+        },
+    );
+    fg.add_pass(names[2])
+        .read(image, Access::TransferRead)
+        .write(buffer, Access::TransferWrite)
+        .execute(move |ctx| {
+            let region = vk::BufferImageCopy {
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_extent: vk::Extent3D {
+                    width: DRAWN,
+                    height: DRAWN,
+                    depth: 1,
+                },
+                ..Default::default()
+            };
+            // SAFETY: recording outside a rendering scope; the graph put the image in
+            // TRANSFER_SRC layout for this pass, and the buffer holds a preview.
+            unsafe {
+                ctx.device.cmd_copy_image_to_buffer(
+                    ctx.cmd,
+                    ctx.image(image),
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    ctx.buffer(buffer),
+                    &[region],
+                );
+            }
+        });
+    Ok(())
 }
 
 /// A preview's view settings: one sample (a resolve would drop the alpha), at its own
@@ -707,9 +945,17 @@ fn settings() -> ViewSettings {
 /// `drawn` (`side` × `side`, RGBA8) averaged down 2 × 2: each pixel's alpha the mean of
 /// its four, its color theirs weighted by their alpha (no dark fringe at edges).
 fn halve(drawn: &[u8], side: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    halve_into(drawn, side, &mut out);
+    out
+}
+
+/// [`halve`] into `out`, its room kept (no allocation once it has grown).
+fn halve_into(drawn: &[u8], side: u32, out: &mut Vec<u8>) {
     let half = (side / 2) as usize;
     let side = side as usize;
-    let mut out = vec![0u8; half * half * 4];
+    out.clear();
+    out.resize(half * half * 4, 0);
     for y in 0..half {
         for x in 0..half {
             let mut color = [0u32; 3];
@@ -731,7 +977,6 @@ fn halve(drawn: &[u8], side: u32) -> Vec<u8> {
             out[o + 3] = ((alpha + 2) / 4) as u8;
         }
     }
-    out
 }
 
 enum Resolved {
