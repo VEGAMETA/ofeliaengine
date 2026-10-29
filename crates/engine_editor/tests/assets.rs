@@ -1073,16 +1073,37 @@ fn a_selected_characters_clips_show_and_p_plays_it_in_place() {
         frame(&mut player, &mut game, &mut overlay);
     }
     let rest = shot(&mut player, &mut game, &mut overlay);
+    // His skeleton's sticks while he is selected (ADR 0124's E12-1c): a stick a joint
+    // below his root, within his height.
+    let [bones, others] = game.skeleton_lines();
+    let joints = player.model_rig(man).unwrap().skeleton().joint_count();
+    println!("{} sticks of {joints} joints", bones.len());
+    assert!(
+        bones.len() + 1 >= joints && bones.len() < joints,
+        "{}",
+        bones.len()
+    );
+    assert!(others.is_empty(), "no other character's");
+    let top = bones.iter().flatten().map(|p| p.y).fold(f32::MIN, f32::max);
+    assert!((1.0..1.6).contains(&top), "his head's joint at {top} m");
     // P: he walks in place.
     tap(&mut game, 0x50, 0x19);
     frame(&mut player, &mut game, &mut overlay);
     assert_eq!(game.playing_in_place(), 1);
     let first = shot(&mut player, &mut game, &mut overlay);
+    let walking = game.skeleton_lines()[0].clone();
     let later = Instant::now();
     while later.elapsed() < Duration::from_millis(300) {
         frame(&mut player, &mut game, &mut overlay);
     }
     let second = shot(&mut player, &mut game, &mut overlay);
+    let strode = walking
+        .iter()
+        .zip(&game.skeleton_lines()[0])
+        .map(|(a, b)| (a[1] - b[1]).length())
+        .fold(0.0f32, f32::max);
+    println!("his joints moved up to {strode} m between the two moments");
+    assert!(strode > 0.02, "the sticks follow his walk: {strode} m");
     let (moved, walked) = (differ(&rest, &first), differ(&first, &second));
     println!("in place: {moved} pixels off his rest pose, {walked} between two moments");
     assert!(moved > 500 && walked > 500, "{moved} / {walked}");
@@ -1094,6 +1115,10 @@ fn a_selected_characters_clips_show_and_p_plays_it_in_place() {
     let off = differ(&rest, &back);
     println!("stopped: {off} pixels off his rest pose");
     assert!(off < 200, "{off} pixels off his rest pose after P");
+    // Nothing selected: no sticks.
+    game.select(None);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.skeleton_lines()[0].is_empty());
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

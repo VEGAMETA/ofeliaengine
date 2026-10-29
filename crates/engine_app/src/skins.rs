@@ -394,6 +394,32 @@ impl Posing {
         );
         &self.palette[..joints]
     }
+
+    /// `rig`'s joints where `pose` puts them (its rest pose without one, or for a clip it
+    /// has not), in the skeleton's order: in the mesh node's space with the import scale
+    /// applied, where the skinned vertices are (ADR 0124's E12-1c).
+    pub(crate) fn joints<'a>(
+        &'a mut self,
+        rig: &Rig,
+        pose: Option<(usize, f32)>,
+    ) -> &'a [Affine3A] {
+        let n = rig.skeleton.joint_count();
+        if self.model.len() < n {
+            self.model.resize(n, Affine3A::IDENTITY);
+        }
+        let local = match pose.filter(|&(c, _)| c < rig.clips.len()) {
+            Some((clip, time)) => {
+                let sampled = self.pose.get_or_insert_with(|| Pose::identity(n));
+                rig.clips[clip]
+                    .clip
+                    .sample(time, rig.skeleton.rest(), sampled);
+                &*sampled
+            }
+            None => rig.skeleton.rest(),
+        };
+        local_to_model(&rig.skeleton, local, &rig.root, &mut self.model[..n]);
+        &self.model[..n]
+    }
 }
 
 #[cfg(test)]
@@ -563,6 +589,21 @@ mod tests {
                 (skinned(part, &palette, v) - skinned(part, &rig.rest, v)).length() > 1e-4 * reach
             });
             assert!(moved, "{path}: {} moves it", clip.name());
+            // The joints where a pose puts them skin as its palette does (ADR 0124's
+            // E12-1c): each skin joint's place times its inverse bind matrix.
+            let mut again = vec![[0.0f32; 12]; rig.joints.len()];
+            for pose in [None, Some((0, clip.duration() * 0.5))] {
+                let joints = posing.joints(&rig, pose).to_vec();
+                assert_eq!(joints.len(), rig.skeleton.joint_count());
+                skinning_matrices(&joints, &rig.joints, &rig.inverse_bind, &mut again);
+                let palette = posing.palette(&rig, pose);
+                let same = palette.iter().zip(&again).all(|(a, b)| {
+                    a.iter()
+                        .zip(b)
+                        .all(|(x, y)| (x - y).abs() <= 1e-4 * (1.0 + x.abs()))
+                });
+                assert!(same, "{path} {pose:?}: the joints skin as the palette does");
+            }
             // No clip, or one it has not: the rest pose.
             assert_eq!(posing.palette(&rig, None), &rig.rest[..]);
             assert_eq!(posing.palette(&rig, Some((99, 0.0))), &rig.rest[..]);

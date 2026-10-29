@@ -389,6 +389,9 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   - a click on a row shows its first frame; ▶ plays it in place from the playhead, ■
     stops it there and holds that pose; the loop, the speed (0.25 to 2×) and the time,
     and a bar under them that scrubs it. Escape lets a held pose go.
+  - **Its skeleton:** while it is selected, its joints show as thin white sticks in front
+    of its mesh, one from each joint to its parent, moving with the clip it plays.
+    **View: Skeletons** shows every character's too, in grey.
   - Pick a skinned model's file in the FileSystem dock and its Clips show the same way,
     under the engine's own drawing of it (drag it to turn it): ▶ plays the chosen clip
     there, and with the dock's **Auto Play** on its first clip plays as soon as its clips
