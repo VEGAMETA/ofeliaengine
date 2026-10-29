@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-1c-3b, attaching in the editor** (#PR, ADR 0124's as-built): with a character's
+  - **E12-1c-3b, attaching in the editor** (#456, ADR 0124's as-built): with a character's
     joints showing (Tab), a tree row dropped on a joint's square or Skeleton row goes into
     the joint's socket (made for it where none is), keeping its place in the world, one
     undo step; a dropped character file's meshes under joints come in sockets. E12-1c is
