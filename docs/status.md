@@ -879,6 +879,14 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-1b-2, the engine's preview of a model picked in the dock** (#450, ADR 0124's
+    as-built): `Player::set_model_preview` draws a skinned model alone, posed at a clip's
+    moment and turned, each frame either changes (77 µs a frame on the RTX, 227 µs on the
+    Radeon while it plays, nothing while it stands); a skinned model file picked in the
+    dock shows its Clips under that preview, ▶ and Auto Play playing it. 0 allocations
+    while it plays, both GPUs, after two fixes it found: the frame graph placing a shape
+    again into a kept placement with less room (every one kept grows together now), and the
+    text layout cache's spares.
   - **E12-1b-1, a character's clips and P in place** (#449, ADR 0124's as-built): the
     selected character's Clips in the inspector (frames, root speed, size, error, and the
     loop's seam: CesiumMan "jumps 3.1 cm at leg_joint_R_1", the Fox's within 0.2 mm), a
@@ -1062,9 +1070,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next** (the owner's order: materials first of the tools, then animation and 2D;
     E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (accepted
-    2026-10-29, every question as recommended). E12-1a and E12-1b-1 are done; next
-    E12-1b-2, the engine's preview of a model picked in the dock (↑/↓, Auto Play, two clips
-    side by side, the floor under root motion), then E12-1c (one entity per character, its
+    2026-10-29, every question as recommended). E12-1a, E12-1b-1 and E12-1b-2 are done;
+    next E12-1b-3 (↑/↓ through clips, two side by side, the floor under root motion and the
+    root's path), then E12-1c (one entity per character, its
     joints in the viewport and the tree, attachments), E12-2 (the `Animator`), E12-3 (the
     Animation tab), E12-4 (keys) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine

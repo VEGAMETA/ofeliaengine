@@ -1,7 +1,9 @@
 //! CLAUDE.md §5: zero heap allocations per frame in steady state with a skinned model (ADR
 //! 0124's E12-1a) posed anew every frame, as the editor poses one playing in place: the
 //! clip sampled, the skeleton's model transforms and the palette made, the instance's
-//! palette set. Khronos' CesiumMan (`tools/fetch-test-assets.ps1`); skipped without it.
+//! palette set; and the editor's live model preview of it playing too (E12-1b), drawn and
+//! read back every frame. Khronos' CesiumMan (`tools/fetch-test-assets.ps1`); skipped
+//! without it.
 //! One test per file, so nothing else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
@@ -60,7 +62,11 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         player.frame(&mut game).unwrap();
     }
     let length = player.model_rig(man).unwrap().clips()[0].duration();
+    // The editor's live model preview of the same model plays too (ADR 0124's E12-1b): its
+    // pose and turn change every frame, so it is drawn and read back every frame.
     let mut time = 0.0f32;
+    let mut pixels = Vec::new();
+    let mut taken = 0u32;
     counting::assert_steady_state_each(
         &mut player,
         &mut game,
@@ -68,8 +74,17 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         |player| {
             time = (time + 1.0 / 60.0) % length;
             player.pose_model(man, Some((0, time)));
+            player.set_model_preview(Some(engine_app::ModelPreview {
+                mesh,
+                material,
+                turn: [time, 0.0],
+                pose: Some((0, time)),
+            }));
+            taken += u32::from(player.take_model_preview(&mut pixels));
         },
     );
+    println!("{taken} model previews taken");
+    assert!(taken > 100, "the live preview drawn as it played: {taken}");
     // Still skinned: the same entity drawn by its instance.
     let world = player.world_mut();
     let mut skinned = QueryState::<(Entity, &engine_runtime::SkinnedMesh)>::new(world);

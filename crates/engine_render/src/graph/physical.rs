@@ -542,6 +542,11 @@ impl PhysicalResources {
             };
             let cache = &mut slot.placements[cache_index];
             cache.last_used = frame;
+            let room = (
+                cache.offsets.capacity(),
+                cache.alias_ranges.capacity(),
+                cache.alias_resources.capacity(),
+            );
             if cache.hash != hash {
                 cache.heap_size = placement::place(&mut self.items, &mut self.scratch);
                 cache.offsets.clear();
@@ -578,6 +583,26 @@ impl PhysicalResources {
             records.aliases.extend_from_slice(&cache.alias_resources);
             for (&(start, end), &r) in cache.alias_ranges.iter().zip(&self.item_resources) {
                 records.resources[r as usize].aliases = base_alias + start..base_alias + end;
+            }
+            // A placement that grew gives every one kept the same room: a shape placed again
+            // into any of them (one coming back after the least recent was replaced, or seen
+            // in the other slot) allocates nothing.
+            let grown = (
+                cache.offsets.capacity(),
+                cache.alias_ranges.capacity(),
+                cache.alias_resources.capacity(),
+            );
+            if grown != room {
+                for placement in self.slots.iter_mut().flat_map(|s| &mut s.placements) {
+                    let len = placement.offsets.len();
+                    placement.offsets.reserve(grown.0.saturating_sub(len));
+                    let len = placement.alias_ranges.len();
+                    placement.alias_ranges.reserve(grown.1.saturating_sub(len));
+                    let len = placement.alias_resources.len();
+                    placement
+                        .alias_resources
+                        .reserve(grown.2.saturating_sub(len));
+                }
             }
 
             // The heap: reuse, or replace when too small.

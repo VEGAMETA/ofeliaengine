@@ -602,6 +602,16 @@ pub fn editor<G: Game>(
         engine_app::PREVIEW_SIZE,
     )?;
     editor.material_texture = Some(material.sampled_index());
+    // The picked model file's preview (ADR 0124's E12-1b): one picture at a time.
+    let model = engine_render::texture::GpuTexture::new(
+        setup.device,
+        setup.allocator,
+        setup.bindless,
+        engine_rhi::ash::vk::Format::R8G8B8A8_SRGB,
+        engine_app::PREVIEW_SIZE,
+        engine_app::PREVIEW_SIZE,
+    )?;
+    editor.model_texture = Some(model.sampled_index());
     editor.mixer_path = settings.audio.layout.to_string_lossy().replace('\\', "/");
     editor.sounds_folder = settings.audio.folder.to_string_lossy().replace('\\', "/");
     let shared = Rc::new(RefCell::new(editor));
@@ -650,6 +660,7 @@ pub fn editor<G: Game>(
             wave,
             preview,
             material,
+            model,
             tiles,
         },
     ))
@@ -1465,13 +1476,21 @@ impl ClipFacts {
     }
 }
 
-/// The active character's Clips (ADR 0124's E12-1b): the entity whose model is drawn skinned,
-/// its rig's place (made anew when its file is read again), its clips, the chosen one and the
-/// playhead along it, and whether the character holds the playhead's pose while nothing
-/// plays (after a pick, a scrub or ■; Escape lets it go).
+/// Whose clips the inspector's Clips show (ADR 0124's E12-1b): a character of the scene, or
+/// a model file picked in the dock (shown by the engine's live preview).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipsOf {
+    Entity(Entity),
+    Asset(AssetId),
+}
+
+/// The inspector's Clips (ADR 0124's E12-1b): whose they are, the rig's place (made anew when
+/// its file is read again), its clips, the chosen one and the playhead along it, and whether
+/// the character (or the preview) holds the playhead's pose while nothing plays (after a pick,
+/// a scrub or ■; Escape lets it go).
 #[derive(Debug)]
 struct ClipsView {
-    entity: Entity,
+    of: ClipsOf,
     rig: usize,
     clips: Vec<ClipFacts>,
     chosen: usize,
@@ -1483,9 +1502,9 @@ struct ClipsView {
 }
 
 impl ClipsView {
-    fn new(entity: Entity, rig: usize, clips: Vec<ClipFacts>) -> Self {
+    fn new(of: ClipsOf, rig: usize, clips: Vec<ClipFacts>) -> Self {
         Self {
-            entity,
+            of,
             rig,
             clips,
             chosen: 0,
@@ -1542,6 +1561,25 @@ struct InPlace {
     start: f32,
     played: f32,
     at: Option<Instant>,
+}
+
+/// The model file picked in the dock, as its Clips' preview shows it (ADR 0124's E12-1b): the
+/// file, the part the engine draws (its first, with its material), its turn and the drag's
+/// last pointer, whether its clip plays and when its last frame was, whether Auto Play came
+/// for it, and the preview's newest pixels to upload (and whether one is in the texture).
+#[derive(Debug)]
+struct ShownModel {
+    file: AssetId,
+    mesh: AssetRef,
+    material: AssetRef,
+    turn: [f32; 2],
+    grab: Option<[f32; 2]>,
+    playing: bool,
+    at: Option<Instant>,
+    auto_played: bool,
+    pixels: Vec<u8>,
+    upload: bool,
+    shown: bool,
 }
 
 /// A section of the picked bus after its Bus section (E11-2b).
@@ -2956,6 +2994,13 @@ struct Editor {
     posing: Vec<Entity>,
     clip_speed: usize,
     clip_loop: bool,
+    /// The model file picked in the dock and its Clips' preview (ADR 0124's E12-1b), the file
+    /// last looked at for it, whether the player was told of a preview, and the texture its
+    /// pixels go to.
+    shown_model: Option<ShownModel>,
+    model_checked: Option<AssetId>,
+    model_given: bool,
+    model_texture: Option<u32>,
     mixer_muted: Vec<String>,
     mixer_soloed: Vec<String>,
     monitor: bool,
@@ -3899,6 +3944,10 @@ impl Editor {
             posing: Vec::new(),
             clip_speed: 2,
             clip_loop: true,
+            shown_model: None,
+            model_checked: None,
+            model_given: false,
+            model_texture: None,
             mixer_muted: Vec::new(),
             mixer_soloed: Vec::new(),
             monitor: false,
@@ -4442,6 +4491,7 @@ impl Editor {
         follow_material_bases(&mut self.material_docs);
         self.update_shown_material(world);
         self.material_preview_frame(world);
+        self.model_preview_frame();
         match self.active() {
             Some(e) => {
                 // An entity a prefab instance placed: its fields against the prefab's.
@@ -5193,6 +5243,21 @@ impl Editor {
                     removable: false,
                 });
             }
+            // A skinned model file's clips, the engine's preview of it at their top (ADR
+            // 0124's E12-1b).
+            if self
+                .clips
+                .as_ref()
+                .is_some_and(|c| c.of == ClipsOf::Asset(asset.id))
+            {
+                self.clips_section = Some(sections.len());
+                sections.push(Section {
+                    title: "Clips",
+                    fields: &[],
+                    script: "",
+                    removable: false,
+                });
+            }
         } else {
             sections.extend(self.shown_sections.iter().filter_map(|&(a, b, k)| {
                 let s = section_list.get(k)?;
@@ -5227,11 +5292,11 @@ impl Editor {
                 });
             }
             // The active character's clips after its components (ADR 0124's E12-1b).
-            if self
-                .clips
-                .as_ref()
-                .is_some_and(|c| Some(c.entity) == self.selection.last().copied())
-            {
+            if self.clips.as_ref().is_some_and(|c| {
+                self.selection
+                    .last()
+                    .is_some_and(|&e| c.of == ClipsOf::Entity(e))
+            }) {
                 self.clips_section = Some(sections.len());
                 sections.push(Section {
                     title: "Clips",
@@ -6171,12 +6236,24 @@ impl Editor {
             }),
             clips: self.clips_section.and_then(|section| {
                 let view = self.clips.as_ref()?;
+                let model = match view.of {
+                    ClipsOf::Asset(file) => self.shown_model.as_ref().filter(|m| m.file == file),
+                    ClipsOf::Entity(_) => None,
+                };
                 Some(crate::shell::ClipsPanel {
                     section,
                     rows: &clip_rows,
                     chosen: view.chosen,
                     note: "No clips in its file",
-                    playing: self.in_place.is_some(),
+                    preview: model.is_some(),
+                    image: model
+                        .filter(|m| m.shown)
+                        .and(self.model_texture)
+                        .map(|texture| engine_ui::UiImage {
+                            texture,
+                            uv: [0.0, 0.0, 1.0, 1.0],
+                        }),
+                    playing: model.map_or(self.in_place.is_some(), |m| m.playing),
                     looping: self.clip_loop,
                     speed: CLIP_SPEED_TEXTS[self.clip_speed],
                     playhead: view.playhead(),
@@ -6403,6 +6480,10 @@ impl Editor {
         }
         if let Some(bar) = response.clip_scrub {
             self.scrub_clip(bar);
+        }
+        if let Some(turn) = response.clip_turn {
+            let pointer = self.input.cursor();
+            self.turn_model_preview(turn, pointer);
         }
         // Sound previews (E11-3b): ▶ on a tile, a click along a playing one, Auto Play.
         if let Some(i) = response.file_play
@@ -6962,7 +7043,9 @@ impl Editor {
             && self.command_palette.is_none()
             && self.ui.editing().is_none()
             && self.drag.is_none();
-        let engaged = self.in_place.is_some() || self.clips.as_ref().is_some_and(|v| v.held);
+        let engaged = self.in_place.is_some()
+            || self.clips.as_ref().is_some_and(|v| v.held)
+            || self.shown_model.as_ref().is_some_and(|m| m.playing);
         if escape && engaged {
             self.stop_in_place();
         } else if self
@@ -17321,6 +17404,62 @@ impl Editor {
         }
     }
 
+    /// The model file picked in the dock (ADR 0124's E12-1b): its first part shown by the
+    /// Clips' preview from its pick on (its file's outline read once), let go once another
+    /// asset or none is picked. Only a skinned one gets Clips (once the player made its rig).
+    fn model_preview_frame(&mut self) {
+        let picked = self
+            .inspected
+            .as_ref()
+            .filter(|a| a.kind == engine_scene::AssetKind::Model)
+            .map(|a| a.id);
+        let Some(file) = picked else {
+            self.model_checked = None;
+            self.shown_model = None;
+            return;
+        };
+        if self.model_checked == Some(file) {
+            return;
+        }
+        self.model_checked = Some(file);
+        let part = self
+            .preview_parts(Subject::File(file))
+            .and_then(|parts| parts.first().copied());
+        self.shown_model = part.map(|(mesh, material, _)| ShownModel {
+            file,
+            mesh,
+            material,
+            turn: [0.0; 2],
+            grab: None,
+            playing: false,
+            at: None,
+            auto_played: false,
+            pixels: Vec::new(),
+            upload: false,
+            shown: false,
+        });
+    }
+
+    /// A drag on the picked model's preview (ADR 0124's E12-1b), as on the material preview:
+    /// sideways about the vertical, up and down about the sideways axis.
+    fn turn_model_preview(&mut self, turn: crate::shell::WaveUse, pointer: Option<[f32; 2]>) {
+        let Some(m) = self.shown_model.as_mut() else {
+            return;
+        };
+        if turn.released {
+            m.grab = None;
+            return;
+        }
+        let Some([x, y]) = pointer else {
+            return;
+        };
+        if let Some([gx, gy]) = m.grab {
+            m.turn[0] += (x - gx) * 0.01;
+            m.turn[1] = (m.turn[1] + (y - gy) * 0.01).clamp(-1.5, 1.5);
+        }
+        m.grab = Some([x, y]);
+    }
+
     /// A drag on the material preview (E10-4d): sideways turns it about the vertical,
     /// up and down about the sideways axis (a quarter turn each way at most), one drawing a
     /// frame at most.
@@ -18665,7 +18804,7 @@ impl Editor {
                 let chosen = self
                     .clips
                     .as_ref()
-                    .filter(|v| v.entity == e)
+                    .filter(|v| v.of == ClipsOf::Entity(e))
                     .map(|v| v.chosen);
                 (e, chosen)
             })
@@ -18698,6 +18837,9 @@ impl Editor {
     /// stand in their rest pose again with the next frame, the playhead at the start.
     fn stop_in_place(&mut self) {
         self.in_place = None;
+        if let Some(m) = self.shown_model.as_mut() {
+            m.playing = false;
+        }
         if let Some(view) = self.clips.as_mut() {
             view.held = false;
             view.time = 0.0;
@@ -18728,17 +18870,30 @@ impl Editor {
     /// The Clips' ▶ or ■ (ADR 0124's E12-1b): the character plays in place from the
     /// playhead, or stops there, holding that pose.
     fn toggle_clip_play(&mut self) {
+        if let Some(view) = self.clips.as_mut()
+            && let ClipsOf::Asset(file) = view.of
+        {
+            if let Some(m) = self.shown_model.as_mut().filter(|m| m.file == file) {
+                m.playing = !m.playing;
+                m.at = None;
+                view.held = !m.playing;
+                if m.playing && !self.clip_loop && view.time >= view.length() {
+                    view.time = 0.0;
+                }
+            }
+            return;
+        }
         if self.in_place.take().is_some() {
             if let Some(view) = self.clips.as_mut() {
                 view.held = true;
             }
             return;
         }
-        let Some(view) = &self.clips else {
+        let Some((ClipsOf::Entity(e), chosen)) = self.clips.as_ref().map(|v| (v.of, v.chosen))
+        else {
             return;
         };
-        let one = vec![(view.entity, Some(view.chosen))];
-        self.start_in_place(one);
+        self.start_in_place(vec![(e, Some(chosen))]);
     }
 
     /// Clip `i` chosen in the Clips (ADR 0124's E12-1b): its first frame shown, held; or, while
@@ -18749,13 +18904,20 @@ impl Editor {
         };
         view.chosen = i;
         view.time = 0.0;
+        if let ClipsOf::Asset(file) = view.of {
+            view.held = !self
+                .shown_model
+                .as_ref()
+                .is_some_and(|m| m.file == file && m.playing);
+            return;
+        }
         match self.in_place.as_mut() {
             Some(play) => {
                 play.start = 0.0;
                 play.played = 0.0;
                 play.clip = Some(view.clips[i].key.clone());
                 for (e, clip) in &mut play.entities {
-                    *clip = (*e == view.entity).then_some(i);
+                    *clip = (ClipsOf::Entity(*e) == view.of).then_some(i);
                 }
             }
             None => view.held = true,
@@ -18777,7 +18939,9 @@ impl Editor {
         let along = ((x - r.pos[0]) / r.size[0].max(1.0)).clamp(0.0, 1.0);
         view.time = along * view.length();
         view.held = true;
-        if let Some(play) = self.in_place.as_mut() {
+        if let ClipsOf::Entity(_) = view.of
+            && let Some(play) = self.in_place.as_mut()
+        {
             play.start = view.time;
             play.played = 0.0;
         }
@@ -18794,15 +18958,72 @@ impl Editor {
             .last()
             .copied()
             .filter(|_| self.play.is_none());
-        match active.and_then(|e| Some((e, player.model_rig(e)?))) {
-            Some((e, rig)) => {
+        // The model file picked in the dock: its preview asked for, posed at the playhead
+        // while its Clips play or hold (Auto Play starts its first clip once they are
+        // known), its newest pixels taken.
+        let (looping, speed) = (self.clip_loop, CLIP_SPEEDS[self.clip_speed]);
+        match self.shown_model.as_mut() {
+            Some(m) => {
+                let view = self
+                    .clips
+                    .as_mut()
+                    .filter(|v| v.of == ClipsOf::Asset(m.file));
+                let pose = view.and_then(|v| {
+                    if !m.auto_played {
+                        m.auto_played = true;
+                        m.playing = self.auto_play;
+                    }
+                    if m.playing {
+                        let now = Instant::now();
+                        let dt = m.at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+                        m.at = Some(now);
+                        let (length, t) = (v.length(), v.time + dt * speed);
+                        if looping {
+                            v.time = t.rem_euclid(length.max(1e-6));
+                        } else if t >= length {
+                            v.time = length;
+                            m.playing = false;
+                            v.held = true;
+                        } else {
+                            v.time = t;
+                        }
+                    }
+                    (m.playing || v.held).then_some((v.chosen, v.time))
+                });
+                player.set_model_preview(Some(engine_app::ModelPreview {
+                    mesh: m.mesh,
+                    material: m.material,
+                    turn: m.turn,
+                    pose,
+                }));
+                if player.take_model_preview(&mut m.pixels) {
+                    m.upload = true;
+                }
+                self.model_given = true;
+            }
+            None if self.model_given => {
+                player.set_model_preview(None);
+                self.model_given = false;
+            }
+            None => {}
+        }
+        // Whose clips the inspector shows: the picked model file's, else the active
+        // character's, once its rig is made.
+        let rigged = match &self.shown_model {
+            Some(m) => player
+                .model_preview_rig()
+                .map(|rig| (ClipsOf::Asset(m.file), rig)),
+            None => active.and_then(|e| Some((ClipsOf::Entity(e), player.model_rig(e)?))),
+        };
+        match rigged {
+            Some((of, rig)) => {
                 let at = std::ptr::from_ref(rig) as usize;
                 if self
                     .clips
                     .as_ref()
-                    .is_none_or(|v| v.entity != e || v.rig != at)
+                    .is_none_or(|v| v.of != of || v.rig != at)
                 {
-                    self.clips = Some(ClipsView::new(e, at, ClipFacts::of(rig)));
+                    self.clips = Some(ClipsView::new(of, at, ClipFacts::of(rig)));
                 }
             }
             None => self.clips = None,
@@ -18841,7 +19062,10 @@ impl Editor {
                 going |= looping || time < length;
                 player.pose_model(*e, Some((k, t)));
                 posing.push(*e);
-                if let Some(v) = view.as_mut().filter(|v| v.entity == *e && v.chosen == k) {
+                if let Some(v) = view
+                    .as_mut()
+                    .filter(|v| v.of == ClipsOf::Entity(*e) && v.chosen == k)
+                {
                     v.time = t;
                 }
                 true
@@ -18858,9 +19082,10 @@ impl Editor {
         }
         if self.in_place.is_none()
             && let Some(view) = self.clips.as_ref().filter(|v| v.held)
+            && let ClipsOf::Entity(e) = view.of
         {
-            player.pose_model(view.entity, Some((view.chosen, view.time)));
-            self.posing.push(view.entity);
+            player.pose_model(e, Some((view.chosen, view.time)));
+            self.posing.push(e);
         }
         if let Some(view) = self.clips.as_mut() {
             view.refresh_time();
@@ -24107,18 +24332,28 @@ impl<G> EditorGame<G> {
     /// The middle of where the last frame drew the text `s` (physical pixels), the first
     /// time it drew it: for tests and tools that point at the editor's panels.
     pub fn text_at(&self, s: &str) -> Option<[f32; 2]> {
+        self.texts_at(s).first().copied()
+    }
+
+    /// Where each text `s` drawn last frame is (the middles, in the window's pixels), in the
+    /// order drawn: for tests.
+    pub fn texts_at(&self, s: &str) -> Vec<[f32; 2]> {
         let shared = self.shared.borrow();
         let scale = shared.scale.max(0.5);
         let frame = shared.ui.last_frame();
-        frame.commands.iter().find_map(|c| match c {
-            engine_ui::DrawCmd::Text { rect, range, .. } if frame.text[range.clone()] == *s => {
-                Some([
-                    (rect.pos[0] + rect.size[0] / 2.0) * scale,
-                    (rect.pos[1] + rect.size[1] / 2.0) * scale,
-                ])
-            }
-            _ => None,
-        })
+        frame
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                engine_ui::DrawCmd::Text { rect, range, .. } if frame.text[range.clone()] == *s => {
+                    Some([
+                        (rect.pos[0] + rect.size[0] / 2.0) * scale,
+                        (rect.pos[1] + rect.size[1] / 2.0) * scale,
+                    ])
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// The active character's Clips (ADR 0124's E12-1b), each row's name, length, facts and
@@ -24133,6 +24368,16 @@ impl<G> EditorGame<G> {
                 .collect();
             (rows, v.time_text.clone())
         })
+    }
+
+    /// Whether the picked model file's preview is drawn in its Clips, and whether it plays
+    /// (ADR 0124's E12-1b): for tests.
+    pub fn model_preview(&self) -> (bool, bool) {
+        self.shared
+            .borrow()
+            .shown_model
+            .as_ref()
+            .map_or((false, false), |m| (m.shown, m.playing))
     }
 
     /// How many characters play in place now (ADR 0124's E12-1b): for tests.
@@ -26113,6 +26358,8 @@ pub struct EditorOverlay {
     preview: engine_render::texture::GpuTexture,
     /// The shown material's preview (E10-4d).
     material: engine_render::texture::GpuTexture,
+    /// The picked model file's preview (ADR 0124's E12-1b).
+    model: engine_render::texture::GpuTexture,
     /// The shown graph's nodes' previews' atlas (E10-4g).
     tiles: engine_render::texture::GpuTexture,
 }
@@ -26139,6 +26386,8 @@ impl EditorOverlay {
             self.preview
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
             self.material
+                .destroy(setup.device, setup.allocator, setup.bindless, 0);
+            self.model
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
             self.tiles
                 .destroy(setup.device, setup.allocator, setup.bindless, 0);
@@ -26651,6 +26900,14 @@ impl Overlay for EditorOverlay {
                 if let Some(p) = editor.material_preview.as_mut() {
                     p.shown = true;
                 }
+            }
+            // The picked model file's preview, as it came back last (ADR 0124's E12-1b).
+            if let Some(m) = editor.shown_model.as_mut().filter(|m| m.upload) {
+                self.model
+                    .upload(pass.fg, pass.ring, &m.pixels)
+                    .map_err(AppError::at("the model's preview"))?;
+                m.upload = false;
+                m.shown = true;
             }
             // The inspector's sound waveform, once read, into the texture's corner (E11-3c).
             if let Some(([width, height], pixels)) = editor
@@ -31989,7 +32246,7 @@ mod tests {
         ed.select_only(man);
         // The player made the man's rig: its clips, as `clips_frame` makes them.
         ed.clips = Some(ClipsView::new(
-            man,
+            ClipsOf::Entity(man),
             1,
             vec![
                 ClipFacts::new(0, "Walk", 1.0, 31, 30.0, 3000, 1e-4, 1.5, (2e-4, "hips")),

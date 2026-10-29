@@ -1,14 +1,15 @@
 //! ADR 0124's E12-1b and CLAUDE.md §5: the editor's frames make no heap allocation while a
-//! character plays in place: CesiumMan selected, his Clips in the inspector, P pressed, so
-//! every frame poses him anew and writes the Clips' time again. The measuring thread's
-//! allocations are counted; a failing measurement prints the stacks of its first ones. One
-//! test per file, so nothing else allocates on that thread.
+//! clip plays: CesiumMan selected, his Clips in the inspector, P pressed, so every frame
+//! poses him anew and writes the Clips' time again; then his file picked in the dock and its
+//! clip played in the engine's preview, drawn, read back and uploaded every frame. The
+//! measuring thread's allocations are counted; a failing measurement prints the stacks of
+//! its first ones. One test per file, so nothing else allocates on that thread.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
 use engine_app::{Game, Model, Player, PlayerSettings, Window};
 use engine_ecs::{Transform, World};
-use engine_platform::window::{WindowEvent, WindowEventKind, WindowId};
+use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind, WindowId};
 use engine_scene::{
     AssetId, AssetMeta, AssetPaths, AssetRef, Name, SaveOptions, SceneId, SceneRegistry, save_with,
 };
@@ -102,18 +103,18 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
     let dir =
         std::env::temp_dir().join(format!("ofelia-editor-clips-alloc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("models")).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
     for file in ["CesiumMan.gltf", "CesiumMan_data.bin", "CesiumMan_img0.jpg"] {
-        std::fs::copy(source.join(file), dir.join("models").join(file)).unwrap();
+        std::fs::copy(source.join(file), dir.join(file)).unwrap();
     }
-    let id = AssetMeta::ensure(&dir.join("models/CesiumMan.gltf")).unwrap();
+    let id = AssetMeta::ensure(&dir.join("CesiumMan.gltf")).unwrap();
     let (mesh, material) = (
         AssetRef::part(id, "Cesium_Man"),
         AssetRef::part(id, "Cesium_Man-effect"),
     );
     let mut paths = AssetPaths::new();
-    paths.insert(mesh, "models/CesiumMan.gltf#Cesium_Man");
-    paths.insert(material, "models/CesiumMan.gltf#Cesium_Man-effect");
+    paths.insert(mesh, "CesiumMan.gltf#Cesium_Man");
+    paths.insert(material, "CesiumMan.gltf#Cesium_Man-effect");
     let mut world = World::new();
     world.spawn((
         SceneId::new(),
@@ -188,15 +189,57 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
     }
     assert_eq!(game.playing_in_place(), 1, "playing in place");
     let shown = game.clips().1;
-    COUNTING.with(|c| c.set(true));
+    let in_place = measured(&mut player, &mut game, &mut overlay);
+    assert_eq!(game.playing_in_place(), 1, "still playing");
+    assert_ne!(game.clips().1, shown, "the time moved on");
+    println!("{in_place} allocations in 240 frames of a character playing in place");
+    // P again; his file picked in the dock, its clip played in the engine's preview.
+    key(&mut game, 0x50, 0x19);
+    frame(&mut player, &mut game, &mut overlay);
+    let tile = game.text_at("CesiumMan.gltf").expect("the file listed");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, tile, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    for _ in 0..600 {
+        frame(&mut player, &mut game, &mut overlay);
+        if game.model_preview().0 && !game.clips().0.is_empty() {
+            break;
+        }
+    }
+    assert!(game.model_preview().0, "the file's preview");
+    let play = game
+        .texts_at(engine_editor::icons::PLAY)
+        .into_iter()
+        .find(|p| p[0] >= 1280.0 - 360.0)
+        .expect("the Clips' play button");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, play, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
     for _ in 0..240 {
         frame(&mut player, &mut game, &mut overlay);
     }
-    COUNTING.with(|c| c.set(false));
-    assert_eq!(game.playing_in_place(), 1, "still playing");
+    // The dock's thumbnails made first: each is a drawing of a frame of its own.
+    for _ in 0..1200 {
+        if ["CesiumMan.gltf", "CesiumMan_img0.jpg"]
+            .iter()
+            .all(|f| game.thumbnail_ready(f))
+        {
+            break;
+        }
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    for _ in 0..120 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.model_preview().1, "its preview playing");
+    let shown = game.clips().1;
+    let previewed = measured(&mut player, &mut game, &mut overlay);
+    assert!(game.model_preview().1, "still playing");
     assert_ne!(game.clips().1, shown, "the time moved on");
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-    println!("{allocations} allocations in 240 frames of a character playing in place");
+    println!("{previewed} allocations in 240 frames of a model's preview playing");
+    let allocations = in_place + previewed;
     if allocations > 0
         && let Ok(traces) = TRACES.lock()
     {
@@ -224,8 +267,59 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
     }
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(
-        allocations, 0,
-        "allocations while a character plays in place"
-    );
+    assert_eq!(in_place, 0, "allocations while a character plays in place");
+    assert_eq!(previewed, 0, "allocations while a model's preview plays");
+}
+
+/// 240 frames counted: the measuring thread's allocations in them.
+fn measured(
+    player: &mut Player,
+    game: &mut engine_editor::EditorGame<NoGame>,
+    overlay: &mut engine_editor::EditorOverlay,
+) -> usize {
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    COUNTING.with(|c| c.set(true));
+    for _ in 0..240 {
+        frame(player, game, overlay);
+    }
+    COUNTING.with(|c| c.set(false));
+    ALLOCATIONS.load(Ordering::Relaxed) - before
+}
+
+/// A key pressed and let go.
+fn key(game: &mut engine_editor::EditorGame<NoGame>, virtual_key: u16, scancode: u16) {
+    for pressed in [true, false] {
+        game.event(&WindowEvent {
+            window: WindowId(0),
+            time: std::time::Instant::now(),
+            kind: WindowEventKind::Key {
+                virtual_key,
+                scancode,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        });
+    }
+}
+
+/// The pointer at `at`, the left button pressed or let go with it.
+fn pointer(game: &mut engine_editor::EditorGame<NoGame>, at: [f32; 2], pressed: Option<bool>) {
+    let mut send = |kind| {
+        game.event(&WindowEvent {
+            window: WindowId(0),
+            time: std::time::Instant::now(),
+            kind,
+        });
+    };
+    send(WindowEventKind::CursorMoved {
+        x: at[0].round() as i32,
+        y: at[1].round() as i32,
+    });
+    if let Some(pressed) = pressed {
+        send(WindowEventKind::MouseButton {
+            button: MouseButton::Left,
+            pressed,
+        });
+    }
 }

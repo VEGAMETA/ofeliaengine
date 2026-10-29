@@ -1628,3 +1628,180 @@ fn a_skinned_model_is_drawn_skinned_and_posed_at_a_clips_moment() {
     assert!(moved > 500, "the pose moved him: {moved}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR 0124's E12-1b: the editor's live model preview draws a skinned model of no scene
+/// alone, its skin made in the background; it draws again only when its pose or its turn
+/// changed, a clip's moment and a quarter turn each giving another picture, and nothing once
+/// it is let go. `ENGINE_MODEL_PREVIEW_PNG=<dir>` writes its three pictures.
+#[test]
+fn a_model_preview_draws_a_skinned_model_posed_and_turned_alone() {
+    let source =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/CesiumMan");
+    if !source.join("CesiumMan.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ofelia-model-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    for file in ["CesiumMan.gltf", "CesiumMan_data.bin", "CesiumMan_img0.jpg"] {
+        std::fs::copy(source.join(file), dir.join("models").join(file)).unwrap();
+    }
+    let id = AssetMeta::ensure(&dir.join("models/CesiumMan.gltf")).unwrap();
+    let (mesh, material) = (
+        AssetRef::part(id, "Cesium_Man"),
+        AssetRef::part(id, "Cesium_Man-effect"),
+    );
+    let settings = PlayerSettings {
+        title: String::from("model preview test"),
+        window: Window::Offscreen {
+            width: 320,
+            height: 240,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut paths = player.assets().paths().clone();
+    paths.insert(mesh, "models/CesiumMan.gltf#Cesium_Man");
+    paths.insert(material, "models/CesiumMan.gltf#Cesium_Man-effect");
+    player.assets_mut().add_paths(&paths);
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let asked = |pose, turn| engine_app::ModelPreview {
+        mesh,
+        material,
+        turn,
+        pose,
+    };
+    let mut pixels = Vec::new();
+    let drawn = |player: &mut Player,
+                 game: &mut Still,
+                 preview: engine_app::ModelPreview,
+                 pixels: &mut Vec<u8>| {
+        player.set_model_preview(Some(preview));
+        let started = Instant::now();
+        loop {
+            player.frame(game).unwrap();
+            if player.take_model_preview(pixels) {
+                return started.elapsed();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "no model preview: {:?}",
+                player.assets().problem(mesh)
+            );
+        }
+    };
+    let covered = |p: &[u8]| p.chunks_exact(4).filter(|c| c[3] > 128).count();
+    let differ = |a: &[u8], b: &[u8]| {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .filter(|(p, q)| p.iter().zip(q.iter()).any(|(x, y)| x.abs_diff(*y) > 24))
+            .count()
+    };
+    let took = drawn(&mut player, &mut game, asked(None, [0.0, 0.0]), &mut pixels);
+    let rest = pixels.clone();
+    let side = engine_app::PREVIEW_SIZE as usize;
+    assert_eq!(rest.len(), side * side * 4);
+    let clips = player.model_preview_rig().map(|r| r.clips().len());
+    println!(
+        "the model preview drawn after {:.0} ms: {} of {} pixels covered, clips {clips:?}",
+        took.as_secs_f64() * 1e3,
+        covered(&rest),
+        side * side
+    );
+    assert!(
+        covered(&rest) > side * side / 20,
+        "the man covers the preview"
+    );
+    assert_eq!(clips, Some(1));
+    // Asked again the same: nothing drawn anew.
+    for _ in 0..10 {
+        player.set_model_preview(Some(asked(None, [0.0, 0.0])));
+        player.frame(&mut game).unwrap();
+    }
+    assert!(
+        !player.take_model_preview(&mut pixels),
+        "drawn again unchanged"
+    );
+    // A clip's moment: another picture; a quarter turn: another again.
+    drawn(
+        &mut player,
+        &mut game,
+        asked(Some((0, 1.0)), [0.0, 0.0]),
+        &mut pixels,
+    );
+    let walking = differ(&rest, &pixels);
+    let walking_shot = pixels.clone();
+    drawn(
+        &mut player,
+        &mut game,
+        asked(Some((0, 1.0)), [core::f32::consts::FRAC_PI_2, 0.0]),
+        &mut pixels,
+    );
+    let turned = covered(&pixels);
+    if let Ok(out) = std::env::var("ENGINE_MODEL_PREVIEW_PNG") {
+        for (name, shot) in [
+            ("rest.png", &rest),
+            ("walking.png", &walking_shot),
+            ("turned.png", &pixels),
+        ] {
+            let png = engine_render::png::encode_png(
+                side as u32,
+                side as u32,
+                engine_render::png::PngFormat::Rgba,
+                shot,
+            )
+            .unwrap();
+            std::fs::write(std::path::Path::new(&out).join(name), png).unwrap();
+        }
+    }
+    println!("posed mid-walk: {walking} pixels changed; turned: {turned} covered");
+    assert!(walking > 100, "the pose shows: {walking}");
+    assert!(
+        turned > side * side / 40,
+        "turned, still in the frame: {turned}"
+    );
+    // What it costs the GPU: frames drawing it anew each time against frames without it.
+    let gpu = |player: &mut Player, game: &mut Still, live: bool| {
+        let (mut total, mut n) = (0.0f64, 0u32);
+        for k in 0..150 {
+            let preview = live.then(|| asked(Some((0, k as f32 / 60.0)), [0.0, 0.0]));
+            player.set_model_preview(preview);
+            player.frame(game).unwrap();
+            if let Some(us) = player.graph().gpu_frame_time().filter(|_| k >= 30) {
+                total += f64::from(us);
+                n += 1;
+            }
+        }
+        total / f64::from(n.max(1))
+    };
+    let with = gpu(&mut player, &mut game, true);
+    let without = gpu(&mut player, &mut game, false);
+    println!(
+        "the GPU's frame: {with:.0} us drawing the preview each frame, {without:.0} us without"
+    );
+    // Let go: nothing more.
+    player.set_model_preview(None);
+    for _ in 0..10 {
+        player.frame(&mut game).unwrap();
+    }
+    assert!(!player.take_model_preview(&mut pixels));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1097,3 +1097,167 @@ fn a_selected_characters_clips_show_and_p_plays_it_in_place() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR 0124's E12-1b: a skinned model file picked in the dock shows its clips in the
+/// inspector under the engine's preview of it; ▶ plays the chosen clip there (the picture
+/// changes from moment to moment) and ■ stops it where it is (the picture stays).
+/// `ENGINE_EDITOR_CLIPS_PNG=<file>` writes the window while it plays.
+#[test]
+fn a_skinned_model_picked_in_the_dock_shows_its_clips_under_its_preview() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/Fox");
+    if !source.join("Fox.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "ofelia-editor-model-preview-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for entry in std::fs::read_dir(&source).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            std::fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
+        }
+    }
+    AssetMeta::ensure(&dir.join("Fox.gltf")).unwrap();
+    let mut world = World::new();
+    let options = engine_scene::SaveOptions {
+        id: Some(AssetId::new()),
+        assets: None,
+        prefabs: None,
+    };
+    let mut text = String::new();
+    engine_scene::save_with(
+        &mut world,
+        &engine_scene::SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor model preview test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    // Its tile picked in the dock: its skin made, its clips under its preview.
+    let tile = game.text_at("Fox.gltf").expect("the model listed");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, tile, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let started = Instant::now();
+    while !(game.clips().0.len() == 3 && game.model_preview().0)
+        && started.elapsed() < Duration::from_secs(30)
+    {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let (rows, _) = game.clips();
+    println!(
+        "clips and preview after {:.2} s: {rows:?}",
+        started.elapsed().as_secs_f64()
+    );
+    assert_eq!(rows.len(), 3, "the Fox's three clips: {rows:?}");
+    for name in ["Survey", "Walk", "Run"] {
+        assert!(rows.iter().any(|r| r.starts_with(name)), "{name}: {rows:?}");
+    }
+    assert!(game.model_preview().0, "its preview drawn");
+    // The inspector's column, where the preview is.
+    let inspector =
+        |player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay| {
+            frame(player, game, overlay);
+            let rgba = player
+                .capture_overlaid(game, Some(overlay))
+                .unwrap()
+                .unwrap();
+            rgba.chunks_exact(4)
+                .enumerate()
+                .filter(|(i, _)| (*i as u32 % width) >= width - 360)
+                .flat_map(|(_, p)| p.iter().copied())
+                .collect::<Vec<u8>>()
+        };
+    let differ = |a: &[u8], b: &[u8]| {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .filter(|(p, q)| p.iter().zip(q.iter()).any(|(x, y)| x.abs_diff(*y) > 24))
+            .count()
+    };
+    // ▶: the clip plays in the preview.
+    let in_inspector = |at: &[[f32; 2]]| at.iter().copied().find(|p| p[0] >= (width - 360) as f32);
+    let play =
+        in_inspector(&game.texts_at(engine_editor::icons::PLAY)).expect("the Clips' play button");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, play, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.model_preview().1, "playing");
+    let first = inspector(&mut player, &mut game, &mut overlay);
+    let later = Instant::now();
+    while later.elapsed() < Duration::from_millis(400) {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let second = inspector(&mut player, &mut game, &mut overlay);
+    let moving = differ(&first, &second);
+    if let Ok(out) = std::env::var("ENGINE_EDITOR_CLIPS_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(out, png).unwrap();
+    }
+    // ■: it stops where it is.
+    let stop =
+        in_inspector(&game.texts_at(engine_editor::icons::STOP)).expect("the Clips' stop button");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, stop, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(!game.model_preview().1, "stopped");
+    for _ in 0..10 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let held = inspector(&mut player, &mut game, &mut overlay);
+    for _ in 0..20 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let still = differ(&held, &inspector(&mut player, &mut game, &mut overlay));
+    println!("playing: {moving} pixels changed in the inspector; stopped: {still}");
+    assert!(moving > 300, "the preview plays: {moving}");
+    assert!(still < 50, "the preview holds: {still}");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
