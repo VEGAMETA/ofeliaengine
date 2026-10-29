@@ -935,7 +935,9 @@ fn a_material_dragged_over_an_object_shows_on_it_before_the_drop() {
 
 /// ADR 0124's E12-1b: a skinned model selected shows its clips in the inspector with its
 /// file's numbers; P plays it in place (the view changes from moment to moment, the scene
-/// file untouched) and P again puts it back in its rest pose.
+/// file untouched) and P again puts it back in its rest pose. E12-1c: its skeleton's sticks
+/// follow it; Tab over the view picks its joints, as the inspector's Skeleton does.
+/// `ENGINE_EDITOR_JOINTS_PNG=<file>` writes the window while a joint is picked.
 #[test]
 fn a_selected_characters_clips_show_and_p_plays_it_in_place() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/CesiumMan");
@@ -1115,7 +1117,84 @@ fn a_selected_characters_clips_show_and_p_plays_it_in_place() {
     let off = differ(&rest, &back);
     println!("stopped: {off} pixels off his rest pose");
     assert!(off < 200, "{off} pixels off his rest pose after P");
-    // Nothing selected: no sticks.
+    // Tab over the view: his joints take the pointer (E12-1c); a click on one picks it,
+    // the selection staying his.
+    let [vx, vy, vw, vh] = [vx as f32, vy as f32, vw as f32, vh as f32];
+    pointer(&mut game, [vx + vw * 0.5, vy + vh * 0.5], None);
+    tap(&mut game, 0x09, 0x0F);
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.picked_joint().1, "Tab enters his joints");
+    // A joint in the view with no other within 12 pixels of it (F framed his origin, so
+    // his upper joints may be above the view).
+    let names = player.model_rig(man).unwrap().skeleton().names().to_vec();
+    let points: Vec<(String, [f32; 2])> = names
+        .iter()
+        .filter_map(|n| Some((n.clone(), game.screen_point(game.joint_point(n)?)?)))
+        .collect();
+    let apart = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).hypot(a[1] - b[1]) >= 12.0;
+    let (joint, at) = points
+        .iter()
+        .find(|(n, p)| {
+            p[0] > vx + 8.0
+                && p[0] < vx + vw - 8.0
+                && p[1] > vy + 8.0
+                && p[1] < vy + vh - 8.0
+                && points.iter().all(|(m, q)| m == n || apart(*p, *q))
+        })
+        .cloned()
+        .expect("a joint alone in the view");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, at, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(
+        game.picked_joint().0.as_deref(),
+        Some(joint.as_str()),
+        "the click picks the joint under it"
+    );
+    assert_eq!(game.selection(), [man], "and keeps him selected");
+    // The inspector's Skeleton lists his joints: a click on a row picks that one.
+    let (name, row) = names
+        .iter()
+        .filter(|n| **n != joint)
+        .find_map(|n| {
+            let at = game
+                .texts_at(n)
+                .into_iter()
+                .find(|p| p[0] >= 1280.0 - 360.0 && p[1] < 700.0)?;
+            Some((n.clone(), at))
+        })
+        .expect("a joint's row in the Skeleton");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, row, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(
+        game.picked_joint(),
+        (Some(name), true),
+        "the row's joint picked, the joints still taking the pointer"
+    );
+    if let Ok(out) = std::env::var("ENGINE_EDITOR_JOINTS_PNG") {
+        pointer(&mut game, at, None);
+        frame(&mut player, &mut game, &mut overlay);
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(out, png).unwrap();
+    }
+    // Escape leaves the joints; nothing selected, no sticks.
+    tap(&mut game, 0x1B, 0x01);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(!game.picked_joint().1, "Escape leaves them");
     game.select(None);
     frame(&mut player, &mut game, &mut overlay);
     assert!(game.skeleton_lines()[0].is_empty());

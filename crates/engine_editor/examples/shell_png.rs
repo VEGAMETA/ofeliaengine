@@ -500,6 +500,7 @@ fn main() {
         sound: None,
         material_preview: None,
         clips: None,
+        joints: None,
         falloff: None,
         tile: 64.0,
         columns: 6,

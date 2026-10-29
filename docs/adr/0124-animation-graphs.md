@@ -372,6 +372,32 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left:** Tab's joint mode (a click picks a joint) and the inspector's joint tree
   (E12-1c-2b); the sticks are one pixel wide.
 
+## As built (E12-1c-2b, 2026-10-30): Tab's joint mode and the Skeleton section
+
+- **Tab over the viewport on a character** (`anim.edit_joints`, Animation: Edit Joints;
+  on brushes Tab still edits faces): the character's joints take the pointer, as faces do.
+  - A small square is drawn at each joint.
+  - The joint nearest the pointer within 8 pixels lights up light blue, with its name.
+  - A press on it picks it: orange, its name in the status bar, the selection unchanged.
+  - Tab, Escape, or a press in the view on no joint ends the mode (that click selects). A
+    press on the panels keeps it, so the Skeleton's rows pick too.
+  - The gizmo and the handles hide meanwhile.
+- **The inspector's Skeleton**, after the Clips: the active character's joints as a tree,
+  each indented under its parent. The picked one is lit; a click on a row picks its joint.
+  The skeleton's own nodes above the skin's joints (CesiumMan's `Z_UP` and `Armature`)
+  are listed too.
+- **Tests:**
+  - on both GPUs, CesiumMan selected: Tab enters his joints; a click on a joint alone in
+    the view picks it, keeping him selected; a click on another joint's row picks that one
+    without leaving the mode; Escape leaves it;
+  - a skeleton's depths, parents first;
+  - 0 allocations while he plays in place with his Skeleton shown, both GPUs, Tracy.
+- **Left:**
+  - the gizmo does not turn a picked joint yet (a pose needs a place to be kept: the
+    Animation tab's keys, E12-3 and E12-4);
+  - F frames a character by its origin, not its skinned box;
+  - the tree has no filter yet.
+
 ## Consequences
 
 - New source files: `.agraph` and `.anim`, and a section in models' `.meta`; a new component

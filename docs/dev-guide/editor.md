@@ -194,6 +194,7 @@ editor = ["dep:engine_editor"]
 | Draw a brush, a cut ([drawing brushes](#drawing-brushes)) | B, Shift+B |
 | Make the selected brushes rooms (walls 0.2 m thick), or solid again | Ctrl+H |
 | Edit the selected brushes' faces, edges and corners ([editing faces](#editing-faces)), with the pointer over the viewport | Tab |
+| Pick the selected character's joints (its Skeleton), with the pointer over the viewport | Tab |
 | Drag the selection over surfaces | Ctrl+Shift with a move handle |
 | What rotating and scaling turn about: the middle, each entity's own origin, the active entity | . (Period) |
 | Play the scene, stop ([playing](#playing)); while playing, go on from a breakpoint or a pause | F5, F8; F5 |
@@ -392,6 +393,12 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   - **Its skeleton:** while it is selected, its joints show as thin white sticks in front
     of its mesh, one from each joint to its parent, moving with the clip it plays.
     **View: Skeletons** shows every character's too, in grey.
+  - **Its joints:** its **Skeleton** section lists them as a tree, each under its parent.
+    **Tab** with the pointer over the viewport shows a small square at each joint. The
+    one under the pointer lights up with its name; a click picks it (orange, its name in
+    the status bar), and the selection stays the character. A click on a row of the
+    Skeleton picks that joint too. Tab, Escape, or a click in the view on no joint ends
+    it.
   - Pick a skinned model's file in the FileSystem dock and its Clips show the same way,
     under the engine's own drawing of it (drag it to turn it): ▶ plays the chosen clip
     there, and with the dock's **Auto Play** on its first clip plays as soon as its clips
