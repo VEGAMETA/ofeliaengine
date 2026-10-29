@@ -38,6 +38,8 @@ const EDGE_VERTEX: &[u8] = include_bytes!("../shaders/outline.outlineEdgeVertex.
 const EDGE_FRAGMENT: &[u8] = include_bytes!("../shaders/outline.outlineEdge.spv");
 const MASK_FORMAT: vk::Format = vk::Format::R32_UINT;
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
+/// The mask's sizes are multiples of this many pixels (see [`Outliner::add_passes`]).
+const MASK_STEP: u32 = 64;
 /// Bytes of an indexed indirect draw.
 const COMMAND_BYTES: u32 = core::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32;
 
@@ -392,7 +394,13 @@ impl Outliner {
                 u[3].max(r[3]),
             ]
         });
-        let (mask_width, mask_height) = (ux1 - ux0, uy1 - uy0);
+        // Its size in whole steps: an outlined object that moves or animates keeps one mask
+        // from frame to frame instead of the graph making images for every new size (the
+        // edge pass reads the mask within its own size; the rest is cleared, never drawn).
+        let (mask_width, mask_height) = (
+            (ux1 - ux0).next_multiple_of(MASK_STEP),
+            (uy1 - uy0).next_multiple_of(MASK_STEP),
+        );
         let (Some(frame), Some(visible), Some(classes), Some(commands)) = (
             ring.push(&[view.clip_from_world.to_cols_array()]),
             ring.push(&self.slots),

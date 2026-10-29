@@ -932,3 +932,165 @@ fn a_material_dragged_over_an_object_shows_on_it_before_the_drop() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR 0124's E12-1b: a skinned model selected shows its clips in the inspector with its
+/// file's numbers; P plays it in place (the view changes from moment to moment, the scene
+/// file untouched) and P again puts it back in its rest pose.
+#[test]
+fn a_selected_characters_clips_show_and_p_plays_it_in_place() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/CesiumMan");
+    if !source.join("CesiumMan.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "ofelia-editor-clips-in-place-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    for file in ["CesiumMan.gltf", "CesiumMan_data.bin", "CesiumMan_img0.jpg"] {
+        std::fs::copy(source.join(file), dir.join("models").join(file)).unwrap();
+    }
+    let id = AssetMeta::ensure(&dir.join("models/CesiumMan.gltf")).unwrap();
+    let (mesh, material) = (
+        AssetRef::part(id, "Cesium_Man"),
+        AssetRef::part(id, "Cesium_Man-effect"),
+    );
+    let mut paths = engine_scene::AssetPaths::new();
+    paths.insert(mesh, "models/CesiumMan.gltf#Cesium_Man");
+    paths.insert(material, "models/CesiumMan.gltf#Cesium_Man-effect");
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Man"),
+        Transform::from_rotation(engine_core::math::Quat::from_rotation_x(
+            -core::f32::consts::FRAC_PI_2,
+        )),
+        Model::new(mesh, material),
+    ));
+    world.spawn((
+        SceneId::new(),
+        Name::new("Sun"),
+        Transform::from_rotation(engine_core::math::Quat::from_rotation_x(-1.0)),
+        engine_app::prelude::Sun {
+            color: Vec3::splat(1.5),
+            ambient: Vec3::splat(0.25),
+        },
+    ));
+    let options = engine_scene::SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    engine_scene::save_with(
+        &mut world,
+        &engine_scene::SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor clips in place test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let man = engine_scene::find_named(player.world_mut(), "Man").expect("the man");
+    game.select(Some(man));
+    // F frames him; his skin is made in the background, then his Clips show.
+    tap(&mut game, 0x46, 0x21);
+    let started = Instant::now();
+    while game.clips().0.is_empty() && started.elapsed() < Duration::from_secs(20) {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let (rows, _) = game.clips();
+    println!(
+        "clips after {:.2} s: {rows:?}",
+        started.elapsed().as_secs_f64()
+    );
+    assert_eq!(rows.len(), 1, "CesiumMan has one clip: {rows:?}");
+    assert!(
+        rows[0].contains("2.00 s") && rows[0].contains("in place"),
+        "{rows:?}"
+    );
+    assert!(
+        rows[0].contains("jumps 3.1 cm at leg_joint_R_1"),
+        "{rows:?}"
+    );
+    // The view alone (the inspector's time changes as he plays).
+    let [vx, vy, vw, vh] = game.view_rect().expect("the view's rectangle");
+    let shot = |player: &mut Player, game: &mut EditorGame<NoGame>, overlay: &mut EditorOverlay| {
+        for _ in 0..20 {
+            frame(player, game, overlay);
+        }
+        let rgba = player
+            .capture_overlaid(game, Some(overlay))
+            .unwrap()
+            .unwrap();
+        let mut view = Vec::with_capacity((vw * vh * 4) as usize);
+        for y in vy..vy + vh {
+            let at = ((y * width + vx) * 4) as usize;
+            view.extend_from_slice(&rgba[at..at + (vw * 4) as usize]);
+        }
+        view
+    };
+    let differ = |a: &[u8], b: &[u8]| {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .filter(|(p, q)| p.iter().zip(q.iter()).any(|(x, y)| x.abs_diff(*y) > 24))
+            .count()
+    };
+    // The camera's flight to him over first.
+    let settle = Instant::now();
+    while settle.elapsed() < Duration::from_secs(1) {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let rest = shot(&mut player, &mut game, &mut overlay);
+    // P: he walks in place.
+    tap(&mut game, 0x50, 0x19);
+    frame(&mut player, &mut game, &mut overlay);
+    assert_eq!(game.playing_in_place(), 1);
+    let first = shot(&mut player, &mut game, &mut overlay);
+    std::thread::sleep(Duration::from_millis(300));
+    let second = shot(&mut player, &mut game, &mut overlay);
+    let (moved, walked) = (differ(&rest, &first), differ(&first, &second));
+    println!("in place: {moved} pixels off his rest pose, {walked} between two moments");
+    assert!(moved > 500 && walked > 500, "{moved} / {walked}");
+    // P again: his rest pose, as before.
+    tap(&mut game, 0x50, 0x19);
+    frame(&mut player, &mut game, &mut overlay);
+    assert_eq!(game.playing_in_place(), 0);
+    let back = shot(&mut player, &mut game, &mut overlay);
+    let off = differ(&rest, &back);
+    println!("stopped: {off} pixels off his rest pose");
+    assert!(off < 200, "{off} pixels off his rest pose after P");
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

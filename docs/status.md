@@ -879,6 +879,15 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-1b-1, a character's clips and P in place** (#PR, ADR 0124's as-built): the
+    selected character's Clips in the inspector (frames, root speed, size, error, and the
+    loop's seam: CesiumMan "jumps 3.1 cm at leg_joint_R_1", the Fox's within 0.2 mm), a
+    clip held at a click, ▶/■, loop, speed and a scrubbing bar; P (now "Scene: Play
+    Selection in Place") plays the selection's characters and sounds where they stand,
+    nothing written. Clips are compressed within 0.1 mm in the model's units (the Fox's
+    1.5–5.6 times smaller). 0 allocations in 240 frames playing in place, both GPUs, after
+    two fixes it found: a selected model's per-frame list, and the outline's images made
+    anew for every size of a moving selection (64-pixel steps now).
   - **E12's research and ADR 0124, proposed** (#447): the runtime of state machines and
     blend graphs read in Godot 4.7.2, Bevy 0.20.1, Fyrox 1.0 and ozz-animation 0.17 (ideas
     only; Unreal and Unity from their documentation), in
@@ -1052,11 +1061,18 @@ Last updated: 2026-10-28.
     no taskbar button, shown without being activated; uncloaking and bringing it to the
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next** (the owner's order: materials first of the tools, then animation and 2D;
-    E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (proposed,
-    nine questions to the team). First the steps no answer changes: E12-1a (skinned models
-    drawn skinned with their clips) is done; next E12-1b, clips seen in the dock and the
-    inspector with the engine's preview, and P in place. Then E12-1c to E12-5 as the
-    answers come.
+    E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (accepted
+    2026-10-29, every question as recommended). E12-1a and E12-1b-1 are done; next
+    E12-1b-2, the engine's preview of a model picked in the dock (↑/↓, Auto Play, two clips
+    side by side, the floor under root motion), then E12-1c (one entity per character, its
+    joints in the viewport and the tree, attachments), E12-2 (the `Animator`), E12-3 (the
+    Animation tab), E12-4 (keys) and E12-5 (graphs).
+  - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
+    questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a
+    (decisions in ticks, poses every frame), 3c (cross-fade or inertialization per
+    transition), 4a (sync by the cycle's fraction; markers with the timeline), 5b (joints,
+    events and number fields), 6a (one entity per skinned model), 7a (`.meta`, `.anim`,
+    `.agraph`), 8a (no record mode), 9b (the last 10 s of play kept, in E12-6).
   - **Settled (2026-10-28, team decision):** E11-5's snapshots are layers with weights,
     as FMOD's and Wwise's: each snapshot overrides only what it names, several at once,
     the later in the file's list winning where they meet; scripts blend one in and out
@@ -1380,7 +1396,7 @@ Left in the core: recording on the job system.
 | **Sound in the player**: `AudioSource`, `AudioSource3D`, `AudioListener` and `ReverbZone` components, positions saved; walls muffling and the room's reverb from rays through the physics world; one mixer for sources and videos; sounds from a live folder while developing, a sound pack in a release | done | ADR 0105 |
 | Audio, text, 2D, basic UI | solid / basic | §11, ADR 0015 |
 | Tests: golden images (FLIP, per vendor), per-pass perf gate, determinism, zero-allocation tests | solid | ADR 0062 |
-| Editor | E1 to E9 done (E8, the code editor, but for rename across the project); E10, materials, done (the graph, ADR 0123); E11, sound, done; E12, animation, designed (ADR 0124, proposed); E13 and E14 ahead | ADR 0107 |
+| Editor | E1 to E9 done (E8, the code editor, but for rename across the project); E10, materials, done (the graph, ADR 0123); E11, sound, done; E12, animation, under way (ADR 0124, accepted: skinned models and the Clips done); E13 and E14 ahead | ADR 0107 |
 | Luau | scripting v1 done: components and hooks, queries and systems, physics, input, messages and timers, saves, networking, reload on save, types; the debugger begun | §10, ADRs 0114, 0119 |
 
 ## 4. In flight

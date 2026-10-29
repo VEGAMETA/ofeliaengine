@@ -499,6 +499,7 @@ fn main() {
         auto_play: false,
         sound: None,
         material_preview: None,
+        clips: None,
         falloff: None,
         tile: 64.0,
         columns: 6,
