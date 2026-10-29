@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-1c-3a, sockets follow their joints** (#PR, ADR 0124's as-built): a
+  - **E12-1c-3a, sockets follow their joints** (#455, ADR 0124's as-built): a
     `JointAttachment` right under a character is a socket on one of its joints; each tick
     the player places it there (held pose, else the animator's, else rest) before
     transforms propagate, and what hangs under it follows (a cube in CesiumMan's hand, on
