@@ -388,8 +388,11 @@ pub struct AnimationEvent {
 /// Scripts and the inspector find a parameter's slot in an [`Animator`]'s `params` here.
 #[derive(Debug, Default)]
 pub struct GraphParams {
-    graphs: std::collections::HashMap<engine_scene::AssetId, Box<[(Box<str>, bool)]>>,
+    graphs: std::collections::HashMap<engine_scene::AssetId, ParamTable>,
 }
+
+/// A graph's parameters by slot: each one's name and whether it is a trigger.
+type ParamTable = Box<[(Box<str>, bool)]>;
 
 impl GraphParams {
     /// Graph file `graph`'s parameters, by slot: each one's name and whether it is a
