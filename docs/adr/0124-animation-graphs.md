@@ -605,6 +605,11 @@ allocation with transitions and events every tick; the same events at the same t
   next tick's script stage after the contacts, each tick's events once; names made into
   Luau strings once each (`data` nil when empty). Windows (`in_window`) come with the
   graphs.
+- **One hook (team decision, 2026-10-30):** the UX note's other way, an event calling the
+  function of its name as `send` does (`Steps.step(self, data)`), is not taken now: one
+  hook, seen in the types and completed as typed, keeps names out of the API. It can be
+  added beside the hook later (about an hour) if `on_animation_event`'s `if name == …`
+  grows tiresome.
 - **Sounds:** an event's sound spawns an `AudioSource3D` despawned at its end where the
   character stands (not while the network re-simulates); it follows nothing.
 - **Live edits:** `Assets::set_clip_events(file, clips)` swaps a file's events in place of

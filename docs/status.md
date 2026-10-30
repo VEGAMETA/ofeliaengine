@@ -2323,6 +2323,16 @@ grown, divide and conquer); the old labels stay in parentheses.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
+- **Sounds spawned to end on their own never end without an audio device** (found
+  2026-10-30 by E12-3b-1's test): an `AudioSource3D` despawned at its end (a clip event's
+  sound, a script's `audio.play_at`) stays in the world while no device plays it, so a
+  dedicated server or a headless run gathers one entity per sound. The sound system
+  should end them by their length when no voice plays them.
+
+- **Clip events as hooks of their names** (team decision, 2026-10-30, ADR 0124's
+  E12-3b-1): `on_animation_event(name, data)` only for now; an event calling the function
+  of its name as `send` does may be added beside it later (about an hour).
+
 - **A scene with no model draws the clear colour, not its sky** (found 2026-10-29 by
   E12-1a's test, not looked into): with its only model removed, CesiumMan's test scene
   drew a uniform dark blue; with a floor beside him, the sky drew. Something skips the
