@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5e-2a, a graph's parameters in Play** (#PR, ADR 0124's as-built): the
+  - **E12-5e-2a, a graph's parameters in Play** (#488, ADR 0124's as-built): the
     inspector's Graph section lists the selected character's parameters as its graph has
     them; a number dragged or typed, a flag clicked is held for testing over what the
     game sets (after the scripts, before each graph tick; the animator keeps the game's
