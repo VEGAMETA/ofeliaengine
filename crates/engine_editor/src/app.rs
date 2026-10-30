@@ -903,6 +903,11 @@ struct CommandIds {
     /// the playhead.
     key_copy: CommandId,
     key_paste: CommandId,
+    /// The Animation tab's Dope Sheet or Curves (E12-4d), and the picked keys' curve.
+    curves_view: CommandId,
+    keys_smooth: CommandId,
+    keys_linear: CommandId,
+    keys_step: CommandId,
     auto_play: CommandId,
     /// A material graph's nodes' previews on its canvas, or not (E10-4g).
     node_previews: CommandId,
@@ -1140,6 +1145,10 @@ fn commands() -> (Commands, CommandIds) {
             "Animation",
             "Paste Keys at the Playhead",
         ),
+        curves_view: c.register("animation.curves", "Animation", "Dope Sheet or Curves"),
+        keys_smooth: c.register("animation.keys_smooth", "Animation", "Picked Keys Smooth"),
+        keys_linear: c.register("animation.keys_linear", "Animation", "Picked Keys Linear"),
+        keys_step: c.register("animation.keys_step", "Animation", "Picked Keys Step"),
         auto_play: c.register("assets.auto_play", "Assets", "Auto Play Sounds"),
         node_previews: c.register("graph.node_previews", "Graph", "Node Previews"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
@@ -1256,6 +1265,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Delete", ids.event_delete),
         ("Ctrl+C", ids.key_copy),
         ("Ctrl+V", ids.key_paste),
+        ("C", ids.curves_view),
     ]
     .map(|(chord, id)| (chord, id, ANIM_KEYS));
     let global = [
@@ -3124,6 +3134,25 @@ struct Editor {
     anim_tracks_area: u64,
     length_text: String,
     length_shown: f32,
+    /// The Animation tab shows the Curves view (E12-4d).
+    curves_shown: bool,
+    /// The clip the Curves view drew last, its tracks laid out (again when it changes).
+    curves_of: Option<engine_scene::AnimFile>,
+    track_curves: Vec<engine_app::TrackCurve>,
+    /// The Curves view this frame: its lines' moments, lanes, points and keys' points; the
+    /// range of values it draws and their texts (written anew only when it changes).
+    curve_times: Vec<f32>,
+    curve_lanes: Vec<crate::shell::CurveLane>,
+    curve_points: Vec<[f32; 2]>,
+    curve_keys: Vec<crate::shell::CurveKey>,
+    curve_range: [f32; 2],
+    curve_range_text: [String; 2],
+    curve_range_shown: [f32; 2],
+    /// A key's point dragged in the Curves view (E12-4d), and the view's node.
+    curve_drag: Option<CurveDrag>,
+    anim_curve_area: u64,
+    /// The curve the picked keys share (E12-4d).
+    key_curve: Option<engine_scene::KeyCurve>,
     /// Mark Foot Plants asked for, done in the next `clips_frame` (E12-3d).
     plants_asked: bool,
     anim_events: u64,
@@ -4164,6 +4193,19 @@ impl Editor {
             anim_tracks_area: 0,
             length_text: String::new(),
             length_shown: f32::NAN,
+            curves_shown: false,
+            curves_of: None,
+            track_curves: Vec::new(),
+            curve_times: Vec::new(),
+            curve_lanes: Vec::new(),
+            curve_points: Vec::new(),
+            curve_keys: Vec::new(),
+            curve_range: [0.0, 1.0],
+            curve_range_text: [String::new(), String::new()],
+            curve_range_shown: [f32::NAN; 2],
+            curve_drag: None,
+            anim_curve_area: 0,
+            key_curve: None,
             plants_asked: false,
             anim_events: 0,
             events_due: Vec::new(),
@@ -4944,8 +4986,10 @@ impl Editor {
         self.follow_clip_events(world);
         // The clip's keys beside the inspector's fields (E12-4b-2).
         self.follow_key_marks(world);
-        // A clip made in the editor: its facts, picked keys and length follow it (E12-4c).
+        // A clip made in the editor: its facts, picked keys and length follow it (E12-4c);
+        // its curves where they show (E12-4d).
         self.follow_own_clip_facts();
+        self.follow_curves();
         let properties = self.inspector.properties();
         let mut values: Vec<&str> = recycle(std::mem::take(&mut self.lists.values));
         let mut spans = std::mem::take(&mut self.lists.spans);
@@ -6673,6 +6717,13 @@ impl Editor {
                             Some([a[0] - x, a[1] - y, b[0] - x, b[1] - y])
                         }),
                         length_text: &self.length_text,
+                        curves: self.curves_shown && !v.own.is_empty(),
+                        curve_lanes: &self.curve_lanes,
+                        curve_points: &self.curve_points,
+                        curve_keys: &self.curve_keys,
+                        curve_range: [&self.curve_range_text[0], &self.curve_range_text[1]],
+                        keys_picked: !v.own.is_empty() && !self.picked_keys.is_empty(),
+                        key_curve: self.key_curve,
                     }
                 }
                 None => crate::shell::AnimationView {
@@ -6708,6 +6759,13 @@ impl Editor {
                     picked_keys: &[],
                     key_box: None,
                     length_text: "",
+                    curves: false,
+                    curve_lanes: &[],
+                    curve_points: &[],
+                    curve_keys: &[],
+                    curve_range: ["", ""],
+                    keys_picked: false,
+                    key_curve: None,
                 },
             }
         });
@@ -7100,6 +7158,27 @@ impl Editor {
             let text = self.ui.edited_text().trim().to_owned();
             self.set_clip_length(world, &text);
         }
+        // The Curves view (E12-4d): shown or not, the picked keys' curve, a key's point.
+        if let Some(curves) = response.anim_curves {
+            self.curves_shown = curves;
+        }
+        if let Some(curve) = response.anim_key_curve {
+            self.set_key_curves(world, curve);
+        }
+        self.anim_curve_area = response.anim_curve_area;
+        if let Some((k, j, lane, used)) = response.anim_curve_key {
+            self.anim_focus = true;
+            if used.pressed {
+                self.press_curve_key(k, j, lane, used);
+            }
+        }
+        if response.anim_curve_empty.is_some() {
+            self.anim_focus = true;
+            if !(self.ui.input().ctrl || self.ui.input().shift) {
+                self.picked_keys.clear();
+            }
+        }
+        self.curve_drag_frame(world);
         if response.anim_events_strip {
             self.anim_focus = true;
             self.picked_event = None;
@@ -7669,6 +7748,17 @@ impl Editor {
         }
         self.asset_drag_frame(world, &response, game_view);
         self.row_drag_frame(world, &response);
+        // A key's point's drag in the Curves view too (E12-4d).
+        if self.ui.input().keys.contains(&UiKey::Escape)
+            && let Some(drag) = self.curve_drag.take()
+        {
+            if drag.moved
+                && let Some(doc) = self.clip_events.as_mut().filter(|d| d.file == drag.file)
+            {
+                doc.edit_anim_live(|a| *a = drag.before);
+            }
+            self.picked_keys = drag.picked;
+        }
         // A drag of keys too (E12-4c): the clip as it was, those keys picked.
         if self.ui.input().keys.contains(&UiKey::Escape)
             && let Some(drag) = self.key_drag.take()
@@ -17006,6 +17096,14 @@ impl Editor {
             self.copy_keys();
         } else if id == ids.key_paste {
             self.paste_keys(world);
+        } else if id == ids.curves_view {
+            self.curves_shown = !self.curves_shown;
+        } else if id == ids.keys_smooth {
+            self.set_key_curves(world, engine_scene::KeyCurve::Smooth);
+        } else if id == ids.keys_linear {
+            self.set_key_curves(world, engine_scene::KeyCurve::Linear);
+        } else if id == ids.keys_step {
+            self.set_key_curves(world, engine_scene::KeyCurve::Step);
         } else if id == ids.mark_foot_plants {
             // Done with the player, where the rig is (E12-3d).
             self.plants_asked = true;
@@ -20233,6 +20331,7 @@ impl Editor {
             self.picked_keys_in = Some(file);
         }
         crate::dope::still_there(anim, &mut self.picked_keys);
+        self.key_curve = crate::dope::shared_curve(anim, &self.picked_keys);
         if self.length_shown != anim.length {
             self.length_shown = anim.length;
             self.length_text.clear();
@@ -20367,6 +20466,182 @@ impl Editor {
             time(at[0]),
             &mut self.picked_keys,
         );
+    }
+
+    /// The Curves view's lines (ADR 0124's E12-4d), while it shows: the tracks of the picked
+    /// keys (all of them with none picked), each number a line, their keys as points, fitted
+    /// to their values (held while a point is dragged). The clip is laid out again only when
+    /// it changes; nothing is allocated in steady state.
+    fn follow_curves(&mut self) {
+        let shown = self.curves_shown && self.bottom == Some(ANIMATION_TAB);
+        let Some(anim) = self
+            .clip_events
+            .as_ref()
+            .and_then(crate::clip_events::EventsDoc::anim)
+            .filter(|_| shown)
+        else {
+            self.curve_lanes.clear();
+            self.curve_points.clear();
+            self.curve_keys.clear();
+            return;
+        };
+        if self.curves_of.as_ref() != Some(anim) {
+            self.track_curves.clear();
+            self.track_curves
+                .extend(anim.tracks.values().map(engine_app::TrackCurve::new));
+            self.curves_of = Some(anim.clone());
+        }
+        let width = self
+            .ui
+            .rect_of(self.anim_ruler)
+            .map_or(600.0, |r| r.size[0]);
+        let picked = &self.picked_keys;
+        let held = self.curve_drag.as_ref().map(|d| d.range);
+        self.curve_range = crate::dope::curve_lines(
+            anim,
+            &self.track_curves,
+            |k| picked.is_empty() || picked.iter().any(|p| p.0 == k),
+            width,
+            held,
+            &mut self.curve_times,
+            &mut self.curve_lanes,
+            &mut self.curve_points,
+            &mut self.curve_keys,
+        );
+        if self.curve_range_shown != self.curve_range {
+            self.curve_range_shown = self.curve_range;
+            for (text, v) in self.curve_range_text.iter_mut().zip(self.curve_range) {
+                text.clear();
+                let _ = match v.abs() {
+                    a if a >= 100.0 => write!(text, "{v:.0}"),
+                    a if a >= 10.0 => write!(text, "{v:.1}"),
+                    _ => write!(text, "{v:.2}"),
+                };
+            }
+        }
+    }
+
+    /// A key's point pressed in the Curves view (ADR 0124's E12-4d): its key picked (Ctrl adds
+    /// it or takes it away), and the picked keys ready to be dragged
+    /// ([`Self::curve_drag_frame`]).
+    fn press_curve_key(&mut self, k: usize, j: usize, lane: usize, used: crate::shell::WaveUse) {
+        let (Some(r), Some(at)) = (self.ui.rect_of(used.node), self.ui.input().mouse) else {
+            return;
+        };
+        let ctrl = self.ui.input().ctrl;
+        let Some((file, anim)) = self
+            .clip_events
+            .as_ref()
+            .and_then(|d| Some((d.file, d.anim()?)))
+        else {
+            return;
+        };
+        let along = ((at[0] - r.pos[0]) / r.size[0].max(1.0)).clamp(0.0, 1.0) * anim.length;
+        self.picked_event = None;
+        self.picked_keys_in = Some(file);
+        let found = self.picked_keys.binary_search(&(k, j));
+        if ctrl {
+            match found {
+                Ok(i) => {
+                    self.picked_keys.remove(i);
+                }
+                Err(i) => self.picked_keys.insert(i, (k, j)),
+            }
+            return;
+        }
+        if found.is_err() {
+            self.picked_keys.clear();
+            self.picked_keys.push((k, j));
+        }
+        self.curve_drag = Some(CurveDrag {
+            before: anim.clone(),
+            picked: self.picked_keys.clone(),
+            file,
+            pressed: (k, j, lane),
+            from: at,
+            time: along,
+            range: self.curve_range,
+            moved: false,
+            was_picked: found.is_ok(),
+        });
+    }
+
+    /// A key's point dragged in the Curves view (ADR 0124's E12-4d), each frame by where the
+    /// pointer is: past 3 pixels the picked keys move in time by whole frames (Shift:
+    /// freely) and the pressed key's number by the height dragged, the view's range held;
+    /// held in memory and given to the player, and written as one undo step when the
+    /// button is let go. Let go without moving on a key among others picked, it is picked
+    /// alone.
+    fn curve_drag_frame(&mut self, world: &mut World) {
+        let Some(drag) = self.curve_drag.as_mut() else {
+            return;
+        };
+        let input = self.ui.input();
+        let (down, shift, mouse) = (input.mouse_down, input.shift, input.mouse);
+        if let (Some(r), Some(at)) = (self.ui.rect_of(self.anim_curve_area), mouse) {
+            drag.moved |=
+                (at[0] - drag.from[0]).abs() >= 3.0 || (at[1] - drag.from[1]).abs() >= 3.0;
+            if drag.moved {
+                let length = drag.before.length;
+                let along = ((at[0] - r.pos[0]) / r.size[0].max(1.0)).clamp(0.0, 1.0) * length;
+                let mut dt = along - drag.time;
+                if !shift {
+                    let rate = drag.before.rate.max(1.0);
+                    dt = (dt * rate).round() / rate;
+                }
+                let dv =
+                    -(at[1] - drag.from[1]) / r.size[1].max(1.0) * (drag.range[1] - drag.range[0]);
+                let mut base = drag.before.clone();
+                let (k, j, lane) = drag.pressed;
+                if let Some(v) = base
+                    .tracks
+                    .values_mut()
+                    .nth(k)
+                    .and_then(|t| t.keys.get_mut(j))
+                    .and_then(|key| key.value.get_mut(lane))
+                {
+                    *v += dv;
+                }
+                let (moved, now) = crate::dope::move_keys(&base, &drag.picked, dt, length);
+                if let Some(doc) = self.clip_events.as_mut().filter(|d| d.file == drag.file) {
+                    doc.edit_anim_live(|a| *a = moved);
+                }
+                self.picked_keys = now;
+            }
+        }
+        if down {
+            return;
+        }
+        let Some(drag) = self.curve_drag.take() else {
+            return;
+        };
+        if drag.moved {
+            self.write_keys(world, "Move Keys");
+        } else if drag.was_picked {
+            self.picked_keys.clear();
+            self.picked_keys.push((drag.pressed.0, drag.pressed.1));
+        }
+    }
+
+    /// The picked keys' curve set (ADR 0124's E12-4d): how the clip goes from each to its
+    /// next key, smooth, straight or held; one undo step.
+    fn set_key_curves(&mut self, world: &mut World, curve: engine_scene::KeyCurve) {
+        if self.picked_keys.is_empty() {
+            self.say(String::from("Pick keys on the tracks to set their curve"));
+            return;
+        }
+        let Some(doc) = self
+            .clip_events
+            .as_mut()
+            .filter(|d| Some(d.file) == self.picked_keys_in)
+        else {
+            return;
+        };
+        let picked = &self.picked_keys;
+        doc.edit_anim_live(|a| {
+            crate::dope::set_curves(a, picked, curve);
+        });
+        self.write_keys(world, "Key Curve");
     }
 
     /// Delete in the Animation tab with keys picked (ADR 0124's E12-4c): they go, a track
@@ -26769,6 +27044,25 @@ impl<G> EditorGame<G> {
         Some([r.pos[0], r.pos[1], r.size[0], r.size[1]])
     }
 
+    /// The Curves view's keys' points where the last frame drew them (E12-4d, for tests):
+    /// each key's track, place and number, and the middle of its point.
+    pub fn curve_key_points(&self) -> Vec<(usize, usize, usize, [f32; 2])> {
+        let shared = self.shared.borrow();
+        let Some(r) = shared.ui.rect_of(shared.anim_curve_area) else {
+            return Vec::new();
+        };
+        let middle = |at: f32, size: f32| (at * size - 3.0).clamp(0.0, (size - 6.0).max(0.0)) + 3.0;
+        shared
+            .curve_keys
+            .iter()
+            .map(|k| {
+                let x = r.pos[0] + middle(k.at[0], r.size[0]);
+                let y = r.pos[1] + middle(k.at[1], r.size[1]);
+                (k.track, k.key, k.lane, [x, y])
+            })
+            .collect()
+    }
+
     /// The keys picked on the Animation tab's tracks: their tracks and places (E12-4c, for
     /// tests).
     pub fn picked_keys(&self) -> Vec<(usize, usize)> {
@@ -27003,6 +27297,26 @@ impl<G: Game> Game for EditorGame<G> {
             game.ui(draw);
         }
     }
+}
+
+/// A key's point dragged in the Curves view (ADR 0124's E12-4d).
+#[derive(Debug)]
+struct CurveDrag {
+    /// The clip before the drag, the keys it moves there, and its file.
+    before: engine_scene::AnimFile,
+    picked: Vec<crate::dope::KeyAt>,
+    file: AssetId,
+    /// The key pressed (its track and place) and its number.
+    pressed: (usize, usize, usize),
+    /// Where the pointer was pressed, and the time under it.
+    from: [f32; 2],
+    time: f32,
+    /// The range of values the view drew then, held while it drags.
+    range: [f32; 2],
+    /// It went past 3 pixels.
+    moved: bool,
+    /// The key pressed was picked already: let go without moving, it is picked alone.
+    was_picked: bool,
 }
 
 /// Picked keys dragged along the Animation tab's tracks (ADR 0124's E12-4c).
@@ -31911,6 +32225,90 @@ mod tests {
         assert_eq!(held(&ed), original);
         assert_eq!(text(), original.to_text(id));
         assert_eq!(ed.length_text, "1.00");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-4d: the Curves view (C in the tab) draws every track's numbers, the
+    /// picked keys' tracks alone once keys are picked; the picked keys take a curve as one
+    /// undo step, and a key's point dragged is written as one more; both undone, the file as
+    /// it was.
+    #[test]
+    fn the_curves_view_draws_the_picked_tracks_and_keys_take_a_curve() {
+        let (dir, mut world, mut ed, boxed) = drop_project("curves");
+        std::fs::create_dir_all(dir.join("animations")).unwrap();
+        let id = AssetId::new();
+        let mut swing = engine_scene::AnimFile::default();
+        swing.set_key("Transform.rotation", 0.0, &[0.0, 0.0, 0.0]);
+        swing.set_key("Transform.rotation", 0.5, &[0.0, 45.0, 0.0]);
+        swing.set_key("Transform.rotation", 1.0, &[0.0, 90.0, 0.0]);
+        swing.set_key("Transform.scale", 0.5, &[1.0, 2.0, 1.0]);
+        std::fs::write(dir.join("animations/box swing.anim"), swing.to_text(id)).unwrap();
+        ed.asset_db.scan();
+        world.insert(
+            boxed,
+            engine_runtime::Animator::new("swing").with_clip("swing", AssetRef::file(id)),
+        );
+        ed.select_only(boxed);
+        ed.bottom = Some(ANIMATION_TAB);
+        ed.follow_own_clips(&world, Some(boxed));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let held = |ed: &Editor| ed.clip_events.as_ref().unwrap().anim().unwrap().clone();
+        let original = held(&ed);
+        // C: every track's numbers, the turn's three keys and the scale's one on each.
+        let curves = ed.ids.curves_view;
+        ed.run(&mut world, curves);
+        ed.update(&mut world);
+        assert!(ed.curves_shown);
+        assert_eq!(ed.curve_lanes.len(), 6);
+        assert_eq!(ed.curve_keys.len(), 3 * 3 + 3);
+        // The turn's middle key picked: its track alone, its curve smooth.
+        ed.picked_keys = vec![(0, 1)];
+        ed.update(&mut world);
+        assert_eq!(ed.curve_lanes.len(), 3, "the picked key's track alone");
+        assert_eq!(ed.key_curve, Some(engine_scene::KeyCurve::Smooth));
+        assert_eq!(ed.curve_range_text, ["-9.00", "99.0"]);
+        // Step: one undo step, written.
+        let step = ed.ids.keys_step;
+        ed.run(&mut world, step);
+        assert_eq!(
+            held(&ed).tracks["Transform.rotation"].keys[1].curve,
+            engine_scene::KeyCurve::Step
+        );
+        ed.update(&mut world);
+        assert_eq!(ed.key_curve, Some(engine_scene::KeyCurve::Step));
+        // Its yaw dragged up to 60 as a drag leaves it, the button let go: one more step.
+        let before = held(&ed);
+        let mut moved = before.clone();
+        moved.tracks.get_mut("Transform.rotation").unwrap().keys[1].value[1] = 60.0;
+        ed.clip_events
+            .as_mut()
+            .unwrap()
+            .edit_anim_live(|a| *a = moved);
+        ed.curve_drag = Some(CurveDrag {
+            before,
+            picked: vec![(0, 1)],
+            file: id,
+            pressed: (0, 1, 1),
+            from: [0.0, 0.0],
+            time: 0.5,
+            range: [0.0, 1.0],
+            moved: true,
+            was_picked: true,
+        });
+        ed.curve_drag_frame(&mut world);
+        assert!(ed.curve_drag.is_none());
+        assert_eq!(
+            held(&ed).tracks["Transform.rotation"].keys[1].value[1],
+            60.0
+        );
+        let names: Vec<&str> = ed.history.steps().map(|s| s.name()).collect();
+        assert_eq!(names, ["Key Curve", "Move Keys"]);
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        ed.run(&mut world, undo);
+        ed.update(&mut world);
+        assert_eq!(held(&ed), original);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -742,11 +742,62 @@ pub struct AnimationView<'a> {
     pub key_box: Option<[f32; 4]>,
     /// A clip made in the editor's length in seconds, typed in the header ("1.00").
     pub length_text: &'a str,
+    /// The Curves view shown in place of the tracks' rows (E12-4d).
+    pub curves: bool,
+    /// Its lanes: a line each, in its number's color.
+    pub curve_lanes: &'a [CurveLane],
+    /// The lines' points (fractions of the view: time along, value down).
+    pub curve_points: &'a [[f32; 2]],
+    /// The keys' points on their lanes.
+    pub curve_keys: &'a [CurveKey],
+    /// The values at its bottom and its top.
+    pub curve_range: [&'a str; 2],
+    /// Keys are picked: their curve's buttons shown.
+    pub keys_picked: bool,
+    /// The curve the picked keys share: its button lit.
+    pub key_curve: Option<engine_scene::KeyCurve>,
 }
 
 /// From one track's row to the next in the Animation tab (E12-4c): 16 pixels and a gap of
 /// 2, what the editor finds the track under the pointer by.
 pub const TRACK_PITCH: f32 = 18.0;
+
+/// The Curves view's height in the Animation tab (E12-4d): as eight tracks' rows.
+pub const CURVES_HEIGHT: f32 = 8.0 * TRACK_PITCH;
+
+/// A number of a track the Curves view draws (ADR 0124's E12-4d): the track, which number
+/// (its color: x, y, z, w) and its line's points' place in the view's list of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CurveLane {
+    /// The track's place among the clip's tracks.
+    pub track: usize,
+    /// Which number of its keys.
+    pub lane: usize,
+    /// The first point's place in the list, and one past the last's.
+    pub points: [u32; 2],
+}
+
+/// A key's point on a lane of the Curves view (E12-4d): the key (its track and place), the
+/// lane, and where it lies as fractions of the view (time along, value down).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurveKey {
+    /// The track's place among the clip's tracks.
+    pub track: usize,
+    /// The key's place in its track.
+    pub key: usize,
+    /// Which number of the key.
+    pub lane: usize,
+    /// Where it lies.
+    pub at: [f32; 2],
+}
+
+/// The Curves view's colors for a key's numbers: x, y and z as the gizmo's axes, w grey.
+pub const LANE_COLORS: [Color; 4] = [
+    [0.93, 0.27, 0.3, 1.0],
+    [0.45, 0.85, 0.3, 1.0],
+    [0.3, 0.55, 0.98, 1.0],
+    [0.92, 0.92, 0.92, 1.0],
+];
 
 /// A track of a clip made in the editor, as the Animation tab shows it (ADR 0124's E12-4b):
 /// what it moves and its keys.
@@ -1325,6 +1376,17 @@ pub struct ShellResponse {
     pub anim_tracks_area: u64,
     /// The clip's length field was left: typed in (true) or cancelled (E12-4c).
     pub anim_length: Option<bool>,
+    /// Dope Sheet (false) or Curves (true) clicked (E12-4d).
+    pub anim_curves: Option<bool>,
+    /// A curve for the picked keys clicked: Smooth, Linear or Step (E12-4d).
+    pub anim_key_curve: Option<engine_scene::KeyCurve>,
+    /// A key's point pressed, dragged or let go in the Curves view (E12-4d): its track, its
+    /// place, its lane, and the view's node.
+    pub anim_curve_key: Option<(usize, usize, usize, WaveUse)>,
+    /// The Curves view pressed where no point is.
+    pub anim_curve_empty: Option<WaveUse>,
+    /// The Curves view's node, 0 while it is not shown.
+    pub anim_curve_area: u64,
     /// One of the clip's settings was clicked (E12-3e): 0 once, 1 across, 2 up, 3 turn.
     pub anim_clip_setting: Option<u8>,
     /// Their bar was pressed, dragged along or let go.
@@ -5903,8 +5965,12 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
     const RULER: f32 = 22.0;
     /// Tracks shown at once (E12-4b).
     const TRACKS: usize = 8;
-    let tall = if view.speeds.is_empty() { 150.0 } else { 182.0 }
-        + 20.0 * view.tracks.len().min(TRACKS) as f32;
+    let rows = if view.curves && !view.tracks.is_empty() {
+        CURVES_HEIGHT + 4.0
+    } else {
+        20.0 * view.tracks.len().min(TRACKS) as f32
+    };
+    let tall = if view.speeds.is_empty() { 150.0 } else { 182.0 } + rows;
     let panel = Style {
         size: [Size::Grow(1.0), Size::Fixed(tall)],
         direction: Direction::Column,
@@ -6022,6 +6088,29 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                     }
                 }
                 ui.spacer("fill");
+                // A clip made in the editor (E12-4d): the picked keys' curve, and the view.
+                if view.own && view.note.is_empty() {
+                    if view.keys_picked {
+                        use engine_scene::KeyCurve;
+                        for (key, label, curve) in [
+                            ("smooth", "Smooth", KeyCurve::Smooth),
+                            ("linear", "Linear", KeyCurve::Linear),
+                            ("step", "Step", KeyCurve::Step),
+                        ] {
+                            let lit = view.key_curve == Some(curve);
+                            if label_button(ui, key, label, lit, p.accent, p) {
+                                out.anim_key_curve = Some(curve);
+                            }
+                        }
+                        text(ui, "views gap", "\u{b7}", SMALL, p.text_dim);
+                    }
+                    if label_button(ui, "dope", "Dope Sheet", !view.curves, p.accent, p) {
+                        out.anim_curves = Some(false);
+                    }
+                    if label_button(ui, "curves", "Curves", view.curves, p.accent, p) {
+                        out.anim_curves = Some(true);
+                    }
+                }
                 text(ui, "time", view.time, SMALL, p.text_dim);
             },
         );
@@ -6189,10 +6278,129 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                 });
             }
         }
-        // A clip made in the editor's tracks (E12-4b): a row each, its name at the left and a
-        // mark where each of its keys is, along the ruler. A press on a mark picks it and a
-        // drag moves the picked keys; one elsewhere draws a box (E12-4c).
-        if !view.tracks.is_empty() {
+        // The Curves view (E12-4d): each number of the shown tracks a line in its color, the
+        // values at the top and the bottom; a key's point pressed picks it, dragged moves it
+        // in time and value.
+        if view.curves && !view.tracks.is_empty() {
+            let height = CURVES_HEIGHT;
+            let mut hit: Option<(usize, usize, usize, bool, bool, bool)> = None;
+            let area = ui.container(
+                "curves",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(height)],
+                    radius: 3.0,
+                    clip: true,
+                    background: Some(p.field),
+                    ..Style::default()
+                },
+                |ui| {
+                    for (i, lane) in view.curve_lanes.iter().enumerate() {
+                        ui.push_id(i as u64);
+                        let [from, to] = lane.points.map(|p| p as usize);
+                        let points = view.curve_points.get(from..to).unwrap_or(&[]);
+                        ui.line(
+                            "lane",
+                            Style {
+                                size: [Size::Fixed(width), Size::Fixed(height)],
+                                placed: Some([0.0, 0.0]),
+                                ..Style::default()
+                            },
+                            points,
+                            LANE_COLORS[lane.lane.min(3)],
+                            1.5,
+                        );
+                        ui.pop_id();
+                    }
+                    for (i, (label, y)) in [
+                        (view.curve_range[1], 1.0),
+                        (view.curve_range[0], height - 15.0),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        ui.push_id(1_000_000 + i as u64);
+                        ui.container(
+                            "range",
+                            Style {
+                                size: [Size::Fit, Size::Fit],
+                                placed: Some([4.0, y]),
+                                ..Style::default()
+                            },
+                            |ui| {
+                                text(ui, "text", label, SMALL, p.text_dim);
+                            },
+                        );
+                        ui.pop_id();
+                    }
+                    for (i, key) in view.curve_keys.iter().enumerate() {
+                        ui.push_id(2_000_000 + i as u64);
+                        let picked = view
+                            .picked_keys
+                            .binary_search(&(key.track, key.key))
+                            .is_ok();
+                        let side = if picked { 8.0 } else { 6.0 };
+                        let mark = ui.container(
+                            "point",
+                            Style {
+                                size: [Size::Fixed(side), Size::Fixed(side)],
+                                radius: side / 2.0,
+                                background: Some(if picked {
+                                    p.text
+                                } else {
+                                    LANE_COLORS[key.lane.min(3)]
+                                }),
+                                placed: Some([
+                                    (key.at[0] * width - side / 2.0)
+                                        .clamp(0.0, (width - side).max(0.0)),
+                                    (key.at[1] * height - side / 2.0).clamp(0.0, height - side),
+                                ]),
+                                ..Style::default()
+                            },
+                            |_| {},
+                        );
+                        let used = ui.sense(mark, false);
+                        if used.pressed || used.active || used.released {
+                            hit = Some((
+                                key.track,
+                                key.key,
+                                key.lane,
+                                used.pressed,
+                                used.active,
+                                used.released,
+                            ));
+                        }
+                        ui.pop_id();
+                    }
+                },
+            );
+            out.anim_curve_area = area;
+            if let Some((k, j, lane, pressed, held, released)) = hit {
+                out.anim_curve_key = Some((
+                    k,
+                    j,
+                    lane,
+                    WaveUse {
+                        node: area,
+                        pressed,
+                        held,
+                        released,
+                    },
+                ));
+            } else {
+                let used = ui.sense(area, false);
+                if used.pressed {
+                    out.anim_curve_empty = Some(WaveUse {
+                        node: area,
+                        pressed: true,
+                        held: used.active,
+                        released: used.released,
+                    });
+                }
+            }
+        } else if !view.tracks.is_empty() {
+            // A clip made in the editor's tracks (E12-4b): a row each, its name at the left
+            // and a mark where each of its keys is, along the ruler. A press on a mark picks
+            // it and a drag moves the picked keys; one elsewhere draws a box (E12-4c).
             let mut hit: Option<(usize, usize, bool, bool, bool)> = None;
             let area = ui.container(
                 "tracks",

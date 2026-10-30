@@ -465,6 +465,18 @@ pub fn paint(
                     order,
                 ) as u32;
             }
+            DrawCmd::Line { a, b, width, color } => {
+                canvas.draw(
+                    &Quad::line(
+                        Vec2::from(*a) * scale,
+                        Vec2::from(*b) * scale,
+                        width * scale,
+                    )
+                    .color(Vec4::from_array(*color))
+                    .order(order),
+                );
+                stats.rects += 1;
+            }
             DrawCmd::Image { rect, image } => {
                 let size = Vec2::new(rect.size[0], rect.size[1]) * scale;
                 if size.x <= 0.0 || size.y <= 0.0 {

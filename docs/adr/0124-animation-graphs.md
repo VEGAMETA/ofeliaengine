@@ -584,6 +584,48 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-4d, 2026-10-30): curves
+
+- **Dope Sheet | Curves** in the Animation tab's header (and C in the tab) switch a clip made
+  in the editor's tracks' rows for the Curves view (Unity's switch, UX note 8).
+  - It draws the tracks of the picked keys, or every track with none picked.
+  - Each number of a track is a line in its color (x, y, z as the gizmo's axes, w grey),
+    with its keys as points on it.
+  - It is fitted to the values drawn with a margin; the values at its top and bottom are
+    written there.
+- **How a line runs:** a smooth stretch through samples about 4 pixels apart (the clip's own
+  monotone cubic, `engine_app::TrackCurve`), a linear one straight, a step flat to the next
+  key and up.
+- **A key's point:** a press picks its key (Ctrl adds it or takes it away). A drag past 3
+  pixels moves the picked keys in time by whole frames (Shift: freely), as the dope sheet
+  does, and the pressed key's number by the height dragged.
+  - The view's range is held while it drags, so the scale does not move under the pointer.
+  - It is one step ("Move Keys"); Escape puts the clip back.
+  - Points one on another (three numbers at 0): the one drawn last is pressed.
+- **The picked keys' curve:** Smooth, Linear and Step show in the header while keys are
+  picked, the one they share lit. A key's curve is how the clip goes from it to its next
+  key, as the file always had it. One step ("Key Curve"); also from the palette ("Picked
+  Keys Smooth" and so on).
+- **Lines in the UI:** `engine_ui` gained a node with a line through points given as
+  fractions of its rectangle (`Ui::line`, `Style::line`, `DrawCmd::Line`), so a curve is
+  laid out, clipped and drawn in order with the panel. The editor paints a piece as a
+  line quad; the points are kept for the frame, with nothing allocated in steady state.
+- **Measured:** 0 allocations in 240 frames of the Curves view, the door's clip playing (the
+  editor's zero-allocation test gained the phase).
+- **Tests:**
+  - The lines: a step flat to just before the next key, a linear stretch straight, a smooth
+    one sampled; the range fitted with a tenth more each way, or the one given kept. The
+    picked keys' shared curve, and setting it.
+  - The editor's: C shows every track's six numbers and twelve points, then the picked
+    key's track alone; Step through the palette's command; a dragged point written as one
+    step; both undone.
+  - The door's GPU test, with the pointer: Curves clicked, a key's point dragged up 30 pixels
+    raises one number and moves nothing in time, Step clicked writes the key's curve.
+  - `engine_ui`'s: a line drawn piece by piece where its node is laid out, and gone the next
+    frame.
+- **Not yet:** tangent handles (a smooth key is the clip's own monotone curve, ADR 0124's
+  E12-4a), framing and zooming the view, values snapped; joints keyed in `.anim` (E12-4e).
+
 ## As built (E12-4c, 2026-10-30): the dope sheet's editing
 
 The Animation tab edits a clip made in the editor's keys on its tracks. The edits are
