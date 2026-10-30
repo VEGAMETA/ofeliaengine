@@ -323,6 +323,11 @@ pub struct GraphState {
     /// Each clip's and blend's phase, a fraction of its length (past 1 on later loops).
     phase: Box<[f32]>,
     phase_before: Box<[f32]>,
+    /// Each clip's and blend's phase where the last tick's step began (after its
+    /// transitions): what an exit time is checked against, so one that falls within a step
+    /// across a loop's seam is still passed (`phase_before` is the next tick's start by
+    /// then).
+    phase_stepped_from: Box<[f32]>,
     /// Each timed node's weight this tick (over all layers).
     node_weight: Box<[f32]>,
     /// Each layer's leaves' weights, layer by layer.
@@ -937,6 +942,7 @@ impl AnimGraph {
                 }
             }
         }
+        s.phase_stepped_from.copy_from_slice(&s.phase);
         // The weighed clips and blends move on: a blend's at the pace of its clips' lengths
         // weighed together, so its clips keep in step.
         for node in self.nodes.iter() {
@@ -982,10 +988,11 @@ impl AnimGraph {
             if self.timed_once[t] {
                 phase = phase.clamp(0.0, 1.0);
             } else if phase > 1024.0 {
-                // Whole loops dropped from both, so the step between them stays.
+                // Whole loops dropped from all, so the step between them stays.
                 let whole = phase.floor();
                 phase -= whole;
                 s.phase_before[t] -= whole;
+                s.phase_stepped_from[t] -= whole;
             }
             s.phase[t] = phase;
         }
@@ -1026,7 +1033,7 @@ impl AnimGraph {
             return true;
         };
         let t = usize::from(timed);
-        let (now, before) = (s.phase[t], s.phase_before[t]);
+        let (now, before) = (s.phase[t], s.phase_stepped_from[t]);
         if self.timed_once[t] {
             return now >= exit.min(1.0);
         }
@@ -1997,6 +2004,7 @@ impl GraphState {
                 .collect(),
             phase: vec![0.0; timed].into_boxed_slice(),
             phase_before: vec![0.0; timed].into_boxed_slice(),
+            phase_stepped_from: vec![0.0; timed].into_boxed_slice(),
             node_weight: vec![0.0; timed].into_boxed_slice(),
             leaf_weight: vec![0.0; leaves].into_boxed_slice(),
             leaf_weight_before: vec![0.0; leaves].into_boxed_slice(),
@@ -2014,7 +2022,7 @@ impl GraphState {
     /// Bytes in memory: what a character playing its graph costs, an inertializing graph's
     /// decays (every joint of each layer that may inertialize) included.
     pub fn size_bytes(&self) -> usize {
-        let floats = self.phase.len() * 3
+        let floats = self.phase.len() * 4
             + self.leaf_weight.len() * 2
             + self.phase_earlier.len()
             + self.leaf_weight_earlier.len();
@@ -2228,6 +2236,31 @@ mod tests {
             &mut out,
         );
         arm(&out)
+    }
+
+    /// An exit time within a tick's step of a looping clip's end is passed when the step
+    /// crosses the loop's seam: at 64 Hz a 1 s clip goes 0.984 → 1.0 (its fraction 0), past
+    /// 0.99 between the two ticks. Before 2026-10-30 the check compared the phase with
+    /// itself and never took it.
+    #[test]
+    fn an_exit_time_across_a_loops_seam_is_passed() {
+        let (skeleton, _clips, angles) = rig();
+        let mut desc = locomotion();
+        desc.transitions = vec![TransitionDesc {
+            from: Some(0),
+            to: 2,
+            exit: 0.99,
+            ..TransitionDesc::default()
+        }];
+        let (g, problems) = AnimGraph::cook(&desc, info(&angles), &skeleton);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut s = GraphState::new(&g);
+        let taken = (1..=200).find(|_| {
+            g.tick(&mut s, 1.0 / 64.0);
+            g.state_name(&s, 0) == Some("Jump")
+        });
+        // Idle's phase reaches 1.0 at the 65th tick's start: the transition is taken then.
+        assert_eq!(taken, Some(65), "taken at the seam's crossing");
     }
 
     /// Idle until it moves, the blend by speed after the fade, a trigger taking it to the jump

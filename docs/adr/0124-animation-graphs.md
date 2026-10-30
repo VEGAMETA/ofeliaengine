@@ -760,6 +760,13 @@ allocation with transitions and events every tick; the same events at the same t
 
 ## As built (E12-5b, 2026-10-30): the graph's runtime in `engine_anim`
 
+- **Fixed (2026-10-30, #PR, found by E12-5b-2's work):** an exit time within a tick's step
+  of a looping clip's end was never taken: the check compared the phase with
+  `phase_before`, which the tick had just made equal to it. `GraphState` now keeps where
+  the last tick's step began (`phase_stepped_from`, written just before the phases move,
+  whole loops dropped from it too), and the check reads that: 0.99 on a 1 s clip at 64 Hz
+  is taken at the 65th tick (`an_exit_time_across_a_loops_seam_is_passed`).
+
 - **What a graph is made from:** `engine_anim::GraphDesc`, its parts by index (parameters,
   layers, nodes, states, transitions), names for clips, parameters and joints. `engine_anim`
   knows nothing of files: the player turns an `.agraph` into one (5c).
