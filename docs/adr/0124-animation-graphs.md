@@ -684,6 +684,80 @@ allocation with transitions and events every tick; the same events at the same t
   others; the Fox GPU test on the Radeon goes Idle → Move → Alert → Move → Idle by its
   parameters, the editor's copy renaming a state, a missing graph at the rest pose.
 
+## As built (E12-5b-2, 2026-10-30): inertialized transitions and blends cut short
+
+- **Bollo's inertialization, chosen by evidence** over Holden's dead blending (the research
+  note's new section): the destination plays at full strength from its first frame, there
+  is nothing to tune, and a frame adds a few multiply-adds per joint (no sine or cosine).
+  Dead blending's case, a long blend between very different poses, keeps its cross-fade.
+  Patents checked 2026-10-30 (Google Patents, Justia): none found for either.
+- **`TransitionDesc::inertialize`** (the `.agraph` file's `inertialize`, mapped by
+  `engine_app::graphs`): only the destination plays.
+  - Each joint's offset of the source from it (the rotation `Δ = source · destination⁻¹`,
+    the translation's and scale's differences) decays over `blend`, with the difference of
+    their velocities.
+  - The decay is `x0·P(u) + v0·T·Q(u) + a0·T²·R(u)` in closed form. Bollo's initial
+    acceleration is kept at 0 or more, and his time is shortened where a joint would pass
+    its destination, so none overshoots.
+  - The whole velocity is kept (Bollo projects it on the offset). A rotation decays along
+    the chord to no turn, normalized.
+  - The pose is exactly the destination after `blend`.
+- **Blends cut short:** a transition taken while its machine still blends (a cross-fade or
+  an inertialization), or one into the pose it leaves (which cannot fade into itself),
+  goes on as an inertialization from the pose shown then. The decay playing is carried
+  into its source, and the state fading out is sampled no more. One set of decays per
+  layer: no frozen pose, no stack of sources.
+- **`AnimGraph::capture(&mut state, clip, rest, &mut work)`**, after each tick, before the
+  next and before `pose`:
+  - It takes the layer as the frames showed it at the transition and a quarter tick
+    before. That gives the source's velocity: a decay playing then bends within a tick, and
+    a quarter tick measured 0.2 % off where a whole tick was 7 % off.
+  - It compares that with the destination at the transition and a tick after, and begins
+    each joint's decay. It samples nothing unless the tick began one
+    (`GraphState::wants_capture`).
+  - It is taken after the tick, not at the first frame: at 30 fps two ticks pass between
+    frames, so a frame's capture would have to keep each tick's source (a queue) or pop.
+    The pose stays a function of the ticks' state and `alpha`, the same at any frame rate,
+    and `pose` keeps `&GraphState` with its arguments unchanged.
+  - A transition never captured plays without its offsets, so characters nobody sees can
+    skip it. The player captures after each animator's tick (`Assets::tick_graphs`,
+    `Posing::capture_graph`, in the frames' graph work).
+- **Room only where a graph may inertialize** (an inertialized transition, a fade into a
+  state that can be left, a pose entered again; `GraphState::size_bytes`):
+  - per joint of each such layer 112 bytes (offsets, velocities, times, brakes), plus the
+    phases and weights a tick earlier;
+  - a tick touches it only when it takes a transition and on the tick after; a frame only
+    while a decay plays (otherwise a clock compare);
+  - the benchmark's 52-joint character: 7,056 bytes, against 576 without.
+- **The first tick** takes an inertialized transition at once (nothing was shown before
+  it). The tick after a cut (`blend` 0) does not read the source's velocity across it.
+- **Measured** (`graph_bench`, ref-1, release, now under the engine's allocator as the
+  player is; the best of 8 runs alternating with main's):
+  - ticks unchanged: 0.09–0.12 µs a character;
+  - a frame on one thread at 100 / 1,000 / 10,000 characters: 4.32 / 4.33 / 4.60 µs a
+    character inertialized, against main's cross-fades at 4.51 / 4.68 / 4.73 (fades cut
+    short, now inertialized, 4.40 / 4.50 / 4.72);
+  - 16 workers: 0.30 / 0.79 / 5.75 ms against 0.31 / 0.89 / 6.1;
+  - a capture 8.1–8.4 µs once per inertialized transition (9.5–10 µs cutting a fade
+    short).
+- **Tests:**
+  - an inertialized transition's first pose is its source's (3·10⁻⁸ rad) at its speed
+    (1.3 %), only the destination is sampled while it blends, and it ends exactly at the
+    destination (10⁻⁵);
+  - a fade cut short halfway goes on from the pose shown (bound 10⁻⁴ rad, 0 measured) at
+    its speed (0.3 %), the state fading out never sampled again;
+  - an inertialization cut short does likewise (0.2 %), its decay carried in;
+  - a transition into the pose it leaves starts the clip again without a pop;
+  - no room for a graph of cuts only; the first tick's inertialized transition is taken at
+    once; a transition never captured plays without its offsets;
+  - no allocation in 800 ticks, captures and frames of 32 characters with 896
+    inertializations captured (`tests/graph_zero_alloc.rs`), nor in the player's frames
+    with the dancer's jump inertialized (`zero_alloc_skins`); the fox's inertialized `look`
+    transition plays in `a_fox_plays_an_animation_graph`.
+- **Left (team decision, 2026-10-30, 3б):** the decays are kept for every joint (about 7 KB
+  for a 52-joint character); keeping translations and scales only where a clip moves them
+  (about 2.5–3 KB) is postponed until crowds need it.
+
 ## As built (E12-5b, 2026-10-30): the graph's runtime in `engine_anim`
 
 - **What a graph is made from:** `engine_anim::GraphDesc`, its parts by index (parameters,

@@ -3430,9 +3430,14 @@ fn a_fox_plays_an_animation_graph() {
     graph
         .transitions
         .insert("t2".into(), go("move", "idle", "speed <= 0.1", 0.0));
-    graph
-        .transitions
-        .insert("t3".into(), go("", "alert", "look", 0.0));
+    // Inertialized (E12-5b-2): the player captures the pose it starts from.
+    graph.transitions.insert(
+        "t3".into(),
+        TransitionFile {
+            inertialize: true,
+            ..go("", "alert", "look", 0.0)
+        },
+    );
     graph
         .transitions
         .insert("t4".into(), go("alert", "idle", "", 0.9));
