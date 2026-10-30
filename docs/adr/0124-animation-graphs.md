@@ -584,6 +584,52 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5e-1, 2026-10-30): the graph's tab live with the player
+
+- **The tab plays as it holds the graph:** an `.agraph` tab gives the player its graph each
+  time it changes (an edit, an undo, an unsaved text the session brings back), which plays
+  it in place of the file (`Assets::set_anim_graph`); closing the tab gives the file back.
+  As Unity's Animator window does in Play mode (Godot's game runs in another process and
+  plays what was saved), and as the mixer's edits do in Play (E11-1b-3).
+- **Only what plays counts:** the player compares the copy's runtime description
+  (`GraphDesc`, now `PartialEq`) with the one it plays. A copy that changes only what the
+  canvas shows (a state moved, the Any State box) changes nothing, nor does a tab opened
+  on the file as read. A file read back as the copy it replaces keeps its cooks. A file
+  saved while its tab holds it changes nothing either: the copy plays. A real change cooks
+  the graph anew, and each character goes on in the state it was in, by name, from that
+  state's start (E12-5c-2's `resume_in`); a renamed or deleted state starts it at its
+  machine's entry.
+- **Where a machine is** (`AnimGraph::machine_now`, `Player::graph_now`, allocation-free):
+  the state it is in, the one it cross-fades from and how far (or that it inertializes),
+  how far the state's pose has played (a blend's length its clips' weighed together, a
+  nested machine's state's pose). `machine_layer` gives the first layer that plays a
+  machine, the one the canvas shows.
+- **In Play**, the shown graph's tab watches one character playing it: the selected one
+  where it does, else the one watched before, else the first found. Its state is ringed in
+  Play's colour with a line under its title for how far it has played, the state it fades
+  from ringed fainter as the fade goes on, and the arrow it fades through drawn in Play's
+  colour with a dot for how far. The bar says it: `Fox: Walk · 0.17 s · from Idle 34 %`.
+- **The inspector's Graph row:** in Play, the active character's graph in the same words
+  (`Walk · 0.71 s`), in a section after its components.
+- **Stop starts the graphs again** (a fix to E12-5c-1): a graph's state is the player's,
+  not the world's, so the world put back at Stop left every character where Play had (and
+  the next Play went on from there). A run's end (`Player::end_run`) now lets them go; the
+  next frame makes each anew from its animator as the world was put back.
+- **Not yet (E12-5e-2):** the parameters' live values in the inspector (a typed value held
+  for testing), View: Animation States labelling every character in the viewport, the
+  layers above the first.
+- **Tests:**
+  - `engine_anim`: a machine's state, fade and place through Idle, a fade into a blend, the
+    fade over, a jump taken at once; a layer it has not;
+  - on the Radeon, the Fox: where its machine is; a copy that only moves a state, then the
+    file given back, keep it going in its clip (it would start the clip again without the
+    comparison);
+  - the editor on the Radeon: a tab whose unsaved text starts `speed` at 1 makes the fox
+    walk in Play though its file keeps it idle; the bar names the fox's state and the fade;
+    the Graph row says it for the selected fox; both go when Play stops, and the fox's
+    graph starts again (it went on from 0.75 s before the fix); the editor's frame still
+    allocates nothing.
+
 ## As built (E12-5c-2, 2026-10-30): a graph's root motion, events and saves
 
 - **Root motion** (`Animator.root_motion` `Move` or `Report`, as a clip's, E12-2c):

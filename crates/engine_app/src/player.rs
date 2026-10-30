@@ -1418,6 +1418,15 @@ impl Player {
         self.assets.model_rig(e)
     }
 
+    /// Where entity `e`'s animation graph is now (ADR 0124's E12-5e), its first layer that
+    /// plays a machine (the one the editor's canvas shows): the state the machine is in,
+    /// the one it fades from and how far, and how far the state's pose has played, as of
+    /// its last tick. `None` for a character playing no graph (or before its skin is made),
+    /// or a graph without a machine. Allocates nothing.
+    pub fn graph_now(&self, e: Entity) -> Option<engine_anim::MachineNow<'_>> {
+        self.assets.graph_now(e)
+    }
+
     /// Entity `e`'s skinned model's joints where its pose puts them (ADR 0124's E12-1c): in
     /// the entity's space (its transform places them as it places the skinned mesh), in its
     /// skeleton's order (the rig's [`crate::Rig::skeleton`] gives their parents), into
@@ -1522,6 +1531,9 @@ impl Player {
         self.end_script_stop();
         self.videos.close_all();
         self.sound.stop_all();
+        // The characters' graphs start again from their animators as the world is put back
+        // (ADR 0124's E12-5e): their states are the player's, not the world's.
+        self.assets.restart_graphs();
         if let Some(net) = self.net.as_mut() {
             net.end(&mut self.runtime.world);
         }
@@ -2231,6 +2243,11 @@ impl Player {
     /// The game's world.
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.runtime.world
+    }
+
+    /// The game's world, to read.
+    pub fn world(&self) -> &World {
+        &self.runtime.world
     }
 
     /// The game's text (the world's resource), if [`PlayerSettings::text`] gave one.

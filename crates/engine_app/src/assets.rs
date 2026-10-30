@@ -3741,6 +3741,28 @@ impl Assets {
         self.owned.get(&e).map(|o| &*o.rig)
     }
 
+    /// Every character's animation graph let go, to be made anew from its animator on the
+    /// next frame or tick (ADR 0124's E12-5e): after a run ends and its world is put back
+    /// (the editor's Stop), the characters start their graphs again as their animators now
+    /// say, not from where the run left them.
+    pub(crate) fn restart_graphs(&mut self) {
+        for owned in self.owned.values_mut() {
+            if owned.graph.take().is_some() {
+                owned.posed = false;
+            }
+        }
+    }
+
+    /// Where entity `e`'s animation graph's first layer that plays a machine is now (ADR
+    /// 0124's E12-5e): its state, the one it fades from and how far, how far the state's
+    /// pose has played. None for a character playing no graph (or not one its rig could
+    /// cook), or a graph without a machine.
+    pub(crate) fn graph_now(&self, e: Entity) -> Option<engine_anim::MachineNow<'_>> {
+        let play = self.owned.get(&e)?.graph.as_ref()?;
+        let graph = &play.cooked.graph;
+        graph.machine_now(&play.state, graph.machine_layer()?)
+    }
+
     /// Entity `e`'s skinned model's joints where its pose puts them (ADR 0124's E12-1c), in
     /// the entity's space, into `out` (its room kept). False for a model drawn without a
     /// skin, or before its skin is made.

@@ -320,6 +320,9 @@ if let (Some((slot, false)), Some(animator)) = (slot, world.get_mut::<Animator>(
   set. Loaded, the character goes on in that state from its start; where in the state it
   was and a blend under way are not kept. A graph edited while it plays goes on in the
   state it was in, too.
+- **Where it is** (E12-5e): `player.graph_now(entity)` tells its first machine's state, the
+  state it fades from and how far, and how far the state has played (the editor shows it
+  in Play on the graph's tab and in the inspector). It allocates nothing.
 
 ```text
 [agraph version=1 id=…]
