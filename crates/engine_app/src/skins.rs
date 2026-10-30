@@ -116,22 +116,31 @@ impl Rig {
         &self.skeleton
     }
 
-    /// How root motion is read from its clips (ADR 0124's E12-2c): the ground motion of its
-    /// topmost skin joint, across and about the mesh's up.
-    pub(crate) fn motion_mode(&self) -> RootMotionMode {
+    /// How root motion is read from a clip (ADR 0124's E12-2c): the motion of its topmost
+    /// skin joint along the clip's own axes (E12-3e: by default across and about the mesh's
+    /// up).
+    pub(crate) fn motion_mode_of(&self, axes: Axes) -> RootMotionMode {
         RootMotionMode {
+            horizontal: axes.across,
+            vertical: axes.up,
+            yaw: axes.turn,
             up: self.motion_up,
-            ..RootMotionMode::default()
         }
     }
 
     /// Clip `k`'s root motion over `from..to` seconds of play (wrapping at its end,
     /// backwards when `to < from`), in its root joint's parent's space as the pose shows it
-    /// with the motion taken out: the root kept facing as at the clip's first moment. None
-    /// for a clip it has not.
-    pub(crate) fn clip_motion(&self, k: usize, from: f32, to: f32) -> Option<RootMotion> {
+    /// with the motion taken out along `axes` (E12-3e): the root kept facing as at the clip's
+    /// first moment. None for a clip it has not.
+    pub(crate) fn clip_motion(
+        &self,
+        k: usize,
+        from: f32,
+        to: f32,
+        axes: Axes,
+    ) -> Option<RootMotion> {
         let clip = &self.clips.get(k)?.clip;
-        let (root, mode) = (self.motion_root, self.motion_mode());
+        let (root, mode) = (self.motion_root, self.motion_mode_of(axes));
         let motion = root_motion_over(clip, &self.skeleton, root, from, to, mode);
         let first = clip.sample_joint(root, 0.0, self.skeleton.rest().get(root));
         let facing = twist_of(first.rotation, mode.up);
@@ -162,7 +171,7 @@ impl Rig {
     /// in radians, counterclockwise seen from above (ADR 0124's E12-1b-3). None for a clip it
     /// has not.
     pub fn scene_motion(&self, k: usize, from: f32, to: f32) -> Option<(Vec3, f32)> {
-        let motion = self.clip_motion(k, from, to)?;
+        let motion = self.clip_motion(k, from, to, Axes::default())?;
         let frame = self.root.inverse() * self.motion_frame;
         Some((
             frame.transform_vector3(motion.translation),
@@ -470,14 +479,36 @@ fn ends(
 /// weight (the rest is this one's).
 pub(crate) type Fade = Option<(usize, f32, f32)>;
 
+/// What of a clip's root motion is taken out of its pose to move the character (ADR 0124's
+/// E12-3e, its model's `.meta`'s): its crossing of the ground, its rise and fall, its turn
+/// about up. By default the ground's two: a jump stays in the pose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Axes {
+    pub(crate) across: bool,
+    pub(crate) up: bool,
+    pub(crate) turn: bool,
+}
+
+impl Default for Axes {
+    fn default() -> Self {
+        Self {
+            across: true,
+            up: false,
+            turn: true,
+        }
+    }
+}
+
 /// What a skinned model shows (ADR 0124's E12-2): a clip at a moment (none: its rest pose),
 /// the clip fading out under it, and whether its root motion is taken out of the pose (the
-/// animator moving the character by it instead, E12-2c).
+/// animator moving the character by it instead, E12-2c), along which axes for each of the
+/// two clips (E12-3e).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) struct Look {
     pub(crate) pose: Option<(usize, f32)>,
     pub(crate) fade: Fade,
     pub(crate) in_place: bool,
+    pub(crate) axes: [Axes; 2],
 }
 
 impl Look {
@@ -513,10 +544,11 @@ impl Posing {
         };
         let rest = rig.skeleton.rest();
         let n = rest.len();
-        let (root, mode) = (rig.motion_root, rig.motion_mode());
+        let root = rig.motion_root;
         let sampled = self.pose.get_or_insert_with(|| Pose::identity(n));
         rig.clips[clip].clip.sample(time, rest, sampled);
         if look.in_place {
+            let mode = rig.motion_mode_of(look.axes[0]);
             remove_root_motion(sampled, &rig.clips[clip].clip, &rig.skeleton, root, mode);
         }
         if let Some((from, from_time, weight)) = look
@@ -526,6 +558,7 @@ impl Posing {
             let other = self.from.get_or_insert_with(|| Pose::identity(n));
             rig.clips[from].clip.sample(from_time, rest, other);
             if look.in_place {
+                let mode = rig.motion_mode_of(look.axes[1]);
                 remove_root_motion(other, &rig.clips[from].clip, &rig.skeleton, root, mode);
             }
             if self.blender_joints < n {
@@ -828,7 +861,9 @@ mod tests {
             );
             let ground = |v: Vec3| v - up * v.dot(up);
             for (k, c) in rig.clips().iter().enumerate() {
-                let motion = rig.clip_motion(k, 0.0, c.duration()).unwrap();
+                let motion = rig
+                    .clip_motion(k, 0.0, c.duration(), Axes::default())
+                    .unwrap();
                 let (moved, turned) = rig.mesh_motion(motion);
                 let crossed = ground(moved).length();
                 println!(

@@ -45,25 +45,51 @@ impl EventsDoc {
             .map_or(&[], |c| &c.events)
     }
 
-    /// Clip `clip`'s events changed by `edit` in memory only (a drag, until its release):
-    /// given to the player, not written.
-    pub(crate) fn edit_live(&mut self, clip: &str, edit: impl FnOnce(&mut Vec<ClipEvent>)) {
+    /// Clip `clip`'s entry in the `.meta` (E12-3e: its events and how it plays), if it has
+    /// one.
+    pub(crate) fn clip(&self, clip: &str) -> Option<&ClipImport> {
+        self.meta.model.clips.iter().find(|c| c.name == clip)
+    }
+
+    /// Clip `clip`'s entry changed by `edit` in memory only (a drag, until its release):
+    /// given to the player, not written. An entry left saying nothing (no events, every
+    /// setting its default) leaves the file.
+    pub(crate) fn edit_clip_live(&mut self, clip: &str, edit: impl FnOnce(&mut ClipImport)) {
         let k = match self.meta.model.clips.iter().position(|c| c.name == clip) {
             Some(k) => k,
             None => {
                 self.meta.model.clips.push(ClipImport {
                     name: clip.to_owned(),
-                    events: Vec::new(),
+                    ..ClipImport::default()
                 });
                 self.meta.model.clips.len() - 1
             }
         };
-        edit(&mut self.meta.model.clips[k].events);
-        // A clip left without events leaves the file.
-        if self.meta.model.clips[k].events.is_empty() {
+        edit(&mut self.meta.model.clips[k]);
+        if self.meta.model.clips[k].is_plain() {
             self.meta.model.clips.remove(k);
         }
         self.given = false;
+    }
+
+    /// Clip `clip`'s events changed by `edit` in memory only ([`Self::edit_clip_live`]).
+    pub(crate) fn edit_live(&mut self, clip: &str, edit: impl FnOnce(&mut Vec<ClipEvent>)) {
+        self.edit_clip_live(clip, |c| edit(&mut c.events));
+    }
+
+    /// Clip `clip`'s entry changed by `edit` and written ([`Self::write`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::write`].
+    pub(crate) fn edit_clip(
+        &mut self,
+        root: &Path,
+        clip: &str,
+        edit: impl FnOnce(&mut ClipImport),
+    ) -> Result<Option<(String, String)>, String> {
+        self.edit_clip_live(clip, edit);
+        self.write(root)
     }
 
     /// What the held events are now, written to the `.meta` under `root`: the text before
@@ -86,11 +112,13 @@ impl EventsDoc {
         Ok(Some((before, after)))
     }
 
-    /// Clip `clip`'s events changed by `edit` and written ([`Self::write`]).
+    /// Clip `clip`'s events changed by `edit` and written ([`Self::write`]): the tests'
+    /// short way to [`Self::edit_clip`].
     ///
     /// # Errors
     ///
     /// As [`Self::write`].
+    #[cfg(test)]
     pub(crate) fn edit(
         &mut self,
         root: &Path,

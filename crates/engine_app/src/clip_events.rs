@@ -18,11 +18,19 @@ pub(crate) struct EventDef {
     pub(crate) sound: Option<Arc<str>>,
 }
 
-/// A model file's clips' events, from its `.meta`: per clip with any, its name in the file
-/// and its events in time order.
+/// How a clip plays (ADR 0124's E12-3e, its `.meta`'s): once, held at its end, or looped;
+/// and what of its root's motion root motion takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ClipPlay {
+    pub(crate) once: bool,
+    pub(crate) axes: crate::skins::Axes,
+}
+
+/// A model file's clips as its `.meta` has them: per clip it names, its name in the file,
+/// its events in time order and how it plays.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct ModelEvents {
-    clips: Vec<(Box<str>, Vec<EventDef>)>,
+    clips: Vec<(Box<str>, Vec<EventDef>, ClipPlay)>,
 }
 
 impl ModelEvents {
@@ -31,7 +39,7 @@ impl ModelEvents {
     pub(crate) fn new(clips: &[ClipImport]) -> Self {
         let clips = clips
             .iter()
-            .filter(|c| !c.events.is_empty())
+            .filter(|c| !c.is_plain())
             .map(|c| {
                 let mut events: Vec<EventDef> = c
                     .events
@@ -45,7 +53,15 @@ impl ModelEvents {
                     })
                     .collect();
                 events.sort_by(|a, b| a.time.total_cmp(&b.time));
-                (Box::from(c.name.as_str()), events)
+                let play = ClipPlay {
+                    once: c.once,
+                    axes: crate::skins::Axes {
+                        across: c.root_across,
+                        up: c.root_up,
+                        turn: c.root_turn,
+                    },
+                };
+                (Box::from(c.name.as_str()), events, play)
             })
             .collect();
         Self { clips }
@@ -53,22 +69,31 @@ impl ModelEvents {
 
     /// No clip has an event.
     pub(crate) fn is_empty(&self) -> bool {
-        self.clips.is_empty()
+        self.clips.iter().all(|(_, events, _)| events.is_empty())
     }
 
-    /// The events of clip `k` of a rig, `name` in its file: an unnamed one is found by the
-    /// name the editor shows it by (`Clip 2` for the second).
+    /// Clip `k` of a rig, `name` in its file: an unnamed one is found by the name the editor
+    /// shows it by (`Clip 2` for the second).
+    fn find(&self, name: &str, k: usize) -> Option<&(Box<str>, Vec<EventDef>, ClipPlay)> {
+        self.clips.iter().find(|(n, _, _)| {
+            if name.is_empty() {
+                clip_number(n) == Some(k + 1)
+            } else {
+                **n == *name
+            }
+        })
+    }
+
+    /// The events of clip `k` of a rig, `name` in its file.
     pub(crate) fn of_clip(&self, name: &str, k: usize) -> &[EventDef] {
-        self.clips
-            .iter()
-            .find(|(n, _)| {
-                if name.is_empty() {
-                    clip_number(n) == Some(k + 1)
-                } else {
-                    **n == *name
-                }
-            })
-            .map_or(&[], |(_, events)| events)
+        self.find(name, k).map_or(&[], |(_, events, _)| events)
+    }
+
+    /// How clip `k` of a rig, `name` in its file, plays (E12-3e): its `.meta`'s, else looped
+    /// with the ground's root motion.
+    pub(crate) fn play(&self, name: &str, k: usize) -> ClipPlay {
+        self.find(name, k)
+            .map_or(ClipPlay::default(), |&(_, _, play)| play)
     }
 }
 
@@ -146,14 +171,17 @@ mod tests {
                     event(0.0, "start", ""),
                     event(0.25, "step", "left"),
                 ],
+                ..ClipImport::default()
             },
             ClipImport {
                 name: String::from("Clip 2"),
                 events: vec![event(0.5, "wave", "")],
+                ..ClipImport::default()
             },
             ClipImport {
                 name: String::from("Idle"),
                 events: Vec::new(),
+                ..ClipImport::default()
             },
         ])
     }

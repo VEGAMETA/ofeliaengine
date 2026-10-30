@@ -2326,6 +2326,7 @@ fn clip_events_fire_over_each_ticks_play() {
             event(0.0, "start", "", ""),
             event(0.25, "step", "left", "sounds/step.wav"),
         ],
+        ..ClipImport::default()
     });
     std::fs::write(AssetMeta::path(&file), meta.to_text(id)).unwrap();
     let mesh = AssetRef::part(id, "Walker");
@@ -2449,6 +2450,7 @@ fn clip_events_fire_over_each_ticks_play() {
         &[ClipImport {
             name: String::from("Turn"),
             events: vec![event(0.5, "halfway", "", "")],
+            ..ClipImport::default()
         }],
     );
     for &e in &walkers {
@@ -2461,6 +2463,128 @@ fn clip_events_fire_over_each_ticks_play() {
     }
     let heard: Vec<(Entity, String)> = game.heard.clone();
     assert_eq!(heard, [(turner, String::from("halfway"))]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR 0124's E12-3e: each clip's settings in its model's `.meta`. A walker whose Walk plays
+/// once stops at its end and holds it; one whose Walk's root motion takes its rise and fall
+/// reports the hips' bob in `moved`, where the ground's motion alone reports none; one whose
+/// Turn's root motion leaves its turn stays facing as it stood.
+#[test]
+fn a_clips_settings_hold_it_at_its_end_and_choose_its_root_motion() {
+    let dir = std::env::temp_dir().join(format!("ofelia-clip-settings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    write_walker(&dir.join("models"));
+    let file = dir.join("models/walker.gltf");
+    let id = AssetMeta::ensure(&file).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("clip settings test"),
+        window: Window::Offscreen {
+            width: 128,
+            height: 128,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mesh = AssetRef::part(id, "Walker");
+    let mut paths = AssetPaths::new();
+    paths.insert(mesh, "models/walker.gltf#Walker");
+    player.assets_mut().add_paths(&paths);
+    let spawn = |player: &mut Player, x: f32, clip: &str, root_motion: RootMotion| {
+        player.world_mut().spawn((
+            Transform::from_xyz(x, 0.0, 0.0),
+            Model::new(mesh, engine_app::builtin::MATERIAL),
+            Animator {
+                root_motion,
+                ..Animator::new(clip)
+            },
+        ))
+    };
+    let walker = spawn(&mut player, 0.0, "Walk", RootMotion::Report);
+    let turner = spawn(&mut player, 3.0, "Turn", RootMotion::Move);
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 64.0));
+    let started = Instant::now();
+    while [walker, turner]
+        .iter()
+        .any(|&e| player.model_rig(e).is_none())
+    {
+        assert!(started.elapsed() < Duration::from_secs(30), "no skin");
+        player.frame(&mut game).unwrap();
+    }
+    let run = |player: &mut Player, game: &mut Still, ticks: u64| {
+        let start = player.ticks_run();
+        let mut ups: Vec<f32> = Vec::new();
+        while player.ticks_run() - start < ticks {
+            player.frame(game).unwrap();
+            ups.push(player.world_mut().get::<Animator>(walker).unwrap().moved.y);
+        }
+        ups
+    };
+    // The defaults: the ground's motion only, looped.
+    let ups = run(&mut player, &mut game, 64);
+    assert!(
+        ups.iter().all(|y| y.abs() < 1e-6),
+        "no rise and fall: {ups:?}"
+    );
+    // Walk once, its rise and fall taken; Turn without its turn.
+    player.assets_mut().set_clip_events(
+        id,
+        &[
+            ClipImport {
+                name: String::from("Walk"),
+                once: true,
+                root_up: true,
+                ..ClipImport::default()
+            },
+            ClipImport {
+                name: String::from("Turn"),
+                root_turn: false,
+                ..ClipImport::default()
+            },
+        ],
+    );
+    for e in [walker, turner] {
+        player.world_mut().get_mut::<Animator>(e).unwrap().time = 0.0;
+    }
+    let facing = player
+        .world_mut()
+        .get::<Transform>(turner)
+        .unwrap()
+        .rotation;
+    let ups = run(&mut player, &mut game, 128);
+    let bob = ups.iter().fold(0.0f32, |m, y| m.max(y.abs()));
+    println!("the hips' rise and fall a tick, at most {bob}");
+    assert!(bob > 1e-4, "its rise and fall in `moved`: {bob}");
+    let a = player.world_mut().get::<Animator>(walker).unwrap().clone();
+    assert_eq!(a.time, 1.0, "Walk held at its end");
+    assert!(a.hold);
+    assert!(
+        ups.iter().rev().take(32).all(|y| y.abs() < 1e-6),
+        "nothing moves once held"
+    );
+    let now = player
+        .world_mut()
+        .get::<Transform>(turner)
+        .unwrap()
+        .rotation;
+    assert!(
+        now.angle_between(facing) < 1e-4,
+        "Turn's turn left in its pose: {facing:?} then {now:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

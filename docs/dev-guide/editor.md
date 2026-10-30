@@ -456,6 +456,10 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
         its neighbours; the tallest is lit. The row beside names the longest step, its
         frames and its speed ("leg_joint_L_2: the longest step 5.2 cm, frame 4 to 5").
       - A click or a drag on the bars puts the playhead there.
+    - **How the clip plays in the game**, in the header: **Once** (it plays once and holds
+      its end; off, it loops) and the root motion's axes, **Across**, **Up** and
+      **Turn**. Each click is an undo step written to the model's `.meta`; a game playing
+      in the editor follows from its next frame.
     - **Mark Foot Plants** (the tab's button, or the command palette) puts a `footstep`
       event, data `left` or `right`, where each foot touches down in the chosen clip, in
       place of the footsteps it marked before; one step of undo.

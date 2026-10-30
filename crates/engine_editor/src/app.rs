@@ -6462,6 +6462,15 @@ impl Editor {
                         .clip_events
                         .as_ref()
                         .map_or(&[][..], |d| d.events(&c.name));
+                    // How it plays (E12-3e), read in place: a copy of its entry would
+                    // allocate its name and events every frame.
+                    let (once, root) = self
+                        .clip_events
+                        .as_ref()
+                        .and_then(|d| d.clip(&c.name))
+                        .map_or((false, [true, false, true]), |s| {
+                            (s.once, [s.root_across, s.root_up, s.root_turn])
+                        });
                     crate::shell::AnimationView {
                         subject: &v.subject,
                         clip: &c.name,
@@ -6487,6 +6496,8 @@ impl Editor {
                         event_autofocus: self.event_autofocus,
                         speeds: self.joint_trail.as_ref().map_or(&[][..], |t| &t.speeds),
                         speed_label: self.joint_trail.as_ref().map_or("", |t| &t.label),
+                        once,
+                        root,
                     }
                 }
                 None => crate::shell::AnimationView {
@@ -6509,6 +6520,8 @@ impl Editor {
                     event_autofocus: false,
                     speeds: &[],
                     speed_label: "",
+                    once: false,
+                    root: [true, false, true],
                 },
             }
         });
@@ -6888,6 +6901,9 @@ impl Editor {
         }
         if response.anim_mark_plants {
             self.plants_asked = true;
+        }
+        if let Some(which) = response.anim_clip_setting {
+            self.toggle_clip_setting(world, which);
         }
         if let Some(bar) = response.clip_scrub {
             self.scrub_clip(bar);
@@ -19733,10 +19749,43 @@ impl Editor {
         clip: &str,
         edit: impl FnOnce(&mut Vec<ClipEvent>),
     ) {
+        self.edit_clip_entry(world, name, clip, |c| edit(&mut c.events));
+    }
+
+    /// One of the chosen clip's settings toggled (ADR 0124's E12-3e): 0 plays once, 1 root
+    /// motion across the ground, 2 up and down, 3 its turn; written to its model's `.meta`
+    /// as an undo step and given to the player.
+    fn toggle_clip_setting(&mut self, world: &mut World, which: u8) {
+        let Some((clip, ..)) = self.events_clip() else {
+            return;
+        };
+        let name = match which {
+            0 => "Clip Plays Once",
+            1 => "Root Motion Across",
+            2 => "Root Motion Up",
+            _ => "Root Motion Turn",
+        };
+        self.edit_clip_entry(world, name, &clip, |c| match which {
+            0 => c.once = !c.once,
+            1 => c.root_across = !c.root_across,
+            2 => c.root_up = !c.root_up,
+            _ => c.root_turn = !c.root_turn,
+        });
+    }
+
+    /// Clip `clip`'s entry changed by `edit`, written to its model's `.meta` as undo step
+    /// `name` (ADR 0124's E12-3b-2, E12-3e); nothing when nothing changed.
+    fn edit_clip_entry(
+        &mut self,
+        world: &mut World,
+        name: &str,
+        clip: &str,
+        edit: impl FnOnce(&mut engine_scene::ClipImport),
+    ) {
         let Some(doc) = self.clip_events.as_mut() else {
             return;
         };
-        match doc.edit(&self.root, clip, edit) {
+        match doc.edit_clip(&self.root, clip, edit) {
             Ok(Some((before, after))) => {
                 let file = doc.file;
                 self.history.begin(name, None);
@@ -30358,6 +30407,65 @@ mod tests {
         let (zeros, text) = speed_curve(&still, 30.0, "Root");
         assert_eq!(zeros, [0.0, 0.0]);
         assert_eq!(text, "Root stands still in this clip");
+    }
+
+    /// E12-3e: the tab's clip settings: Once and the root motion's axes toggled into the
+    /// model's `.meta`, each an undo step; back at the defaults, the clip leaves the file.
+    #[test]
+    fn the_animation_tab_toggles_a_clips_settings_into_its_meta() {
+        let (dir, mut world, mut ed, _) = drop_project("clip-settings");
+        let crate_id = ed.asset_db.find("props/crate.gltf").unwrap().id;
+        let meta = || std::fs::read_to_string(dir.join("props/crate.gltf.meta")).unwrap();
+        ed.clips = Some(ClipsView::new(
+            ClipsOf::Asset(crate_id),
+            1,
+            vec![ClipFacts::new(
+                0,
+                "Jump",
+                1.0,
+                31,
+                30.0,
+                3000,
+                1e-4,
+                1.5,
+                (2e-4, "hips"),
+            )],
+        ));
+        ed.bottom = Some(ANIMATION_TAB);
+        ed.update(&mut world);
+        ed.toggle_clip_setting(&mut world, 0);
+        ed.toggle_clip_setting(&mut world, 2);
+        assert!(meta().contains("model.clips.0.once = true"), "{}", meta());
+        assert!(
+            meta().contains("model.clips.0.root_up = true"),
+            "{}",
+            meta()
+        );
+        ed.update(&mut world);
+        assert!(!texts(&ed, "Once").is_empty(), "the toggles drawn");
+        let names: Vec<&str> = ed.history.steps().map(|s| s.name()).collect();
+        assert_eq!(names, ["Clip Plays Once", "Root Motion Up"]);
+        let (undo, redo) = (ed.ids.undo, ed.ids.redo);
+        ed.run(&mut world, undo);
+        assert!(meta().contains("root_up = false"), "{}", meta());
+        ed.run(&mut world, undo);
+        assert!(
+            !meta().contains("model.clips"),
+            "the defaults leave no entry: {}",
+            meta()
+        );
+        ed.run(&mut world, redo);
+        ed.run(&mut world, redo);
+        assert!(meta().contains("once = true") && meta().contains("root_up = true"));
+        let held = ed
+            .clip_events
+            .as_ref()
+            .unwrap()
+            .clip("Jump")
+            .cloned()
+            .unwrap();
+        assert!(held.once && held.root_up && held.root_across && held.root_turn);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

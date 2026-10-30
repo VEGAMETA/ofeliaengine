@@ -46,7 +46,7 @@
 //!   time it is asked for, every mesh of the file at once, on a thread of its own (convex
 //!   parts can take seconds). A built-in mesh's is its own shape.
 
-use crate::clip_events::{ModelEvents, crossed};
+use crate::clip_events::{ClipPlay, ModelEvents, crossed};
 use crate::loading::{Done, Job, Loader, Made};
 use crate::skins::Look;
 use engine_assets::colliders::{ColliderRules, Motion, cook_node_colliders};
@@ -908,46 +908,69 @@ struct PreviewSkin {
 
 /// What an animator shows a frame (ADR 0124's E12-2): its clip at its moment, the clip
 /// fading out under it (at its own moment, with the first's weight), its root motion taken
-/// out or not; and the two clips' lengths.
-type Shown = (Look, (f32, f32));
+/// out or not (along each clip's axes, E12-3e); and the two clips' lengths and whether each
+/// plays once (E12-3e).
+type Shown = (Look, [(f32, bool); 2]);
+
+/// How clip `k` of `rig` plays by its model's `.meta` (ADR 0124's E12-3e).
+fn clip_play(rig: &crate::skins::Rig, table: &ModelEvents, k: usize) -> ClipPlay {
+    let name = rig.clips().get(k).map_or("", crate::RigClip::name);
+    table.play(name, k)
+}
 
 /// What an animator shows a frame `alpha` of the way from its last tick to its next
-/// ([`Shown`]); None for a rig without clips.
-fn animator_pose(rig: &crate::skins::Rig, animator: &Animator, alpha: f32) -> Option<Shown> {
+/// ([`Shown`]), its clips played as `table` (its model's `.meta`) says; None for a rig
+/// without clips.
+fn animator_pose(
+    rig: &crate::skins::Rig,
+    animator: &Animator,
+    alpha: f32,
+    table: &ModelEvents,
+) -> Option<Shown> {
     let clips = rig.clips();
     let names = clips.iter().map(crate::RigClip::name);
     let k = named_clip(names.clone(), &animator.clip);
     let length = clips.get(k)?.duration();
-    let mut from_length = 0.0;
+    let play = clip_play(rig, table, k);
+    let mut from = (0.0, false);
+    let mut from_axes = crate::skins::Axes::default();
     let fade = (animator.fade > 0.0).then(|| {
         let f = named_clip(names, &animator.from_clip);
-        from_length = clips.get(f).map_or(0.0, crate::RigClip::duration);
-        (
-            f,
-            animator.from_at(alpha, from_length),
-            animator.weight(alpha),
-        )
+        let from_play = clip_play(rig, table, f);
+        from = (
+            clips.get(f).map_or(0.0, crate::RigClip::duration),
+            from_play.once,
+        );
+        from_axes = from_play.axes;
+        (f, animator.from_at(alpha, from.0), animator.weight(alpha))
     });
     let look = Look {
         pose: Some((k, animator.at(alpha, length))),
         fade,
         in_place: animator.root_motion != RootMotion::InPose,
+        axes: [play.axes, from_axes],
     };
-    Some((look, (length, from_length)))
+    Some((look, [(length, play.once), from]))
 }
 
 /// The root motion an [`Animator`]'s last tick played (ADR 0124's E12-2c), in its rig's
 /// mesh space: how far its root crossed the ground, and its turn about the mesh's up in
 /// radians. Through a fade the two clips' motions blend by the fade's weight. None for a
 /// rig without clips.
-fn tick_motion(rig: &crate::skins::Rig, animator: &Animator) -> Option<(Vec3, f32)> {
+fn tick_motion(
+    rig: &crate::skins::Rig,
+    animator: &Animator,
+    table: &ModelEvents,
+) -> Option<(Vec3, f32)> {
     let names = rig.clips().iter().map(crate::RigClip::name);
     let k = named_clip(names.clone(), &animator.clip);
-    let main = rig.clip_motion(k, animator.previous, animator.time)?;
+    let axes = clip_play(rig, table, k).axes;
+    let main = rig.clip_motion(k, animator.previous, animator.time, axes)?;
     let from = (animator.fade > 0.0)
         .then(|| {
             let f = named_clip(names, &animator.from_clip);
-            rig.clip_motion(f, animator.from_previous, animator.from_time)
+            let axes = clip_play(rig, table, f).axes;
+            rig.clip_motion(f, animator.from_previous, animator.from_time, axes)
         })
         .flatten();
     let motion = match from {
@@ -2832,7 +2855,9 @@ impl Assets {
                 } else {
                     world
                         .get::<Animator>(character)
-                        .and_then(|animator| animator_pose(&owned.rig, animator, 1.0))
+                        .and_then(|animator| {
+                            animator_pose(&owned.rig, animator, 1.0, &owned.events)
+                        })
                         .map_or(Look::default(), |(look, _)| look)
                 };
                 let rig_id = Arc::as_ptr(&owned.rig) as usize as u64;
@@ -2892,7 +2917,7 @@ impl Assets {
             let motion = if owned.held || mode == RootMotion::InPose {
                 None
             } else {
-                tick_motion(&owned.rig, animator)
+                tick_motion(&owned.rig, animator, &owned.events)
             };
             let Some((moved, turned)) = motion else {
                 if (animator.moved != Vec3::ZERO || animator.turned != 0.0)
@@ -3023,17 +3048,23 @@ impl Assets {
             }
             let shown = world
                 .get::<Animator>(e)
-                .and_then(|animator| animator_pose(&owned.rig, animator, alpha));
-            // The clips' lengths back to the animator, for its ticks to wrap at.
-            if let Some((_, (length, from_length))) = shown
+                .and_then(|animator| animator_pose(&owned.rig, animator, alpha, &owned.events));
+            // The clips' lengths back to the animator, for its ticks to wrap at, and whether
+            // each plays once, for them to hold at its end instead (E12-3e).
+            if let Some((_, [(length, hold), (from_length, from_hold)])) = shown
                 && world.get::<Animator>(e).is_some_and(|a| {
-                    a.length != length || (a.fade > 0.0 && a.from_length != from_length)
+                    a.length != length
+                        || a.hold != hold
+                        || (a.fade > 0.0
+                            && (a.from_length != from_length || a.from_hold != from_hold))
                 })
                 && let Some(animator) = world.get_mut::<Animator>(e)
             {
                 animator.length = length;
+                animator.hold = hold;
                 if animator.fade > 0.0 {
                     animator.from_length = from_length;
+                    animator.from_hold = from_hold;
                 }
             }
             let look = shown.map_or(Look::default(), |(look, _)| look);
