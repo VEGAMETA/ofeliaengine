@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5d-2b-1, a graph's layers** (#PR, ADR 0124's as-built): a chip per layer on the
+  - **E12-5d-2b-1, a graph's layers** (#492, ADR 0124's as-built): a chip per layer on the
     graph's bar (the shown one's machine on the canvas, + adds a layer with its own
     machine), the shown layer's section with nothing selected (name, blend, weight, weight
     from; × deletes it with what only it plays, ↑ ↓ reorder), each a step; in Play the bar
