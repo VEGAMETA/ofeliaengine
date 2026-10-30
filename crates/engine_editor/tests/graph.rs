@@ -1240,6 +1240,19 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
     let params = game.graph_params();
     println!("its parameters: {params:?}");
     assert_eq!(params, [(String::from("speed"), 1.0, false)]);
+    // View: Animation States (E12-5e-2b): the fox's label says the same over its head.
+    assert!(game.anim_labels().is_empty(), "off by default");
+    assert!(game.run_command(player.world_mut(), "view.anim_states"));
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let labels = game.anim_labels();
+    println!("the labels: {labels:?}");
+    assert_eq!(labels.len(), 1, "{labels:?}");
+    assert!(labels[0].starts_with("Walk \u{b7} "), "{labels:?}");
+    assert!(game.run_command(player.world_mut(), "view.anim_states"));
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.anim_labels().is_empty(), "hidden again");
     // Stopped: nothing watched, nothing said.
     game.stop_playing(&mut player);
     for _ in 0..3 {

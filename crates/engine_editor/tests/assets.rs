@@ -2016,8 +2016,19 @@ fn a_character_dragged_from_the_dock_is_one_entity_standing_on_the_floor() {
     let [x, y, w, h] = game.view_rect().unwrap();
     let middle = [(x + w / 2) as f32, (y + h / 2) as f32];
     pointer(&mut game, middle, None);
-    for _ in 0..30 {
+    // Held there until he stands on the floor: the surface under the pointer is read back a
+    // frame or more late, later still when the machine is busy (a fixed 30 frames let go of
+    // him early once, under a gate's load). At least 30 frames, at most ten seconds.
+    let started = Instant::now();
+    for k in 0.. {
         frame(&mut player, &mut game, &mut overlay);
+        let world = player.world_mut();
+        let standing = engine_scene::find_named(world, "CesiumMan")
+            .and_then(|e| world.get::<Transform>(e).copied())
+            .is_some_and(|t| (t.translation.y + 0.5).abs() < 1e-3);
+        if (k >= 30 && standing) || started.elapsed() > Duration::from_secs(10) {
+            break;
+        }
     }
     pointer(&mut game, middle, Some(false));
     frame(&mut player, &mut game, &mut overlay);
