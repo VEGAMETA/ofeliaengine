@@ -599,7 +599,7 @@ allocation with transitions and events every tick; the same events at the same t
   (5a); New Animation Graph is to give the new graph to the selected characters' `Animator`
   (4a), as New Material gives its material to the selected models; transitions drawn in the
   editor are to inertialize by default, the file's default staying a cross-fade (2a). Both
-  built at once after the canvas (#PR): `drawn_transition` sets `inertialize`, and New
+  built at once after the canvas (#484): `drawn_transition` sets `inertialize`, and New
   Animation Graph sets the selected animators' `graph` in one step.
 
 ## As built (E12-5c, scripts, 2026-10-30): the scripts' calls on a graph
@@ -760,7 +760,7 @@ allocation with transitions and events every tick; the same events at the same t
 
 ## As built (E12-5b, 2026-10-30): the graph's runtime in `engine_anim`
 
-- **Fixed (2026-10-30, #PR, found by E12-5b-2's work):** an exit time within a tick's step
+- **Fixed (2026-10-30, #484, found by E12-5b-2's work):** an exit time within a tick's step
   of a looping clip's end was never taken: the check compared the phase with
   `phase_before`, which the tick had just made equal to it. `GraphState` now keeps where
   the last tick's step began (`phase_stepped_from`, written just before the phases move,
