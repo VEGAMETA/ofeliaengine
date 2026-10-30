@@ -879,6 +879,10 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-1b-3b, two clips side by side** (#PR, ADR 0124's as-built): a Ctrl+click on a
+    picked file's clip plays it beside the chosen one in the preview, at the same fraction
+    of its length, framed with it on the one floor. 0 allocations. The root's path on the
+    floor waits for the Animation tab's trails (E12-3).
   - **E12-1b-3a, the preview's floor, In Place, the arrows** (#459, ADR 0124's as-built):
     a picked model file's preview stands on the blockout's grid. A clip that crosses the
     ground walks on its spot while the floor goes by under it; In Place holds the floor
@@ -1115,10 +1119,10 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next** (the owner's order: materials first of the tools, then animation and 2D;
     E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (accepted
-    2026-10-29, every question as recommended). E12-1a, E12-1b-1, E12-1b-2, E12-1b-3a, E12-1c
-    and E12-2 are done (layers, masks and the animator's other script calls come with the
-    graphs, E12-5, and the clips' events, E12-3, as decision 1c has it); next E12-1b-3b (two
-    clips side by side, the root's path on the floor), E12-3 (the Animation tab), E12-4 (keys) and E12-5 (graphs).
+    2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
+    animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
+    as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
+    E12-3 (the Animation tab), E12-4 (keys) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
     questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a
     (decisions in ticks, poses every frame), 3c (cross-fade or inertialization per

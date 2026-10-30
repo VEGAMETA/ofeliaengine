@@ -1531,6 +1531,8 @@ struct ClipsView {
     rig: usize,
     clips: Vec<ClipFacts>,
     chosen: usize,
+    /// The clip played beside the chosen one in a picked file's preview (E12-1b-3b).
+    beside: Option<usize>,
     time: f32,
     held: bool,
     /// The time its text shows, and the text ("frame 18 / 48 · 0.75 s").
@@ -1545,6 +1547,7 @@ impl ClipsView {
             rig,
             clips,
             chosen: 0,
+            beside: None,
             time: 0.0,
             held: false,
             shown: f32::NAN,
@@ -6397,6 +6400,7 @@ impl Editor {
                     section,
                     rows: &clip_rows,
                     chosen: view.chosen,
+                    beside: view.beside,
                     note: "No clips in its file",
                     preview: model.is_some(),
                     image: model
@@ -6630,7 +6634,11 @@ impl Editor {
         }
         // The Clips (ADR 0124's E12-1b): a clip chosen, ▶ or ■, the loop, the speed, the bar.
         if let Some(i) = response.clip_pick {
-            self.choose_clip(i);
+            if self.input.ctrl() {
+                self.clip_beside(i);
+            } else {
+                self.choose_clip(i);
+            }
         }
         // The Skeleton (E12-1c): a joint picked, as a click on it in the joint mode picks it.
         if let Some(j) = response.joint_pick
@@ -19194,6 +19202,20 @@ impl Editor {
         }
     }
 
+    /// Clip `i` Ctrl+clicked in the Clips (ADR 0124's E12-1b-3b): in a picked file's preview,
+    /// played beside the chosen one, in step; Ctrl+clicked again, or the chosen one, gone.
+    /// A character's Clips have no second: a Ctrl+click chooses.
+    fn clip_beside(&mut self, i: usize) {
+        let Some(view) = self.clips.as_mut().filter(|v| i < v.clips.len()) else {
+            return;
+        };
+        if let ClipsOf::Entity(_) = view.of {
+            self.choose_clip(i);
+            return;
+        }
+        view.beside = (view.beside != Some(i) && view.chosen != i).then_some(i);
+    }
+
     /// Clip `i` chosen in the Clips (ADR 0124's E12-1b): its first frame shown, held; or, while
     /// it plays, played from its start.
     fn choose_clip(&mut self, i: usize) {
@@ -19201,6 +19223,9 @@ impl Editor {
             return;
         };
         view.chosen = i;
+        if view.beside == Some(i) {
+            view.beside = None;
+        }
         view.time = 0.0;
         if let ClipsOf::Asset(file) = view.of {
             view.held = !self
@@ -19262,13 +19287,13 @@ impl Editor {
         let (looping, speed) = (self.clip_loop, CLIP_SPEEDS[self.clip_speed]);
         match self.shown_model.as_mut() {
             Some(m) => {
-                let view = self
+                let mut view = self
                     .clips
                     .as_mut()
                     .filter(|v| v.of == ClipsOf::Asset(m.file));
                 // The span of the clip played this frame, for the floor to go by (E12-1b-3).
                 let mut walked = None;
-                let pose = view.and_then(|v| {
+                let pose = view.as_deref_mut().and_then(|v| {
                     if !m.auto_played {
                         m.auto_played = true;
                         m.playing = self.auto_play;
@@ -19297,6 +19322,12 @@ impl Editor {
                     }
                     (m.playing || v.held).then_some((v.chosen, v.time))
                 });
+                // The clip beside, at the same fraction of its length (E12-1b-3b).
+                let beside = view.as_deref().and_then(|v| {
+                    let b = v.beside?;
+                    let fraction = v.playhead();
+                    Some((b, fraction * v.clips.get(b)?.duration))
+                });
                 // In Place holds the floor still; else it goes back by the root's motion.
                 if let (Some((clip, from, to)), false) = (walked, self.clip_in_place)
                     && let Some((moved, turned)) = player
@@ -19311,6 +19342,7 @@ impl Editor {
                     turn: m.turn,
                     pose,
                     floor: Some(m.floor),
+                    beside,
                 }));
                 if player.take_model_preview(&mut m.pixels) {
                     m.upload = true;
@@ -24895,6 +24927,11 @@ impl<G> EditorGame<G> {
     /// The Clips' chosen clip (ADR 0124's E12-1b-3): for tests.
     pub fn chosen_clip(&self) -> Option<usize> {
         self.shared.borrow().clips.as_ref().map(|v| v.chosen)
+    }
+
+    /// The clip played beside the chosen one (ADR 0124's E12-1b-3b): for tests.
+    pub fn beside_clip(&self) -> Option<usize> {
+        self.shared.borrow().clips.as_ref().and_then(|v| v.beside)
     }
 
     /// Whether the picked model file's preview is drawn in its Clips, and whether it plays
@@ -33000,6 +33037,47 @@ mod tests {
         ed.run(&mut world, previous);
         ed.run(&mut world, previous);
         assert_eq!(chosen(&ed), Some((0, true)), "the first stays the first");
+    }
+
+    /// E12-1b-3b: a Ctrl+click on a picked file's clip plays it beside the chosen one; again,
+    /// or on the chosen one, it goes; choosing it makes it the one. A character's Clips have
+    /// no second: a Ctrl+click chooses.
+    #[test]
+    fn a_ctrl_click_puts_a_clip_beside_the_chosen_one() {
+        let mut world = World::new();
+        let mut ed = draw_editor("clips-beside", &mut world);
+        let facts = || {
+            vec![
+                ClipFacts::new(0, "Survey", 3.4, 103, 30.0, 3000, 1e-4, 0.0, (1e-4, "hips")),
+                ClipFacts::new(1, "Walk", 0.7, 22, 30.0, 2600, 1e-4, 0.0, (2e-4, "hips")),
+                ClipFacts::new(2, "Run", 1.2, 37, 30.0, 4100, 1e-4, 0.0, (1e-4, "hips")),
+            ]
+        };
+        ed.clips = Some(ClipsView::new(ClipsOf::Asset(AssetId::new()), 1, facts()));
+        let beside = |ed: &Editor| ed.clips.as_ref().and_then(|v| v.beside);
+        ed.clip_beside(2);
+        assert_eq!(beside(&ed), Some(2));
+        ed.clip_beside(1);
+        assert_eq!(beside(&ed), Some(1), "another in its place");
+        ed.clip_beside(1);
+        assert_eq!(beside(&ed), None, "again: gone");
+        ed.clip_beside(0);
+        assert_eq!(beside(&ed), None, "the chosen one is not beside itself");
+        ed.clip_beside(2);
+        ed.choose_clip(2);
+        assert_eq!(
+            ed.clips.as_ref().map(|v| (v.chosen, v.beside)),
+            Some((2, None)),
+            "chosen, it is the one"
+        );
+        // A character's: chosen.
+        let man = world.spawn((SceneId::new(), Name::new("Man"), Transform::IDENTITY));
+        ed.clips = Some(ClipsView::new(ClipsOf::Entity(man), 1, facts()));
+        ed.clip_beside(2);
+        assert_eq!(
+            ed.clips.as_ref().map(|v| (v.chosen, v.beside)),
+            Some((2, None))
+        );
     }
 
     /// E12-1b-3: a model's floor after a walk: it stays where the walk left it, so in the

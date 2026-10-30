@@ -633,6 +633,8 @@ pub struct ClipsPanel<'a> {
     pub rows: &'a [ClipRow<'a>],
     /// The chosen clip.
     pub chosen: usize,
+    /// The clip played beside it in the preview (E12-1b-3b: a Ctrl+click on its row).
+    pub beside: Option<usize>,
     /// Shown instead of the rows: that the skin is being made, or that it has no clip.
     pub note: &'a str,
     /// The engine's preview of a model file at the panel's top (a drag turns it).
@@ -2869,6 +2871,7 @@ fn clips_panel(ui: &mut Ui, panel: &ClipsPanel<'_>, p: &Palette, out: &mut Shell
             for (i, row) in panel.rows.iter().enumerate() {
                 ui.push_id(i as u64);
                 let chosen = i == panel.chosen;
+                let beside = panel.beside == Some(i);
                 let hovered = ui.is_hovered(ui.id("clip"));
                 let id = ui.column(
                     "clip",
@@ -2878,6 +2881,8 @@ fn clips_panel(ui: &mut Ui, panel: &ClipsPanel<'_>, p: &Palette, out: &mut Shell
                         radius: 3.0,
                         background: if chosen {
                             Some(p.selection)
+                        } else if beside {
+                            Some(p.selection_dim)
                         } else {
                             hovered.then_some(p.field_hover)
                         },

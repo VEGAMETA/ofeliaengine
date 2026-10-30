@@ -584,6 +584,37 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-1b-3b, 2026-10-30): two clips side by side
+
+- **The model preview's second model** (`ModelPreview::beside`): a second clip's moment of
+  the same model.
+  - It has its own instance of the skin, made the first time one is asked for and kept
+    with the preview (`Assets::preview_beside`), posed as the first is (its root motion
+    taken out with a floor).
+  - The two stand apart along the frame's right on the ground (the previews' slant turned
+    22.5°), 1.25 times the framing's reach on each side of the model's place. Each turns
+    about its own place, and the camera frames the pair.
+  - The floor stays the first clip's.
+  - Until the second is made and posed the preview draws nothing new, so it never shows
+    half a pair.
+- **The editor:**
+  - a Ctrl+click on a picked file's clip row plays it beside the chosen one, at the same
+    fraction of its length, so a walk and a run are compared step for step;
+  - its row is marked in the paler selection colour;
+  - a Ctrl+click again, or on the chosen one, takes it away, and choosing it makes it the
+    chosen one;
+  - a character's Clips have no second: a Ctrl+click there chooses.
+- **Tests:**
+  - on both GPUs, the generated walker: the second model changes 5,581 pixels of the
+    picture, its own turn 2,230 more, and back to one model the picture is the first;
+  - the Fox in the dock: a Ctrl+click on Run puts it beside Survey (31,877 pixels of the
+    inspector change), Survey still chosen;
+  - the Ctrl+click's rules;
+  - 0 allocations with the pair posed every frame (both builds).
+- **Left:** the root's path and facing drawn on the floor. The preview draws meshes only,
+  so drawing them needs lines in the preview's view or a strip mesh made per clip. It is
+  kept for the Animation tab (E12-3), which draws a picked joint's trail anyway.
+
 ## As built (E12-2c, 2026-10-30): root motion
 
 - **`Animator::root_motion`** (saved, shown): `RootMotion::InPose` (the default), `Move`

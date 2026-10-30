@@ -419,6 +419,10 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
       clip made in place leaves the floor still.
     - **In Place**, beside the speed, holds the floor still too: the walk is seen on a
       treadmill. Choosing another clip puts the floor back.
+    - **Ctrl+click** another clip's row and it plays beside the chosen one, at the same
+      fraction of its length: compare two takes, or check that a walk and a run plant the
+      same foot first. Its row is marked in a paler colour. Ctrl+click it again to take it
+      away; choosing it makes it the chosen one.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

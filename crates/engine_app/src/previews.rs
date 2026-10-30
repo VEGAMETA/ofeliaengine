@@ -165,12 +165,16 @@ pub struct ModelPreview {
     /// scene's units. With a floor its clip's root motion is taken out of its pose, so it
     /// walks on its spot while the floor goes by under it; none: no floor, the pose as made.
     pub floor: Option<[f32; 3]>,
+    /// A second clip's moment of the same model, drawn beside it to compare two clips in
+    /// step (ADR 0124's E12-1b-3b): the first on the left, this one on the right, framed
+    /// together on the one floor. None: the one model.
+    pub beside: Option<(usize, f32)>,
 }
 
-/// The live model preview a frame draws: its draws (the model, then its floor), its camera
-/// and its read back's slot.
+/// The live model preview a frame draws: its draws (the model, the one beside it, its
+/// floor), how many, its camera and its read back's slot.
 pub(crate) struct LiveDrawing {
-    draws: [DrawItem; 2],
+    draws: [DrawItem; 3],
     count: usize,
     camera: ViewCamera,
     slot: usize,
@@ -330,7 +334,15 @@ impl Previews {
         if !assets.settled(material) {
             return None;
         }
-        let (lo, hi) = geometry.mesh(mesh).map(|m| (m.min, m.max))?;
+        // The second model, once asked for, made and posed (E12-1b-3b); until then the one.
+        let beside = live.beside.and_then(|_| assets.preview_beside());
+        if live.beside.is_some() && beside.is_none() {
+            return None;
+        }
+        let (mut lo, mut hi) = geometry.mesh(mesh).map(|m| (m.min, m.max))?;
+        if let Some((blo, bhi)) = beside.and_then(|b| geometry.mesh(b).map(|m| (m.min, m.max))) {
+            (lo, hi) = (lo.min(blo), hi.max(bhi));
+        }
         let slot = self.free_live_slot(allocator)?;
         // The rest pose's box in its file's scene, and room for what a pose reaches past it.
         let place = root.inverse();
@@ -357,11 +369,24 @@ impl Previews {
         let world =
             Affine3A::from_translation(middle) * turn * Affine3A::from_translation(-middle) * place;
         let reach = Vec3::new(across, half.y, across);
+        // Two side by side: apart along the frame's right on the ground, each turned about
+        // its own place.
+        let apart = if beside.is_some() {
+            let right = Quat::from_rotation_y(22.5f32.to_radians()) * Vec3::X;
+            right * (across * 1.25)
+        } else {
+            Vec3::ZERO
+        };
         let model = DrawItem {
             mesh,
             material,
-            world_from_object: Mat4::from(world),
+            world_from_object: Mat4::from(Affine3A::from_translation(-apart) * world),
         };
+        let second = beside.map(|mesh| DrawItem {
+            mesh,
+            material,
+            world_from_object: Mat4::from(Affine3A::from_translation(apart) * world),
+        });
         // The floor under its feet (the posed box's lowest point), turned with it and
         // centred on its origin, not on the posed box, which sways with its limbs: where its
         // walk has taken it, its offset wrapped by whole cells along its own axes (the grid
@@ -393,10 +418,20 @@ impl Previews {
         }
         self.live_readbacks[slot].written = Some((frame, 0));
         self.live_drawn = Some(live);
+        let mut draws = [model; 3];
+        let mut count = 1;
+        for item in [second, floor].into_iter().flatten() {
+            draws[count] = item;
+            count += 1;
+        }
+        let (lo, hi) = (middle - reach, middle + reach);
         Some(LiveDrawing {
-            draws: [model, floor.unwrap_or(model)],
-            count: if floor.is_some() { 2 } else { 1 },
-            camera: framing(middle - reach, middle + reach),
+            draws,
+            count,
+            camera: framing(
+                lo.min(lo - apart).min(lo + apart),
+                hi.max(hi - apart).max(hi + apart),
+            ),
             slot,
         })
     }

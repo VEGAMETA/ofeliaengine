@@ -883,6 +883,12 @@ struct PreviewSkin {
     /// Its clip's root motion taken out of the pose (a floor under it, E12-1b-3).
     in_place: bool,
     posed: bool,
+    /// A second clip's moment drawn beside it (E12-1b-3b): its own instance of the skin,
+    /// made the first time one is asked for and kept with the preview, its pose and
+    /// whether its palette was set for it.
+    beside: Option<(SkinnedId, MeshId)>,
+    beside_pose: Option<(usize, f32)>,
+    beside_posed: bool,
 }
 
 /// What an animator shows a frame (ADR 0124's E12-2): its clip at its moment, the clip
@@ -2959,8 +2965,10 @@ impl Assets {
         if shown == preview {
             return;
         }
-        if let Some((id, _)) = self.preview_skin.take().and_then(|p| p.instance) {
-            skinning.remove_instance(id, geometry, self.frame);
+        if let Some(p) = self.preview_skin.take() {
+            for (id, _) in p.instance.into_iter().chain(p.beside) {
+                skinning.remove_instance(id, geometry, self.frame);
+            }
         }
         self.preview_skin = preview.map(|(mesh, material)| PreviewSkin {
             mesh,
@@ -2971,21 +2979,41 @@ impl Assets {
             pose: None,
             in_place: false,
             posed: false,
+            beside: None,
+            beside_pose: None,
+            beside_posed: false,
         });
     }
 
     /// The live preview's model posed at a clip's moment, or in its rest pose: set by the
     /// next sync.
-    pub(crate) fn pose_preview(&mut self, pose: Option<(usize, f32)>, in_place: bool) {
-        if let Some(p) = self
-            .preview_skin
-            .as_mut()
-            .filter(|p| p.pose != pose || p.in_place != in_place)
-        {
+    pub(crate) fn pose_preview(
+        &mut self,
+        pose: Option<(usize, f32)>,
+        in_place: bool,
+        beside: Option<(usize, f32)>,
+    ) {
+        let Some(p) = self.preview_skin.as_mut() else {
+            return;
+        };
+        if p.pose != pose || p.in_place != in_place {
             p.pose = pose;
             p.in_place = in_place;
             p.posed = false;
+            p.beside_posed = false;
         }
+        if p.beside_pose != beside {
+            p.beside_pose = beside;
+            p.beside_posed = false;
+        }
+    }
+
+    /// The mesh of the live preview's second model (ADR 0124's E12-1b-3b), while one is asked
+    /// for and once its instance is made and posed.
+    pub(crate) fn preview_beside(&self) -> Option<MeshId> {
+        let p = self.preview_skin.as_ref()?;
+        p.beside_pose?;
+        p.beside.filter(|_| p.beside_posed).map(|(_, mesh)| mesh)
     }
 
     /// The live preview's rig, once its skin is made.
@@ -3035,17 +3063,28 @@ impl Assets {
             return;
         };
         if p.skins != made.skins {
-            if let Some((id, _)) = p.instance.take() {
+            for (id, _) in p.instance.take().into_iter().chain(p.beside.take()) {
                 skinning.remove_instance(id, geometry, frame);
             }
             p.skins.clone_from(&made.skins);
             p.rig = Some(Arc::clone(&made.rig));
             p.posed = false;
+            p.beside_posed = false;
             if let Some(&skin) = p.skins.first() {
                 match skinning.add_instance(skin, geometry) {
                     Ok(made) => p.instance = Some(made),
                     Err(why) => log::warn!(target: "engine_app", "the model preview: {why}"),
                 }
+            }
+        }
+        // The second model, the first time one is asked for (E12-1b-3b).
+        if p.beside_pose.is_some()
+            && p.beside.is_none()
+            && let Some(&skin) = p.skins.first()
+        {
+            match skinning.add_instance(skin, geometry) {
+                Ok(made) => p.beside = Some(made),
+                Err(why) => log::warn!(target: "engine_app", "the model preview's second: {why}"),
             }
         }
         if !p.posed
@@ -3057,6 +3096,17 @@ impl Assets {
             };
             skinning.set_palette(id, self.posing.palette(rig, look));
             p.posed = true;
+        }
+        if !p.beside_posed
+            && p.beside_pose.is_some()
+            && let (Some((id, _)), Some(rig)) = (p.beside, p.rig.as_ref())
+        {
+            let look = Look {
+                in_place: p.in_place,
+                ..Look::at(p.beside_pose)
+            };
+            skinning.set_palette(id, self.posing.palette(rig, look));
+            p.beside_posed = true;
         }
     }
 

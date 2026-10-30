@@ -2285,6 +2285,7 @@ fn a_model_previews_floor_goes_by_under_its_walk() {
         turn: [0.6, 0.3],
         pose,
         floor,
+        beside: None,
     };
     let drawn = |player: &mut Player, preview: engine_app::ModelPreview| {
         player.set_model_preview(Some(preview));
@@ -2373,6 +2374,31 @@ fn a_model_previews_floor_goes_by_under_its_walk() {
         differ(&made_start, &as_made) > side * side / 50,
         "without one it turns as made"
     );
+    // Two clips side by side (E12-1b-3b): a second model beside the first, framed with it,
+    // posed on its own.
+    let pair = |pose, beside| engine_app::ModelPreview {
+        beside: Some(beside),
+        ..asked(pose, None)
+    };
+    let two = drawn(&mut player, pair(Some((0, 0.0)), (1, 0.5)));
+    let two_turned = drawn(&mut player, pair(Some((0, 0.0)), (1, 0.0)));
+    println!(
+        "side by side: {} pixels from the one, {} as the second turns, {} covered",
+        differ(&bare, &two),
+        differ(&two, &two_turned),
+        covered(&two)
+    );
+    assert!(
+        differ(&bare, &two) > side * side / 20,
+        "a second model drawn"
+    );
+    assert!(
+        differ(&two, &two_turned) > 50,
+        "the second posed on its own"
+    );
+    // Back to the one: as it was.
+    let one = drawn(&mut player, asked(Some((0, 0.0)), None));
+    assert!(differ(&bare, &one) < 20, "the one again");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2593,6 +2619,7 @@ fn a_model_preview_draws_a_skinned_model_posed_and_turned_alone() {
         turn,
         pose,
         floor: None,
+        beside: None,
     };
     let mut pixels = Vec::new();
     let drawn = |player: &mut Player,

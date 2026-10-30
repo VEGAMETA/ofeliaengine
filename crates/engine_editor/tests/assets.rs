@@ -1392,6 +1392,24 @@ fn a_skinned_model_picked_in_the_dock_shows_its_clips_under_its_preview() {
         frame(&mut player, &mut game, &mut overlay);
         assert_eq!(game.chosen_clip(), Some(expected), "the arrow {vk:#x}");
     }
+    // E12-1b-3b: Ctrl+click on Run: it plays beside Survey in the preview.
+    let one = inspector(&mut player, &mut game, &mut overlay);
+    let run = in_inspector(&game.texts_at("Run")).expect("Run's row");
+    key(&mut game, 0x11, 0x1D, true);
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, run, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    key(&mut game, 0x11, 0x1D, false);
+    assert_eq!(game.beside_clip(), Some(2), "Run beside");
+    assert_eq!(game.chosen_clip(), Some(0), "Survey still the chosen one");
+    let mut two = inspector(&mut player, &mut game, &mut overlay);
+    let started = Instant::now();
+    while differ(&one, &two) < 300 && started.elapsed() < Duration::from_secs(10) {
+        two = inspector(&mut player, &mut game, &mut overlay);
+    }
+    println!("side by side: {} pixels changed", differ(&one, &two));
+    assert!(differ(&one, &two) >= 300, "two in the preview");
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
