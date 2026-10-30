@@ -688,6 +688,8 @@ struct FrameLists {
     graphs: Vec<&'static str>,
     /// The shown graph's inspector values (E10-3f-1).
     graph_values: Vec<&'static str>,
+    /// A shown animation graph's open list's options (ADR 0124 E12-5d-1).
+    anim_options: Vec<&'static str>,
     /// The inspector's shown values, each property's range of them, its fields and
     /// sections (an asset's too).
     values: Vec<&'static str>,
@@ -868,6 +870,10 @@ struct CommandIds {
     frame_nodes: CommandId,
     /// The node search on a graph's canvas (ADR 0123 E10-3e).
     add_node: CommandId,
+    /// An animation graph (ADR 0124 E12-5d-1): a new one, and the state selected alone its
+    /// machine's entry.
+    new_anim_graph: CommandId,
+    set_entry: CommandId,
     /// Functions on a graph's canvas (E10-3g-2b, Blender's Ctrl+G, Tab and Ctrl+Alt+G):
     /// the selection made one, a call's function entered (and left), a call taken apart.
     make_function: CommandId,
@@ -1095,6 +1101,8 @@ fn commands() -> (Commands, CommandIds) {
             "Put the Selection in a Frame",
         ),
         add_node: c.register("graph.add_node", "Graph", "Add Node…"),
+        new_anim_graph: c.register("animation.new_graph", "Animation", "New Animation Graph"),
+        set_entry: c.register("graph.set_entry", "Graph", "Set Entry State"),
         make_function: c.register("graph.make_function", "Graph", "Make Function"),
         enter_function: c.register(
             "graph.enter_function",
@@ -2127,6 +2135,8 @@ enum Pick {
     Call(AssetId, String),
     /// Adds a call of this function file (E10-3g-2b).
     Function(AssetId),
+    /// Adds a state playing this to an animation graph (ADR 0124 E12-5d-1).
+    State(crate::agraph::StateKind),
 }
 
 impl Pick {
@@ -2137,6 +2147,7 @@ impl Pick {
             Self::Component { script: false, .. } => icons::ADD_COMPONENT,
             Self::NewScript => icons::SCRIPT_MARK,
             Self::Node(_) | Self::Call(..) | Self::Function(_) => icons::SHADER,
+            Self::State(_) => icons::CHARACTER,
             _ => icons::SCENE,
         }
     }
@@ -2912,6 +2923,10 @@ struct Editor {
     active_graph: Option<usize>,
     /// The drag under way on the shown graph's canvas.
     graph_drag: Option<crate::graph::Drag>,
+    /// The drag under way on a shown animation graph's canvas (ADR 0124 E12-5d-1).
+    anim_drag: Option<crate::agraph::Drag>,
+    /// Which graph tabs are animation graphs' (their tabs' icon), made with the frame.
+    graph_anim: Vec<bool>,
     /// The canvas as the last frame placed it (logical pixels: x, y, width, height), and
     /// in pixels, for the overlay hook to draw it.
     graph_area: Option<[f32; 4]>,
@@ -2943,6 +2958,13 @@ struct Editor {
     /// into the same room every frame.
     graph_status: String,
     graph_scratch: String,
+    /// The inspector's rows for a shown animation graph (ADR 0124 E12-5d-1), where each
+    /// one's shown texts are in `graph_texts`, its sections with their rows' ranges, and
+    /// where the first of them is among the inspector's sections this frame.
+    anim_rows: Vec<crate::agraph::AnimRow>,
+    anim_spans: Vec<(usize, usize)>,
+    anim_sections: Vec<(crate::agraph::AnimSection, usize, usize)>,
+    anim_section_at: Option<usize>,
     /// The keys go to the shown script's code: its tab was shown, or a press landed in it.
     /// A press anywhere else gives them back to the editor.
     code_focus: bool,
@@ -4094,6 +4116,8 @@ impl Editor {
             graphs: Vec::new(),
             active_graph: None,
             graph_drag: None,
+            anim_drag: None,
+            graph_anim: Vec::new(),
             graph_area: None,
             graph_rect: None,
             graph_add: None,
@@ -4111,6 +4135,10 @@ impl Editor {
             node_drag: None,
             graph_status: String::new(),
             graph_scratch: String::new(),
+            anim_rows: Vec::new(),
+            anim_spans: Vec::new(),
+            anim_sections: Vec::new(),
+            anim_section_at: None,
             code_focus: false,
             code_rect: None,
             code_advance: 0.0,
@@ -5273,6 +5301,7 @@ impl Editor {
         self.mixer_section = None;
         self.snapshot_section = None;
         self.graph_section = None;
+        self.anim_section_at = None;
         let mut graph_values: Vec<&str> = recycle(std::mem::take(&mut self.lists.graph_values));
         let mut outputs: Vec<&str> = recycle(std::mem::take(&mut self.lists.outputs));
         let mut part_values: Vec<&str> = recycle(std::mem::take(&mut self.lists.part_values));
@@ -5286,6 +5315,18 @@ impl Editor {
             .active_graph
             .and_then(|g| self.graphs.get(g))
             .filter(|_| !self.graph_rows.is_empty());
+        // An animation graph's tab (ADR 0124 E12-5d-1), and its open list's options.
+        let anim_doc = self
+            .active_graph
+            .and_then(|g| self.graphs.get(g))
+            .and_then(|d| d.anim.as_deref())
+            .filter(|_| !self.anim_sections.is_empty());
+        let mut anim_options: Vec<&str> = recycle(std::mem::take(&mut self.lists.anim_options));
+        if let (Some(anim), Some(k)) = (anim_doc, self.node_choice)
+            && let Some(&row) = self.anim_rows.get(k)
+        {
+            anim.options(row, &mut anim_options);
+        }
         if let Some(doc) = graph_doc {
             // A graph's tab (ADR 0123 E10-3f-1): the node selected alone, or the graph.
             use crate::graph::NodeRow;
@@ -5337,6 +5378,56 @@ impl Editor {
                 script: "",
                 removable: false,
             });
+        } else if let Some(anim) = anim_doc {
+            // An animation graph's tab (ADR 0124 E12-5d-1): the state or the transition
+            // selected alone, or the graph's parameters (a section each, × deleting one)
+            // and Add. A field a row, so a section's rows are its fields.
+            use crate::agraph::{AnimSection, RowLook};
+            graph_values.extend(self.graph_texts.iter().map(String::as_str));
+            for (k, &row) in self.anim_rows.iter().enumerate() {
+                let (at, n) = self.anim_spans[k];
+                let shown = &graph_values[at..at + n];
+                let first = shown.first().copied().unwrap_or("");
+                let widget = match anim.look(row) {
+                    RowLook::Text => Widget::Edit(first),
+                    RowLook::Numbers(n, _) => Widget::Numbers {
+                        values: shown,
+                        labels: if n == 2 { &["X", "Y"] } else { &[] },
+                        typing: self
+                            .node_typing
+                            .filter(|&(r, _)| r == k)
+                            .map(|(_, part)| part),
+                        lock: None,
+                    },
+                    RowLook::Check(on) => Widget::Check(Some(on)),
+                    RowLook::Choice => Widget::Choice {
+                        current: first,
+                        open: (self.node_choice == Some(k)).then_some(&anim_options[..]),
+                        missing: false,
+                    },
+                    RowLook::Problem => Widget::Problem(first),
+                };
+                asset_fields.push(Field {
+                    name: row.name(),
+                    widget,
+                    changed: anim.changed(row),
+                    key: None,
+                });
+            }
+            self.anim_section_at = Some(sections.len());
+            for &(section, from, to) in &self.anim_sections {
+                let title = match section {
+                    AnimSection::Selected => self.graph_title.as_str(),
+                    AnimSection::Param(p) => anim.param(p).map_or("", |(name, _)| name),
+                    AnimSection::Add => "Add Parameter",
+                };
+                sections.push(Section {
+                    title,
+                    fields: &asset_fields[from..to],
+                    script: "",
+                    removable: matches!(section, AnimSection::Param(_)),
+                });
+            }
         } else if let Some((doc, bus)) = picked {
             // The picked bus of the mixer (E11-1b): its name, output, fader, balance,
             // voices and reverb.
@@ -6382,12 +6473,16 @@ impl Editor {
         let script_tabs: Vec<&str> = script_labels.iter().map(String::as_str).collect();
         let mut graph_tabs: Vec<&str> = recycle(std::mem::take(&mut self.lists.graphs));
         graph_tabs.extend(self.graphs.iter().map(|d| d.tab.as_str()));
+        self.graph_anim.clear();
+        self.graph_anim
+            .extend(self.graphs.iter().map(|d| d.anim.is_some()));
         let graph_bar =
             self.active_graph
                 .and_then(|g| self.graphs.get(g))
                 .map(|d| crate::shell::GraphBar {
                     path: &d.path,
                     status: &self.graph_status,
+                    slang: d.anim.is_none(),
                     preview: self
                         .graph_preview
                         .as_ref()
@@ -6831,6 +6926,7 @@ impl Editor {
             active_script: self.active_script,
             code,
             graphs: &graph_tabs,
+            graph_anim: &self.graph_anim,
             active_graph: self.active_graph,
             graph: graph_bar,
             tools: &tools,
@@ -7008,6 +7104,7 @@ impl Editor {
         self.lists.scenes = recycle(scenes);
         self.lists.graphs = recycle(graph_tabs);
         self.lists.graph_values = recycle(graph_values);
+        self.lists.anim_options = recycle(anim_options);
         self.listing = self
             .ui
             .rect_of(response.listing)
@@ -7310,7 +7407,9 @@ impl Editor {
                             self.open_script(world, &path, None);
                         }
                         Some((
-                            engine_scene::AssetKind::Graph | engine_scene::AssetKind::Function,
+                            engine_scene::AssetKind::Graph
+                            | engine_scene::AssetKind::Function
+                            | engine_scene::AssetKind::AnimGraph,
                             path,
                         )) if double => {
                             self.open_graph(world, &path);
@@ -7381,6 +7480,8 @@ impl Editor {
         if let Some(s) = response.remove_section {
             if let Some(part) = self.mixer_part(s) {
                 self.remove_part(world, part);
+            } else if let Some(p) = self.anim_param_section(s) {
+                self.delete_anim_param(world, p);
             } else {
                 self.remove_section(world, s);
             }
@@ -7724,6 +7825,8 @@ impl Editor {
         if let Some(event) = response.field {
             if Some(event.section) == self.graph_section {
                 self.edit_graph_node(world, event);
+            } else if let Some(k) = self.anim_row_at(event.section, event.field) {
+                self.edit_anim(world, k, event);
             } else if Some(event.section) == self.snapshot_section {
                 self.edit_snapshot(world, event);
             } else if Some(event.section) == self.mixer_section {
@@ -7760,6 +7863,8 @@ impl Editor {
                 };
                 if Some(section) == self.graph_section {
                     self.edit_graph_node(world, event);
+                } else if let Some(k) = self.anim_row_at(section, field) {
+                    self.edit_anim(world, k, event);
                 } else if Some(section) == self.snapshot_section {
                     self.edit_snapshot(world, event);
                 } else if Some(section) == self.mixer_section {
@@ -8792,6 +8897,7 @@ impl Editor {
                                 self.add_graph_call(world, module, &function);
                             }
                             Pick::Function(function) => self.add_graph_function(world, function),
+                            Pick::State(kind) => self.add_anim_state(world, kind),
                         }
                     }
                 } else if cp.finds_objects() {
@@ -13224,6 +13330,10 @@ impl Editor {
         self.active_graph = Some(g);
         self.code_focus = false;
         self.graph_drag = None;
+        self.anim_drag = None;
+        self.node_typing = None;
+        self.node_choice = None;
+        self.node_drag = None;
         self.write_session(world);
     }
 
@@ -13260,6 +13370,7 @@ impl Editor {
             other => other,
         };
         self.graph_drag = None;
+        self.anim_drag = None;
         self.write_session(world);
     }
 
@@ -13646,7 +13757,12 @@ impl Editor {
     /// titled by their marks and their signatures their functions' again.
     fn node_functions_frame(&mut self) {
         if self.node_scanner.is_none() {
-            if self.active_graph.is_none() {
+            // A material graph shown (an animation graph calls no Slang).
+            if self
+                .active_graph
+                .and_then(|g| self.graphs.get(g))
+                .is_none_or(|d| d.anim.is_some())
+            {
                 return;
             }
             let Some(scanner) = crate::node_functions::NodeScanner::start(&self.root) else {
@@ -13743,7 +13859,10 @@ impl Editor {
     /// where the graph (an undo may bring back an older signature) or what it calls
     /// changed.
     fn calls_frame(&mut self) {
-        let Some(g) = self.active_graph.filter(|&g| g < self.graphs.len()) else {
+        let Some(g) = self
+            .active_graph
+            .filter(|&g| self.graphs.get(g).is_some_and(|d| d.anim.is_none()))
+        else {
             return;
         };
         let stamp = self.callees_stamp();
@@ -13970,6 +14089,7 @@ impl Editor {
                 ids.frame,
                 ids.duplicate,
                 ids.add_node,
+                ids.set_entry,
                 ids.show_slang,
                 ids.frame_nodes,
                 ids.make_function,
@@ -13983,9 +14103,13 @@ impl Editor {
     /// it with, in a code tab of its own, read only and following the graph.
     fn show_graph_slang(&mut self, world: &World) {
         let stamp = self.callees_stamp();
-        let Some(doc) = self.active_graph.and_then(|g| self.graphs.get(g)) else {
+        let Some(doc) = self
+            .active_graph
+            .and_then(|g| self.graphs.get(g))
+            .filter(|d| d.anim.is_none())
+        else {
             self.say(String::from(
-                "Show Slang shows a graph's code: open a graph",
+                "Show Slang shows a material graph's code: open one",
             ));
             return;
         };
@@ -14079,7 +14203,10 @@ impl Editor {
     /// compiles it), the material file drawing it to give the player, a preview to ask for.
     /// A value's change rewrites no code: only the material's values change.
     fn graph_preview_frame(&mut self) {
-        let Some(g) = self.active_graph.filter(|&g| g < self.graphs.len()) else {
+        let Some(g) = self
+            .active_graph
+            .filter(|&g| self.graphs.get(g).is_some_and(|d| d.anim.is_none()))
+        else {
             return;
         };
         let stamp = self.callees_stamp();
@@ -14184,9 +14311,26 @@ impl Editor {
         }
         self.graph_status.clear();
         self.graph_rows.clear();
+        self.anim_rows.clear();
+        self.anim_sections.clear();
         let Some(doc) = self.active_graph.and_then(|g| self.graphs.get(g)) else {
             return;
         };
+        // An animation graph's (ADR 0124 E12-5d-1): the inspector's rows and sections, the
+        // selection's title, the bar's status.
+        if let Some(anim) = doc.anim.as_deref() {
+            anim.rows(&mut self.anim_rows, &mut self.anim_sections);
+            self.anim_spans.clear();
+            let mut at = 0;
+            for &row in &self.anim_rows {
+                let n = anim.row_texts(row, &mut self.graph_texts, at);
+                self.anim_spans.push((at, n));
+                at += n;
+            }
+            anim.title(&mut self.graph_title);
+            anim.status(doc.view.zoom(), &mut self.graph_status);
+            return;
+        }
         // The inspector's rows (E10-3f-1): the node selected alone's, or the graph's.
         doc.rows(&mut self.graph_rows);
         self.graph_spans.clear();
@@ -14295,13 +14439,277 @@ impl Editor {
             ctrl: self.input.ctrl(),
             escape: free && self.ui.input().keys.contains(&UiKey::Escape),
         };
-        let outcome = self.graphs[g].pointer(&pointer, [x, y], &mut self.graph_drag);
+        // An animation graph's canvas (ADR 0124 E12-5d-1), or a material graph's.
+        let outcome = if self.graphs[g].anim.is_some() {
+            self.graphs[g].anim_pointer(&pointer, [x, y], &mut self.anim_drag)
+        } else {
+            self.graphs[g].pointer(&pointer, [x, y], &mut self.graph_drag)
+        };
         // Laid out again at once: this frame draws the boxes where they went.
         {
             let text = &mut self.text;
             self.graphs[g].relayout(&mut |s, size| text.measure(s, size, None)[0]);
         }
         self.graph_outcome(world, g, outcome);
+    }
+
+    /// The shown graph tab, where it is an animation graph's (ADR 0124 E12-5d-1).
+    fn anim_graph_shown(&self) -> Option<usize> {
+        self.active_graph
+            .filter(|&g| self.graphs.get(g).is_some_and(|d| d.anim.is_some()))
+    }
+
+    /// "Graph: Add Node…" on an animation graph's canvas (Space or Shift+A; ADR 0124
+    /// E12-5d-1): what a state can play, in the palette at the pointer; the state picked
+    /// goes to canvas point `at` (the pointer's, or the canvas's middle when the pointer is
+    /// elsewhere).
+    fn open_state_search(&mut self, world: &mut World, g: usize, at: Option<[f32; 2]>) {
+        let scale = self.scale.max(0.5);
+        let pointer = self.input.cursor().map(|[x, y]| [x / scale, y / scale]);
+        let area = self.graph_area;
+        let Some(doc) = self.graphs.get(g) else {
+            return;
+        };
+        let inside = |[px, py]: [f32; 2]| {
+            area.is_some_and(|[x, y, w, h]| px >= x && py >= y && px < x + w && py < y + h)
+        };
+        let at = at.or_else(|| {
+            let [x, y, w, h] = area?;
+            let q = pointer
+                .filter(|&q| inside(q))
+                .unwrap_or([x + w * 0.5, y + h * 0.5]);
+            Some(doc.view.canvas_point(q, [x, y]))
+        });
+        let Some(at) = at else {
+            return;
+        };
+        let items = crate::agraph::StateKind::ALL
+            .iter()
+            .map(|&kind| {
+                let (label, detail) = kind.label();
+                Choice {
+                    label: label.to_owned(),
+                    detail: detail.to_owned(),
+                    pick: Pick::State(kind),
+                }
+            })
+            .collect();
+        self.graph_add = Some(GraphAdd {
+            graph: doc.id,
+            at,
+            from: None,
+        });
+        self.open_list(world, "Add a state: what it plays", items);
+        if let Some(cp) = &mut self.command_palette {
+            cp.at = pointer.filter(|&q| inside(q));
+            if let Some(choices) = &mut cp.choices {
+                choices.ranked = true;
+            }
+        }
+    }
+
+    /// The state search's pick: a state playing `kind` added where the search was opened,
+    /// as a step (its graph's tab shown).
+    fn add_anim_state(&mut self, world: &mut World, kind: crate::agraph::StateKind) {
+        let Some(add) = self.graph_add.take() else {
+            return;
+        };
+        let Some(g) = self.graphs.iter().position(|d| d.id == add.graph) else {
+            return;
+        };
+        let outcome = self.graphs[g].add_state(kind, add.at, None);
+        self.graph_outcome(world, g, outcome);
+        if self.active_graph != Some(g) {
+            self.show_graph(world, g);
+        }
+    }
+
+    /// "Graph: Set Entry State" (ADR 0124 E12-5d-1): the state selected alone its
+    /// machine's entry, as a step.
+    fn set_entry_state(&mut self, world: &mut World, g: usize) {
+        let state = self
+            .graphs
+            .get(g)
+            .and_then(|d| d.anim())
+            .and_then(|a| a.inspected_state())
+            .map(str::to_owned);
+        let Some(state) = state else {
+            self.say(String::from("Select the state its machine is to start at"));
+            return;
+        };
+        let outcome = self.graphs[g].set_entry(&state);
+        self.graph_outcome(world, g, outcome);
+    }
+
+    /// The shown animation graph's row that inspector section `section`'s field `field` is
+    /// (ADR 0124 E12-5d-1): a field a row.
+    fn anim_row_at(&self, section: usize, field: usize) -> Option<usize> {
+        let j = section.checked_sub(self.anim_section_at?)?;
+        let &(_, from, to) = self.anim_sections.get(j)?;
+        let k = from + field;
+        (k < to).then_some(k)
+    }
+
+    /// The shown animation graph's parameter whose section inspector section `section` is.
+    fn anim_param_section(&self, section: usize) -> Option<usize> {
+        let j = section.checked_sub(self.anim_section_at?)?;
+        match self.anim_sections.get(j)? {
+            &(crate::agraph::AnimSection::Param(p), ..) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The × of the shown animation graph's parameter `p`'s section: it deleted, as a step.
+    fn delete_anim_param(&mut self, world: &mut World, p: usize) {
+        let Some(g) = self.anim_graph_shown() else {
+            return;
+        };
+        let name = self.graphs[g]
+            .anim()
+            .and_then(|a| a.param(p))
+            .map(|(n, _)| n.to_owned());
+        let edit = self.graphs[g].delete_param(p);
+        self.graph_edit(world, g, "Delete Parameter", None, edit);
+        if let Some(name) = name {
+            self.say(format!("Deleted the parameter {name}: Ctrl+Z puts it back"));
+        }
+    }
+
+    /// Applies an inspector field's action to the shown animation graph (ADR 0124
+    /// E12-5d-1): row `k` of the state or the transition selected alone, or of a parameter;
+    /// each change a step of the one history (a drag's moves one), drawn by the next frame.
+    fn edit_anim(&mut self, world: &mut World, k: usize, event: FieldEvent) {
+        use crate::agraph::RowLook;
+        let Some(g) = self.anim_graph_shown() else {
+            return;
+        };
+        let Some(&row) = self.anim_rows.get(k) else {
+            return;
+        };
+        let Some(anim) = self.graphs[g].anim() else {
+            return;
+        };
+        let look = anim.look(row);
+        let numbers = anim.numbers(row);
+        let name = row.name();
+        match event.action {
+            FieldAction::Drag {
+                part,
+                travel,
+                start,
+            } => {
+                let RowLook::Numbers(n, whole) = look else {
+                    return;
+                };
+                if start || self.node_drag.is_none() {
+                    self.gestures += 1;
+                    self.node_drag = Some(NodeDrag {
+                        row: k,
+                        part: usize::from(part).min(usize::from(n.max(1)) - 1),
+                        start: numbers,
+                        merge: self.gestures,
+                        moved: false,
+                    });
+                    self.node_typing = None;
+                    return;
+                }
+                let Some(drag) = self.node_drag.as_mut() else {
+                    return;
+                };
+                if travel != 0.0 {
+                    drag.moved = true;
+                }
+                let drag = *drag;
+                let quantity = if whole {
+                    Quantity::Integer
+                } else {
+                    Quantity::Number { step: None }
+                };
+                let (shift, ctrl) = (self.input.shift(), self.input.ctrl());
+                let mut values = drag.start;
+                values[drag.part] = self.snapping.drag(
+                    quantity,
+                    f64::from(drag.start[drag.part]),
+                    travel,
+                    shift,
+                    ctrl,
+                ) as f32;
+                let edit = self.graphs[g].anim_set_numbers(row, values);
+                self.graph_edit(world, g, &format!("Edit {name}"), Some(drag.merge), edit);
+            }
+            FieldAction::Release => {
+                if let Some(drag) = self.node_drag.take()
+                    && !drag.moved
+                {
+                    self.node_typing = Some((drag.row, drag.part as u8));
+                }
+            }
+            FieldAction::Typed { part, commit } => {
+                self.node_typing = None;
+                if !commit {
+                    return;
+                }
+                let text = self.ui.edited_text().trim().to_owned();
+                let part = usize::from(part).min(3);
+                let mut values = numbers;
+                match crate::expr::evaluate(&text, f64::from(values[part])) {
+                    Ok(value) => values[part] = value as f32,
+                    Err(reason) => {
+                        self.say(format!("{name}: {reason}"));
+                        return;
+                    }
+                }
+                let edit = self.graphs[g].anim_set_numbers(row, values);
+                self.graph_edit(world, g, &format!("Set {name}"), None, edit);
+            }
+            FieldAction::Text { commit } => {
+                if !commit {
+                    return;
+                }
+                let text = self.ui.edited_text().to_owned();
+                match self.graphs[g].anim_set_text(row, &text) {
+                    Ok(edit) => self.graph_edit(world, g, &format!("Set {name}"), None, edit),
+                    Err(why) => self.say(why),
+                }
+            }
+            FieldAction::Toggle => match self.graphs[g].anim_toggle(row) {
+                Ok(outcome) => self.graph_outcome(world, g, outcome),
+                Err(why) => self.say(why.to_owned()),
+            },
+            FieldAction::Open => {
+                self.node_choice = (self.node_choice != Some(k)).then_some(k);
+            }
+            FieldAction::Choose(i) => {
+                self.node_choice = None;
+                let edit = self.graphs[g].anim_choose(row, i);
+                self.graph_edit(world, g, &format!("Set {name}"), None, edit);
+            }
+            FieldAction::Reset => {
+                let edit = self.graphs[g].anim_reset(row);
+                self.graph_edit(world, g, &format!("Reset {name}"), None, edit);
+            }
+            FieldAction::Pick | FieldAction::Lock | FieldAction::Play | FieldAction::Key => {}
+        }
+    }
+
+    /// "Animation: New Animation Graph" (ADR 0124 E12-5d-1): an animation graph in the
+    /// dock's folder (`New Animation Graph.agraph`, numbered when taken): a base layer
+    /// playing a machine whose entry state, Idle, plays a clip not named yet; it opens in
+    /// its tab.
+    fn new_animation_graph(&mut self, world: &World) {
+        let folder = self.browser.folder.clone();
+        let path = unique_file(&self.root, &folder, "New Animation Graph", "agraph");
+        let id = AssetId::new();
+        let text = crate::agraph::starter().to_text(id, None);
+        if let Err(e) = self.write_material_file(&path, id, &text) {
+            self.say(format!("{path} could not be written: {e}"));
+            return;
+        }
+        self.open_graph(world, Path::new(&path));
+        self.say(format!(
+            "{path}: Idle plays no clip yet (the inspector names it); Space adds a state, a \
+             drag from a state's edge a transition"
+        ));
     }
 
     /// "File: Open Script…" (a double click in the dock, a click on an error at one's
@@ -16747,6 +17155,50 @@ impl Editor {
     fn run(&mut self, world: &mut World, id: CommandId) {
         self.commands.ran(id);
         let ids = self.ids;
+        // An animation graph's tab (ADR 0124 E12-5d-1): as a material graph's, Space adding
+        // a state; the material graph's own keys (copies, frames, functions) said to be its.
+        if let Some(g) = self.anim_graph_shown() {
+            let canvas = !self.tree_focus && !self.dock_focus;
+            if id == ids.save {
+                self.save_graph(g);
+                return;
+            }
+            if id == ids.close_scene {
+                self.close_graph(world, g);
+                return;
+            }
+            if id == ids.delete && canvas {
+                let outcome = self.graphs[g].delete_anim_selection();
+                self.graph_outcome(world, g, outcome);
+                return;
+            }
+            if id == ids.frame && canvas {
+                self.frame_graph(g);
+                return;
+            }
+            if id == ids.add_node {
+                self.open_state_search(world, g, None);
+                return;
+            }
+            if id == ids.set_entry {
+                self.set_entry_state(world, g);
+                return;
+            }
+            let material = [
+                ids.duplicate,
+                ids.frame_nodes,
+                ids.make_function,
+                ids.enter_function,
+                ids.ungroup_function,
+            ];
+            if canvas && material.contains(&id) {
+                self.say(String::from(
+                    "That works on a material graph's canvas; on an animation graph's, Space \
+                     adds a state and a drag from a state's edge a transition",
+                ));
+                return;
+            }
+        }
         // A graph's tab (ADR 0123 E10-3d): Ctrl+S saves the graph, Ctrl+W closes it; Delete
         // and F are its canvas's, unless the tree or the dock has the keys.
         if let Some(g) = self.active_graph.filter(|&g| g < self.graphs.len()) {
@@ -17148,6 +17600,13 @@ impl Editor {
         } else if id == ids.add_node {
             self.say(String::from(
                 "Add Node works in a material graph's tab (a double click on a .mgraph)",
+            ));
+        } else if id == ids.new_anim_graph {
+            self.new_animation_graph(world);
+        } else if id == ids.set_entry {
+            self.say(String::from(
+                "Set Entry State works in an animation graph's tab (a double click on an \
+                 .agraph)",
             ));
         } else if id == ids.make_variant {
             self.make_variant(world);
@@ -19034,7 +19493,12 @@ impl Editor {
             let graph_path = self
                 .asset_db
                 .get(id)
-                .filter(|e| e.kind == engine_scene::AssetKind::Graph)
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        engine_scene::AssetKind::Graph | engine_scene::AssetKind::AnimGraph
+                    )
+                })
                 .map(|e| e.path.clone());
             if !self.graphs.iter().any(|d| d.id == id)
                 && let Some(path) = graph_path
@@ -22992,6 +23456,9 @@ impl Editor {
         use engine_scene::AssetKind as K;
         let name = drag.name.clone();
         match (drag.over, drag.kind) {
+            (DropTarget::Graph, _) if self.anim_graph_shown().is_some() => self.say(format!(
+                "{name}: an animation graph takes no files yet (Space adds a state)"
+            )),
             (DropTarget::Graph, K::Texture) => self.drop_on_graph(world, &drag),
             (DropTarget::Graph, _) => self.say(format!(
                 "{name} is not an image: an image dropped here makes a texture node"
@@ -30135,8 +30602,28 @@ impl Overlay for EditorOverlay {
                     &mut self.canvas,
                 );
             }
-            // The shown graph's canvas (ADR 0123 E10-3d), over the viewport's overlays.
+            // The shown graph's canvas (ADR 0123 E10-3d), over the viewport's overlays: an
+            // animation graph's (ADR 0124 E12-5d-1), or a material graph's.
             if let (Some(g), Some(rect)) = (editor.active_graph, editor.graph_rect)
+                && let Some(doc) = editor.graphs.get(g)
+                && let Some(anim) = doc.anim.as_deref()
+            {
+                let look = crate::graph::Look {
+                    rect,
+                    scale: editor.scale.max(0.5),
+                    palette: &editor.palette,
+                    glyphs: &self.glyphs,
+                    tiles: None,
+                };
+                crate::agraph::draw(
+                    doc,
+                    anim,
+                    editor.anim_drag.as_ref(),
+                    &look,
+                    &mut editor.text,
+                    &mut self.canvas,
+                );
+            } else if let (Some(g), Some(rect)) = (editor.active_graph, editor.graph_rect)
                 && let Some(doc) = editor.graphs.get(g)
             {
                 let tiles = editor
@@ -41249,6 +41736,243 @@ return Coin
         let again = crate::graph::GraphDoc::open(&dir, "materials/glow.mgraph").unwrap();
         assert_eq!(again.graph, ed.graphs[0].graph);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124 E12-5d-1: an animation graph opens in a tab of its own (no Show Slang); a
+    /// drag from a state's edge onto another is a transition, selected; its condition typed
+    /// in the inspector is checked as it is, its problem said under it and in the bar; Delete,
+    /// undo and redo; with nothing selected the parameters (one added, one deleted by its
+    /// section's ×); Ctrl+S writes the file, Ctrl+W closes the tab and an undo opens it again;
+    /// New Animation Graph writes one and opens it, and Space over its canvas adds a state.
+    #[test]
+    fn an_animation_graph_opens_in_a_tab_and_its_canvas_edits_as_steps() {
+        use crate::agraph::{AnimRow, AnimSection};
+        const SPACE: (u16, u16) = (0x20, 0x39);
+        const DELETE: (u16, u16) = (0x2E, 0x53);
+        let dir = project("agraph-tab");
+        std::fs::create_dir_all(dir.join("anim")).unwrap();
+        std::fs::write(
+            dir.join("anim/hero.agraph"),
+            format!(
+                "[agraph version=1 id={}]\n\n\
+                 params[\"speed\"].kind = Float\n\
+                 layers[\"base\"].name = \"Base\"\nlayers[\"base\"].root = \"m\"\n\
+                 nodes[\"m\"].kind = Machine\nnodes[\"m\"].entry = \"idle\"\n\
+                 nodes[\"m\"].at = [-200, -100]\n\
+                 nodes[\"ci\"].clip = \"Idle\"\nnodes[\"cw\"].clip = \"Walk\"\n\
+                 states[\"idle\"].machine = \"m\"\nstates[\"idle\"].name = \"Idle\"\n\
+                 states[\"idle\"].pose = \"ci\"\n\
+                 states[\"walk\"].at = [300, 0]\nstates[\"walk\"].machine = \"m\"\n\
+                 states[\"walk\"].name = \"Walk\"\nstates[\"walk\"].pose = \"cw\"\n",
+                AssetId::new()
+            ),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        ed.update(&mut world);
+        ed.open_graph(&world, Path::new("anim/hero.agraph"));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(ed.active_graph, Some(0));
+        assert!(ed.graphs[0].anim.is_some());
+        assert!(!texts(&ed, "hero.agraph").is_empty(), "its tab");
+        assert!(!texts(&ed, "anim/hero.agraph").is_empty(), "its bar");
+        assert!(
+            ed.graph_status.starts_with("2 states \u{b7} 0 transitions"),
+            "{}",
+            ed.graph_status
+        );
+        assert!(texts(&ed, "Show Slang").is_empty(), "no code to show");
+        assert!(!texts(&ed, "Add Parameter").is_empty(), "the parameters");
+        // From Idle's edge onto Walk: a transition, a step, selected.
+        let [x, y, ..] = ed.graph_area.unwrap();
+        let panel = |ed: &Editor, c: [f32; 2]| ed.graphs[0].view.panel_point(c, [x, y]);
+        let edge = panel(&ed, [crate::agraph::STATE_WIDTH - 1.0, 30.0]);
+        let walk = panel(&ed, [370.0, 30.0]);
+        mouse(&mut ed, edge, None);
+        ed.update(&mut world);
+        mouse(&mut ed, edge, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, walk, None);
+        ed.update(&mut world);
+        mouse(&mut ed, walk, Some(false));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(anim(&ed).file.transitions.len(), 1);
+        let (t, made) = anim(&ed).file.transitions.iter().next().unwrap();
+        let t = t.clone();
+        assert_eq!((made.from.as_str(), made.to.as_str()), ("idle", "walk"));
+        assert!(anim(&ed).transitions.contains(&t), "selected");
+        assert_eq!(ed.history.steps().count(), 1);
+        assert!(!texts(&ed, "Transition \u{b7} Idle \u{2192} Walk").is_empty());
+        assert!(ed.anim_rows.contains(&AnimRow::Problem), "no condition yet");
+        // Its condition typed in the inspector: a misspelt name said where it is.
+        let label = texts(&ed, "when")[0];
+        let field = [label.pos[0] + 150.0, label.pos[1] + label.size[1] * 0.5];
+        click(&mut ed, &mut world, field);
+        ed.update(&mut world);
+        assert!(ed.ui.editing().is_some(), "a click types the condition");
+        chars(&mut ed, "speeed > 0.1");
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, true);
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, false);
+        ed.update(&mut world);
+        assert_eq!(anim(&ed).file.transitions[&t].when, "speeed > 0.1");
+        assert!(
+            ed.graph_texts
+                .iter()
+                .any(|s| s == "no parameter `speeed` (at 1)"),
+            "under the condition"
+        );
+        assert!(
+            ed.graph_status
+                .contains("Idle \u{2192} Walk: no parameter `speeed`"),
+            "{}",
+            ed.graph_status
+        );
+        // Typed again right: no problem.
+        let at = on_row(&ed, "when", "speeed > 0.1");
+        click(&mut ed, &mut world, at);
+        ed.update(&mut world);
+        for _ in 0.."speeed > 0.1".len() {
+            key(&mut ed, 0x08, 0x0E, true);
+            key(&mut ed, 0x08, 0x0E, false);
+        }
+        chars(&mut ed, "speed > 0.1");
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, true);
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, false);
+        ed.update(&mut world);
+        assert_eq!(anim(&ed).file.transitions[&t].when, "speed > 0.1");
+        assert!(!ed.anim_rows.contains(&AnimRow::Problem));
+        assert_eq!(ed.history.steps().count(), 3);
+        // Undo and redo.
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        assert_eq!(anim(&ed).file.transitions[&t].when, "speeed > 0.1");
+        chord(&mut ed, &mut world, &[CTRL, Y]);
+        assert_eq!(anim(&ed).file.transitions[&t].when, "speed > 0.1");
+        // Delete takes the selected transition; undo puts it back.
+        for pressed in [true, false] {
+            event(
+                &mut ed,
+                WindowEventKind::Key {
+                    virtual_key: DELETE.0,
+                    scancode: DELETE.1,
+                    extended: true,
+                    pressed,
+                    repeat: false,
+                },
+            );
+            ed.update(&mut world);
+        }
+        assert!(anim(&ed).file.transitions.is_empty());
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        assert_eq!(anim(&ed).file.transitions[&t].when, "speed > 0.1");
+        // Nothing selected: the parameters; a flag added, then deleted by its ×.
+        anim_mut_clear(&mut ed);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let at = ed.anim_section_at.unwrap();
+        let add = ed
+            .anim_sections
+            .iter()
+            .position(|(s, ..)| *s == AnimSection::Add)
+            .unwrap();
+        let (_, row, _) = ed.anim_sections[add];
+        let event = |action| FieldEvent {
+            section: at + add,
+            field: 0,
+            action,
+        };
+        ed.edit_anim(&mut world, row, event(FieldAction::Open));
+        ed.edit_anim(&mut world, row, event(FieldAction::Choose(1)));
+        assert_eq!(
+            anim(&ed).file.params["flag"].kind,
+            engine_scene::ParamKind::Bool
+        );
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "flag").is_empty(), "its section");
+        let flag = ed
+            .anim_sections
+            .iter()
+            .position(|(s, ..)| *s == AnimSection::Param(0))
+            .unwrap();
+        assert_eq!(ed.anim_param_section(at + flag), Some(0));
+        ed.delete_anim_param(&mut world, 0);
+        assert!(!anim(&ed).file.params.contains_key("flag"));
+        // Ctrl+S writes the file, read back as the tab holds it.
+        chord(&mut ed, &mut world, &[CTRL, S]);
+        assert!(!ed.graphs[0].dirty());
+        let again = crate::graph::GraphDoc::open(&dir, "anim/hero.agraph").unwrap();
+        assert_eq!(again.anim.unwrap().file, anim(&ed).file);
+        // Ctrl+W closes it; the deletion undone opens it again, unsaved.
+        chord(&mut ed, &mut world, &[CTRL, W]);
+        assert!(ed.graphs.is_empty() && ed.active_graph.is_none());
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        assert_eq!(ed.graphs.len(), 1, "opened again by the undo");
+        assert!(ed.graphs[0].dirty() && ed.graphs[0].anim.is_some());
+        assert!(anim(&ed).file.params.contains_key("flag"));
+        // New Animation Graph: written in the dock's folder, opened; Idle names no clip.
+        let new = ed.ids.new_anim_graph;
+        ed.run(&mut world, new);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(dir.join("New Animation Graph.agraph").is_file());
+        assert!(ed.asset_db.find("New Animation Graph.agraph").is_some());
+        assert_eq!(ed.active_graph, Some(1));
+        assert!(
+            ed.graph_status.starts_with("1 state \u{b7} 0 transitions"),
+            "{}",
+            ed.graph_status
+        );
+        assert!(
+            ed.graph_status.contains("Idle: no clip"),
+            "{}",
+            ed.graph_status
+        );
+        // Space over its canvas: the state search at the pointer; Enter adds a clip state.
+        let [x, y, w, h] = ed.graph_area.unwrap();
+        mouse(&mut ed, [x + w * 0.5, y + h - 60.0], None);
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[SPACE]);
+        let cp = ed.command_palette.as_ref().expect("the state search");
+        assert!(cp.choices.is_some() && cp.at.is_some());
+        ed.update(&mut world);
+        chars(&mut ed, "clip");
+        ed.update(&mut world);
+        chord(&mut ed, &mut world, &[ENTER]);
+        ed.update(&mut world);
+        let states: Vec<&str> = ed.graphs[1]
+            .anim
+            .as_deref()
+            .unwrap()
+            .file
+            .states
+            .values()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(states.contains(&"New State"), "{states:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The first graph tab's animation graph.
+    fn anim(ed: &Editor) -> &crate::agraph::AnimDoc {
+        ed.graphs[0].anim.as_deref().unwrap()
+    }
+
+    /// Nothing selected on the shown animation graph's canvas.
+    fn anim_mut_clear(ed: &mut Editor) {
+        if let Some(a) = ed
+            .active_graph
+            .and_then(|g| ed.graphs.get_mut(g))
+            .and_then(|d| d.anim.as_deref_mut())
+        {
+            a.clear_selection();
+        }
     }
 
     #[test]

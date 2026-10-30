@@ -1001,13 +1001,18 @@ pub(crate) fn mixer_autosave_name(layout: &Path) -> PathBuf {
 }
 
 /// Where a material graph's unsaved text goes, relative to `.ofelia/` (ADR 0123 E10-3d):
-/// by its file's stem and a hash of its path, as a material file's.
+/// by its file's stem and a hash of its path, as a material file's; an animation graph's
+/// keeps its extension (ADR 0124 E12-5d-1).
 pub(crate) fn graph_autosave_name(graph: &Path) -> PathBuf {
     let stem = graph
         .file_stem()
         .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
     let hash = engine_core::hash::state_hash64(slashes(graph).as_bytes());
-    PathBuf::from(format!("autosave/{stem}-{hash:016x}.mgraph"))
+    let anim = graph
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("agraph"));
+    let extension = if anim { "agraph" } else { "mgraph" };
+    PathBuf::from(format!("autosave/{stem}-{hash:016x}.{extension}"))
 }
 
 /// Where a material file's unsaved text goes, relative to `.ofelia/` (E10-1c): by its file's

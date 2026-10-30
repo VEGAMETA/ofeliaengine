@@ -25,6 +25,9 @@ engine_assets.workspace = true
 engine_brush.workspace = true
 # Material graphs opened in tabs of their own and edited on a canvas (ADR 0123 E10-3d).
 engine_material_graph.workspace = true
+# Animation graphs' transition conditions, checked as they are typed (ADR 0124 E12-5d-1);
+# already built for the player (`engine_app`).
+engine_anim.workspace = true
 engine_core.workspace = true
 # Logging and crash reports of the editor application (ADR 0061).
 engine_crash.workspace = true
