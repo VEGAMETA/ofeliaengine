@@ -584,6 +584,36 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-3d, 2026-10-30): Mark Foot Plants
+
+- **The command** (`animation.mark_foot_plants`, and the tab's button beside + while no
+  event is picked) works on the chosen clip, of a character or of the dock's model.
+  - It puts a `footstep` event, data `left` or `right`, where each foot touches down.
+  - It replaces the footsteps it marked before (name `footstep`, data `left` or `right`),
+    as one undo step written to the `.meta`.
+  - It runs in the next `clips_frame`, where the rig is.
+- **The feet** (`clip_events::find_feet`): the first joint named for a foot on each side
+  (`foot`, else `ankle`; the side from `left`/`right` or an `L`/`R` part of the name).
+  - **The Fox:** `b_LeftFoot01_017` and `b_RightFoot01_021`.
+  - **Else:** each named side's lowest joint in the rest pose (CesiumMan:
+    `leg_joint_L_5`, `leg_joint_R_5`).
+  - **Else:** the lowest joint and the lowest one a tenth of the skeleton's height apart.
+- **The touch-downs** (`clip_events::foot_plants`): where the foot's path (`joint_path`,
+  heights along `Rig::up`) comes down into the lowest fifth of its height's range.
+  - Speed is no guide: in a clip made in place, a planted foot slides back nearly as fast
+    as it swings. A first speed criterion marked three footsteps for two on a synthetic
+    walk, so it was dropped.
+  - A loop leaves out its last sample (its first again), and does not mark its start when
+    the foot was already down before its end.
+  - **Engine side:** `Rig::up` and `Rig::rest_places` (the rest pose's places).
+- **Tests:**
+  - **Unit:** a walking foot's touch-downs, one a cycle, once across a loop's end, none
+    for a foot that never lifts; feet found by name (the Fox's), by each side's lowest
+    (though a joint of the same leg lies well apart), and by geometry.
+  - **GPU, the Fox:** Walk gets a right footstep at 0.042 s and a left at 0.542 s.
+  - **GPU, CesiumMan:** one left and one right in his 2 s walk.
+- **Left:** clips picked together for one run; foot locking or IK from the plants.
+
 ## As built (E12-3c, 2026-10-30): a picked joint's trail and speed curve
 
 - **The path:** `Rig::joint_path(clip, joint, out)` gives the joint's place in the model's

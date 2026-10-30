@@ -175,6 +175,20 @@ impl Rig {
         &self.clips
     }
 
+    /// Up in the model's space (ADR 0124's E12-3d): the file's, glTF's +Y in its scene.
+    pub fn up(&self) -> Vec3 {
+        self.mesh_up
+    }
+
+    /// Each joint's place in the model's space in the rest pose (ADR 0124's E12-3d), in the
+    /// skeleton's order.
+    pub fn rest_places(&self, out: &mut Vec<Vec3>) {
+        out.clear();
+        let mut posing = Posing::default();
+        let joints = posing.joints(self, Look::default());
+        out.extend(joints.iter().map(|m| Vec3::from(m.translation)));
+    }
+
     /// Joint `joint`'s place in the model's space at each of clip `k`'s samples (ADR 0124's
     /// E12-3c), its root motion left in: the path the editor's trail draws and its speed
     /// curve is read from. Empty for a clip or a joint it has not.
