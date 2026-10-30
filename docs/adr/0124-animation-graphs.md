@@ -584,6 +584,34 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5d-2c-1, 2026-10-30): machines inside machines
+
+- **A state can play a machine:** its **plays** row offers `Machine`, and the add search
+  (Space) `State: Machine`. The machine gets its own Idle as its entry (playing a clip not
+  named yet), its Any State box above and left of it. Its pose made a clip or a blend again
+  takes its states (and theirs, and their transitions) with it.
+- **In and out:** a double-click on a state playing a machine, or **Tab** with it selected
+  alone, shows its machine on the canvas (nothing selected, framed anew); **Tab** with
+  nothing selected comes back out one level, the state that plays it selected. The bar's
+  crumbs after the layers' chips (`› Locomotion › Ground`) name the machines entered; a
+  click on one backs out to it, the shown layer's chip to the layer's own. What is
+  entered is the tab's, not the file's: an edit or an undo that takes a machine away
+  brings the canvas back out to where it still holds.
+- **States go into the machine shown** (Space and an arrow dropped on the canvas), and
+  `Set Entry State` sets its entry.
+- **Its live state in Play:** `AnimGraph::machine_now_of_node(state, node)` (the cook keeps
+  each description node's machine), and `Player::graph_now_node(entity, node)`, the node
+  by its place among the graph file's nodes in their ids' order; the canvas, the bar and
+  the inspector read the machine shown through it, a layer's or one inside a state.
+- **Grouping the selected states into a machine (Ctrl+G) and taking one apart
+  (Ctrl+Alt+G)** come next (E12-5d-2c-2).
+- **Tests:** the runtime's (a machine inside Move found by its node while Move plays,
+  `Walking` at its time; the layer's machine by its node too; a clip's node none); the
+  document's (a pose made a machine, its Idle; Tab in; the crumbs; a state added inside;
+  Tab out with the state selected; a double-click in; the pose a clip again taking its
+  states; a machine state from the search; the canvas back out when its state is
+  deleted); the fox in Play reads its live state through the node now.
+
 ## As built (E12-5d-2b-2, 2026-10-30): a layer's mask as check boxes over the joints
 
 - **The team's а (2026-10-30):** with nothing selected, a **Mask** section follows the

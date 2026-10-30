@@ -73,7 +73,7 @@ const MACHINE_TITLE: Vec4 = Vec4::new(0.09, 0.045, 0.188, 1.0);
 const EDGE_COLOR: Vec4 = Vec4::new(0.155, 0.43, 0.91, 1.0);
 
 /// What a state's pose can be, in the inspector's list (a machine is made otherwise).
-pub(crate) const POSE_KINDS: [&str; 3] = ["Clip", "Blend1d", "Blend2d"];
+pub(crate) const POSE_KINDS: [&str; 4] = ["Clip", "Blend1d", "Blend2d", "Machine"];
 /// What a parameter can hold, in the inspector's lists.
 pub(crate) const PARAM_KINDS: [&str; 4] = ["Float", "Bool", "Int", "Trigger"];
 
@@ -103,11 +103,13 @@ pub(crate) enum StateKind {
     Blend1d,
     /// Clips blended over two parameters.
     Blend2d,
+    /// A state machine of its own inside (ADR 0124's E12-5d-2c).
+    Machine,
 }
 
 impl StateKind {
     /// Every kind, in the search's order.
-    pub(crate) const ALL: [Self; 3] = [Self::Clip, Self::Blend1d, Self::Blend2d];
+    pub(crate) const ALL: [Self; 4] = [Self::Clip, Self::Blend1d, Self::Blend2d, Self::Machine];
 
     /// Its pose node's kind.
     fn node(self) -> NodeKind {
@@ -115,6 +117,7 @@ impl StateKind {
             Self::Clip => NodeKind::Clip,
             Self::Blend1d => NodeKind::Blend1d,
             Self::Blend2d => NodeKind::Blend2d,
+            Self::Machine => NodeKind::Machine,
         }
     }
 
@@ -127,6 +130,7 @@ impl StateKind {
                 "State: Blend by Two Parameters",
                 "clips over two parameters",
             ),
+            Self::Machine => ("State: Machine", "a state machine inside it (Tab enters)"),
         }
     }
 }
@@ -467,6 +471,9 @@ pub(crate) struct AnimDoc {
     /// The skeleton masks are edited over (E12-5d-2b): a character's playing the graph, its
     /// joints' names, parents and depths in its order (parents first); empty until one is
     /// found. And the joint picked in the shown layer's mask, by name.
+    /// The machines entered from the shown layer's (ADR 0124's E12-5d-2c), by node id, each
+    /// the pose of a state of the one before: the canvas shows the last.
+    pub(crate) path: Vec<String>,
     pub(crate) joints: Vec<String>,
     pub(crate) joint_parents: Vec<Option<usize>>,
     pub(crate) joint_depths: Vec<u16>,
@@ -502,6 +509,7 @@ impl AnimDoc {
             file,
             layer: String::new(),
             layer_ids: Vec::new(),
+            path: Vec::new(),
             joints: Vec::new(),
             joint_parents: Vec::new(),
             joint_depths: Vec::new(),
@@ -536,7 +544,24 @@ impl AnimDoc {
         );
         let layer = shown_layer(&self.file, &self.layer).unwrap_or_default();
         self.layer = layer;
-        self.machine = shown_machine(&self.file, &self.layer);
+        let root = shown_machine(&self.file, &self.layer);
+        // The machines entered, while each is still the pose of a state of the one before.
+        let mut keep = 0;
+        for (k, m) in self.path.iter().enumerate() {
+            let parent = if k == 0 { &root } else { &self.path[k - 1] };
+            let held = is_machine(&self.file, m)
+                && self
+                    .file
+                    .states
+                    .values()
+                    .any(|s| s.machine == *parent && s.pose == *m);
+            if !held {
+                break;
+            }
+            keep = k + 1;
+        }
+        self.path.truncate(keep);
+        self.machine = self.path.last().cloned().unwrap_or(root);
         self.marks.clear();
         for (what, why) in self.file.problems() {
             let on = match what.split_once(' ') {
@@ -1012,22 +1037,41 @@ impl AnimDoc {
         self.file.layers.get(&self.layer)
     }
 
+    /// The names of the states whose machines are entered, outermost first (the bar's crumbs,
+    /// ADR 0124's E12-5d-2c), into `out` (its room kept).
+    pub(crate) fn crumbs<'a>(&'a self, out: &mut Vec<&'a str>) {
+        out.clear();
+        for (k, m) in self.path.iter().enumerate() {
+            let parent = if k == 0 {
+                self.file
+                    .layers
+                    .get(&self.layer)
+                    .map_or("", |l| l.root.as_str())
+            } else {
+                self.path[k - 1].as_str()
+            };
+            let name = self
+                .file
+                .states
+                .values()
+                .find(|s| s.machine == parent && s.pose == *m)
+                .map_or("", |s| s.name.as_str());
+            out.push(name);
+        }
+    }
+
+    /// The shown machine's node's place among the file's nodes (in their ids' order, as the
+    /// player's graph has them; ADR 0124's E12-5d-2c), for its live state.
+    pub(crate) fn machine_node_index(&self) -> Option<usize> {
+        if self.machine.is_empty() {
+            return None;
+        }
+        self.file.nodes.keys().position(|k| *k == self.machine)
+    }
+
     /// The shown layer's place among the layers in their order (the player's layer index).
     pub(crate) fn layer_index(&self) -> Option<usize> {
         self.layer_ids.iter().position(|id| *id == self.layer)
-    }
-
-    /// The shown layer's place among the layers the player cooks: those before it whose root
-    /// node the graph has (the cook leaves out a layer playing nothing), for its live state.
-    pub(crate) fn cooked_layer_index(&self) -> Option<usize> {
-        let k = self.layer_index()?;
-        let plays = |id: &String| {
-            self.file
-                .layers
-                .get(id)
-                .is_some_and(|l| self.file.nodes.contains_key(&l.root))
-        };
-        Some(self.layer_ids[..k].iter().filter(|id| plays(id)).count())
     }
 
     /// The skeleton masks are edited over (a character's playing the graph): its joints'
@@ -1636,6 +1680,32 @@ fn fresh_layer_name(file: &AnimGraphFile) -> String {
         .unwrap_or_default()
 }
 
+/// Machine node `machine` given an Idle state as its entry where it has no state (ADR 0124's
+/// E12-5d-2c: a state made a machine, or one added), playing a clip not named yet, its Any
+/// State box above and left of it.
+fn fill_machine(file: &mut AnimGraphFile, machine: &str) {
+    if file.states.values().any(|s| s.machine == machine) {
+        return;
+    }
+    let clip = fresh_id(file);
+    file.nodes.insert(clip.clone(), NodeFile::default());
+    let idle = fresh_id(file);
+    file.states.insert(
+        idle.clone(),
+        StateFile {
+            name: String::from("Idle"),
+            machine: machine.to_owned(),
+            pose: clip,
+            at: [0.0, 0.0],
+        },
+    );
+    if let Some(m) = file.nodes.get_mut(machine) {
+        m.kind = NodeKind::Machine;
+        m.at = [-180.0, -90.0];
+        m.entry = idle;
+    }
+}
+
 /// A layer put over `file`'s others (ADR 0124's E12-5d-2b), named by [`fresh_layer_name`],
 /// playing a machine of its own whose entry state, Idle, plays a clip not named yet, the
 /// machine's Any State box above and left of it: its id.
@@ -2026,6 +2096,9 @@ fn insert_state(
     }
     let pose = fresh_id(file);
     file.nodes.insert(pose.clone(), node);
+    if kind == StateKind::Machine {
+        fill_machine(file, &pose);
+    }
     let name = fresh_state_name(file, &machine, "New State");
     let id = fresh_id(file);
     file.states.insert(
@@ -2311,6 +2384,22 @@ impl GraphDoc {
                 && p.over
                 && let Some(c) = at
             {
+                // A second press soon after the first, in its place, on a state playing a
+                // machine: into it (E12-5d-2c, Unity's and Unreal's double-click).
+                let now = std::time::Instant::now();
+                let again = self.last_press.replace((now, c)).is_some_and(|(t, q)| {
+                    now.duration_since(t) <= graph::DOUBLE_CLICK
+                        && (q[0] - c[0]).hypot(q[1] - c[1]) * zoom <= CLICK_SLOP
+                });
+                if again
+                    && let Hit::State(k) = anim.hover
+                    && let Some(b) = anim.boxes.get(k).filter(|b| b.machine)
+                {
+                    let id = b.id.clone();
+                    self.last_press = None;
+                    self.enter_machine(&id);
+                    return None;
+                }
                 *drag = anim.press(c, edge, p.shift, p.ctrl);
             }
             return None;
@@ -2763,19 +2852,44 @@ impl GraphDoc {
         };
         self.edit_anim(|f| match row {
             AnimRow::Pose => {
-                let Some(n) = state.as_deref().and_then(|s| Self::anim_pose_mut(f, s)) else {
+                let Some(pose) = state
+                    .as_deref()
+                    .and_then(|s| f.states.get(s))
+                    .map(|s| s.pose.clone())
+                else {
                     return;
                 };
+                let Some(n) = f.nodes.get_mut(&pose) else {
+                    return;
+                };
+                let was_machine = n.kind == NodeKind::Machine;
                 n.kind = match picked.as_str() {
                     "Blend1d" => NodeKind::Blend1d,
                     "Blend2d" => NodeKind::Blend2d,
+                    "Machine" => NodeKind::Machine,
                     _ => NodeKind::Clip,
                 };
-                if n.kind != NodeKind::Clip && n.param.is_empty() {
+                if matches!(n.kind, NodeKind::Blend1d | NodeKind::Blend2d) && n.param.is_empty() {
                     n.param = numbers.first().cloned().unwrap_or_default();
                 }
                 if n.kind == NodeKind::Blend2d && n.param_y.is_empty() {
                     n.param_y = numbers.get(1).cloned().unwrap_or_default();
+                }
+                let machine = n.kind == NodeKind::Machine;
+                // A machine made (E12-5d-2c): its own Idle; one no longer: its states go.
+                if machine && !was_machine {
+                    fill_machine(f, &pose);
+                } else if was_machine && !machine {
+                    if let Some(n) = f.nodes.get_mut(&pose) {
+                        n.entry.clear();
+                    }
+                    let inner: BTreeSet<String> = f
+                        .states
+                        .iter()
+                        .filter(|(_, s)| s.machine == pose)
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    remove(f, &inner, &BTreeSet::new());
                 }
             }
             AnimRow::BlendParam | AnimRow::BlendParamY => {
@@ -2913,6 +3027,77 @@ impl GraphDoc {
         })
     }
 
+    /// State `state`'s machine entered (Tab or a double-click on a state playing a machine;
+    /// ADR 0124's E12-5d-2c): the canvas shows its states, nothing selected, framed anew.
+    /// False for a state playing no machine. Not a step: what the tab shows.
+    pub(crate) fn enter_machine(&mut self, state: &str) -> bool {
+        let Some(anim) = self.anim.as_deref_mut() else {
+            return false;
+        };
+        let Some(pose) = anim.file.states.get(state).map(|s| s.pose.clone()) else {
+            return false;
+        };
+        if !is_machine(&anim.file, &pose) {
+            return false;
+        }
+        anim.path.push(pose);
+        anim.clear_selection();
+        anim.refresh();
+        anim.laid_out = None;
+        self.framed = false;
+        true
+    }
+
+    /// Back out to the machine `level` entries down (0: the shown layer's own; the bar's
+    /// crumbs, Tab with nothing selected one level; ADR 0124's E12-5d-2c), the state that
+    /// plays the machine left selected. False where it is that deep already.
+    pub(crate) fn leave_machine(&mut self, level: usize) -> bool {
+        let Some(anim) = self.anim.as_deref_mut() else {
+            return false;
+        };
+        if level >= anim.path.len() {
+            return false;
+        }
+        let left = anim.path[level].clone();
+        anim.path.truncate(level);
+        anim.clear_selection();
+        anim.refresh();
+        let machine = anim.machine.clone();
+        if let Some(id) = anim
+            .file
+            .states
+            .iter()
+            .find(|(_, s)| s.machine == machine && s.pose == left)
+            .map(|(id, _)| id.clone())
+        {
+            anim.selected.insert(id);
+        }
+        anim.laid_out = None;
+        self.framed = false;
+        true
+    }
+
+    /// Tab on an animation graph's canvas (ADR 0124's E12-5d-2c): into the selected state's
+    /// machine, or out one level with no machine state selected. What it did, to say.
+    pub(crate) fn anim_tab(&mut self) -> Result<(), &'static str> {
+        let Some(anim) = self.anim.as_deref() else {
+            return Err("");
+        };
+        let one = (anim.selected.len() == 1)
+            .then(|| anim.selected.iter().next().cloned())
+            .flatten();
+        if let Some(id) = one
+            && self.enter_machine(&id)
+        {
+            return Ok(());
+        }
+        let depth = self.anim.as_deref().map_or(0, |a| a.path.len());
+        if depth > 0 && self.leave_machine(depth - 1) {
+            return Ok(());
+        }
+        Err("Tab enters a state playing a machine (its pose a Machine), and comes back out")
+    }
+
     /// Layer `k` (in their order) shown on the canvas (ADR 0124's E12-5d-2b): its machine,
     /// nothing selected, framed anew. Not a step: what the tab shows.
     pub(crate) fn show_layer(&mut self, k: usize) {
@@ -2922,9 +3107,11 @@ impl GraphDoc {
         let Some(id) = anim.layer_ids.get(k).cloned() else {
             return;
         };
-        if anim.layer == id {
+        // The shown layer's chip again: out of its machines (E12-5d-2c).
+        if anim.layer == id && anim.path.is_empty() {
             return;
         }
+        anim.path.clear();
         anim.layer = id;
         anim.clear_selection();
         anim.refresh();
@@ -4009,10 +4196,101 @@ mod tests {
         assert!(!anim(&d).changed(AnimRow::MaskWeight));
     }
 
-    /// A layer playing nothing is left out of the cook: the shown layer's live state is read
-    /// at its place among those that play (ADR 0124's E12-5d-2b).
+    /// ADR 0124's E12-5d-2c: a state's pose made a machine gets its own Idle as its entry;
+    /// Tab (or a double-click) enters it, the bar's crumbs name it, a state added goes inside,
+    /// Tab with nothing selected comes back out with the state selected; the machine gone
+    /// (its state's pose a clip again) takes its states with it and the canvas comes out.
     #[test]
-    fn a_layer_playing_nothing_is_not_counted_for_the_live_state() {
+    fn a_state_playing_a_machine_is_entered_and_left() {
+        let mut d = doc();
+        anim_mut(&mut d).selected.insert(String::from("idle"));
+        assert_eq!(POSE_KINDS[3], "Machine");
+        assert!(d.anim_choose(AnimRow::Pose, 3).is_some(), "a step");
+        let inner = anim(&d).file.states["idle"].pose.clone();
+        let a = anim(&d);
+        assert_eq!(a.file.nodes[&inner].kind, NodeKind::Machine);
+        let entry = a.file.nodes[&inner].entry.clone();
+        assert_eq!(a.file.states[&entry].name, "Idle");
+        assert_eq!(a.file.states[&entry].machine, inner);
+        // Tab: in.
+        assert!(d.anim_tab().is_ok());
+        assert_eq!(anim(&d).path, std::slice::from_ref(&inner));
+        assert_eq!(anim(&d).machine, inner);
+        assert!(anim(&d).selected.is_empty());
+        assert!(!d.framed, "framed anew");
+        let mut crumbs = Vec::new();
+        anim(&d).crumbs(&mut crumbs);
+        assert_eq!(crumbs, ["Idle"]);
+        let nodes: Vec<&String> = anim(&d).file.nodes.keys().collect();
+        assert_eq!(
+            anim(&d).machine_node_index(),
+            nodes.iter().position(|k| **k == inner)
+        );
+        // A state added goes inside.
+        assert!(d.add_state(StateKind::Clip, [300.0, 0.0], None).is_some());
+        assert_eq!(anim(&d).file.states_of(&inner).count(), 2);
+        assert_eq!(
+            anim(&d).file.states_of("m").count(),
+            2,
+            "the outer one's untouched"
+        );
+        // Tab with nothing selected: out, the state selected.
+        anim_mut(&mut d).clear_selection();
+        assert!(d.anim_tab().is_ok());
+        assert!(anim(&d).path.is_empty());
+        assert_eq!(anim(&d).machine, "m");
+        assert!(anim(&d).selected.contains("idle"));
+        // A double-click on the state enters it too.
+        d.relayout(&mut measure);
+        let k = anim(&d).boxes.iter().position(|b| b.id == "idle").unwrap();
+        assert!(anim(&d).boxes[k].machine);
+        let [lo, hi] = anim(&d).boxes[k].rect();
+        let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
+        let mut drag = None;
+        for _ in 0..2 {
+            at(&mut d, &mut drag, c, true, true, false);
+            at(&mut d, &mut drag, c, false, false, false);
+        }
+        assert_eq!(
+            anim(&d).path,
+            std::slice::from_ref(&inner),
+            "entered by the double-click"
+        );
+        // Its pose a clip again: its states go, the canvas comes out.
+        d.leave_machine(0);
+        anim_mut(&mut d).clear_selection();
+        anim_mut(&mut d).selected.insert(String::from("idle"));
+        assert!(d.anim_choose(AnimRow::Pose, 0).is_some());
+        assert_eq!(anim(&d).file.states_of(&inner).count(), 0);
+        assert_eq!(anim(&d).file.nodes[&inner].kind, NodeKind::Clip);
+        // A machine state added from the search: its own Idle inside.
+        anim_mut(&mut d).clear_selection();
+        assert!(
+            d.add_state(StateKind::Machine, [0.0, 300.0], None)
+                .is_some()
+        );
+        let made = anim(&d).selected.iter().next().unwrap().clone();
+        let pose = anim(&d).file.states[&made].pose.clone();
+        assert_eq!(anim(&d).file.states_of(&pose).count(), 1);
+        // Entered, then the state deleted (by its text): the canvas comes out.
+        assert!(d.enter_machine(&made));
+        let mut text = d.text.clone();
+        let gone = text
+            .lines()
+            .filter(|l| !l.contains(&format!("[\"{made}\"]")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        text.clone_from(&gone);
+        d.put_text(&text).unwrap();
+        assert!(anim(&d).path.is_empty(), "{:?}", anim(&d).path);
+        assert_eq!(anim(&d).machine, "m");
+    }
+
+    /// ADR 0124's E12-5d-2c: the shown machine's live state is read at its node's place among
+    /// the file's nodes (in their ids' order, as the player's graph has them), a layer
+    /// playing nothing before it or not.
+    #[test]
+    fn the_shown_machine_is_found_by_its_nodes_place() {
         let mut f = file();
         f.layers.insert(
             String::from("aaa"),
@@ -4024,8 +4302,8 @@ mod tests {
         );
         let d = GraphDoc::new_anim(AssetId::new(), "anim/hero.agraph", f, AssetPaths::new());
         assert_eq!(anim(&d).layer, "base", "the first playing a machine");
-        assert_eq!(anim(&d).layer_index(), Some(1));
-        assert_eq!(anim(&d).cooked_layer_index(), Some(0));
+        // Nodes in their ids' order: ci, cw, m.
+        assert_eq!(anim(&d).machine_node_index(), Some(2));
     }
 
     /// A state's rows: its name (refused empty or taken), its clip, its pace, what it plays

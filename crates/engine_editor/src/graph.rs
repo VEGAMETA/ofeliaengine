@@ -101,7 +101,7 @@ const FRAME_GRIP: f32 = 12.0;
 const FRAME_FILL: Vec4 = Vec4::new(0.03, 0.035, 0.045, 0.55);
 const FRAME_BAR: Vec4 = Vec4::new(0.05, 0.055, 0.07, 0.9);
 /// Two presses this close in time (and in place, [`CLICK_SLOP`]) are a double-click.
-const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+pub(crate) const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 /// Under this many panel pixels a box's drag is a click.
 pub(crate) const CLICK_SLOP: f32 = 3.0;
 
@@ -1312,7 +1312,7 @@ pub(crate) struct GraphDoc {
     /// when it has one.
     pub(crate) error: Option<GraphError>,
     /// The canvas's last press: when and where (a double-click on a link, E10-3e-2a).
-    last_press: Option<(std::time::Instant, [f32; 2])>,
+    pub(crate) last_press: Option<(std::time::Instant, [f32; 2])>,
     /// The selected frames, by id (E10-3e-2b): apart from the nodes, as a file's ids for
     /// both could meet.
     pub(crate) selected_frames: BTreeSet<String>,

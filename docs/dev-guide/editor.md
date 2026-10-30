@@ -1698,8 +1698,12 @@ unless it says otherwise).
   and everything under it in or out (untick the legs for an upper-body layer); click a
   joint's name to pick it and type a weight from 0 to 1 in **joint weight** (↺ takes it
   back). With every joint in, the mask is empty.
-- **Not yet:** machines inside machines (Tab into one) and the character's preview in the
-  corner come with the next steps (ADR 0124's E12-5d-2).
+- **Machines inside machines:** a state can play a state machine of its own (its
+  **plays** row's `Machine`, or `State: Machine` from Space). Double-click it, or select it
+  and press **Tab**, to edit its states; **Tab** with nothing selected comes back out. The
+  bar names the machines you are in after the layers' chips; click one to go back to it.
+- **Not yet:** grouping selected states into a machine (Ctrl+G) and the character's
+  preview in the corner come with the next steps (ADR 0124's E12-5d-2).
 
 ## Autosave and the session
 

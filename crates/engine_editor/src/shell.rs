@@ -1118,6 +1118,9 @@ pub struct GraphBar<'a> {
     pub layers: &'a [&'a str],
     /// The layer the canvas shows, lit.
     pub layer: usize,
+    /// The states whose machines are entered, outermost first (ADR 0124's E12-5d-2c): a
+    /// crumb each after the layers, the last lit; a click backs out to it.
+    pub crumbs: &'a [&'a str],
 }
 
 /// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
@@ -1421,6 +1424,8 @@ pub struct ShellResponse {
     pub graph_layer: Option<usize>,
     /// Its + clicked: a layer added.
     pub graph_add_layer: bool,
+    /// A crumb of the machines entered clicked (E12-5d-2c): back out to it.
+    pub graph_crumb: Option<usize>,
     /// The Clips (ADR 0124's E12-1b): a clip's row was clicked.
     pub clip_pick: Option<usize>,
     /// Their ▶ or ■ was clicked.
@@ -1862,6 +1867,16 @@ fn center(
                             }
                             if panel_button(ui, "add layer", icons::PLUS, false, p) {
                                 out.graph_add_layer = true;
+                            }
+                            // The machines entered (E12-5d-2c), a crumb each.
+                            for (k, name) in graph.crumbs.iter().enumerate() {
+                                ui.push_id(1_000 + k as u64);
+                                text(ui, "into", "\u{203a}", TEXT, p.text_dim);
+                                let last = k + 1 == graph.crumbs.len();
+                                if label_button(ui, "crumb", name, last, p.accent, p) {
+                                    out.graph_crumb = Some(k);
+                                }
+                                ui.pop_id();
                             }
                         },
                     );
