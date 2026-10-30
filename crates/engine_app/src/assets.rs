@@ -911,8 +911,9 @@ struct PreviewSkin {
 /// What an animator shows a frame (ADR 0124's E12-2): its clip at its moment, the clip
 /// fading out under it (at its own moment, with the first's weight), its root motion taken
 /// out or not (along each clip's axes, E12-3e); and the two clips' lengths and whether each
-/// plays once (E12-3e).
-type Shown = (Look, [(f32, bool); 2]);
+/// plays once (E12-3e), none for a clip of the animator's own (the clips made in the
+/// editor's ticks tell it theirs, E12-4a).
+type Shown = (Look, [Option<(f32, bool)>; 2]);
 
 /// How clip `k` of `rig` plays by its model's `.meta` (ADR 0124's E12-3e).
 fn clip_play(rig: &crate::skins::Rig, table: &ModelEvents, k: usize) -> ClipPlay {
@@ -929,58 +930,90 @@ fn animator_pose(
     alpha: f32,
     table: &ModelEvents,
 ) -> Option<Shown> {
-    // One of its own clips (E12-4a) poses nothing: the model rests.
-    if animator.plays_own_clip() {
-        return None;
-    }
     let clips = rig.clips();
     let names = clips.iter().map(crate::RigClip::name);
-    let k = named_clip(names.clone(), &animator.clip);
-    let length = clips.get(k)?.duration();
-    let play = clip_play(rig, table, k);
-    let mut from = (0.0, false);
-    let mut from_axes = crate::skins::Axes::default();
-    let fade =
-        (animator.fade > 0.0 && !animator.clips.contains_key(&animator.from_clip)).then(|| {
-            let f = named_clip(names, &animator.from_clip);
-            let from_play = clip_play(rig, table, f);
-            from = (
-                clips.get(f).map_or(0.0, crate::RigClip::duration),
-                from_play.once,
-            );
-            from_axes = from_play.axes;
-            (f, animator.from_at(alpha, from.0), animator.weight(alpha))
-        });
-    let look = Look {
-        pose: Some((k, animator.at(alpha, length))),
-        fade,
+    let mut look = Look {
         in_place: animator.root_motion != RootMotion::InPose,
-        axes: [play.axes, from_axes],
+        ..Look::default()
     };
-    Some((look, [(length, play.once), from]))
+    let mut lengths = [None; 2];
+    // One of its own clips (E12-4e): the joints it keys over the rest pose, at its moment as
+    // its length (told by the clips made in the editor's ticks) wraps or holds it.
+    if let Some(own) = animator.clips.get(&animator.clip) {
+        look.own = Some(crate::skins::OwnPose {
+            file: own.file,
+            time: animator.at(alpha, animator.length),
+            playhead: false,
+        });
+    } else {
+        let k = named_clip(names.clone(), &animator.clip);
+        let length = clips.get(k)?.duration();
+        let play = clip_play(rig, table, k);
+        look.pose = Some((k, animator.at(alpha, length)));
+        look.axes[0] = play.axes;
+        lengths[0] = Some((length, play.once));
+    }
+    if animator.fade > 0.0 {
+        let weight = animator.weight(alpha);
+        if let Some(own) = animator.clips.get(&animator.from_clip) {
+            let shown = crate::skins::OwnPose {
+                file: own.file,
+                time: animator.from_at(alpha, animator.from_length),
+                playhead: false,
+            };
+            look.own_fade = Some((shown, weight));
+        } else {
+            let f = named_clip(names, &animator.from_clip);
+            let play = clip_play(rig, table, f);
+            let length = clips.get(f).map_or(0.0, crate::RigClip::duration);
+            look.fade = Some((f, animator.from_at(alpha, length), weight));
+            look.axes[1] = play.axes;
+            lengths[1] = Some((length, play.once));
+        }
+    }
+    Some((look, lengths))
+}
+
+/// The clips of an animator's own `look` shows (ADR 0124's E12-4e), the one fading in and
+/// the one fading out, as `fields` last read or holds them.
+fn own_clips<'a>(
+    fields: &'a crate::field_clips::FieldClips,
+    look: &Look,
+) -> [Option<&'a crate::field_clips::FieldClip>; 2] {
+    [look.own.map(|o| o.file), look.own_fade.map(|(o, _)| o.file)]
+        .map(|file| file.and_then(|f| fields.loaded(f)).map(|c| &**c))
 }
 
 /// The root motion an [`Animator`]'s last tick played (ADR 0124's E12-2c), in its rig's
 /// mesh space: how far its root crossed the ground, and its turn about the mesh's up in
 /// radians. Through a fade the two clips' motions blend by the fade's weight. None for a
-/// rig without clips.
+/// rig without clips, or while one of the animator's own clips plays alone: those move
+/// nothing by root motion (E12-4e), so through a fade into or out of one the model's clip's
+/// motion fades.
 fn tick_motion(
     rig: &crate::skins::Rig,
     animator: &Animator,
     table: &ModelEvents,
 ) -> Option<(Vec3, f32)> {
-    if animator.plays_own_clip() {
+    if animator.plays_own_clip() && animator.fade <= 0.0 {
         return None;
     }
     let names = rig.clips().iter().map(crate::RigClip::name);
-    let k = named_clip(names.clone(), &animator.clip);
-    let axes = clip_play(rig, table, k).axes;
-    let main = rig.clip_motion(k, animator.previous, animator.time, axes)?;
-    let from = (animator.fade > 0.0 && !animator.clips.contains_key(&animator.from_clip))
+    let motion_of = |name: &str, previous: f32, time: f32| {
+        if animator.clips.contains_key(name) {
+            return Some(engine_anim::RootMotion::NONE);
+        }
+        let k = named_clip(names.clone(), name);
+        rig.clip_motion(k, previous, time, clip_play(rig, table, k).axes)
+    };
+    let main = motion_of(&animator.clip, animator.previous, animator.time)?;
+    let from = (animator.fade > 0.0)
         .then(|| {
-            let f = named_clip(names, &animator.from_clip);
-            let axes = clip_play(rig, table, f).axes;
-            rig.clip_motion(f, animator.from_previous, animator.from_time, axes)
+            motion_of(
+                &animator.from_clip,
+                animator.from_previous,
+                animator.from_time,
+            )
         })
         .flatten();
     let motion = match from {
@@ -1244,6 +1277,7 @@ impl Assets {
         self.building_skins.retain(|(a, _)| a.file != file);
         self.clip_events.remove(&file);
         self.fields.forget(file);
+        self.repose_showing(file);
         let (meshes, materials) = (&mut self.stale_meshes, &mut self.stale_materials);
         self.meshes.retain(|asset, &mut mesh| {
             let keep = asset.file != file;
@@ -2869,7 +2903,10 @@ impl Assets {
                 .count();
             if let Some(owned) = self.owned.get(&character) {
                 let look = if owned.held {
-                    Look::at(owned.look.pose)
+                    Look {
+                        own: owned.look.own,
+                        ..Look::at(owned.look.pose)
+                    }
                 } else {
                     world
                         .get::<Animator>(character)
@@ -2879,7 +2916,8 @@ impl Assets {
                         .map_or(Look::default(), |(look, _)| look)
                 };
                 let rig_id = Arc::as_ptr(&owned.rig) as usize as u64;
-                let joints = self.posing.joints(&owned.rig, look);
+                let own = own_clips(&self.fields, &look);
+                let joints = self.posing.joints(&owned.rig, look, own);
                 let skeleton = owned.rig.skeleton();
                 for &(_, socket) in &self.socket_list[k..end] {
                     let Some(attachment) = world.get::<JointAttachment>(socket) else {
@@ -3070,6 +3108,39 @@ impl Assets {
             .preview(world, entity, file, time, kept, |asset| {
                 file_path(paths, asset).map(|p| root.join(p))
             });
+        // A character: its joints the clip keys, posed over its rest pose (E12-4e), held
+        // while the preview lasts ([`Self::end_anim_preview`]).
+        if let Some(owned) = self.owned.get_mut(&entity) {
+            let look = Look {
+                own: Some(crate::skins::OwnPose {
+                    file: file.file,
+                    time,
+                    playhead: true,
+                }),
+                ..Look::default()
+            };
+            self.events_dirty |= !owned.held;
+            owned.held = true;
+            if owned.look != look {
+                owned.look = look;
+                owned.posed = false;
+            }
+        }
+    }
+
+    /// The editor's preview of a clip made in it no longer shows on character `entity` (E12-4e):
+    /// back to its animator's pose.
+    pub fn end_anim_preview(&mut self, entity: Entity) {
+        if let Some(owned) = self
+            .owned
+            .get_mut(&entity)
+            .filter(|o| o.held && o.look.own.is_some())
+        {
+            owned.held = false;
+            owned.look = Look::default();
+            owned.posed = false;
+            self.events_dirty = true;
+        }
     }
 
     /// Clip file `file` (an `.anim`) as the editor holds it (ADR 0124's E12-4a), read in
@@ -3077,6 +3148,19 @@ impl Assets {
     /// next tick.
     pub fn set_anim_clip(&mut self, file: AssetId, anim: Option<&engine_scene::AnimFile>) {
         self.fields.hold(file, anim);
+        self.repose_showing(file);
+    }
+
+    /// The characters showing a clip of file `file` (an `.anim`, E12-4e) posed again: it
+    /// changed.
+    fn repose_showing(&mut self, file: AssetId) {
+        for owned in self.owned.values_mut() {
+            let look = owned.look;
+            let own = [look.own.map(|o| o.file), look.own_fade.map(|(o, _)| o.file)];
+            if own.contains(&Some(file)) {
+                owned.posed = false;
+            }
+        }
     }
 
     /// The clips' events of model file `file` as `clips` say (ADR 0124's E12-3b), in place of
@@ -3113,25 +3197,38 @@ impl Assets {
             let shown = world
                 .get::<Animator>(e)
                 .and_then(|animator| animator_pose(&owned.rig, animator, alpha, &owned.events));
-            // The clips' lengths back to the animator, for its ticks to wrap at, and whether
-            // each plays once, for them to hold at its end instead (E12-3e).
-            if let Some((_, [(length, hold), (from_length, from_hold)])) = shown
+            // The model's clips' lengths back to the animator, for its ticks to wrap at, and
+            // whether each plays once, for them to hold at its end instead (E12-3e).
+            if let Some((_, [main, from])) = shown
                 && world.get::<Animator>(e).is_some_and(|a| {
-                    a.length != length
-                        || a.hold != hold
-                        || (a.fade > 0.0
-                            && (a.from_length != from_length || a.from_hold != from_hold))
+                    main.is_some_and(|m| m != (a.length, a.hold))
+                        || (a.fade > 0.0 && from.is_some_and(|f| f != (a.from_length, a.from_hold)))
                 })
                 && let Some(animator) = world.get_mut::<Animator>(e)
             {
-                animator.length = length;
-                animator.hold = hold;
-                if animator.fade > 0.0 {
-                    animator.from_length = from_length;
-                    animator.from_hold = from_hold;
+                if let Some((length, hold)) = main {
+                    animator.length = length;
+                    animator.hold = hold;
+                }
+                if let Some((length, hold)) = from
+                    && animator.fade > 0.0
+                {
+                    animator.from_length = length;
+                    animator.from_hold = hold;
                 }
             }
             let look = shown.map_or(Look::default(), |(look, _)| look);
+            // Its own clips read the first time it shows them (E12-4e; while the world runs
+            // their ticks read them first).
+            for file in [look.own.map(|o| o.file), look.own_fade.map(|(o, _)| o.file)]
+                .into_iter()
+                .flatten()
+            {
+                let (paths, root) = (&self.paths, &self.root);
+                self.fields.read_once(file, || {
+                    file_path(paths, AssetRef::file(file)).map(|p| root.join(p))
+                });
+            }
             if owned.look != look {
                 owned.look = look;
                 owned.posed = false;
@@ -3156,9 +3253,10 @@ impl Assets {
             alive
         });
         self.events_dirty |= self.owned.len() != before;
-        let posing = &mut self.posing;
+        let (posing, fields) = (&mut self.posing, &self.fields);
         for owned in self.owned.values_mut().filter(|o| !o.posed) {
-            let palette = posing.palette(&owned.rig, owned.look);
+            let own = own_clips(fields, &owned.look);
+            let palette = posing.palette(&owned.rig, owned.look, own);
             for &id in &owned.instances {
                 skinning.set_palette(id, palette);
             }
@@ -3318,7 +3416,7 @@ impl Assets {
                 in_place: p.in_place,
                 ..Look::at(p.pose)
             };
-            skinning.set_palette(id, self.posing.palette(rig, look));
+            skinning.set_palette(id, self.posing.palette(rig, look, [None; 2]));
             p.posed = true;
         }
         if !p.beside_posed
@@ -3329,7 +3427,7 @@ impl Assets {
                 in_place: p.in_place,
                 ..Look::at(p.beside_pose)
             };
-            skinning.set_palette(id, self.posing.palette(rig, look));
+            skinning.set_palette(id, self.posing.palette(rig, look, [None; 2]));
             p.beside_posed = true;
         }
     }
@@ -3347,7 +3445,8 @@ impl Assets {
             return false;
         };
         out.clear();
-        out.extend_from_slice(self.posing.joints(&owned.rig, owned.look));
+        let own = own_clips(&self.fields, &owned.look);
+        out.extend_from_slice(self.posing.joints(&owned.rig, owned.look, own));
         true
     }
 

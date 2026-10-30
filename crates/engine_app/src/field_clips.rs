@@ -11,11 +11,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use core::sync::atomic::{AtomicU32, Ordering};
 use engine_core::math::{EulerRot, Quat};
 use engine_ecs::{Entity, QueryState, World};
 use engine_runtime::{Animator, FieldRef};
 use engine_scene::{
     AnimFile, AnimTrack, AssetId, AssetRef, KeyCurve, Name, anim_target, split_anim_target,
+    split_joint_target,
 };
 
 use crate::clip_events::{EventDef, crossed, event_defs};
@@ -125,6 +127,49 @@ fn slopes(times: &[f32], values: &[f32], lanes: usize) -> Box<[f32]> {
     out
 }
 
+/// Which part of a joint's transform a track keys (ADR 0124's E12-4e).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JointPart {
+    Translation,
+    Rotation,
+    Scale,
+}
+
+/// A track of a skinned model's joint (`@Hips.rotation`, ADR 0124's E12-4e): the joint by its
+/// name, the part it keys, its keys laid out.
+#[derive(Debug)]
+struct JointTrack {
+    joint: Box<str>,
+    part: JointPart,
+    track: FieldTrack,
+    /// Where its joint was in the last skeleton posed, checked by its name before it is used:
+    /// characters of one model find it there, not by a search each frame.
+    found: AtomicU32,
+}
+
+impl PartialEq for JointTrack {
+    fn eq(&self, other: &Self) -> bool {
+        self.joint == other.joint && self.part == other.part && self.track == other.track
+    }
+}
+
+impl JointTrack {
+    /// Its joint in `skeleton`, if it has it.
+    fn joint_in(&self, skeleton: &engine_anim::Skeleton) -> Option<usize> {
+        let last = self.found.load(Ordering::Relaxed) as usize;
+        if skeleton
+            .names()
+            .get(last)
+            .is_some_and(|n| *n == *self.joint)
+        {
+            return Some(last);
+        }
+        let j = skeleton.find(&self.joint)?;
+        self.found.store(j as u32, Ordering::Relaxed);
+        Some(j)
+    }
+}
+
 /// A clip read from an `.anim` file.
 #[derive(Debug, PartialEq)]
 pub(crate) struct FieldClip {
@@ -133,6 +178,8 @@ pub(crate) struct FieldClip {
     /// Plays once and holds its end.
     pub(crate) once: bool,
     tracks: Box<[FieldTrack]>,
+    /// Its tracks of a skinned model's joints (E12-4e), posed over its rest pose.
+    joints: Box<[JointTrack]>,
     /// Its events in time order.
     pub(crate) events: Vec<EventDef>,
 }
@@ -150,9 +197,80 @@ impl FieldClip {
             tracks: file
                 .tracks
                 .iter()
+                .filter(|(target, _)| split_joint_target(target).is_none())
                 .filter_map(|(target, track)| FieldTrack::new(target, track))
                 .collect(),
+            joints: file
+                .tracks
+                .iter()
+                .filter_map(|(target, track)| {
+                    let (joint, part) = split_joint_target(target)?;
+                    let part = match part {
+                        "translation" => JointPart::Translation,
+                        "rotation" => JointPart::Rotation,
+                        _ => JointPart::Scale,
+                    };
+                    Some(JointTrack {
+                        joint: Box::from(joint),
+                        part,
+                        track: FieldTrack::new(target, track)?,
+                        found: AtomicU32::new(u32::MAX),
+                    })
+                })
+                .collect(),
             events: event_defs(&file.events),
+        }
+    }
+
+    /// Whether it keys a skinned model's joints (E12-4e).
+    pub(crate) fn keys_joints(&self) -> bool {
+        !self.joints.is_empty()
+    }
+
+    /// `pose` (the rest pose of `skeleton`'s joints) with the joints this clip keys set as it
+    /// says `time` seconds into it: an animator's time wrapped or held as the clip plays, or
+    /// with `playhead` the editor's playhead, held within the clip (its end shows the last
+    /// keys, also for a clip that loops). A rotation is keyed as three Euler angles in
+    /// degrees as a field's is (four numbers: a quaternion), a scale as one number uniform.
+    /// Joints the skeleton lacks are left out; nothing is allocated.
+    pub(crate) fn pose_joints(
+        &self,
+        time: f32,
+        playhead: bool,
+        skeleton: &engine_anim::Skeleton,
+        pose: &mut engine_anim::Pose,
+    ) {
+        let t = if playhead {
+            time.clamp(0.0, self.length)
+        } else {
+            clip_time(self, time)
+        };
+        let mut v = [0.0f32; 4];
+        for jt in &self.joints {
+            let Some(j) = jt.joint_in(skeleton).filter(|&j| j < pose.len()) else {
+                continue;
+            };
+            jt.track.sample(t, &mut v);
+            let lanes = jt.track.lanes;
+            match (jt.part, lanes) {
+                (JointPart::Translation, 3..) => {
+                    pose.translations[j] = engine_core::math::Vec3A::new(v[0], v[1], v[2]);
+                }
+                (JointPart::Rotation, 3) => {
+                    let [pitch, yaw, roll] = [v[0], v[1], v[2]].map(f32::to_radians);
+                    pose.rotations[j] = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
+                }
+                (JointPart::Rotation, 4) => {
+                    pose.rotations[j] = Quat::from_array(v).normalize();
+                }
+                (JointPart::Scale, 1) => {
+                    pose.scales[j] = engine_core::math::Vec3A::splat(v[0]);
+                }
+                (JointPart::Scale, 3..) => {
+                    pose.scales[j] = engine_core::math::Vec3A::new(v[0], v[1], v[2]);
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -323,6 +441,27 @@ impl FieldClips {
         self.preview = Some((entity, bound));
     }
 
+    /// Clip file `file` as last read or held, if it was (E12-4e: a character's pose of its
+    /// joints, read by its animator's ticks or held by the editor).
+    pub(crate) fn loaded(&self, file: AssetId) -> Option<&Arc<FieldClip>> {
+        self.held
+            .get(&file)
+            .or_else(|| self.read.get(&file).and_then(Option::as_ref))
+    }
+
+    /// Clip file `file` read from `path_of`'s path (under the project's root) unless it was
+    /// read or is held (E12-4e: a character showing it before its animator's tick reads it);
+    /// the path is asked for only then.
+    pub(crate) fn read_once(
+        &mut self,
+        file: AssetId,
+        path_of: impl FnOnce() -> Option<std::path::PathBuf>,
+    ) {
+        if !self.held.contains_key(&file) && !self.read.contains_key(&file) {
+            self.clip(file, path_of());
+        }
+    }
+
     /// File `file` read again on its next use (it changed on disk).
     pub(crate) fn forget(&mut self, file: AssetId) {
         if self.read.remove(&file).is_some() {
@@ -377,15 +516,14 @@ impl FieldClips {
             if animator.clips.is_empty() {
                 return;
             }
+            // Kept while it plays its model's clips (E12-4e: a character going from one of its
+            // own clips to its model's and back keeps its bindings, allocating nothing).
             let main = animator.clips.get(&animator.clip).copied();
             let from = if animator.fade > 0.0 {
                 animator.clips.get(&animator.from_clip).copied()
             } else {
                 None
             };
-            if main.is_none() && from.is_none() {
-                return;
-            }
             work.push(Work {
                 entity,
                 main,

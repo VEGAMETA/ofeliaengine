@@ -20208,6 +20208,19 @@ impl Editor {
                     f.lanes,
                 )
             }));
+            // A character's joints it keys (E12-4e), as the clip has them there.
+            for (target, track) in anim
+                .tracks
+                .iter()
+                .filter(|(t, _)| engine_scene::split_joint_target(t).is_some())
+            {
+                let curve = engine_app::TrackCurve::new(track);
+                let mut value = [0.0f32; 4];
+                curve.sample(time, &mut value);
+                if curve.lanes() > 0 {
+                    keys.push((target.clone(), value, curve.lanes()));
+                }
+            }
         }
         if keys.is_empty() {
             self.say(String::from(
@@ -20215,9 +20228,16 @@ impl Editor {
             ));
             return;
         }
-        let n = keys.len();
+        let joints = keys
+            .iter()
+            .filter(|(t, ..)| engine_scene::split_joint_target(t).is_some())
+            .count();
         self.set_keys(world, "Key Fields", file, time, &keys);
-        self.say(format!("{n} fields keyed at {time:.2} s"));
+        self.say(match (keys.len() - joints, joints) {
+            (fields, 0) => format!("{fields} fields keyed at {time:.2} s"),
+            (0, joints) => format!("{joints} joints keyed at {time:.2} s"),
+            (fields, joints) => format!("{fields} fields and {joints} joints keyed at {time:.2} s"),
+        });
     }
 
     /// ◆ beside field `field` of section `section` (ADR 0124's E12-4b-2): that field of the
@@ -32123,6 +32143,67 @@ mod tests {
         );
         let names: Vec<&str> = ed.history.steps().map(|s| s.name()).collect();
         assert_eq!(names, ["New Clip", "Key Fields", "Key Field"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-4e: a clip keying a character's joints (`@joint.rotation`) besides its
+    /// fields. The fields' sampler leaves the joints' tracks out (they are no field), and K
+    /// keys them too at the playhead with the values the clip has there; one undo step.
+    #[test]
+    fn k_keys_a_clips_joints_with_the_values_it_has_at_the_playhead() {
+        let (dir, mut world, mut ed, boxed) = drop_project("joint keys");
+        std::fs::create_dir_all(dir.join("animations")).unwrap();
+        let id = AssetId::new();
+        let target = engine_scene::joint_target("mixamorig:Hips", "rotation");
+        let mut wave = engine_scene::AnimFile::default();
+        wave.set_key(&target, 0.0, &[0.0, 0.0, 0.0]);
+        wave.set_key(&target, 1.0, &[0.0, 90.0, 0.0]);
+        wave.set_key("Transform.translation", 0.0, &[0.0, 0.0, -3.0]);
+        let anim_file = dir.join("animations/wave.anim");
+        std::fs::write(&anim_file, wave.to_text(id)).unwrap();
+        ed.asset_db.scan();
+        world.insert(
+            boxed,
+            engine_runtime::Animator::new("wave").with_clip("wave", AssetRef::file(id)),
+        );
+        ed.select_only(boxed);
+        ed.bottom = Some(ANIMATION_TAB);
+        ed.follow_own_clips(&world, Some(boxed));
+        ed.update(&mut world);
+        {
+            let v = ed.clips.as_mut().unwrap();
+            v.time = 0.5;
+            v.held = true;
+        }
+        ed.update(&mut world);
+        let mut fields = Vec::new();
+        let anim = ed.clip_events.as_ref().unwrap().anim().unwrap().clone();
+        ed.key_sampler
+            .sample(&mut world, boxed, &anim, 0.5, &mut fields);
+        assert_eq!(fields.len(), 1, "the position alone is a field");
+        let key_clip = ed.ids.key_clip;
+        ed.run(&mut world, key_clip);
+        let anim = ed.clip_events.as_ref().unwrap().anim().unwrap();
+        let k = anim
+            .key_at(&target, 0.5)
+            .expect("the joint keyed at the playhead");
+        let value = &anim.tracks[&target].keys[k].value;
+        assert_eq!(value.len(), 3);
+        assert!(
+            (value[1] - 45.0).abs() < 1e-3,
+            "as the clip had it: {value:?}"
+        );
+        assert!(anim.key_at("Transform.translation", 0.5).is_some());
+        let names: Vec<&str> = ed.history.steps().map(|s| s.name()).collect();
+        assert_eq!(names, ["Key Fields"]);
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        let anim = ed.clip_events.as_ref().unwrap().anim().unwrap();
+        assert!(anim.key_at(&target, 0.5).is_none(), "undone");
+        assert_eq!(
+            std::fs::read_to_string(&anim_file).unwrap(),
+            anim.to_text(id)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

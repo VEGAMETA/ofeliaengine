@@ -230,15 +230,27 @@ events.0.name = "thud"
 - **Through a fade** (`play(clip, fade)`), a field both clips key blends; one only the
   clip fading out keys stays where it was left.
 - **A character with a model** plays its model's clips by their names; a name in `clips`
-  plays the file instead, and the model rests meanwhile (combining the two comes with
-  graphs).
+  plays the file instead. Such a clip can key the character's joints (below); the joints
+  it does not key rest. Combining an own clip with a model's at once comes with graphs.
+- **Joints** are keyed by tracks named `@` and the joint's name, then its part:
+  `@mixamorig:Hips.rotation`, `@Skeleton_arm_joint_R.translation`, `@Hand.L.scale` (the
+  part follows the last dot).
+  - The keys are in the joint's parent's space, as the model's clips have them. A rotation
+    is three Euler angles in degrees, like a field's (four numbers: a quaternion), and a
+    scale is one number or three.
+  - The pose is the model's rest pose with the keyed joints set over it. A joint the model
+    lacks is left out, so a clip made for one model plays on another with the same names.
+  - `play(clip, fade)` blends the poses across both kinds of clips: from a model's walk
+    into a wave keyed in the editor and back. An own clip moves nothing by root motion,
+    so the walk's motion fades out with it.
 - **What it costs:** about 70 ns a door a tick with two tracks (1,000 doors: 70 µs on
   ref-1), no allocation, also when an animator switches between clips it played before.
 - **While the editor edits** the world stands still and nothing is written: the door
   shows the values the scene holds. The Animation tab previews a clip on it (its
   playhead held or ▶), setting its fields for drawing only; the scene, its saves and undo
   keep their own values (the [editor guide](editor.md) has the keys). New Clip makes a
-  clip; K, ◆ and an edit of a field the clip moves key it at the playhead (E12-4b-2).
+  clip; K, ◆ and an edit of a field the clip moves key it at the playhead (E12-4b-2). On
+  a character the preview poses the joints the clip keys.
 
 ### Sockets: things that follow a joint
 

@@ -1467,6 +1467,12 @@ impl Player {
     /// propagated and drawn, and gives them their values back as the frame's presentation
     /// begins: the game, the editor, saves and undo only ever see the scene's own values.
     pub fn preview_anim(&mut self, preview: Option<(Entity, engine_scene::AssetRef, f32)>) {
+        // A character the preview left: its animator's pose again (E12-4e).
+        if let Some((was, ..)) = self.anim_preview
+            && preview.is_none_or(|(e, ..)| e != was)
+        {
+            self.assets.end_anim_preview(was);
+        }
         self.anim_preview = preview;
     }
 
