@@ -584,6 +584,35 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-3c, 2026-10-30): a picked joint's trail and speed curve
+
+- **The path:** `Rig::joint_path(clip, joint, out)` gives the joint's place in the model's
+  space at each of the clip's samples (`Posing::joints` a sample, the root motion left
+  in). The editor asks for it again only when the character, its rig, the clip or the joint
+  changes (`JointTrail`).
+- **The trail:** while the Animation tab shows the character's clips with a joint picked
+  in the Skeleton, the path is drawn in the view where the character stands, as a line in
+  front of everything. Each frame gets a tick 3 cm long, so a pop shows as a long gap. The
+  trail is magenta, apart from the selection's orange outline, the skeletons' white and
+  the colliders' colors.
+- **The speed curve** (`speed_curve`): each step's length over the longest, a bar a frame
+  in a row under the events' strip, aligned with the ruler's frames. The longest bar is lit
+  in the warning color. The tab's row adds the joint, the longest step, its frames and its
+  speed; a joint that never moves "stands still in this clip". A press or a drag on the
+  bars scrubs, as the ruler does. The tab grows to 182 pixels while it has the curve.
+- **Tests:**
+  - **Unit:** the curve, with a pop named by its frames and speed, and a still joint.
+  - **The walker:** Hips' path through Walk, 31 places a metre along +z, always forward;
+    none for a clip it has not.
+  - **GPU, CesiumMan:** with a joint picked in the view (`leg_joint_L_2`) and the tab
+    open, 97 trail lines are drawn: 48 steps and 49 ticks for his 49 samples. There are 48
+    bars, and the label reads "the longest step 5.2 cm, frame 4 to 5 (1.25 m/s)". A press
+    on the curve's middle gives 1.000 s of 2.000 s. With the tab shut, there is no trail.
+  - **Screenshot:** `ENGINE_EDITOR_TRAIL_PNG` (the knee's loop in magenta).
+  - 0 allocations unchanged (both builds).
+- **Left:** the dock's model (it has no Skeleton to pick from); each joint's own
+  compression error beside its curve; Mark Foot Plants, which these paths feed.
+
 ## As built (E12-3b-3, 2026-10-30): event sounds in the editor's previews
 
 - **Which events play:** each frame, the span of the shown clip a preview played is found.

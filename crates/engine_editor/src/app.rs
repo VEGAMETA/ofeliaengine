@@ -3017,6 +3017,11 @@ struct Editor {
     /// (tests); and the events undo put back into files the tab does not hold, for the
     /// player.
     clip_events: Option<crate::clip_events::EventsDoc>,
+    /// The picked joint's path through the chosen clip while the Animation tab shows it
+    /// (E12-3c), and its trail's lines in the world this frame.
+    joint_trail: Option<JointTrail>,
+    trail_lines: Vec<[Vec3; 2]>,
+    anim_curve: u64,
     picked_event: Option<usize>,
     picked_on: String,
     event_drag: Option<(usize, f32, f32, bool)>,
@@ -4036,6 +4041,9 @@ impl Editor {
             anim_focus: false,
             anim_ruler: 0,
             clip_events: None,
+            joint_trail: None,
+            trail_lines: Vec::new(),
+            anim_curve: 0,
             picked_event: None,
             picked_on: String::new(),
             event_drag: None,
@@ -6468,6 +6476,8 @@ impl Editor {
                         length: c.duration,
                         picked_event: self.picked_event.filter(|&k| k < events.len()),
                         event_autofocus: self.event_autofocus,
+                        speeds: self.joint_trail.as_ref().map_or(&[][..], |t| &t.speeds),
+                        speed_label: self.joint_trail.as_ref().map_or("", |t| &t.label),
                     }
                 }
                 None => crate::shell::AnimationView {
@@ -6488,6 +6498,8 @@ impl Editor {
                     length: 0.0,
                     picked_event: None,
                     event_autofocus: false,
+                    speeds: &[],
+                    speed_label: "",
                 },
             }
         });
@@ -6845,6 +6857,7 @@ impl Editor {
         // Its events (E12-3b-2): a field's typing first (a click elsewhere ends it, on the
         // event it was typed for), then the marks, the strip and the buttons.
         self.anim_events = response.anim_events;
+        self.anim_curve = response.anim_curve;
         self.event_autofocus = false;
         if let Some((field, true)) = response.anim_event_text {
             let text = self.ui.edited_text().trim().to_owned();
@@ -19921,6 +19934,43 @@ impl Editor {
         }) {
             self.joint_edit = None;
         }
+        // The picked joint's trail through the chosen clip (E12-3c), while the Animation
+        // tab shows the character's clips: made again when the character, its rig, the clip
+        // or the joint changes.
+        let wanted = self
+            .clips
+            .as_ref()
+            .filter(|_| self.bottom == Some(ANIMATION_TAB))
+            .and_then(|v| {
+                let ClipsOf::Entity(e) = v.of else {
+                    return None;
+                };
+                let joint = self
+                    .skeleton_view
+                    .as_ref()
+                    .filter(|s| s.entity == e)?
+                    .picked?;
+                Some((e, v.rig, v.chosen, joint))
+            });
+        match wanted {
+            None => self.joint_trail = None,
+            Some(key) if self.joint_trail.as_ref().is_some_and(|t| t.key == key) => {}
+            Some(key @ (e, _, clip, joint)) => {
+                let mut trail = JointTrail {
+                    key,
+                    path: Vec::new(),
+                    speeds: Vec::new(),
+                    label: String::new(),
+                };
+                if let Some(rig) = player.model_rig(e) {
+                    rig.joint_path(clip, joint, &mut trail.path);
+                    let rate = rig.clips().get(clip).map_or(30.0, |c| c.sample_rate());
+                    let name = rig.skeleton().names().get(joint).map_or("", String::as_str);
+                    (trail.speeds, trail.label) = speed_curve(&trail.path, rate, name);
+                }
+                self.joint_trail = Some(trail);
+            }
+        }
         if self.play.is_some() {
             self.in_place = None;
         }
@@ -20005,6 +20055,25 @@ impl Editor {
         let [selected, others] = &mut self.skeleton_lines;
         selected.clear();
         others.clear();
+        // The picked joint's trail (E12-3c): its path through the clip where the character
+        // stands, a tick at each frame, so a pop shows as a long gap.
+        self.trail_lines.clear();
+        if let Some(trail) = &self.joint_trail
+            && let Some(at) = player
+                .world_mut()
+                .get::<GlobalTransform>(trail.key.0)
+                .map(|g| g.0)
+        {
+            let tick = Vec3::new(0.0, 0.015, 0.0);
+            let points = trail.path.iter().map(|&p| at.transform_point3(p));
+            let ticks = trail
+                .path
+                .iter()
+                .map(|&p| [at.transform_point3(p - tick), at.transform_point3(p + tick)]);
+            self.trail_lines
+                .extend(points.clone().zip(points.skip(1)).map(|(a, b)| [a, b]));
+            self.trail_lines.extend(ticks);
+        }
         self.skeleton_of.clear();
         self.skeleton_of.extend_from_slice(&self.selection);
         let chosen = self.skeleton_of.len();
@@ -25460,6 +25529,28 @@ impl<G> EditorGame<G> {
         self.shared.borrow().clips.as_ref().and_then(|v| v.beside)
     }
 
+    /// The picked joint's trail (ADR 0124's E12-3c): its lines in the world this frame, and
+    /// its speed curve's bars and text; for tests.
+    pub fn joint_trail(&self) -> (usize, usize, String) {
+        let shared = self.shared.borrow();
+        let (bars, label) = shared
+            .joint_trail
+            .as_ref()
+            .map_or((0, String::new()), |t| (t.speeds.len(), t.label.clone()));
+        (shared.trail_lines.len(), bars, label)
+    }
+
+    /// The Animation tab's speed curve where the last frame drew it: x, y, width, height
+    /// (E12-3c, for tests).
+    pub fn animation_speed_curve(&self) -> Option<[f32; 4]> {
+        let shared = self.shared.borrow();
+        if shared.anim_curve == 0 {
+            return None;
+        }
+        let r = shared.ui.rect_of(shared.anim_curve)?;
+        Some([r.pos[0], r.pos[1], r.size[0], r.size[1]])
+    }
+
     /// The Clips' playhead in seconds, and whether the Animation tab is open with its ruler
     /// where the last frame drew it (ADR 0124's E12-3a): for tests.
     pub fn clip_time(&self) -> Option<f32> {
@@ -26298,6 +26389,51 @@ fn motion_batch(collider: &ModelCollider) -> usize {
 /// The characters' skeletons' colors (ADR 0124's E12-1c; linear, straight alpha): the
 /// selected ones' white, every other one's (View: Skeletons) a dim grey.
 const SKELETON_COLORS: [[f32; 4]; 2] = [[0.95, 0.95, 0.95, 0.95], [0.7, 0.7, 0.7, 0.45]];
+
+/// The picked joint's trail's color (E12-3c, linear, straight alpha): magenta, apart from
+/// the selection's orange outline, the skeletons' white and the colliders' colors.
+const TRAIL_COLOR: [f32; 4] = [1.0, 0.25, 0.85, 1.0];
+
+/// A picked joint's path through the chosen clip (ADR 0124's E12-3c): the character, its
+/// rig, the clip and the joint it was made for; its place at each sample (the character's
+/// space); each step's length over the longest, a bar a frame of the speed curve; and the
+/// curve's text.
+#[derive(Debug)]
+struct JointTrail {
+    key: (Entity, usize, usize, usize),
+    path: Vec<Vec3>,
+    speeds: Vec<f32>,
+    label: String,
+}
+
+/// A joint's path's steps as a speed curve (ADR 0124's E12-3c): each step's length over the
+/// longest (0 to 1), and the text: the longest step, between which frames, and the speed it
+/// is at `rate` samples a second. A pop is a step far longer than its neighbours.
+fn speed_curve(path: &[Vec3], rate: f32, joint: &str) -> (Vec<f32>, String) {
+    let steps: Vec<f32> = path.windows(2).map(|w| (w[1] - w[0]).length()).collect();
+    let (at, longest) =
+        steps.iter().copied().enumerate().fold(
+            (0, 0.0f32),
+            |(k, m), (i, s)| if s > m { (i, s) } else { (k, m) },
+        );
+    let speeds = steps
+        .iter()
+        .map(|&s| if longest > 0.0 { s / longest } else { 0.0 })
+        .collect();
+    let label = if steps.is_empty() {
+        String::new()
+    } else if longest <= 0.0 {
+        format!("{joint} stands still in this clip")
+    } else {
+        format!(
+            "{joint}: the longest step {}, frame {at} to {} ({:.2} m/s)",
+            length_text(longest),
+            at + 1,
+            longest * rate
+        )
+    };
+    (speeds, label)
+}
 
 /// The models' colliders' colors by [`motion_batch`] (linear, straight alpha): static cyan
 /// as the blockout's, dynamic orange, kinematic violet, sensors yellow.
@@ -27956,6 +28092,12 @@ impl Overlay for EditorOverlay {
                         LineBatch {
                             lines: selected_bones,
                             color: SKELETON_COLORS[0],
+                            hidden: 1.0,
+                        },
+                        // The picked joint's trail (E12-3c).
+                        LineBatch {
+                            lines: &editor.trail_lines,
+                            color: TRAIL_COLOR,
                             hidden: 1.0,
                         },
                     ];
@@ -30102,6 +30244,32 @@ mod tests {
             _ => panic!("the step's sound played across the loop"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E12-3c: a joint's path read as a speed curve: each step over the longest, the longest
+    /// one named with its frames and speed; a path of one point has no curve.
+    #[test]
+    fn a_joints_path_reads_as_a_speed_curve_with_its_pop_named() {
+        let path: Vec<Vec3> = [0.0, 0.01, 0.02, 0.03, 0.08, 0.09]
+            .iter()
+            .map(|&z| Vec3::new(0.0, 1.0, z))
+            .collect();
+        let (speeds, label) = speed_curve(&path, 30.0, "Hand.R");
+        assert_eq!(speeds.len(), 5, "a bar a step");
+        assert!(
+            (speeds[3] - 1.0).abs() < 1e-5,
+            "the pop the longest: {speeds:?}"
+        );
+        assert!((speeds[0] - 0.2).abs() < 1e-3, "{speeds:?}");
+        assert!(label.starts_with("Hand.R: the longest step 5"), "{label}");
+        assert!(label.contains("frame 3 to 4"), "{label}");
+        assert!(label.contains("(1.50 m/s)"), "{label}");
+        let (none, text) = speed_curve(&path[..1], 30.0, "Hand.R");
+        assert!(none.is_empty() && text.is_empty());
+        let still = [Vec3::ONE; 3];
+        let (zeros, text) = speed_curve(&still, 30.0, "Root");
+        assert_eq!(zeros, [0.0, 0.0]);
+        assert_eq!(text, "Root stands still in this clip");
     }
 
     #[test]

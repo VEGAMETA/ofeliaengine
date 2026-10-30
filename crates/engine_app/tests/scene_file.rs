@@ -2178,6 +2178,20 @@ fn root_motion_moves_the_character_or_is_left_for_the_game() {
     let speed = rig.clips()[0].root_speed();
     println!("Walk's root speed {speed} a second");
     assert!((speed - 1.0).abs() < 1e-3, "{speed}");
+    // ADR 0124's E12-3c: the hips' path through Walk, a place a sample, its root motion left
+    // in: a metre along +z over its 31 samples, always forward.
+    let mut path = Vec::new();
+    rig.joint_path(0, hips, &mut path);
+    assert_eq!(path.len(), 31);
+    assert!(
+        (path[30].z - path[0].z - 1.0).abs() < 0.01,
+        "{} {}",
+        path[0],
+        path[30]
+    );
+    assert!(path.windows(2).all(|w| w[1].z > w[0].z), "always forward");
+    rig.joint_path(5, hips, &mut path);
+    assert!(path.is_empty(), "a clip it has not");
     let at = |player: &mut Player, e| *player.world_mut().get::<Transform>(e).unwrap();
     let animator = |player: &mut Player, e| player.world_mut().get::<Animator>(e).unwrap().clone();
     let hips_at = |player: &mut Player, e| {

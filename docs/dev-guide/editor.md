@@ -448,6 +448,14 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
       - **Their sounds play in the previews:** the dock's model playing its clip, and P
         playing a character in place, play an event's sound as they pass it, on the same
         bus as the dock's sound previews (one at a time).
+    - **Pops, found:** pick one of a character's joints (Tab in the view, or its row in
+      the inspector's Skeleton) while the tab shows his clips.
+      - The joint leaves a **trail** through the clip in the view: its path in magenta, a
+        tick at each frame.
+      - Its **speed** draws under the events, a bar a frame. A pop is a bar far taller than
+        its neighbours; the tallest is lit. The row beside names the longest step, its
+        frames and its speed ("leg_joint_L_2: the longest step 5.2 cm, frame 4 to 5").
+      - A click or a drag on the bars puts the playhead there.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

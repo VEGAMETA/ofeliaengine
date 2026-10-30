@@ -1170,6 +1170,66 @@ fn a_selected_characters_clips_show_and_p_plays_it_in_place() {
         "the click picks the joint under it"
     );
     assert_eq!(game.selection(), [man], "and keeps him selected");
+    // E12-3c: with the Animation tab open, the picked joint leaves a trail through his clip
+    // in the view, a tick a frame, and its speed draws as a bar a frame under the ruler; a
+    // press on the curve's middle puts the playhead at the clip's middle.
+    key(&mut game, 0x12, 0x38, true);
+    tap(&mut game, 0x4E, 0x31); // Alt+N
+    key(&mut game, 0x12, 0x38, false);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let samples = player.model_rig(man).unwrap().clips()[0].sample_count() as usize;
+    let length = player.model_rig(man).unwrap().clips()[0].duration();
+    let (lines, bars, label) = game.joint_trail();
+    println!("trail: {lines} lines, {bars} bars; {label}");
+    assert_eq!(bars, samples - 1, "a bar a step");
+    assert!(
+        !label.contains("stands still"),
+        "a joint that moves: {label}"
+    );
+    assert_eq!(
+        lines,
+        2 * samples - 1,
+        "the path's segments and a tick a sample"
+    );
+    assert!(
+        label.starts_with(&format!("{joint}: the longest step")),
+        "{label}"
+    );
+    let [x, y, w, h] = game.animation_speed_curve().expect("the speed curve");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, [x + w * 0.5, y + h * 0.5], pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let played = game.clip_time().unwrap();
+    println!("the curve's middle: {played:.3} s of {length:.3} s");
+    assert!(
+        (played - length * 0.5).abs() < 0.05,
+        "the clip's middle: {played}"
+    );
+    if let Ok(out) = std::env::var("ENGINE_EDITOR_TRAIL_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(out, png).unwrap();
+    }
+    key(&mut game, 0x12, 0x38, true);
+    tap(&mut game, 0x4E, 0x31); // Alt+N: the tab shut again
+    key(&mut game, 0x12, 0x38, false);
+    // The docks take the tab's room back (the inspector laid out again).
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(game.joint_trail().0, 0, "no trail with the tab shut");
     // The inspector's Skeleton lists his joints: a click on a row picks that one.
     let (name, row) = names
         .iter()
