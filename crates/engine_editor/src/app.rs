@@ -1668,18 +1668,38 @@ struct ClipsView {
     /// found once; and "24 joints" (E12-3a).
     subject: String,
     joints: String,
-    /// The time its text shows, and the text ("frame 18 / 48 · 0.75 s").
+    /// The time its text shows, of which clip and its frames, and the text ("frame 18 / 48
+    /// · 0.75 s").
     shown: f32,
+    shown_clip: (usize, u32),
     time_text: String,
-    /// Clips made in the editor (ADR 0124's E12-4b): each clip's file, in the order of
-    /// `clips` (empty for a rig's); whether the chosen one plays (on the frame's time, the
-    /// player showing it on its entity) and when its last frame was.
+    /// Clips made in the editor (ADR 0124's E12-4b): each clip's file, in the order of the
+    /// last of `clips` (on a character, after its model's, E12-4e-2; none for a model file
+    /// picked in the dock); whether the chosen one plays (on the frame's time, the player
+    /// showing it on its entity) and when its last frame was.
     own: Vec<AssetRef>,
     playing: bool,
     at: Option<Instant>,
 }
 
 impl ClipsView {
+    /// Where its clips made in the editor begin among `clips`: after a character's model's.
+    fn own_start(&self) -> usize {
+        self.clips.len().saturating_sub(self.own.len())
+    }
+
+    /// The chosen clip's file when it is one made in the editor (ADR 0124's E12-4b).
+    fn chosen_own(&self) -> Option<AssetRef> {
+        self.own
+            .get(self.chosen.checked_sub(self.own_start())?)
+            .copied()
+    }
+
+    /// Whether the chosen clip is one made in the editor, not a model's.
+    fn own_chosen(&self) -> bool {
+        self.chosen_own().is_some()
+    }
+
     fn new(of: ClipsOf, rig: usize, clips: Vec<ClipFacts>) -> Self {
         Self {
             of,
@@ -1692,6 +1712,7 @@ impl ClipsView {
             subject: String::new(),
             joints: String::new(),
             shown: f32::NAN,
+            shown_clip: (usize::MAX, 0),
             time_text: String::with_capacity(48),
             own: Vec::new(),
             playing: false,
@@ -1719,10 +1740,12 @@ impl ClipsView {
         };
         let frame = ((self.time * c.rate).round() as u32).min(c.frames);
         let at = frame as f32 / c.rate.max(1e-6);
-        if self.shown == at {
+        // Another clip chosen, or the clip's length changed, at the same moment: written anew.
+        if self.shown == at && self.shown_clip == (self.chosen, c.frames) {
             return;
         }
         self.shown = at;
+        self.shown_clip = (self.chosen, c.frames);
         self.time_text.clear();
         let _ = write!(
             self.time_text,
@@ -3436,6 +3459,11 @@ struct Editor {
     /// the world as the last frame put them, to pick from.
     joint_edit: Option<JointEdit>,
     joint_points: Vec<Vec3>,
+    /// Each of those joints' turn in the world and its parent's (E12-4e-2): the joint's
+    /// rings' axes, and the space its turn is keyed in.
+    joint_turns: Vec<(Quat, Quat)>,
+    /// A joint turned by a ring of the picked joint's (E12-4e-2), keyed as it turns.
+    joint_turn: Option<JointTurn>,
     /// View: Sound Ranges (E11-4c).
     show_sound_ranges: bool,
     /// The active entity's 3D sound's falloff for the inspector (E11-4c): its bars, and
@@ -4366,6 +4394,8 @@ impl Editor {
             joint_places: Vec::new(),
             joint_edit: None,
             joint_points: Vec::new(),
+            joint_turns: Vec::new(),
+            joint_turn: None,
             show_sound_ranges: false,
             falloff_bars: [0.0; FALLOFF_BARS],
             falloff_texts: Default::default(),
@@ -5902,7 +5932,14 @@ impl Editor {
                 .skeleton_view
                 .as_ref()
                 .and_then(|v| Some(v.names[v.picked?].as_str()));
+            let posing = self
+                .joint_edit
+                .and_then(|j| self.posed_joint(j.entity))
+                .is_some();
             match picked {
+                Some(name) if posing => {
+                    let _ = write!(self.status, "{name}  ·  {JOINTS_POSE_HELP}  ·  ");
+                }
                 Some(name) => {
                     let _ = write!(self.status, "{name}  ·  {JOINTS_HELP}  ·  ");
                 }
@@ -6633,11 +6670,14 @@ impl Editor {
                     .map(|(name, &depth)| crate::shell::JointRow { name, depth }),
             );
         }
-        // New Clip (E12-4b-1b) for a selected entity without a rig: none of a model's clips
-        // shown (a character's own clips come later).
+        // New Clip (E12-4b-1b) for a selected entity, a character's beside its model's clips
+        // (E12-4e-2); not for a model file picked in the dock.
         let new_clip_offered = self.active().is_some()
             && self.shown_model.is_none()
-            && self.clips.as_ref().is_none_or(|v| !v.own.is_empty());
+            && self
+                .clips
+                .as_ref()
+                .is_none_or(|v| matches!(v.of, ClipsOf::Entity(_)));
         // A clip made in the editor's tracks (E12-4b), from the file the tab holds.
         let mut track_rows: Vec<crate::shell::TrackRow<'_>> =
             recycle(std::mem::take(&mut self.lists.track_rows));
@@ -6645,7 +6685,7 @@ impl Editor {
             && let Some(anim) = self
                 .clips
                 .as_ref()
-                .filter(|v| !v.own.is_empty())
+                .filter(|v| v.own_chosen())
                 .and(self.clip_events.as_ref())
                 .and_then(crate::clip_events::EventsDoc::anim)
         {
@@ -6702,11 +6742,11 @@ impl Editor {
                         speed_label: self.joint_trail.as_ref().map_or("", |t| &t.label),
                         once,
                         root,
-                        own: !v.own.is_empty(),
+                        own: v.own_chosen(),
                         tracks: &track_rows,
-                        new_clip: !v.own.is_empty(),
-                        clip_autofocus: !v.own.is_empty() && self.clip_autofocus,
-                        picked_keys: if v.own.is_empty() {
+                        new_clip: matches!(v.of, ClipsOf::Entity(_)),
+                        clip_autofocus: v.own_chosen() && self.clip_autofocus,
+                        picked_keys: if !v.own_chosen() {
                             &[]
                         } else {
                             &self.picked_keys
@@ -6717,12 +6757,12 @@ impl Editor {
                             Some([a[0] - x, a[1] - y, b[0] - x, b[1] - y])
                         }),
                         length_text: &self.length_text,
-                        curves: self.curves_shown && !v.own.is_empty(),
+                        curves: self.curves_shown && v.own_chosen(),
                         curve_lanes: &self.curve_lanes,
                         curve_points: &self.curve_points,
                         curve_keys: &self.curve_keys,
                         curve_range: [&self.curve_range_text[0], &self.curve_range_text[1]],
-                        keys_picked: !v.own.is_empty() && !self.picked_keys.is_empty(),
+                        keys_picked: v.own_chosen() && !self.picked_keys.is_empty(),
                         key_curve: self.key_curve,
                     }
                 }
@@ -7791,11 +7831,13 @@ impl Editor {
                 self.stop_hearing();
             }
         }
-        // So does playing in place (ADR 0124's E12-1b); Escape lets a held pose go too.
+        // So does playing in place (ADR 0124's E12-1b); Escape lets a held pose go too (not
+        // while a joint turns: Escape takes the turn back, E12-4e-2).
         let escape = self.ui.input().keys.contains(&UiKey::Escape)
             && self.command_palette.is_none()
             && self.ui.editing().is_none()
-            && self.drag.is_none();
+            && self.drag.is_none()
+            && self.joint_turn.is_none();
         let engaged = self.in_place.is_some()
             || self.clips.as_ref().is_some_and(|v| v.held)
             || self.shown_model.as_ref().is_some_and(|m| m.playing);
@@ -9931,10 +9973,10 @@ impl Editor {
             self.hovered_side = None;
             return;
         }
-        // Picking a character's joints (Tab, ADR 0124's E12-1c): so do the joints.
+        // Picking a character's joints (Tab, ADR 0124's E12-1c): so do the joints, the
+        // picked joint's rings in the gizmo's place (E12-4e-2).
         if self.joint_edit.is_some() {
-            self.joints_frame(&view, cursor);
-            self.hovered_handle = None;
+            self.joints_frame(world, &view, cursor, scale);
             self.handles.clear();
             self.sound_handles.clear();
             self.hovered_side = None;
@@ -10130,18 +10172,42 @@ impl Editor {
     /// Tab's joint mode's frame (ADR 0124's E12-1c): the character's joint nearest the
     /// pointer within 8 pixels lit; a press on it picks it, a press in the view on no joint
     /// ends the mode (the click selecting as clicks do), one on the panels keeps it (the
-    /// Skeleton's rows pick too); Escape ends it.
-    fn joints_frame(&mut self, view: &ViewProj, cursor: Option<Vec2>) {
+    /// Skeleton's rows pick too); Escape ends it. With a clip made in the editor shown on the
+    /// character, the picked joint has rings in its own axes (E12-4e-2): a press on one
+    /// turns the joint ([`Self::joint_turn_frame`]).
+    fn joints_frame(
+        &mut self,
+        world: &mut World,
+        view: &ViewProj,
+        cursor: Option<Vec2>,
+        scale: f32,
+    ) {
+        self.hovered_handle = None;
         let Some(mut edit) = self.joint_edit.take() else {
             return;
         };
+        if self.joint_turn.is_some() {
+            self.joint_edit = Some(edit);
+            self.joint_turn_frame(world, view, cursor, scale);
+            return;
+        }
         if self.ui.input().keys.contains(&UiKey::Escape) {
             return;
         }
         let free = !self.camera_drag && self.command_palette.is_none() && !self.add_open;
+        if let Some(j) = self.posed_joint(edit.entity) {
+            let (turn, _) = self.joint_turns[j];
+            let axes = [turn * Vec3::X, turn * Vec3::Y, turn * Vec3::Z];
+            let pivot = self.joint_points[j];
+            self.gizmo_shown = self.gizmo.layout(view, Mode::Rotate, pivot, axes, scale);
+            self.hovered_handle = cursor
+                .filter(|&at| self.gizmo_shown && free && view.contains(at))
+                .and_then(|at| self.gizmo.hit(at, scale));
+        }
         let reach = 8.0 * self.scale.max(0.5);
+        let on_ring = self.hovered_handle.is_some();
         edit.hovered = cursor
-            .filter(|&at| free && view.contains(at))
+            .filter(|&at| free && !on_ring && view.contains(at))
             .and_then(|at| {
                 self.joint_points
                     .iter()
@@ -10152,6 +10218,11 @@ impl Editor {
             })
             .map(|(j, _)| j);
         if self.input.pressed(Button::Left) && cursor.is_some_and(|at| view.contains(at)) {
+            if let (Some(handle), Some(at)) = (self.hovered_handle, cursor) {
+                self.joint_edit = Some(edit);
+                self.start_joint_turn(view, handle, at);
+                return;
+            }
             let Some(j) = edit.hovered else {
                 // A press in the view on no joint: the mode ends, the click selects.
                 return;
@@ -10161,6 +10232,125 @@ impl Editor {
             }
         }
         self.joint_edit = Some(edit);
+    }
+
+    /// The picked joint of character `entity` in Tab's joint mode while a clip made in the
+    /// editor shows on him (ADR 0124's E12-4e-2): the joint his rings turn and K keys.
+    fn posed_joint(&self, entity: Entity) -> Option<usize> {
+        let (e, ..) = self.shown_own_clip().filter(|c| c.0 == entity)?;
+        let j = self
+            .skeleton_view
+            .as_ref()
+            .filter(|v| v.entity == e)?
+            .picked?;
+        (j < self.joint_turns.len() && j < self.joint_points.len()).then_some(j)
+    }
+
+    /// A press on a ring of the picked joint's (E12-4e-2): its turn begins, the clip held
+    /// at the playhead's frame (stopped there when it played).
+    fn start_joint_turn(&mut self, view: &ViewProj, handle: Handle, at: Vec2) {
+        let Some((e, file, time, _)) = self.shown_own_clip() else {
+            return;
+        };
+        let Some(j) = self.posed_joint(e) else {
+            return;
+        };
+        let Some(name) = self.skeleton_view.as_ref().and_then(|v| v.names.get(j)) else {
+            return;
+        };
+        let Some(anim) = self
+            .clip_events
+            .as_ref()
+            .filter(|d| d.file == file)
+            .and_then(crate::clip_events::EventsDoc::anim)
+        else {
+            return;
+        };
+        let target = engine_scene::joint_target(name, "rotation");
+        let time = crate::clip_events::on_frame(time, anim.rate, anim.length);
+        let (world_turn, parent) = self.joint_turns[j];
+        let near = joint_near(anim, &target, time, parent.inverse() * world_turn);
+        let before = anim.clone();
+        self.gestures += 1;
+        let Some(drag) = GizmoDrag::start(&self.gizmo, view, handle, at, Vec::new(), self.gestures)
+        else {
+            return;
+        };
+        if let Some(v) = self.clips.as_mut() {
+            v.playing = false;
+            v.time = time;
+            v.held = true;
+        }
+        self.joint_turn = Some(JointTurn {
+            drag,
+            file,
+            time,
+            before,
+            target,
+            world: world_turn,
+            parent,
+            near,
+            cancelled: false,
+        });
+    }
+
+    /// The joint turning (ADR 0124's E12-4e-2): the ring's turn (snapped by the rules, Shift
+    /// and Ctrl as for the gizmo) set on the joint in the clip at the turn's frame as it is
+    /// dragged, drawn at once; let go, it is written as one step ("Pose <joint>"). Escape puts
+    /// the clip back as it was; the turn ends with the button.
+    fn joint_turn_frame(
+        &mut self,
+        world: &mut World,
+        view: &ViewProj,
+        cursor: Option<Vec2>,
+        scale: f32,
+    ) {
+        let Some(mut turn) = self.joint_turn.take() else {
+            return;
+        };
+        if self.ui.input().keys.contains(&UiKey::Escape) && !turn.cancelled {
+            turn.cancelled = true;
+            turn.drag.last = None;
+            if let Some(doc) = self.clip_events.as_mut().filter(|d| d.file == turn.file) {
+                let before = &turn.before;
+                doc.edit_anim_live(|a| a.clone_from(before));
+            }
+        }
+        if !self.input.held(Button::Left) {
+            // Back as it was, nothing is written; else the turn is one step.
+            let joint = engine_scene::split_joint_target(&turn.target).map_or("", |(j, _)| j);
+            let name = format!("Pose {joint}");
+            self.write_keys(world, &name);
+            return;
+        }
+        if !turn.cancelled
+            && let Some(at) = cursor
+            && let Some(change) = turn.drag.change(
+                view,
+                at,
+                &self.snapping,
+                self.input.shift(),
+                self.input.ctrl(),
+            )
+            && turn.drag.last != Some(change)
+            && let Change::Turn(q) = change
+        {
+            turn.drag.last = Some(change);
+            let local = turn.parent.inverse() * (q * turn.world);
+            let key = engine_app::euler_near(&local.normalize().to_array(), &turn.near);
+            if let Some(doc) = self.clip_events.as_mut().filter(|d| d.file == turn.file) {
+                let (before, target, time) = (&turn.before, &turn.target, turn.time);
+                doc.edit_anim_live(|a| {
+                    a.clone_from(before);
+                    a.set_key(target, time, &key[..3]);
+                });
+            }
+        }
+        self.gizmo_shown =
+            self.gizmo
+                .layout(view, Mode::Rotate, turn.drag.pivot, turn.drag.axes, scale);
+        self.hovered_handle = Some(turn.drag.handle);
+        self.joint_turn = Some(turn);
     }
 
     fn toggle_face_edit(&mut self, world: &World) {
@@ -10710,6 +10900,7 @@ impl Editor {
     fn start_key_transform(&mut self, world: &World, kind: transform::Kind) {
         if self.key_transform.is_some()
             || self.gizmo_drag.is_some()
+            || self.joint_turn.is_some()
             || self.drag.is_some()
             || self.camera_drag
         {
@@ -11339,6 +11530,12 @@ impl Editor {
         self.face_edit = None;
         self.drag = None;
         self.gizmo_drag = None;
+        if let Some(turn) = self.joint_turn.take()
+            && let Some(doc) = self.clip_events.as_mut().filter(|d| d.file == turn.file)
+        {
+            doc.edit_anim_live(|a| *a = turn.before);
+            self.write_keys(world, "Pose");
+        }
         self.side_drag = None;
         self.sound_drag = None;
         self.box_drag = None;
@@ -19765,7 +19962,7 @@ impl Editor {
                 let chosen = self
                     .clips
                     .as_ref()
-                    .filter(|v| v.of == ClipsOf::Entity(e))
+                    .filter(|v| v.of == ClipsOf::Entity(e) && !v.own_chosen())
                     .map(|v| v.chosen);
                 (e, chosen)
             })
@@ -19833,7 +20030,7 @@ impl Editor {
     /// playhead, or stops there, holding that pose.
     fn toggle_clip_play(&mut self) {
         // A clip made in the editor (E12-4b): played on the frame's time, shown on its entity.
-        if let Some(view) = self.clips.as_mut().filter(|v| !v.own.is_empty()) {
+        if let Some(view) = self.clips.as_mut().filter(|v| v.own_chosen()) {
             view.playing = !view.playing;
             view.at = None;
             view.held = !view.playing;
@@ -19963,7 +20160,17 @@ impl Editor {
                 .is_some_and(|m| m.file == file && m.playing);
             return;
         }
+        // A character's clip made in the editor and its model's do not play together
+        // (E12-4e-2): choosing one stops the other kind.
+        let own = view.own_chosen();
+        if !own {
+            view.playing = false;
+        }
         match self.in_place.as_mut() {
+            Some(_) if own => {
+                self.in_place = None;
+                view.held = true;
+            }
             Some(play) => {
                 play.start = 0.0;
                 play.played = 0.0;
@@ -19993,7 +20200,7 @@ impl Editor {
         view.time = along * view.length();
         view.held = true;
         // A clip made in the editor's playhead lands on its frames, where keys go (E12-4b-2).
-        if !view.own.is_empty()
+        if view.own_chosen()
             && let Some(c) = view.clips.get(view.chosen)
         {
             view.time = crate::clip_events::on_frame(view.time, c.rate, c.duration);
@@ -20011,9 +20218,9 @@ impl Editor {
     /// the pick let go when another clip is chosen.
     fn follow_clip_events(&mut self, world: &World) {
         // A clip made in the editor (E12-4b): its own file holds its events and loop.
-        if let Some(v) = self.clips.as_ref().filter(|v| !v.own.is_empty()) {
-            let chosen = v.own.get(v.chosen).zip(v.clips.get(v.chosen));
-            let Some((&file, c)) = chosen else {
+        if let Some(v) = self.clips.as_ref().filter(|v| v.own_chosen()) {
+            let chosen = v.chosen_own().zip(v.clips.get(v.chosen));
+            let Some((file, c)) = chosen else {
                 self.clip_events = None;
                 self.picked_event = None;
                 return;
@@ -20070,8 +20277,8 @@ impl Editor {
     /// the game not playing, the file held. Its clip, from the held file.
     fn shown_own_clip(&self) -> Option<(Entity, AssetId, f32, bool)> {
         let open = self.bottom == Some(ANIMATION_TAB) && self.play.is_none();
-        let v = self.clips.as_ref().filter(|v| open && !v.own.is_empty())?;
-        let (ClipsOf::Entity(e), Some(file)) = (v.of, v.own.get(v.chosen)) else {
+        let v = self.clips.as_ref().filter(|v| open && v.own_chosen())?;
+        let (ClipsOf::Entity(e), Some(file)) = (v.of, v.chosen_own()) else {
             return None;
         };
         let anim = self
@@ -20182,6 +20389,22 @@ impl Editor {
         };
         // On a frame, also while it plays (it stops there).
         let time = crate::clip_events::on_frame(time, anim.rate, anim.length);
+        // In Tab's joint mode, the picked joint (E12-4e-2): its turn as the pose has it.
+        if let Some(j) = self
+            .joint_edit
+            .and_then(|edit| self.posed_joint(edit.entity))
+            && let Some(name) = self.skeleton_view.as_ref().and_then(|v| v.names.get(j))
+        {
+            let target = engine_scene::joint_target(name, "rotation");
+            let (world_turn, parent) = self.joint_turns[j];
+            let local = parent.inverse() * world_turn;
+            let near = joint_near(anim, &target, time, local);
+            let key = engine_app::euler_near(&local.normalize().to_array(), &near);
+            let said = format!("{name} keyed at {time:.2} s");
+            self.set_keys(world, "Key Joint", file, time, &[(target, key, 3)]);
+            self.say(said);
+            return;
+        }
         let mut keys: Vec<(String, [f32; 4], usize)> = Vec::new();
         if anim.tracks.is_empty() {
             for target in [
@@ -20336,7 +20559,7 @@ impl Editor {
             self.key_drag = None;
             return;
         };
-        if let Some(v) = self.clips.as_mut().filter(|v| !v.own.is_empty())
+        if let Some(v) = self.clips.as_mut().filter(|v| v.own_chosen())
             && let Some(c) = v.clips.get_mut(v.chosen)
         {
             let rate = if anim.rate > 0.0 { anim.rate } else { 30.0 };
@@ -20829,7 +21052,7 @@ impl Editor {
     /// The chosen clip made in the editor and its entity (E12-4b-1b), by its key among the
     /// entity's animator's clips.
     fn chosen_own_clip(&self) -> Option<(Entity, String)> {
-        let v = self.clips.as_ref().filter(|v| !v.own.is_empty())?;
+        let v = self.clips.as_ref().filter(|v| v.own_chosen())?;
         let ClipsOf::Entity(e) = v.of else {
             return None;
         };
@@ -20930,6 +21153,49 @@ impl Editor {
         self.clips = Some(view);
     }
 
+    /// Character `e`'s clips made in the editor after its model's in the Clips (ADR 0124's
+    /// E12-4e-2), as its animator lists them: made again only when they change (a clip made,
+    /// renamed or deleted), the animator's clip chosen then when it is one of them.
+    fn follow_character_clips(&mut self, world: &World, e: Entity) {
+        let animator = world.get::<engine_runtime::Animator>(e);
+        let Some(view) = self.clips.as_mut() else {
+            return;
+        };
+        let start = view.own_start();
+        let mut wanted = animator.map(|a| a.clips.iter()).into_iter().flatten();
+        let same = view.own.len() == animator.map_or(0, |a| a.clips.len())
+            && view
+                .own
+                .iter()
+                .zip(&view.clips[start..])
+                .zip(wanted.by_ref())
+                .all(|((file, c), (name, f))| file == f && c.key == *name);
+        if same {
+            return;
+        }
+        let chosen_model = (view.chosen < start).then_some(view.chosen);
+        view.clips.truncate(start);
+        view.own.clear();
+        for (name, file) in animator.map(|a| a.clips.iter()).into_iter().flatten() {
+            let anim = self
+                .asset_db
+                .get(file.file)
+                .map(|entry| engine_scene::AnimFile::load(&self.root.join(&entry.path)));
+            view.clips.push(ClipFacts::own(name, anim));
+            view.own.push(*file);
+        }
+        let own_clip = animator.and_then(|a| {
+            let k = a.clips.keys().position(|name| *name == a.clip)?;
+            Some(start + k)
+        });
+        view.chosen = own_clip.or(chosen_model).unwrap_or(0);
+        if own_clip.is_some() {
+            view.time = 0.0;
+            view.held = true;
+            view.playing = false;
+        }
+    }
+
     /// The events clip `k`'s preview passed from `from` to `to` seconds this frame (ADR
     /// 0124's E12-3b-3): the last one's sound played on the editor's preview bus, as the
     /// dock plays a sound (one at a time, the next one cutting it).
@@ -20978,6 +21244,12 @@ impl Editor {
         let Some(view) = self.clips.as_ref() else {
             return;
         };
+        if view.own_chosen() {
+            self.say(String::from(
+                "Mark Foot Plants marks a model's clips: choose one of them",
+            ));
+            return;
+        }
         let k = view.chosen;
         let rig = match view.of {
             ClipsOf::Entity(e) => player.model_rig(e),
@@ -21374,6 +21646,13 @@ impl Editor {
                 self.skeleton_view = None;
             }
         }
+        // A character's own clips after its model's (E12-4e-2), as its animator's change.
+        if let Some(e) = self.clips.as_ref().and_then(|v| match v.of {
+            ClipsOf::Entity(e) if v.rig != 0 => Some(e),
+            _ => None,
+        }) {
+            self.follow_character_clips(player.world_mut(), e);
+        }
         if self.joint_edit.is_some_and(|j| {
             self.skeleton_view
                 .as_ref()
@@ -21395,7 +21674,7 @@ impl Editor {
                 let joint = self
                     .skeleton_view
                     .as_ref()
-                    .filter(|s| s.entity == e)?
+                    .filter(|s| s.entity == e && !v.own_chosen())?
                     .picked?;
                 Some((e, v.rig, v.chosen, joint))
             });
@@ -21474,7 +21753,7 @@ impl Editor {
             }
         }
         if self.in_place.is_none()
-            && let Some(view) = self.clips.as_ref().filter(|v| v.held && v.own.is_empty())
+            && let Some(view) = self.clips.as_ref().filter(|v| v.held && !v.own_chosen())
             && let ClipsOf::Entity(e) = view.of
         {
             player.pose_model(e, Some((view.chosen, view.time)));
@@ -21489,7 +21768,7 @@ impl Editor {
             CLIP_SPEEDS[self.clip_speed],
             self.bottom == Some(ANIMATION_TAB) && self.play.is_none(),
         );
-        if let Some(v) = self.clips.as_mut().filter(|v| !v.own.is_empty()) {
+        if let Some(v) = self.clips.as_mut().filter(|v| v.own_chosen()) {
             if v.playing {
                 let now = Instant::now();
                 let dt = v.at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
@@ -21510,7 +21789,7 @@ impl Editor {
             if open
                 && (v.playing || v.held)
                 && let ClipsOf::Entity(e) = v.of
-                && let Some(&file) = v.own.get(v.chosen)
+                && let Some(file) = v.chosen_own()
             {
                 preview = Some((e, file, v.time));
             }
@@ -21593,6 +21872,15 @@ impl Editor {
                         .iter()
                         .map(|m| at.transform_point3(Vec3::from(m.translation))),
                 );
+                // Their turns in the world, and their parents' (E12-4e-2).
+                let turn = |m: &Affine3A| (at * *m).to_scale_rotation_translation().1;
+                let root = turn(&rig.root_place());
+                self.joint_turns.clear();
+                self.joint_turns
+                    .extend(joints.iter().enumerate().map(|(j, m)| {
+                        let parent = skeleton.parent(j).and_then(|p| joints.get(p));
+                        (turn(m), parent.map_or(root, turn))
+                    }));
             }
             lines.extend(joints.iter().enumerate().filter_map(|(j, m)| {
                 let parent = joints.get(skeleton.parent(j)?)?;
@@ -24982,6 +25270,7 @@ impl Editor {
     fn gesture(&self) -> bool {
         self.drag.is_some()
             || self.gizmo_drag.is_some()
+            || self.joint_turn.is_some()
             || self.side_drag.is_some()
             || self.face_edit.as_ref().is_some_and(FaceEdit::dragging)
             || self.key_transform.is_some()
@@ -27116,6 +27405,25 @@ impl<G> EditorGame<G> {
         (picked, shared.joint_edit.is_some())
     }
 
+    /// A point on the gizmo's ring about its axis `axis` as it shows now (the picked joint's
+    /// in Tab's joint mode, ADR 0124's E12-4e-2), and how many pieces of it are drawn (all of
+    /// it facing the camera, half of it seen from the side): for tests.
+    pub fn gizmo_ring(&self, axis: usize) -> Option<([f32; 2], usize)> {
+        let shared = self.shared.borrow();
+        if !shared.gizmo_shown {
+            return None;
+        }
+        let ring: Vec<&(Handle, Vec2, Vec2)> = shared
+            .gizmo
+            .lines
+            .iter()
+            .filter(|(h, ..)| *h == Handle::Ring(axis))
+            .collect();
+        let (_, a, b) = ring.get(ring.len() / 2)?;
+        let m = (*a + *b) * 0.5;
+        Some(([m.x, m.y], ring.len()))
+    }
+
     /// Where joint `name` of the character in Tab's joint mode is in the world (ADR 0124's
     /// E12-1c): for tests.
     pub fn joint_point(&self, name: &str) -> Option<Vec3> {
@@ -27695,6 +28003,41 @@ const FACES_HELP: &str = "drag a face, an edge or a corner: move it  ·  Alt+dra
 
 /// The status bar's help while a character's joints are picked (ADR 0124's E12-1c).
 const JOINTS_HELP: &str = "click a joint: pick it  ·  Tab or Esc: done";
+
+/// The same while a clip made in the editor shows on him (E12-4e-2): the picked joint posed.
+const JOINTS_POSE_HELP: &str = "drag a ring: turn the joint, keyed at the playhead  ·  K: key it  ·  click a joint: pick \
+     it  ·  Tab or Esc: done";
+
+/// A joint turned by a ring of the picked joint's (ADR 0124's E12-4e-2): the ring's drag; the
+/// clip file shown, the frame keyed and the clip before; the joint's track; its turn in the
+/// world and its parent's at the press; the angles nearest which its turn is keyed.
+struct JointTurn {
+    drag: GizmoDrag,
+    file: AssetId,
+    time: f32,
+    before: engine_scene::AnimFile,
+    target: String,
+    world: Quat,
+    parent: Quat,
+    near: [f32; 4],
+    /// Escape took it back: nothing more until the button is up.
+    cancelled: bool,
+}
+
+/// The angles a joint's turn is keyed nearest (ADR 0124's E12-4e-2): its track's in `anim`
+/// at `time`, or without one its turn `local`'s own, so no key turns it a whole turn from
+/// its neighbours.
+fn joint_near(anim: &engine_scene::AnimFile, target: &str, time: f32, local: Quat) -> [f32; 4] {
+    if let Some(track) = anim.tracks.get(target) {
+        let curve = engine_app::TrackCurve::new(track);
+        if curve.lanes() == 3 {
+            let mut v = [0.0f32; 4];
+            curve.sample(time, &mut v);
+            return v;
+        }
+    }
+    engine_app::euler_near(&local.normalize().to_array(), &[0.0; 4])
+}
 
 /// Tab's joint mode (ADR 0124's E12-1c): the character, and the joint under the pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32143,6 +32486,41 @@ mod tests {
         );
         let names: Vec<&str> = ed.history.steps().map(|s| s.name()).collect();
         assert_eq!(names, ["New Clip", "Key Fields", "Key Field"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-4e-2: a character's clips made in the editor follow its model's in the
+    /// Clips as its animator lists them, the new one chosen; followed again with nothing
+    /// changed, nothing is made anew and the choice stays; a model's clip chosen is not one.
+    #[test]
+    fn a_characters_own_clips_follow_its_models_in_the_clips() {
+        let (dir, mut world, mut ed, boxed) = drop_project("character clips");
+        let model = vec![ClipFacts::own("Walk", None), ClipFacts::own("Run", None)];
+        let mut view = ClipsView::new(ClipsOf::Entity(boxed), 1, model);
+        view.chosen = 1;
+        ed.clips = Some(view);
+        ed.follow_character_clips(&world, boxed);
+        let v = ed.clips.as_ref().unwrap();
+        assert_eq!((v.clips.len(), v.chosen, v.own_chosen()), (2, 1, false));
+        let id = AssetId::new();
+        world.insert(
+            boxed,
+            engine_runtime::Animator::new("wave").with_clip("wave", AssetRef::file(id)),
+        );
+        ed.follow_character_clips(&world, boxed);
+        let v = ed.clips.as_ref().unwrap();
+        let keys: Vec<&str> = v.clips.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, ["Walk", "Run", "wave"]);
+        assert_eq!((v.own_start(), v.chosen), (2, 2));
+        assert_eq!(v.chosen_own(), Some(AssetRef::file(id)));
+        ed.clips.as_mut().unwrap().chosen = 0;
+        ed.follow_character_clips(&world, boxed);
+        let v = ed.clips.as_ref().unwrap();
+        assert_eq!(
+            (v.clips.len(), v.chosen, v.own_chosen()),
+            (3, 0, false),
+            "kept"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

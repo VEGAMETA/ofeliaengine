@@ -250,7 +250,8 @@ events.0.name = "thud"
   playhead held or ▶), setting its fields for drawing only; the scene, its saves and undo
   keep their own values (the [editor guide](editor.md) has the keys). New Clip makes a
   clip; K, ◆ and an edit of a field the clip moves key it at the playhead (E12-4b-2). On
-  a character the preview poses the joints the clip keys.
+  a character the preview poses the joints the clip keys, and in Tab's joint mode the
+  picked joint's rings turn it and key it (E12-4e-2).
 
 ### Sockets: things that follow a joint
 

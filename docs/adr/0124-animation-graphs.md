@@ -584,6 +584,53 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-4e-2, 2026-10-30): a character's joints posed in the view
+
+- **A character's own clips beside its model's:** the Animation tab (and the inspector's
+  Clips) list a character's model clips first, then the clips its animator has made in the
+  editor (E12-4b left that for later).
+  - Choosing a clip chooses its kind's tools: an own clip shows Once, Length, the tracks,
+    keys and curves; a model clip shows its loop's seam, root motion, Mark Foot Plants, the
+    picked joint's trail and P in place.
+  - New Clip is offered for a character too. The new clip comes after the model's, chosen
+    and held at its start.
+  - The list follows the animator: a clip made, renamed or deleted rebuilds the own part.
+    A steady frame compares in place and allocates nothing.
+  - Choosing one kind stops the other playing: an own clip ends P in place, a model clip
+    stops an own clip's ▶.
+- **The picked joint's rings:** in Tab's joint mode, with one of the character's own clips
+  shown, the picked joint gets rotation rings in its own axes (the gizmo's rings, drawn and
+  hit as for an entity). The rings take the pointer before the joints do.
+  - A ring dragged turns the joint (snapped by the rules, Shift and Ctrl as for the gizmo).
+    Its turn in the world becomes a turn in its parent's space (`Rig::root_place` above a
+    root), keyed at the playhead's frame as `@<joint>.rotation`.
+  - The keyed angles are the Euler angles nearest the track's at that moment (or the
+    joint's own turn without a track), so a key never turns a whole turn from its
+    neighbours (`engine_app::euler_near`, now public).
+  - The clip is edited live: the character follows the pointer. Letting go writes one undo
+    step, "Pose <joint>". Escape puts the clip back as it was (the turn ends when the
+    button is up); Play takes an unfinished turn back.
+  - A playing clip stops at its frame when a ring is pressed.
+- **K in joint mode** keys the picked joint's turn, as the pose has it, at the playhead
+  ("Key Joint"). Outside joint mode K keys every track of the clip, as before.
+- **The status bar** says what the rings and K do while a joint can be posed.
+- **Also fixed:** the clip's time text ("frame 0 / 48") was written again only when the
+  time changed, so choosing another clip at the same moment kept the old clip's frame
+  count. It now follows the chosen clip and its length too.
+- **Measured:** 0 allocations in 240 frames of a character's own clip playing in joint
+  mode with the picked joint's rings laid out every frame (a new phase of the editor's
+  clips zero-allocation test, after the asset database's one-off scan of the written clip).
+- **Tests:**
+  - **GPU, CesiumMan:** New Clip on him lists his model's clip and his own. Tab and a click
+    pick a joint with a child, and the ring facing the camera dragged 60 pixels along
+    itself turns it: the clip file gains its `@<joint>.rotation` track and the child moves
+    11 cm. Undo takes the track away and puts the child back. K at frame 10 keys the joint
+    there.
+  - **The Clips:** a character's own clips follow its model's as its animator lists them,
+    the new one chosen. Followed again with nothing changed, the choice stays.
+- **Not yet:** moving a root joint (its translation) with arrows, keyed marks on the
+  Skeleton's rows, rings for several joints at once, IK handles (E12-6).
+
 ## As built (E12-4e-1, 2026-10-30): joints keyed in `.anim`
 
 E12-4e is taken in two steps: **4e-1** the joints' tracks in the file, played and previewed
