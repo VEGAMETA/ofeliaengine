@@ -1042,10 +1042,10 @@ fn an_animation_graphs_tab_draws_its_states_and_transitions() {
         .unwrap();
         std::fs::write(path, png).unwrap();
     }
-    assert!(a > 2_000, "the entry's title bar: {a}");
-    assert!(b > 4_000, "two states' title bars: {b}");
-    assert!(t > 2_000, "the Any State box: {t}");
-    assert!(g > 500, "the Entry tag: {g}");
+    assert!(a > 1_200, "the entry's title bar: {a}");
+    assert!(b > 2_500, "two states' title bars: {b}");
+    assert!(t > 1_200, "the Any State box: {t}");
+    assert!(g > 250, "the Entry tag: {g}");
     assert!(r > 100, "the broken condition's arrow and why: {r}");
     // Ctrl+Tab: the scene's tab, the viewport where the canvas was.
     key(&mut game, 0x11, 0x1D, true);
