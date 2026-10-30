@@ -1448,19 +1448,13 @@ impl AnimGraph {
                 ..
             } => {
                 node_weight[usize::from(timed)] += weight;
-                let v = value(param);
-                let xs = |k: u16| self.leaves[usize::from(k)].at[0];
-                if v <= xs(a) || b - a == 1 {
-                    leaf_weight[usize::from(a)] += weight;
-                } else if v >= xs(b - 1) {
-                    leaf_weight[usize::from(b - 1)] += weight;
-                } else {
-                    let k = (a..b - 1).find(|&k| v < xs(k + 1)).unwrap_or(b - 2);
-                    let span = (xs(k + 1) - xs(k)).max(1e-6);
-                    let t = ((v - xs(k)) / span).clamp(0.0, 1.0);
-                    leaf_weight[usize::from(k)] += weight * (1.0 - t);
-                    leaf_weight[usize::from(k + 1)] += weight * t;
-                }
+                let base = usize::from(a);
+                weigh_1d(
+                    usize::from(b - a),
+                    |k| self.leaves[base + k].at[0],
+                    value(param),
+                    |k, w| leaf_weight[base + k] += weight * w,
+                );
             }
             NodeDef::Blend2d {
                 params: [x, y],
@@ -1470,36 +1464,16 @@ impl AnimGraph {
                 ..
             } => {
                 node_weight[usize::from(timed)] += weight;
-                let p = [value(x), value(y)];
-                let at = |k: u16| self.leaves[usize::from(k)].at;
-                let mut give = |k: u16, w: f32| leaf_weight[usize::from(k)] += weight * w;
-                // Inside a triangle: its corners by barycentric weights.
-                for tri in &self.triangles[usize::from(ta)..usize::from(tb)] {
-                    if let Some(bary) = barycentric(p, at(tri[0]), at(tri[1]), at(tri[2])) {
-                        for (k, w) in tri.iter().zip(bary) {
-                            give(*k, w);
-                        }
-                        return;
-                    }
-                }
-                // Outside them (or too few points for one): the nearest point of the
-                // nearest segment between two clips.
-                let mut best = (f32::MAX, a, a, 0.0f32);
-                for i in a..b {
-                    for j in i..b {
-                        let (t, d) = nearest_on_segment(p, at(i), at(j));
-                        if d < best.0 {
-                            best = (d, i, j, t);
-                        }
-                    }
-                }
-                let (_, i, j, t) = best;
-                if i == j {
-                    give(i, 1.0);
-                } else {
-                    give(i, 1.0 - t);
-                    give(j, t);
-                }
+                let base = usize::from(a);
+                weigh_2d(
+                    usize::from(b - a),
+                    |k| self.leaves[base + k].at,
+                    self.triangles[usize::from(ta)..usize::from(tb)]
+                        .iter()
+                        .map(|t| t.map(|k| usize::from(k) - base)),
+                    [value(x), value(y)],
+                    |k, w| leaf_weight[base + k] += weight * w,
+                );
             }
             NodeDef::Machine { machine } => {
                 let Some(ms) = machines.get(usize::from(machine)) else {
@@ -2141,9 +2115,73 @@ fn nearest_on_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> (f32, f32) {
     (t, q[0] * q[0] + q[1] * q[1])
 }
 
+/// How a 1D blend weighs its `n` clips at value `v` (ADR 0124's E12-5b; the editor's
+/// blend panel draws the same, E12-5d-2a): `x(k)` is clip `k`'s place, ascending. Below
+/// the first or above the last, that one alone; between two, the two by their distances.
+/// `give(k, w)` is told each clip given a weight. Allocates nothing.
+#[inline]
+pub fn weigh_1d(n: usize, x: impl Fn(usize) -> f32, v: f32, mut give: impl FnMut(usize, f32)) {
+    if n == 0 {
+        return;
+    }
+    if v <= x(0) || n == 1 {
+        give(0, 1.0);
+    } else if v >= x(n - 1) {
+        give(n - 1, 1.0);
+    } else {
+        let k = (0..n - 1).find(|&k| v < x(k + 1)).unwrap_or(n - 2);
+        let span = (x(k + 1) - x(k)).max(1e-6);
+        let t = ((v - x(k)) / span).clamp(0.0, 1.0);
+        give(k, 1.0 - t);
+        give(k + 1, t);
+    }
+}
+
+/// How a 2D blend weighs its `n` clips at `p` (ADR 0124's E12-5b; the editor's blend panel
+/// draws the same, E12-5d-2a): `at(k)` is clip `k`'s place, `triangles` their Delaunay
+/// triangles ([`delaunay`]). Inside a triangle, its corners by barycentric weights; outside
+/// them (or with too few clips for one), the nearest point of the nearest segment between
+/// two clips. `give(k, w)` is told each clip given a weight. Allocates nothing.
+#[inline]
+pub fn weigh_2d(
+    n: usize,
+    at: impl Fn(usize) -> [f32; 2],
+    triangles: impl Iterator<Item = [usize; 3]>,
+    p: [f32; 2],
+    mut give: impl FnMut(usize, f32),
+) {
+    for tri in triangles {
+        if let Some(bary) = barycentric(p, at(tri[0]), at(tri[1]), at(tri[2])) {
+            for (k, w) in tri.into_iter().zip(bary) {
+                give(k, w);
+            }
+            return;
+        }
+    }
+    if n == 0 {
+        return;
+    }
+    let mut best = (f32::MAX, 0, 0, 0.0f32);
+    for i in 0..n {
+        for j in i..n {
+            let (t, d) = nearest_on_segment(p, at(i), at(j));
+            if d < best.0 {
+                best = (d, i, j, t);
+            }
+        }
+    }
+    let (_, i, j, t) = best;
+    if i == j {
+        give(i, 1.0);
+    } else {
+        give(i, 1.0 - t);
+        give(j, t);
+    }
+}
+
 /// Points `points`' Delaunay triangles (Bowyer–Watson), by index; none for fewer than three
 /// points or all on a line.
-fn delaunay(points: &[[f32; 2]]) -> Vec<[usize; 3]> {
+pub fn delaunay(points: &[[f32; 2]]) -> Vec<[usize; 3]> {
     let n = points.len();
     if n < 3 {
         return Vec::new();
@@ -3286,6 +3324,51 @@ mod tests {
     }
 
     /// Delaunay: a square's two triangles; points on a line, none.
+    /// ADR 0124's E12-5d-2a: the weighing the tick and the editor share. 1D: one clip below
+    /// the first and above the last, two between by distance; 2D: barycentric inside a
+    /// triangle, the nearest segment outside; every weighing sums to one.
+    #[test]
+    fn blends_weigh_their_clips_by_place() {
+        let xs = [0.0f32, 1.0, 4.0];
+        let weights = |v: f32| {
+            let mut w = [0.0f32; 3];
+            weigh_1d(3, |k| xs[k], v, |k, x| w[k] += x);
+            w
+        };
+        assert_eq!(weights(-1.0), [1.0, 0.0, 0.0]);
+        assert_eq!(weights(9.0), [0.0, 0.0, 1.0]);
+        let w = weights(2.5);
+        assert!(
+            (w[1] - 0.5).abs() < 1e-6 && (w[2] - 0.5).abs() < 1e-6,
+            "{w:?}"
+        );
+        let mut none = 0;
+        weigh_1d(0, |_| 0.0, 1.0, |_, _| none += 1);
+        assert_eq!(none, 0, "no clips, no weights");
+        let points = [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let triangles = delaunay(&points);
+        assert_eq!(triangles.len(), 2);
+        let weights = |p: [f32; 2]| {
+            let mut w = [0.0f32; 4];
+            weigh_2d(
+                4,
+                |k| points[k],
+                triangles.iter().copied(),
+                p,
+                |k, x| w[k] += x,
+            );
+            w
+        };
+        let w = weights([0.25, 0.25]);
+        assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-5, "{w:?}");
+        assert!(w[0] > 0.4, "the nearest corner weighs most: {w:?}");
+        let w = weights([3.0, 0.0]);
+        assert!(
+            (w[1] - 1.0).abs() < 1e-5,
+            "outside: the nearest clip: {w:?}"
+        );
+    }
+
     #[test]
     fn delaunay_triangulates_the_points() {
         let tris = delaunay(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);

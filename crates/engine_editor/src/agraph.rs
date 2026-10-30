@@ -944,6 +944,13 @@ impl AnimDoc {
         sections.push((AnimSection::Add, from, rows.len()));
     }
 
+    /// The inspected state's pose when it is a blend (ADR 0124's E12-5d-2a): what the
+    /// inspector's blend panel draws.
+    pub(crate) fn inspected_blend(&self) -> Option<&NodeFile> {
+        self.pose()
+            .filter(|n| matches!(n.kind, NodeKind::Blend1d | NodeKind::Blend2d))
+    }
+
     /// The inspected state's pose node.
     fn pose(&self) -> Option<&NodeFile> {
         let state = self.file.states.get(self.inspected_state()?)?;
@@ -1983,6 +1990,25 @@ impl GraphDoc {
             }
             Drag::Pan => None,
         }
+    }
+
+    /// The inspected state's blend's clips put at `places` (each one's place among its
+    /// points, and where; ADR 0124's E12-5d-2a, Place by Speed): its step's texts, when it
+    /// changed.
+    pub(crate) fn place_points(
+        &mut self,
+        places: &[(usize, [f32; 2])],
+    ) -> Option<(String, String)> {
+        let state = self.anim.as_deref()?.inspected_state()?.to_owned();
+        self.edit_anim(|f| {
+            if let Some(n) = Self::anim_pose_mut(f, &state) {
+                for &(k, at) in places {
+                    if let Some(p) = n.points.get_mut(k) {
+                        p.at = at;
+                    }
+                }
+            }
+        })
     }
 
     /// The inspected state's pose node, to change.

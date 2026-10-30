@@ -273,6 +273,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         auto_play: true,
         sound: None,
         material_preview: None,
+        blend: None,
         clips: None,
         joints: None,
         falloff: None,
