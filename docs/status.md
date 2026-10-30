@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5d-2c-1, machines inside machines** (#PR, ADR 0124's as-built): a state's pose
+  - **E12-5d-2c-1, machines inside machines** (#494, ADR 0124's as-built): a state's pose
     can be a machine (its own Idle inside); double-click or Tab enters it, Tab with nothing
     selected comes out, the bar's crumbs name the machines entered; its live state in Play
     by its node (`AnimGraph::machine_now_of_node`, `Player::graph_now_node`).
