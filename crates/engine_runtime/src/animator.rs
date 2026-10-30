@@ -3,7 +3,9 @@
 //! after the scripts' tick and before `Game::tick`). Each rendered frame then poses the
 //! character at the frame's moment between the last two ticks ([`Animator::at`]). A
 //! [`JointAttachment`] under a character follows one of its joints (E12-1c). The clips'
-//! events a tick played past are its [`AnimationEvents`] (E12-3b).
+//! events a tick played past are its [`AnimationEvents`] (E12-3b). An animator may play an
+//! animation graph instead of a clip (E12-5c), its parameters named by the graph
+//! ([`GraphParams`]).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -104,7 +106,23 @@ pub struct Animator {
     /// Likewise, its turn about its own up, in radians (counterclockwise seen from above).
     #[reflect(skip)]
     pub turned: f32,
+    /// The animation graph it plays (an `.agraph`, ADR 0124's E12-5) in place of `clip`;
+    /// none: it plays `clip`.
+    pub graph: AssetRef,
+    /// Its graph's parameters, by the slots its graph names them in ([`GraphParams`]): a
+    /// number, a flag's 0 or 1, a trigger's count of fires not yet taken by a transition.
+    /// Scripts set them by name (`animator:set("speed", 3.5)`, `animator:trigger("jump")`).
+    #[reflect(hidden)]
+    pub params: [f32; MAX_GRAPH_PARAMS],
+    /// The state its graph's first layer is in, by name, as the last tick left it (empty
+    /// without a graph): what scripts read as `animator.state`. Not sent over the network:
+    /// every peer's graph makes its own.
+    #[reflect(hidden, net_skip)]
+    pub state: String,
 }
+
+/// The most parameters an animation graph has (ADR 0124's E12-5).
+pub const MAX_GRAPH_PARAMS: usize = 16;
 
 reflect_component!(Animator);
 
@@ -131,6 +149,9 @@ impl Default for Animator {
             from_hold: false,
             moved: Vec3::ZERO,
             turned: 0.0,
+            graph: AssetRef::NONE,
+            params: [0.0; MAX_GRAPH_PARAMS],
+            state: String::new(),
         }
     }
 }
@@ -153,6 +174,36 @@ impl Animator {
     /// Whether its clip is one of its `clips` (made in the editor), not its model's.
     pub fn plays_own_clip(&self) -> bool {
         self.clips.contains_key(&self.clip)
+    }
+
+    /// Whether it plays an animation graph (E12-5c) rather than a clip.
+    pub fn plays_graph(&self) -> bool {
+        self.graph != AssetRef::NONE
+    }
+
+    /// Parameter `name` of its graph set to `value` (a flag: 0 or 1), its slot found in
+    /// `params` ([`GraphParams`]). False when the graph has no such parameter, or it is a
+    /// trigger (fired by [`Self::trigger`], not set).
+    pub fn set(&mut self, params: &GraphParams, name: &str, value: f32) -> bool {
+        match params.slot(self.graph.file, name) {
+            Some((slot, false)) => {
+                self.params[usize::from(slot)] = value;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Trigger `name` of its graph fired: it holds until a transition takes it. False when
+    /// the graph has no such trigger.
+    pub fn trigger(&mut self, params: &GraphParams, name: &str) -> bool {
+        match params.slot(self.graph.file, name) {
+            Some((slot, true)) => {
+                self.params[usize::from(slot)] += 1.0;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Plays clip `clip` from its start, fading from what plays now over `fade` seconds (at
@@ -330,6 +381,43 @@ pub struct AnimationEvent {
     pub name: Arc<str>,
     /// What else it tells ("left"); empty when nothing.
     pub data: Arc<str>,
+}
+
+/// The parameters of the animation graphs the player has read (ADR 0124's E12-5c), a world
+/// resource: each graph file's parameters by slot, by name and whether each is a trigger.
+/// Scripts and the inspector find a parameter's slot in an [`Animator`]'s `params` here.
+#[derive(Debug, Default)]
+pub struct GraphParams {
+    graphs: std::collections::HashMap<engine_scene::AssetId, ParamTable>,
+}
+
+/// A graph's parameters by slot: each one's name and whether it is a trigger.
+type ParamTable = Box<[(Box<str>, bool)]>;
+
+impl GraphParams {
+    /// Graph file `graph`'s parameters, by slot: each one's name and whether it is a
+    /// trigger (in place of what was known of it).
+    pub fn insert<'a>(
+        &mut self,
+        graph: engine_scene::AssetId,
+        params: impl IntoIterator<Item = (&'a str, bool)>,
+    ) {
+        let params = params.into_iter().map(|(n, t)| (n.into(), t)).collect();
+        self.graphs.insert(graph, params);
+    }
+
+    /// Parameter `name` of graph file `graph`: its slot and whether it is a trigger.
+    pub fn slot(&self, graph: engine_scene::AssetId, name: &str) -> Option<(u16, bool)> {
+        let params = self.graphs.get(&graph)?;
+        let k = params.iter().position(|(n, _)| &**n == name)?;
+        Some((k as u16, params[k].1))
+    }
+
+    /// Graph file `graph`'s parameters, by slot: each one's name and whether it is a
+    /// trigger (none before the player read it).
+    pub fn of(&self, graph: engine_scene::AssetId) -> &[(Box<str>, bool)] {
+        self.graphs.get(&graph).map_or(&[], |p| p)
+    }
 }
 
 /// The clips' events the last tick fired (ADR 0124's E12-3b), a resource the player keeps.
@@ -542,5 +630,30 @@ mod tests {
         }
         assert_eq!(world.get::<Animator>(walking).unwrap().time, 1.5);
         assert_eq!(world.get::<Animator>(held).unwrap().time, 0.0);
+    }
+
+    /// ADR 0124's E12-5c: a graph's parameters set and fired by name through the slots the
+    /// graph names them in; a trigger is not set, a number is not fired, an unknown name
+    /// is neither.
+    #[test]
+    fn a_graphs_parameters_are_set_and_fired_by_name() {
+        let graph = engine_scene::AssetId::new();
+        let mut params = GraphParams::default();
+        params.insert(graph, [("speed", false), ("jump", true)]);
+        assert_eq!(params.slot(graph, "jump"), Some((1, true)));
+        let mut a = Animator {
+            graph: AssetRef::file(graph),
+            ..Animator::default()
+        };
+        assert!(a.plays_graph());
+        assert!(a.set(&params, "speed", 3.5));
+        assert!(a.trigger(&params, "jump"));
+        assert!(a.trigger(&params, "jump"));
+        assert_eq!(&a.params[..2], &[3.5, 2.0]);
+        assert!(!a.set(&params, "jump", 1.0), "a trigger is fired, not set");
+        assert!(!a.trigger(&params, "speed"), "a number is set, not fired");
+        assert!(!a.set(&params, "sped", 1.0));
+        assert!(!Animator::default().plays_graph());
+        assert_eq!(params.of(graph).len(), 2);
     }
 }
