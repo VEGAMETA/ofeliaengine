@@ -1066,6 +1066,16 @@ fn a_video_in_a_material_and_the_ui() {
     });
 }
 
+/// A 2D scene on the player (ADR 0125): a field of tiles, characters of three parts in
+/// sort groups on a layer sorted by y (half transparent shadows under them, every other one
+/// facing left), a turned and tinted orb drawn with linear filtering over them, a sign
+/// stretched to a size of its own; a pixel-art camera rendering 320 × 180 pixels shown
+/// twice as large, its colours as painted.
+#[test]
+fn a_2d_scene_on_the_player() {
+    check(&Shot::new("sprites_2d", Source::Sprites));
+}
+
 /// Sponza by night with everything on (`scene::sponza_night`): a bonfire in the
 /// courtyard (sparks, smoke, its light), lights along the hall, all with shadows; fog,
 /// probe GI, ambient occlusion, reflection probes and screen-space reflections, TAA,

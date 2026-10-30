@@ -426,3 +426,70 @@ fn views_without_2d_content_pay_nothing_for_it() {
     assert_valid(&player);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A sprite, a sort group and a pixel-art camera written to a scene file and read back,
+/// and taken into a save and applied: as any component (ADR 0125).
+#[test]
+fn sprites_are_kept_in_scenes_and_saves() {
+    use engine_scene::{SaveOptions, SceneId, SceneRegistry, load, save_with};
+    let registry = SceneRegistry::from_program();
+    let mut world = World::new();
+    let image = AssetId::new();
+    let mut paths = AssetPaths::new();
+    paths.insert(AssetRef::file(image), "art/hero.png");
+    let sprite = Sprite {
+        flip_x: 1,
+        size: engine_core::math::Vec2::new(2.0, 0.0),
+        ..Sprite::new(AssetRef::file(image))
+            .on_layer(3, -2)
+            .with_color([1.0, 0.5, 0.25, 0.75])
+    };
+    let group = SortGroup { layer: 1, order: 4 };
+    let camera = Camera::pixel_art([320, 180], 16.0);
+    world.spawn((SceneId::new(), Transform::from_xyz(2.0, 1.0, 0.0), sprite));
+    world.spawn((SceneId::new(), Transform::IDENTITY, group));
+    world.spawn((SceneId::new(), Transform::IDENTITY, camera));
+    let mut text = String::new();
+    let options = SaveOptions {
+        id: None,
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    save_with(&mut world, &registry, &options, &mut text).unwrap();
+    println!("{text}");
+    for line in [
+        format!("Sprite.image = asset(\"art/hero.png\", {image})"),
+        String::from("Sprite.flip_x = 1"),
+        String::from("Sprite.layer = 3"),
+        String::from("Sprite.order = -2"),
+        String::from("SortGroup.order = 4"),
+        String::from("Camera.projection = 1"),
+        String::from("Camera.reference = [320, 180]"),
+    ] {
+        assert!(text.contains(&line), "{line}");
+    }
+    let mut back = World::new();
+    let report = load(&mut back, &registry, &text).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let found = |world: &mut World| {
+        let mut sprites = QueryState::<&Sprite>::new(world);
+        let mut groups = QueryState::<&SortGroup>::new(world);
+        let mut cameras = QueryState::<&Camera>::new(world);
+        (
+            sprites.iter_readonly(world).copied().collect::<Vec<_>>(),
+            groups.iter_readonly(world).copied().collect::<Vec<_>>(),
+            cameras.iter_readonly(world).copied().collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(found(&mut back), (vec![sprite], vec![group], vec![camera]));
+    // A save: taken, written as text, read and applied to a fresh world.
+    let save = engine_save::capture(&world, &engine_save::CaptureOptions::default());
+    let bytes =
+        engine_save::encode(&save, engine_save::Encoding::Text, &Default::default()).unwrap();
+    let mut loaded = World::new();
+    engine_save::apply(&mut loaded, &engine_save::decode(&bytes).unwrap()).unwrap();
+    assert_eq!(
+        found(&mut loaded),
+        (vec![sprite], vec![group], vec![camera])
+    );
+}
