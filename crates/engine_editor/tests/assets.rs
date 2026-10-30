@@ -1453,6 +1453,62 @@ fn a_skinned_model_picked_in_the_dock_shows_its_clips_under_its_preview() {
         stepped > at && stepped - at < 0.1,
         "a frame on: {at} then {stepped}"
     );
+    // E12-3b-2: E adds an event at the playhead's frame, written to Fox.gltf's `.meta` and
+    // drawn on the strip, its name typed at once; Escape leaves the name, Delete removes the
+    // event, Ctrl+Z brings it back.
+    let meta = || std::fs::read_to_string(dir.join("Fox.gltf.meta")).unwrap();
+    let tap = |game: &mut EditorGame<NoGame>,
+               player: &mut Player,
+               overlay: &mut EditorOverlay,
+               vk: u16,
+               sc: u16| {
+        key(game, vk, sc, true);
+        frame(player, game, overlay);
+        key(game, vk, sc, false);
+        frame(player, game, overlay);
+    };
+    tap(&mut game, &mut player, &mut overlay, 0x45, 0x12); // E
+    frame(&mut player, &mut game, &mut overlay);
+    println!("{}", meta());
+    assert!(
+        meta().contains("model.clips.0.name = \"Survey\"")
+            && meta().contains("model.clips.0.events.0.name = \"event\""),
+        "{}",
+        meta()
+    );
+    let time: f32 = meta()
+        .lines()
+        .find_map(|l| l.strip_prefix("model.clips.0.events.0.time = "))
+        .and_then(|t| t.trim().parse().ok())
+        .unwrap();
+    println!("an event at {time:.4} s");
+    assert!(
+        (time - stepped).abs() < 0.006,
+        "at the playhead: {time} {stepped}"
+    );
+    assert!(game.text_at("event").is_some(), "its mark drawn");
+    if let Ok(out) = std::env::var("ENGINE_EDITOR_EVENTS_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(out, png).unwrap();
+    }
+    tap(&mut game, &mut player, &mut overlay, 0x1B, 0x01); // Escape
+    tap(&mut game, &mut player, &mut overlay, 0x2E, 0x53); // Delete
+    assert!(!meta().contains("model.clips"), "{}", meta());
+    key(&mut game, 0x11, 0x1D, true);
+    tap(&mut game, &mut player, &mut overlay, 0x5A, 0x2C); // Ctrl+Z
+    key(&mut game, 0x11, 0x1D, false);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(meta().contains("events.0.name = \"event\""), "{}", meta());
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

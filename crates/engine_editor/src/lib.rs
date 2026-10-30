@@ -12,6 +12,7 @@ mod breakpoints;
 mod build;
 pub mod camera;
 mod checker;
+mod clip_events;
 mod code;
 mod complete;
 mod draw;
