@@ -22,7 +22,7 @@
 //! ```
 
 use crate::{ViewCamera, ViewFrame};
-use engine_core::math::{Mat4, vulkan_perspective};
+use engine_core::math::Mat4;
 use engine_render::graph::{FrameGraph, Texture};
 use engine_render::upload::UploadRing;
 use engine_render2d::{Canvas, QuadMode, Render2dError, Renderer2d, SceneDepth, View2d};
@@ -140,8 +140,7 @@ impl UiRenderer {
                     depth,
                 )?,
                 Placement::Camera(view_from_canvas) => {
-                    let projection =
-                        vulkan_perspective(camera.fov_y, aspect, camera.near, camera.far);
+                    let projection = camera.clip_from_view(aspect);
                     self.renderer.add_depth_tested_pass(
                         fg,
                         ring,

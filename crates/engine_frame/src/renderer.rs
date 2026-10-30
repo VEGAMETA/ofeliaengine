@@ -4,10 +4,10 @@ use crate::antialiasing::{
     Antialiasing, AntialiasingSupport, InvalidAntialiasing, Msaa, PostAntialiasing, SmaaQuality,
     Upscale,
 };
-use crate::settings::{Exposure, FrameGeneration, ViewSettings};
+use crate::settings::{Exposure, FrameGeneration, ViewKind, ViewSettings};
 use crate::view::{HistoryImage, Prepared, Retired, View};
 use core::fmt;
-use engine_core::math::{Mat4, Quat, Vec3, vulkan_perspective};
+use engine_core::math::{Mat4, Quat, Vec2, Vec3, vulkan_orthographic, vulkan_perspective};
 use engine_render::dof::{DepthOfField, DofCamera};
 use engine_render::environment::Environment;
 use engine_render::forward::{
@@ -18,8 +18,8 @@ use engine_render::fsr1::{Fsr1, Fsr1Exposure};
 use engine_render::gpu_scene::SceneFrame;
 use engine_render::grading::GradingLut;
 use engine_render::graph::{
-    Access, Buffer, FrameGraph, ImportedTexture, LoadOp, ShaderStages, Texture, TextureDesc,
-    TextureState,
+    Access, Buffer, FrameGraph, ImportedTexture, LoadOp, ShaderStages, StoreOp, Texture,
+    TextureDesc, TextureState,
 };
 use engine_render::material::{MaterialFrame, MaterialTable};
 use engine_render::mesh::GeometryFrame;
@@ -36,6 +36,7 @@ use engine_render::skinning::Skinning;
 use engine_render::skinning::SkinningFrame;
 use engine_render::upload::UploadRing;
 use engine_render::vsm::VirtualShadows;
+use engine_render2d::{Camera2d, Canvas, QuadMode, Render2dError, Renderer2d};
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocator, Bindless, Device, RhiError, SamplerKind};
 use engine_upscale::{
@@ -60,6 +61,9 @@ pub enum FrameError {
     /// The view's antialiasing cannot run (ADR 0075): an invalid combination, or one
     /// this GPU does not support ([`FrameRenderer::check`]).
     Antialiasing(InvalidAntialiasing),
+    /// A 2D view's sprites could not be declared (ADR 0125): the canvas was not prepared,
+    /// or the upload ring had no room for its quads.
+    Sprites(Render2dError),
 }
 
 impl fmt::Display for FrameError {
@@ -74,6 +78,7 @@ impl fmt::Display for FrameError {
                  resampling",
             ),
             Self::Antialiasing(e) => write!(f, "{e}"),
+            Self::Sprites(e) => write!(f, "the 2D view's sprites: {e}"),
         }
     }
 }
@@ -115,6 +120,12 @@ pub struct ViewCamera {
     /// level): the history is dropped, nothing of the previous view ghosts into it, and
     /// automatic exposure jumps instead of adapting.
     pub cut: bool,
+    /// An orthographic camera (ADR 0125): `Some(height)`, the world units it shows from
+    /// the image's bottom edge to its top, its width following the image's aspect. Its
+    /// view is a 2D view: the frame renderer draws the 2D world in it
+    /// ([`FrameRenderer::add_view_2d`]), not the scene passes. `None`: perspective, through
+    /// `fov_y`.
+    pub orthographic: Option<f32>,
 }
 
 impl ViewCamera {
@@ -129,13 +140,55 @@ impl ViewCamera {
             near,
             far,
             cut: false,
+            orthographic: None,
+        }
+    }
+
+    /// An orthographic camera at `position`, turned by `rotation` as
+    /// [`Self::from_rigid`]'s, showing `height` world units from the image's bottom edge to
+    /// its top, between the planes at `near` and `far` (which may lie behind it): a 2D view
+    /// (ADR 0125) when it looks down −Z, turned about Z only.
+    pub fn orthographic(rotation: Quat, position: Vec3, height: f32, near: f32, far: f32) -> Self {
+        Self {
+            orthographic: Some(height),
+            ..Self::from_rigid(rotation, position, 0.0, near, far)
+        }
+    }
+
+    /// Whether it is orthographic: a 2D view.
+    pub fn is_orthographic(&self) -> bool {
+        self.orthographic.is_some()
+    }
+
+    /// The projection at an `aspect` (width over height), without jitter.
+    pub fn clip_from_view(&self, aspect: f32) -> Mat4 {
+        match self.orthographic {
+            Some(height) => {
+                let half = Vec2::new(height * aspect, height) * 0.5;
+                vulkan_orthographic(-half.x, half.x, -half.y, half.y, self.near, self.far)
+            }
+            None => vulkan_perspective(self.fov_y, aspect, self.near, self.far),
         }
     }
 
     /// The projection times the view at an `aspect` (width over height), without jitter
     /// (the forward renderer adds it).
     pub fn clip_from_world(&self, aspect: f32) -> Mat4 {
-        vulkan_perspective(self.fov_y, aspect, self.near, self.far) * self.view_from_world
+        self.clip_from_view(aspect) * self.view_from_world
+    }
+
+    /// An orthographic camera's view of the 2D world (ADR 0125) on a target of
+    /// `render.1` pixels' height: its position in the XY plane, its turn about Z, and the
+    /// pixels a world unit takes. `None` for a perspective camera.
+    pub fn camera_2d(&self, render: (u32, u32)) -> Option<Camera2d> {
+        let height = self.orthographic?;
+        // The camera's own X axis in the world (the view's inverse rotation's).
+        let x = Quat::from_mat4(&self.view_from_world).conjugate() * Vec3::X;
+        Some(Camera2d {
+            center: self.position.truncate(),
+            pixels_per_unit: render.1.max(1) as f32 / height.max(f32::MIN_POSITIVE),
+            rotation: x.y.atan2(x.x),
+        })
     }
 }
 
@@ -404,6 +457,9 @@ pub struct FrameRenderer {
     dof: Option<Box<DepthOfField>>,
     /// Motion blur (ADR 0096), made with the first cinematic view that uses it.
     motion_blur: Option<Box<MotionBlur>>,
+    /// The 2D world's renderer (ADR 0125), into the scene's HDR color, made with the first
+    /// 2D view ([`FrameRenderer::prepare_2d`]).
+    sprites: Option<Box<Renderer2d>>,
     #[cfg(feature = "dlss")]
     streamline: Option<engine_dlss::Streamline>,
 }
@@ -654,6 +710,7 @@ impl FrameRenderer {
             fsr1: None,
             dof: None,
             motion_blur: None,
+            sprites: None,
             #[cfg(feature = "dlss")]
             streamline: None,
         })
@@ -722,6 +779,9 @@ impl FrameRenderer {
         unsafe {
             self.forward.destroy(device, allocator, bindless);
             self.post.destroy(device, allocator, bindless);
+            if let Some(sprites) = self.sprites.as_mut() {
+                sprites.destroy(allocator);
+            }
         }
     }
 
@@ -1000,6 +1060,11 @@ impl FrameRenderer {
         {
             view.grading = Some(GradingLut::new(device, allocator, bindless)?);
         }
+        // Without a tone curve (a 2D view's, ADR 0125) the LUT is built by a pipeline of
+        // its own, made the first time such a view grades.
+        if let Some(lut) = view.grading.as_mut() {
+            lut.prepare_curve(device, bindless, settings.curve)?;
+        }
         match settings.exposure {
             Exposure::Auto(exposure) => match &view.exposure {
                 Some(auto) => auto.set_settings(exposure),
@@ -1192,6 +1257,68 @@ impl FrameRenderer {
         Ok(prepared)
     }
 
+    /// [`Self::prepare`] for a 2D view (ADR 0125: an orthographic camera's, drawn with
+    /// [`Self::add_view_2d`]): the 2D renderer made with the first one, and of `settings`
+    /// only what a 2D view uses. It has no temporal antialiasing (a temporal upscale falls
+    /// back to bilinear: sprites keep hard edges and SDF shapes antialias themselves), no
+    /// MSAA, no frame generation nor motion vectors (sprites have none yet), and none of
+    /// the scene passes' state (shadows, occlusion, reflections) nor depth of field and
+    /// motion blur: a 2D view allocates nothing of theirs.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::prepare`].
+    pub fn prepare_2d(
+        &mut self,
+        view: &mut View,
+        settings: &ViewSettings,
+        output: (u32, u32),
+        ctx: PrepareContext<'_>,
+    ) -> Result<Prepared, FrameError> {
+        if self.sprites.is_none() {
+            self.sprites = Some(Box::new(Renderer2d::new(
+                ctx.device,
+                ctx.allocator,
+                ctx.bindless,
+                HDR_FORMAT,
+                QuadMode::for_device(ctx.device),
+            )?));
+        }
+        self.prepare(view, &settings_2d(settings), output, ctx)
+    }
+
+    /// Declares a 2D view's whole frame (ADR 0125): `canvas`, the 2D world in world units
+    /// (prepared, `Canvas::prepare`), drawn as `camera` (orthographic) sees it at the
+    /// render size over the view's clear color, then the upscale and the post chain as
+    /// [`Self::add_view`]'s. An empty canvas declares no 2D pass, only the clear. The
+    /// depth ([`ViewFrame::depth`]) is the far plane's everywhere, for UI placed in the
+    /// world. [`Self::prepare_2d`] must have run for this frame.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameError::Sprites`] when the canvas was not prepared or the upload ring had no
+    /// room for its quads; otherwise as [`Self::add_view`].
+    pub fn add_view_2d<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ctx: &mut FrameContext<'_, 'g>,
+        view: &'g mut View,
+        canvas: &'g Canvas,
+        camera: &ViewCamera,
+        target: ViewTarget,
+    ) -> Result<ViewFrame, FrameError> {
+        self.declare_view(
+            fg,
+            ctx,
+            view,
+            ViewScene::Sprites(canvas),
+            camera,
+            target,
+            None,
+            |_, _| {},
+        )
+    }
+
     /// Declares `view`'s whole frame into `fg` (see the crate documentation), drawn from
     /// `camera`, into `target`. [`Self::prepare`] must have run for this frame. The frame
     /// must execute with `ctx.bindless`.
@@ -1233,7 +1360,16 @@ impl FrameRenderer {
         target: ViewTarget,
         hook: impl FnOnce(&mut FrameGraph<'g>, &SceneTargets<'_>),
     ) -> Result<ViewFrame, FrameError> {
-        self.declare_view(fg, ctx, view, scene, camera, target, None, hook)
+        self.declare_view(
+            fg,
+            ctx,
+            view,
+            ViewScene::World(scene),
+            camera,
+            target,
+            None,
+            hook,
+        )
     }
 
     /// [`Self::add_view_with`] with frame generation (ADR 0091): `target` is a paced
@@ -1257,7 +1393,61 @@ impl FrameRenderer {
         generated: GeneratedTarget,
         hook: impl FnOnce(&mut FrameGraph<'g>, &SceneTargets<'_>),
     ) -> Result<ViewFrame, FrameError> {
-        self.declare_view(fg, ctx, view, scene, camera, target, Some(generated), hook)
+        self.declare_view(
+            fg,
+            ctx,
+            view,
+            ViewScene::World(scene),
+            camera,
+            target,
+            Some(generated),
+            hook,
+        )
+    }
+
+    /// A 2D view's scene (ADR 0125): `canvas` at the render size over the view's clear
+    /// color, and the depth cleared to the far plane (its pass culled when nothing reads
+    /// it).
+    #[allow(clippy::too_many_arguments)]
+    fn add_sprites<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ctx: &mut FrameContext<'_, 'g>,
+        canvas: &'g Canvas,
+        camera: &ViewCamera,
+        (color, depth): (Texture, Texture),
+        clear: Option<[f32; 4]>,
+        render: (u32, u32),
+    ) -> Result<ForwardPasses, FrameError> {
+        let background = clear.unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        match (self.sprites.as_deref(), canvas.is_empty()) {
+            (Some(renderer), false) => {
+                let view = camera
+                    .camera_2d(render)
+                    .unwrap_or_default()
+                    .view(render.0, render.1);
+                renderer
+                    .add_pass(
+                        fg,
+                        ctx.ring,
+                        ctx.bindless,
+                        canvas,
+                        &view,
+                        color,
+                        Some(background),
+                    )
+                    .map_err(FrameError::Sprites)?;
+            }
+            // Nothing drawn: no 2D pass, the background alone.
+            _ => fg
+                .add_pass("clear")
+                .color(color, LoadOp::Clear(background), StoreOp::Store)
+                .execute(|_| {}),
+        }
+        fg.add_pass("2d depth")
+            .depth(depth, LoadOp::Clear([1.0, 0.0, 0.0, 0.0]), StoreOp::Store)
+            .execute(|_| {});
+        Ok(ForwardPasses::none())
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1266,7 +1456,7 @@ impl FrameRenderer {
         fg: &mut FrameGraph<'g>,
         ctx: &mut FrameContext<'_, 'g>,
         view: &'g mut View,
-        scene: &SceneInput<'_, 'g>,
+        scene: ViewScene<'_, '_, 'g>,
         camera: &ViewCamera,
         target: ViewTarget,
         generated_target: Option<GeneratedTarget>,
@@ -1362,50 +1552,72 @@ impl FrameRenderer {
             clip_from_world: camera.clip_from_world(aspect),
             position: camera.position,
         };
-        let forward_view = ForwardView {
-            camera: scene_camera,
-            light: scene.light,
-            color,
-            depth,
-            clear: settings.clear,
-            occlusion,
-            temporal,
-            shadow_cache,
-            virtual_shadows,
-            lights: scene.lights,
-            decals: scene.decals,
-            environment: scene.environment,
-            reflections: Reflections {
-                probes: scene.reflection_probes,
-                ssr: reflections.as_ref(),
-            },
-            gi: scene.gi,
-            features: prepared.settings.features,
+        let mut passes = match scene {
+            ViewScene::World(scene) => {
+                let forward_view = ForwardView {
+                    camera: scene_camera,
+                    light: scene.light,
+                    color,
+                    depth,
+                    clear: settings.clear,
+                    occlusion,
+                    temporal,
+                    shadow_cache,
+                    virtual_shadows,
+                    lights: scene.lights,
+                    decals: scene.decals,
+                    environment: scene.environment,
+                    reflections: Reflections {
+                        probes: scene.reflection_probes,
+                        ssr: reflections.as_ref(),
+                    },
+                    gi: scene.gi,
+                    features: prepared.settings.features,
+                };
+                let passes = match scene.draws {
+                    SceneDraws::List(draws) => self.forward.add_passes(
+                        fg,
+                        ctx.ring,
+                        ctx.bindless,
+                        scene.geometry,
+                        scene.materials,
+                        draws,
+                        &forward_view,
+                    ),
+                    SceneDraws::Scene(frame) => self.forward.add_scene_passes(
+                        fg,
+                        ctx.ring,
+                        ctx.bindless,
+                        scene.geometry,
+                        scene.materials,
+                        frame,
+                        &forward_view,
+                    ),
+                }
+                .ok_or(FrameError::RingFull)?;
+                if let (Some(skinning), Some(motion)) = (scene.skinning, &passes.motion) {
+                    skinning.add_motion_pass(
+                        fg,
+                        ctx.ring,
+                        ctx.bindless,
+                        scene.geometry,
+                        depth,
+                        motion,
+                    )?;
+                }
+                passes
+            }
+            // A 2D view (ADR 0125): its sprites instead of the scene passes.
+            ViewScene::Sprites(canvas) => self.add_sprites(
+                fg,
+                ctx,
+                canvas,
+                camera,
+                (color, depth),
+                settings.clear,
+                render,
+            )?,
         };
-        let mut passes = match scene.draws {
-            SceneDraws::List(draws) => self.forward.add_passes(
-                fg,
-                ctx.ring,
-                ctx.bindless,
-                scene.geometry,
-                scene.materials,
-                draws,
-                &forward_view,
-            ),
-            SceneDraws::Scene(frame) => self.forward.add_scene_passes(
-                fg,
-                ctx.ring,
-                ctx.bindless,
-                scene.geometry,
-                scene.materials,
-                frame,
-                &forward_view,
-            ),
-        }
-        .ok_or(FrameError::RingFull)?;
-        if let (Some(skinning), Some(motion)) = (scene.skinning, &passes.motion) {
-            skinning.add_motion_pass(fg, ctx.ring, ctx.bindless, scene.geometry, depth, motion)?;
-        }
         // MSAA: the samples resolved (color weighted by luminance, motion vectors of the
         // nearest sample, depth by the forward renderer); with SMAA S2x also half the two
         // samples' difference. Everything after reads one value per pixel.
@@ -1886,8 +2098,8 @@ fn is_float(format: vk::Format) -> bool {
     )
 }
 
-/// The camera half-way between `a` and `b` (a generated frame's): positions and fields
-/// of view blended, rotations by spherical interpolation.
+/// The camera half-way between `a` and `b` (a generated frame's): positions, fields of
+/// view and orthographic heights blended, rotations by spherical interpolation.
 pub(crate) fn halfway(a: &ViewCamera, b: &ViewCamera) -> ViewCamera {
     let ra = Quat::from_mat4(&a.view_from_world).conjugate();
     let rb = Quat::from_mat4(&b.view_from_world).conjugate();
@@ -1896,7 +2108,46 @@ pub(crate) fn halfway(a: &ViewCamera, b: &ViewCamera) -> ViewCamera {
     ViewCamera {
         fov_y: 0.5 * (a.fov_y + b.fov_y),
         cut: false,
+        orthographic: match (a.orthographic, b.orthographic) {
+            (Some(ha), Some(hb)) => Some(0.5 * (ha + hb)),
+            (_, other) => other,
+        },
         ..ViewCamera::from_rigid(rotation, position, b.fov_y, b.near, b.far)
+    }
+}
+
+/// What a view's scene passes draw: the 3D world, or a 2D view's sprites (ADR 0125).
+enum ViewScene<'s, 'a, 'g> {
+    World(&'s SceneInput<'a, 'g>),
+    Sprites(&'g Canvas),
+}
+
+/// What a 2D view keeps of `settings` (ADR 0125, [`FrameRenderer::prepare_2d`]).
+fn settings_2d(settings: &ViewSettings) -> ViewSettings {
+    let wanted = settings.antialiasing;
+    ViewSettings {
+        antialiasing: Antialiasing {
+            samples: Msaa::X1,
+            upscale: if wanted.upscale.is_temporal() {
+                Upscale::Bilinear
+            } else {
+                wanted.upscale
+            },
+            post: wanted.post,
+        },
+        frame_generation: FrameGeneration::Off,
+        motion_vectors: false,
+        previous_color: false,
+        occlusion_culling: false,
+        cached_shadows: false,
+        virtual_shadows: None,
+        screen_space_reflections: None,
+        depth_of_field: None,
+        kind: match settings.kind {
+            ViewKind::Cinematic { .. } => ViewKind::Cinematic { motion_blur: None },
+            ViewKind::Gameplay => ViewKind::Gameplay,
+        },
+        ..*settings
     }
 }
 
@@ -1956,6 +2207,73 @@ mod tests {
             render_sizes(&fixed((320, 180)), None, Upscale::Fsr1, (1920, 1080)),
             ((320, 180), (320, 180), None)
         );
+    }
+
+    #[test]
+    fn an_orthographic_camera_shows_its_height_and_the_images_aspect() {
+        use engine_core::math::Vec4;
+        // 11.25 m high (180 pixels of art at 16 a metre), at (3, 2), looking down −Z.
+        let camera = ViewCamera::orthographic(
+            Quat::IDENTITY,
+            Vec3::new(3.0, 2.0, 0.0),
+            11.25,
+            -1000.0,
+            1000.0,
+        );
+        assert!(camera.is_orthographic());
+        let clip = camera.clip_from_world(320.0 / 180.0);
+        let to_clip = |x: f32, y: f32| {
+            let c = clip * Vec4::new(x, y, 0.0, 1.0);
+            (c.x / c.w, c.y / c.w, c.z / c.w)
+        };
+        // The centre in the middle; 20 m across and 11.25 m up and down to the edges (y
+        // down in Vulkan's clip space); the plane between its near and far planes.
+        let (x, y, z) = to_clip(3.0, 2.0);
+        assert!(x.abs() < 1e-6 && y.abs() < 1e-6 && (0.0..=1.0).contains(&z));
+        let (x, y, _) = to_clip(13.0, 2.0 + 5.625);
+        assert!((x - 1.0).abs() < 1e-5 && (y + 1.0).abs() < 1e-5, "{x} {y}");
+        // Its 2D view: its place, its turn, 16 pixels a metre on 180 rows.
+        let view = camera.camera_2d((320, 180)).unwrap();
+        assert_eq!(view.center, Vec2::new(3.0, 2.0));
+        assert!((view.pixels_per_unit - 16.0).abs() < 1e-5 && view.rotation.abs() < 1e-6);
+        let turned =
+            ViewCamera::orthographic(Quat::from_rotation_z(0.5), Vec3::ZERO, 10.0, -1.0, 1.0);
+        assert!((turned.camera_2d((100, 100)).unwrap().rotation - 0.5).abs() < 1e-5);
+        // A perspective camera has none; half way between two keeps the projection.
+        let perspective = ViewCamera::from_rigid(Quat::IDENTITY, Vec3::ZERO, 1.0, 0.1, 10.0);
+        assert!(perspective.camera_2d((320, 180)).is_none());
+        let other = ViewCamera::orthographic(Quat::IDENTITY, Vec3::ZERO, 20.0, -1.0, 1.0);
+        assert_eq!(halfway(&turned, &other).orthographic, Some(15.0));
+    }
+
+    #[test]
+    fn a_2d_view_keeps_what_it_uses_of_its_settings() {
+        let wanted = ViewSettings {
+            antialiasing: Antialiasing::TAAU.with_samples(Msaa::X4),
+            frame_generation: FrameGeneration::Fsr,
+            occlusion_culling: true,
+            cached_shadows: true,
+            previous_color: true,
+            kind: ViewKind::Cinematic {
+                motion_blur: Some(engine_render::motion_blur::MotionBlurSettings::default()),
+            },
+            bloom: true,
+            ..ViewSettings::default()
+        };
+        let kept = settings_2d(&wanted);
+        assert_eq!(kept.antialiasing, Antialiasing::OFF);
+        assert_eq!(kept.frame_generation, FrameGeneration::Off);
+        assert!(!kept.occlusion_culling && !kept.cached_shadows && !kept.previous_color);
+        assert!(!kept.wants_motion());
+        assert_eq!(kept.kind, ViewKind::Cinematic { motion_blur: None });
+        // What the post chain does stays the view's: bloom here, if asked.
+        assert!(kept.bloom);
+        // Integer scaling and the filters after tone mapping are kept.
+        let pixel_art = ViewSettings {
+            antialiasing: Antialiasing::spatial(Upscale::Integer).with_post(PostAntialiasing::Fxaa),
+            ..ViewSettings::default()
+        };
+        assert_eq!(settings_2d(&pixel_art).antialiasing, pixel_art.antialiasing);
     }
 
     #[test]

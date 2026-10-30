@@ -1220,6 +1220,7 @@ fn framing(lo: Vec3, hi: Vec3) -> ViewCamera {
         near: (distance - reach * 1.5).max(distance * 0.01),
         far: distance + reach * 1.5,
         cut: true,
+        orthographic: None,
     }
 }
 

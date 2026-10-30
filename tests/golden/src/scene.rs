@@ -2063,6 +2063,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                     near,
                     far,
                     cut: accumulated == Some(0),
+                    orthographic: None,
                 },
             ),
         };
