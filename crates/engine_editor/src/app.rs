@@ -28919,7 +28919,7 @@ fn file_kind(kind: engine_scene::AssetKind) -> FileKind {
         // A graph is a material type, as a module is (ADR 0123); a function is a graph's
         // part (E10-3g-2).
         K::Shader | K::Graph | K::Function => FileKind::Shader,
-        K::Material | K::Video | K::Font | K::Mixer | K::Anim => FileKind::Other,
+        K::Material | K::Video | K::Font | K::Mixer | K::Anim | K::AnimGraph => FileKind::Other,
     }
 }
 

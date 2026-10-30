@@ -283,10 +283,13 @@ pub enum AssetKind {
     /// A material graph's function (`.mfunc`): nodes called as one node (ADR 0123's
     /// E10-3g-2).
     Function,
+    /// An animation graph (`.agraph`): what plays a character's clips as its parameters
+    /// say (ADR 0124's E12-5).
+    AnimGraph,
 }
 
 /// Every kind with its name and extensions.
-const KINDS: [(AssetKind, &str, &[&str]); 13] = [
+const KINDS: [(AssetKind, &str, &[&str]); 14] = [
     (AssetKind::Scene, "scene", &["scene"]),
     (AssetKind::Material, "material", &["material"]),
     (AssetKind::Model, "model", &["glb", "gltf"]),
@@ -304,6 +307,7 @@ const KINDS: [(AssetKind, &str, &[&str]); 13] = [
     (AssetKind::Graph, "graph", &["mgraph"]),
     (AssetKind::Function, "function", &["mfunc"]),
     (AssetKind::Anim, "animation", &["anim"]),
+    (AssetKind::AnimGraph, "animation graph", &["agraph"]),
 ];
 
 impl AssetKind {
@@ -343,7 +347,13 @@ impl AssetKind {
     pub fn own_id(self) -> bool {
         matches!(
             self,
-            Self::Scene | Self::Material | Self::Mixer | Self::Graph | Self::Function | Self::Anim
+            Self::Scene
+                | Self::Material
+                | Self::Mixer
+                | Self::Graph
+                | Self::Function
+                | Self::Anim
+                | Self::AnimGraph
         )
     }
 }

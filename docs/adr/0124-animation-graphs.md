@@ -584,6 +584,68 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5a, 2026-10-30): the `.agraph` file and transition conditions
+
+E12-5 is taken in five steps: **5a** the file and the conditions (this one); **5b** the
+graph's runtime in `engine_anim` (cooked flat arrays, the tick's decisions and the frame's
+pose stack, measured on 100, 1,000 and 10,000 characters); **5c** the `Animator` playing a
+graph in the player (parameters, saves, events, root motion, the scripts' calls); **5d** the
+graph's canvas in the editor (states, transitions, blends, layers and masks); **5e** the live
+state in Play.
+
+- **The file** (`engine_scene::AnimGraphFile`, `.agraph`, `AssetKind::AnimGraph` "animation
+  graph", its id inside), in the editor's grammar as the research note sketched:
+  - **`params`** by name (scripts and conditions name them): a kind (`Float`, `Bool`, `Int`,
+    `Trigger`) and the value it starts with.
+  - **`layers`** by id: a name, an `order` (the smallest plays first, under the others), the
+    `root` node it plays, `Normal` or `Additive`, a constant `weight` or a parameter's
+    (`weight_param`), a `mask` of joints each with a weight for its subtree (empty: all).
+  - **`nodes`** by id: a `Clip` (by its name: the model's, or one of the animator's own),
+    a `Blend1d` along a parameter or a `Blend2d` over two (`points`: a clip and where it lies),
+    or a `Machine` (its `entry` state); a node's `speed`, its `sync` group, its place on the
+    canvas (`at`).
+  - **`states`** by id: a name (what `animator.state` will read), the `machine` it belongs
+    to, the `pose` node it shows, its place on the machine's canvas.
+  - **`transitions`** by id: `from` a state (none: from any state of the destination's
+    machine), `to` one, `when` (a condition), `blend` seconds (0.25), `priority` (the
+    smallest first), an `exit` time as a fraction of the source's clip (0: none), an `offset`
+    into the destination or `keep_phase`, and `inertialize` in place of a cross-fade.
+  - A clip's points refer to clips by name rather than to nodes: a blend of blends can come
+    later as a node reference beside `clip`, without changing these lines.
+  - `preview` names a model for the editor; the game binds a graph to the character
+    playing it by the names of its clips and joints.
+- **Lines at their defaults are left out**, found by writing each entry type's defaults once
+  (no list of strings to keep in step with the fields); an entry with every field at its
+  default keeps its first line, so it is read back. Sorted on write: a diff shows what
+  changed.
+- **`AnimGraphFile::problems`** names what does not hold together (a missing root, entry,
+  machine, pose or state; a parameter a blend or a layer names and the graph lacks; a
+  transition between two machines; a blend without clips; a transition that would go at once,
+  with neither a condition nor an exit time), each with what it is (`transition t1`), for the
+  editor's marks and the cook.
+- **Conditions** (`engine_anim::Condition`): numbers, parameters, `true`, `false`; `+ - * /`
+  and a unary `-`; `< <= > >= ==` and `~=` or `!=`; `and`, `or`, `not` (also `&&`, `||`, `!`);
+  parentheses.
+  - `not` binds looser than a comparison (`not speed > 1` is `not (speed > 1)`, unlike
+    Luau's `(not speed) > 1`, which no one means), `and` tighter than `or`. A comparison
+    chained (`0 < speed < 2`) is refused with a hint to join two with `and`.
+  - Compiled once into stack operations over parameter slots; `holds(values)` runs them
+    on a fixed array of 32 values: no allocation, no name looked up, no panic (a malformed
+    program reads false). A condition deeper than 32 pending values is refused.
+  - The triggers a condition names are listed once each (`triggers()`), to be used up when
+    its transition goes. A blank condition always holds.
+  - Errors carry a byte offset and a length, for the editor to underline as the text is
+    typed: "no parameter speeed", "expected a value at the end", "≥ is not part of a
+    condition" (spanning the whole character).
+- **Tests:** the file written without its defaults (an all-default parameter keeping a line)
+  and read back equal and written alike again; the layers in order, a machine's states, a
+  transition's machine; each kind of broken reference named, and a graph that holds together
+  naming none. Conditions: precedence and every operator spelling, triggers listed once,
+  each fault with its place (Unicode spanning its character), the depth limit.
+- **The scripts' calls** (ADR 0124's proposal: `animator:set`, `animator:trigger`,
+  `animator.state`, `animator:in_window`) are the public scripting API, so they were put to
+  the team (2026-10-30) before 5c needs them.
+
 ## As built (E12-4e-2, 2026-10-30): a character's joints posed in the view
 
 - **A character's own clips beside its model's:** the Animation tab (and the inspector's
