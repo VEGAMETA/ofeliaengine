@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5e-1, the graph's tab live with the player** (#PR, ADR 0124's as-built): the tab
+  - **E12-5e-1, the graph's tab live with the player** (#486, ADR 0124's as-built): the tab
     gives the player its graph as it changes (unsaved, in Play too); only what plays counts
     (a state moved on the canvas changes nothing; a real change keeps each character in its
     state by name). In Play the tab lights the watched character's state, how far it played
