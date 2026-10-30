@@ -630,6 +630,48 @@ pub struct MaterialPanel<'a> {
     pub note: &'a str,
 }
 
+/// A blend's clip on the inspector's blend panel (ADR 0124's E12-5d-2a).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlendDot<'a> {
+    /// Where it lies on the panel, as fractions of it (0, 0 its top left corner).
+    pub at: [f32; 2],
+    /// Its clip's name, with its weight while it has one: "Walk 62 %".
+    pub label: &'a str,
+    /// Its weight at the values marked, 0 to 1: its dot grows with it.
+    pub weight: f32,
+    /// Its name goes on its other side: left of a plane's dot (near the right edge), under
+    /// a line's (every other one along it, so neighbours' names do not meet).
+    pub flip: bool,
+    /// It is dragged.
+    pub picked: bool,
+}
+
+/// The inspector's blend panel under its section's header (ADR 0124's E12-5d-2a): a 1D
+/// blend's clips along a line or a 2D blend's on a plane, the plane's triangles between
+/// them, and the parameters' values marked, each clip's dot as large as its weight there.
+/// A press on a dot drags its clip; elsewhere it moves the mark.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlendPanel<'a> {
+    /// The section it shows under.
+    pub section: usize,
+    /// A 2D blend's plane (else a 1D blend's line).
+    pub plane: bool,
+    /// Its clips.
+    pub dots: &'a [BlendDot<'a>],
+    /// A plane's triangles, three corners each, as fractions of it.
+    pub triangles: &'a [[f32; 2]],
+    /// The values marked, as fractions of it.
+    pub mark: [f32; 2],
+    /// The values are a running character's (Play): marked in the playing color.
+    pub live: bool,
+    /// The axes' ends: "speed −0.60 … 4.60", and up's for a plane.
+    pub axes: [&'a str; 2],
+    /// The values marked: "speed 1.25 · direction 0.30".
+    pub now: &'a str,
+    /// Its button: "Place by Speed" (a line's) or "Place by Velocity" (a plane's).
+    pub place: &'a str,
+}
+
 /// A clip of the inspector's character (ADR 0124's E12-1b): its name and length, then what
 /// else is known of it in one line (frames, root speed, size, error, loop seam).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1152,6 +1194,9 @@ pub struct ShellModel<'a> {
     pub sound: Option<SoundPanel<'a>>,
     /// The shown material's preview, under its section's header (E10-4d).
     pub material_preview: Option<MaterialPanel<'a>>,
+    /// The inspected blend's clips on a line or a plane, under its section's header (ADR
+    /// 0124's E12-5d-2a).
+    pub blend: Option<BlendPanel<'a>>,
     /// The active character's clips, under their section's header (ADR 0124's E12-1b).
     pub clips: Option<ClipsPanel<'a>>,
     /// The active character's joints, under their section's header (ADR 0124's E12-1c).
@@ -1327,6 +1372,15 @@ pub struct ShellResponse {
     pub sound_wave: Option<WaveUse>,
     /// The material preview was pressed, dragged or let go (E10-4d): it turns.
     pub material_turn: Option<WaveUse>,
+    /// The blend panel (ADR 0124's E12-5d-2a): a clip's dot pressed, dragged or let go (its
+    /// place among the blend's points), the panel's node saying where the pointer is.
+    pub blend_dot: Option<(usize, WaveUse)>,
+    /// The panel pressed, dragged over or let go off its dots: the mark goes there.
+    pub blend_mark: Option<WaveUse>,
+    /// Its Place by Speed (or Velocity) was clicked.
+    pub blend_place: bool,
+    /// The panel's node this frame (0 when it is not shown).
+    pub blend_area: u64,
     /// The Clips (ADR 0124's E12-1b): a clip's row was clicked.
     pub clip_pick: Option<usize>,
     /// Their ▶ or ■ was clicked.
@@ -2985,6 +3039,191 @@ fn material_panel(ui: &mut Ui, panel: &MaterialPanel<'_>, p: &Palette, out: &mut
                     released: used.released,
                 });
             }
+        },
+    );
+}
+
+/// The blend panel's height: a 2D blend's plane, a 1D blend's line.
+pub(crate) const BLEND_PLANE: f32 = 160.0;
+pub(crate) const BLEND_LINE: f32 = 48.0;
+
+/// The inspected blend (ADR 0124's E12-5d-2a): its clips as dots on a line or a plane, a
+/// plane's triangles between them, the values marked by a cross (a line through a line's),
+/// each dot as large as its clip's weight there with its name beside it; under it, the
+/// axes' ends, the values and Place by Speed. A press on a dot drags it, elsewhere the mark.
+fn blend_panel(ui: &mut Ui, panel: &BlendPanel<'_>, p: &Palette, out: &mut ShellResponse) {
+    const NAME: f32 = 120.0;
+    let width = SOUND_WIDTH;
+    let height = if panel.plane { BLEND_PLANE } else { BLEND_LINE };
+    let whole = Style {
+        size: [Size::Fixed(width), Size::Fixed(height)],
+        placed: Some([0.0, 0.0]),
+        ..Style::default()
+    };
+    let marked = if panel.live { p.playing } else { p.accent };
+    ui.column(
+        "blend",
+        Style {
+            size: [Size::Grow(1.0), Size::Fit],
+            padding: [SOUND_PAD, 6.0, SOUND_PAD, 4.0],
+            gap: 3.0,
+            ..Style::default()
+        },
+        |ui| {
+            let mut hit: Option<(usize, bool, bool, bool)> = None;
+            let area = ui.container(
+                "plane",
+                Style {
+                    size: [Size::Fixed(width), Size::Fixed(height)],
+                    radius: 3.0,
+                    clip: true,
+                    background: Some(p.field),
+                    ..Style::default()
+                },
+                |ui| {
+                    if panel.plane {
+                        for (i, t) in panel.triangles.chunks_exact(3).enumerate() {
+                            ui.push_id(i as u64);
+                            ui.line("edges", whole, &[t[0], t[1], t[2], t[0]], p.text_dim, 1.0);
+                            ui.pop_id();
+                        }
+                    } else {
+                        ui.line("axis", whole, &[[0.0, 0.5], [1.0, 0.5]], p.text_dim, 1.0);
+                    }
+                    let [mx, my] = panel.mark.map(|v| v.clamp(0.0, 1.0));
+                    ui.line("across", whole, &[[mx, 0.0], [mx, 1.0]], marked, 1.0);
+                    if panel.plane {
+                        ui.line("up", whole, &[[0.0, my], [1.0, my]], marked, 1.0);
+                    }
+                    for (i, dot) in panel.dots.iter().enumerate() {
+                        ui.push_id(1_000 + i as u64);
+                        let side = (7.0 + 7.0 * dot.weight.clamp(0.0, 1.0)).round();
+                        let [x, y] = [dot.at[0] * width, dot.at[1] * height];
+                        let color = if dot.picked {
+                            p.text
+                        } else if dot.weight > 0.0 {
+                            p.playing
+                        } else {
+                            p.text_dim
+                        };
+                        let id = ui.container(
+                            "dot",
+                            Style {
+                                size: [Size::Fixed(side), Size::Fixed(side)],
+                                radius: side / 2.0,
+                                background: Some(color),
+                                placed: Some([
+                                    (x - side / 2.0).clamp(0.0, width - side),
+                                    (y - side / 2.0).clamp(0.0, height - side),
+                                ]),
+                                ..Style::default()
+                            },
+                            |_| {},
+                        );
+                        // Its name: right of a plane's dot (left near the right edge), over a
+                        // line's (under, every other one).
+                        let (at, align) = match (panel.plane, dot.flip) {
+                            (true, false) => ([x + side / 2.0 + 3.0, y - 7.0], Align::Start),
+                            (true, true) => ([x - side / 2.0 - 3.0 - NAME, y - 7.0], Align::End),
+                            (false, false) => ([x - NAME / 2.0, 0.0], Align::Center),
+                            (false, true) => ([x - NAME / 2.0, height - 14.0], Align::Center),
+                        };
+                        ui.row(
+                            "name",
+                            Style {
+                                size: [Size::Fixed(NAME), Size::Fixed(14.0)],
+                                align_main: align,
+                                align_cross: Align::Center,
+                                placed: Some([at[0], at[1].clamp(0.0, height - 14.0)]),
+                                ..Style::default()
+                            },
+                            |ui| {
+                                let shade = if dot.weight > 0.0 { p.text } else { p.text_dim };
+                                text(ui, "text", dot.label, SMALL, shade);
+                            },
+                        );
+                        let used = ui.sense(id, false);
+                        if used.pressed || used.active || used.released {
+                            hit = Some((i, used.pressed, used.active, used.released));
+                        }
+                        ui.pop_id();
+                    }
+                    // The values: a dot where the cross meets.
+                    let y = if panel.plane {
+                        my * height
+                    } else {
+                        height * 0.5
+                    };
+                    ui.container(
+                        "mark",
+                        Style {
+                            size: [Size::Fixed(7.0), Size::Fixed(7.0)],
+                            radius: 3.5,
+                            background: Some(marked),
+                            placed: Some([
+                                (mx * width - 3.5).clamp(0.0, width - 7.0),
+                                (y - 3.5).clamp(0.0, height - 7.0),
+                            ]),
+                            ..Style::default()
+                        },
+                        |_| {},
+                    );
+                },
+            );
+            out.blend_area = area;
+            if let Some((i, pressed, held, released)) = hit {
+                out.blend_dot = Some((
+                    i,
+                    WaveUse {
+                        node: area,
+                        pressed,
+                        held,
+                        released,
+                    },
+                ));
+            } else {
+                let used = ui.sense(area, false);
+                if used.pressed || used.active || used.released {
+                    out.blend_mark = Some(WaveUse {
+                        node: area,
+                        pressed: used.pressed,
+                        held: used.active,
+                        released: used.released,
+                    });
+                }
+            }
+            ui.row(
+                "axes",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(14.0)],
+                    gap: 6.0,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    text(ui, "across", panel.axes[0], SMALL, p.text_dim);
+                    ui.spacer("fill");
+                    text(ui, "now", panel.now, SMALL, marked);
+                },
+            );
+            ui.row(
+                "under",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(18.0)],
+                    gap: 6.0,
+                    align_cross: Align::Center,
+                    ..Style::default()
+                },
+                |ui| {
+                    if panel.plane {
+                        text(ui, "up", panel.axes[1], SMALL, p.text_dim);
+                    }
+                    ui.spacer("fill");
+                    if label_button(ui, "place", panel.place, false, p.accent, p) {
+                        out.blend_place = true;
+                    }
+                },
+            );
         },
     );
 }
@@ -4672,6 +4911,10 @@ fn inspector_dock(
                     // The material's preview under its section's header (E10-4d).
                     if let Some(panel) = model.material_preview.filter(|panel| panel.section == s) {
                         material_panel(ui, &panel, p, out);
+                    }
+                    // The inspected blend's clips under its state's (ADR 0124's E12-5d-2a).
+                    if let Some(panel) = model.blend.filter(|panel| panel.section == s) {
+                        blend_panel(ui, &panel, p, out);
                     }
                     // A character's clips under theirs (ADR 0124's E12-1b), its joints under
                     // theirs (E12-1c).

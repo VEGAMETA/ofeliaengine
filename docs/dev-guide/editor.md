@@ -1678,9 +1678,16 @@ unless it says otherwise).
 - **View: Animation States** (Ctrl+Shift+P) labels every character in the viewport over
   its head with what it plays: its graph's state as above, or its clip and time. Run it
   again to hide them.
-- **Not yet:** machines inside machines (Tab into one), layers and masks, blends drawn as
-  points and the character's preview in the corner come with the next step (ADR 0124's
-  E12-5d-2).
+- **A blend's state** selected shows its blend in the inspector, under the state's name:
+  its clips as dots along a line (a 1D blend) or on a plane between triangles (2D), each as
+  large as its weight at the values the cross marks, with its name and share. Drag a dot
+  to move its clip (Ctrl: round steps); press anywhere else on it to try other values:
+  while editing only the panel shows them, in Play they are held on the character as the
+  Graph section holds them. **Place by Speed** (**by Velocity** for a 2D blend) puts each
+  clip at how fast its root crosses the ground, read from a character playing the graph;
+  clips made in place keep theirs.
+- **Not yet:** machines inside machines (Tab into one), layers and masks, and the
+  character's preview in the corner come with the next steps (ADR 0124's E12-5d-2).
 
 ## Autosave and the session
 

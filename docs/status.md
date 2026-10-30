@@ -879,6 +879,12 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5d-2a, blends drawn as points** (#PR, ADR 0124's as-built): a blend's state
+    inspected shows its clips on a line or on a plane between Delaunay triangles, the
+    values marked and each clip's weight there (the tick's own weighing, now shared as
+    `weigh_1d`/`weigh_2d`); a dot dragged is one step, a press previews values (holds them
+    on the character in Play); Place by Speed / Velocity from a rig's root motion
+    (`Rig::clip_velocity`). 0 allocations dragging the mark.
   - **E12-5e-2b, View: Animation States** (#489, ADR 0124's as-built): every character
     labelled over its head with what it plays (its graph's state, or its clip and time);
     nothing paid while off. **E12-5e is done.**
@@ -1290,9 +1296,9 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    E12-5d-2 (layers and masks on the canvas, blends drawn as points, machines in
-    machines, the character previewed in the corner), the last of E12; 5a to 5c, 5d-1 and
-    5e are done, and E12-4. E13 (2D) has begun: E13-1a's runtime by an agent.
+    E12-5d-2b to 2d (layers and masks on the canvas, machines in machines, the character
+    previewed in the corner), the last of E12; 5a to 5c, 5d-1, 5d-2a and 5e are done, and
+    E12-4. E13 (2D) has begun: E13-1a's runtime by an agent.
   - **Settled (2026-10-30, ADR 0125 accepted, team decisions 1а 2а 3а 4а 5в 6а 7а 8а 9а
     10а):** 2D entities in the one world (the XY plane); metres, 16 pixels a metre by
     default; tile cells in the scene by rows of 32-cell chunks through a palette; terrain

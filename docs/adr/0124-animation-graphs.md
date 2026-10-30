@@ -584,6 +584,41 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5d-2a, 2026-10-30): blends drawn as points
+
+- **The inspector's blend panel:** a state playing a blend, selected alone on the graph's
+  canvas, shows its blend under the section's header: a 1D blend's clips as dots along a
+  line, a 2D blend's on a plane with the Delaunay triangles between them, and the
+  parameters' values marked by a cross (in Play's colour when they are the running
+  character's). Each dot is as large as its clip's weight there, its name and share
+  beside it (`Walk 67 %`). Under it: each axis's ends, the values, and **Place by Speed**
+  (**by Velocity** for a plane).
+- **The tick's own weighing:** `engine_anim::weigh_1d` and `weigh_2d` now hold what the
+  graph's tick weighs a blend's clips by, and the panel calls the same (`delaunay` is
+  public). Measured neutral on `graph_bench`, best of five: the tick 0.121 / 0.106 / 0.099
+  → 0.120 / 0.107 / 0.100 µs a character at 100 / 1,000 / 10,000 characters.
+- **A dot dragged** moves its clip, to hundredths (Ctrl: round steps of about a tenth of
+  the axis); the whole drag is one step of the history. The axes hold still while it
+  moves and take in its new place after. **A press off the dots** moves the mark: while
+  editing, the panel previews those values and nothing else changes; in Play it holds
+  the watched character's parameters there, as the Graph section holds them (↺ or Stop
+  lets them go).
+- **Place by Speed** (a 1D blend), **by Velocity** (2D), also *Animation: Place Blend by
+  Speed* in the palette (Unity's Compute Positions): each clip at how fast its root
+  crosses the ground over its length, read from a character playing the graph (the one
+  watched in Play, the active one, or the first in the scene) through
+  `Rig::clip_velocity`: `[right, forward]` of glTF's character, which faces +Z. Clips
+  crossing under 0.05 units a second keep their places, and the message names them:
+  idles, and clips made in place (every sample model's are). One step.
+- **Cost:** nothing unless a blend's state is inspected; then its weights and texts each
+  frame into kept room: 0 allocations over 240 frames of the mark dragged round a
+  five-clip plane (`tests/graph_zero_alloc.rs`).
+- **Tests:** the editor's panel (the weights at the starting values as the tick gives
+  them, the preview, a dot's drag as one step and its undo, Place by Speed's places); the
+  fox in Play (the panel's values the fox's, a press holding its speed past Run's place,
+  Place by Speed keeping its clips made in place); the walker's velocity (a metre a second
+  forward); every sample rig's velocities against its root speeds.
+
 ## As built (E12-5e-2b, 2026-10-30): View: Animation States
 
 - **View: Animation States** (the palette, as View: Skeletons) labels every character with
