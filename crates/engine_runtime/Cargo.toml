@@ -17,6 +17,9 @@ engine_core.workspace = true
 engine_ecs.workspace = true
 # The components' descriptions: saves hold what they describe (ADR 0104).
 engine_reflect.workspace = true
+# The clip files an `Animator` plays by name (`AssetRef`, ADR 0124's E12-4a); engine_scene
+# needs nothing of this crate.
+engine_scene.workspace = true
 # A tween whose target names nothing is reported once.
 log = "0.4"
 # The frame renderer a camera's view goes to (ADR 0072).

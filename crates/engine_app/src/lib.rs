@@ -65,6 +65,7 @@ mod blockout;
 mod clip_events;
 pub mod dap;
 mod entry;
+mod field_clips;
 mod game;
 mod loading;
 mod net;

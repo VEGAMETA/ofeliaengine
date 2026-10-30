@@ -3390,6 +3390,7 @@ impl Player {
                         // the game's (ADR 0124's E12-2), their sockets with them; the events
                         // they played past fire for the game now, for scripts next tick.
                         animators.advance(world, dt);
+                        assets.borrow_mut().animate_fields(world);
                         assets.borrow_mut().move_roots(world);
                         assets.borrow_mut().fire_events(world);
                         assets.borrow_mut().place_sockets(world);

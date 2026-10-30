@@ -6,8 +6,10 @@
 //! the ticks and its pose each frame, fading all along from the clip at another moment
 //! (E12-2b: two samples blended), the fade started again now and then, its root motion
 //! moving it (E12-2c: taken out of both poses, read over each tick), its clip's events
-//! fired as it plays (E12-3b: eight a loop, from its model's `.meta`). Khronos' CesiumMan
-//! (`tools/fetch-test-assets.ps1`); skipped without it.
+//! fired as it plays (E12-3b: eight a loop, from its model's `.meta`); and a door playing
+//! clips made in the editor (E12-4a: its turn and its lamp's range keyed, an event, a fade
+//! between two clips now and then). Khronos' CesiumMan (`tools/fetch-test-assets.ps1`);
+//! skipped without it.
 //! One test per file, so nothing else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
@@ -17,8 +19,9 @@ mod common;
 mod counting;
 
 use engine_app::{AssetMeta, Model};
+use engine_core::math::Vec3;
 use engine_ecs::{Entity, QueryState, Transform};
-use engine_scene::{AssetPaths, AssetRef};
+use engine_scene::{AnimFile, AssetId, AssetPaths, AssetRef, ClipEvent, Name};
 use std::time::{Duration, Instant};
 
 #[global_allocator]
@@ -98,6 +101,45 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         Model::new(engine_app::builtin::CUBE, engine_app::builtin::MATERIAL),
     ));
     player.world_mut().set_parent(cube, Some(hand)).unwrap();
+    // A door with two clips made in the editor (E12-4a), held as the editor holds them.
+    let (swing_file, flicker_file) = (AssetId::new(), AssetId::new());
+    let mut swing = AnimFile::default();
+    swing.set_key("Transform.rotation", 0.0, &[0.0, 0.0, 0.0]);
+    swing.set_key("Transform.rotation", 0.5, &[0.0, 60.0, 0.0]);
+    swing.set_key("Transform.rotation", 1.0, &[0.0, 0.0, 0.0]);
+    swing.events.push(ClipEvent {
+        time: 0.5,
+        name: String::from("creak"),
+        ..ClipEvent::default()
+    });
+    let mut flicker = AnimFile {
+        length: 0.5,
+        ..AnimFile::default()
+    };
+    flicker.set_key("Lamp:PointLight.range", 0.0, &[2.0]);
+    flicker.set_key("Lamp:PointLight.range", 0.25, &[6.0]);
+    flicker.set_key("Transform.rotation", 0.0, &[0.0, 10.0, 0.0]);
+    player.assets_mut().set_anim_clip(swing_file, Some(&swing));
+    player
+        .assets_mut()
+        .set_anim_clip(flicker_file, Some(&flicker));
+    let door = player.world_mut().spawn((
+        Transform::from_xyz(-1.0, -1.0, -3.0),
+        engine_runtime::Animator::new("swing")
+            .with_clip("swing", AssetRef::file(swing_file))
+            .with_clip("flicker", AssetRef::file(flicker_file)),
+    ));
+    let lamp = player.world_mut().spawn((
+        Name::new("Lamp"),
+        Transform::IDENTITY,
+        engine_runtime::PointLight::new(Vec3::ONE, 2.0),
+    ));
+    player.world_mut().set_parent(lamp, Some(door)).unwrap();
+    let switch = |player: &mut engine_app::Player, clip: &str| {
+        if let Some(animator) = player.world_mut().get_mut::<engine_runtime::Animator>(door) {
+            animator.play(clip, 0.25);
+        }
+    };
     let started = Instant::now();
     while player.model_rig(man).is_none() || player.model_rig(walker).is_none() {
         assert!(started.elapsed() < Duration::from_secs(30), "no skin");
@@ -113,7 +155,16 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         }
     };
     fade(&mut player);
+    // Both of the door's clips played once before counting: each bound once, then kept.
+    for clip in ["flicker", "swing"] {
+        switch(&mut player, clip);
+        for _ in 0..40 {
+            player.frame(&mut game).unwrap();
+        }
+    }
     let mut frames = 0u32;
+    let mut creaks = 0usize;
+    let mut door_clip = "swing";
     // The editor's live model preview of the same model plays too (ADR 0124's E12-1b): its
     // pose and turn change every frame, so it is drawn and read back every frame.
     let mut time = 0.0f32;
@@ -136,18 +187,36 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
                 beside: Some((0, length - time)),
             }));
             taken += u32::from(player.take_model_preview(&mut pixels));
-            heard += player
+            if let Some(events) = player
                 .world_mut()
                 .resource::<engine_runtime::AnimationEvents>()
-                .map_or(0, |e| e.fired().len());
+            {
+                heard += events.fired().len();
+                creaks += events.fired().iter().filter(|e| e.entity == door).count();
+            }
             frames += 1;
             if frames.is_multiple_of(200) {
                 fade(player);
             }
+            if frames.is_multiple_of(150) {
+                door_clip = if door_clip == "swing" {
+                    "flicker"
+                } else {
+                    "swing"
+                };
+                switch(player, door_clip);
+            }
         },
     );
-    println!("{taken} model previews taken, {heard} clip events heard");
+    println!("{taken} model previews taken, {heard} clip events heard, {creaks} creaks");
     assert!(heard > 0, "the walker's clip fired its events");
+    assert!(creaks > 0, "the door's clip fired its event");
+    let range = player
+        .world_mut()
+        .get::<engine_runtime::PointLight>(lamp)
+        .unwrap()
+        .range;
+    println!("the door's lamp's range {range}");
     assert!(taken > 100, "the live preview drawn as it played: {taken}");
     let walked = player
         .world_mut()

@@ -584,6 +584,77 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-4a, 2026-10-30): clips made in the editor, `.anim` files
+
+E12-4 is taken in five steps: **4a** the files and their playing (this one); **4b** the
+editor's own clips (New Clip, their tracks in the Animation tab, scrubbing without writing
+the scene, K and ◆, a key made by editing an animated field); **4c** the dope sheet's
+editing (select, box, move by whole frames and Shift freely, copy and paste, delete);
+**4d** curves (the Curves view, step, linear and smooth keys); **4e** joints keyed in an
+`.anim`.
+
+- **The file** (`engine_scene::AnimFile`, `.anim`, `AssetKind::Anim`, its id inside, as
+  the other files of ours): `length`, `rate` (the editor's grid, 30 frames a second),
+  `once`, `events` (as an imported clip's `ClipEvent`s) and `tracks`.
+  - **One track a field, keyed by what it moves:** `Transform.rotation`, or
+    `Lamp:PointLight.color` for a field of an entity below the animated one, named by
+    its path of names (`Arm/Lamp:`), as `Tween`'s targets.
+  - **A key** is its time, as many numbers as the field and its curve (`Smooth` unless
+    it says `Step` or `Linear`; the curve goes from that key to the next).
+  - **A rotation is keyed as the inspector shows it:** three Euler angles in degrees
+    (pitch, yaw, roll, applied yaw first). A door's 90 degrees reads `[0, 90, 0]`, and a
+    fan turns past 180 between two keys, which a quaternion cannot.
+  - Lines at their defaults are left out, and the tracks sort by name, so a merge sees
+    the tracks a change touched.
+- **Smooth keys** use a monotone piecewise cubic (Fritsch and Butland's weighted harmonic
+  slopes, as PCHIP): flat at the ends and where a key is higher or lower than both its
+  neighbours, so a curve never overshoots its keys. Two keys ease in and out.
+- **The `Animator`** gains `clips` (hidden in the inspector, saved, in scenes): the clip
+  files it plays by name, besides its model's, a name there winning. `with_clip(name,
+  file)`, `plays_own_clip()`. A door's `open` and `shut`, played by
+  `self.Animator:play("open", 0.2)`.
+  - `engine_runtime` now depends on `engine_scene` for `AssetRef`; nothing goes the
+    other way.
+- **Played each tick** right after the animators move on (`Assets::animate_fields` in the
+  player's tick, `engine_app::field_clips`), so the game, scripts, saves and the network
+  see the tick's values; a moved transform is drawn between ticks as every one is.
+  - An animator binds a clip once: each track's entity found by names and its field by
+    `engine_runtime::FieldRef` (the reflected component and offset, the code `Tween`
+    used, now shared). It keeps the bindings of every clip it played, so switching clips
+    binds nothing.
+  - The bindings lie in the animators' order, the same tick after tick, so a tick looks
+    nothing up; they are lined up again only when animators come or go.
+  - The clip's length and `once` go back to the animator as a model's clip's do.
+  - Through a fade, a field both clips key blends by the fade's weight (Euler angles
+    blended, then turned into the rotation); one only the clip fading out keys keeps its
+    value until the fade ends.
+  - Events fire as an imported clip's, over the tick's span, the heavier clip's in a
+    fade, appended to `AnimationEvents` after the models'.
+  - A skinned model's animator playing one of its own clips poses nothing: the model
+    rests (combining the two is a graph's layers, E12-5).
+- **Files:** read from the path a scene's reference gives once, again when the file
+  changes (`Player::asset_changed`, `Assets::reload`); `Assets::set_anim_clip(file,
+  Some(&anim))` holds the editor's version in place of the file.
+- **Nothing is written while the editor edits** (the world stands still): a door shows
+  the scene's values. Previewing an own clip without writing the scene is E12-4b's.
+- **Cost** (ref-1, release): 1,000 doors, each turning (three smooth Euler keys) with its
+  lamp's range stepping, 69.5 µs a tick, 70 ns a door (116 µs while each tick looked the
+  bindings up in a hash map and borrowed every animator).
+- **Tests:**
+  - **The file:** written and read back with its defaults left out; keys kept in time
+    order, a key at a keyed time changed; targets split.
+  - **Tracks:** steps hold, lines, the ends held; smooth keys ease (45 degrees halfway
+    between 0 and 90) and never overshoot a peak or fall while rising.
+  - **A bare world:** the door turns 45 degrees at half a second and 90 after, its lamp's
+    range steps, the clip played once holds, its event fires once; a fade to `shut`
+    turns it back steadily; an animator playing a clip it does not own is left alone; the
+    editor's edit is followed the next tick.
+  - **GPU, the player:** a scene saved with the door reads `door open.anim` from its
+    reference; 45 and 90 degrees, the lamp's step, one event in `AnimationEvents`; the
+    file written anew and reported changed, the door follows it.
+  - **Zero allocations:** the player's skinned frames with a door switching between two
+    of its own clips by fades: 0 allocations in 702 frames, 15 of its events heard.
+
 ## As built (E12-3e, 2026-10-30): each clip's loop and root motion settings
 
 - **The `.meta`** (`ClipImport`): `once`, plus `root_across`, `root_up` and `root_turn`

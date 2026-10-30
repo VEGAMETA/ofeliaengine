@@ -65,4 +65,4 @@ pub use lights::{LightExtract, PointLight, SpotLight, Sun};
 pub use probes::{GiExtract, GiVolume, ProbeExtract, ProbeSink, ReflectionProbe};
 pub use runtime::{Driven, FrameStages, Runtime};
 pub use skinned::SkinnedMesh;
-pub use timing::{Ease, Repeat, Timer, Timing, Tween};
+pub use timing::{Ease, FieldRef, Repeat, Timer, Timing, Tween};

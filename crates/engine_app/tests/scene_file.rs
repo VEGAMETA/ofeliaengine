@@ -14,9 +14,13 @@
 
 use engine_app::prelude::*;
 use engine_app::{AssetMeta, Assets, BakedBrush, PREVIEW_SIZE, PreviewRequest};
+use engine_core::math::EulerRot;
 use engine_render::material::MaterialTypeId;
+use engine_runtime::AnimationEvents;
 use engine_runtime::SkinnedMesh;
-use engine_scene::{AssetPaths, ClipEvent, ClipImport, SaveOptions, SceneRegistry, save_with};
+use engine_scene::{
+    AnimFile, AssetPaths, ClipEvent, ClipImport, KeyCurve, SaveOptions, SceneRegistry, save_with,
+};
 use std::time::{Duration, Instant};
 
 struct Still;
@@ -2463,6 +2467,156 @@ fn clip_events_fire_over_each_ticks_play() {
     }
     let heard: Vec<(Entity, String)> = game.heard.clone();
     assert_eq!(heard, [(turner, String::from("halfway"))]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR 0124's E12-4a: a clip made in the editor. A scene's door names `door open.anim` among
+/// its animator's clips; the player reads the file the scene's reference names, turns the
+/// door and steps its lamp's range each tick, holds the clip's end and fires its event
+/// into `AnimationEvents`. The file written anew is read again: the door follows it.
+#[test]
+fn a_door_plays_a_clip_made_in_the_editor() {
+    let dir = std::env::temp_dir().join(format!("ofelia-anim-file-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("animations")).unwrap();
+    let anim_id = AssetId::new();
+    let mut opening = AnimFile {
+        once: true,
+        ..AnimFile::default()
+    };
+    opening.set_key("Transform.rotation", 0.0, &[0.0, 0.0, 0.0]);
+    opening.set_key("Transform.rotation", 1.0, &[0.0, 90.0, 0.0]);
+    opening.set_key("Lamp:PointLight.range", 0.0, &[2.0]);
+    opening
+        .tracks
+        .get_mut("Lamp:PointLight.range")
+        .unwrap()
+        .keys[0]
+        .curve = KeyCurve::Step;
+    opening.set_key("Lamp:PointLight.range", 0.5, &[8.0]);
+    opening.events.push(ClipEvent {
+        time: 0.5,
+        name: String::from("creak"),
+        ..ClipEvent::default()
+    });
+    let anim_path = dir.join("animations/door open.anim");
+    std::fs::write(&anim_path, opening.to_text(anim_id)).unwrap();
+    // The scene, saved as the editor saves it: the door, its lamp below it.
+    let mut world = World::new();
+    let door = world.spawn((
+        SceneId::new(),
+        Name::new("Door"),
+        Transform::IDENTITY,
+        Animator::new("open").with_clip("open", AssetRef::file(anim_id)),
+    ));
+    let lamp = world.spawn((
+        SceneId::new(),
+        Name::new("Lamp"),
+        Transform::from_xyz(0.0, 2.0, 0.0),
+        PointLight::new(Vec3::ONE, 2.0),
+    ));
+    world.set_parent(lamp, Some(door)).unwrap();
+    let mut paths = AssetPaths::new();
+    paths.insert(AssetRef::file(anim_id), "animations/door open.anim");
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    assert!(text.contains("animations/door open.anim"), "{text}");
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("anim file test"),
+        window: Window::Offscreen {
+            width: 128,
+            height: 128,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let report = player.load_scene("main.scene").unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let named = |player: &mut Player, name: &str| {
+        let world = player.world_mut();
+        report
+            .entities
+            .iter()
+            .copied()
+            .find(|&e| world.get::<Name>(e).is_some_and(|n| n.as_str() == name))
+            .unwrap()
+    };
+    let (door, lamp) = (named(&mut player, "Door"), named(&mut player, "Lamp"));
+    let yaw = |player: &mut Player| {
+        let q = player.world_mut().get::<Transform>(door).unwrap().rotation;
+        q.to_euler(EulerRot::YXZ).0.to_degrees()
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 64.0));
+    let mut creaks = 0;
+    let mut run = |player: &mut Player, ticks: u64| {
+        let start = player.ticks_run();
+        while player.ticks_run() - start < ticks {
+            player.frame(&mut game).unwrap();
+            let events = player
+                .world_mut()
+                .resource_mut::<AnimationEvents>()
+                .unwrap();
+            creaks += events
+                .fired()
+                .iter()
+                .filter(|e| e.entity == door && &*e.name == "creak")
+                .count();
+        }
+        creaks
+    };
+    run(&mut player, 32);
+    assert!(
+        (yaw(&mut player) - 45.0).abs() < 0.5,
+        "halfway: {}",
+        yaw(&mut player)
+    );
+    assert_eq!(
+        player.world_mut().get::<PointLight>(lamp).unwrap().range,
+        8.0
+    );
+    let creaks = run(&mut player, 64);
+    assert!(
+        (yaw(&mut player) - 90.0).abs() < 0.01,
+        "held open: {}",
+        yaw(&mut player)
+    );
+    assert_eq!(creaks, 1, "its event fired once");
+    // Written anew (as the editor saves it): read again, the door follows.
+    opening.set_key("Transform.rotation", 1.0, &[0.0, 120.0, 0.0]);
+    std::fs::write(&anim_path, opening.to_text(anim_id)).unwrap();
+    player.asset_changed(anim_id, "animations/door open.anim");
+    player.frame(&mut game).unwrap();
+    assert!(
+        (yaw(&mut player) - 120.0).abs() < 0.01,
+        "{}",
+        yaw(&mut player)
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

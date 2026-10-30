@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use engine_scene::ClipImport;
+use engine_scene::{ClipEvent, ClipImport};
 
 /// One event as the player fires it: its moment, and texts shared by every firing so a
 /// firing allocates nothing.
@@ -41,18 +41,7 @@ impl ModelEvents {
             .iter()
             .filter(|c| !c.is_plain())
             .map(|c| {
-                let mut events: Vec<EventDef> = c
-                    .events
-                    .iter()
-                    .filter(|e| e.time.is_finite())
-                    .map(|e| EventDef {
-                        time: e.time.max(0.0),
-                        name: Arc::from(e.name.as_str()),
-                        data: Arc::from(e.data.as_str()),
-                        sound: (!e.sound.is_empty()).then(|| Arc::from(e.sound.as_str())),
-                    })
-                    .collect();
-                events.sort_by(|a, b| a.time.total_cmp(&b.time));
+                let events = event_defs(&c.events);
                 let play = ClipPlay {
                     once: c.once,
                     axes: crate::skins::Axes {
@@ -95,6 +84,23 @@ impl ModelEvents {
         self.find(name, k)
             .map_or(ClipPlay::default(), |&(_, _, play)| play)
     }
+}
+
+/// `events` (a file's) as the player fires them, sorted by time; moments that are not
+/// numbers left out, those before the clip's start at its start.
+pub(crate) fn event_defs(events: &[ClipEvent]) -> Vec<EventDef> {
+    let mut defs: Vec<EventDef> = events
+        .iter()
+        .filter(|e| e.time.is_finite())
+        .map(|e| EventDef {
+            time: e.time.max(0.0),
+            name: Arc::from(e.name.as_str()),
+            data: Arc::from(e.data.as_str()),
+            sound: (!e.sound.is_empty()).then(|| Arc::from(e.sound.as_str())),
+        })
+        .collect();
+    defs.sort_by(|a, b| a.time.total_cmp(&b.time));
+    defs
 }
 
 /// `Clip 2`'s 2.

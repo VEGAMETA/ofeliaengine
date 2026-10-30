@@ -5,11 +5,13 @@
 //! [`JointAttachment`] under a character follows one of its joints (E12-1c). The clips'
 //! events a tick played past are its [`AnimationEvents`] (E12-3b).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use engine_core::math::Vec3;
 use engine_ecs::{Entity, QueryState, World, reflect_component};
 use engine_reflect::Reflect;
+use engine_scene::AssetRef;
 
 /// What an [`Animator`] does with its clips' root motion (ADR 0124's E12-2c): its root
 /// joint's crossing of the ground and its turn about the character's up.
@@ -38,9 +40,15 @@ pub enum RootMotion {
 /// ```
 #[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct Animator {
-    /// The clip, by its name in the model's file; empty, or a name it has not: its first.
+    /// The clip, by its name in the model's file or among `clips`; empty, or a name neither
+    /// has: the model's first.
     #[reflect(hint = "clip")]
     pub clip: String,
+    /// Clips made in the editor (`.anim` files, ADR 0124's E12-4a) it plays by these names,
+    /// besides its model's (a name here wins): a door's `open`, a lamp's `flicker`. Any
+    /// entity can play them; they move the fields they key.
+    #[reflect(hidden)]
+    pub clips: BTreeMap<String, AssetRef>,
     /// How fast it plays: 1 at its own pace, 0.5 half as fast, negative backwards.
     pub speed: f32,
     /// Held where it is.
@@ -104,6 +112,7 @@ impl Default for Animator {
     fn default() -> Self {
         Self {
             clip: String::new(),
+            clips: BTreeMap::new(),
             speed: 1.0,
             paused: false,
             time: 0.0,
@@ -133,6 +142,17 @@ impl Animator {
             clip: clip.to_owned(),
             ..Self::default()
         }
+    }
+
+    /// With clip file `file` (an `.anim`) among its clips as `name` (ADR 0124's E12-4a).
+    pub fn with_clip(mut self, name: &str, file: AssetRef) -> Self {
+        self.clips.insert(name.to_owned(), file);
+        self
+    }
+
+    /// Whether its clip is one of its `clips` (made in the editor), not its model's.
+    pub fn plays_own_clip(&self) -> bool {
+        self.clips.contains_key(&self.clip)
     }
 
     /// Plays clip `clip` from its start, fading from what plays now over `fade` seconds (at
