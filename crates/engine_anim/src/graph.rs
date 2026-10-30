@@ -2033,6 +2033,12 @@ impl GraphState {
         bytes
     }
 
+    /// Whether the last tick began an inertialization that waits for
+    /// [`AnimGraph::capture`]: a caller can leave its clips and work out until one does.
+    pub fn wants_capture(&self) -> bool {
+        self.marked && self.inertia.as_deref().is_some_and(|i| i.pending)
+    }
+
     /// Parameter `slot`'s value (0 for none).
     pub fn get(&self, slot: u16) -> f32 {
         self.params.get(usize::from(slot)).copied().unwrap_or(0.0)

@@ -355,6 +355,7 @@ pub(crate) fn desc_of(file: &AnimGraphFile) -> GraphDesc {
                 exit: t.exit,
                 offset: t.offset,
                 keep_phase: t.keep_phase,
+                inertialize: t.inertialize,
             })
             .collect(),
     }
@@ -475,6 +476,7 @@ mod tests {
                 to: "gone".into(),
                 when: "jump".into(),
                 keep_phase: true,
+                inertialize: true,
                 ..TransitionFile::default()
             },
         );
@@ -526,7 +528,7 @@ mod tests {
         let (t1, t2) = (&desc.transitions[0], &desc.transitions[1]);
         assert_eq!((t1.from, t1.to, &*t1.when), (Some(0), 1, "speed > 0.1"));
         assert_eq!((t2.from, t2.to), (None, usize::MAX));
-        assert!(t2.keep_phase);
+        assert!(t2.keep_phase && t2.inertialize && !t1.inertialize);
         // The file's parameters for scripts: by slot, triggers marked.
         let graph = GraphFile::new(&file(), String::from("test"));
         assert_eq!(
