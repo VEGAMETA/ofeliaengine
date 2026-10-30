@@ -3296,16 +3296,18 @@ impl Assets {
     /// One tick of the characters playing animation graphs (ADR 0124's E12-5c), after the
     /// scripts' tick and before the game's: the parameters each one's animator set go in,
     /// its transitions are taken and its clips move on by the tick times its animator's
-    /// speed (held while paused, or at a speed below 0), its parameters come back (a trigger a
-    /// transition took used up, those not set at the graph's values) and its first layer's
-    /// state is named in `Animator::state`. A pose the editor holds moves nothing; ticks the
-    /// network plays again move nothing (a graph's state is not part of what it rolls back).
+    /// speed (held while paused, or at a speed below 0), the pose an inertialized transition
+    /// starts from is taken (E12-5b-2), its parameters come back (a trigger a transition took
+    /// used up, those not set at the graph's values) and its first layer's state is named in
+    /// `Animator::state`. A pose the editor holds moves nothing; ticks the network plays
+    /// again move nothing (a graph's state is not part of what it rolls back).
     pub(crate) fn tick_graphs(&mut self, world: &mut World, dt: f32) {
         if self.owned.is_empty() || engine_net::Resimulating::now(world) {
             return;
         }
         engine_profiler::zone!("app::Assets::tick_graphs");
-        let (graphs, paths, root) = (&mut self.graphs, &self.paths, &self.root);
+        let (graphs, paths, root, posing) =
+            (&mut self.graphs, &self.paths, &self.root, &mut self.posing);
         for (&e, owned) in &mut self.owned {
             if owned.held {
                 continue;
@@ -3329,6 +3331,9 @@ impl Assets {
                 dt * animator.speed
             };
             graph.tick(&mut play.state, step);
+            if play.state.wants_capture() {
+                posing.capture_graph(&owned.rig, graph, &mut play.state);
+            }
             let count = graph.params().count().min(MAX_GRAPH_PARAMS);
             for (k, value) in animator.params.iter_mut().enumerate().take(count) {
                 *value = play.state.get(k as u16);

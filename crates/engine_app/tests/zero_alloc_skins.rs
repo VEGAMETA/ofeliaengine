@@ -12,7 +12,9 @@
 //! keys its joints (E12-4e: its arms and neck turned over its rest pose, a joint it lacks
 //! left out), fading into its model's clip and back now and then; and a character playing an
 //! animation graph (E12-5c: two states cross-faded by a number set now and then, a trigger
-//! taken from any state, a layer masked to an arm and an additive one). Khronos' CesiumMan
+//! taken from any state, a layer masked to an arm and an additive one; E12-5b-2: the
+//! trigger's transition inertialized, and a fade it cuts short going on as one, their poses
+//! captured after the ticks). Khronos' CesiumMan
 //! (`tools/fetch-test-assets.ps1`); skipped without it.
 //! One test per file, so nothing else allocates concurrently.
 
@@ -426,6 +428,8 @@ fn dance_graph() -> AnimGraphFile {
             },
         );
     }
+    // The jump inertialized (E12-5b-2), and a fade it cuts short goes on as one: the
+    // player captures their poses.
     for (id, from, to, when) in [
         ("t1", "walk", "run", "speed > 0.5"),
         ("t2", "run", "walk", "speed <= 0.5"),
@@ -437,6 +441,7 @@ fn dance_graph() -> AnimGraphFile {
                 from: from.into(),
                 to: to.into(),
                 when: when.into(),
+                inertialize: id == "t3",
                 ..TransitionFile::default()
             },
         );

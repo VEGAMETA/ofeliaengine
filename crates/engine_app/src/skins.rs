@@ -674,11 +674,7 @@ impl Posing {
     ) -> bool {
         let rest = rig.skeleton.rest();
         let n = rest.len();
-        if self.graph_joints < n {
-            self.graph_work = None;
-        }
-        let work = self.graph_work.get_or_insert_with(|| GraphWork::new(n));
-        self.graph_joints = self.graph_joints.max(n);
+        let work = graph_work(&mut self.graph_work, &mut self.graph_joints, n);
         let sampled = self.pose.get_or_insert_with(|| Pose::identity(n));
         let clips = &rig.clips;
         graph.pose(
@@ -689,6 +685,21 @@ impl Posing {
             work,
             sampled,
         )
+    }
+
+    /// The pose a transition the last tick took starts its inertialization from, taken for
+    /// `rig`'s character state `state` of `graph` (ADR 0124's E12-5b-2): after each tick that
+    /// asks for it ([`GraphState::wants_capture`]), before the next.
+    pub(crate) fn capture_graph(&mut self, rig: &Rig, graph: &AnimGraph, state: &mut GraphState) {
+        let rest = rig.skeleton.rest();
+        let work = graph_work(&mut self.graph_work, &mut self.graph_joints, rest.len());
+        let clips = &rig.clips;
+        graph.capture(
+            state,
+            |k| clips.get(usize::from(k)).map(|c| &c.clip),
+            rest,
+            work,
+        );
     }
 
     /// `rig`'s skinning matrices as `look` shows it ([`Self::local`]), its rest pose's
@@ -782,6 +793,20 @@ impl Posing {
         local_to_model(&rig.skeleton, local, &rig.root, &mut self.model[..n]);
         &self.model[..n]
     }
+}
+
+/// Where graphs' poses are worked out (`work`, with room for `joints`), made with room for
+/// `n` joints at least: a graph of a smaller rig works in it too.
+fn graph_work<'w>(
+    work: &'w mut Option<GraphWork>,
+    joints: &mut usize,
+    n: usize,
+) -> &'w mut GraphWork {
+    if *joints < n {
+        *work = None;
+    }
+    *joints = (*joints).max(n);
+    work.get_or_insert_with(|| GraphWork::new(n))
 }
 
 #[cfg(test)]

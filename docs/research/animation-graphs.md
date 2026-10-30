@@ -30,8 +30,9 @@ note: numbers are ADR 0068's measurements, or marked as estimates.
 | [ozz-animation](https://github.com/guillaumeblanc/ozz-animation) `track_triggering_job`, `motion_blending_job`, `track`; samples `blend`, `partial_blend`, `user_channel`, `motion_blend` | 0.17.0, commit `744eb9d9` (2026-08-01), read 2026-10-29 | MIT | speeds synchronized by a weighted loop length; edge triggering over any time range; root motion blending; float user channels |
 | Unreal Engine 5.8 docs: [Sync Groups](https://dev.epicgames.com/documentation/en-us/unreal-engine/animation-sync-groups-in-unreal-engine), [Transition Rules](https://dev.epicgames.com/documentation/en-us/unreal-engine/transition-rules-in-unreal-engine), [Blend Spaces](https://dev.epicgames.com/documentation/en-us/unreal-engine/blend-spaces-in-unreal-engine) | checked 2026-10-29 | proprietary (source **not read**) | leaders, followers, markers; follower notifies suppressed; priority order; inertialization as a blend logic; automatic rule (exit time); input smoothing, weight speed, notify trigger mode |
 | Unity 6.4 manual: [Transitions](https://docs.unity3d.com/Manual/class-Transition.html), [Blend Trees](https://docs.unity3d.com/Manual/class-BlendTree.html), [2D Blending](https://docs.unity3d.com/Manual/BlendTree-2DBlending.html); blog "[Wait, I've changed my mind](https://unity.com/blog/engine-platform/state-machine-transition-interruptions)" | checked 2026-10-29 | proprietary | exit time, interruption sources, frozen pose on interruption, normalized time in blend trees, freeform 2D modes |
-| D. Bollo, "[Inertialization: High-Performance Animation Transitions in Gears of War](https://gdcvault.com/play/1025165/Inertialization-High-Performance-Animation-Transitions)", GDC 2018 (and his SIGGRAPH 2017 talk) | talk | — | evaluate only the destination; decay the source's offset and velocity with a quintic |
-| D. Holden, "[Dead Blending](https://theorangeduck.com/page/dead-blending)" (2023-02-25), "[Spring-It-On](https://theorangeduck.com/page/spring-roll-call)" (2021) | articles, read 2026-10-29 | code license not stated: ideas only | extrapolate the source, then cross-fade; inertialization with critically damped springs |
+| D. Bollo, "[Inertialization: High-Performance Animation Transitions in Gears of War](https://gdcvault.com/play/1025165/Inertialization-High-Performance-Animation-Transitions)", GDC 2018 (and his SIGGRAPH 2017 talk) | talk | — | evaluate only the destination; decay the source's offset and velocity with a quintic; shorten the blend where the offset would overshoot |
+| D. Holden, "[Dead Blending](https://theorangeduck.com/page/dead-blending)" (2023-02-25), "[Dead Blending Node in Unreal Engine](https://www.theorangeduck.com/page/dead-blending-node-unreal-engine)" (2023-08-13), "[Spring-It-On](https://theorangeduck.com/page/spring-roll-call)" (2021) | articles, read 2026-10-29 and 2026-10-30 | code license not stated: **no code read**, ideas only | extrapolate the source, then cross-fade; per-axis decay half-lives found by a heuristic; inertialization with critically damped springs |
+| Unreal Engine 5.3 docs: [`AnimNode_DeadBlending`](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/AnimNode_DeadBlending) | checked 2026-10-30 | proprietary (source **not read**) | extrapolation with an exponential decay chosen from how the source moves against the destination; a drop-in for the inertialization node |
 | R. S. Johansen, *Automated Semi-Procedural Animation for Character Locomotion*, MSc thesis, Aarhus University, 2009, §6.3 | thesis | — | gradient band interpolation (Unity's freeform 2D modes) |
 
 ## How they work
@@ -305,10 +306,100 @@ transitions["t2b8"].blend = 0.2
   per frame (gradient bands cost O(n²) in the samples); RBF can overshoot.
 - **Motion matching:** its own decision (patents, ADR 0068's note).
 
-## Patents (checked 2026-10-29: web searches of Google Patents, Justia)
+## Inertialization: Bollo's offset decay or dead blending (E12-5b-2, 2026-10-30)
 
-- Inertialization (Bollo), dead blending, normalized-time and marker sync, gradient bands: none
-  found; a proper search before inertialization ships.
+Two ways to blend with only the destination sampled, both starting from the pose shown and
+its velocity at the transition:
+
+- **Bollo's inertialization** (GDC 2018): at the transition, each joint's offset of the
+  source from the destination and its velocity; each frame, the destination with the offset
+  added, the offset decayed by a quintic that starts at the offset and its velocity and
+  ends at nothing with no velocity or acceleration after the blend time. Where the joint
+  already moves toward the destination fast enough to pass it, the blend is shortened so
+  it never overshoots. Unreal's inertialization node; the destination's motion shows at
+  full strength from the first frame.
+- **Holden's dead blending** (2023): the source extrapolated from its pose and velocity
+  (the velocity decaying, Unreal's node picking a half-life per axis by a heuristic
+  comparing source and destination), cross-faded into the destination. A cross-fade
+  between two plausible poses, so fewer odd poses on long blends; but it "damps out some
+  of the details of the destination clip", long extrapolations "quickly produce crazy
+  poses" without joint limits (the 2023-02 article), and Holden calls his Unreal node
+  experimental, finding it "better looking" than inertialization in general and sometimes
+  damping the motion more (2023-08). Its motivation, avoiding an evaluation of both sides
+  at the transition, does not apply here: our clips are sampled statelessly.
+
+Measured against what we need:
+
+| | Bollo's | dead blending |
+|---|---|---|
+| Responsiveness | the destination's motion at full strength at once | faded in over the blend, like a cross-fade |
+| Per frame | the destination, plus a few multiply-adds per joint | the destination, an extrapolation (an exponential and an exponential map per joint) and a blend |
+| At the transition | source at two moments, destination at two (velocity continuity) | source at two moments (the destination too for the half-life heuristic) |
+| Ends exactly at the destination | yes (the quintic reaches 0 at its time) | yes (the cross-fade reaches 1) |
+| Tuning | none: blend time only | a half-life (or Unreal's heuristic) per axis; joint limits for long blends |
+| Long blends between very different poses | odd poses (Unreal: under about 0.4 s) | better; a cross-fade is kept for those anyway (ADR 0124's 3c) |
+
+**Taken: Bollo's**, as ADR 0124 decided ("only the destination plays, the old pose's
+offset decays"): it keeps the destination's motion responsive (CLAUDE.md §7), needs no
+tuning, costs a few multiply-adds per joint (no transcendental function per frame), and
+the case where dead blending wins, long blends between very different poses, keeps its
+cross-fade. Dead blending stays the alternative to try if artists see odd poses.
+
+How it is built (derived here from the talk's conditions; Unreal's source and Holden's
+code were not read):
+
+- **The quintic in closed form.** With `u = t/T`, the offset `x0`, its velocity `v0` and an
+  initial acceleration `a0`: `x(t) = x0·P(u) + v0·T·Q(u) + a0·T²·R(u)` with
+  `P = (1-u)³(1+3u+6u²)`, `Q = u(1-u)³(1+3u)`, `R = u²(1-u)³/2`. With Bollo's
+  `a0 = (-8·v0·T - 20·x0)/T²` it is `(1-u)⁴·(x0·(1+4u) + v0·T·u)`, which passes the
+  destination when `v0·T < -5·x0`; there Bollo shortens `T` to `5·x0/|v0|` (giving
+  `x0·(1-u)⁵`). Here `a0` is also kept at 0 or more: `a0 = 0` starts gently (no sudden
+  acceleration) and never passes the destination while `v0·T ≥ -2.5·x0`, exactly where
+  Bollo's `a0` turns positive, so the decay is continuous in the offset and the velocity
+  and never overshoots along the offset.
+- **Vectors whole.** Bollo projects the velocity on the offset's direction; here the full
+  velocity is kept (the start's velocity matches in every direction), the projection only
+  choosing the time and the brake. Rotations are `Δ = source · destination⁻¹` with its rate,
+  decayed along the chord from `Δ` to no turn and normalized: no sine or cosine per frame,
+  exact at both ends.
+- **Velocities.** The source's over the last quarter of the tick before the transition (as
+  the frames showed it; a decay then playing bends within a tick, and a quarter measured
+  0.2 % off where a whole tick was 7 % off), minus the destination's over its first tick:
+  the pose's speed carries on across the transition (Bollo's frames-based version leaves
+  out the destination's).
+- **When it is taken.** `AnimGraph::capture` after each tick, not at the first frame: at 30
+  frames a second two ticks pass between frames, so a capture at the frame would have to
+  keep each tick's source for later, or pop. After the tick the pose stays a function of
+  the ticks' state and the frame's moment, the same at any frame rate, and the frame
+  (`pose`) keeps taking the state read-only.
+- **Interruptions.** A transition taken while its machine still blends (cross-fade or
+  inertialization), or into the pose it leaves (a clip cannot fade into itself), becomes an
+  inertialization from the pose shown then: the running decay is carried into the new
+  source, and the fading state stops being sampled. Per layer one set of decays: nothing
+  piles up.
+- **Room.** Only graphs that may inertialize (an inertialized transition, a fade into a
+  state that can be left, a pose entered again) get it: per joint of each such layer the
+  three offsets with their velocities, times and brakes (112 bytes), and the source's
+  phases and weights at the tick before.
+
+## Patents (checked 2026-10-29 and, for inertialization, 2026-10-30)
+
+- **Inertialization, dead blending, offset-decay transitions (2026-10-30):** Google Patents
+  full-text queries ("inertialization" with "animation": 8 results; "inertialize",
+  "inertial blending"; "dead blending": 1 result; animation transition with offset, decay
+  and pose; animation with extrapolate and crossfade: 22 results) and Justia (site
+  searches) found no patent claiming either method. The nearest: Microsoft's US9478057B2
+  "Chaining animations" (active, to 2029) claims chaining *captured* motion from image data
+  with a pre-canned animation at a gesture-difficulty transition point; EA's US10388053
+  "System for seamless animation transition" picks the destination's starting frame by
+  matching pose features (a motion-matching step we do not take); Soul Machines'
+  WO2024127258A1 claims turning behaviour commands into channel parameters, naming
+  inertialization only as a use of a pose buffer; US20240203017A1 (sign language) cites
+  inertialization as existing work. Bollo's method has been public since his talks (2017,
+  2018), and adding a smooth displacement to a motion since motion warping and displacement
+  mapping (Witkin and Popović; Bruderlin and Williams; both SIGGRAPH 1995). Not legal
+  advice: no patent found, nothing licensed.
+- Normalized-time and marker sync, gradient bands (2026-10-29): none found.
 - RBF interpolation of example motions (Microsoft, US7091975B1): expired 2022-01-12; not planned.
 - Motion matching variants: patented (ADR 0068's research note); not part of this work.
 

@@ -1,6 +1,7 @@
-//! CLAUDE.md §5 and ADR 0124's E12-5b: an animation graph's ticks and frames allocate nothing
-//! in steady state, with transitions, triggers, cross-fades, a 2D blend, a masked layer and
-//! an additive one at work. One test per file, so nothing else allocates concurrently.
+//! CLAUDE.md §5 and ADR 0124's E12-5b: an animation graph's ticks, captures and frames
+//! allocate nothing in steady state, with transitions, triggers, cross-fades,
+//! inertializations, blends cut short, a 2D blend, a masked layer and an additive one at
+//! work. One test per file, so nothing else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -179,6 +180,8 @@ fn graph_ticks_and_frames_do_not_allocate() {
             },
         ],
         transitions: vec![
+            // Cross-faded in, inertialized out: the wishes below flip within a few ticks, so
+            // both are cut short too.
             TransitionDesc {
                 from: Some(0),
                 to: 1,
@@ -191,6 +194,7 @@ fn graph_ticks_and_frames_do_not_allocate() {
                 to: 0,
                 when: "x + y <= 0.1".into(),
                 blend: 0.2,
+                inertialize: true,
                 ..TransitionDesc::default()
             },
             TransitionDesc {
@@ -198,6 +202,7 @@ fn graph_ticks_and_frames_do_not_allocate() {
                 to: 2,
                 when: "jump".into(),
                 blend: 0.1,
+                inertialize: true,
                 ..TransitionDesc::default()
             },
             TransitionDesc {
@@ -230,7 +235,7 @@ fn graph_ticks_and_frames_do_not_allocate() {
         .collect();
     let mut work = GraphWork::new(skeleton.joint_count());
     let mut run = |frames: usize, states: &mut [GraphState], poses: &mut [Pose]| {
-        let mut visited = 0usize;
+        let (mut visited, mut captured) = (0usize, 0usize);
         for frame in 0..frames {
             for (i, s) in states.iter_mut().enumerate() {
                 // Wishes changing, a jump now and then.
@@ -241,6 +246,9 @@ fn graph_ticks_and_frames_do_not_allocate() {
                     s.fire(jump);
                 }
                 graph.tick(s, 1.0 / 64.0);
+                if graph.capture(s, |k| clips.get(usize::from(k)), skeleton.rest(), &mut work) {
+                    captured += 1;
+                }
                 if graph.state_name(s, 0) == Some("Jump") {
                     visited += 1;
                 }
@@ -256,15 +264,20 @@ fn graph_ticks_and_frames_do_not_allocate() {
                 );
             }
         }
-        visited
+        (visited, captured)
     };
     run(400, &mut states, &mut poses);
     let before = ALLOCATIONS.load(Ordering::Relaxed);
-    let jumped = run(800, &mut states, &mut poses);
+    let (jumped, captured) = run(800, &mut states, &mut poses);
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
     println!(
-        "{allocations} allocations in 800 ticks and frames of 32 characters; {jumped} jumping"
+        "{allocations} allocations in 800 ticks and frames of 32 characters; {jumped} jumping, \
+         {captured} inertializations captured"
     );
     assert!(jumped > 0, "the trigger took them to the jump");
+    assert!(
+        captured > 0,
+        "inertializations and blends cut short captured"
+    );
     assert_eq!(allocations, 0, "allocations in steady state");
 }

@@ -20,13 +20,17 @@
 //! - **A frame** samples the clips each layer weighs (their phases and weights between the
 //!   last two ticks), blends them with one [`Blender::blend`], and stacks the layers.
 //!   Nothing is allocated, looked up by name or dispatched dynamically on the way.
-//! - A transition taken while its machine still fades drops the state fading out (an
-//!   inertialized hand-over comes later).
+//! - **A transition blends** by a cross-fade (both states play) or by inertialization
+//!   (Bollo's: only the destination plays, and the source's offset from it, with its
+//!   velocity, decays to nothing over the blend). A transition taken while its machine
+//!   still blends, or into the pose it leaves, goes on as an inertialization from the pose
+//!   shown then: no frozen pose, no stack of sources. [`AnimGraph::capture`], after each
+//!   tick, takes the pose such a transition starts from.
 
 use crate::condition::{Condition, ParamSlot};
 use crate::pose::same_hemisphere;
 use crate::{Blender, CompressedClip, Layer, LayerMode, Pose, Skeleton};
-use engine_core::math::{Quat, Vec3A, Vec4};
+use engine_core::math::{Quat, Vec3, Vec3A, Vec4};
 
 /// The most parameters a graph has.
 pub const MAX_PARAMS: usize = 16;
@@ -39,6 +43,11 @@ const DEPTH: u32 = 8;
 const NONE: u16 = u16::MAX;
 /// Weights below it play nothing.
 const EPSILON: f32 = 1e-4;
+/// An offset (or how far its velocity takes it over the blend) below it decays nothing.
+const TINY: f32 = 1e-6;
+/// The part of the tick before a transition its source's velocity is taken over: the
+/// frames move a tick's clips evenly, but a decay playing then bends within the tick.
+const SOURCE_STEP: f32 = 0.25;
 
 /// What a parameter holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -153,7 +162,7 @@ pub struct TransitionDesc {
     pub to: usize,
     /// Its condition's text (empty: always).
     pub when: String,
-    /// Seconds its cross-fade takes (0: at once).
+    /// Seconds its blend takes (0: at once).
     pub blend: f32,
     /// Tried in this order among its source's: the smallest first.
     pub priority: i32,
@@ -163,6 +172,10 @@ pub struct TransitionDesc {
     pub offset: f32,
     /// The destination starts at the fraction the source played, in place of `offset`.
     pub keep_phase: bool,
+    /// Blends by inertialization in place of a cross-fade: only the destination plays, the
+    /// source's offset from it decaying over `blend` (half the sampling; best under about
+    /// 0.4 s, a cross-fade for longer blends between very different poses).
+    pub inertialize: bool,
 }
 
 /// A clip a graph names, as the character playing it has it.
@@ -248,6 +261,7 @@ struct TransitionDef {
     exit: f32,
     offset: f32,
     keep_phase: bool,
+    inertialize: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -277,6 +291,13 @@ pub struct AnimGraph {
     /// Each leaf's first frame where an additive layer plays it ([`AnimGraph::prepare`]):
     /// what its difference is taken from, sampled once instead of every frame.
     references: Box<[Option<Pose>]>,
+    /// Whether each layer plays each machine, layer by layer.
+    layer_machines: Box<[bool]>,
+    /// Whether each machine may inertialize: an inertialized transition, a fade something
+    /// can cut short, a pose entered again.
+    machine_inertial: Box<[bool]>,
+    /// Whether each layer may inertialize (it plays such a machine).
+    layer_inertial: Box<[bool]>,
     joints: usize,
 }
 
@@ -284,10 +305,12 @@ pub struct AnimGraph {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct MachineState {
     state: u16,
-    /// The state fading out (`NONE`: none), and how far into its fade.
+    /// The state fading out (`NONE`: none), and how far into its blend.
     from: u16,
     faded: f32,
     fade: f32,
+    /// In an inertialization (its source is not played: its layers decay its offset).
+    inertial: bool,
 }
 
 /// One character's state of a graph: its parameters, its machines' states, its clips' phases
@@ -307,16 +330,89 @@ pub struct GraphState {
     leaf_weight_before: Box<[f32]>,
     /// Ticks since it was made: the first one has no tick before to blend from.
     ticked: bool,
+    /// The ticks' seconds so far, and the last tick's: where a frame between the last two
+    /// ticks is.
+    clock: f64,
+    dt: f32,
+    /// Each clip's and blend's phase and each layer's leaves' weights at the tick before
+    /// `phase_before` and `leaf_weight_before`: where a source's velocity comes from (empty
+    /// for a graph that never inertializes).
+    phase_earlier: Box<[f32]>,
+    leaf_weight_earlier: Box<[f32]>,
+    /// The next tick has marks of this one's transitions to clear in `inertia`.
+    marked: bool,
+    /// The clock until which some layer's offsets decay.
+    decaying_until: f64,
+    /// Its inertializations (only for a graph that may inertialize): a tick touches them
+    /// only when it takes a transition, and the tick after.
+    inertia: Option<Box<Inertia>>,
 }
 
-/// What [`AnimGraph::pose`] works in: poses for a layer's clips, sized for a rig. Made once
-/// per rig size; posing allocates nothing.
+/// A character's inertializations: the source the tick's transitions leave, and each
+/// layer's joints' offsets decaying.
+#[derive(Debug, Clone, PartialEq)]
+struct Inertia {
+    /// The source the tick's transitions leave: phases, then weights, as the tick before
+    /// began (the first half) and ended (the second).
+    source_phase: Box<[f32]>,
+    source_weight: Box<[f32]>,
+    /// The tick before's seconds.
+    source_dt: f32,
+    /// This tick has kept the source.
+    taken: bool,
+    /// Some layer waits for [`AnimGraph::capture`].
+    pending: bool,
+    /// Per layer.
+    layers: Box<[LayerInertia]>,
+}
+
+/// A layer's inertialization.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct LayerInertia {
+    /// The clock when it began, and the seconds it takes.
+    began: f64,
+    time: f32,
+    /// Its joints' offsets decay over what the layer plays (until `time` after `began`).
+    live: bool,
+    /// Begun by the last tick: waits for [`AnimGraph::capture`].
+    pending: bool,
+    /// The decay that played when it began goes into its source, `carried` seconds in.
+    carry: bool,
+    carried: f32,
+    /// A transition cut to its destination at once this tick, and at the tick before: the
+    /// tick after a cut tells nothing of the source's velocity.
+    cut: bool,
+    cut_before: bool,
+    /// Per joint (none: the layer never inertializes).
+    joints: Box<[JointDecay]>,
+}
+
+/// A joint's offsets from its destination decaying ([`decay_weights`]): the rotation's,
+/// translation's and scale's at the transition and their velocities, then each one's
+/// seconds (0: none) and brake.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct JointDecay {
+    rotation: Vec4,
+    spin: Vec4,
+    translation: Vec3,
+    shift: Vec3,
+    scale: Vec3,
+    stretch: Vec3,
+    time: [f32; 3],
+    brake: [f32; 3],
+}
+
+/// What [`AnimGraph::pose`] and [`AnimGraph::capture`] work in: poses for a layer's clips,
+/// sized for a rig. Made once per rig size; posing allocates nothing.
 #[derive(Debug, Clone)]
 pub struct GraphWork {
     poses: Vec<Pose>,
     layer: Pose,
     reference: Pose,
     delta: Pose,
+    /// A capture's source a step before the transition and at it, then its destination at
+    /// the transition and a tick after.
+    held: [Pose; 4],
     blender: Blender,
 }
 
@@ -328,6 +424,7 @@ impl GraphWork {
             layer: Pose::identity(joints),
             reference: Pose::identity(joints),
             delta: Pose::identity(joints),
+            held: std::array::from_fn(|_| Pose::identity(joints)),
             blender: Blender::new(joints),
         }
     }
@@ -583,6 +680,7 @@ impl AnimGraph {
                     exit: desc_t.exit.max(0.0),
                     offset: desc_t.offset,
                     keep_phase: desc_t.keep_phase,
+                    inertialize: desc_t.inertialize,
                 },
             ));
         }
@@ -645,7 +743,7 @@ impl AnimGraph {
                 mask,
             });
         }
-        let graph = Self {
+        let mut graph = Self {
             params: params.into_boxed_slice(),
             layers: layers.into_boxed_slice(),
             nodes: nodes.into_boxed_slice(),
@@ -656,9 +754,78 @@ impl AnimGraph {
             triangles: triangles.into_boxed_slice(),
             timed_once: timed_once.into_boxed_slice(),
             references: Box::default(),
+            layer_machines: Box::default(),
+            machine_inertial: Box::default(),
+            layer_inertial: Box::default(),
             joints,
         };
+        graph.plan_inertia();
         (graph, problems)
+    }
+
+    /// Which machines may inertialize (an inertialized transition; a fade into a state that
+    /// can be left, so something may cut it short; a pose entered again, which cannot fade
+    /// into itself), and which layers play them: only those get room for it.
+    fn plan_inertia(&mut self) {
+        let machines = self.machines.len();
+        let leaves_state = |state: u16| {
+            self.states.get(usize::from(state)).is_some_and(|st| {
+                st.transitions.0 < st.transitions.1
+                    || self
+                        .machines
+                        .get(usize::from(st.machine))
+                        .is_some_and(|m| m.any.0 < m.any.1)
+            })
+        };
+        let needs = |def: &TransitionDef, from_pose: Option<u16>| {
+            let to_pose = self.states.get(usize::from(def.to)).map(|st| st.pose);
+            def.blend > 0.0
+                && (def.inertialize
+                    || leaves_state(def.to)
+                    || (from_pose.is_some() && from_pose == to_pose))
+        };
+        let mut inertial = vec![false; machines];
+        for st in self.states.iter() {
+            let own =
+                &self.transitions[usize::from(st.transitions.0)..usize::from(st.transitions.1)];
+            if own.iter().any(|def| needs(def, Some(st.pose)))
+                && let Some(flag) = inertial.get_mut(usize::from(st.machine))
+            {
+                *flag = true;
+            }
+        }
+        for (m, def) in self.machines.iter().enumerate() {
+            let any = &self.transitions[usize::from(def.any.0)..usize::from(def.any.1)];
+            if any.iter().any(|def| needs(def, None)) {
+                inertial[m] = true;
+            }
+        }
+        let mut reach = vec![false; self.layers.len() * machines];
+        for (l, layer) in self.layers.iter().enumerate() {
+            self.mark_machines(layer.root, &mut reach[l * machines..(l + 1) * machines], 0);
+        }
+        self.layer_inertial = (0..self.layers.len())
+            .map(|l| (0..machines).any(|m| reach[l * machines + m] && inertial[m]))
+            .collect();
+        self.layer_machines = reach.into_boxed_slice();
+        self.machine_inertial = inertial.into_boxed_slice();
+    }
+
+    /// Every machine node `node` plays (itself, and those its states show), marked in `out`.
+    fn mark_machines(&self, node: u16, out: &mut [bool], depth: u32) {
+        if depth > DEPTH {
+            return;
+        }
+        let Some(NodeDef::Machine { machine }) = self.nodes.get(usize::from(node)) else {
+            return;
+        };
+        match out.get_mut(usize::from(*machine)) {
+            Some(seen) if !*seen => *seen = true,
+            _ => return,
+        }
+        for st in self.states.iter().filter(|st| st.machine == *machine) {
+            self.mark_machines(st.pose, out, depth + 1);
+        }
     }
 
     /// The slot of parameter `name`.
@@ -696,13 +863,35 @@ impl AnimGraph {
     }
 
     /// One tick of `dt` seconds of character state `s`: its machines' transitions taken, its
-    /// clips weighed and their phases moved on. Allocates nothing.
+    /// clips weighed and their phases moved on. Allocates nothing. Where a transition
+    /// inertializes, [`Self::capture`] takes the pose it starts from before the next tick.
     pub fn tick(&self, s: &mut GraphState, dt: f32) {
+        if !s.phase_earlier.is_empty() {
+            // The tick before's start kept, for a source's velocity.
+            std::mem::swap(&mut s.phase_earlier, &mut s.phase_before);
+            std::mem::swap(&mut s.leaf_weight_earlier, &mut s.leaf_weight_before);
+        }
+        if s.marked
+            && let Some(i) = s.inertia.as_deref_mut()
+        {
+            // The last tick's marks cleared (a transition never captured plays without its
+            // offsets); a cut's kept a tick more.
+            i.taken = false;
+            i.pending = false;
+            let mut cut = false;
+            for layer in i.layers.iter_mut() {
+                layer.pending = false;
+                layer.cut_before = layer.cut;
+                layer.cut = false;
+                cut |= layer.cut_before;
+            }
+            s.marked = cut;
+        }
         s.phase_before.copy_from_slice(&s.phase);
         s.leaf_weight_before.copy_from_slice(&s.leaf_weight);
         let dt = dt.max(0.0);
-        // Each machine's transitions (taken at the tick's start), then its fade on by the
-        // tick: a fade begun now is `dt` in at its end.
+        // Each machine's transitions (taken at the tick's start), then its blend on by the
+        // tick: a blend begun now is `dt` in at its end.
         for m in 0..self.machines.len() {
             for _ in 0..CHAIN {
                 let Some(t) = self.choose(m, s) else {
@@ -711,10 +900,11 @@ impl AnimGraph {
                 self.take(m, t, s);
             }
             let ms = &mut s.machines[m];
-            if ms.from != NONE {
+            if ms.from != NONE || ms.inertial {
                 ms.faded += dt;
                 if ms.faded >= ms.fade {
                     ms.from = NONE;
+                    ms.inertial = false;
                 }
             }
         }
@@ -733,6 +923,19 @@ impl AnimGraph {
                 &mut s.node_weight,
                 0,
             );
+        }
+        // A layer inertializing from this tick shows its destination alone from the tick's
+        // start (its offset makes up the difference).
+        if s.marked
+            && let Some(i) = s.inertia.as_deref()
+            && i.pending
+        {
+            for (l, layer) in i.layers.iter().enumerate() {
+                if layer.pending {
+                    let range = l * leaves..(l + 1) * leaves;
+                    s.leaf_weight_before[range.clone()].copy_from_slice(&s.leaf_weight[range]);
+                }
+            }
         }
         // The weighed clips and blends move on: a blend's at the pace of its clips' lengths
         // weighed together, so its clips keep in step.
@@ -786,6 +989,8 @@ impl AnimGraph {
             }
             s.phase[t] = phase;
         }
+        s.clock += f64::from(dt);
+        s.dt = dt;
         if !s.ticked {
             // The first tick: nothing before it to blend from.
             s.phase_before.copy_from_slice(&s.phase);
@@ -840,7 +1045,9 @@ impl AnimGraph {
     }
 
     /// Transition `t` taken by machine `m`: its triggers used up, its destination entered at
-    /// its offset or the source's fraction, the source fading out over its blend.
+    /// its offset or the source's fraction, the source fading out over its blend, or its
+    /// layers inertializing from what they show (an inertialized transition, one taken while
+    /// the machine still blends, one into the pose it leaves).
     fn take(&self, m: usize, t: u16, s: &mut GraphState) {
         let def = &self.transitions[usize::from(t)];
         for &slot in def.condition.triggers() {
@@ -854,21 +1061,86 @@ impl AnimGraph {
             .get(usize::from(source))
             .and_then(|st| self.timed_of(st.pose))
             .map_or(0.0, |timed| s.phase[usize::from(timed)]);
-        let ms = &mut s.machines[m];
-        if def.blend > 0.0 {
-            ms.from = source;
-            ms.faded = 0.0;
-            ms.fade = def.blend;
-        } else {
-            ms.from = NONE;
+        // The source as the tick before left it, kept once a tick before anything is
+        // entered: a later transition of the tick may blend from it.
+        if s.ticked
+            && let Some(i) = s.inertia.as_deref_mut()
+            && !i.taken
+        {
+            let timed = s.phase.len();
+            i.source_phase[..timed].copy_from_slice(&s.phase_earlier);
+            i.source_phase[timed..].copy_from_slice(&s.phase_before);
+            let n = s.leaf_weight.len();
+            i.source_weight[..n].copy_from_slice(&s.leaf_weight_earlier);
+            i.source_weight[n..].copy_from_slice(&s.leaf_weight_before);
+            i.source_dt = s.dt;
+            i.taken = true;
+            s.marked = true;
         }
+        let ms = s.machines[m];
+        let pose_of = |state: u16| self.states.get(usize::from(state)).map(|st| st.pose);
+        let wants = def.blend > 0.0
+            && (def.inertialize
+                || ms.from != NONE
+                || ms.inertial
+                || pose_of(source) == pose_of(def.to));
+        let inertial = wants
+            && s.ticked
+            && s.inertia.is_some()
+            && self.machine_inertial.get(m).copied().unwrap_or(false);
+        let ms = &mut s.machines[m];
+        ms.faded = 0.0;
+        ms.fade = def.blend;
+        ms.inertial = inertial;
+        // A cross-fade; else the source is not played (inertialized, taken at once, or at
+        // the first tick, where nothing was shown to blend from).
+        ms.from = if def.blend > 0.0 && !inertial && (s.ticked || !wants) {
+            source
+        } else {
+            NONE
+        };
         ms.state = def.to;
+        self.begin(m, def.blend, inertial, s);
         let start = if def.keep_phase {
             source_phase - source_phase.floor()
         } else {
             def.offset
         };
         self.enter(def.to, start, s, 0);
+    }
+
+    /// Machine `m`'s layers after a transition: inertializing over `time` seconds from what
+    /// they show (a decay playing carried in), waiting for [`Self::capture`]; or, for a
+    /// transition taken at once, marked cut.
+    fn begin(&self, m: usize, time: f32, inertial: bool, s: &mut GraphState) {
+        let Some(i) = s.inertia.as_deref_mut() else {
+            return;
+        };
+        if !inertial && time > 0.0 {
+            return;
+        }
+        // Transitions are taken at the tick's start.
+        let now = s.clock;
+        let machines = self.machines.len();
+        for (l, layer) in i.layers.iter_mut().enumerate() {
+            if layer.joints.is_empty() || !self.layer_machines[l * machines + m] {
+                continue;
+            }
+            s.marked = true;
+            if !inertial {
+                layer.cut = true;
+                continue;
+            }
+            if !layer.pending {
+                layer.carried = (now - layer.began) as f32;
+                layer.carry = layer.live && layer.carried < layer.time;
+                layer.live = false;
+                layer.pending = true;
+                layer.began = now;
+            }
+            layer.time = time;
+            i.pending = true;
+        }
     }
 
     /// State `state` entered: its pose from `start` (a fraction), a machine it shows at its
@@ -891,6 +1163,7 @@ impl AnimGraph {
                 from: NONE,
                 faded: 0.0,
                 fade: 0.0,
+                inertial: false,
             };
             self.enter(entry, 0.0, s, depth + 1);
         }
@@ -1022,9 +1295,10 @@ impl AnimGraph {
 
     /// Character state `s`'s pose a frame `alpha` of the way from its last tick to its next,
     /// into `out` (local transforms): each layer's clips sampled (by `clip`, the character's
-    /// clip of an index) at their phases and weights between the two ticks, blended, and the
-    /// layers stacked over the rest pose `rest`. Allocates nothing; false when nothing plays
-    /// (`out` is then the rest pose).
+    /// clip of an index) at their phases and weights between the two ticks, blended, an
+    /// inertialization's offsets decayed over them, and the layers stacked over the rest
+    /// pose `rest`. Allocates nothing; false when nothing plays (`out` is then the rest
+    /// pose).
     pub fn pose<'c>(
         &self,
         s: &GraphState,
@@ -1037,6 +1311,9 @@ impl AnimGraph {
         out.copy_from(rest);
         let alpha = alpha.clamp(0.0, 1.0);
         let leaves = self.leaves.len();
+        // The frame's moment on the ticks' clock.
+        let now = s.clock - f64::from(s.dt * (1.0 - alpha));
+        let decaying = now < s.decaying_until;
         let mut posed = false;
         for (l, layer) in self.layers.iter().enumerate() {
             let weight = if layer.weight_param == NONE {
@@ -1051,58 +1328,188 @@ impl AnimGraph {
             if weight <= EPSILON {
                 continue;
             }
-            // The layer's clips this frame, the heaviest when more than room.
-            let mut chosen = [(0u16, 0.0f32); MAX_LEAVES];
-            let mut count = 0usize;
-            for k in 0..leaves {
-                let w0 = s.leaf_weight_before[l * leaves + k];
-                let w1 = s.leaf_weight[l * leaves + k];
-                let w = w0 + (w1 - w0) * alpha;
-                if w <= EPSILON {
-                    continue;
-                }
-                if count < MAX_LEAVES {
-                    chosen[count] = (k as u16, w);
-                    count += 1;
-                } else if let Some(lightest) = chosen
-                    .iter_mut()
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .filter(|c| c.1 < w)
-                {
-                    *lightest = (k as u16, w);
-                }
-            }
-            if count == 0 {
+            let range = l * leaves..(l + 1) * leaves;
+            let weights = (&s.leaf_weight_before[range.clone()], &s.leaf_weight[range]);
+            let phases = (&s.phase_before[..], &s.phase[..]);
+            if !self.layer_pose(l, weights, phases, alpha, &clip, rest, work) {
                 continue;
             }
-            let sampled = self.sample_leaves(s, &chosen[..count], alpha, false, &clip, rest, work);
-            if sampled == 0 {
-                continue;
+            if decaying
+                && let Some(inertia) = s.inertia.as_deref()
+                && let Some(decay) = inertia.layers.get(l)
+                && decay.live
+            {
+                decay_pose(&decay.joints, (now - decay.began) as f32, &mut work.layer);
             }
-            blend_sampled(&chosen[..count], rest, work, false);
             if layer.additive {
-                // The difference from the clips' first frames (prepared once, else sampled),
-                // added.
-                if self.references.len() == self.leaves.len() {
-                    self.blend_references(&chosen[..count], rest, work);
-                } else {
-                    self.sample_leaves(s, &chosen[..count], alpha, true, &clip, rest, work);
-                    blend_sampled(&chosen[..count], rest, work, true);
-                }
-                let GraphWork {
-                    layer: now,
-                    reference,
-                    delta,
-                    ..
-                } = work;
-                now.delta_from(reference, delta);
-                add_into(out, delta, weight, layer.mask.as_deref());
+                add_into(out, &work.layer, weight, layer.mask.as_deref());
             } else {
                 lerp_into(out, &work.layer, weight, layer.mask.as_deref());
             }
             posed = true;
         }
         posed
+    }
+
+    /// The pose each layer the last tick began inertializing blends from, taken: the layer
+    /// as it was shown at the transition and just before (a decay then playing included),
+    /// against its destination at the transition and a tick after, each joint's offset and
+    /// velocity starting its decay. Call it after each tick, before the next one and before
+    /// [`Self::pose`], with the same clips: it samples nothing unless the tick took such a
+    /// transition (a transition never captured plays without its offset). Allocates
+    /// nothing; whether it took any.
+    pub fn capture<'c>(
+        &self,
+        s: &mut GraphState,
+        clip: impl Fn(u16) -> Option<&'c CompressedClip>,
+        rest: &Pose,
+        work: &mut GraphWork,
+    ) -> bool {
+        let GraphState {
+            phase,
+            phase_before,
+            leaf_weight,
+            leaf_weight_before,
+            dt,
+            decaying_until,
+            inertia,
+            ..
+        } = s;
+        let Some(i) = inertia.as_deref_mut() else {
+            return false;
+        };
+        if !i.pending {
+            return false;
+        }
+        i.pending = false;
+        let leaves = self.leaves.len();
+        let all = leaf_weight.len();
+        let (earlier, before) = i.source_phase.split_at(phase.len());
+        let mut captured = false;
+        for l in 0..i.layers.len() {
+            if !i.layers[l].pending {
+                continue;
+            }
+            i.layers[l].pending = false;
+            let range = l * leaves..(l + 1) * leaves;
+            let at = |start: usize| &i.source_weight[start + l * leaves..start + (l + 1) * leaves];
+            let weights = (at(0), at(all));
+            let decay = &i.layers[l];
+            // The source at the transition and a step before, as the frames showed it.
+            let mut shown = true;
+            for (k, alpha) in [1.0 - SOURCE_STEP, 1.0].into_iter().enumerate() {
+                shown &= self.layer_pose(l, weights, (earlier, before), alpha, &clip, rest, work);
+                if decay.carry {
+                    let back = (1.0 - alpha) * i.source_dt;
+                    decay_pose(&decay.joints, decay.carried - back, &mut work.layer);
+                }
+                std::mem::swap(&mut work.layer, &mut work.held[k]);
+            }
+            // The destination at the transition and a tick after.
+            let destination = [
+                (&leaf_weight_before[range.clone()], &phase_before[..]),
+                (&leaf_weight[range], &phase[..]),
+            ];
+            for (k, (weights, phases)) in destination.into_iter().enumerate() {
+                shown &= self.layer_pose(
+                    l,
+                    (weights, weights),
+                    (phases, phases),
+                    0.0,
+                    &clip,
+                    rest,
+                    work,
+                );
+                std::mem::swap(&mut work.layer, &mut work.held[2 + k]);
+            }
+            let layer = &mut i.layers[l];
+            if !shown {
+                // Nothing played on one side: a cut.
+                layer.live = false;
+                continue;
+            }
+            // After a cut the tick before tells nothing of the source's velocity.
+            let source_step = if layer.cut_before {
+                0.0
+            } else {
+                SOURCE_STEP * i.source_dt
+            };
+            let [s0, s1, d0, d1] = &work.held;
+            start_decays(
+                &mut layer.joints,
+                [s0, s1, d0, d1],
+                (source_step, *dt),
+                layer.time,
+                self.layers[l].mask.as_deref(),
+            );
+            layer.live = true;
+            *decaying_until = decaying_until.max(layer.began + f64::from(layer.time));
+            captured = true;
+        }
+        captured
+    }
+
+    /// Layer `l`'s pose into `work.layer`: its clips (the heaviest [`MAX_LEAVES`]) at
+    /// `weights` (its leaves', at the last two ticks) and `phases` (every clip's and
+    /// blend's, at the last two ticks) `alpha` of the way between, blended; for an additive
+    /// layer their difference from their first frames. False when nothing plays.
+    #[allow(clippy::too_many_arguments)]
+    fn layer_pose<'c>(
+        &self,
+        l: usize,
+        weights: (&[f32], &[f32]),
+        phases: (&[f32], &[f32]),
+        alpha: f32,
+        clip: &impl Fn(u16) -> Option<&'c CompressedClip>,
+        rest: &Pose,
+        work: &mut GraphWork,
+    ) -> bool {
+        let Some(layer) = self.layers.get(l) else {
+            return false;
+        };
+        // The layer's clips, the heaviest when more than room.
+        let mut chosen = [(0u16, 0.0f32); MAX_LEAVES];
+        let mut count = 0usize;
+        for (k, (&w0, &w1)) in weights.0.iter().zip(weights.1).enumerate() {
+            let w = w0 + (w1 - w0) * alpha;
+            if w <= EPSILON {
+                continue;
+            }
+            if count < MAX_LEAVES {
+                chosen[count] = (k as u16, w);
+                count += 1;
+            } else if let Some(lightest) = chosen
+                .iter_mut()
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .filter(|c| c.1 < w)
+            {
+                *lightest = (k as u16, w);
+            }
+        }
+        if count == 0 {
+            return false;
+        }
+        let chosen = &chosen[..count];
+        self.sample_leaves(chosen, phases, alpha, false, clip, rest, work);
+        blend_sampled(chosen, rest, work, false);
+        if layer.additive {
+            // The difference from the clips' first frames (prepared once, else sampled).
+            if self.references.len() == self.leaves.len() {
+                self.blend_references(chosen, rest, work);
+            } else {
+                self.sample_leaves(chosen, phases, alpha, true, clip, rest, work);
+                blend_sampled(chosen, rest, work, true);
+            }
+            let GraphWork {
+                layer: now,
+                reference,
+                delta,
+                ..
+            } = work;
+            now.delta_from(reference, delta);
+            std::mem::swap(now, delta);
+        }
+        true
     }
 
     /// The first frames of the clips additive layers play, sampled once for the rig (`clip`
@@ -1177,19 +1584,19 @@ impl AnimGraph {
     }
 
     /// The clips `chosen` (leaf, weight) sampled into `work.poses` in order: at their phases
-    /// between the ticks, or at their first frames (`first`). A clip `clip` lacks samples as
-    /// the rest pose. How many there are.
+    /// `alpha` of the way between `phases` (every clip's and blend's at the last two ticks),
+    /// or at their first frames (`first`). A clip `clip` lacks samples as the rest pose.
     #[allow(clippy::too_many_arguments)]
     fn sample_leaves<'c>(
         &self,
-        s: &GraphState,
         chosen: &[(u16, f32)],
+        phases: (&[f32], &[f32]),
         alpha: f32,
         first: bool,
         clip: &impl Fn(u16) -> Option<&'c CompressedClip>,
         rest: &Pose,
         work: &mut GraphWork,
-    ) -> usize {
+    ) {
         for (slot, &(leaf, _)) in chosen.iter().enumerate() {
             let def = self.leaves[usize::from(leaf)];
             let pose = &mut work.poses[slot];
@@ -1199,7 +1606,7 @@ impl AnimGraph {
                         0.0
                     } else {
                         let t = usize::from(def.timed);
-                        let (p0, p1) = (s.phase_before[t], s.phase[t]);
+                        let (p0, p1) = (phases.0[t], phases.1[t]);
                         let p = p0 + (p1 - p0) * alpha;
                         let p = if def.once {
                             p.clamp(0.0, 1.0)
@@ -1213,7 +1620,163 @@ impl AnimGraph {
                 None => pose.copy_from(rest),
             }
         }
-        chosen.len()
+    }
+}
+
+/// Bollo's decay at `u` (0 to 1) of its `time`: the weights of an offset and of its velocity.
+/// The quintic `x(t)` that starts at the offset `x0` with its velocity `v0` and initial
+/// acceleration `a0`, and ends at nothing with no velocity or acceleration, written as
+/// `x0·P(u) + v0·time·Q(u) + a0·time²·R(u)`; `brake` is `a0·time²/x0`.
+/// - `P(u) = (1-u)³(1 + 3u + 6u²)`, `Q(u) = u(1-u)³(1 + 3u)`, `R(u) = u²(1-u)³/2`.
+#[inline]
+fn decay_weights(u: f32, time: f32, brake: f32) -> (f32, f32) {
+    let w = 1.0 - u;
+    let w3 = w * w * w;
+    let offset = w3 * (1.0 + 3.0 * u + 6.0 * u * u + 0.5 * brake * u * u);
+    let velocity = time * u * w3 * (1.0 + 3.0 * u);
+    (offset, velocity)
+}
+
+/// How long an offset of length `size`, its velocity `along` it and `speed` in all, takes
+/// to decay within `time`, and its brake (Bollo's rules): where it moves toward the
+/// destination fast enough to pass it, braking from the start (`a0 > 0`), its time cut to
+/// `5·size/|along|` if even that passes it; else a gentle start (`a0 = 0`). It never
+/// overshoots along itself. `(0, 0)`: nothing to decay.
+fn decay_shape(size: f32, along: f32, speed: f32, time: f32) -> (f32, f32) {
+    if time <= 0.0 || (size <= TINY && speed * time <= TINY) {
+        return (0.0, 0.0);
+    }
+    if size <= TINY {
+        // Moving only: no direction to brake along.
+        return (time, 0.0);
+    }
+    let time = if along < 0.0 {
+        time.min(-5.0 * size / along)
+    } else {
+        time
+    };
+    let k = along * time / size;
+    (time, (-8.0 * k - 20.0).max(0.0))
+}
+
+/// The Hamilton product of two quaternions held as 4 numbers (not only unit ones).
+#[inline]
+fn quat_mul(a: Vec4, b: Vec4) -> Vec4 {
+    Vec4::new(
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    )
+}
+
+/// Each joint's decays begun from the source's poses a step before the transition and at
+/// it (`poses[0]`, `[1]`) and the destination's at it and a tick after (`[2]`, `[3]`),
+/// those steps `dt` seconds (source, destination; 0: no velocity) long: the offset of the
+/// source from the destination, and the difference of their velocities (rotations as
+/// `Δ = source · destination⁻¹` and its rate), each decaying over `time`. Joints `mask`
+/// leaves out decay nothing.
+fn start_decays(
+    joints: &mut [JointDecay],
+    poses: [&Pose; 4],
+    dt: (f32, f32),
+    time: f32,
+    mask: Option<&[f32]>,
+) {
+    let [s0, s1, d0, d1] = poses;
+    let n = joints
+        .len()
+        .min(s0.len())
+        .min(s1.len())
+        .min(d0.len())
+        .min(d1.len());
+    let rate = |dt: f32| if dt > 0.0 { 1.0 / dt } else { 0.0 };
+    let (source_rate, destination_rate) = (rate(dt.0), rate(dt.1));
+    let linear = |a0: Vec3A, a1: Vec3A, b0: Vec3A, b1: Vec3A| {
+        let offset = Vec3::from(a1 - b0);
+        let velocity = Vec3::from((a1 - a0) * source_rate - (b1 - b0) * destination_rate);
+        let size = offset.length();
+        let along = if size > TINY {
+            velocity.dot(offset) / size
+        } else {
+            0.0
+        };
+        let (t, brake) = decay_shape(size, along, velocity.length(), time);
+        (offset, velocity, t, brake)
+    };
+    for (j, decay) in joints.iter_mut().enumerate().take(n) {
+        *decay = JointDecay::default();
+        if mask.and_then(|m| m.get(j)).copied().unwrap_or(1.0) <= EPSILON {
+            continue;
+        }
+        // Rotation: the offset `Δ` and its rate `Δ'`, as 4 numbers (`Δ'` along the sphere).
+        let q1 = Vec4::from(s1.rotations[j]);
+        let q0 = Vec4::from(same_hemisphere(s0.rotations[j], s1.rotations[j]));
+        let p0 = Vec4::from(d0.rotations[j]);
+        let p1 = Vec4::from(same_hemisphere(d1.rotations[j], d0.rotations[j]));
+        let inverse = Vec4::new(-p0.x, -p0.y, -p0.z, p0.w);
+        let mut offset = quat_mul(q1, inverse);
+        // (s·d⁻¹)' = s'·d⁻¹ − s·d⁻¹·d'·d⁻¹
+        let mut spin = quat_mul((q1 - q0) * source_rate, inverse)
+            - quat_mul(quat_mul(offset, (p1 - p0) * destination_rate), inverse);
+        if offset.w < 0.0 {
+            offset = -offset;
+            spin = -spin;
+        }
+        spin -= offset * offset.dot(spin);
+        let chord = offset - Vec4::W;
+        let size = chord.length();
+        let along = if size > TINY {
+            spin.dot(chord) / size
+        } else {
+            0.0
+        };
+        let (t, brake) = decay_shape(size, along, spin.length(), time);
+        decay.rotation = offset;
+        decay.spin = spin;
+        decay.time[0] = t;
+        decay.brake[0] = brake;
+        let (offset, velocity, t, brake) = linear(
+            s0.translations[j],
+            s1.translations[j],
+            d0.translations[j],
+            d1.translations[j],
+        );
+        decay.translation = offset;
+        decay.shift = velocity;
+        decay.time[1] = t;
+        decay.brake[1] = brake;
+        let (offset, velocity, t, brake) =
+            linear(s0.scales[j], s1.scales[j], d0.scales[j], d1.scales[j]);
+        decay.scale = offset;
+        decay.stretch = velocity;
+        decay.time[2] = t;
+        decay.brake[2] = brake;
+    }
+}
+
+/// Joints' decays `at` seconds in applied over `pose` (the destination): the offsets and
+/// velocities weighed by [`decay_weights`] added, a rotation's as `Δ(t) · rotation` with
+/// `Δ(t)` from `Δ` toward no turn along the sphere's chord, normalized.
+fn decay_pose(joints: &[JointDecay], at: f32, pose: &mut Pose) {
+    let at = at.max(0.0);
+    let n = joints.len().min(pose.len());
+    for (j, decay) in joints.iter().enumerate().take(n) {
+        let [rotation, translation, scale] = decay.time;
+        if at < rotation {
+            let (p, q) = decay_weights(at / rotation, rotation, decay.brake[0]);
+            let turn = Vec4::W * (1.0 - p) + decay.rotation * p + decay.spin * q;
+            let turn = Quat::from_vec4(turn.normalize_or(Vec4::W));
+            pose.rotations[j] = (turn * pose.rotations[j]).normalize();
+        }
+        if at < translation {
+            let (p, q) = decay_weights(at / translation, translation, decay.brake[1]);
+            pose.translations[j] += Vec3A::from(decay.translation * p + decay.shift * q);
+        }
+        if at < scale {
+            let (p, q) = decay_weights(at / scale, scale, decay.brake[2]);
+            pose.scales[j] += Vec3A::from(decay.scale * p + decay.stretch * q);
+        }
     }
 }
 
@@ -1395,6 +1958,30 @@ impl GraphState {
         }
         let timed = graph.timed_once.len();
         let leaves = graph.leaves.len() * graph.layers.len();
+        // Room to inertialize only where the graph may: per joint of the layers that may.
+        let inertial = graph.layer_inertial.iter().any(|&b| b);
+        let earlier = |n: usize| vec![0.0; if inertial { n } else { 0 }].into_boxed_slice();
+        let inertia = inertial.then(|| {
+            Box::new(Inertia {
+                source_phase: vec![0.0; 2 * timed].into_boxed_slice(),
+                source_weight: vec![0.0; 2 * leaves].into_boxed_slice(),
+                source_dt: 0.0,
+                taken: false,
+                pending: false,
+                layers: graph
+                    .layer_inertial
+                    .iter()
+                    .map(|&inertial| LayerInertia {
+                        joints: if inertial {
+                            vec![JointDecay::default(); graph.joints].into_boxed_slice()
+                        } else {
+                            Box::default()
+                        },
+                        ..LayerInertia::default()
+                    })
+                    .collect(),
+            })
+        });
         Self {
             params,
             machines: graph
@@ -1405,6 +1992,7 @@ impl GraphState {
                     from: NONE,
                     faded: 0.0,
                     fade: 0.0,
+                    inertial: false,
                 })
                 .collect(),
             phase: vec![0.0; timed].into_boxed_slice(),
@@ -1413,7 +2001,42 @@ impl GraphState {
             leaf_weight: vec![0.0; leaves].into_boxed_slice(),
             leaf_weight_before: vec![0.0; leaves].into_boxed_slice(),
             ticked: false,
+            clock: 0.0,
+            dt: 0.0,
+            phase_earlier: earlier(timed),
+            leaf_weight_earlier: earlier(leaves),
+            marked: false,
+            decaying_until: 0.0,
+            inertia,
         }
+    }
+
+    /// Bytes in memory: what a character playing its graph costs, an inertializing graph's
+    /// decays (every joint of each layer that may inertialize) included.
+    pub fn size_bytes(&self) -> usize {
+        let floats = self.phase.len() * 3
+            + self.leaf_weight.len() * 2
+            + self.phase_earlier.len()
+            + self.leaf_weight_earlier.len();
+        let mut bytes = size_of::<Self>()
+            + floats * size_of::<f32>()
+            + self.machines.len() * size_of::<MachineState>();
+        if let Some(i) = &self.inertia {
+            bytes += size_of::<Inertia>()
+                + (i.source_phase.len() + i.source_weight.len()) * size_of::<f32>()
+                + i.layers.len() * size_of::<LayerInertia>()
+                + i.layers
+                    .iter()
+                    .map(|l| l.joints.len() * size_of::<JointDecay>())
+                    .sum::<usize>();
+        }
+        bytes
+    }
+
+    /// Whether the last tick began an inertialization that waits for
+    /// [`AnimGraph::capture`]: a caller can leave its clips and work out until one does.
+    pub fn wants_capture(&self) -> bool {
+        self.marked && self.inertia.as_deref().is_some_and(|i| i.pending)
     }
 
     /// Parameter `slot`'s value (0 for none).
@@ -1839,6 +2462,337 @@ mod tests {
         let mut s = GraphState::new(&g);
         g.tick(&mut s, 0.3);
         assert!(posed(&g, &s, &clips, &skeleton).abs() < 1e-3);
+    }
+
+    const DT: f32 = 1.0 / 64.0;
+
+    /// The arm's turn `alpha` of the way from the last tick to the next, and how many times
+    /// clip `watched` was sampled for it.
+    fn arm_at(
+        g: &AnimGraph,
+        s: &GraphState,
+        clips: &[CompressedClip],
+        skeleton: &Skeleton,
+        alpha: f32,
+        watched: u16,
+    ) -> (f32, usize) {
+        let mut work = GraphWork::new(skeleton.joint_count());
+        let mut out = Pose::identity(skeleton.joint_count());
+        let seen = std::cell::Cell::new(0usize);
+        g.pose(
+            s,
+            alpha,
+            |k| {
+                if k == watched {
+                    seen.set(seen.get() + 1);
+                }
+                clips.get(usize::from(k))
+            },
+            skeleton.rest(),
+            &mut work,
+            &mut out,
+        );
+        (arm(&out), seen.get())
+    }
+
+    /// A tick, then its capture.
+    fn step(
+        g: &AnimGraph,
+        s: &mut GraphState,
+        clips: &[CompressedClip],
+        skeleton: &Skeleton,
+    ) -> bool {
+        let mut work = GraphWork::new(skeleton.joint_count());
+        g.tick(s, DT);
+        g.capture(s, |k| clips.get(usize::from(k)), skeleton.rest(), &mut work)
+    }
+
+    /// The arm's speed just before the last tick's start (its last quarter of a tick before)
+    /// and just after it (its first quarter), from the frames around it: `before` posed
+    /// before that tick ran.
+    fn speeds(before: (f32, f32), after: (f32, f32)) -> (f32, f32) {
+        (
+            (before.1 - before.0) / (0.25 * DT),
+            (after.1 - after.0) / (0.25 * DT),
+        )
+    }
+
+    /// Spinning (the turn clip) until `go`, then running (a still pose) after an
+    /// inertialized blend of a quarter second; back to spinning when `go` is cleared.
+    fn spin_then_run(inertialize: bool) -> GraphDesc {
+        GraphDesc {
+            params: vec![ParamDesc {
+                name: "go".into(),
+                kind: GraphParamKind::Bool,
+                value: 0.0,
+            }],
+            layers: vec![LayerDesc {
+                name: "Base".into(),
+                root: 0,
+                weight: 1.0,
+                ..LayerDesc::default()
+            }],
+            nodes: vec![
+                NodeDesc::Machine { entry: 0 },
+                NodeDesc::Clip {
+                    clip: "Turn".into(),
+                    speed: 1.0,
+                },
+                NodeDesc::Clip {
+                    clip: "Run".into(),
+                    speed: 1.0,
+                },
+            ],
+            states: vec![
+                StateDesc {
+                    name: "Spin".into(),
+                    machine: 0,
+                    pose: 1,
+                },
+                StateDesc {
+                    name: "Run".into(),
+                    machine: 0,
+                    pose: 2,
+                },
+            ],
+            transitions: vec![
+                TransitionDesc {
+                    from: Some(0),
+                    to: 1,
+                    when: "go".into(),
+                    blend: 0.25,
+                    inertialize,
+                    ..TransitionDesc::default()
+                },
+                TransitionDesc {
+                    from: Some(1),
+                    to: 0,
+                    when: "not go".into(),
+                    blend: 0.25,
+                    inertialize,
+                    ..TransitionDesc::default()
+                },
+            ],
+        }
+    }
+
+    /// An inertialized transition: the pose right after it is the source's, moving at the
+    /// source's speed; only the destination is sampled while it blends; after its blend the
+    /// pose is the destination's exactly.
+    #[test]
+    fn an_inertialized_transition_starts_at_its_source_and_ends_at_its_destination() {
+        let (skeleton, clips, angles) = rig();
+        let (g, problems) = AnimGraph::cook(&spin_then_run(true), info(&angles), &skeleton);
+        assert!(problems.is_empty(), "{problems:?}");
+        let turn = g.leaves[0].clip;
+        let mut s = GraphState::new(&g);
+        for _ in 0..20 {
+            step(&g, &mut s, &clips, &skeleton);
+        }
+        let at = |s: &GraphState, alpha| arm_at(&g, s, &clips, &skeleton, alpha, turn);
+        let before = (at(&s, 0.75).0, at(&s, 1.0).0);
+        assert!(
+            (before.1 - 20.0 * DT).abs() < 1e-2,
+            "spinning: {}",
+            before.1
+        );
+        s.set(g.param("go").unwrap(), 1.0);
+        assert!(step(&g, &mut s, &clips, &skeleton), "the source captured");
+        assert_eq!(g.state_name(&s, 0), Some("Run"));
+        let after = (at(&s, 0.0).0, at(&s, 0.25).0);
+        assert!(
+            (after.0 - before.1).abs() < 1e-5,
+            "no pop: {} after {}",
+            after.0,
+            before.1
+        );
+        let (was, is) = speeds(before, after);
+        assert!(
+            (is - was).abs() < 0.05 * was.abs(),
+            "speed {is} after {was}"
+        );
+        // While it blends (16 ticks of a quarter second), the turn is never sampled; then
+        // the run alone.
+        for _ in 0..16 {
+            for alpha in [0.0, 0.5, 1.0] {
+                let (angle, sampled) = at(&s, alpha);
+                assert_eq!(sampled, 0, "only the destination is sampled");
+                assert!(angle > before.1 - 1e-4 && angle < 2.0 + 1e-4, "{angle}");
+            }
+            step(&g, &mut s, &clips, &skeleton);
+        }
+        for alpha in [0.0, 0.5, 1.0] {
+            let (angle, _) = at(&s, alpha);
+            assert!(
+                (angle - 2.0).abs() < 1e-5,
+                "ended at the destination: {angle}"
+            );
+        }
+        assert!(
+            s.clock - f64::from(s.dt) >= s.decaying_until,
+            "nothing decays"
+        );
+    }
+
+    /// A fade cut short by the transition back: it goes on from the pose shown then (no
+    /// pop, the same speed), never samples the state fading out again, and ends at the new
+    /// destination after its blend.
+    #[test]
+    fn an_interrupted_fade_goes_on_from_the_pose_it_shows() {
+        let (skeleton, clips, angles) = rig();
+        let (g, problems) = AnimGraph::cook(&locomotion(), info(&angles), &skeleton);
+        assert!(problems.is_empty(), "{problems:?}");
+        let run = angles.iter().position(|(n, _)| *n == "Run").unwrap() as u16;
+        let mut s = GraphState::new(&g);
+        step(&g, &mut s, &clips, &skeleton);
+        let speed = g.param("speed").unwrap();
+        s.set(speed, 4.0);
+        for _ in 0..8 {
+            step(&g, &mut s, &clips, &skeleton);
+        }
+        let at = |s: &GraphState, alpha| arm_at(&g, s, &clips, &skeleton, alpha, run);
+        let before = (at(&s, 0.75).0, at(&s, 1.0).0);
+        assert!(before.1 > 0.5 && before.1 < 1.5, "fading in: {}", before.1);
+        // Back to idle halfway through the fade.
+        s.set(speed, 0.0);
+        assert!(
+            step(&g, &mut s, &clips, &skeleton),
+            "the fade's pose captured"
+        );
+        assert_eq!(g.state_name(&s, 0), Some("Idle"));
+        assert_eq!(
+            s.machines[0].from, NONE,
+            "nothing fades: no stack of sources"
+        );
+        let after = (at(&s, 0.0).0, at(&s, 0.25).0);
+        assert!(
+            (after.0 - before.1).abs() < 1e-4,
+            "no pop: {} after {}",
+            after.0,
+            before.1
+        );
+        let (was, is) = speeds(before, after);
+        assert!(
+            (is - was).abs() < 0.05 * was.abs(),
+            "speed {is} after {was}"
+        );
+        for _ in 0..16 {
+            assert_eq!(at(&s, 0.5).1, 0, "the run is not sampled again");
+            step(&g, &mut s, &clips, &skeleton);
+        }
+        assert!(at(&s, 0.0).0.abs() < 1e-5, "at idle: {}", at(&s, 0.0).0);
+    }
+
+    /// An inertialization cut short by another: it goes on from the pose shown, its decay
+    /// carried in.
+    #[test]
+    fn an_inertialization_cut_short_goes_on_from_the_pose_it_shows() {
+        let (skeleton, clips, angles) = rig();
+        let (g, _) = AnimGraph::cook(&spin_then_run(true), info(&angles), &skeleton);
+        let mut s = GraphState::new(&g);
+        let go = g.param("go").unwrap();
+        for _ in 0..20 {
+            step(&g, &mut s, &clips, &skeleton);
+        }
+        s.set(go, 1.0);
+        for _ in 0..6 {
+            step(&g, &mut s, &clips, &skeleton);
+        }
+        let at = |s: &GraphState, alpha| arm_at(&g, s, &clips, &skeleton, alpha, NONE).0;
+        let before = (at(&s, 0.75), at(&s, 1.0));
+        s.set(go, 0.0);
+        assert!(step(&g, &mut s, &clips, &skeleton));
+        assert_eq!(g.state_name(&s, 0), Some("Spin"));
+        let layer = &s.inertia.as_ref().unwrap().layers[0];
+        assert!(layer.live && layer.carry, "the running decay carried in");
+        let after = (at(&s, 0.0), at(&s, 0.25));
+        assert!(
+            (after.0 - before.1).abs() < 1e-4,
+            "{} after {}",
+            after.0,
+            before.1
+        );
+        let (was, is) = speeds(before, after);
+        assert!(
+            (is - was).abs() < 0.05 * was.abs().max(1.0),
+            "speed {is} after {was}"
+        );
+        for _ in 0..17 {
+            step(&g, &mut s, &clips, &skeleton);
+        }
+        // Spinning again from the turn's start, nothing left of either offset.
+        let mut pose = Pose::identity(2);
+        clips[usize::from(g.leaves[0].clip)].sample(s.phase[0], skeleton.rest(), &mut pose);
+        assert!((at(&s, 1.0) - arm(&pose)).abs() < 1e-5);
+    }
+
+    /// A transition into the pose it leaves (a fade cannot play a clip at two times):
+    /// inertialized, the clip starting again with no pop.
+    #[test]
+    fn a_transition_into_the_pose_it_leaves_starts_it_again_smoothly() {
+        let (skeleton, clips, angles) = rig();
+        let mut desc = spin_then_run(false);
+        desc.params.push(ParamDesc {
+            name: "again".into(),
+            kind: GraphParamKind::Trigger,
+            value: 0.0,
+        });
+        desc.transitions.push(TransitionDesc {
+            from: Some(0),
+            to: 0,
+            when: "again".into(),
+            blend: 0.2,
+            ..TransitionDesc::default()
+        });
+        let (g, problems) = AnimGraph::cook(&desc, info(&angles), &skeleton);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut s = GraphState::new(&g);
+        for _ in 0..40 {
+            step(&g, &mut s, &clips, &skeleton);
+        }
+        let at = |s: &GraphState, alpha| arm_at(&g, s, &clips, &skeleton, alpha, NONE).0;
+        let before = at(&s, 1.0);
+        s.fire(g.param("again").unwrap());
+        assert!(step(&g, &mut s, &clips, &skeleton), "inertialized");
+        assert!(
+            (at(&s, 0.0) - before).abs() < 1e-5,
+            "{} after {before}",
+            at(&s, 0.0)
+        );
+        assert!(
+            s.phase[0] < 2.0 * DT,
+            "the turn started again: {}",
+            s.phase[0]
+        );
+    }
+
+    /// Room to inertialize only where a graph may: none for transitions taken at once; the
+    /// first tick takes an inertialized transition at once (nothing was shown before it);
+    /// a transition never captured plays without its offset.
+    #[test]
+    fn graphs_inertialize_only_where_they_may() {
+        let (skeleton, clips, angles) = rig();
+        let mut desc = spin_then_run(true);
+        for t in &mut desc.transitions {
+            t.blend = 0.0;
+        }
+        let (g, _) = AnimGraph::cook(&desc, info(&angles), &skeleton);
+        let plain = GraphState::new(&g);
+        assert!(plain.inertia.is_none(), "cuts only: no room");
+        let (g, _) = AnimGraph::cook(&spin_then_run(true), info(&angles), &skeleton);
+        let mut s = GraphState::new(&g);
+        assert!(s.inertia.is_some());
+        assert!(s.size_bytes() > plain.size_bytes() + 2 * size_of::<JointDecay>());
+        // The first tick: straight to the run.
+        s.set(g.param("go").unwrap(), 1.0);
+        assert!(!step(&g, &mut s, &clips, &skeleton), "nothing to capture");
+        let at = |s: &GraphState, alpha| arm_at(&g, s, &clips, &skeleton, alpha, NONE).0;
+        assert!((at(&s, 0.0) - 2.0).abs() < 1e-5);
+        // Never captured: the destination at once.
+        s.set(g.param("go").unwrap(), 0.0);
+        g.tick(&mut s, DT);
+        assert_eq!(g.state_name(&s, 0), Some("Spin"));
+        assert!(at(&s, 0.0).abs() < 1e-3, "{}", at(&s, 0.0));
     }
 
     /// Delaunay: a square's two triangles; points on a line, none.

@@ -346,6 +346,15 @@ transitions["t1"].when = "speed > 0.1"
 - **A transition** goes when its condition holds (and, with an `exit` time, once the state
   it leaves has played that much), blending over `blend` seconds (0.25), by a cross-fade or
   by inertialization. Without `from` it leaves any state of its machine.
+  - **A cross-fade** plays both states while it blends.
+  - **`inertialize = true`** plays only the state it goes to, from its first frame at full
+    strength (half the sampling, and the most responsive), while each joint's difference
+    from the pose shown, and its speed, fade to nothing over `blend`: no pop, no jolt in
+    speed, exactly the new state after `blend`. Best for short blends (under about 0.4 s);
+    keep a cross-fade for a long blend between very different poses.
+  - **Cut short:** a transition taken while its machine still blends (either way), or one
+    into the clip it leaves, goes on as an inertialization from the pose shown then, so a
+    character that changes its mind mid-blend never pops or freezes.
 - **Conditions** are expressions over the parameters:
   - `speed > 0.1 and grounded`, `not crouch or speed < 2`, `jump`, `(a + b) * 2 >= 3`;
   - comparisons `< <= > >= ==` and `~=` (or `!=`); `and`, `or`, `not` (or `&&`, `||`, `!`);
@@ -367,17 +376,24 @@ graph.prepare(|k| clips.get(usize::from(k)), skeleton.rest()); // additive layer
 let speed = graph.param("speed").unwrap();
 let mut state = GraphState::new(&graph);
 let mut work = GraphWork::new(skeleton.joint_count());
-// Each tick: parameters set, transitions taken, phases moved on.
+// Each tick: parameters set, transitions taken, phases moved on; then the pose an
+// inertialized (or cut-short) transition starts from taken, before the next tick.
 state.set(speed, 3.0);
 graph.tick(&mut state, 1.0 / 64.0);
+graph.capture(&mut state, |k| clips.get(usize::from(k)), skeleton.rest(), &mut work);
 // Each frame: the pose between the last two ticks.
 graph.pose(&state, alpha, |k| clips.get(usize::from(k)), skeleton.rest(), &mut work, &mut pose);
 ```
 
+- **`capture` after every tick** (it samples nothing unless that tick began an
+  inertialization): skip it and those transitions play without their offsets (a pop),
+  which is fine for characters nobody sees.
 - **What it costs** (ref-1, a 52-joint humanoid, idle and a nine-clip 2D blend, an
   upper-body layer and an additive lean): about 0.1 µs a character a tick and 4.5 µs a frame
-  on one thread; 10,000 characters' frames in 5.7 ms on 16 workers. Nothing is allocated
-  after `GraphState::new` and `GraphWork::new`.
+  on one thread (4.3–4.6 µs with inertialized transitions); a capture about 8 µs once per
+  inertialized transition; 10,000 characters' frames in about 6 ms on 16 workers. A
+  character's state is about 7 KB when its graph can inertialize (the decays of 52
+  joints), 0.6 KB else. Nothing is allocated after `GraphState::new` and `GraphWork::new`.
 
 ### Sockets: things that follow a joint
 
