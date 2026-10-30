@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-2b, cross-fades and `animator:play`** (#PR, ADR 0124's as-built):
+  - **E12-2b, cross-fades and `animator:play`** (#457, ADR 0124's as-built):
     `Animator::play(clip, fade)` starts a clip and fades from what played. Both clips move
     on in the ticks; each frame blends the two poses by the fade's weight between ticks;
     the fade is saved. Scripts call `self.Animator:play("Run", 0.25)`. The Fox fades from
