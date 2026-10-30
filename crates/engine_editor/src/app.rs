@@ -111,8 +111,8 @@ use engine_render::wire::{LineBatch, LineLists, WireStyle, WireView, Wireframer}
 use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
 use engine_runtime::{Camera, Disabled, PointLight, SpotLight, Sun, look_rotation};
 use engine_scene::{
-    AssetId, AssetPaths, AssetRef, KeptBlocks, LoadOptions, Name, PrefabInstance, PrefabPart,
-    RootOrder, SaveOptions, SceneId, SceneRegistry,
+    AssetId, AssetPaths, AssetRef, ClipEvent, ClipImport, KeptBlocks, LoadOptions, Name,
+    PrefabInstance, PrefabPart, RootOrder, SaveOptions, SceneId, SceneRegistry,
 };
 use engine_ui::{Theme, Ui, UiKey};
 use std::cell::RefCell;
@@ -889,6 +889,8 @@ struct CommandIds {
     frame_first: CommandId,
     frame_last: CommandId,
     animation_play: CommandId,
+    event_add: CommandId,
+    event_delete: CommandId,
     auto_play: CommandId,
     /// A material graph's nodes' previews on its canvas, or not (E10-4g).
     node_previews: CommandId,
@@ -1098,6 +1100,16 @@ fn commands() -> (Commands, CommandIds) {
         frame_first: c.register("animation.first_frame", "Animation", "First Frame"),
         frame_last: c.register("animation.last_frame", "Animation", "Last Frame"),
         animation_play: c.register("animation.play", "Animation", "Play or Stop the Clip"),
+        event_add: c.register(
+            "animation.add_event",
+            "Animation",
+            "Add an Event at the Playhead",
+        ),
+        event_delete: c.register(
+            "animation.delete_event",
+            "Animation",
+            "Delete the Picked Event",
+        ),
         auto_play: c.register("assets.auto_play", "Assets", "Auto Play Sounds"),
         node_previews: c.register("graph.node_previews", "Graph", "Node Previews"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
@@ -1210,6 +1222,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Home", ids.frame_first),
         ("End", ids.frame_last),
         ("Space", ids.animation_play),
+        ("E", ids.event_add),
+        ("Delete", ids.event_delete),
     ]
     .map(|(chord, id)| (chord, id, ANIM_KEYS));
     let global = [
@@ -2996,6 +3010,19 @@ struct Editor {
     /// The Animation tab's keys after a press in it (E12-3a), and its ruler's node (tests).
     anim_focus: bool,
     anim_ruler: u64,
+    /// The Clips' model file's clip events as the Animation tab edits them (E12-3b-2): its
+    /// `.meta` held; the picked event and the clip it is on; the event being dragged (where
+    /// the press was along the clip from the event, the pointer's x then, and whether it
+    /// moved); its name typed at once (an event just added); the events' strip's node
+    /// (tests); and the events undo put back into files the tab does not hold, for the
+    /// player.
+    clip_events: Option<crate::clip_events::EventsDoc>,
+    picked_event: Option<usize>,
+    picked_on: String,
+    event_drag: Option<(usize, f32, f32, bool)>,
+    event_autofocus: bool,
+    anim_events: u64,
+    events_due: Vec<(AssetId, Vec<ClipImport>)>,
     renaming_file: Option<AssetId>,
     /// The file the inspector shows instead of the entities, with its import settings
     /// (E4-9): the dock's last pick, until the entity selection changes.
@@ -4008,6 +4035,13 @@ impl Editor {
             clip_in_place: false,
             anim_focus: false,
             anim_ruler: 0,
+            clip_events: None,
+            picked_event: None,
+            picked_on: String::new(),
+            event_drag: None,
+            event_autofocus: false,
+            anim_events: 0,
+            events_due: Vec::new(),
             renaming_file: None,
             inspected: None,
             material_docs: Vec::new(),
@@ -4768,6 +4802,10 @@ impl Editor {
                 .any(|p| p.attrs.hint == engine_reflect::Hint::Bus)
         {
             self.open_mixer();
+        }
+        // The Animation tab's events (E12-3b-2): the Clips' model file's `.meta` held.
+        if self.bottom == Some(ANIMATION_TAB) {
+            self.follow_clip_events(world);
         }
         let properties = self.inspector.properties();
         let mut values: Vec<&str> = recycle(std::mem::take(&mut self.lists.values));
@@ -6403,25 +6441,36 @@ impl Editor {
                 .as_ref()
                 .and_then(|v| Some((v, v.clips.get(v.chosen)?)));
             match chosen {
-                Some((v, c)) => crate::shell::AnimationView {
-                    subject: &v.subject,
-                    clip: &c.name,
-                    note: "",
-                    playing: match v.of {
-                        ClipsOf::Asset(file) => self
-                            .shown_model
-                            .as_ref()
-                            .is_some_and(|m| m.file == file && m.playing),
-                        ClipsOf::Entity(_) => self.in_place.is_some(),
-                    },
-                    looping: self.clip_loop,
-                    speed: CLIP_SPEED_TEXTS[self.clip_speed],
-                    time: &v.time_text,
-                    frames: c.frames,
-                    playhead: v.playhead(),
-                    joints: &v.joints,
-                    sampled: &c.sampled,
-                },
+                Some((v, c)) => {
+                    let events = self
+                        .clip_events
+                        .as_ref()
+                        .map_or(&[][..], |d| d.events(&c.name));
+                    crate::shell::AnimationView {
+                        subject: &v.subject,
+                        clip: &c.name,
+                        note: "",
+                        playing: match v.of {
+                            ClipsOf::Asset(file) => self
+                                .shown_model
+                                .as_ref()
+                                .is_some_and(|m| m.file == file && m.playing),
+                            ClipsOf::Entity(_) => self.in_place.is_some(),
+                        },
+                        looping: self.clip_loop,
+                        speed: CLIP_SPEED_TEXTS[self.clip_speed],
+                        time: &v.time_text,
+                        frames: c.frames,
+                        width: self.ui.rect_of(self.anim_ruler).map_or(0.0, |r| r.size[0]),
+                        playhead: v.playhead(),
+                        joints: &v.joints,
+                        sampled: &c.sampled,
+                        events,
+                        length: c.duration,
+                        picked_event: self.picked_event.filter(|&k| k < events.len()),
+                        event_autofocus: self.event_autofocus,
+                    }
+                }
                 None => crate::shell::AnimationView {
                     subject: "",
                     clip: "",
@@ -6432,9 +6481,14 @@ impl Editor {
                     speed: "",
                     time: "",
                     frames: 0,
+                    width: 0.0,
                     playhead: 0.0,
                     joints: "",
                     sampled: "",
+                    events: &[],
+                    length: 0.0,
+                    picked_event: None,
+                    event_autofocus: false,
                 },
             }
         });
@@ -6788,6 +6842,28 @@ impl Editor {
         }
         if let Some(ruler) = response.anim_scrub {
             self.scrub_clip(ruler);
+        }
+        // Its events (E12-3b-2): a field's typing first (a click elsewhere ends it, on the
+        // event it was typed for), then the marks, the strip and the buttons.
+        self.anim_events = response.anim_events;
+        self.event_autofocus = false;
+        if let Some((field, true)) = response.anim_event_text {
+            let text = self.ui.edited_text().trim().to_owned();
+            self.set_event_text(world, field, text);
+        }
+        if let Some((k, used)) = response.anim_event {
+            self.anim_focus = true;
+            self.drag_event(world, k, used);
+        }
+        if response.anim_events_strip {
+            self.anim_focus = true;
+            self.picked_event = None;
+        }
+        if response.anim_event_add {
+            self.add_event(world);
+        }
+        if response.anim_event_delete {
+            self.delete_event(world);
         }
         if let Some(bar) = response.clip_scrub {
             self.scrub_clip(bar);
@@ -16643,6 +16719,10 @@ impl Editor {
             self.step_frame(FrameStep::Last);
         } else if id == ids.animation_play {
             self.toggle_clip_play();
+        } else if id == ids.event_add {
+            self.add_event(world);
+        } else if id == ids.event_delete {
+            self.delete_event(world);
         } else if id == ids.node_previews {
             self.node_previews = !self.node_previews;
             self.write_session(world);
@@ -18378,6 +18458,29 @@ impl Editor {
             {
                 log::warn!(target: "engine_editor", "{e}");
             }
+            // A model's clip events (E12-3b-2): its `.meta`, held by the Animation tab or
+            // read for the step, written back and given to the player.
+            let model_path = self
+                .asset_db
+                .get(id)
+                .filter(|e| e.kind == engine_scene::AssetKind::Model)
+                .map(|e| e.path.clone());
+            if let Some(path) = model_path {
+                match self.clip_events.as_mut().filter(|d| d.file == id) {
+                    Some(doc) => {
+                        if let Err(e) = doc.put_text(&self.root, &text) {
+                            log::warn!(target: "engine_editor", "{e}");
+                        }
+                    }
+                    None => {
+                        let mut doc = crate::clip_events::EventsDoc::open(&self.root, id, &path);
+                        match doc.put_text(&self.root, &text) {
+                            Ok(()) => self.events_due.push((id, doc.meta.model.clips)),
+                            Err(e) => log::warn!(target: "engine_editor", "{e}"),
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -19451,12 +19554,209 @@ impl Editor {
         }
     }
 
+    /// The Clips' model file's clip events (ADR 0124's E12-3b-2): its `.meta` held while the
+    /// Animation tab shows its clips (a character's file, or the one picked in the dock);
+    /// the pick let go when another clip is chosen.
+    fn follow_clip_events(&mut self, world: &World) {
+        let chosen = self.clips.as_ref().and_then(|v| {
+            let file = match v.of {
+                ClipsOf::Asset(id) => Some(id),
+                ClipsOf::Entity(e) => world.get::<Model>(e).map(|m| m.mesh.file),
+            }?;
+            Some((file, v.clips.get(v.chosen)?.name.as_str()))
+        });
+        let Some((file, clip)) = chosen else {
+            self.clip_events = None;
+            self.picked_event = None;
+            return;
+        };
+        if self.picked_on != clip {
+            self.picked_on.clear();
+            self.picked_on.push_str(clip);
+            self.picked_event = None;
+        }
+        if self.clip_events.as_ref().is_some_and(|d| d.file == file) {
+            return;
+        }
+        self.picked_event = None;
+        self.clip_events = self
+            .asset_db
+            .get(file)
+            .map(|entry| crate::clip_events::EventsDoc::open(&self.root, file, &entry.path));
+    }
+
+    /// The chosen clip's name as its model's `.meta` names it, its length in seconds and its
+    /// samples a second (ADR 0124's E12-3b-2).
+    fn events_clip(&self) -> Option<(String, f32, f32)> {
+        let v = self.clips.as_ref()?;
+        let c = v.clips.get(v.chosen)?;
+        Some((c.name.clone(), c.duration, c.rate))
+    }
+
+    /// Clip `clip`'s events changed by `edit`, written to their model's `.meta` as undo step
+    /// `name` (ADR 0124's E12-3b-2); nothing when nothing changed.
+    fn edit_events(
+        &mut self,
+        world: &mut World,
+        name: &str,
+        clip: &str,
+        edit: impl FnOnce(&mut Vec<ClipEvent>),
+    ) {
+        let Some(doc) = self.clip_events.as_mut() else {
+            return;
+        };
+        match doc.edit(&self.root, clip, edit) {
+            Ok(Some((before, after))) => {
+                let file = doc.file;
+                self.history.begin(name, None);
+                self.history.change_file(file, &before, &after);
+                self.history.commit(world);
+            }
+            Ok(None) => {}
+            Err(e) => self.say(format!("Events not saved: {e}")),
+        }
+    }
+
+    /// E in the Animation tab, or its +: an event at the playhead's frame on the chosen
+    /// clip, picked, its name typed at once (ADR 0124's E12-3b-2).
+    fn add_event(&mut self, world: &mut World) {
+        self.follow_clip_events(world);
+        let (Some((clip, length, rate)), true) = (self.events_clip(), self.clip_events.is_some())
+        else {
+            self.say(String::from(
+                "Events go on clips: select a character or pick a model file in the dock",
+            ));
+            return;
+        };
+        let playhead = self.clips.as_ref().map_or(0.0, |v| v.time);
+        let time = crate::clip_events::on_frame(playhead, rate, length);
+        let mut at = None;
+        self.edit_events(world, "Add Event", &clip, |events| {
+            let event = ClipEvent {
+                time,
+                name: String::from("event"),
+                ..ClipEvent::default()
+            };
+            at = Some(crate::clip_events::add_event(events, event));
+        });
+        if at.is_some() {
+            self.picked_event = at;
+            self.event_autofocus = true;
+            self.anim_focus = true;
+        }
+    }
+
+    /// Delete in the Animation tab, or the picked event's ✕: that event removed (ADR 0124's
+    /// E12-3b-2).
+    fn delete_event(&mut self, world: &mut World) {
+        let (Some(k), Some((clip, ..))) = (self.picked_event, self.events_clip()) else {
+            return;
+        };
+        self.edit_events(world, "Delete Event", &clip, |events| {
+            if k < events.len() {
+                events.remove(k);
+            }
+        });
+        self.picked_event = None;
+    }
+
+    /// The picked event's name (0), data (1) or sound (2) typed (ADR 0124's E12-3b-2); an
+    /// empty name keeps the one it had.
+    fn set_event_text(&mut self, world: &mut World, field: u8, text: String) {
+        let (Some(k), Some((clip, ..))) = (self.picked_event, self.events_clip()) else {
+            return;
+        };
+        if field == 0 && text.is_empty() {
+            return;
+        }
+        let name = match field {
+            0 => "Rename Event",
+            1 => "Event Data",
+            _ => "Event Sound",
+        };
+        self.edit_events(world, name, &clip, |events| {
+            if let Some(e) = events.get_mut(k) {
+                match field {
+                    0 => e.name = text,
+                    1 => e.data = text,
+                    _ => e.sound = text,
+                }
+            }
+        });
+    }
+
+    /// An event's mark pressed, dragged or let go (ADR 0124's E12-3b-2): picked; dragged
+    /// along the strip (past 3 pixels) it moves frame by frame, held in memory and given to
+    /// the player; let go, written to the `.meta` as one undo step.
+    fn drag_event(&mut self, world: &mut World, k: usize, used: crate::shell::WaveUse) {
+        let Some((clip, length, rate)) = self.events_clip() else {
+            return;
+        };
+        let (Some(r), Some([x, _])) = (self.ui.rect_of(used.node), self.ui.input().mouse) else {
+            return;
+        };
+        let along = ((x - r.pos[0]) / r.size[0].max(1.0)).clamp(0.0, 1.0) * length;
+        if used.pressed {
+            self.picked_event = Some(k);
+            let at = self
+                .clip_events
+                .as_ref()
+                .and_then(|d| d.events(&clip).get(k))
+                .map_or(along, |e| e.time);
+            self.event_drag = Some((k, along - at, x, false));
+        }
+        let Some((mut at, grab, from_x, mut moved)) = self.event_drag else {
+            return;
+        };
+        moved |= (x - from_x).abs() >= 3.0;
+        if moved
+            && (used.held || used.released)
+            && let Some(doc) = self.clip_events.as_mut()
+        {
+            let time = crate::clip_events::on_frame(along - grab, rate, length);
+            if doc.events(&clip).get(at).is_some_and(|e| e.time != time) {
+                doc.edit_live(&clip, |events| {
+                    at = crate::clip_events::move_event(events, at, time);
+                });
+                self.picked_event = Some(at);
+            }
+        }
+        self.event_drag = Some((at, grab, from_x, moved));
+        if used.released {
+            self.event_drag = None;
+            let Some(doc) = self.clip_events.as_mut() else {
+                return;
+            };
+            match doc.write(&self.root) {
+                Ok(Some((before, after))) => {
+                    let file = doc.file;
+                    self.history.begin("Move Event", None);
+                    self.history.change_file(file, &before, &after);
+                    self.history.commit(world);
+                }
+                Ok(None) => {}
+                Err(e) => self.say(format!("Events not saved: {e}")),
+            }
+        }
+    }
+
     /// The characters in place, with the player (ADR 0124's E12-1b): the active entity's Clips
     /// made when it or its rig changed (once its skin is made); those playing in place moved
     /// on by the frame's time and posed (each one's clip found once); the active one posed at
     /// the playhead while it holds it; those posed last frame and not now let go back to
     /// their rest pose. A steady frame poses nothing anew and allocates nothing.
     fn clips_frame(&mut self, player: &mut Player) {
+        // The clip events edited (E12-3b-2): given to the player, which fires them from its
+        // next tick.
+        if let Some(doc) = self.clip_events.as_mut().filter(|d| !d.given) {
+            player
+                .assets_mut()
+                .set_clip_events(doc.file, &doc.meta.model.clips);
+            doc.given = true;
+        }
+        for (file, clips) in self.events_due.drain(..) {
+            player.assets_mut().set_clip_events(file, &clips);
+        }
         let active = self
             .selection
             .last()
@@ -29583,6 +29883,119 @@ mod tests {
         // Opened the plain way, the palette's assets go to the dock again.
         ed.open_palette(&mut world, "#red");
         assert!(ed.command_palette.as_ref().unwrap().for_field.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E12-3b-2: the Animation tab's events. E adds one at the playhead's frame, picked, its
+    /// name typed at once; each edit is written to the model's `.meta` as an undo step; a
+    /// drag on its mark moves it frame by frame, one step when let go; Delete removes it;
+    /// undo and redo put the `.meta` back each time.
+    #[test]
+    fn the_animation_tab_adds_moves_names_and_deletes_clip_events() {
+        let (dir, mut world, mut ed, _) = drop_project("clip-events");
+        let crate_id = ed.asset_db.find("props/crate.gltf").unwrap().id;
+        let meta = || std::fs::read_to_string(dir.join("props/crate.gltf.meta")).unwrap();
+        let mut view = ClipsView::new(
+            ClipsOf::Asset(crate_id),
+            1,
+            vec![ClipFacts::new(
+                0,
+                "Walk",
+                1.0,
+                31,
+                30.0,
+                3000,
+                1e-4,
+                1.5,
+                (2e-4, "hips"),
+            )],
+        );
+        view.time = 0.51;
+        ed.clips = Some(view);
+        ed.bottom = Some(ANIMATION_TAB);
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let (add, delete, undo, redo) = (
+            ed.ids.event_add,
+            ed.ids.event_delete,
+            ed.ids.undo,
+            ed.ids.redo,
+        );
+        // E: an event at frame 15 (0.5 s), picked, its name typed at once.
+        ed.run(&mut world, add);
+        assert!(
+            meta().contains(
+                "model.clips.0.events.0.time = 0.5
+"
+            ),
+            "{}",
+            meta()
+        );
+        assert!(meta().contains("events.0.name = \"event\""), "{}", meta());
+        assert_eq!(ed.picked_event, Some(0));
+        ed.update(&mut world);
+        assert!(ed.ui.editing().is_some(), "its name typed at once");
+        chars(&mut ed, "step");
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, true); // Enter
+        ed.update(&mut world);
+        key(&mut ed, 0x0D, 0x1C, false);
+        ed.update(&mut world);
+        assert!(meta().contains("events.0.name = \"step\""), "{}", meta());
+        // Its mark dragged a quarter of the strip to the right: about 0.75 s, one step.
+        let strip = ed.ui.rect_of(ed.anim_events).expect("the events' strip");
+        let (x, y) = (
+            strip.pos[0] + strip.size[0] * 0.5 + 1.0,
+            strip.pos[1] + strip.size[1] * 0.5,
+        );
+        let to = x + strip.size[0] * 0.25;
+        for (at, pressed) in [
+            (x, None),
+            (x, Some(true)),
+            (x + 20.0, None),
+            (to, None),
+            (to, Some(false)),
+        ] {
+            mouse(&mut ed, [at, y], pressed);
+            ed.update(&mut world);
+        }
+        let time = |ed: &Editor| ed.clip_events.as_ref().unwrap().events("Walk")[0].time;
+        assert!((time(&ed) - 0.75).abs() < 0.04, "{}", time(&ed));
+        // The ruler laid out by its own width (E12-3a drew it 600 pixels wide): its last
+        // frame's number near its right end.
+        assert!(
+            texts(&ed, "30")
+                .iter()
+                .any(|r| r.pos[0] > strip.pos[0] + strip.size[0] * 0.9),
+            "{:?}",
+            texts(&ed, "30")
+        );
+        assert!(meta().contains("events.0.time = 0.7"), "{}", meta());
+        let names: Vec<&str> = ed.history.steps().map(|s| s.name()).collect();
+        assert_eq!(names, ["Add Event", "Rename Event", "Move Event"]);
+        // Undo twice: back at 0.5 s, then named "event"; redo twice: moved again.
+        ed.run(&mut world, undo);
+        assert!(
+            meta().contains(
+                "events.0.time = 0.5
+"
+            ),
+            "{}",
+            meta()
+        );
+        assert!((time(&ed) - 0.5).abs() < 1e-6, "held as the file says");
+        ed.run(&mut world, undo);
+        assert!(meta().contains("events.0.name = \"event\""), "{}", meta());
+        ed.run(&mut world, redo);
+        ed.run(&mut world, redo);
+        assert!((time(&ed) - 0.75).abs() < 0.04, "{}", time(&ed));
+        // Delete: gone, its clip with it; undo brings it back.
+        ed.picked_event = Some(0);
+        ed.run(&mut world, delete);
+        assert!(!meta().contains("model.clips"), "{}", meta());
+        assert_eq!(ed.picked_event, None);
+        ed.run(&mut world, undo);
+        assert!(meta().contains("events.0.name = \"step\""), "{}", meta());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

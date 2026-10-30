@@ -1,7 +1,8 @@
 //! ADR 0124's E12-1b and CLAUDE.md §5: the editor's frames make no heap allocation while a
 //! clip plays: CesiumMan selected, his Clips in the inspector, P pressed, so every frame
 //! poses him anew and writes the Clips' time again; then his file picked in the dock and its
-//! clip played in the engine's preview, drawn, read back and uploaded every frame. The
+//! clip played in the engine's preview, drawn, read back and uploaded every frame, the
+//! Animation tab open with its clip's events marked (E12-3a, E12-3b-2). The
 //! measuring thread's allocations are counted; a failing measurement prints the stacks of
 //! its first ones. One test per file, so nothing else allocates on that thread.
 
@@ -108,6 +109,20 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
         std::fs::copy(source.join(file), dir.join(file)).unwrap();
     }
     let id = AssetMeta::ensure(&dir.join("CesiumMan.gltf")).unwrap();
+    // His clip's events (ADR 0124's E12-3b-2): their marks drawn on the Animation tab's
+    // strip every frame below.
+    let mut meta = AssetMeta::read(&dir.join("CesiumMan.gltf"));
+    meta.model.clips.push(engine_scene::ClipImport {
+        name: String::from("Clip 1"),
+        events: (0..4)
+            .map(|i| engine_scene::ClipEvent {
+                time: i as f32 * 0.5,
+                name: String::from(if i % 2 == 0 { "left" } else { "right" }),
+                ..engine_scene::ClipEvent::default()
+            })
+            .collect(),
+    });
+    meta.write(&dir.join("CesiumMan.gltf"), id).unwrap();
     let (mesh, material) = (
         AssetRef::part(id, "Cesium_Man"),
         AssetRef::part(id, "Cesium_Man-effect"),
@@ -240,6 +255,7 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
         frame(&mut player, &mut game, &mut overlay);
     }
     assert!(game.animation_ruler().is_some(), "the Animation tab open");
+    assert!(game.text_at("right").is_some(), "the clip's events marked");
     // The dock's thumbnails made first: each is a drawing of a frame of its own.
     for _ in 0..1200 {
         if ["CesiumMan.gltf", "CesiumMan_img0.jpg"]

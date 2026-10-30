@@ -114,6 +114,9 @@ model.clips.0.events.1.data = "right"
 - **A clip by its name in the file.** An unnamed one goes by the name the editor shows it
   by (`Clip 2`). `data` is optional text for whoever hears the event; `sound` is optional
   too.
+- **Made in the editor:** the Animation tab's strip adds, moves, names and removes them,
+  writing the `.meta` with undo ([editor guide](editor.md)); the lines above are what it
+  writes.
 - **Fired in the ticks.** Each tick, once the animators move on, every character fires the
   events its clip passed over the tick. That holds at any speed: backwards (the latest
   first), and several loops in one tick if the clip is short and fast. An event at a

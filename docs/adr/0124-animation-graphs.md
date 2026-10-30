@@ -584,6 +584,53 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-3b-2, 2026-10-30): the Animation tab's events
+
+- **The strip** under the ruler (`AnimationView::events`): a mark and a name per event of
+  the chosen clip, the picked one lit.
+  - A press picks a mark. A drag past 3 pixels moves it frame by frame, keeping where it
+    was grabbed. The move is held in memory and given to the player; letting go writes it
+    as one step.
+  - A press on the strip off the marks lets the pick go.
+- **Adding and removing:**
+  - E (`ANIM_KEYS`) or + adds an event at the playhead's frame, named "event", picked, its
+    name field focused.
+  - Delete or the row's ✕ removes the picked one.
+- **The row under the strip:** the picked event's name, data and sound in text fields,
+  committed by Enter, Tab or a click elsewhere. An empty name keeps the old one.
+- **`EventsDoc`** (`engine_editor::clip_events`): the Clips' model file's `.meta`, held
+  while the tab shows its clips (a character's model file, or the one picked in the dock).
+  - Each edit keeps the events in time order, drops a clip left without events, and
+    writes the `.meta` at once.
+  - It records the text before and after with `History::change_file`; undo and redo put
+    the text back (`put_back_files`).
+  - A file the tab no longer holds is read for the step, and its events go to the player
+    all the same.
+  - The player gets them through `Assets::set_clip_events` in the next `clips_frame`.
+    A `.meta` write is no change of the file (`AssetDatabase::scan` compares the file
+    itself), so nothing is loaded again.
+- **Fixed on the way:** E12-3a laid the ruler's numbers and playhead out 600 pixels wide.
+  `Ui::rect_of` sees only the frame being built, so it never found last frame's ruler.
+  The app now passes the ruler's last width in `AnimationView::width`, read before the
+  frame begins.
+- **Tests:**
+  - **Unit:** the doc's edits, writes and put-backs, order kept and frames snapped.
+  - **The tab:** E at 0.51 s gives an event at 0.5 s with its name typed at once, then a
+    rename; dragging the mark a quarter of the strip lands it at about 0.75 s. The steps
+    are "Add Event", "Rename Event" and "Move Event", and undo and redo put the `.meta`
+    back. Delete removes the clip's entry, and undo brings it back. The ruler's last
+    number sits near its right end.
+  - **GPU, the Fox in the dock:** E adds an event at the playhead (1.71875 s, frame 165 at
+    96 Hz), written and drawn. Escape, then Delete, removes it, and Ctrl+Z brings it back.
+  - **Screenshot:** `ENGINE_EDITOR_EVENTS_PNG`.
+- **Left:**
+  - event sounds heard in the editor's previews (the UX note's "sounds play in every
+    preview");
+  - a sound dropped from the dock onto the sound field;
+  - a picked joint's trail and speed curve;
+  - Mark Foot Plants;
+  - the clips' loop and root motion settings.
+
 ## As built (E12-3b-1, 2026-10-30): clip events
 
 - **The `.meta`** (`engine_scene::ModelImport::clips`, as question 7 has it): a
@@ -629,8 +676,7 @@ allocation with transitions and events every tick; the same events at the same t
   - a character's script hearing each tick's events once, data nil when empty;
   - 0 allocations: skinned characters firing eight events a loop, and ten scripts hearing
     two events a tick (both builds).
-- **Left (E12-3b-2):** the Animation tab's events row (E adds one at the playhead, drags,
-  Delete, the sound field, written to the `.meta` with undo).
+- **Left (E12-3b-2, done):** the Animation tab's events row.
 
 ## As built (E12-3a, 2026-10-30): the Animation tab's timeline
 

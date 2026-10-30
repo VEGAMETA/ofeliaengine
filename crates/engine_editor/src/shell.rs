@@ -677,12 +677,24 @@ pub struct AnimationView<'a> {
     pub time: &'a str,
     /// Its last frame's number: the ruler runs from 0 to it.
     pub frames: u32,
+    /// The ruler's width last frame, which its numbers, playhead and the events' marks are
+    /// laid out by (a frame's own layout comes after it is built); 0 before it was drawn.
+    pub width: f32,
     /// The playhead, 0 to 1 along the clip.
     pub playhead: f32,
     /// Its row: "24 joints".
     pub joints: &'a str,
     /// Its row: "sampled at 30 Hz".
     pub sampled: &'a str,
+    /// The clip's events (E12-3b-2), in time order: their marks along the strip under the
+    /// ruler.
+    pub events: &'a [engine_scene::ClipEvent],
+    /// The clip's length in seconds, which the marks are placed along.
+    pub length: f32,
+    /// The picked event: lit, its fields under the row.
+    pub picked_event: Option<usize>,
+    /// Its name typed as soon as it shows (an event just added).
+    pub event_autofocus: bool,
 }
 
 /// A joint of the inspector's Skeleton (ADR 0124's E12-1c): its name and how deep below
@@ -1220,6 +1232,19 @@ pub struct ShellResponse {
     pub anim_hovered: bool,
     /// Its ruler's node this frame (0 when it is not drawn).
     pub anim_ruler: u64,
+    /// An event's mark (E12-3b-2) was pressed, dragged along or let go: the event, and the
+    /// events' strip it moves along.
+    pub anim_event: Option<(usize, WaveUse)>,
+    /// The events' strip was pressed off any mark.
+    pub anim_events_strip: bool,
+    /// The events' strip's node this frame (0 when it is not drawn).
+    pub anim_events: u64,
+    /// Typing the picked event's name (0), data (1) or sound (2) ended: kept or not.
+    pub anim_event_text: Option<(u8, bool)>,
+    /// The events' + was clicked: one at the playhead.
+    pub anim_event_add: bool,
+    /// The picked event's ✕ was clicked.
+    pub anim_event_delete: bool,
     /// Their bar was pressed, dragged along or let go.
     pub clip_scrub: Option<WaveUse>,
     /// Their model's preview was pressed, dragged or let go: it turns.
@@ -5831,7 +5856,7 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
             return;
         }
         // The ruler, laid out by the width it had last frame.
-        let width = ui.rect_of(ui.id("ruler")).map_or(600.0, |r| r.size[0]);
+        let width = if view.width > 0.0 { view.width } else { 600.0 };
         let ruler = ui.container(
             "ruler",
             Style {
@@ -5895,6 +5920,71 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                 released: used.released,
             });
         }
+        // The clip's events (E12-3b-2): a mark where each happens, its name beside it; a
+        // press picks one, a drag moves it.
+        let length = view.length.max(1e-6);
+        let mut marked: Option<(usize, bool, bool, bool)> = None;
+        let strip = ui.container(
+            "events",
+            Style {
+                size: [Size::Grow(1.0), Size::Fixed(18.0)],
+                radius: 3.0,
+                clip: true,
+                background: Some(p.field),
+                ..Style::default()
+            },
+            |ui| {
+                for (k, e) in view.events.iter().enumerate() {
+                    ui.push_id(k as u64);
+                    let picked = view.picked_event == Some(k);
+                    let x = (e.time / length).clamp(0.0, 1.0) * width;
+                    let mark = ui.row(
+                        "mark",
+                        Style {
+                            size: [Size::Fit, Size::Fixed(18.0)],
+                            gap: 3.0,
+                            padding: [0.0, 0.0, 4.0, 0.0],
+                            align_cross: Align::Center,
+                            placed: Some([(x - 3.0).max(0.0), 0.0]),
+                            ..Style::default()
+                        },
+                        |ui| {
+                            ui.container(
+                                "pin",
+                                Style {
+                                    size: [Size::Fixed(6.0), Size::Fixed(12.0)],
+                                    radius: 2.0,
+                                    background: Some(if picked { p.accent } else { p.text_dim }),
+                                    ..Style::default()
+                                },
+                                |_| {},
+                            );
+                            let color = if picked { p.text } else { p.text_dim };
+                            text(ui, "name", &e.name, SMALL, color);
+                        },
+                    );
+                    let used = ui.sense(mark, false);
+                    if used.pressed || used.active || used.released {
+                        marked = Some((k, used.pressed, used.active, used.released));
+                    }
+                    ui.pop_id();
+                }
+            },
+        );
+        out.anim_events = strip;
+        if let Some((k, pressed, held, released)) = marked {
+            out.anim_event = Some((
+                k,
+                WaveUse {
+                    node: strip,
+                    pressed,
+                    held,
+                    released,
+                },
+            ));
+        } else if ui.sense(strip, false).pressed {
+            out.anim_events_strip = true;
+        }
         ui.row(
             "row",
             Style {
@@ -5910,6 +6000,61 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                 text(ui, "subject", view.subject, SMALL, p.text);
                 text(ui, "joints", view.joints, SMALL, p.text_dim);
                 text(ui, "sampled", view.sampled, SMALL, p.text_dim);
+            },
+        );
+        // The picked event's name, data and sound, typed in place (E12-3b-2); without one,
+        // + adds one at the playhead.
+        ui.row(
+            "event",
+            Style {
+                size: [Size::Grow(1.0), Size::Fixed(22.0)],
+                gap: 6.0,
+                align_cross: Align::Center,
+                ..Style::default()
+            },
+            |ui| {
+                let picked = view
+                    .picked_event
+                    .and_then(|k| Some((k, view.events.get(k)?)));
+                let Some((k, e)) = picked else {
+                    if panel_button(ui, "add", icons::PLUS, false, p) {
+                        out.anim_event_add = true;
+                    }
+                    let hint = "E adds an event at the playhead; drag a mark to move it";
+                    text(ui, "hint", hint, SMALL, p.text_dim);
+                    return;
+                };
+                ui.push_id(k as u64);
+                text(ui, "label", "Event", SMALL, p.text_dim);
+                let fields = [
+                    ("name", e.name.as_str(), "name", 1.0),
+                    ("data", e.data.as_str(), "data", 1.0),
+                    (
+                        "sound",
+                        e.sound.as_str(),
+                        "sound: a path in the project",
+                        1.6,
+                    ),
+                ];
+                for (i, (key, value, hint, grow)) in fields.into_iter().enumerate() {
+                    let style = Style {
+                        size: [Size::Grow(grow), Size::Fixed(20.0)],
+                        padding: [5.0, 0.0, 5.0, 0.0],
+                        radius: 3.0,
+                        background: Some(p.field),
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    };
+                    let autofocus = i == 0 && view.event_autofocus;
+                    let r = ui.text_field(key, value, &field_look(p, style, hint, autofocus));
+                    if r.committed || r.cancelled {
+                        out.anim_event_text = Some((i as u8, r.committed));
+                    }
+                }
+                if panel_button(ui, "delete", icons::CLOSE, false, p) {
+                    out.anim_event_delete = true;
+                }
+                ui.pop_id();
             },
         );
     });

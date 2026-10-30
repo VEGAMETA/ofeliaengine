@@ -435,6 +435,16 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
     - After a click in the tab, **←** and **→** step one frame (the clip stops there),
       **Home** and **End** go to the first and last frames, and **Space** plays or stops.
     - The tab and the Clips share one playhead: what one shows, the other does.
+    - **Events** (footsteps and other moments, see the
+      [animation guide](animation.md#clip-events-footsteps-and-other-moments)) sit on the
+      strip under the ruler, a mark and a name each.
+      - **E** (after a click in the tab) or **+** adds one at the playhead's frame, named
+        "event", its name ready to type: type and press Enter.
+      - A click on a mark picks it. Drag it to move it, frame by frame.
+      - The picked event's **name**, **data** and **sound** (a path in the project) are
+        typed in the row under the strip. **Delete** or its **✕** removes it.
+      - Every change is written to the model's `.meta` at once and is one step of undo.
+        A game playing in the editor hears it from its next tick.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.
