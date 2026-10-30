@@ -584,6 +584,30 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5d-2b-2, 2026-10-30): a layer's mask as check boxes over the joints
+
+- **The team's а (2026-10-30):** with nothing selected, a **Mask** section follows the
+  shown layer's: the skeleton's joints, indented by depth, each with its check box (on at
+  a weight of 1, half below 1, off at 0). A click on a box turns that joint and its
+  subtree in or out, one step; a click on a row picks the joint, and the section's
+  **joint weight** row sets its own weight from 0 to 1 (↺ gives it back to what it
+  inherits). Its title says `Mask · all joints` or `Mask · 2 set`.
+- **The weights are the cook's** (`mask_weight_of`): a joint's own entry, else its nearest
+  ancestor's, else 1 for an empty mask (every joint) and 0 for another.
+- **Written its shortest way** (`simplify_mask`): an entry below a root that repeats what it
+  inherits goes; every root at 1 with nothing else is the empty mask; a mask that would
+  empty while keeping joints out keeps its roots' weights (an empty one puts every joint
+  in); a weight set from the empty mask spells its roots out at 1 first, so the other
+  joints stay in. Entries naming joints the skeleton has not stay.
+- **The skeleton** comes from a character playing the graph (the one watched in Play, the
+  active one, or the first in the scene), once, as soon as its skin is made; until then the
+  section only counts the mask's entries.
+- **Tests:** the mask's rules (a leg out and back in, the hips out, the spine in alone, a
+  hand-written mask turned out, a weight from the empty mask and its ↺); the document's
+  (the section, its title, a box, the picked joint's row set and reset); the fox in Play
+  (its 25 joints all in under the Upper layer; a box turns a joint and its subtree out, the
+  root in).
+
 ## As built (E12-5d-2b-1, 2026-10-30): a graph's layers on its bar and in the inspector
 
 - **The bar's chips:** an animation graph's tab shows a chip per layer after its path, in

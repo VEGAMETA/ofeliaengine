@@ -879,6 +879,10 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5d-2b-2, layer masks** (#493, ADR 0124's as-built; the team's а): a Mask section
+    after the shown layer's, the skeleton of a character playing the graph with a check
+    box a joint (its subtree in or out, one step), the picked joint's weight typed; the
+    mask written its shortest way (every joint in is the empty mask).
   - **E12-5d-2b-1, a graph's layers** (#492, ADR 0124's as-built): a chip per layer on the
     graph's bar (the shown one's machine on the canvas, + adds a layer with its own
     machine), the shown layer's section with nothing selected (name, blend, weight, weight
@@ -1313,8 +1317,8 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    E12-5d-2b-2 to 2d (layer masks, machines in machines, the character previewed in the
-    corner), the last of E12; 5a to 5c, 5d-1, 5d-2a, 5d-2b-1 and 5e are done, and E12-4.
+    E12-5d-2c and 2d (machines in machines, the character previewed in the corner), the
+    last of E12; 5a to 5c, 5d-1, 5d-2a, 5d-2b and 5e are done, and E12-4.
     E13 (2D) has begun: E13-1a, sprites in scenes, is done (#491); E13-1b, the editor's 2D
     view, follows E12. No agents from now on (the owner, 2026-10-30).
   - **Settled (2026-10-30, ADR 0125 accepted, team decisions 1а 2а 3а 4а 5в 6а 7а 8а 9а

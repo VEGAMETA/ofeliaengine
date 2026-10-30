@@ -512,6 +512,7 @@ fn main() {
         sound: None,
         material_preview: None,
         blend: None,
+        mask: None,
         clips: None,
         joints: None,
         falloff: None,

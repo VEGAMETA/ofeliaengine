@@ -770,8 +770,10 @@ struct FrameLists {
     joint_rows: Vec<crate::shell::JointRow<'static>>,
     /// The inspected blend's clips (ADR 0124's E12-5d-2a).
     blend_dots: Vec<crate::shell::BlendDot<'static>>,
-    /// A shown animation graph's layers' names (E12-5d-2b).
+    /// A shown animation graph's layers' names (E12-5d-2b), and its shown layer's mask's
+    /// joints.
     anim_layers: Vec<&'static str>,
+    mask_rows: Vec<crate::shell::MaskRow<'static>>,
 }
 
 /// The inspector's blend panel (ADR 0124's E12-5d-2a): the shown animation graph's inspected
@@ -3333,8 +3335,11 @@ struct Editor {
     anim_spans: Vec<(usize, usize)>,
     anim_sections: Vec<(crate::agraph::AnimSection, usize, usize)>,
     anim_section_at: Option<usize>,
-    /// The shown layer's section's title (`Layer · Base`, ADR 0124's E12-5d-2b).
+    /// The shown layer's section's title (`Layer · Base`, ADR 0124's E12-5d-2b), its mask's
+    /// (`Mask · all joints`), and its joints' own weights' texts (their room kept).
     layer_title: String,
+    mask_title: String,
+    mask_texts: Vec<String>,
     /// The keys go to the shown script's code: its tab was shown, or a press landed in it.
     /// A press anywhere else gives them back to the editor.
     code_focus: bool,
@@ -4551,6 +4556,8 @@ impl Editor {
             anim_sections: Vec::new(),
             anim_section_at: None,
             layer_title: String::new(),
+            mask_title: String::new(),
+            mask_texts: Vec::new(),
             code_focus: false,
             code_rect: None,
             code_advance: 0.0,
@@ -5855,6 +5862,7 @@ impl Editor {
                 let title = match section {
                     AnimSection::Selected => self.graph_title.as_str(),
                     AnimSection::Layer => self.layer_title.as_str(),
+                    AnimSection::Mask => self.mask_title.as_str(),
                     AnimSection::Param(p) => anim.param(p).map_or("", |(name, _)| name),
                     AnimSection::Add => "Add Parameter",
                 };
@@ -7250,6 +7258,31 @@ impl Editor {
             snapshot,
             snapshots: self.snapshot_menu.then_some(snapshot_items.as_slice()),
         });
+        let mut mask_rows: Vec<crate::shell::MaskRow<'_>> =
+            recycle(std::mem::take(&mut self.lists.mask_rows));
+        let mut mask_section = None;
+        if let Some(at) = self.anim_section_at
+            && let Some(j) = self
+                .anim_sections
+                .iter()
+                .position(|&(s, ..)| s == crate::agraph::AnimSection::Mask)
+            && let Some(anim) = self
+                .active_graph
+                .and_then(|g| self.graphs.get(g))
+                .and_then(|d| d.anim.as_deref())
+        {
+            mask_section = Some(at + j);
+            let mask = anim.shown_layer().map(|l| &l.mask);
+            let picked = anim.mask_joint();
+            mask_rows.extend((0..anim.joints.len()).map(|k| crate::shell::MaskRow {
+                name: &anim.joints[k],
+                depth: anim.joint_depths.get(k).copied().unwrap_or(0),
+                weight: anim.mask_weight(k),
+                own: mask.is_some_and(|m| m.contains_key(&anim.joints[k])),
+                picked: picked == Some(k),
+                text: self.mask_texts.get(k).map_or("", String::as_str),
+            }));
+        }
         let mut joint_rows: Vec<crate::shell::JointRow<'_>> =
             recycle(std::mem::take(&mut self.lists.joint_rows));
         if let Some(view) = self
@@ -7535,6 +7568,10 @@ impl Editor {
                     time: &view.time_text,
                 })
             }),
+            mask: mask_section.map(|section| crate::shell::MaskPanel {
+                section,
+                rows: &mask_rows,
+            }),
             joints: self.skeleton_section.and_then(|section| {
                 Some(crate::shell::JointsPanel {
                     section,
@@ -7635,6 +7672,7 @@ impl Editor {
         self.lists.clip_rows = recycle(clip_rows);
         self.lists.track_rows = recycle(track_rows);
         self.lists.joint_rows = recycle(joint_rows);
+        self.lists.mask_rows = recycle(mask_rows);
         self.joined = joined;
         self.lists.scenes = recycle(scenes);
         self.lists.graphs = recycle(graph_tabs);
@@ -7767,6 +7805,25 @@ impl Editor {
         }
         if response.blend_place {
             self.blend_place_asked = true;
+        }
+        // A layer's mask (E12-5d-2b): a joint's box turns its subtree in or out, a row picks.
+        if let Some(j) = response.mask_toggle
+            && let Some(g) = self.anim_graph_shown()
+        {
+            let edit = self.graphs[g].toggle_mask_joint(j);
+            self.graph_edit(world, g, "Edit Mask", None, edit);
+        }
+        if let Some(j) = response.mask_pick
+            && let Some(anim) = self
+                .anim_graph_shown()
+                .and_then(|g| self.graphs[g].anim.as_deref_mut())
+            && let Some(name) = anim.joints.get(j)
+        {
+            if anim.mask_joint == *name {
+                anim.mask_joint.clear();
+            } else {
+                anim.mask_joint.clone_from(name);
+            }
         }
         // An animation graph's layers (E12-5d-2b): one shown, one added.
         if let Some(k) = response.graph_layer
@@ -14964,6 +15021,26 @@ impl Editor {
             }
             anim.title(&mut self.graph_title);
             anim.layer_title(&mut self.layer_title);
+            anim.mask_title(&mut self.mask_title);
+            // Its joints' own weights where they are neither 0 nor 1 (E12-5d-2b).
+            if self.mask_texts.len() < anim.joints.len() {
+                self.mask_texts.resize_with(anim.joints.len(), String::new);
+            }
+            let mask = anim.shown_layer().map(|l| &l.mask);
+            for (j, text) in self
+                .mask_texts
+                .iter_mut()
+                .enumerate()
+                .take(anim.joints.len())
+            {
+                text.clear();
+                if let Some(&w) = mask.and_then(|m| m.get(&anim.joints[j]))
+                    && w > 0.0
+                    && w < 1.0
+                {
+                    let _ = write!(text, "{w:.2}");
+                }
+            }
             anim.status(doc.view.zoom(), &mut self.graph_status);
             return;
         }
@@ -15233,6 +15310,42 @@ impl Editor {
         }
         // Shown at once, before the next tick says it.
         self.blend.live = Some(at);
+    }
+
+    /// The shown animation graph's skeleton for its layers' masks (ADR 0124's E12-5d-2b):
+    /// once, from a character playing it (the one watched in Play, the active one, or the
+    /// first in the scene) as soon as one has its skin. Nothing once it has one.
+    fn mask_joints_frame(&mut self, player: &Player) {
+        let Some(g) = self.anim_graph_shown() else {
+            return;
+        };
+        let id = self.graphs[g].id;
+        if self.graphs[g]
+            .anim
+            .as_deref()
+            .is_none_or(|a| !a.joints.is_empty())
+        {
+            return;
+        }
+        let world = player.world();
+        let plays = |e: Entity| {
+            world
+                .get::<engine_runtime::Animator>(e)
+                .is_some_and(|a| a.graph.file == id)
+        };
+        let character = self
+            .anim_watched
+            .filter(|&e| plays(e))
+            .or_else(|| self.selection.last().copied().filter(|&e| plays(e)))
+            .or_else(|| player.skinned_models().find(|&e| plays(e)));
+        let Some(rig) = character.and_then(|e| player.model_rig(e)) else {
+            return;
+        };
+        let skeleton = rig.skeleton();
+        let n = skeleton.joint_count();
+        if let Some(anim) = self.graphs[g].anim.as_deref_mut() {
+            anim.set_joints(skeleton.names(), (0..n).map(|j| skeleton.parent(j)));
+        }
     }
 
     /// Place by Speed (a 1D blend) or by Velocity (a 2D one) on the blend panel (ADR 0124's
@@ -23216,6 +23329,7 @@ impl Editor {
         if core::mem::take(&mut self.blend_place_asked) {
             self.place_blend_by_speed(player);
         }
+        self.mask_joints_frame(player);
         let active = self
             .selection
             .last()
@@ -28918,6 +29032,41 @@ impl<G> EditorGame<G> {
     /// For tests.
     pub fn graph_now(&self) -> String {
         self.shared.borrow().anim_status.clone()
+    }
+
+    /// The shown animation graph's shown layer's mask as its section lists it (ADR 0124's
+    /// E12-5d-2b): each joint's name and weight; empty until a character playing the graph
+    /// gives its skeleton. For tests.
+    pub fn mask_joints(&self) -> Vec<(String, f32)> {
+        let shared = self.shared.borrow();
+        let Some(anim) = shared
+            .anim_graph_shown()
+            .and_then(|g| shared.graphs[g].anim.as_deref())
+        else {
+            return Vec::new();
+        };
+        (0..anim.joints.len())
+            .map(|j| (anim.joints[j].clone(), anim.mask_weight(j)))
+            .collect()
+    }
+
+    /// Clicks joint `name`'s check box in the shown layer's mask (ADR 0124's E12-5d-2b), as
+    /// a step in the player's world; false without that joint. For tests.
+    pub fn toggle_mask_joint(&mut self, world: &mut World, name: &str) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        let Some(g) = shared.anim_graph_shown() else {
+            return false;
+        };
+        let Some(j) = shared.graphs[g]
+            .anim
+            .as_deref()
+            .and_then(|a| a.joints.iter().position(|n| n == name))
+        else {
+            return false;
+        };
+        let edit = shared.graphs[g].toggle_mask_joint(j);
+        shared.graph_edit(world, g, "Edit Mask", None, edit);
+        true
     }
 
     /// Shows layer `k` (in their order) of the shown animation graph, as a click on its chip
