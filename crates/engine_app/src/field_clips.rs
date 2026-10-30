@@ -155,6 +155,28 @@ impl FieldClip {
     }
 }
 
+/// A field the editor's preview of a clip changed, and the value it had (ADR 0124's
+/// E12-4b): what the editor puts back before it edits, so the scene keeps its own values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeptField {
+    entity: Entity,
+    field: FieldRef,
+    value: [f32; 4],
+}
+
+impl KeptField {
+    /// The field given its value back (nothing when the entity or its component is gone).
+    pub fn put_back(&self, world: &mut World) {
+        self.field
+            .write(world, self.entity, &self.value[..self.field.lanes()]);
+    }
+
+    /// The entity whose field it is.
+    pub fn entity(&self) -> Entity {
+        self.entity
+    }
+}
+
 /// Where a track writes: the entity and its field.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Target {
@@ -235,6 +257,8 @@ pub(crate) struct FieldClips {
     epoch: u64,
     /// The events the last tick played past: (entity, event).
     pub(crate) fired: Vec<(Entity, EventDef)>,
+    /// The editor's preview (E12-4b): the entity it shows a clip on, bound as an animator.
+    preview: Option<(Entity, Bound)>,
 }
 
 impl core::fmt::Debug for FieldClips {
@@ -247,6 +271,56 @@ impl core::fmt::Debug for FieldClips {
 }
 
 impl FieldClips {
+    /// Clip file `file` shown on `entity` at `time` seconds while the editor edits (E12-4b):
+    /// the fields its tracks key written as it says there, each one's value before it put in
+    /// `kept` the first time (a field already there is not kept again). The entity is bound
+    /// as an animator is, once per clip.
+    pub(crate) fn preview(
+        &mut self,
+        world: &mut World,
+        entity: Entity,
+        file: AssetRef,
+        time: f32,
+        kept: &mut Vec<KeptField>,
+        mut path_of: impl FnMut(AssetRef) -> Option<std::path::PathBuf>,
+    ) {
+        let mut bound = match self.preview.take() {
+            Some((e, b)) if e == entity => b,
+            _ => Bound::default(),
+        };
+        if bound.epoch != self.epoch {
+            bound.bindings.clear();
+            bound.epoch = self.epoch;
+        }
+        bound.main = self.binding(world, entity, file, &mut bound, &mut path_of);
+        bound.from = None;
+        if let Some(b) = bound.main() {
+            // The editor's playhead lies in the clip: its end shows the last keys, also
+            // for a clip that loops.
+            let t = time.clamp(0.0, b.clip.length);
+            let mut value = [0.0f32; 4];
+            for (track, target) in b.clip.tracks.iter().zip(&b.targets) {
+                let Some(target) = target else {
+                    continue;
+                };
+                let known = kept
+                    .iter()
+                    .any(|k| k.entity == target.entity && k.field == target.field);
+                let mut was = [0.0f32; 4];
+                if !known && target.field.read(world, target.entity, &mut was) {
+                    kept.push(KeptField {
+                        entity: target.entity,
+                        field: target.field,
+                        value: was,
+                    });
+                }
+                track.sample(t, &mut value);
+                write(world, target, &value, track.lanes);
+            }
+        }
+        self.preview = Some((entity, bound));
+    }
+
     /// File `file` read again on its next use (it changed on disk).
     pub(crate) fn forget(&mut self, file: AssetId) {
         if self.read.remove(&file).is_some() {
@@ -791,6 +865,47 @@ mod tests {
             "1,000 doors, two tracks each: {per_tick:?} a tick, {:?} a door",
             per_tick / 1000
         );
+    }
+
+    /// ADR 0124's E12-4b: the editor's preview writes a clip's values at a moment and keeps
+    /// what the fields held; put back, the scene has its own values again, and a preview
+    /// at another moment keeps nothing twice.
+    #[test]
+    fn a_preview_shows_a_clip_and_its_kept_values_put_the_scene_back() {
+        use engine_core::math::Vec3;
+        use engine_ecs::Transform;
+        use engine_runtime::PointLight;
+        let mut world = World::new();
+        let file = AssetRef::file(AssetId::from_u128(77));
+        let door = world.spawn((
+            Transform::from_rotation(Quat::from_rotation_y(0.3)),
+            Animator::new("open").with_clip("open", file),
+        ));
+        let lamp = world.spawn((Name::new("Lamp"), PointLight::new(Vec3::ONE, 3.0)));
+        world.set_parent(lamp, Some(door)).unwrap();
+        let mut anim = AnimFile::default();
+        anim.set_key("Transform.rotation", 0.0, &[0.0, 0.0, 0.0]);
+        anim.set_key("Transform.rotation", 1.0, &[0.0, 90.0, 0.0]);
+        anim.set_key("Lamp:PointLight.range", 0.0, &[8.0]);
+        let mut clips = FieldClips::default();
+        clips.hold(file.file, Some(&anim));
+        let mut kept = Vec::new();
+        clips.preview(&mut world, door, file, 1.0, &mut kept, |_| None);
+        assert!((yaw(&world, door) - 90.0).abs() < 0.01);
+        assert_eq!(world.get::<PointLight>(lamp).unwrap().range, 8.0);
+        assert_eq!(kept.len(), 2, "both fields kept");
+        // Again at half a second: the values move, nothing is kept twice.
+        clips.preview(&mut world, door, file, 0.5, &mut kept, |_| None);
+        assert!((yaw(&world, door) - 45.0).abs() < 0.01);
+        assert_eq!(kept.len(), 2);
+        for k in kept.drain(..) {
+            k.put_back(&mut world);
+        }
+        assert!(
+            (yaw(&world, door) - 0.3f32.to_degrees()).abs() < 0.01,
+            "the scene's own"
+        );
+        assert_eq!(world.get::<PointLight>(lamp).unwrap().range, 3.0);
     }
 
     #[test]
