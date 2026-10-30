@@ -257,8 +257,28 @@ events.0.name = "thud"
 
 A graph says which clips a character plays as its parameters change: idle until it moves, a
 walk blended into a run by its speed, a jump when a script fires one (ADR 0124's E12-5). The
-file comes first (E12-5a); the player plays graphs from E12-5c and the editor draws them
-from E12-5d.
+player plays a graph an `Animator` names in its `graph` (E12-5c); the editor draws them from
+E12-5d.
+
+```rust
+world.spawn((
+    Model::new(mesh, material),
+    Animator { graph: AssetRef::file(graph_id), ..Animator::default() },
+));
+// In a tick: its parameters by name (`GraphParams` is a world resource).
+let slot = world.resource::<GraphParams>().unwrap().slot(graph_id, "speed");
+if let (Some((slot, false)), Some(animator)) = (slot, world.get_mut::<Animator>(fox)) {
+    animator.set_slot(slot, 3.5);
+}
+// After the tick: `animator.state` names the state its first layer is in.
+```
+
+- The parameters a game sets keep their values; the others follow the graph's (its starting
+  values until a transition changes them), and a trigger is back at 0 once a transition
+  took it. `params_set` marks which were set.
+- The graph plays at the animator's `speed`, held while it is `paused`.
+- For now its root motion stays in its pose, its clips fire no events, and a save does not
+  keep where it is (E12-5c-2).
 
 ```text
 [agraph version=1 id=…]

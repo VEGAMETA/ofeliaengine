@@ -3320,3 +3320,281 @@ fn a_model_preview_draws_a_skinned_model_posed_and_turned_alone() {
     assert!(!player.take_model_preview(&mut pixels));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR 0124's E12-5c: a fox plays an animation graph in place of a clip. Its first layer's
+/// state is named in its animator and its parameters come back at the graph's values; a
+/// number set by name takes it from Idle to Move and back, a trigger takes it to Alert and
+/// is used up; its pose moves between ticks; the editor's copy of the graph plays in place
+/// of the file; a graph that cannot be read shows the rest pose.
+#[test]
+fn a_fox_plays_an_animation_graph() {
+    use engine_scene::{
+        AnimGraphFile, BlendPoint, LayerFile, NodeFile, NodeKind, ParamFile, ParamKind, StateFile,
+        TransitionFile,
+    };
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/Fox");
+    if !source.join("Fox.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ofelia-agraph-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    std::fs::create_dir_all(dir.join("anims")).unwrap();
+    for file in ["Fox.gltf", "Fox.bin", "Texture.png"] {
+        std::fs::copy(source.join(file), dir.join("models").join(file)).unwrap();
+    }
+    let id = AssetMeta::ensure(&dir.join("models/Fox.gltf")).unwrap();
+    let (mesh, material) = (
+        AssetRef::part(id, "fox1"),
+        AssetRef::part(id, "fox_material"),
+    );
+    // Idle (Survey) and Move (Walk to Run along `speed`); `look` takes it to Alert (Survey
+    // twice as fast) from any state, back to Idle near its end.
+    let graph_id = AssetId::new();
+    let mut graph = AnimGraphFile::default();
+    let param = |kind, value| ParamFile { kind, value };
+    graph
+        .params
+        .insert("speed".into(), param(ParamKind::Float, 0.0));
+    graph
+        .params
+        .insert("look".into(), param(ParamKind::Trigger, 0.0));
+    graph
+        .params
+        .insert("lean".into(), param(ParamKind::Float, 0.25));
+    graph.layers.insert(
+        "base".into(),
+        LayerFile {
+            name: "Base".into(),
+            root: "m".into(),
+            ..LayerFile::default()
+        },
+    );
+    let clip = |clip: &str, speed: f32| NodeFile {
+        clip: clip.into(),
+        speed,
+        ..NodeFile::default()
+    };
+    graph.nodes.insert(
+        "m".into(),
+        NodeFile {
+            kind: NodeKind::Machine,
+            entry: "idle".into(),
+            ..NodeFile::default()
+        },
+    );
+    graph.nodes.insert("survey".into(), clip("Survey", 1.0));
+    graph.nodes.insert("alert".into(), clip("Survey", 2.0));
+    graph.nodes.insert(
+        "move".into(),
+        NodeFile {
+            kind: NodeKind::Blend1d,
+            param: "speed".into(),
+            points: vec![
+                BlendPoint {
+                    at: [0.0, 0.0],
+                    clip: "Walk".into(),
+                },
+                BlendPoint {
+                    at: [1.0, 0.0],
+                    clip: "Run".into(),
+                },
+            ],
+            ..NodeFile::default()
+        },
+    );
+    let state = |name: &str, pose: &str| StateFile {
+        name: name.into(),
+        machine: "m".into(),
+        pose: pose.into(),
+        ..StateFile::default()
+    };
+    graph.states.insert("idle".into(), state("Idle", "survey"));
+    graph.states.insert("move".into(), state("Move", "move"));
+    graph.states.insert("alert".into(), state("Alert", "alert"));
+    let go = |from: &str, to: &str, when: &str, exit: f32| TransitionFile {
+        from: from.into(),
+        to: to.into(),
+        when: when.into(),
+        blend: 0.2,
+        exit,
+        ..TransitionFile::default()
+    };
+    graph
+        .transitions
+        .insert("t1".into(), go("idle", "move", "speed > 0.1", 0.0));
+    graph
+        .transitions
+        .insert("t2".into(), go("move", "idle", "speed <= 0.1", 0.0));
+    graph
+        .transitions
+        .insert("t3".into(), go("", "alert", "look", 0.0));
+    graph
+        .transitions
+        .insert("t4".into(), go("alert", "idle", "", 0.9));
+    std::fs::write(dir.join("anims/fox.agraph"), graph.to_text(graph_id, None)).unwrap();
+    let mut paths = Assets::new(dir.clone()).paths().clone();
+    paths.insert(mesh, "models/Fox.gltf#fox1");
+    paths.insert(material, "models/Fox.gltf#fox_material");
+    paths.insert(AssetRef::file(graph_id), "anims/fox.agraph");
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Fox"),
+        Transform::from_scale(Vec3::splat(0.01)),
+        Model::new(mesh, material),
+        Animator {
+            graph: AssetRef::file(graph_id),
+            ..Animator::default()
+        },
+    ));
+    let options = SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    save_with(
+        &mut world,
+        &SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    assert!(text.contains("anims/fox.agraph"), "{text}");
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("graph test"),
+        window: Window::Offscreen {
+            width: 128,
+            height: 128,
+        },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 60.0));
+    let fox = find_named(player.world_mut(), "Fox").unwrap();
+    let started = Instant::now();
+    while player.model_rig(fox).is_none() {
+        assert!(started.elapsed() < Duration::from_secs(30), "no skin");
+        player.frame(&mut game).unwrap();
+    }
+    for _ in 0..4 {
+        player.frame(&mut game).unwrap();
+    }
+    let animator = |player: &mut Player| player.world_mut().get::<Animator>(fox).unwrap().clone();
+    let joints = |player: &mut Player| {
+        let mut joints = Vec::new();
+        assert!(player.model_joints(fox, &mut joints));
+        joints
+    };
+    let off = |a: &[Affine3A], b: &[Affine3A]| {
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| (Vec3::from(a.translation) - Vec3::from(b.translation)).length())
+            .fold(0.0f32, f32::max)
+    };
+    // The rest pose, as the editor holds a clip the fox has not.
+    assert!(player.pose_model(fox, Some((99, 0.0))));
+    let rest = joints(&mut player);
+    assert!(player.pose_model(fox, None));
+    player.frame(&mut game).unwrap();
+    // Its entry state named; its parameters at the graph's values (by name: lean, look,
+    // speed), none set.
+    let a = animator(&mut player);
+    assert_eq!(a.state, "Idle");
+    assert_eq!(&a.params[..3], &[0.25, 0.0, 0.0]);
+    assert_eq!(a.params_set, 0);
+    let slot = |player: &mut Player, name: &str| {
+        let params = player
+            .world_mut()
+            .resource::<engine_runtime::GraphParams>()
+            .unwrap();
+        params.slot(graph_id, name).unwrap()
+    };
+    assert_eq!(slot(&mut player, "speed"), (2, false));
+    assert_eq!(slot(&mut player, "look"), (1, true));
+    // Its pose moves between frames, and is not the rest pose.
+    let before = joints(&mut player);
+    for _ in 0..10 {
+        player.frame(&mut game).unwrap();
+    }
+    let after = joints(&mut player);
+    println!(
+        "idle: moved {:.3} in 10 frames, {:.3} from the rest pose",
+        off(&before, &after),
+        off(&after, &rest)
+    );
+    assert!(off(&before, &after) > 0.01, "it plays");
+    assert!(off(&after, &rest) > 0.01, "not the rest pose");
+    // A number set by name: it moves.
+    let (speed, _) = slot(&mut player, "speed");
+    let set = |player: &mut Player, slot: u16, value: f32| {
+        let a = player.world_mut().get_mut::<Animator>(fox).unwrap();
+        assert!(a.set_slot(slot, value));
+    };
+    set(&mut player, speed, 1.0);
+    let until = |player: &mut Player, game: &mut Still, state: &str| {
+        for _ in 0..240 {
+            player.frame(game).unwrap();
+            if animator(player).state == state {
+                return;
+            }
+        }
+        panic!("never {state}: {}", animator(player).state);
+    };
+    until(&mut player, &mut game, "Move");
+    assert_eq!(animator(&mut player).params[usize::from(speed)], 1.0);
+    // A trigger: Alert, used up by the transition that took it; back to Move after it.
+    let (look, _) = slot(&mut player, "look");
+    assert!(
+        player
+            .world_mut()
+            .get_mut::<Animator>(fox)
+            .unwrap()
+            .fire_slot(look)
+    );
+    until(&mut player, &mut game, "Alert");
+    assert_eq!(
+        animator(&mut player).params[usize::from(look)],
+        0.0,
+        "used up"
+    );
+    until(&mut player, &mut game, "Move");
+    set(&mut player, speed, 0.0);
+    until(&mut player, &mut game, "Idle");
+    // The editor's copy of the graph in place of the file: its states made anew.
+    let mut edited = graph.clone();
+    edited.states.get_mut("idle").unwrap().name = "Rest".into();
+    player.assets_mut().set_anim_graph(graph_id, Some(&edited));
+    until(&mut player, &mut game, "Rest");
+    player.assets_mut().set_anim_graph(graph_id, None);
+    until(&mut player, &mut game, "Idle");
+    // A graph that cannot be read: the rest pose.
+    player.world_mut().get_mut::<Animator>(fox).unwrap().graph = AssetRef::file(AssetId::new());
+    for _ in 0..3 {
+        player.frame(&mut game).unwrap();
+    }
+    let broken = joints(&mut player);
+    assert!(off(&broken, &rest) < 1e-4, "{}", off(&broken, &rest));
+    let _ = std::fs::remove_dir_all(&dir);
+}
