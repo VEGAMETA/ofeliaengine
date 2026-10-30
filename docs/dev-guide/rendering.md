@@ -1540,6 +1540,8 @@ exposure.reset();
   - `ToneCurve::Aces`: the classic contrasty film look of many games; mid-grey darker
     (add about +0.7 EV of exposure);
   - AgX and ACES are SDR curves: on HDR screens they do not use the extra range.
+  - `ToneCurve::None` (ADR 0125): colours as they are, clipped only by the output; what
+    a 2D view uses unless its camera asks for the post chain (`2d.md`).
   - Compare them: `scene_bench -- <scene> --post --curve gt|pbr-neutral|agx|aces`.
 - **What it costs** at 1080p: bloom 0.11 ms, exposure 0.02 ms, tone map 0.03 ms on an RTX
   4060 Ti. On a Radeon iGPU they are 1.1 ms, 0.28 ms and 0.99 ms: consider fewer bloom

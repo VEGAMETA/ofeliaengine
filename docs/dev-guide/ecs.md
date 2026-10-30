@@ -339,3 +339,7 @@ frame.add_view(&mut fg, &mut ctx, &mut view, &scene_input, &main.camera, target)
   for cutscenes with its `shutter` for motion blur (the only views that may have it, ADR
   0067 and 0096). Everything else
   (bloom, tone curve, occlusion culling) comes from the `CameraView`'s base settings.
+- **An orthographic camera** (`Camera::orthographic`, `Camera::pixel_art`; ADR 0125) is a
+  2D view: it draws the sprites (`2d.md`), not the 3D scene, at its pixel-art resolution
+  when it has one, its colours as painted unless its `post_effects` asks for the base
+  settings' bloom, tone curve and grading.

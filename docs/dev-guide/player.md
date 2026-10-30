@@ -250,7 +250,8 @@ settings.
   `environment` (`set_atmosphere`, `set_fog`, `set_panorama`, `set_intensity`).
 - **Bloom, the tone curve, color grading, depth of field** and the clear color live in
   `player.view_settings_mut()`. The camera entity gives the antialiasing, the render size,
-  the exposure and whether it is cinematic.
+  the exposure and whether it is cinematic. An orthographic camera's 2D view leaves out
+  bloom, the curve and grading unless the camera asks for them (`2d.md`).
 - **Graphics options at run time:** `player.set_global_illumination(...)` changes the GI
   volume's settings or turns it off; the volume is made again and converges again.
 - **When to lift a loading screen:** `player.scene_settled()` says that streaming has gone
