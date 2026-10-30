@@ -1834,3 +1834,158 @@ fn a_character_dragged_from_the_dock_is_one_entity_standing_on_the_floor() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR 0124's E12-4b: a door's clip made in the editor, previewed in the Animation tab. The
+/// tab lists the door's clip; a press at its ruler's end shows the door turned by 90 degrees
+/// (drawn so: its `GlobalTransform`) while its `Transform`, and the scene saved meanwhile,
+/// keep the scene's own; the tab shut, the door is drawn as the scene has it.
+#[test]
+fn a_door_previews_its_clip_in_the_animation_tab_and_the_scene_keeps_its_values() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-own-clip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("animations")).unwrap();
+    let anim_id = AssetId::new();
+    let mut opening = engine_scene::AnimFile {
+        once: true,
+        ..engine_scene::AnimFile::default()
+    };
+    opening.set_key("Transform.rotation", 0.0, &[0.0, 0.0, 0.0]);
+    opening.set_key("Transform.rotation", 1.0, &[0.0, 90.0, 0.0]);
+    std::fs::write(
+        dir.join("animations/door open.anim"),
+        opening.to_text(anim_id),
+    )
+    .unwrap();
+    let mut paths = engine_scene::AssetPaths::new();
+    paths.insert(AssetRef::file(anim_id), "animations/door open.anim");
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Door"),
+        Transform::from_xyz(0.0, 0.0, -3.0),
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+        engine_runtime::Animator::new("open").with_clip("open", AssetRef::file(anim_id)),
+    ));
+    let options = engine_scene::SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    engine_scene::save_with(
+        &mut world,
+        &engine_scene::SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor own clip test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    // A tick a frame: the scene is propagated and drawn with the ticks.
+    player.set_frame_time(Some(1.0 / 64.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let door = engine_scene::find_named(player.world_mut(), "Door").expect("the door");
+    game.select(Some(door));
+    let drawn_yaw = |player: &mut Player| {
+        let g = player
+            .world_mut()
+            .get::<engine_ecs::GlobalTransform>(door)
+            .unwrap()
+            .0;
+        let (_, rotation, _) = g.to_scale_rotation_translation();
+        rotation
+            .to_euler(engine_core::math::EulerRot::YXZ)
+            .0
+            .to_degrees()
+    };
+    // Alt+N: the Animation tab, the door's clip in it.
+    key(&mut game, 0x12, 0x38, true);
+    key(&mut game, 0x4E, 0x31, true);
+    frame(&mut player, &mut game, &mut overlay);
+    key(&mut game, 0x4E, 0x31, false);
+    key(&mut game, 0x12, 0x38, false);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let (rows, _) = game.clips();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].contains("open"), "{rows:?}");
+    assert!(
+        drawn_yaw(&mut player).abs() < 0.01,
+        "nothing shown before a scrub"
+    );
+    // A press at the ruler's end: the door drawn open, the scene's own kept.
+    let [x, y, w, h] = game.animation_ruler().expect("the Animation tab's ruler");
+    let end = [x + w - 1.0, y + h * 0.5];
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, end, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let at = game.clip_time().unwrap();
+    println!(
+        "the ruler's end: {at:.3} s, drawn at {:.2} degrees",
+        drawn_yaw(&mut player)
+    );
+    assert!(at > 0.99, "{at}");
+    assert!(
+        (drawn_yaw(&mut player) - 90.0).abs() < 1.0,
+        "{}",
+        drawn_yaw(&mut player)
+    );
+    let own = player.world_mut().get::<Transform>(door).unwrap().rotation;
+    assert!(
+        own.angle_between(engine_core::math::Quat::IDENTITY) < 1e-5,
+        "the scene's own: {own:?}"
+    );
+    // Saved meanwhile: the scene's own rotation written.
+    assert!(game.run_command(player.world_mut(), "file.save"));
+    frame(&mut player, &mut game, &mut overlay);
+    let saved = std::fs::read_to_string(dir.join("main.scene")).unwrap();
+    assert!(
+        saved.contains("Transform.rotation = (0, 0, 0, 1)"),
+        "the scene's own rotation, not the clip's: {saved}"
+    );
+    // The tab shut (Alt+N again): drawn as the scene has it.
+    key(&mut game, 0x12, 0x38, true);
+    key(&mut game, 0x4E, 0x31, true);
+    frame(&mut player, &mut game, &mut overlay);
+    key(&mut game, 0x4E, 0x31, false);
+    key(&mut game, 0x12, 0x38, false);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(
+        drawn_yaw(&mut player).abs() < 0.01,
+        "{}",
+        drawn_yaw(&mut player)
+    );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

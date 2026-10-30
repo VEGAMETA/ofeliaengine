@@ -581,6 +581,10 @@ pub struct Player {
     previews: crate::previews::Previews,
     /// Ticks to run while the world is kept still ([`Player::step_tick`]).
     steps: u32,
+    /// The clip file the editor shows on an entity while the world stands still (ADR 0124's
+    /// E12-4b, [`Player::preview_anim`]), and the fields it set with the values they had.
+    anim_preview: Option<(Entity, engine_scene::AssetRef, f32)>,
+    anim_kept: Vec<crate::KeptField>,
     /// Fixed ticks run since the start ([`Player::ticks_run`]).
     ticks_run: u64,
     /// The pause point a script reached (ADR 0119): the world was kept still after its
@@ -1227,6 +1231,8 @@ impl Player {
             wait_for_assets: true,
             previews: crate::previews::Previews::new(settings.frames_in_flight),
             steps: 0,
+            anim_preview: None,
+            anim_kept: Vec::new(),
             ticks_run: 0,
             debug_pause: None,
             script_debugging: false,
@@ -1453,6 +1459,15 @@ impl Player {
     /// The same, to learn asset paths or make an asset ahead of its first use.
     pub fn assets_mut(&mut self) -> &mut crate::Assets {
         &mut self.assets
+    }
+
+    /// Clip file `file` (an `.anim`) shown on `entity` at `time` seconds from the next frame
+    /// on while the world stands still (ADR 0124's E12-4b: the editor's Animation tab);
+    /// `None` stops. Each frame sets the fields the clip keys just before the scene is
+    /// propagated and drawn, and gives them their values back as the frame's presentation
+    /// begins: the game, the editor, saves and undo only ever see the scene's own values.
+    pub fn preview_anim(&mut self, preview: Option<(Entity, engine_scene::AssetRef, f32)>) {
+        self.anim_preview = preview;
     }
 
     /// Whether the world's time runs (ADR 0107 E3): the game's ticks, the timers and tweens,
@@ -3195,6 +3210,20 @@ impl Player {
                 }
             }
         }
+        // The editor's preview of a clip made in it (ADR 0124's E12-4b): its fields set for
+        // the scene's propagation and extraction, given their values back as the frame's
+        // presentation begins, before the game or the editor reads or writes the world.
+        if !self.simulating
+            && let Some((entity, file, time)) = self.anim_preview
+        {
+            self.assets.preview_anim(
+                &mut self.runtime.world,
+                entity,
+                file,
+                time,
+                &mut self.anim_kept,
+            );
+        }
         // Ticks, presentation, interpolation (ADR 0064).
         // The network session's requests (host, join, leave) at the frame's start (ADR 0106).
         if let Some(net) = &mut self.net {
@@ -3249,7 +3278,12 @@ impl Player {
             // tick extracts it; a joined client's frame always does): what renderers let
             // go of is drawn until then.
             let extracted = Cell::new(joined);
+            let anim_kept = &mut self.anim_kept;
             let present = |world: &mut World, (): &(), alpha: f32| {
+                // The preview drawn: the scene's own values back (see above).
+                for kept in anim_kept.drain(..) {
+                    kept.put_back(world);
+                }
                 if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                     input.sample_frame(Instant::now());
                 }

@@ -584,6 +584,51 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-4b-1a, 2026-10-30): clips made in the editor in the Animation tab
+
+- **The preview** (`Player::preview_anim(Some((entity, file, time)))`, asked each frame by
+  the editor): while the world stands still, the player sets the clip's fields at that
+  moment just before the scene is propagated and extracted, and gives them their values
+  back (`KeptField`, read by `FieldRef::read` the first time each field is set) as the
+  frame's presentation begins, before the game or the editor reads or writes the world.
+  - So the inspector, undo, saves, autosaves and Play's snapshot only ever see the
+    scene's own values. Godot's previews write into the scene (hence its RESET clip);
+    Unity loses an edit not keyed when the playhead moves. Here nothing is written.
+  - The preview binds the entity as an animator does (`FieldClips::preview`, its own
+    bindings kept), clamping the playhead into the clip: a looping clip's end shows its
+    last keys.
+  - Transforms propagate with the ticks (64 a second): the preview moves as the editor's
+    own edits do.
+- **The tab:** an entity without a rig whose `Animator` has clips gets the Clips' view of
+  them (`ClipsView.own`: each clip's file; `ClipFacts::own`: length, frame rate, tracks).
+  - The animator's own clip is chosen first; ↑/↓, the ruler, ←/→, Home/End and ▶ work as
+    for a character's clips. A clip that plays runs on the frame's time
+    (`ClipsView.playing`); a step or a scrub holds it.
+  - It is shown while the tab is open, the game not playing, and the clip plays or holds
+    a moment; shutting the tab, choosing another entity or Escape gives the scene back.
+  - **Tracks** (`AnimationView.tracks`, `TrackRow`): a row per track under the events,
+    a mark per key; root motion's toggles and Mark Foot Plants are not shown for such a
+    clip (`AnimationView.own`).
+- **The clip's own file holds its events and loop:** the events' document (`EventsDoc`)
+  holds a `.meta` or an `.anim` (`Held`), so the events row, its sounds and Once work on
+  both. Each change is written to the `.anim` and is one undo step; undo's text goes back
+  to the held document, or to the player through `anims_due`.
+- **Not yet:** an entity with a rig and clips of its own lists its model's clips only;
+  New Clip, renaming and deleting a clip (E12-4b-1b); keys (E12-4b-2).
+- **Tests:**
+  - **Engine:** a preview at 1 s and 0.5 s writes 90 and 45 degrees and keeps each field
+    once; put back, the scene's own values return.
+  - **Player (GPU):** the door drawn at 90 then 45 degrees (`GlobalTransform`) while its
+    `Transform` stays the identity; stopped, drawn as the scene has it.
+  - **Editor (unit):** a door's two clips listed, the animator's first; its tracks, events
+    and Once shown, Across and Mark Foot Plants not; Once written to the `.anim` and taken
+    back; ▶ plays, End holds at 1 s, ↓ chooses the second clip (2 s).
+  - **Editor (GPU):** Alt+N, a press at the ruler's end: drawn at 90 degrees, its
+    `Transform` and the saved scene the identity; the tab shut, drawn as the scene has it.
+  - **Zero allocations:** the editor's frames with the door's clip playing in the tab
+    (tracks drawn, the player previewing it every frame): 0 in 240 frames, beside the
+    character in place and the dock's preview.
+
 ## As built (E12-4a, 2026-10-30): clips made in the editor, `.anim` files
 
 E12-4 is taken in five steps: **4a** the files and their playing (this one); **4b** the

@@ -2620,6 +2620,88 @@ fn a_door_plays_a_clip_made_in_the_editor() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR 0124's E12-4b: the editor's preview of a clip made in it. While the world stands
+/// still, a door shown at the end of its `open` clip is drawn turned (its `GlobalTransform`,
+/// what the renderer reads, at 90 degrees) while its `Transform` keeps the scene's own value
+/// for everything else that reads the world; the preview stopped, the door is drawn as the
+/// scene has it.
+#[test]
+fn a_clips_preview_is_drawn_while_the_scene_keeps_its_values() {
+    let dir = std::env::temp_dir().join(format!("ofelia-anim-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings = PlayerSettings {
+        title: String::from("anim preview test"),
+        window: Window::Offscreen {
+            width: 128,
+            height: 128,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let file = AssetRef::file(AssetId::new());
+    let mut opening = AnimFile {
+        once: true,
+        ..AnimFile::default()
+    };
+    opening.set_key("Transform.rotation", 0.0, &[0.0, 0.0, 0.0]);
+    opening.set_key("Transform.rotation", 1.0, &[0.0, 90.0, 0.0]);
+    player.assets_mut().set_anim_clip(file.file, Some(&opening));
+    let door = player.world_mut().spawn((
+        Transform::IDENTITY,
+        Model::new(builtin::CUBE, builtin::MATERIAL),
+        Animator::new("open").with_clip("open", file),
+    ));
+    player.set_simulating(false);
+    // A tick each frame: the scene is propagated and drawn with the ticks (the world's
+    // time standing still, they run no game).
+    player.set_frame_time(Some(1.0 / 64.0));
+    let mut game = Still;
+    let drawn_yaw = |player: &mut Player| {
+        let g = player.world_mut().get::<GlobalTransform>(door).unwrap().0;
+        let (_, rotation, _) = g.to_scale_rotation_translation();
+        rotation.to_euler(EulerRot::YXZ).0.to_degrees()
+    };
+    player.preview_anim(Some((door, file, 1.0)));
+    player.frame(&mut game).unwrap();
+    player.frame(&mut game).unwrap();
+    assert!(
+        (drawn_yaw(&mut player) - 90.0).abs() < 0.01,
+        "{}",
+        drawn_yaw(&mut player)
+    );
+    let own = player.world_mut().get::<Transform>(door).unwrap().rotation;
+    assert!(
+        own.angle_between(Quat::IDENTITY) < 1e-5,
+        "the scene's own: {own:?}"
+    );
+    // Halfway, then stopped: drawn as the scene has it.
+    player.preview_anim(Some((door, file, 0.5)));
+    player.frame(&mut game).unwrap();
+    assert!((drawn_yaw(&mut player) - 45.0).abs() < 0.01);
+    player.preview_anim(None);
+    player.frame(&mut game).unwrap();
+    assert!(
+        drawn_yaw(&mut player).abs() < 0.01,
+        "{}",
+        drawn_yaw(&mut player)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ADR 0124's E12-3e: each clip's settings in its model's `.meta`. A walker whose Walk plays
 /// once stops at its end and holds it; one whose Walk's root motion takes its rise and fall
 /// reports the hips' bob in `moved`, where the ground's motion alone reports none; one whose

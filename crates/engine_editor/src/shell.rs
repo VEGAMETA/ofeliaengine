@@ -706,6 +706,21 @@ pub struct AnimationView<'a> {
     pub once: bool,
     /// See `once`.
     pub root: [bool; 3],
+    /// A clip made in the editor (an `.anim`, ADR 0124's E12-4b): no root motion, no feet;
+    /// its tracks shown instead.
+    pub own: bool,
+    /// Its tracks: a row each under the events, its keys marked along it.
+    pub tracks: &'a [TrackRow<'a>],
+}
+
+/// A track of a clip made in the editor, as the Animation tab shows it (ADR 0124's E12-4b):
+/// what it moves and its keys.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackRow<'a> {
+    /// Its target: `Transform.rotation`, `Lamp:PointLight.range`.
+    pub label: &'a str,
+    /// Its keys, in time order.
+    pub keys: &'a [engine_scene::AnimKey],
 }
 
 /// A joint of the inspector's Skeleton (ADR 0124's E12-1c): its name and how deep below
@@ -5806,7 +5821,10 @@ fn mark_glyph(look: MarkLook) -> &'static str {
 /// The Animation tab's panel (ADR 0124's E12-3a, [`AnimationView`]).
 fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut ShellResponse) {
     const RULER: f32 = 22.0;
-    let tall = if view.speeds.is_empty() { 150.0 } else { 182.0 };
+    /// Tracks shown at once (E12-4b).
+    const TRACKS: usize = 8;
+    let tall = if view.speeds.is_empty() { 150.0 } else { 182.0 }
+        + 20.0 * view.tracks.len().min(TRACKS) as f32;
     let panel = Style {
         size: [Size::Grow(1.0), Size::Fixed(tall)],
         direction: Direction::Column,
@@ -5871,11 +5889,14 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                     if label_button(ui, "once", "Once", view.once, p.accent, p) {
                         out.anim_clip_setting = Some(0);
                     }
-                    text(ui, "root", "root motion:", SMALL, p.text_dim);
-                    let axes = [("across", "Across"), ("up", "Up"), ("turn", "Turn")];
-                    for (i, (key, label)) in axes.into_iter().enumerate() {
-                        if label_button(ui, key, label, view.root[i], p.accent, p) {
-                            out.anim_clip_setting = Some(i as u8 + 1);
+                    // A clip made in the editor has no root to move by.
+                    if !view.own {
+                        text(ui, "root", "root motion:", SMALL, p.text_dim);
+                        let axes = [("across", "Across"), ("up", "Up"), ("turn", "Turn")];
+                        for (i, (key, label)) in axes.into_iter().enumerate() {
+                            if label_button(ui, key, label, view.root[i], p.accent, p) {
+                                out.anim_clip_setting = Some(i as u8 + 1);
+                            }
                         }
                     }
                 }
@@ -6047,6 +6068,51 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                 });
             }
         }
+        // A clip made in the editor's tracks (E12-4b): a row each, its name at the left and a
+        // mark where each of its keys is, along the ruler.
+        for (k, track) in view.tracks.iter().enumerate().take(TRACKS) {
+            ui.push_id(k as u64);
+            ui.container(
+                "track",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(16.0)],
+                    radius: 3.0,
+                    clip: true,
+                    background: Some(p.field),
+                    ..Style::default()
+                },
+                |ui| {
+                    for (j, key) in track.keys.iter().enumerate() {
+                        ui.push_id(j as u64);
+                        let x = (key.time / length).clamp(0.0, 1.0) * width;
+                        ui.container(
+                            "key",
+                            Style {
+                                size: [Size::Fixed(7.0), Size::Fixed(7.0)],
+                                radius: 1.0,
+                                background: Some(p.accent),
+                                placed: Some([(x - 3.5).clamp(0.0, (width - 7.0).max(0.0)), 4.5]),
+                                ..Style::default()
+                            },
+                            |_| {},
+                        );
+                        ui.pop_id();
+                    }
+                    ui.container(
+                        "label",
+                        Style {
+                            size: [Size::Fit, Size::Fit],
+                            placed: Some([6.0, 0.0]),
+                            ..Style::default()
+                        },
+                        |ui| {
+                            text(ui, "text", track.label, SMALL, p.text_dim);
+                        },
+                    );
+                },
+            );
+            ui.pop_id();
+        }
         out.anim_events = strip;
         if let Some((k, pressed, held, released)) = marked {
             out.anim_event = Some((
@@ -6099,7 +6165,9 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                     if panel_button(ui, "add", icons::PLUS, false, p) {
                         out.anim_event_add = true;
                     }
-                    if label_button(ui, "plants", "Mark Foot Plants", false, p.accent, p) {
+                    if !view.own
+                        && label_button(ui, "plants", "Mark Foot Plants", false, p.accent, p)
+                    {
                         out.anim_mark_plants = true;
                     }
                     let hint = "E adds an event at the playhead; drag a mark to move it";

@@ -2,7 +2,9 @@
 //! clip plays: CesiumMan selected, his Clips in the inspector, P pressed, so every frame
 //! poses him anew and writes the Clips' time again; then his file picked in the dock and its
 //! clip played in the engine's preview, drawn, read back and uploaded every frame, the
-//! Animation tab open with its clip's events marked (E12-3a, E12-3b-2). The
+//! Animation tab open with its clip's events marked (E12-3a, E12-3b-2); and a door's clip
+//! made in the editor playing in the tab, its tracks drawn and the player previewing it on
+//! the door every frame (E12-4b). The
 //! measuring thread's allocations are counted; a failing measurement prints the stacks of
 //! its first ones. One test per file, so nothing else allocates on that thread.
 
@@ -138,6 +140,22 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
         Transform::IDENTITY,
         Model::new(mesh, material),
     ));
+    // A door with a clip made in the editor (E12-4b): it swings, its lamp flickers.
+    let swing_id = AssetId::new();
+    let mut swing = engine_scene::AnimFile::default();
+    swing.set_key("Transform.rotation", 0.0, &[0.0, 0.0, 0.0]);
+    swing.set_key("Transform.rotation", 0.5, &[0.0, 60.0, 0.0]);
+    swing.set_key("Transform.rotation", 1.0, &[0.0, 0.0, 0.0]);
+    swing.set_key("Transform.scale.y", 0.25, &[1.5]);
+    std::fs::write(dir.join("door swing.anim"), swing.to_text(swing_id)).unwrap();
+    paths.insert(AssetRef::file(swing_id), "door swing.anim");
+    world.spawn((
+        SceneId::new(),
+        Name::new("Door"),
+        Transform::from_xyz(2.0, 0.0, 0.0),
+        Model::new(engine_app::builtin::CUBE, engine_app::builtin::MATERIAL),
+        engine_runtime::Animator::new("swing").with_clip("swing", AssetRef::file(swing_id)),
+    ));
     let mut text = String::new();
     let options = SaveOptions {
         id: Some(AssetId::new()),
@@ -209,9 +227,39 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
     assert_eq!(game.playing_in_place(), 1, "still playing");
     assert_ne!(game.clips().1, shown, "the time moved on");
     println!("{in_place} allocations in 240 frames of a character playing in place");
-    // P again; his file picked in the dock, its clip played in the engine's preview.
+    // P again; the door selected, the Animation tab opened, its clip played there: the
+    // player previews it on the door every frame (E12-4b).
     key(&mut game, 0x50, 0x19);
     frame(&mut player, &mut game, &mut overlay);
+    let door = engine_scene::find_named(player.world_mut(), "Door").unwrap();
+    game.select(Some(door));
+    alt_n(&mut game);
+    for _ in 0..30 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.animation_ruler().is_some(), "the Animation tab open");
+    let play = game
+        .texts_at(engine_editor::icons::PLAY)
+        .into_iter()
+        .max_by(|a, b| a[1].total_cmp(&b[1]))
+        .expect("the tab's play button");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, play, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    for _ in 0..120 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let shown = game.clips().1;
+    let own_clip = measured(&mut player, &mut game, &mut overlay);
+    assert_ne!(game.clips().1, shown, "the door's clip moved on");
+    println!("{own_clip} allocations in 240 frames of a door's clip made in the editor playing");
+    alt_n(&mut game);
+    game.select(Some(man));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    // His file picked in the dock, its clip played in the engine's preview.
     let tile = game.text_at("CesiumMan.gltf").expect("the file listed");
     for pressed in [None, Some(true), Some(false)] {
         pointer(&mut game, tile, pressed);
@@ -276,7 +324,7 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
     assert!(game.model_preview().1, "still playing");
     assert_ne!(game.clips().1, shown, "the time moved on");
     println!("{previewed} allocations in 240 frames of a model's preview playing");
-    let allocations = in_place + previewed;
+    let allocations = in_place + previewed + own_clip;
     if allocations > 0
         && let Ok(traces) = TRACES.lock()
     {
@@ -306,6 +354,32 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(in_place, 0, "allocations while a character plays in place");
     assert_eq!(previewed, 0, "allocations while a model's preview plays");
+    assert_eq!(
+        own_clip, 0,
+        "allocations while a clip made in the editor plays"
+    );
+}
+
+/// Alt+N: the Animation tab opened or shut.
+fn alt_n(game: &mut engine_editor::EditorGame<NoGame>) {
+    for (virtual_key, scancode, pressed) in [
+        (0x12, 0x38, true),
+        (0x4E, 0x31, true),
+        (0x4E, 0x31, false),
+        (0x12, 0x38, false),
+    ] {
+        game.event(&WindowEvent {
+            window: WindowId(0),
+            time: std::time::Instant::now(),
+            kind: WindowEventKind::Key {
+                virtual_key,
+                scancode,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        });
+    }
 }
 
 /// 240 frames counted: the measuring thread's allocations in them.

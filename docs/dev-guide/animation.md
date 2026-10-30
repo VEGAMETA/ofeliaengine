@@ -235,8 +235,10 @@ events.0.name = "thud"
 - **What it costs:** about 70 ns a door a tick with two tracks (1,000 doors: 70 µs on
   ref-1), no allocation, also when an animator switches between clips it played before.
 - **While the editor edits** the world stands still and nothing is written: the door
-  shows the values the scene holds. Making and previewing these clips in the editor's
-  Animation tab comes next (E12-4b).
+  shows the values the scene holds. The Animation tab previews a clip on it (its
+  playhead held or ▶), setting its fields for drawing only; the scene, its saves and undo
+  keep their own values (the [editor guide](editor.md) has the keys). Making a clip in the
+  editor (New Clip) and keying it come next (E12-4b).
 
 ### Sockets: things that follow a joint
 

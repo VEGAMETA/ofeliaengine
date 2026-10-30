@@ -468,6 +468,24 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
         bar names the feet it used.
       - A touch-down is where the foot comes down into the lowest fifth of its height in
         the clip; a loop's footstep across its end is marked once.
+  - **Clips made in the editor** (`.anim` files, see the
+    [animation guide](animation.md#clips-made-in-the-editor-anim-files)): select an entity
+    whose `Animator` has some (a door, a lamp) and the tab shows them, the animator's own
+    clip first; ↑ and ↓ step through them, as through a character's.
+    - **Its tracks** are rows under the events, one per field the clip moves
+      (`Transform.rotation`, `Lamp:PointLight.range`), a mark at each key.
+    - **The playhead shows the clip on its entity:** a press or a drag on the ruler, ←,
+      →, Home and End hold a moment; ▶ plays it. The door turns in the view as the clip
+      says, and the inspector, undo, a save and Play still see the scene's own values: the
+      clip is set only for drawing, and given back before anything else reads the world.
+      Shut the tab, choose another entity or press Escape and the door is drawn as the
+      scene has it.
+    - **Once**, its events (E, drag, Delete, the row's fields) and their sounds work as
+      for an imported clip, written into the clip's own file, each change one step of
+      undo. It has no root motion and no feet, so those buttons are not shown.
+    - The row under the strip names its tracks and frame rate ("2 tracks · 30 frames a
+      second").
+    - Making a clip (New Clip), and keys, come next (E12-4b and on).
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

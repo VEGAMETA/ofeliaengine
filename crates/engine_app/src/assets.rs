@@ -3053,6 +3053,25 @@ impl Assets {
             .tick(world, |asset| file_path(paths, asset).map(|p| root.join(p)));
     }
 
+    /// Clip file `file` (an `.anim`) shown on `entity` at `time` seconds while the editor
+    /// edits (ADR 0124's E12-4b): the fields it keys written as it says there; each one's
+    /// value before goes into `kept` once, for the editor to put back before it edits
+    /// ([`crate::KeptField::put_back`]), so saves, undo and Play see the scene's own values.
+    pub fn preview_anim(
+        &mut self,
+        world: &mut World,
+        entity: Entity,
+        file: AssetRef,
+        time: f32,
+        kept: &mut Vec<crate::KeptField>,
+    ) {
+        let (paths, root) = (&self.paths, &self.root);
+        self.fields
+            .preview(world, entity, file, time, kept, |asset| {
+                file_path(paths, asset).map(|p| root.join(p))
+            });
+    }
+
     /// Clip file `file` (an `.anim`) as the editor holds it (ADR 0124's E12-4a), read in
     /// place of the file until `None` gives the file back: its animators follow from the
     /// next tick.
