@@ -937,3 +937,139 @@ fn a_calls_and_a_functions_nodes_show_their_previews() {
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An animation graph (ADR 0124 E12-5d-1): Idle (the entry), Walk and Run; transitions both
+/// ways between Idle and Walk, one from Walk into Run, and one from Any State into Run whose
+/// condition names a parameter the graph lacks.
+fn hero(id: AssetId) -> String {
+    format!(
+        "[agraph version=1 id={id}]\n\n\
+         params[\"speed\"].kind = Float\n\
+         layers[\"base\"].name = \"Base\"\nlayers[\"base\"].root = \"m\"\n\
+         nodes[\"m\"].kind = Machine\nnodes[\"m\"].entry = \"idle\"\n\
+         nodes[\"m\"].at = [-220, -120]\n\
+         nodes[\"ci\"].clip = \"Idle\"\nnodes[\"cw\"].clip = \"Walk\"\n\
+         nodes[\"cr\"].clip = \"Run\"\n\
+         states[\"idle\"].machine = \"m\"\nstates[\"idle\"].name = \"Idle\"\n\
+         states[\"idle\"].pose = \"ci\"\n\
+         states[\"walk\"].at = [320, 0]\nstates[\"walk\"].machine = \"m\"\n\
+         states[\"walk\"].name = \"Walk\"\nstates[\"walk\"].pose = \"cw\"\n\
+         states[\"run\"].at = [320, 200]\nstates[\"run\"].machine = \"m\"\n\
+         states[\"run\"].name = \"Run\"\nstates[\"run\"].pose = \"cr\"\n\
+         transitions[\"t1\"].from = \"idle\"\ntransitions[\"t1\"].to = \"walk\"\n\
+         transitions[\"t1\"].when = \"speed > 0.1\"\n\
+         transitions[\"t2\"].from = \"walk\"\ntransitions[\"t2\"].to = \"idle\"\n\
+         transitions[\"t2\"].when = \"speed <= 0.1\"\n\
+         transitions[\"t3\"].from = \"walk\"\ntransitions[\"t3\"].to = \"run\"\n\
+         transitions[\"t3\"].when = \"speed > 3\"\n\
+         transitions[\"t4\"].to = \"run\"\ntransitions[\"t4\"].when = \"sprint\"\n"
+    )
+}
+
+/// ADR 0124 E12-5d-1: an animation graph's tab draws its canvas where the viewport is, under
+/// the panels: the states' title bars (the entry's amber, the others' blue), the Entry tag,
+/// the Any State box, the transitions' arrows, the one whose condition does not compile in
+/// red; all gone behind the scene's tab. `ENGINE_EDITOR_AGRAPH_PNG=<file>` writes the frame.
+#[test]
+fn an_animation_graphs_tab_draws_its_states_and_transitions() {
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-agraph-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["anim", ".ofelia"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    std::fs::write(dir.join("main.scene"), "[scene version=4]\n").unwrap();
+    std::fs::write(dir.join("anim/hero.agraph"), hero(AssetId::new())).unwrap();
+    std::fs::write(
+        dir.join(".ofelia/session"),
+        "[session version=1]\n\n[editor]\ngraph = 0\n\n[graph]\npath = \"anim/hero.agraph\"\n",
+    )
+    .unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor animation graph test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    game.begin_session(&mut player).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    let count = |rgba: &[u8], test: &dyn Fn(f32, f32, f32) -> bool| {
+        rgba.chunks_exact(4)
+            .filter(|p| test(f32::from(p[0]), f32::from(p[1]), f32::from(p[2])))
+            .count()
+    };
+    // sRGB about 120 74 23, 55 74 119, 30 95 105, 40 110 60, 236 104 96.
+    let amber = |r: f32, g: f32, b: f32| r > 1.4 * g && g > 2.0 * b && (95.0..150.0).contains(&r);
+    let blue = |r: f32, g: f32, b: f32| b > 1.8 * r && b > 1.4 * g && (95.0..145.0).contains(&b);
+    let teal =
+        |r: f32, g: f32, b: f32| g > 2.4 * r && b > 2.4 * r && (g - b).abs() < 25.0 && g < 130.0;
+    let green = |r: f32, g: f32, b: f32| g > 2.2 * r && g > 1.5 * b && (90.0..135.0).contains(&g);
+    let red = |r: f32, g: f32, b: f32| r > 200.0 && g < 130.0 && b < 125.0 && r > 1.8 * g;
+    let (shot, frames, took) = until(&mut player, &mut game, &mut overlay, &|shot| {
+        count(shot, &amber) > 1_000
+    });
+    let said = game.message().unwrap_or_default();
+    assert!(!said.contains("could not"), "{said}");
+    let tests: [&dyn Fn(f32, f32, f32) -> bool; 5] = [&amber, &blue, &teal, &green, &red];
+    let [a, b, t, g, r] = tests.map(|f| count(&shot, f));
+    println!(
+        "drawn after {took:.2} s, {frames} frames: amber {a}, blue {b}, teal {t}, green {g}, \
+         red {r}"
+    );
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_AGRAPH_PNG") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &shot,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
+    assert!(a > 1_200, "the entry's title bar: {a}");
+    assert!(b > 2_500, "two states' title bars: {b}");
+    assert!(t > 1_200, "the Any State box: {t}");
+    assert!(g > 250, "the Entry tag: {g}");
+    assert!(r > 100, "the broken condition's arrow and why: {r}");
+    // Ctrl+Tab: the scene's tab, the viewport where the canvas was.
+    key(&mut game, 0x11, 0x1D, true);
+    key(&mut game, 0x09, 0x0F, true);
+    player
+        .frame_overlaid(&mut game, Some(&mut overlay))
+        .unwrap();
+    key(&mut game, 0x09, 0x0F, false);
+    key(&mut game, 0x11, 0x1D, false);
+    for _ in 0..2 {
+        player
+            .frame_overlaid(&mut game, Some(&mut overlay))
+            .unwrap();
+    }
+    let scene = player
+        .capture_overlaid(&mut game, Some(&mut overlay))
+        .unwrap()
+        .unwrap();
+    let [a0, t0, g0] = [tests[0], tests[2], tests[3]].map(|f| count(&scene, f));
+    println!("the scene's tab: amber {a0}, teal {t0}, green {g0}");
+    assert!(
+        a0 < 200 && t0 < 200 && g0 < 200,
+        "no canvas behind the scene"
+    );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
