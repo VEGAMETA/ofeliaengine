@@ -1337,6 +1337,32 @@ pub struct ForwardPasses {
     pub virtual_shadows: Option<crate::vsm::VsmFrame>,
 }
 
+impl ForwardPasses {
+    /// What a view whose scene passes did not run declared (ADR 0125: a 2D view draws its
+    /// sprites instead): nothing drawn, no motion vectors, none of the scene's targets.
+    pub fn none() -> Self {
+        Self {
+            instances: 0,
+            batches: 0,
+            draw_commands: 0,
+            list_commands: 0,
+            occlusion: false,
+            commands: None,
+            motion: None,
+            ao: None,
+            atmosphere: None,
+            contact_shadows: None,
+            virtual_shadows: None,
+            decals: None,
+            gi: None,
+            reflections: None,
+            resolved_depth: None,
+            draws: None,
+            meshlets: None,
+        }
+    }
+}
+
 /// Where a view's meshlet lists are in [`ForwardPasses::commands`] (ADR 0085): one per
 /// culling phase, each starting with the meshlet draws it made per pipeline state (32
 /// `u32`).

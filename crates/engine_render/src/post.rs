@@ -93,6 +93,12 @@ pub enum ToneCurve {
     /// hue. Mid-grey comes out darker (0.18 → 0.11: about +0.7 EV of exposure matches the
     /// other curves). SDR only, like [`Self::Agx`].
     Aces,
+    /// None (ADR 0125): colors as they are, clipped only by the output (an 8-bit image
+    /// keeps what lies between black and white; an HDR display shows brighter values up
+    /// to its own peak, where it clips them). A 2D view's default, so a sprite reaches the
+    /// screen as it was painted. The tone mapper's pass-through: no code of its own in any
+    /// entry point.
+    None,
 }
 
 /// `m · v` for a row-major 3 × 3 matrix.
@@ -224,6 +230,7 @@ impl ToneCurve {
             Self::PbrNeutral => pbr_neutral(rgb, peak),
             Self::Agx => agx(rgb),
             Self::Aces => aces(rgb),
+            Self::None => rgb,
         }
     }
 }
@@ -788,6 +795,8 @@ impl Tonemap {
                             ToneCurve::PbrNeutral => FLAG_PBR_NEUTRAL,
                             ToneCurve::Agx => FLAG_AGX,
                             ToneCurve::Aces => FLAG_ACES,
+                            // The pass-through: exposure, the output's encoding.
+                            ToneCurve::None => FLAG_PASS_THROUGH,
                         }
                         | if auto_exposure.is_some() {
                             FLAG_AUTO_EXPOSURE
@@ -922,6 +931,17 @@ mod tests {
         let dim = ToneCurve::Agx.apply([0.3, 0.05, 0.02], 1.0);
         let bright = ToneCurve::Agx.apply([300.0, 50.0, 20.0], 1.0);
         assert!(bright[2] / bright[0] > dim[2] / dim[0] * 2.0);
+    }
+
+    #[test]
+    fn no_curve_keeps_colors_to_the_bit() {
+        // ADR 0125: a sprite as it was painted; the output clips what it cannot show.
+        for c in [0.0f32, 1.0 / 255.0, 0.18, 0.5, 0.999, 1.0, 4.0] {
+            for peak in [1.0, 5.0] {
+                let rgb = [c, c * 0.5, 0.25];
+                assert_eq!(ToneCurve::None.apply(rgb, peak), rgb);
+            }
+        }
     }
 
     #[test]
