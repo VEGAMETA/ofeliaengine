@@ -1,8 +1,10 @@
 //! ADR 0107 §8, ADR 0123 E10-3d and CLAUDE.md §5: the editor's frames make no heap
 //! allocation in a steady state with a material graph's tab shown: its canvas drawn, the
 //! pointer going over its boxes, ports and the empty canvas so every frame lights something
-//! else. The measuring thread's allocations are counted; a failing measurement prints the
-//! stacks of its first ones. One test per file, so nothing else allocates on that thread.
+//! else; then likewise with an animation graph's tab shown (ADR 0124 E12-5d-1), the pointer
+//! over its states, their edges, its arrows (their conditions shown) and Any State. The
+//! measuring thread's allocations are counted; a failing measurement prints the stacks of
+//! its first ones. One test per file, so nothing else allocates on that thread.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -75,11 +77,73 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
 
+/// The measurement's allocations so far, their first ones' stacks printed (by their first
+/// frames in the engine's crates, with their lines).
+fn report(what: &str) -> usize {
+    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    println!("{allocations} allocations in 240 frames of {what}");
+    if allocations > 0
+        && let Ok(traces) = TRACES.lock()
+    {
+        for (k, trace) in traces.iter().enumerate() {
+            let text = trace.to_string();
+            let lines: Vec<&str> = text.lines().map(str::trim).collect();
+            let mut ours = Vec::new();
+            for (i, l) in lines.iter().enumerate() {
+                if l.contains(": engine_") && !l.contains("tests::") {
+                    let symbol = l.split(": ").nth(1).unwrap_or(l);
+                    let at = lines
+                        .get(i + 1)
+                        .filter(|n| n.starts_with("at "))
+                        .and_then(|n| n.rsplit(['\\', '/']).next())
+                        .unwrap_or("");
+                    ours.push(format!("{symbol} @ {at}"));
+                    if ours.len() == 3 {
+                        break;
+                    }
+                }
+            }
+            println!("allocation {}: {}", k + 1, ours.join(" <- "));
+        }
+    }
+    allocations
+}
+
+/// An animation graph: Idle (the entry), Walk and Run, transitions both ways between Idle
+/// and Walk, one from Walk into Run, one from Any State whose condition does not compile.
+fn hero() -> String {
+    format!(
+        "[agraph version=1 id={}]\n\n\
+         params[\"speed\"].kind = Float\n\
+         layers[\"base\"].name = \"Base\"\nlayers[\"base\"].root = \"m\"\n\
+         nodes[\"m\"].kind = Machine\nnodes[\"m\"].entry = \"idle\"\n\
+         nodes[\"m\"].at = [-220, -120]\n\
+         nodes[\"ci\"].clip = \"Idle\"\nnodes[\"cw\"].clip = \"Walk\"\n\
+         nodes[\"cr\"].clip = \"Run\"\n\
+         states[\"idle\"].machine = \"m\"\nstates[\"idle\"].name = \"Idle\"\n\
+         states[\"idle\"].pose = \"ci\"\n\
+         states[\"walk\"].at = [320, 0]\nstates[\"walk\"].machine = \"m\"\n\
+         states[\"walk\"].name = \"Walk\"\nstates[\"walk\"].pose = \"cw\"\n\
+         states[\"run\"].at = [320, 200]\nstates[\"run\"].machine = \"m\"\n\
+         states[\"run\"].name = \"Run\"\nstates[\"run\"].pose = \"cr\"\n\
+         transitions[\"t1\"].from = \"idle\"\ntransitions[\"t1\"].to = \"walk\"\n\
+         transitions[\"t1\"].when = \"speed > 0.1\"\n\
+         transitions[\"t2\"].from = \"walk\"\ntransitions[\"t2\"].to = \"idle\"\n\
+         transitions[\"t2\"].when = \"speed <= 0.1\"\n\
+         transitions[\"t3\"].from = \"walk\"\ntransitions[\"t3\"].to = \"run\"\n\
+         transitions[\"t3\"].when = \"speed > 3\"\n\
+         transitions[\"t4\"].to = \"run\"\ntransitions[\"t4\"].when = \"sprint\"\n",
+        AssetId::new()
+    )
+}
+
 #[test]
 fn a_graph_tabs_frames_do_not_allocate() {
     let dir = std::env::temp_dir().join(format!("ofelia-graph-alloc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("materials")).unwrap();
+    std::fs::create_dir_all(dir.join("anim")).unwrap();
+    std::fs::write(dir.join("anim/hero.agraph"), hero()).unwrap();
     std::fs::create_dir_all(dir.join(".ofelia")).unwrap();
     std::fs::write(dir.join("main.scene"), "[scene version=4]\n").unwrap();
     std::fs::write(
@@ -103,7 +167,7 @@ fn a_graph_tabs_frames_do_not_allocate() {
     std::fs::write(
         dir.join(".ofelia/session"),
         "[session version=1]\n\n[editor]\ngraph = 0\n\n[graph]\npath = \
-         \"materials/moss.mgraph\"\n",
+         \"materials/moss.mgraph\"\n\n[graph]\npath = \"anim/hero.agraph\"\n",
     )
     .unwrap();
     let (width, height) = (1280u32, 720u32);
@@ -141,8 +205,39 @@ fn a_graph_tabs_frames_do_not_allocate() {
         (450, 300),
         (560, 240),
     ];
-    let mut frame = |n: usize| {
-        let (x, y) = spots[n % spots.len()];
+    // The animation graph's, at its framing (80 %) in the same layout: Any State and its
+    // edge, Idle and its edge, the arrows between Idle and Walk, Walk into Run, the red one
+    // from Any State, the empty canvas, Run.
+    let anim_spots: [(i32, i32); 9] = [
+        (116, 145),
+        (73, 145),
+        (300, 258),
+        (359, 250),
+        (430, 244),
+        (560, 330),
+        (430, 331),
+        (600, 150),
+        (560, 415),
+    ];
+    let mut frame = |n: usize, anim: bool, keys: &[(u16, u16, bool)]| {
+        for &(vk, scancode, pressed) in keys {
+            game.event(&WindowEvent {
+                window: WindowId(0),
+                time: std::time::Instant::now(),
+                kind: WindowEventKind::Key {
+                    virtual_key: vk,
+                    scancode,
+                    extended: false,
+                    pressed,
+                    repeat: false,
+                },
+            });
+        }
+        let (x, y) = if anim {
+            anim_spots[n % anim_spots.len()]
+        } else {
+            spots[n % spots.len()]
+        };
         game.event(&WindowEvent {
             window: WindowId(0),
             time: std::time::Instant::now(),
@@ -160,7 +255,7 @@ fn a_graph_tabs_frames_do_not_allocate() {
     let started = std::time::Instant::now();
     let (mut n, mut pending) = (0, 1);
     while n < 240 || pending > 0 {
-        pending = frame(n);
+        pending = frame(n, false, &[]);
         n += 1;
         assert!(
             started.elapsed().as_secs() < 90,
@@ -170,7 +265,7 @@ fn a_graph_tabs_frames_do_not_allocate() {
     // Its nodes' previews (E10-4g) ask for their own pipeline once the type is made: rounds
     // of frames until one has none on its way (their atlas drawn, read back and shown).
     loop {
-        let most = (0..120).map(&mut frame).max().unwrap_or(0);
+        let most = (0..120).map(|n| frame(n, false, &[])).max().unwrap_or(0);
         if most == 0 {
             break;
         }
@@ -181,37 +276,56 @@ fn a_graph_tabs_frames_do_not_allocate() {
     }
     COUNTING.with(|c| c.set(true));
     for n in 0..240 {
-        frame(n);
+        frame(n, false, &[]);
     }
     COUNTING.with(|c| c.set(false));
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-    println!("{allocations} allocations in 240 frames of a graph's tab");
-    if allocations > 0
-        && let Ok(traces) = TRACES.lock()
-    {
-        // Each one by its first frames in the engine's crates, with their lines.
-        for (k, trace) in traces.iter().enumerate() {
-            let text = trace.to_string();
-            let lines: Vec<&str> = text.lines().map(str::trim).collect();
-            let mut ours = Vec::new();
-            for (i, l) in lines.iter().enumerate() {
-                if l.contains(": engine_") && !l.contains("tests::") {
-                    let symbol = l.split(": ").nth(1).unwrap_or(l);
-                    let at = lines
-                        .get(i + 1)
-                        .filter(|n| n.starts_with("at "))
-                        .and_then(|n| n.rsplit(['\\', '/']).next())
-                        .unwrap_or("");
-                    ours.push(format!("{symbol} @ {at}"));
-                    if ours.len() == 3 {
-                        break;
-                    }
-                }
-            }
-            println!("allocation {}: {}", k + 1, ours.join(" <- "));
-        }
+    let material = report("a material graph's tab");
+    // Ctrl+Tab: the animation graph's tab; its frames as they come with the pointer on its
+    // round, then measured alike.
+    frame(0, true, &[(0x11, 0x1D, true), (0x09, 0x0F, true)]);
+    frame(1, true, &[(0x09, 0x0F, false), (0x11, 0x1D, false)]);
+    for n in 0..240 {
+        frame(n, true, &[]);
+    }
+    if let Ok(mut traces) = TRACES.lock() {
+        traces.clear();
+    }
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.with(|c| c.set(true));
+    for n in 0..240 {
+        frame(n, true, &[]);
+    }
+    COUNTING.with(|c| c.set(false));
+    let anim = report("an animation graph's tab");
+    // It was the animation graph's canvas that was measured: its entry's amber title bar.
+    let shot = player
+        .capture_overlaid(&mut game, Some(&mut overlay))
+        .unwrap()
+        .unwrap();
+    let amber = shot
+        .chunks_exact(4)
+        .filter(|p| {
+            let (r, g, b) = (f32::from(p[0]), f32::from(p[1]), f32::from(p[2]));
+            r > 1.4 * g && g > 2.0 * b && (95.0..150.0).contains(&r)
+        })
+        .count();
+    assert!(amber > 1_000, "the animation graph's tab shown: {amber}");
+    // `ENGINE_EDITOR_AGRAPH_ALLOC_PNG=<file>` writes it: the pointer on Walk's arrow into Run.
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_AGRAPH_ALLOC_PNG") {
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &shot,
+        )
+        .unwrap();
+        std::fs::write(path, png).unwrap();
     }
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(allocations, 0, "allocations in the graph tab's frames");
+    assert_eq!(
+        material, 0,
+        "allocations in the material graph tab's frames"
+    );
+    assert_eq!(anim, 0, "allocations in the animation graph tab's frames");
 }

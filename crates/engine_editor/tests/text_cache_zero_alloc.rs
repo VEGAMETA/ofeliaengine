@@ -253,6 +253,7 @@ fn a_steady_shell_frame_does_not_allocate() {
         active_script: None,
         code: None,
         graphs: &[],
+        graph_anim: &[],
         active_graph: None,
         graph: None,
         tools: &["Select", "Move"],

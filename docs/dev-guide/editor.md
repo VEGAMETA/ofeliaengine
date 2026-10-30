@@ -1301,7 +1301,7 @@ Tabs:
   - "File: Open Script…" in the palette;
   - a click on an error at a script's line in the Output, which opens it at that line.
 - **A scene's tab** brings the scene back in front; Ctrl+Tab goes through the scenes'
-  tabs, then the scripts', then the material graphs'.
+  tabs, then the scripts', then the graphs' (material and animation graphs).
 - **The keys are VS Code's:**
   - Ctrl+D selects the word, then its next match, each with a caret of its own;
     Alt+click and Ctrl+Alt+Up or Down add carets; Escape leaves one;
@@ -1579,6 +1579,84 @@ Until its shaders are made, the material draws its colour.
     was. A function that the function calls stays a call.
   - Before a graph is written, each call is replaced by its function's nodes (inlining,
     as Unreal does). An error inside a function is shown at its call ("in tint: …").
+
+## Animation graphs
+
+An animation graph (an `.agraph` file, ADR 0124) is what plays a character's clips as its
+parameters say: state machines whose states play a clip or a blend of clips, with
+transitions between them. It opens as a material graph does, in a tab of its own after the
+scripts' (its icon a character's), its canvas where the viewport is: a double click on it
+in the FileSystem dock. The bar names the file, the machine's states and transitions, the
+selection, the zoom, and the first thing that does not hold together.
+
+**Animation: New Animation Graph** (Ctrl+Shift+P) writes `New Animation Graph.agraph` in the
+dock's folder and opens it: a base layer playing a machine whose entry state, Idle, plays a
+clip not named yet (marked as a problem until you name it in the inspector).
+
+- **The canvas** shows the first layer's state machine:
+  - each state is a box: its name, and under it what it plays (`Walk`, `Blend1d speed:
+    Walk · Run`, `Machine`);
+  - the **entry state** (where the machine starts) has an amber title bar and an **Entry**
+    tag with an arrow into it;
+  - **Any State** holds the transitions that can leave any state of the machine (Unity's
+    Any State). Drag it where you like: its place is kept in the file (its machine's own);
+  - **transitions** are arrows from the edge of one box to the edge of the other. Two
+    between the same states, one each way, are drawn side by side.
+- **Adding states:** **Space** (or Shift+A) over the canvas opens the state search at the
+  pointer: a state playing a clip, a blend along one parameter, or a blend over two. The
+  state picked goes where the pointer was, named `New State` (numbered when taken),
+  selected. **Graph: Add Node…** in the palette does the same at the canvas's middle. The
+  first state of a machine becomes its entry.
+- **The mouse:**
+  - **drag from a state's edge** (it lights blue under the pointer), or **Ctrl+drag** from
+    anywhere on it, onto another state: a transition, selected, ready for its condition. A
+    transition into the state it leaves is refused;
+  - **drop it on the empty canvas** instead: a new state there, the transition going into
+    it;
+  - drag from **Any State**'s edge the same way: a transition from any state;
+  - **click a box** to select it, Shift+click to add it or take it out, and drag it (the
+    selection moves with it, to whole units);
+  - **click an arrow** to select it (Shift adds it);
+  - **drag on the empty canvas:** a box selects the states it meets (Shift adds); a click
+    there lets the selection go;
+  - **the middle or the right button** pans, **the wheel** zooms about the pointer.
+- **The inspector:**
+  - **a state** selected alone: its name (what scripts read; no two states of a machine
+    share one), **entry** (switch it on to start its machine there), what it **plays**
+    (Clip, Blend1d, Blend2d), a clip's name, a blend's parameter or two and its clips
+    (each one's name and where it lies; type a name in **add clip** to add one, empty a
+    clip's name to take it out), and its **speed**;
+  - **a transition** selected alone: **when**, its condition, then its **blend** (seconds),
+    **priority** (the smallest is tried first), **exit time** (a fraction of the clip it
+    leaves; 0 for none), **offset** (where the next state starts), **keep phase** and
+    **inertialize**;
+  - **nothing selected:** the graph's parameters, a section each: its **name**, its
+    **kind** (Float, Bool, Int, Trigger) and the value it **starts at**. The section's ×
+    deletes it; **Add Parameter** adds one of a kind (`number`, `flag`, `count`,
+    `trigger`, numbered when taken). Renaming a parameter renames it in every condition,
+    blend and layer that names it.
+- **Conditions** are expressions over the parameters, checked as you type:
+  `speed > 0.1 and grounded`, `not crouch`, `jump` (a trigger: it holds once fired, and the
+  transition taking it uses it up). Numbers, `true`, `false`, `+ - * /`, `< <= > >= == ~=`
+  (or `!=`), `and`, `or`, `not` (or `&&`, `||`, `!`) and parentheses. A misspelt name or a
+  missing value is said under the field with where it is (``no parameter `speeed` (at 1)``).
+  A transition with neither a condition nor an exit time would go at once: it is marked
+  until it has one.
+- **Problems** are marked where they are: a box or an arrow framed in red, why under the
+  box or by the arrow, in the inspector under its fields, and the first one in the bar. A
+  state whose clip has no name, a blend without clips or parameter, a condition that does
+  not compile, a reference a merge broke.
+- **The keys:** Delete deletes the selected states (with every transition into or out of
+  them) and transitions (Any State stays; a machine whose entry went starts at its first
+  state left), F frames the selection (or everything), Escape takes a drag back or lets the
+  selection go, Ctrl+S writes the file, Ctrl+W closes the tab, Ctrl+Z and Ctrl+Y undo and
+  redo. **Graph: Set Entry State** in the palette makes the selected state its machine's
+  entry.
+- **Every edit is one step** of the editor's one history; unsaved graphs are autosaved and
+  the session brings their tabs back, as material graphs'.
+- **Not yet:** machines inside machines (Tab into one), layers and masks, blends drawn as
+  points, the character's preview in the corner, and the live state in Play come with the
+  next steps (ADR 0124's E12-5d and E12-5e).
 
 ## Autosave and the session
 

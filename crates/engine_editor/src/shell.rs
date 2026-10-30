@@ -443,6 +443,10 @@ pub enum Widget<'a> {
         /// A sound's ▶, ■ while it plays (E11-3d); none for other assets.
         play: Option<bool>,
     },
+    /// What does not hold together on the fields above it (ADR 0124 E12-5d-1: a state's
+    /// problem, a condition that does not compile at its place), in the error colour,
+    /// wrapped.
+    Problem(&'a str),
 }
 
 /// One property in the inspector.
@@ -1025,8 +1029,9 @@ pub struct BreakOptionsView<'a> {
 /// A graph's preview's side in the canvas's corner (E10-3f-2), logical pixels.
 const PREVIEW: f32 = 128.0;
 
-/// The bar over a material graph's canvas (ADR 0123 E10-3d), in the center instead of the
-/// viewport; the app draws the canvas under the panels.
+/// The bar over a graph's canvas (ADR 0123 E10-3d; an animation graph's, ADR 0124
+/// E12-5d-1), in the center instead of the viewport; the app draws the canvas under the
+/// panels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GraphBar<'a> {
     /// The graph's file.
@@ -1035,6 +1040,8 @@ pub struct GraphBar<'a> {
     pub status: &'a str,
     /// Its material's preview, once drawn: a sphere in the canvas's corner (E10-3f-2).
     pub preview: Option<UiImage>,
+    /// It has code to show (a material graph's): the Show Slang button.
+    pub slang: bool,
 }
 
 /// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
@@ -1120,6 +1127,8 @@ pub struct ShellModel<'a> {
     pub code: Option<CodeView<'a>>,
     /// Open material graphs (tabs after the scripts'); an unsaved one ends with `*`.
     pub graphs: &'a [&'a str],
+    /// Which of them are animation graphs (ADR 0124 E12-5d-1): their tabs' icon.
+    pub graph_anim: &'a [bool],
     /// The graph tab shown, if one is: its canvas instead of the viewport.
     pub active_graph: Option<usize>,
     /// The shown graph's bar.
@@ -1737,7 +1746,10 @@ fn center(
                 ui.spacer("fill");
                 text(ui, "status", graph.status, TEXT, p.text_dim);
                 // Its code, read only in a tab of its own (E10-3f-3).
-                out.show_slang = label_button(ui, "show slang", "Show Slang", false, p.field, p);
+                if graph.slang {
+                    out.show_slang =
+                        label_button(ui, "show slang", "Show Slang", false, p.field, p);
+                }
             });
             // Its preview in the top right corner, over the canvas the app draws.
             let mut preview = 0;
@@ -2094,11 +2106,17 @@ fn script_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shell
     }
 }
 
-/// The open material graphs' tabs, after the scripts' (ADR 0123 E10-3d).
+/// The open graphs' tabs, after the scripts' (ADR 0123 E10-3d): a material graph's with a
+/// shader's icon, an animation graph's with a character's (ADR 0124 E12-5d-1).
 fn graph_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellResponse) {
     for (i, label) in model.graphs.iter().enumerate() {
         ui.push_id(i as u64);
         let on = model.active_graph == Some(i);
+        let (glyph, tint) = if model.graph_anim.get(i).copied().unwrap_or(false) {
+            (icons::CHARACTER, srgb(232, 170, 90))
+        } else {
+            (icons::SHADER, srgb(120, 196, 222))
+        };
         let mut close = 0;
         let id = ui.container(
             "graph tab",
@@ -2111,7 +2129,7 @@ fn graph_tabs(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut ShellR
                 ..Style::default()
             },
             |ui| {
-                text(ui, "icon", icons::SHADER, ICON, srgb(120, 196, 222));
+                text(ui, "icon", glyph, ICON, tint);
                 let color = if on { p.text } else { p.text_dim };
                 text(ui, "label", label, TEXT, color);
                 close = ui.container(
@@ -4686,15 +4704,16 @@ fn inspector_dock(
                     for (f, field) in section.fields.iter().enumerate() {
                         ui.push_id(f as u64);
                         let mut action = None;
-                        let height = if matches!(field.widget, Widget::Asset { .. }) {
-                            ASSET_ROW
-                        } else {
-                            26.0
+                        // A problem's text wraps: its row as high as it needs.
+                        let height = match field.widget {
+                            Widget::Asset { .. } => Size::Fixed(ASSET_ROW),
+                            Widget::Problem(_) => Size::Fit,
+                            _ => Size::Fixed(26.0),
                         };
                         let row = ui.row(
                             "field",
                             Style {
-                                size: [Size::Grow(1.0), Size::Fixed(height)],
+                                size: [Size::Grow(1.0), height],
                                 padding: [12.0, 0.0, 8.0, 0.0],
                                 gap: 8.0,
                                 align_cross: Align::Center,
@@ -4797,6 +4816,30 @@ fn inspector_dock(
                                         }
                                     }
                                     Widget::Check(on) => checkbox(ui, on, p, &mut action),
+                                    Widget::Problem(why) => {
+                                        ui.row(
+                                            "value",
+                                            Style {
+                                                size: [Size::Grow(1.0), Size::Fit],
+                                                padding: [6.0, 4.0, 6.0, 4.0],
+                                                align_cross: Align::Center,
+                                                ..Style::default()
+                                            },
+                                            |ui| {
+                                                ui.text_node(
+                                                    "text",
+                                                    Style {
+                                                        size: [Size::Grow(1.0), Size::Fit],
+                                                        ..Style::default()
+                                                    },
+                                                    why,
+                                                    TEXT,
+                                                    p.error,
+                                                    true,
+                                                );
+                                            },
+                                        );
+                                    }
                                     Widget::Choice {
                                         current,
                                         open,

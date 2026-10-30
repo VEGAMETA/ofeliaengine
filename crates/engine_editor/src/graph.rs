@@ -63,7 +63,7 @@ pub(crate) const TITLE: f32 = 26.0;
 /// A row of ports.
 pub(crate) const ROW: f32 = 22.0;
 /// Room inside a box's edges.
-const PAD: f32 = 10.0;
+pub(crate) const PAD: f32 = 10.0;
 /// Between the inputs' names and the outputs'.
 const GAP: f32 = 20.0;
 /// The narrowest box.
@@ -73,9 +73,9 @@ const PORT_RADIUS: f32 = 4.5;
 /// How far from a port a press or a drop still takes it, in panel pixels.
 pub(crate) const PORT_REACH: f32 = 9.0;
 /// The titles' text at zoom 1.
-const TITLE_TEXT: f32 = 13.0;
+pub(crate) const TITLE_TEXT: f32 = 13.0;
 /// The ports' text.
-const PORT_TEXT: f32 = 12.0;
+pub(crate) const PORT_TEXT: f32 = 12.0;
 /// Around the nodes framed (F), in panel pixels.
 const FRAME_MARGIN: f32 = 40.0;
 /// A node's preview's tile (E10-4g), in canvas units: the atlas's pixels at zoom 1.
@@ -83,7 +83,7 @@ pub(crate) const TILE: f32 = 64.0;
 /// Room above and below a tile.
 const TILE_ROOM: f32 = 8.0;
 /// A box's corners.
-const RADIUS: f32 = 5.0;
+pub(crate) const RADIUS: f32 = 5.0;
 /// The grid's small and large squares.
 const GRID: f32 = 20.0;
 const GRID_MAJOR: f32 = 100.0;
@@ -103,7 +103,7 @@ const FRAME_BAR: Vec4 = Vec4::new(0.05, 0.055, 0.07, 0.9);
 /// Two presses this close in time (and in place, [`CLICK_SLOP`]) are a double-click.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 /// Under this many panel pixels a box's drag is a click.
-const CLICK_SLOP: f32 = 3.0;
+pub(crate) const CLICK_SLOP: f32 = 3.0;
 
 /// How the canvas shows: the canvas point at the panel's top left, and the zoom's step.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -421,7 +421,7 @@ pub(crate) fn link_point(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
 }
 
 /// How far point `p` is from the segment `a`–`b`.
-fn segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+pub(crate) fn segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let length = dx * dx + dy * dy;
     let t = if length > 0.0 {
@@ -1316,6 +1316,10 @@ pub(crate) struct GraphDoc {
     /// The selected frames, by id (E10-3e-2b): apart from the nodes, as a file's ids for
     /// both could meet.
     pub(crate) selected_frames: BTreeSet<String>,
+    /// An animation graph's file (`.agraph`, ADR 0124 E12-5d-1) in place of a material
+    /// graph, with what its canvas shows ([`crate::agraph`]); `graph` stays empty then. Its
+    /// tab, history, saves and autosaves are a material graph's.
+    pub(crate) anim: Option<Box<crate::agraph::AnimDoc>>,
 }
 
 impl GraphDoc {
@@ -1326,6 +1330,17 @@ impl GraphDoc {
     /// A file that cannot be read or is not a graph.
     pub(crate) fn open(root: &Path, path: &str) -> Result<Self, String> {
         let text = std::fs::read_to_string(root.join(path)).map_err(|e| format!("{path}: {e}"))?;
+        // An animation graph's (ADR 0124 E12-5d-1).
+        if crate::agraph::is_anim_graph(path) {
+            let (file, report) =
+                engine_scene::AnimGraphFile::parse(&text).map_err(|e| format!("{path}:{e}"))?;
+            return Ok(Self::new_anim(
+                report.id.unwrap_or_else(AssetId::new),
+                path,
+                file,
+                report.assets,
+            ));
+        }
         let (graph, report) =
             read_text(is_function(path), &text).map_err(|e| format!("{path}: {e}"))?;
         Ok(Self::new(
@@ -1339,14 +1354,38 @@ impl GraphDoc {
     /// Graph `graph` of file `id` at `path`, its references written with `paths`, as
     /// saved: unsaved only once edited.
     pub(crate) fn new(id: AssetId, path: &str, graph: Graph, paths: AssetPaths) -> Self {
-        let text = file_text(is_function(path), &graph, id, &paths);
-        Self {
+        Self::with(id, path, graph, paths, None)
+    }
+
+    /// Animation graph `file` of file `id` at `path`, its references written with `paths`,
+    /// as saved (ADR 0124 E12-5d-1).
+    pub(crate) fn new_anim(
+        id: AssetId,
+        path: &str,
+        file: engine_scene::AnimGraphFile,
+        paths: AssetPaths,
+    ) -> Self {
+        let mut graph = Graph::new(Model::Lit);
+        graph.nodes.clear();
+        let anim = crate::agraph::AnimDoc::new(file);
+        Self::with(id, path, graph, paths, Some(Box::new(anim)))
+    }
+
+    /// A graph's document, as saved: its text made from what it holds.
+    fn with(
+        id: AssetId,
+        path: &str,
+        graph: Graph,
+        paths: AssetPaths,
+        anim: Option<Box<crate::agraph::AnimDoc>>,
+    ) -> Self {
+        let mut doc = Self {
             id,
             path: path.to_owned(),
             graph,
             paths,
-            saved: text.clone(),
-            text,
+            saved: String::new(),
+            text: String::new(),
             revision: 0,
             view: View::default(),
             selected: BTreeSet::new(),
@@ -1366,6 +1405,18 @@ impl GraphDoc {
             error: None,
             last_press: None,
             selected_frames: BTreeSet::new(),
+            anim,
+        };
+        doc.text = doc.current_text();
+        doc.saved.clone_from(&doc.text);
+        doc
+    }
+
+    /// Its text as it now is: its graph's (a function's), or its animation graph's.
+    fn current_text(&self) -> String {
+        match &self.anim {
+            Some(anim) => anim.file.to_text(self.id, Some(&self.paths)),
+            None => file_text(self.function, &self.graph, self.id, &self.paths),
         }
     }
 
@@ -1397,11 +1448,14 @@ impl GraphDoc {
 
     /// After the graph changed in place (a drag's moves): laid out again, its text again,
     /// and whether that changed (its text before and after).
-    fn settle(&mut self) -> Option<(String, String)> {
+    pub(crate) fn settle(&mut self) -> Option<(String, String)> {
         self.revision += 1;
-        let after = file_text(self.function, &self.graph, self.id, &self.paths);
+        let after = self.current_text();
         if after == self.text {
             return None;
+        }
+        if let Some(anim) = self.anim.as_deref_mut() {
+            anim.refresh();
         }
         let before = core::mem::replace(&mut self.text, after.clone());
         Some((before, after))
@@ -1413,6 +1467,15 @@ impl GraphDoc {
     ///
     /// A text that is not a graph.
     pub(crate) fn put_text(&mut self, text: &str) -> Result<(), String> {
+        if let Some(anim) = self.anim.as_deref_mut() {
+            let (file, report) = engine_scene::AnimGraphFile::parse(text)
+                .map_err(|e| format!("{}:{e}", self.path))?;
+            anim.put(file);
+            self.paths = report.assets;
+            self.text = text.to_owned();
+            self.revision += 1;
+            return Ok(());
+        }
         let (graph, report) =
             read_text(self.function, text).map_err(|e| format!("{}: {e}", self.path))?;
         self.graph = graph;
@@ -1433,6 +1496,10 @@ impl GraphDoc {
     /// Its boxes laid out again where the graph changed since (`measure`: a text's width
     /// at a size).
     pub(crate) fn relayout(&mut self, measure: &mut dyn FnMut(&str, f32) -> f32) {
+        if let Some(anim) = self.anim.as_deref_mut() {
+            anim.relayout(self.revision, measure);
+            return;
+        }
         let key = (self.revision, self.tiles);
         if self.laid_out != Some(key) {
             layout(
@@ -1666,7 +1733,11 @@ impl GraphDoc {
     /// The view framing the selected nodes (all of them, none selected) in a panel of
     /// `size`.
     pub(crate) fn frame(&mut self, size: [f32; 2]) {
-        if let Some(area) = self.extent() {
+        let area = match &self.anim {
+            Some(anim) => anim.extent(),
+            None => self.extent(),
+        };
+        if let Some(area) = area {
             self.view.frame(area, size);
         }
     }
@@ -2976,7 +3047,7 @@ fn port_color(ty: PortType) -> Vec4 {
 
 /// A title bar's colour by its kind's group in the node search, dark enough for white
 /// text (linear: about sRGB 40 95 90 for the inputs, 55 75 120 for the maths).
-fn title_color(category: &str) -> Vec4 {
+pub(crate) fn title_color(category: &str) -> Vec4 {
     match category {
         "Input" => Vec4::new(0.021, 0.115, 0.1, 1.0),
         "Math" => Vec4::new(0.038, 0.07, 0.188, 1.0),
@@ -2988,7 +3059,10 @@ fn title_color(category: &str) -> Vec4 {
 }
 
 /// A box's body (linear: about sRGB 63 63 67).
-const BODY: Vec4 = Vec4::new(0.05, 0.05, 0.058, 0.97);
+pub(crate) const BODY: Vec4 = Vec4::new(0.05, 0.05, 0.058, 0.97);
+/// A selected box's frame (the viewport's orange), and one under the pointer's.
+pub(crate) const SELECTED: Vec4 = Vec4::new(1.0, 0.62, 0.18, 1.0);
+pub(crate) const HOVERED: Vec4 = Vec4::new(1.0, 1.0, 1.0, 0.3);
 
 /// A constant's components as the canvas shows them: up to three decimals, no trailing
 /// zeros.
@@ -3063,15 +3137,9 @@ pub(crate) fn draw(
     scratch: &mut String,
 ) {
     let [rx, ry, rw, rh] = look.rect.map(|v| v as f32);
-    canvas.set_clip(Some(ClipRect {
-        x: look.rect[0] as i32,
-        y: look.rect[1] as i32,
-        width: look.rect[2],
-        height: look.rect[3],
-    }));
-    let order = Order::layer(-1);
+    draw_back(&doc.view, look, canvas);
+    let order = CANVAS_ORDER;
     let z = doc.view.zoom() * look.scale;
-    let pan = doc.view.pan;
     let origin = [rx / look.scale, ry / look.scale];
     let to = |c: [f32; 2]| {
         let q = doc.view.panel_point(c, origin);
@@ -3085,42 +3153,6 @@ pub(crate) fn draw(
                 .order(order),
         );
     };
-    solid(
-        canvas,
-        Vec2::new(rx, ry),
-        Vec2::new(rx + rw, ry + rh),
-        Vec4::from_array(p.code),
-    );
-    // The grid: its small squares while they are 8 pixels or more apart, its large ones.
-    for (step, alpha) in [(GRID, 0.035), (GRID_MAJOR, 0.07)] {
-        if step * z < 8.0 {
-            continue;
-        }
-        let color = Vec4::new(1.0, 1.0, 1.0, alpha);
-        let first = [(pan[0] / step).ceil(), (pan[1] / step).ceil()];
-        let mut x = first[0] * step;
-        while to([x, 0.0]).x < rx + rw {
-            let sx = to([x, 0.0]).x;
-            solid(
-                canvas,
-                Vec2::new(sx, ry),
-                Vec2::new(sx + 1.0, ry + rh),
-                color,
-            );
-            x += step;
-        }
-        let mut y = first[1] * step;
-        while to([0.0, y]).y < ry + rh {
-            let sy = to([0.0, y]).y;
-            solid(
-                canvas,
-                Vec2::new(rx, sy),
-                Vec2::new(rx + rw, sy + 1.0),
-                color,
-            );
-            y += step;
-        }
-    }
     let line = |canvas: &mut Canvas, a: [f32; 2], b: [f32; 2], width: f32, color: Vec4| {
         let mut last = to(a);
         for s in 1..=LINK_SEGMENTS {
@@ -3191,9 +3223,9 @@ pub(crate) fn draw(
             );
         }
         let frame = if doc.selected_frames.contains(id) {
-            Some(Vec4::new(1.0, 0.62, 0.18, 1.0))
+            Some(SELECTED)
         } else if matches!(doc.hover, Hit::Frame(h) | Hit::FrameCorner(h) if h == k) {
-            Some(Vec4::new(1.0, 1.0, 1.0, 0.3))
+            Some(HOVERED)
         } else {
             None
         };
@@ -3369,9 +3401,9 @@ pub(crate) fn draw(
         let frame = if error.is_some() {
             Some(Vec4::from_array(p.error))
         } else if doc.selected.contains(&b.id) {
-            Some(Vec4::new(1.0, 0.62, 0.18, 1.0))
+            Some(SELECTED)
         } else if doc.hover == Hit::Node(k) {
-            Some(Vec4::new(1.0, 1.0, 1.0, 0.3))
+            Some(HOVERED)
         } else {
             None
         };
@@ -3437,21 +3469,106 @@ pub(crate) fn draw(
         }
     }
     if let Some((a, b)) = select_box(drag, doc.cursor) {
-        let (a, b) = (to(a), to(b));
-        let (lo, hi) = (a.min(b), a.max(b));
-        canvas.draw(
-            &Quad::solid((lo + hi) * 0.5, hi - lo)
-                .color(Vec4::new(0.35, 0.55, 0.95, 0.12))
-                .order(order),
-        );
-        canvas.draw(
-            &Quad::rect((lo + hi) * 0.5, hi - lo)
-                .outline(look.scale)
-                .color(Vec4::new(0.45, 0.65, 1.0, 0.7))
-                .order(order),
-        );
+        draw_select_box(&doc.view, look, a, b, canvas);
     }
     canvas.set_clip(None);
+}
+
+/// The order a canvas draws in: under the panels (layer −1), after the viewport's overlays,
+/// which its background covers.
+pub(crate) const CANVAS_ORDER: Order = Order::layer(-1);
+
+/// A canvas's back, clipped to its panel (the animation graph's canvas's too): its colour,
+/// the grid's small squares while they are 8 pixels or more apart, its large ones.
+pub(crate) fn draw_back(view: &View, look: &Look<'_>, canvas: &mut Canvas) {
+    let [rx, ry, rw, rh] = look.rect.map(|v| v as f32);
+    canvas.set_clip(Some(ClipRect {
+        x: look.rect[0] as i32,
+        y: look.rect[1] as i32,
+        width: look.rect[2],
+        height: look.rect[3],
+    }));
+    let z = view.zoom() * look.scale;
+    let pan = view.pan;
+    let origin = [rx / look.scale, ry / look.scale];
+    let to = |c: [f32; 2]| {
+        let q = view.panel_point(c, origin);
+        Vec2::new(q[0] * look.scale, q[1] * look.scale)
+    };
+    let solid = |canvas: &mut Canvas, lo: Vec2, hi: Vec2, color: Vec4| {
+        canvas.draw(
+            &Quad::solid((lo + hi) * 0.5, hi - lo)
+                .color(color)
+                .order(CANVAS_ORDER),
+        );
+    };
+    solid(
+        canvas,
+        Vec2::new(rx, ry),
+        Vec2::new(rx + rw, ry + rh),
+        Vec4::from_array(look.palette.code),
+    );
+    for (step, alpha) in [(GRID, 0.035), (GRID_MAJOR, 0.07)] {
+        if step * z < 8.0 {
+            continue;
+        }
+        let color = Vec4::new(1.0, 1.0, 1.0, alpha);
+        let first = [(pan[0] / step).ceil(), (pan[1] / step).ceil()];
+        let mut x = first[0] * step;
+        while to([x, 0.0]).x < rx + rw {
+            let sx = to([x, 0.0]).x;
+            solid(
+                canvas,
+                Vec2::new(sx, ry),
+                Vec2::new(sx + 1.0, ry + rh),
+                color,
+            );
+            x += step;
+        }
+        let mut y = first[1] * step;
+        while to([0.0, y]).y < ry + rh {
+            let sy = to([0.0, y]).y;
+            solid(
+                canvas,
+                Vec2::new(rx, sy),
+                Vec2::new(rx + rw, sy + 1.0),
+                color,
+            );
+            y += step;
+        }
+    }
+}
+
+/// The box a selection is being dragged as, from canvas point `a` to `b`: a faint blue
+/// area and its edge.
+pub(crate) fn draw_select_box(
+    view: &View,
+    look: &Look<'_>,
+    a: [f32; 2],
+    b: [f32; 2],
+    canvas: &mut Canvas,
+) {
+    let origin = [
+        look.rect[0] as f32 / look.scale,
+        look.rect[1] as f32 / look.scale,
+    ];
+    let to = |c: [f32; 2]| {
+        let q = view.panel_point(c, origin);
+        Vec2::new(q[0] * look.scale, q[1] * look.scale)
+    };
+    let (a, b) = (to(a), to(b));
+    let (lo, hi) = (a.min(b), a.max(b));
+    canvas.draw(
+        &Quad::solid((lo + hi) * 0.5, hi - lo)
+            .color(Vec4::new(0.35, 0.55, 0.95, 0.12))
+            .order(CANVAS_ORDER),
+    );
+    canvas.draw(
+        &Quad::rect((lo + hi) * 0.5, hi - lo)
+            .outline(look.scale)
+            .color(Vec4::new(0.45, 0.65, 1.0, 0.7))
+            .order(CANVAS_ORDER),
+    );
 }
 
 /// A port's dot at `at`: filled where linked, a ring where not, white-ringed under the

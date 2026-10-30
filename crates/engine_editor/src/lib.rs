@@ -7,6 +7,7 @@
 //! [`camera`] is the viewport's orbit camera. The session and the scenes' autosaves live in
 //! the project's `.ofelia/` folder (ADR 0107 §4).
 
+mod agraph;
 pub mod app;
 mod breakpoints;
 mod build;

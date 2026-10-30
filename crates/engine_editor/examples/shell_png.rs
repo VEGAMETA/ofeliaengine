@@ -491,6 +491,7 @@ fn main() {
         active_script: None,
         code: None,
         graphs: &[],
+        graph_anim: &[],
         active_graph: None,
         graph: None,
         tools: &tools,
