@@ -584,6 +584,22 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5e-2b, 2026-10-30): View: Animation States
+
+- **View: Animation States** (the palette, as View: Skeletons) labels every character with
+  an animator over its highest joint: a graph's machine as the canvas's bar says it
+  (`Walk · 0.42 s · from Idle 34 %`), a clip animator's clip and time (and the clip it
+  fades from, with how far). In Play and while editing (a still world shows its first
+  state), in the entities' order so the labels keep their places.
+- **Cost:** nothing while off. On, each character's joints are read once a frame for the
+  head (as View: Skeletons reads them) and its line written into a text that keeps its
+  room; no allocation once every label has its room.
+- **Tests:** the editor on the Radeon: off by default; on in Play, the fox's label reads
+  `Walk · …`; off again, none.
+- **E12-5e is done with this:** the graph's tab live with the player, the running state on
+  the canvas, in the bar and the inspector, the parameters held for testing, and every
+  character's state in the viewport.
+
 ## As built (E12-5e-2a, 2026-10-30): a graph's parameters in Play
 
 - **The inspector's Graph section** lists, under `now`, the active character's graph

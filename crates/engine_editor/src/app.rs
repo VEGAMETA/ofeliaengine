@@ -677,6 +677,16 @@ pub fn editor<G: Game>(
 /// The rooms of the lists a frame builds for the shell. Their rows and labels borrow the
 /// editor and the world, so the lists cannot stay between frames, but their room does
 /// ([`recycle`]): a steady frame makes nothing (ADR 0107 §8).
+/// A character's label with View: Animation States (ADR 0124's E12-5e-2b): whose, the point
+/// over its head, where that falls in the viewport (none off it), and what it plays.
+#[derive(Debug, Default)]
+struct AnimLabel {
+    entity: Entity,
+    head: Vec3,
+    at: Option<Vec2>,
+    text: String,
+}
+
 /// A parameter of the active character's graph in Play, as the inspector's Graph section
 /// shows it (ADR 0124's E12-5e-2): its name, kind, value as the last tick left it (or as the
 /// editor holds it), its number's text; its room kept from frame to frame.
@@ -986,6 +996,7 @@ struct CommandIds {
     /// Every character's skeleton over the viewport, not only the selected ones' (ADR
     /// 0124's E12-1c).
     skeletons: CommandId,
+    anim_states: CommandId,
     /// Tab on a character: its joints take the pointer (ADR 0124's E12-1c).
     edit_joints: CommandId,
     /// View: Sound Ranges (E11-4c): every source's reach and every zone, dim.
@@ -1224,6 +1235,7 @@ fn commands() -> (Commands, CommandIds) {
         overlays: c.register("view.overlays", "View", "Overlays"),
         colliders: c.register("view.colliders", "View", "Colliders"),
         skeletons: c.register("view.skeletons", "View", "Skeletons"),
+        anim_states: c.register("view.anim_states", "View", "Animation States"),
         edit_joints: c.register("anim.edit_joints", "Animation", "Edit Joints"),
         sound_ranges: c.register("view.sound_ranges", "View", "Sound Ranges"),
         docks_beside_code: c.register("view.docks_beside_code", "View", "Scene Docks Beside Code"),
@@ -3537,6 +3549,14 @@ struct Editor {
     /// (else the selected ones' only); their sticks in the world, the selected ones' and
     /// the others', made each frame from the joints and the entities they are made for.
     show_skeletons: bool,
+    /// View: Animation States (ADR 0124's E12-5e-2b): every character's state labelled over
+    /// its head; the labels in use (`anim_label_count` of them, the rest's room kept), the
+    /// characters asked about and their joints.
+    show_anim_states: bool,
+    anim_labels: Vec<AnimLabel>,
+    anim_label_count: usize,
+    anim_label_of: Vec<Entity>,
+    anim_label_joints: Vec<Affine3A>,
     skeleton_lines: [Vec<[Vec3; 2]>; 2],
     skeleton_joints: Vec<Affine3A>,
     skeleton_of: Vec<Entity>,
@@ -4497,6 +4517,11 @@ impl Editor {
             hint: String::new(),
             show_colliders: false,
             show_skeletons: false,
+            show_anim_states: false,
+            anim_labels: Vec::new(),
+            anim_label_count: 0,
+            anim_label_of: Vec::new(),
+            anim_label_joints: Vec::new(),
             skeleton_lines: Default::default(),
             skeleton_joints: Vec::new(),
             skeleton_of: Vec::new(),
@@ -9644,6 +9669,13 @@ impl Editor {
         };
         let view = ViewProj::new(&self.orbit, rect);
         let playing = self.play.is_some();
+        // View: Animation States (E12-5e-2b): each label over its character's head.
+        for label in &mut self.anim_labels[..self.anim_label_count] {
+            label.at = view
+                .screen(label.head)
+                .filter(|&at| view.contains(at))
+                .filter(|_| (label.head - view.eye).dot(view.forward) > 0.0);
+        }
         // Who hears when the scene has no listener (E11-4c): the game's main camera, the
         // active one of the highest priority, the lowest index among equals, as the
         // player picks it.
@@ -17887,6 +17919,13 @@ impl Editor {
             } else {
                 "Sound ranges hidden"
             }));
+        } else if id == ids.anim_states {
+            self.show_anim_states = !self.show_anim_states;
+            self.say(String::from(if self.show_anim_states {
+                "Animation states shown: what every character plays, over its head"
+            } else {
+                "Animation states hidden"
+            }));
         } else if id == ids.skeletons {
             self.show_skeletons = !self.show_skeletons;
             self.say(String::from(if self.show_skeletons {
@@ -22279,6 +22318,71 @@ impl Editor {
         }
     }
 
+    /// View: Animation States (ADR 0124's E12-5e-2b): a label for every character with an
+    /// animator, over its highest joint: its graph's machine as the canvas's bar says it
+    /// (`Walk · 0.42 s · from Idle 34 %`), or its clip and time (and the clip it fades
+    /// from). Their texts keep their room; placed on the screen by the next overlay pass.
+    fn anim_labels_frame(&mut self, player: &mut Player) {
+        self.anim_label_count = 0;
+        if !self.show_anim_states {
+            return;
+        }
+        self.anim_label_of.clear();
+        self.anim_label_of.extend(player.skinned_models());
+        // In the entities' order, so the labels keep their places frame to frame.
+        self.anim_label_of.sort_unstable();
+        for k in 0..self.anim_label_of.len() {
+            let e = self.anim_label_of[k];
+            let world = player.world();
+            let (Some(animator), Some(at)) = (
+                world.get::<engine_runtime::Animator>(e),
+                world.get::<GlobalTransform>(e).map(|g| g.0),
+            ) else {
+                continue;
+            };
+            if self.anim_labels.len() == self.anim_label_count {
+                self.anim_labels.push(AnimLabel::default());
+            }
+            let label = &mut self.anim_labels[self.anim_label_count];
+            label.entity = e;
+            label.at = None;
+            if animator.plays_graph() {
+                match player.graph_now(e) {
+                    Some(now) => crate::agraph::write_now(&mut label.text, &now),
+                    None => continue,
+                }
+            } else {
+                label.text.clear();
+                let _ = write!(
+                    label.text,
+                    "{} \u{b7} {:.2} s",
+                    animator.clip, animator.time
+                );
+                if animator.fade > 0.0 && !animator.from_clip.is_empty() {
+                    let _ = write!(
+                        label.text,
+                        " \u{b7} from {} {:.0} %",
+                        animator.from_clip,
+                        animator.weight(1.0) * 100.0
+                    );
+                }
+            }
+            // Over its head: its highest joint, else where it stands.
+            label.head = Vec3::from(at.translation);
+            if player.model_joints(e, &mut self.anim_label_joints) {
+                let top = self
+                    .anim_label_joints
+                    .iter()
+                    .map(|j| at.transform_point3(Vec3::from(j.translation)))
+                    .max_by(|a, b| a.y.total_cmp(&b.y));
+                if let Some(top) = top {
+                    label.head = top;
+                }
+            }
+            self.anim_label_count += 1;
+        }
+    }
+
     /// Animation graphs live with the player (ADR 0124's E12-5e): each graph tab's file given
     /// to the player as it changes, played in place of the file from the next tick (its
     /// characters go on in the states they are in; what the canvas alone shows, a state's
@@ -22306,6 +22410,7 @@ impl Editor {
         for (e, slot, value) in self.holds_due.drain(..) {
             player.hold_graph_param(e, slot, value);
         }
+        self.anim_labels_frame(player);
         if !playing {
             // The player lets its holds go at the run's end.
             self.live_holds.clear();
@@ -28096,6 +28201,16 @@ impl<G> EditorGame<G> {
         self.shared.borrow().anim_status.clone()
     }
 
+    /// View: Animation States' labels as they read (ADR 0124's E12-5e-2b), in the characters'
+    /// order; for tests.
+    pub fn anim_labels(&self) -> Vec<String> {
+        let shared = self.shared.borrow();
+        shared.anim_labels[..shared.anim_label_count]
+            .iter()
+            .map(|l| l.text.clone())
+            .collect()
+    }
+
     /// In Play, the active character's graph's parameters as the inspector's Graph section
     /// shows them (ADR 0124's E12-5e-2): each one's name, value and whether the editor holds
     /// it. For tests.
@@ -28723,6 +28838,19 @@ fn draw_overlays(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, can
         }
         if Some(icon.entity) == active {
             active_at = Some(icon.at);
+        }
+    }
+    // View: Animation States (E12-5e-2b): a label over each character's head.
+    for label in &editor.anim_labels[..editor.anim_label_count] {
+        if let Some(at) = label.at {
+            self::label(
+                &mut editor.text,
+                glyphs,
+                canvas,
+                at - Vec2::new(0.0, 18.0 * scale),
+                &label.text,
+                scale,
+            );
         }
     }
     // The active reverb zone's room and priority, under its icon; taken for the label's

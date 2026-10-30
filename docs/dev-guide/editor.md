@@ -1675,9 +1675,12 @@ unless it says otherwise).
   now. Drag or type a number, or click a flag: the value is **held** there for testing,
   whatever the game's scripts set, until its ↺ lets it go or Play stops (the game's own
   value comes back). A trigger's box fires it once.
+- **View: Animation States** (Ctrl+Shift+P) labels every character in the viewport over
+  its head with what it plays: its graph's state as above, or its clip and time. Run it
+  again to hide them.
 - **Not yet:** machines inside machines (Tab into one), layers and masks, blends drawn as
-  points, the character's preview in the corner, and every character's state labelled in
-  the viewport come with the next steps (ADR 0124's E12-5d-2 and E12-5e-2b).
+  points and the character's preview in the corner come with the next step (ADR 0124's
+  E12-5d-2).
 
 ## Autosave and the session
 
