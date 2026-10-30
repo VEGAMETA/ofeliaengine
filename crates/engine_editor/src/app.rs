@@ -181,6 +181,9 @@ const DOCK_KEYS: KeyContext = KeyContext::Panel(3);
 /// A material graph's canvas's keys while its tab is shown (ADR 0123 E10-3e): Space (and
 /// Blender's Shift+A) opens the node search.
 const GRAPH_KEYS: KeyContext = KeyContext::Panel(4);
+/// The inspector's Clips' keys after a press in them (ADR 0124's E12-1b-3): the arrows move
+/// through the clips.
+const CLIPS_KEYS: KeyContext = KeyContext::Panel(5);
 
 /// What a part shows while the selected entities hold different values there.
 const MIXED: &str = "—";
@@ -873,6 +876,8 @@ struct CommandIds {
     find_references: CommandId,
     /// Sound previews (E11-3b): the picked sound played or stopped, Auto Play.
     preview_sound: CommandId,
+    clip_next: CommandId,
+    clip_previous: CommandId,
     auto_play: CommandId,
     /// A material graph's nodes' previews on its canvas, or not (E10-4g).
     node_previews: CommandId,
@@ -1074,6 +1079,8 @@ fn commands() -> (Commands, CommandIds) {
         break_next: c.register("debug.break_next", "Debug", "Break at the Next Script Line"),
         find_references: c.register("assets.references", "Assets", "Find References"),
         preview_sound: c.register("assets.preview", "Assets", "Play or Stop the Picked Sound"),
+        clip_next: c.register("clips.next", "Clips", "Next Clip"),
+        clip_previous: c.register("clips.previous", "Clips", "Previous Clip"),
         auto_play: c.register("assets.auto_play", "Assets", "Auto Play Sounds"),
         node_previews: c.register("graph.node_previews", "Graph", "Node Previews"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
@@ -1178,6 +1185,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("ArrowRight", ids.expand),
     ]
     .map(|(chord, id)| (chord, id, DOCK_KEYS));
+    let clips = [("ArrowDown", ids.clip_next), ("ArrowUp", ids.clip_previous)]
+        .map(|(chord, id)| (chord, id, CLIPS_KEYS));
     let global = [
         ("Ctrl+Z", ids.undo),
         ("Ctrl+Y", ids.redo),
@@ -1309,7 +1318,13 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+Alt+G", ids.ungroup_function),
     ]
     .map(|(chord, id)| (chord, id, GRAPH_KEYS));
-    for (chord, id, context) in global.chain(tree).chain(dock).chain(code).chain(graph) {
+    for (chord, id, context) in global
+        .chain(tree)
+        .chain(dock)
+        .chain(clips)
+        .chain(code)
+        .chain(graph)
+    {
         if let Some(chord) = Chord::parse(chord) {
             let _ = keymap.bind(chord, context, id);
             shortcuts.entry(id).or_insert_with(|| chord.to_string());
@@ -1487,6 +1502,17 @@ impl ClipFacts {
     }
 }
 
+/// A model preview's floor after its model walked `moved` across the ground and turned
+/// `turned` about the vertical in its own frame (ADR 0124's E12-1b-3): the floor stays where
+/// the walk left it, so in the model's frame it goes back by the step. `floor` is its offset
+/// (x, z) and turn, the offset applied after the turn.
+fn floor_walked(floor: [f32; 3], moved: Vec3, turned: f32) -> [f32; 3] {
+    let offset = Vec3::new(floor[0] - moved.x, 0.0, floor[1] - moved.z);
+    let back = Quat::from_rotation_y(-turned) * offset;
+    let yaw = (floor[2] - turned).rem_euclid(core::f32::consts::TAU);
+    [back.x, back.z, yaw]
+}
+
 /// Whose clips the inspector's Clips show (ADR 0124's E12-1b): a character of the scene, or
 /// a model file picked in the dock (shown by the engine's live preview).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1591,6 +1617,10 @@ struct ShownModel {
     pixels: Vec<u8>,
     upload: bool,
     shown: bool,
+    /// Its floor (E12-1b-3): where its clip's walk has taken it, across the ground and
+    /// turned about the vertical, in its file's units; and the clip it walked.
+    floor: [f32; 3],
+    floor_clip: usize,
 }
 
 /// A section of the picked bus after its Bus section (E11-2b).
@@ -2911,6 +2941,10 @@ struct Editor {
     row_drag: Option<RowDrag>,
     /// The listing was clicked last (F2 renames its file), and the file renamed in place.
     dock_focus: bool,
+    /// The Clips' arrows after a press in them (E12-1b-3).
+    clips_focus: bool,
+    /// The picked model's floor holds still under its clips (E12-1b-3's In Place).
+    clip_in_place: bool,
     renaming_file: Option<AssetId>,
     /// The file the inspector shows instead of the entities, with its import settings
     /// (E4-9): the dock's last pick, until the entity selection changes.
@@ -3919,6 +3953,8 @@ impl Editor {
             asset_drag: None,
             row_drag: None,
             dock_focus: false,
+            clips_focus: false,
+            clip_in_place: false,
             renaming_file: None,
             inspected: None,
             material_docs: Vec::new(),
@@ -6372,6 +6408,7 @@ impl Editor {
                         }),
                     playing: model.map_or(self.in_place.is_some(), |m| m.playing),
                     looping: self.clip_loop,
+                    in_place: self.clip_in_place,
                     speed: CLIP_SPEED_TEXTS[self.clip_speed],
                     playhead: view.playhead(),
                     time: &view.time_text,
@@ -6609,6 +6646,9 @@ impl Editor {
         }
         if response.clip_speed {
             self.clip_speed = (self.clip_speed + 1) % CLIP_SPEEDS.len();
+        }
+        if response.clip_in_place {
+            self.clip_in_place = !self.clip_in_place;
         }
         if let Some(bar) = response.clip_scrub {
             self.scrub_clip(bar);
@@ -6929,6 +6969,7 @@ impl Editor {
         if self.ui.input().mouse_pressed {
             self.tree_focus = response.tree_hovered;
             self.dock_focus = response.listing_hovered;
+            self.clips_focus = response.clips_hovered;
             // Anywhere but in the code, the keys are the editor's again.
             if response.code == 0 || !self.ui.hovers(response.code) {
                 self.code_focus = false;
@@ -7233,6 +7274,8 @@ impl Editor {
             Some(TREE_KEYS)
         } else if self.dock_focus {
             Some(DOCK_KEYS)
+        } else if self.clips_focus && self.clips.is_some() {
+            Some(CLIPS_KEYS)
         } else {
             None
         };
@@ -16438,6 +16481,9 @@ impl Editor {
                 Some(file) if self.is_sound(file) => self.toggle_preview(file),
                 _ => self.say(String::from("Pick a sound file in the FileSystem dock")),
             }
+        } else if id == ids.clip_next || id == ids.clip_previous {
+            // The Clips' arrows (E12-1b-3).
+            self.step_clip(if id == ids.clip_next { 1 } else { -1 });
         } else if id == ids.node_previews {
             self.node_previews = !self.node_previews;
             self.write_session(world);
@@ -17661,6 +17707,8 @@ impl Editor {
             pixels: Vec::new(),
             upload: false,
             shown: false,
+            floor: [0.0; 3],
+            floor_clip: 0,
         });
     }
 
@@ -19120,6 +19168,32 @@ impl Editor {
         self.start_in_place(vec![(e, Some(chosen))]);
     }
 
+    /// The clip after (`by` 1) or before (-1) the chosen one in the Clips (ADR 0124's
+    /// E12-1b-3), chosen as a click on its row chooses it; a picked file's plays at once with
+    /// Auto Play, as the dock's sounds do.
+    fn step_clip(&mut self, by: isize) {
+        let Some(view) = self.clips.as_ref() else {
+            return;
+        };
+        let last = view.clips.len().saturating_sub(1);
+        let i = view.chosen.saturating_add_signed(by).min(last);
+        if view.clips.is_empty() || i == view.chosen {
+            return;
+        }
+        let of = view.of;
+        self.choose_clip(i);
+        if let ClipsOf::Asset(file) = of
+            && self.auto_play
+            && let Some(m) = self.shown_model.as_mut().filter(|m| m.file == file)
+        {
+            m.playing = true;
+            m.at = None;
+            if let Some(view) = self.clips.as_mut() {
+                view.held = false;
+            }
+        }
+    }
+
     /// Clip `i` chosen in the Clips (ADR 0124's E12-1b): its first frame shown, held; or, while
     /// it plays, played from its start.
     fn choose_clip(&mut self, i: usize) {
@@ -19192,16 +19266,23 @@ impl Editor {
                     .clips
                     .as_mut()
                     .filter(|v| v.of == ClipsOf::Asset(m.file));
+                // The span of the clip played this frame, for the floor to go by (E12-1b-3).
+                let mut walked = None;
                 let pose = view.and_then(|v| {
                     if !m.auto_played {
                         m.auto_played = true;
                         m.playing = self.auto_play;
+                    }
+                    if m.floor_clip != v.chosen {
+                        m.floor_clip = v.chosen;
+                        m.floor = [0.0; 3];
                     }
                     if m.playing {
                         let now = Instant::now();
                         let dt = m.at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
                         m.at = Some(now);
                         let (length, t) = (v.length(), v.time + dt * speed);
+                        let from = v.time;
                         if looping {
                             v.time = t.rem_euclid(length.max(1e-6));
                         } else if t >= length {
@@ -19211,14 +19292,25 @@ impl Editor {
                         } else {
                             v.time = t;
                         }
+                        let to = if looping { t } else { t.min(length) };
+                        walked = Some((v.chosen, from, to));
                     }
                     (m.playing || v.held).then_some((v.chosen, v.time))
                 });
+                // In Place holds the floor still; else it goes back by the root's motion.
+                if let (Some((clip, from, to)), false) = (walked, self.clip_in_place)
+                    && let Some((moved, turned)) = player
+                        .model_preview_rig()
+                        .and_then(|rig| rig.scene_motion(clip, from, to))
+                {
+                    m.floor = floor_walked(m.floor, moved, turned);
+                }
                 player.set_model_preview(Some(engine_app::ModelPreview {
                     mesh: m.mesh,
                     material: m.material,
                     turn: m.turn,
                     pose,
+                    floor: Some(m.floor),
                 }));
                 if player.take_model_preview(&mut m.pixels) {
                     m.upload = true;
@@ -24798,6 +24890,11 @@ impl<G> EditorGame<G> {
                 .collect();
             (rows, v.time_text.clone())
         })
+    }
+
+    /// The Clips' chosen clip (ADR 0124's E12-1b-3): for tests.
+    pub fn chosen_clip(&self) -> Option<usize> {
+        self.shared.borrow().clips.as_ref().map(|v| v.chosen)
     }
 
     /// Whether the picked model file's preview is drawn in its Clips, and whether it plays
@@ -32862,6 +32959,66 @@ mod tests {
         ed.edit(&mut world, event(FieldAction::Choose(0)));
         assert_eq!(clip(&world), "Walk");
         assert_eq!(ed.history.steps().count(), steps + 2, "a step each");
+    }
+
+    /// E12-1b-3: the Clips' arrows move through the clips, each held at its first frame, and
+    /// stop at the ends.
+    #[test]
+    fn the_clips_arrows_move_through_the_clips() {
+        let mut world = World::new();
+        let mut ed = draw_editor("clips-arrows", &mut world);
+        let man = world.spawn((
+            SceneId::new(),
+            Name::new("Man"),
+            Transform::IDENTITY,
+            GlobalTransform::default(),
+            Model::new(builtin::CUBE, AssetRef::NONE),
+        ));
+        ed.select_only(man);
+        ed.clips = Some(ClipsView::new(
+            ClipsOf::Entity(man),
+            1,
+            vec![
+                ClipFacts::new(0, "Walk", 1.0, 31, 30.0, 3000, 1e-4, 1.5, (2e-4, "hips")),
+                ClipFacts::new(1, "Run", 0.7, 22, 30.0, 2600, 1e-4, 4.2, (2e-4, "hips")),
+                ClipFacts::new(2, "Idle", 2.0, 61, 30.0, 4100, 1e-4, 0.0, (1e-4, "hips")),
+            ],
+        ));
+        let chosen = |ed: &Editor| ed.clips.as_ref().map(|v| (v.chosen, v.held));
+        let (next, previous) = (ed.ids.clip_next, ed.ids.clip_previous);
+        ed.run(&mut world, next);
+        assert_eq!(
+            chosen(&ed),
+            Some((1, true)),
+            "the next one's first frame, held"
+        );
+        ed.run(&mut world, next);
+        ed.run(&mut world, next);
+        assert_eq!(chosen(&ed), Some((2, true)), "the last stays the last");
+        ed.run(&mut world, previous);
+        assert_eq!(chosen(&ed), Some((1, true)));
+        ed.run(&mut world, previous);
+        ed.run(&mut world, previous);
+        assert_eq!(chosen(&ed), Some((0, true)), "the first stays the first");
+    }
+
+    /// E12-1b-3: a model's floor after a walk: it stays where the walk left it, so in the
+    /// model's frame it goes back by each step, and turns back by each turn.
+    #[test]
+    fn a_previews_floor_goes_back_by_the_walk() {
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-5);
+        let walked = floor_walked([0.0; 3], Vec3::new(0.0, 0.0, 1.0), 0.0);
+        assert!(near(walked, [0.0, -1.0, 0.0]), "{walked:?}");
+        // A quarter turn on the spot: the floor turns back a quarter, its offset with it.
+        let turned = floor_walked([0.0, -1.0, 0.0], Vec3::ZERO, core::f32::consts::FRAC_PI_2);
+        let back = Quat::from_rotation_y(-core::f32::consts::FRAC_PI_2) * Vec3::new(0.0, 0.0, -1.0);
+        assert!(
+            near(turned, [back.x, back.z, 1.5 * core::f32::consts::PI]),
+            "{turned:?}"
+        );
+        // Steps add up as one walk.
+        let two = floor_walked(walked, Vec3::new(0.0, 0.0, 1.0), 0.0);
+        assert!(near(two, [0.0, -2.0, 0.0]), "{two:?}");
     }
 
     #[test]

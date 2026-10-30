@@ -390,6 +390,8 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
   - a click on a row shows its first frame; ▶ plays it in place from the playhead, ■
     stops it there and holds that pose; the loop, the speed (0.25 to 2×) and the time,
     and a bar under them that scrubs it. Escape lets a held pose go.
+  - After a click in the Clips, **↓** and **↑** move to the next and the previous clip,
+    as a click on its row would. With Auto Play on, a picked file's clip plays at once.
   - **Its `Animator`** (Add Component: Animator) plays a clip in Play. Its `clip` field is
     a list of the character's clips (empty: its first clip, which is what plays). While you edit, the character stands at the animator's `time`.
   - **Its skeleton:** while it is selected, its joints show as thin white sticks in front
@@ -411,6 +413,12 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
     under the engine's own drawing of it (drag it to turn it): ▶ plays the chosen clip
     there, and with the dock's **Auto Play** on its first clip plays as soon as its clips
     are read. Nothing of the scene changes.
+    - It stands on a floor of the blockout's grid. A clip that crosses the ground walks on
+      its spot while the floor goes by under it, back by the root's motion and turned by
+      its turn, so you see how far and which way it goes (Godot's root motion view). A
+      clip made in place leaves the floor still.
+    - **In Place**, beside the speed, holds the floor still too: the walk is seen on a
+      treadmill. Choosing another clip puts the floor back.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

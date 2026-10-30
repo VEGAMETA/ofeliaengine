@@ -400,6 +400,22 @@ fn box_brush() -> BakedBrush {
 }
 
 /// The pointer at `at`, the left button pressed or let go with it (window events).
+fn key(game: &mut EditorGame<NoGame>, vk: u16, scancode: u16, down: bool) {
+    // The arrows are extended keys.
+    let extended = matches!(vk, 0x21..=0x28 | 0x2D | 0x2E);
+    game.event(&WindowEvent {
+        window: WindowId(0),
+        time: Instant::now(),
+        kind: WindowEventKind::Key {
+            virtual_key: vk,
+            scancode,
+            extended,
+            pressed: down,
+            repeat: false,
+        },
+    });
+}
+
 fn pointer(game: &mut EditorGame<NoGame>, at: [f32; 2], pressed: Option<bool>) {
     let mut send = |kind| {
         game.event(&WindowEvent {
@@ -1362,6 +1378,20 @@ fn a_skinned_model_picked_in_the_dock_shows_its_clips_under_its_preview() {
     println!("playing: {moving} pixels changed in the inspector; stopped: {still}");
     assert!(moving > 300, "the preview plays: {moving}");
     assert!(still < 50, "the preview holds: {still}");
+    // E12-1b-3: a click on a clip's row gives the Clips the arrows: ↓ the next clip, ↑ back.
+    let walk = in_inspector(&game.texts_at("Walk")).expect("Walk's row");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, walk, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(game.chosen_clip(), Some(1), "Walk chosen by its row");
+    for (vk, scancode, expected) in [(0x28, 0x50, 2), (0x26, 0x48, 1), (0x26, 0x48, 0)] {
+        key(&mut game, vk, scancode, true);
+        frame(&mut player, &mut game, &mut overlay);
+        key(&mut game, vk, scancode, false);
+        frame(&mut player, &mut game, &mut overlay);
+        assert_eq!(game.chosen_clip(), Some(expected), "the arrow {vk:#x}");
+    }
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

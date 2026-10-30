@@ -111,6 +111,7 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
                 material,
                 turn: [time, 0.0],
                 pose: Some((0, time)),
+                floor: Some([time, 0.0, time]),
             }));
             taken += u32::from(player.take_model_preview(&mut pixels));
             frames += 1;
