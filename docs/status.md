@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-1b-3b, two clips side by side** (#PR, ADR 0124's as-built): a Ctrl+click on a
+  - **E12-1b-3b, two clips side by side** (#460, ADR 0124's as-built): a Ctrl+click on a
     picked file's clip plays it beside the chosen one in the preview, at the same fraction
     of its length, framed with it on the one floor. 0 allocations. The root's path on the
     floor waits for the Animation tab's trails (E12-3).
