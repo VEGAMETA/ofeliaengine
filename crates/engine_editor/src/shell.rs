@@ -646,6 +646,34 @@ pub struct BlendDot<'a> {
     pub picked: bool,
 }
 
+/// A joint of the shown layer's mask (ADR 0124's E12-5d-2b, the team's а).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MaskRow<'a> {
+    /// Its name in the skeleton.
+    pub name: &'a str,
+    /// Its depth: 0 for a root.
+    pub depth: u16,
+    /// Its weight in the mask, its own or inherited: its check box on at 1, half at less.
+    pub weight: f32,
+    /// The mask sets it (it is not inherited): its name in the text's color.
+    pub own: bool,
+    /// It is picked: its weight is the section's row.
+    pub picked: bool,
+    /// Its own weight where it is neither 0 nor 1 ("0.50"), else empty.
+    pub text: &'a str,
+}
+
+/// The shown layer's mask under its section's header (ADR 0124's E12-5d-2b, the team's а):
+/// the skeleton's joints, indented by depth, each with its check box; a click on the box
+/// turns the joint and its subtree in or out, a click on the row picks it.
+#[derive(Debug, Clone, Copy)]
+pub struct MaskPanel<'a> {
+    /// The section it shows under.
+    pub section: usize,
+    /// The joints, in the skeleton's order (parents first).
+    pub rows: &'a [MaskRow<'a>],
+}
+
 /// The inspector's blend panel under its section's header (ADR 0124's E12-5d-2a): a 1D
 /// blend's clips along a line or a 2D blend's on a plane, the plane's triangles between
 /// them, and the parameters' values marked, each clip's dot as large as its weight there.
@@ -1207,6 +1235,8 @@ pub struct ShellModel<'a> {
     pub clips: Option<ClipsPanel<'a>>,
     /// The active character's joints, under their section's header (ADR 0124's E12-1c).
     pub joints: Option<JointsPanel<'a>>,
+    /// The shown layer's mask of an animation graph's tab (ADR 0124's E12-5d-2b).
+    pub mask: Option<MaskPanel<'a>>,
     /// The active entity's 3D sound's level over distance, the camera's distance marked
     /// (E11-4c, Unity's red line).
     pub falloff: Option<FalloffView<'a>>,
@@ -1468,6 +1498,10 @@ pub struct ShellResponse {
     pub clip_turn: Option<WaveUse>,
     /// The Skeleton (ADR 0124's E12-1c): a joint's row was clicked.
     pub joint_pick: Option<usize>,
+    /// The shown layer's mask (E12-5d-2b): a joint's check box was clicked.
+    pub mask_toggle: Option<usize>,
+    /// A joint's row of it was clicked: picked.
+    pub mask_pick: Option<usize>,
     /// The joint whose row the pointer is over (what a dragged row would attach to).
     pub joint_hovered: Option<usize>,
     /// The mixer (E11-1): + Bus was clicked.
@@ -3263,6 +3297,80 @@ fn blend_panel(ui: &mut Ui, panel: &BlendPanel<'_>, p: &Palette, out: &mut Shell
     );
 }
 
+/// The shown layer's mask (ADR 0124's E12-5d-2b): a row a joint, indented by its depth,
+/// its check box (on at a weight of 1, half below, off at 0) and its name, its own weight
+/// at the right where it is neither; the picked one lit. A click on a box turns that joint
+/// and its subtree in or out; a click on a row picks it.
+fn mask_panel(ui: &mut Ui, panel: &MaskPanel<'_>, p: &Palette, out: &mut ShellResponse) {
+    ui.column(
+        "mask",
+        Style {
+            size: [Size::Grow(1.0), Size::Fit],
+            padding: [SOUND_PAD, 4.0, SOUND_PAD, 4.0],
+            ..Style::default()
+        },
+        |ui| {
+            for (i, row) in panel.rows.iter().enumerate() {
+                ui.push_id(i as u64);
+                let hovered = ui.is_hovered(ui.id("joint"));
+                let indent = 4.0 + 12.0 * f32::from(row.depth.min(12));
+                let id = ui.row(
+                    "joint",
+                    Style {
+                        size: [Size::Grow(1.0), Size::Fixed(20.0)],
+                        padding: [indent, 0.0, 6.0, 0.0],
+                        gap: 6.0,
+                        radius: 3.0,
+                        background: if row.picked {
+                            Some(p.selection)
+                        } else {
+                            hovered.then_some(p.field_hover)
+                        },
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    },
+                    |ui| {
+                        let on = row.weight >= 0.999;
+                        let half = !on && row.weight > 0.0;
+                        let check = ui.container(
+                            "check",
+                            Style {
+                                size: [Size::Fixed(14.0), Size::Fixed(14.0)],
+                                radius: 3.0,
+                                background: Some(if on { p.accent } else { p.field }),
+                                border: (!on).then_some((p.text_dim, 1.0)),
+                                align_main: Align::Center,
+                                align_cross: Align::Center,
+                                ..Style::default()
+                            },
+                            |ui| {
+                                if on {
+                                    text(ui, "mark", icons::CHECK, 12.0, p.text);
+                                } else if half {
+                                    text(ui, "mark", icons::MIXED, 12.0, p.text_dim);
+                                }
+                            },
+                        );
+                        if ui.sense(check, false).clicked {
+                            out.mask_toggle = Some(i);
+                        }
+                        let shade = if row.own { p.text } else { p.text_dim };
+                        text(ui, "name", row.name, SMALL, shade);
+                        if !row.text.is_empty() {
+                            ui.spacer("fill");
+                            text(ui, "weight", row.text, SMALL, p.text_dim);
+                        }
+                    },
+                );
+                if ui.sense(id, false).clicked && out.mask_toggle.is_none() {
+                    out.mask_pick = Some(i);
+                }
+                ui.pop_id();
+            }
+        },
+    );
+}
+
 /// The clips' bar's height.
 pub(crate) const CLIP_BAR: f32 = 14.0;
 
@@ -4958,6 +5066,10 @@ fn inspector_dock(
                     }
                     if let Some(panel) = model.joints.filter(|panel| panel.section == s) {
                         joints_panel(ui, &panel, p, out);
+                    }
+                    // A layer's mask under its section's header (E12-5d-2b).
+                    if let Some(panel) = model.mask.filter(|panel| panel.section == s) {
+                        mask_panel(ui, &panel, p, out);
                     }
                     // A script's component: its file, as Godot's Script property.
                     if !section.script.is_empty() {

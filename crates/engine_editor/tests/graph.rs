@@ -1302,6 +1302,33 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
         bar.starts_with("1 state") && bar.contains("Fox: Look \u{b7} "),
         "{bar}"
     );
+    // Its mask (E12-5d-2b-2): the fox's joints, every one in; a joint's box turns it and
+    // its subtree out, one step; the root stays in.
+    let joints = game.mask_joints();
+    println!("the mask's joints: {}", joints.len());
+    assert!(joints.len() > 10, "{joints:?}");
+    assert!(joints.iter().all(|(_, w)| *w == 1.0), "{joints:?}");
+    let picked = joints[1].0.clone();
+    assert!(game.toggle_mask_joint(player.world_mut(), &picked));
+    frame(&mut player, &mut game, &mut overlay);
+    let after = game.mask_joints();
+    assert_eq!(after[0].1, 1.0, "the root in");
+    assert_eq!(after[1].1, 0.0, "{picked} out");
+    assert!(
+        after.iter().filter(|(_, w)| *w == 0.0).count() > 1,
+        "its subtree out"
+    );
+    // `ENGINE_EDITOR_MASK_PNG=<file>` writes the editor with the mask's section shown.
+    if let Ok(path) = std::env::var("ENGINE_EDITOR_MASK_PNG") {
+        let shot = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png =
+            engine_render::png::encode_png(1280, 720, engine_render::png::PngFormat::Rgba, &shot)
+                .unwrap();
+        std::fs::write(path, png).unwrap();
+    }
     game.show_graph_layer(0);
     frame(&mut player, &mut game, &mut overlay);
     assert!(

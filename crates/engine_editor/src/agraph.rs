@@ -38,7 +38,7 @@ use engine_scene::{
     AnimGraphFile, AssetId, BlendPoint, LayerBlend, LayerFile, NodeFile, NodeKind, ParamFile,
     ParamKind, StateFile, TransitionFile,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// A state's box: its least width and its height (its name, then what its pose plays).
@@ -327,6 +327,9 @@ pub(crate) enum AnimRow {
     LayerBlend,
     LayerWeight,
     LayerWeightParam,
+    /// The joint picked in the shown layer's mask (ADR 0124's E12-5d-2b): its weight, its
+    /// own or what it inherits; ↺ gives it back to what it inherits.
+    MaskWeight,
     /// With nothing selected, parameter `k` (in their names' order): its name, kind and
     /// starting value.
     ParamName(usize),
@@ -344,6 +347,7 @@ impl AnimRow {
             Self::LayerBlend => "blend",
             Self::LayerWeight => "weight",
             Self::LayerWeightParam => "weight from",
+            Self::MaskWeight => "joint weight",
             Self::Entry => "entry",
             Self::Pose => "plays",
             Self::Clip => "clip",
@@ -392,6 +396,9 @@ pub(crate) enum AnimSection {
     /// With nothing selected, the layer shown (ADR 0124's E12-5d-2b), titled by
     /// [`AnimDoc::layer_title`]: its × deletes it, its ↑ and ↓ move it among the layers.
     Layer,
+    /// Its mask, after it (E12-5d-2b, the team's а): the skeleton's joints with their check
+    /// boxes under its header, the picked joint's weight its row.
+    Mask,
     /// Parameter `k`, titled by its name; its × deletes it.
     Param(usize),
     /// Adding a parameter.
@@ -457,6 +464,13 @@ pub(crate) struct AnimDoc {
     /// first playing a machine (empty without layers); and the layers' ids in their order.
     pub(crate) layer: String,
     pub(crate) layer_ids: Vec<String>,
+    /// The skeleton masks are edited over (E12-5d-2b): a character's playing the graph, its
+    /// joints' names, parents and depths in its order (parents first); empty until one is
+    /// found. And the joint picked in the shown layer's mask, by name.
+    pub(crate) joints: Vec<String>,
+    pub(crate) joint_parents: Vec<Option<usize>>,
+    pub(crate) joint_depths: Vec<u16>,
+    pub(crate) mask_joint: String,
     /// The machine the canvas shows, by id (empty without one): the shown layer's root,
     /// where it is one.
     pub(crate) machine: String,
@@ -488,6 +502,10 @@ impl AnimDoc {
             file,
             layer: String::new(),
             layer_ids: Vec::new(),
+            joints: Vec::new(),
+            joint_parents: Vec::new(),
+            joint_depths: Vec::new(),
+            mask_joint: String::new(),
             machine: String::new(),
             selected: BTreeSet::new(),
             transitions: BTreeSet::new(),
@@ -970,6 +988,11 @@ impl AnimDoc {
                 AnimRow::LayerWeightParam,
             ]);
             sections.push((AnimSection::Layer, 0, rows.len()));
+            let from = rows.len();
+            if self.mask_joint().is_some() {
+                rows.push(AnimRow::MaskWeight);
+            }
+            sections.push((AnimSection::Mask, from, rows.len()));
         }
         for (k, p) in self.file.params.values().enumerate() {
             let from = rows.len();
@@ -1005,6 +1028,60 @@ impl AnimDoc {
                 .is_some_and(|l| self.file.nodes.contains_key(&l.root))
         };
         Some(self.layer_ids[..k].iter().filter(|id| plays(id)).count())
+    }
+
+    /// The skeleton masks are edited over (a character's playing the graph): its joints'
+    /// names and parents in its order, their depths worked out.
+    pub(crate) fn set_joints(
+        &mut self,
+        names: &[String],
+        parents: impl Iterator<Item = Option<usize>>,
+    ) {
+        self.joints.clear();
+        self.joints.extend(names.iter().cloned());
+        self.joint_parents.clear();
+        self.joint_parents.extend(parents.take(names.len()));
+        self.joint_parents.resize(names.len(), None);
+        self.joint_depths.clear();
+        for j in 0..names.len() {
+            let depth = self.joint_parents[j]
+                .and_then(|p| self.joint_depths.get(p).copied())
+                .map_or(0, |d| d.saturating_add(1));
+            self.joint_depths.push(depth);
+        }
+    }
+
+    /// The joint picked in the shown layer's mask, by its place in the skeleton.
+    pub(crate) fn mask_joint(&self) -> Option<usize> {
+        if self.mask_joint.is_empty() || self.shown_layer().is_none() {
+            return None;
+        }
+        self.joints.iter().position(|n| *n == self.mask_joint)
+    }
+
+    /// Joint `j`'s weight in the shown layer's mask (as the cook binds it): its own, else its
+    /// nearest ancestor's, else 1 for an empty mask and 0 for another.
+    pub(crate) fn mask_weight(&self, j: usize) -> f32 {
+        self.shown_layer().map_or(1.0, |l| {
+            mask_weight_of(&l.mask, &self.joints, &self.joint_parents, j)
+        })
+    }
+
+    /// The mask's section's title into `out`: `Mask · all joints`, `Mask · 3 set`, or what
+    /// it needs while no skeleton is known.
+    pub(crate) fn mask_title(&self, out: &mut String) {
+        out.clear();
+        let Some(l) = self.shown_layer() else {
+            return;
+        };
+        let _ = match (l.mask.len(), self.joints.is_empty()) {
+            (0, _) => write!(out, "Mask \u{b7} all joints"),
+            (n, false) => write!(out, "Mask \u{b7} {n} set"),
+            (n, true) => write!(
+                out,
+                "Mask \u{b7} {n} set (a character playing the graph shows its joints)"
+            ),
+        };
     }
 
     /// The shown layer's section's title into `out`: `Layer · Base`.
@@ -1072,7 +1149,8 @@ impl AnimDoc {
             | AnimRow::Blend
             | AnimRow::Exit
             | AnimRow::Offset
-            | AnimRow::LayerWeight => RowLook::Numbers(1, false),
+            | AnimRow::LayerWeight
+            | AnimRow::MaskWeight => RowLook::Numbers(1, false),
             AnimRow::Priority => RowLook::Numbers(1, true),
             AnimRow::PointAt(_) => {
                 let wide = self.pose().is_some_and(|n| n.kind == NodeKind::Blend2d);
@@ -1134,6 +1212,7 @@ impl AnimDoc {
             AnimRow::Offset => one(self.transition().map_or(0.0, |t| t.offset)),
             AnimRow::ParamValue(k) => one(self.param(k).map_or(0.0, |(_, p)| p.value)),
             AnimRow::LayerWeight => one(self.shown_layer().map_or(1.0, |l| l.weight)),
+            AnimRow::MaskWeight => one(self.mask_joint().map_or(1.0, |j| self.mask_weight(j))),
             _ => [0.0; 4],
         }
     }
@@ -1169,6 +1248,9 @@ impl AnimDoc {
                 .shown_layer()
                 .is_some_and(|l| !l.weight_param.is_empty()),
             AnimRow::LayerName => false,
+            AnimRow::MaskWeight => self
+                .shown_layer()
+                .is_some_and(|l| l.mask.contains_key(&self.mask_joint)),
             AnimRow::Name
             | AnimRow::Entry
             | AnimRow::Pose
@@ -1206,6 +1288,7 @@ impl AnimDoc {
                 | AnimRow::Exit
                 | AnimRow::Offset
                 | AnimRow::LayerWeight
+                | AnimRow::MaskWeight
                 | AnimRow::ParamValue(_) => graph::value_text(text, &numbers[k..=k]),
                 AnimRow::LayerName => {
                     text.push_str(self.shown_layer().map_or("", |l| l.name.as_str()));
@@ -1366,6 +1449,151 @@ fn shown_layer(file: &AnimGraphFile, chosen: &str) -> Option<String> {
         .find(|(_, l)| is_machine(file, &l.root))
         .or(layers.first())
         .map(|(id, _)| (*id).to_owned())
+}
+
+/// Joint `j`'s weight under mask `mask`, as the cook binds it (ADR 0124's E12-5d-2b): its
+/// own entry's, else its nearest ancestor's, else 1 for an empty mask (every joint) and 0
+/// for another. `names` and `parents` in the skeleton's order. Allocates nothing.
+pub(crate) fn mask_weight_of(
+    mask: &BTreeMap<String, f32>,
+    names: &[String],
+    parents: &[Option<usize>],
+    j: usize,
+) -> f32 {
+    let mut at = Some(j);
+    while let Some(k) = at {
+        if let Some(&w) = names.get(k).and_then(|n| mask.get(n)) {
+            return w.clamp(0.0, 1.0);
+        }
+        at = parents.get(k).copied().flatten();
+    }
+    if mask.is_empty() { 1.0 } else { 0.0 }
+}
+
+/// Joint `k` lies under joint `j` (not `j` itself).
+fn is_under(parents: &[Option<usize>], k: usize, j: usize) -> bool {
+    let mut at = parents.get(k).copied().flatten();
+    while let Some(p) = at {
+        if p == j {
+            return true;
+        }
+        at = parents.get(p).copied().flatten();
+    }
+    false
+}
+
+/// Mask `mask` with an empty one (every joint at 1) spelt out as its roots at 1, so a weight
+/// set on one joint keeps the others in.
+fn spell_out(mask: &mut BTreeMap<String, f32>, names: &[String], parents: &[Option<usize>]) {
+    if mask.is_empty() {
+        for (k, name) in names.iter().enumerate() {
+            if parents.get(k).copied().flatten().is_none() {
+                mask.insert(name.clone(), 1.0);
+            }
+        }
+    }
+}
+
+/// Mask `mask` with joint `j`'s subtree turned in (from a weight of 0) or out (a check box
+/// clicked; ADR 0124's E12-5d-2b, the team's а): the joints under `j` lose their own
+/// weights, then [`simplify_mask`].
+pub(crate) fn toggle_mask(
+    mask: &mut BTreeMap<String, f32>,
+    names: &[String],
+    parents: &[Option<usize>],
+    j: usize,
+) {
+    let Some(name) = names.get(j) else {
+        return;
+    };
+    let to = if mask_weight_of(mask, names, parents, j) > 0.0 {
+        0.0
+    } else {
+        1.0
+    };
+    spell_out(mask, names, parents);
+    for (k, under) in names.iter().enumerate().skip(j + 1) {
+        if is_under(parents, k, j) {
+            mask.remove(under);
+        }
+    }
+    mask.insert(name.clone(), to);
+    simplify_mask(mask, names, parents);
+}
+
+/// Joint `j`'s own weight in mask `mask` set to `w` (held within 0 to 1), the others
+/// keeping theirs (ADR 0124's E12-5d-2b), then [`simplify_mask`].
+pub(crate) fn set_mask_weight(
+    mask: &mut BTreeMap<String, f32>,
+    names: &[String],
+    parents: &[Option<usize>],
+    j: usize,
+    w: f32,
+) {
+    let Some(name) = names.get(j) else {
+        return;
+    };
+    spell_out(mask, names, parents);
+    mask.insert(name.clone(), w.clamp(0.0, 1.0));
+    simplify_mask(mask, names, parents);
+}
+
+/// Joint `j`'s own weight in mask `mask` taken out: it inherits its ancestors' again (its
+/// ↺; ADR 0124's E12-5d-2b), then [`simplify_mask`].
+pub(crate) fn reset_mask_weight(
+    mask: &mut BTreeMap<String, f32>,
+    names: &[String],
+    parents: &[Option<usize>],
+    j: usize,
+) {
+    if let Some(name) = names.get(j)
+        && mask.remove(name).is_some()
+    {
+        simplify_mask(mask, names, parents);
+    }
+}
+
+/// Mask `mask` written its shortest way with the same weights (ADR 0124's E12-5d-2b): a
+/// joint below a root whose own weight is what it inherits loses it; every root at 1 with
+/// nothing else is the empty mask; a mask left empty that kept joints out holds its roots'
+/// weights (an empty one would put every joint in). Entries naming joints the skeleton has
+/// not stay.
+pub(crate) fn simplify_mask(
+    mask: &mut BTreeMap<String, f32>,
+    names: &[String],
+    parents: &[Option<usize>],
+) {
+    let target: Vec<f32> = (0..names.len())
+        .map(|j| mask_weight_of(mask, names, parents, j))
+        .collect();
+    let is_root = |k: usize| parents.get(k).copied().flatten().is_none();
+    for (k, name) in names.iter().enumerate() {
+        if is_root(k) {
+            continue;
+        }
+        let inherited = parents.get(k).copied().flatten().map_or(0.0, |p| target[p]);
+        if mask.get(name).is_some_and(|w| (w - inherited).abs() < 1e-6) {
+            mask.remove(name);
+        }
+    }
+    let roots_only = mask
+        .keys()
+        .all(|n| names.iter().position(|m| m == n).is_some_and(is_root));
+    let roots_in = names
+        .iter()
+        .enumerate()
+        .filter(|&(k, _)| is_root(k))
+        .all(|(_, n)| mask.get(n) == Some(&1.0));
+    if roots_only && roots_in {
+        mask.clear();
+    }
+    if mask.is_empty() && target.iter().any(|&w| w < 1.0) {
+        for (k, name) in names.iter().enumerate() {
+            if is_root(k) {
+                mask.insert(name.clone(), target[k]);
+            }
+        }
+    }
 }
 
 /// Node `id` is a state machine.
@@ -2244,6 +2472,9 @@ impl GraphDoc {
             AnimRow::ParamValue(k) => anim.param(k).map(|(n, p)| (n.to_owned(), p.kind)),
             _ => None,
         };
+        let joint = anim
+            .mask_joint()
+            .map(|j| (anim.joints.clone(), anim.joint_parents.clone(), j));
         let v = values[0];
         self.edit_anim(|f| match row {
             AnimRow::Speed => {
@@ -2263,6 +2494,11 @@ impl GraphDoc {
             AnimRow::LayerWeight => {
                 if let Some(l) = f.layers.get_mut(&layer) {
                     l.weight = v.clamp(0.0, 1.0);
+                }
+            }
+            AnimRow::MaskWeight => {
+                if let (Some(l), Some((names, parents, j))) = (f.layers.get_mut(&layer), &joint) {
+                    set_mask_weight(&mut l.mask, names, parents, *j, v);
                 }
             }
             AnimRow::Blend | AnimRow::Priority | AnimRow::Exit | AnimRow::Offset => {
@@ -2604,12 +2840,20 @@ impl GraphDoc {
         };
         let defaults = TransitionFile::default();
         let layer = anim.layer.clone();
+        let joint = anim
+            .mask_joint()
+            .map(|j| (anim.joints.clone(), anim.joint_parents.clone(), j));
         self.edit_anim(|f| {
             if let Some(l) = f.layers.get_mut(&layer) {
                 match row {
                     AnimRow::LayerBlend => l.blend = LayerBlend::Normal,
                     AnimRow::LayerWeight => l.weight = 1.0,
                     AnimRow::LayerWeightParam => l.weight_param.clear(),
+                    AnimRow::MaskWeight => {
+                        if let Some((names, parents, j)) = &joint {
+                            reset_mask_weight(&mut l.mask, names, parents, *j);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2645,6 +2889,26 @@ impl GraphDoc {
                     AnimRow::ParamValue(_) => p.value = 0.0,
                     _ => {}
                 }
+            }
+        })
+    }
+
+    /// Joint `j`'s check box in the shown layer's mask clicked (ADR 0124's E12-5d-2b, the
+    /// team's а): its subtree turned in or out ([`toggle_mask`]). Its step's texts, when it
+    /// changed.
+    pub(crate) fn toggle_mask_joint(&mut self, j: usize) -> Option<(String, String)> {
+        let anim = self.anim.as_deref()?;
+        let (layer, names, parents) = (
+            anim.layer.clone(),
+            anim.joints.clone(),
+            anim.joint_parents.clone(),
+        );
+        if j >= names.len() {
+            return None;
+        }
+        self.edit_anim(|f| {
+            if let Some(l) = f.layers.get_mut(&layer) {
+                toggle_mask(&mut l.mask, &names, &parents, j);
             }
         })
     }
@@ -3661,6 +3925,90 @@ mod tests {
         assert!(anim(&d).file.nodes.contains_key(&machine));
     }
 
+    /// ADR 0124's E12-5d-2b, the team's а: a layer's mask as check boxes over the joints.
+    /// A box turns its joint's subtree in or out, the mask written its shortest way: every
+    /// joint in is the empty mask, a mask putting every joint out keeps its roots at 0 (an
+    /// empty one would put them in), entries repeating what they inherit go. The picked
+    /// joint's weight row sets its own weight (the others kept in) and ↺ gives it back.
+    #[test]
+    fn a_layers_mask_turns_subtrees_in_and_out_by_check_boxes() {
+        // hips ─┬─ spine ── arm
+        //       └─ leg ── foot
+        let names: Vec<String> = ["hips", "spine", "arm", "leg", "foot"]
+            .map(String::from)
+            .to_vec();
+        let parents = [None, Some(0), Some(1), Some(0), Some(3)];
+        let weights = |m: &BTreeMap<String, f32>| {
+            (0..names.len())
+                .map(|j| mask_weight_of(m, &names, &parents, j))
+                .collect::<Vec<_>>()
+        };
+        let entries =
+            |m: &BTreeMap<String, f32>| m.iter().map(|(k, v)| (k.clone(), *v)).collect::<Vec<_>>();
+        let mut mask = BTreeMap::new();
+        assert_eq!(weights(&mask), [1.0; 5], "empty: every joint in");
+        // The leg out: the hips spelt out, the leg's subtree at 0.
+        toggle_mask(&mut mask, &names, &parents, 3);
+        assert_eq!(
+            entries(&mask),
+            [(String::from("hips"), 1.0), (String::from("leg"), 0.0)]
+        );
+        assert_eq!(weights(&mask), [1.0, 1.0, 1.0, 0.0, 0.0]);
+        // Back in: every joint in again, the empty mask.
+        toggle_mask(&mut mask, &names, &parents, 3);
+        assert!(mask.is_empty(), "{mask:?}");
+        // The hips out: every joint out, the root kept at 0.
+        toggle_mask(&mut mask, &names, &parents, 0);
+        assert_eq!(entries(&mask), [(String::from("hips"), 0.0)]);
+        assert_eq!(weights(&mask), [0.0; 5]);
+        // The spine in: the upper body alone.
+        toggle_mask(&mut mask, &names, &parents, 1);
+        assert_eq!(weights(&mask), [0.0, 1.0, 1.0, 0.0, 0.0]);
+        // A hand-written mask of the spine alone, the spine turned out: the root at 0.
+        let mut alone = BTreeMap::from([(String::from("spine"), 1.0)]);
+        toggle_mask(&mut alone, &names, &parents, 1);
+        assert_eq!(entries(&alone), [(String::from("hips"), 0.0)]);
+        // A weight on the arm from the empty mask keeps the others in.
+        let mut half = BTreeMap::new();
+        set_mask_weight(&mut half, &names, &parents, 2, 0.5);
+        assert_eq!(weights(&half), [1.0, 1.0, 0.5, 1.0, 1.0]);
+        reset_mask_weight(&mut half, &names, &parents, 2);
+        assert!(half.is_empty(), "back to every joint: {half:?}");
+        // Through the document: the picked joint's row, a box, each a step.
+        let mut d = doc();
+        anim_mut(&mut d).set_joints(&names, parents.into_iter());
+        assert_eq!(anim(&d).joint_depths, [0, 1, 2, 1, 2]);
+        let (mut rows, mut sections) = (Vec::new(), Vec::new());
+        anim(&d).rows(&mut rows, &mut sections);
+        assert_eq!(
+            sections[1],
+            (AnimSection::Mask, 4, 4),
+            "no joint picked: no row"
+        );
+        let mut title = String::new();
+        anim(&d).mask_title(&mut title);
+        assert_eq!(title, "Mask \u{b7} all joints");
+        assert!(d.toggle_mask_joint(3).is_some());
+        assert_eq!(anim(&d).mask_weight(4), 0.0, "the foot with its leg");
+        anim(&d).mask_title(&mut title);
+        assert_eq!(title, "Mask \u{b7} 2 set");
+        anim_mut(&mut d).mask_joint = String::from("arm");
+        anim(&d).rows(&mut rows, &mut sections);
+        assert_eq!(sections[1], (AnimSection::Mask, 4, 5));
+        assert_eq!(rows[4], AnimRow::MaskWeight);
+        assert_eq!(anim(&d).numbers(AnimRow::MaskWeight)[0], 1.0, "inherited");
+        assert!(!anim(&d).changed(AnimRow::MaskWeight));
+        assert!(
+            d.anim_set_numbers(AnimRow::MaskWeight, [0.25, 0.0, 0.0, 0.0])
+                .is_some()
+        );
+        assert_eq!(anim(&d).mask_weight(2), 0.25);
+        assert!(anim(&d).changed(AnimRow::MaskWeight));
+        assert!(d.anim_reset(AnimRow::MaskWeight).is_some());
+        assert_eq!(anim(&d).mask_weight(2), 1.0);
+        assert!(!anim(&d).changed(AnimRow::MaskWeight));
+    }
+
     /// A layer playing nothing is left out of the cook: the shown layer's live state is read
     /// at its place among those that play (ADR 0124's E12-5d-2b).
     #[test]
@@ -3807,6 +4155,7 @@ mod tests {
             sections,
             [
                 (AnimSection::Layer, 0, 4),
+                (AnimSection::Mask, 4, 4),
                 (AnimSection::Param(0), 4, 6),
                 (AnimSection::Param(1), 6, 9),
                 (AnimSection::Add, 9, 10)

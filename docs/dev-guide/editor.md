@@ -1693,9 +1693,13 @@ unless it says otherwise).
   **weight**, and **weight from** (a number parameter that sets the weight instead). Its ×
   deletes the layer with its states; ↑ and ↓ move it under or over the others. In Play the
   bar follows the shown layer's state.
-- **Not yet:** layer masks (the joints a layer plays: a joint tree with check boxes),
-  machines inside machines (Tab into one), and the character's preview in the corner come
-  with the next steps (ADR 0124's E12-5d-2).
+- **A layer's mask** (the joints it plays) follows in the **Mask** section: the skeleton
+  of a character playing the graph, a check box a joint. Click a box to turn that joint
+  and everything under it in or out (untick the legs for an upper-body layer); click a
+  joint's name to pick it and type a weight from 0 to 1 in **joint weight** (↺ takes it
+  back). With every joint in, the mask is empty.
+- **Not yet:** machines inside machines (Tab into one) and the character's preview in the
+  corner come with the next steps (ADR 0124's E12-5d-2).
 
 ## Autosave and the session
 
