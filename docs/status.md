@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-4e-2, a character's joints posed in the view** (#PR, ADR 0124's as-built):
+  - **E12-4e-2, a character's joints posed in the view** (#475, ADR 0124's as-built):
     - A character's own clips are listed after its model's in the Animation tab. Choosing
       one shows its kind's tools, and New Clip is offered for characters too.
     - In Tab's joint mode the picked joint gets rings in its own axes. A drag turns it,
