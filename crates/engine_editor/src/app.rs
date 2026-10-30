@@ -770,6 +770,8 @@ struct FrameLists {
     joint_rows: Vec<crate::shell::JointRow<'static>>,
     /// The inspected blend's clips (ADR 0124's E12-5d-2a).
     blend_dots: Vec<crate::shell::BlendDot<'static>>,
+    /// A shown animation graph's layers' names (E12-5d-2b).
+    anim_layers: Vec<&'static str>,
 }
 
 /// The inspector's blend panel (ADR 0124's E12-5d-2a): the shown animation graph's inspected
@@ -3331,6 +3333,8 @@ struct Editor {
     anim_spans: Vec<(usize, usize)>,
     anim_sections: Vec<(crate::agraph::AnimSection, usize, usize)>,
     anim_section_at: Option<usize>,
+    /// The shown layer's section's title (`Layer · Base`, ADR 0124's E12-5d-2b).
+    layer_title: String,
     /// The keys go to the shown script's code: its tab was shown, or a press landed in it.
     /// A press anywhere else gives them back to the editor.
     code_focus: bool,
@@ -4546,6 +4550,7 @@ impl Editor {
             anim_spans: Vec::new(),
             anim_sections: Vec::new(),
             anim_section_at: None,
+            layer_title: String::new(),
             code_focus: false,
             code_rect: None,
             code_advance: 0.0,
@@ -5849,14 +5854,19 @@ impl Editor {
             for &(section, from, to) in &self.anim_sections {
                 let title = match section {
                     AnimSection::Selected => self.graph_title.as_str(),
+                    AnimSection::Layer => self.layer_title.as_str(),
                     AnimSection::Param(p) => anim.param(p).map_or("", |(name, _)| name),
                     AnimSection::Add => "Add Parameter",
                 };
+                // The layer's ↑ and ↓ move it among the layers (E12-5d-2b).
+                if section == AnimSection::Layer && anim.layer_ids.len() > 1 {
+                    movable = [sections.len(), sections.len() + 1];
+                }
                 sections.push(Section {
                     title,
                     fields: &asset_fields[from..to],
                     script: "",
-                    removable: matches!(section, AnimSection::Param(_)),
+                    removable: matches!(section, AnimSection::Param(_) | AnimSection::Layer),
                 });
             }
         } else if let Some((doc, bus)) = picked {
@@ -6948,6 +6958,20 @@ impl Editor {
         self.graph_anim.clear();
         self.graph_anim
             .extend(self.graphs.iter().map(|d| d.anim.is_some()));
+        let mut anim_layers: Vec<&str> = recycle(std::mem::take(&mut self.lists.anim_layers));
+        let mut shown_layer = 0;
+        if let Some(anim) = self
+            .active_graph
+            .and_then(|g| self.graphs.get(g))
+            .and_then(|d| d.anim.as_deref())
+        {
+            anim_layers.extend(
+                anim.layer_ids
+                    .iter()
+                    .map(|id| anim.file.layers.get(id).map_or("", |l| l.name.as_str())),
+            );
+            shown_layer = anim.layer_index().unwrap_or(usize::MAX);
+        }
         let graph_bar =
             self.active_graph
                 .and_then(|g| self.graphs.get(g))
@@ -6955,6 +6979,9 @@ impl Editor {
                     path: &d.path,
                     status: &self.graph_status,
                     slang: d.anim.is_none(),
+                    layered: d.anim.is_some(),
+                    layers: &anim_layers,
+                    layer: shown_layer,
                     preview: self
                         .graph_preview
                         .as_ref()
@@ -7614,6 +7641,7 @@ impl Editor {
         self.lists.graph_values = recycle(graph_values);
         self.lists.anim_options = recycle(anim_options);
         self.lists.blend_dots = recycle(blend_dots);
+        self.lists.anim_layers = recycle(anim_layers);
         self.blend.area = response.blend_area;
         self.listing = self
             .ui
@@ -7739,6 +7767,18 @@ impl Editor {
         }
         if response.blend_place {
             self.blend_place_asked = true;
+        }
+        // An animation graph's layers (E12-5d-2b): one shown, one added.
+        if let Some(k) = response.graph_layer
+            && let Some(g) = self.anim_graph_shown()
+        {
+            self.graphs[g].show_layer(k);
+        }
+        if response.graph_add_layer
+            && let Some(g) = self.anim_graph_shown()
+        {
+            let outcome = self.graphs[g].add_layer();
+            self.graph_outcome(world, g, outcome);
         }
         // The Clips (ADR 0124's E12-1b): a clip chosen, ▶ or ■, the loop, the speed, the bar.
         if let Some(i) = response.clip_pick {
@@ -8003,14 +8043,21 @@ impl Editor {
                 self.remove_part(world, part);
             } else if let Some(p) = self.anim_param_section(s) {
                 self.delete_anim_param(world, p);
+            } else if self.anim_layer_section(s) {
+                self.delete_anim_layer(world);
             } else {
                 self.remove_section(world, s);
             }
         }
-        if let Some((s, up)) = response.move_section
-            && let Some(MixerPart::Effect(k)) = self.mixer_part(s)
-        {
-            self.move_part(world, k, up);
+        if let Some((s, up)) = response.move_section {
+            if let Some(MixerPart::Effect(k)) = self.mixer_part(s) {
+                self.move_part(world, k, up);
+            } else if self.anim_layer_section(s)
+                && let Some(g) = self.anim_graph_shown()
+            {
+                let edit = self.graphs[g].move_layer(up);
+                self.graph_edit(world, g, "Move Layer", None, edit);
+            }
         }
         // The Debugger panel's buttons, frames and breakpoints.
         if let Some(go) = response.debug_go {
@@ -14916,6 +14963,7 @@ impl Editor {
                 at += n;
             }
             anim.title(&mut self.graph_title);
+            anim.layer_title(&mut self.layer_title);
             anim.status(doc.view.zoom(), &mut self.graph_status);
             return;
         }
@@ -15394,6 +15442,34 @@ impl Editor {
         match self.anim_sections.get(j)? {
             &(crate::agraph::AnimSection::Param(p), ..) => Some(p),
             _ => None,
+        }
+    }
+
+    /// Inspector section `section` is the shown animation graph's layer's (E12-5d-2b).
+    fn anim_layer_section(&self, section: usize) -> bool {
+        let Some(j) = self.anim_section_at.and_then(|at| section.checked_sub(at)) else {
+            return false;
+        };
+        matches!(
+            self.anim_sections.get(j),
+            Some(&(crate::agraph::AnimSection::Layer, ..))
+        )
+    }
+
+    /// The × of the shown animation graph's layer's section: it deleted with what only it
+    /// plays, as a step (E12-5d-2b).
+    fn delete_anim_layer(&mut self, world: &mut World) {
+        let Some(g) = self.anim_graph_shown() else {
+            return;
+        };
+        let name = self.graphs[g]
+            .anim()
+            .and_then(|a| a.shown_layer())
+            .map(|l| l.name.clone());
+        let edit = self.graphs[g].delete_layer();
+        self.graph_edit(world, g, "Delete Layer", None, edit);
+        if let Some(name) = name {
+            self.say(format!("Deleted the layer {name}: Ctrl+Z puts it back"));
         }
     }
 
@@ -23082,8 +23158,10 @@ impl Editor {
             .or_else(|| self.anim_watched.filter(|&e| plays(e)))
             .or_else(|| player.skinned_models().find(|&e| plays(e)));
         self.anim_watched = watched;
+        // The layer the canvas shows (E12-5d-2b).
         if let Some(e) = watched
-            && let Some(now) = player.graph_now(e)
+            && let Some(layer) = anim.layer_index()
+            && let Some(now) = player.graph_now_in(e, layer)
         {
             let who = world.get::<Name>(e).map_or("a character", Name::as_str);
             anim.live.set(who, &now);
@@ -28840,6 +28918,15 @@ impl<G> EditorGame<G> {
     /// For tests.
     pub fn graph_now(&self) -> String {
         self.shared.borrow().anim_status.clone()
+    }
+
+    /// Shows layer `k` (in their order) of the shown animation graph, as a click on its chip
+    /// does (ADR 0124's E12-5d-2b); for tests.
+    pub fn show_graph_layer(&mut self, k: usize) {
+        let mut shared = self.shared.borrow_mut();
+        if let Some(g) = shared.anim_graph_shown() {
+            shared.graphs[g].show_layer(k);
+        }
     }
 
     /// Selects state `state` alone on the shown animation graph's canvas, as a click on it
@@ -43433,6 +43520,90 @@ return Coin
             .map(|s| s.name.as_str())
             .collect();
         assert!(states.contains(&"New State"), "{states:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-5d-2b: an animation graph's layers as chips on its bar, the shown one
+    /// lit; a click on another shows its machine, and with nothing selected its section
+    /// leads the inspector; its × deletes it (one step, undone).
+    #[test]
+    fn a_graphs_layers_are_chips_on_its_bar_and_one_shows_at_a_time() {
+        let dir = project("graph-layers");
+        std::fs::create_dir_all(dir.join("anim")).unwrap();
+        std::fs::write(
+            dir.join("anim/hero.agraph"),
+            format!(
+                "[agraph version=1 id={}]\n\n\
+                 params[\"speed\"].kind = Float\n\
+                 layers[\"base\"].name = \"Base\"\nlayers[\"base\"].root = \"m\"\n\
+                 layers[\"upper\"].name = \"Upper\"\nlayers[\"upper\"].order = 1\n\
+                 layers[\"upper\"].root = \"u\"\nlayers[\"upper\"].weight = 0.5\n\
+                 nodes[\"m\"].kind = Machine\nnodes[\"m\"].entry = \"idle\"\n\
+                 nodes[\"u\"].kind = Machine\nnodes[\"u\"].entry = \"wave\"\n\
+                 nodes[\"ci\"].clip = \"Idle\"\nnodes[\"cw\"].clip = \"Walk\"\n\
+                 nodes[\"cv\"].clip = \"Wave\"\n\
+                 states[\"idle\"].machine = \"m\"\nstates[\"idle\"].name = \"Idle\"\n\
+                 states[\"idle\"].pose = \"ci\"\n\
+                 states[\"walk\"].at = [300, 0]\nstates[\"walk\"].machine = \"m\"\n\
+                 states[\"walk\"].name = \"Walk\"\nstates[\"walk\"].pose = \"cw\"\n\
+                 states[\"wave\"].machine = \"u\"\nstates[\"wave\"].name = \"Wave\"\n\
+                 states[\"wave\"].pose = \"cv\"\n",
+                AssetId::new()
+            ),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        ed.update(&mut world);
+        ed.open_graph(&world, Path::new("anim/hero.agraph"));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert_eq!(anim(&ed).layer, "base");
+        assert!(
+            ed.graph_status.starts_with("2 states"),
+            "{}",
+            ed.graph_status
+        );
+        // The chips on the bar (under the tabs); Base's name is in its section's field too.
+        let on_bar = |ed: &Editor, s: &str| {
+            texts(ed, s)
+                .into_iter()
+                .filter(|r| r.pos[1] < 64.0)
+                .collect::<Vec<_>>()
+        };
+        let upper = on_bar(&ed, "Upper");
+        assert_eq!(upper.len(), 1, "a chip each");
+        assert_eq!(on_bar(&ed, "Base").len(), 1);
+        assert!(!texts(&ed, "Layer \u{b7} Base").is_empty(), "its section");
+        // A click on Upper's chip: its machine, its section.
+        let chip = [
+            upper[0].pos[0] + upper[0].size[0] / 2.0,
+            upper[0].pos[1] + upper[0].size[1] / 2.0,
+        ];
+        click(&mut ed, &mut world, chip);
+        ed.update(&mut world);
+        assert_eq!(anim(&ed).layer, "upper");
+        assert_eq!(anim(&ed).machine, "u");
+        assert!(
+            ed.graph_status.starts_with("1 state"),
+            "{}",
+            ed.graph_status
+        );
+        assert!(!texts(&ed, "Layer \u{b7} Upper").is_empty());
+        assert!(!texts(&ed, "0.5").is_empty(), "its weight");
+        assert_eq!(ed.history.steps().count(), 0, "showing is not a step");
+        // Its ×: deleted with its machine, one step; undone.
+        ed.delete_anim_layer(&mut world);
+        ed.update(&mut world);
+        assert_eq!(anim(&ed).layer_ids, ["base"]);
+        assert!(!anim(&ed).file.nodes.contains_key("u"));
+        assert!(!anim(&ed).file.states.contains_key("wave"));
+        assert_eq!(ed.history.steps().count(), 1);
+        assert!(on_bar(&ed, "Upper").is_empty());
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        ed.update(&mut world);
+        assert_eq!(anim(&ed).layer_ids.len(), 2);
+        assert!(anim(&ed).file.states.contains_key("wave"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

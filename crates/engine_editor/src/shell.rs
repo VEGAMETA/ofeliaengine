@@ -1084,6 +1084,12 @@ pub struct GraphBar<'a> {
     pub preview: Option<UiImage>,
     /// It has code to show (a material graph's): the Show Slang button.
     pub slang: bool,
+    /// It is an animation graph's: its layers' chips and + on the bar (ADR 0124's E12-5d-2b).
+    pub layered: bool,
+    /// Its layers by name, in their order: a chip each.
+    pub layers: &'a [&'a str],
+    /// The layer the canvas shows, lit.
+    pub layer: usize,
 }
 
 /// A script in the center instead of the viewport (ADR 0107 E8): the lines in view and
@@ -1381,6 +1387,10 @@ pub struct ShellResponse {
     pub blend_place: bool,
     /// The panel's node this frame (0 when it is not shown).
     pub blend_area: u64,
+    /// An animation graph's layer chip clicked (ADR 0124's E12-5d-2b): shown on the canvas.
+    pub graph_layer: Option<usize>,
+    /// Its + clicked: a layer added.
+    pub graph_add_layer: bool,
     /// The Clips (ADR 0124's E12-1b): a clip's row was clicked.
     pub clip_pick: Option<usize>,
     /// Their ▶ or ■ was clicked.
@@ -1797,6 +1807,31 @@ fn center(
         if let Some(graph) = &model.graph {
             ui.row("graph bar", bar(p, 30.0).background(p.dock), |ui| {
                 text(ui, "path", graph.path, TEXT, p.text_dim);
+                // An animation graph's layers (E12-5d-2b): the one the canvas shows lit.
+                if graph.layered {
+                    ui.row(
+                        "layers",
+                        Style {
+                            size: [Size::Fit, Size::Fit],
+                            gap: 4.0,
+                            padding: [12.0, 0.0, 0.0, 0.0],
+                            align_cross: Align::Center,
+                            ..Style::default()
+                        },
+                        |ui| {
+                            for (k, name) in graph.layers.iter().enumerate() {
+                                ui.push_id(k as u64);
+                                if label_button(ui, "layer", name, k == graph.layer, p.accent, p) {
+                                    out.graph_layer = Some(k);
+                                }
+                                ui.pop_id();
+                            }
+                            if panel_button(ui, "add layer", icons::PLUS, false, p) {
+                                out.graph_add_layer = true;
+                            }
+                        },
+                    );
+                }
                 ui.spacer("fill");
                 text(ui, "status", graph.status, TEXT, p.text_dim);
                 // Its code, read only in a tab of its own (E10-3f-3).

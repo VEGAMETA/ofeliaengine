@@ -1427,6 +1427,13 @@ impl Player {
         self.assets.graph_now(e)
     }
 
+    /// [`Self::graph_now`] of layer `layer` of entity `e`'s graph, in the layers' order
+    /// (ADR 0124's E12-5d-2b: the layer the editor's canvas shows). `None` where that layer
+    /// plays no machine. Allocates nothing.
+    pub fn graph_now_in(&self, e: Entity, layer: usize) -> Option<engine_anim::MachineNow<'_>> {
+        self.assets.graph_now_in(e, layer)
+    }
+
     /// The parameters of entity `e`'s animation graph as its last tick left them (ADR 0124's
     /// E12-5e): each one's name, kind and value, by slot (its place among the graph's
     /// names). `None` for a character playing no graph. Allocates nothing.
