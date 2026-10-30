@@ -1,22 +1,33 @@
-//! A model file's clip events as the Animation tab edits them (ADR 0124's E12-3b-2): its
-//! `.meta` held, each edit written back at once and given to the player, undo handing the
-//! `.meta`'s text back ([`crate::undo::History::change_file`]).
+//! A clip's events and how it plays, as the Animation tab edits them (ADR 0124's E12-3b-2,
+//! E12-3e, E12-4b): a model file's `.meta` held for its clips, or a clip made in the editor
+//! (an `.anim` file) held whole; each edit written back at once and given to the player,
+//! undo handing the file's text back ([`crate::undo::History::change_file`]).
 
 use std::path::Path;
 
 use engine_core::math::Vec3;
-use engine_scene::{AssetId, AssetMeta, ClipEvent, ClipImport};
+use engine_scene::{AnimFile, AssetId, AssetMeta, ClipEvent, ClipImport};
 
-/// A model file's `.meta`, held while its clips show (see the module).
+/// What an [`EventsDoc`] holds.
+#[derive(Debug)]
+pub(crate) enum Held {
+    /// A model file's `.meta`: its clips' entries.
+    Meta(AssetMeta),
+    /// A clip made in the editor: its file, whose events and loop are its own.
+    Anim(AnimFile),
+}
+
+/// A model file's `.meta`, or a clip file, held while its clip shows (see the module).
 #[derive(Debug)]
 pub(crate) struct EventsDoc {
-    /// The model file, and its path under the project.
+    /// The file (the model's, or the clip's), and its path under the project.
     pub(crate) file: AssetId,
     pub(crate) path: String,
-    pub(crate) meta: AssetMeta,
-    /// The `.meta`'s text as last read or written: what an edit's undo puts back.
+    pub(crate) held: Held,
+    /// The written file's text as last read or written: what an edit's undo puts back.
     text: String,
-    /// The player has its events as held ([`engine_app::Assets::set_clip_events`]).
+    /// The player has it as held ([`engine_app::Assets::set_clip_events`],
+    /// [`engine_app::Assets::set_anim_clip`]).
     pub(crate) given: bool,
 }
 
@@ -28,46 +39,110 @@ impl EventsDoc {
         Self {
             file,
             path: path.to_owned(),
-            meta,
+            held: Held::Meta(meta),
             text,
             given: true,
         }
     }
 
-    /// Clip `clip`'s events (by its name in the file, an unnamed one's as the editor shows
-    /// it), in time order.
-    pub(crate) fn events(&self, clip: &str) -> &[ClipEvent] {
-        self.meta
-            .model
-            .clips
-            .iter()
-            .find(|c| c.name == clip)
-            .map_or(&[], |c| &c.events)
+    /// Clip file `file` (an `.anim`) at `path` under `root` (E12-4b).
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be read or is not a clip's.
+    pub(crate) fn open_anim(root: &Path, file: AssetId, path: &str) -> Result<Self, String> {
+        let anim = AnimFile::load(&root.join(path))?;
+        let text = anim.to_text(file);
+        Ok(Self {
+            file,
+            path: path.to_owned(),
+            held: Held::Anim(anim),
+            text,
+            given: true,
+        })
     }
 
-    /// Clip `clip`'s entry in the `.meta` (E12-3e: its events and how it plays), if it has
+    /// The `.meta` held, for a model file's clips.
+    pub(crate) fn meta(&self) -> Option<&AssetMeta> {
+        match &self.held {
+            Held::Meta(meta) => Some(meta),
+            Held::Anim(_) => None,
+        }
+    }
+
+    /// The clip file held, for a clip made in the editor.
+    pub(crate) fn anim(&self) -> Option<&AnimFile> {
+        match &self.held {
+            Held::Anim(anim) => Some(anim),
+            Held::Meta(_) => None,
+        }
+    }
+
+    /// Clip `clip`'s events (by its name in the file, an unnamed one's as the editor shows
+    /// it; a clip file's own), in time order.
+    pub(crate) fn events(&self, clip: &str) -> &[ClipEvent] {
+        match &self.held {
+            Held::Meta(meta) => meta
+                .model
+                .clips
+                .iter()
+                .find(|c| c.name == clip)
+                .map_or(&[], |c| &c.events),
+            Held::Anim(anim) => &anim.events,
+        }
+    }
+
+    /// Clip `clip`'s entry in a `.meta` (E12-3e: its events and how it plays), if it has
     /// one.
     pub(crate) fn clip(&self, clip: &str) -> Option<&ClipImport> {
-        self.meta.model.clips.iter().find(|c| c.name == clip)
+        self.meta()?.model.clips.iter().find(|c| c.name == clip)
+    }
+
+    /// How clip `clip` plays (E12-3e): once, and its root motion's axes (across, up, turn);
+    /// a clip file's loop, with the default axes (it has no root).
+    pub(crate) fn settings(&self, clip: &str) -> (bool, [bool; 3]) {
+        match &self.held {
+            Held::Meta(_) => self.clip(clip).map_or((false, [true, false, true]), |s| {
+                (s.once, [s.root_across, s.root_up, s.root_turn])
+            }),
+            Held::Anim(anim) => (anim.once, [true, false, true]),
+        }
     }
 
     /// Clip `clip`'s entry changed by `edit` in memory only (a drag, until its release):
-    /// given to the player, not written. An entry left saying nothing (no events, every
-    /// setting its default) leaves the file.
+    /// given to the player, not written. A `.meta`'s entry left saying nothing (no events,
+    /// every setting its default) leaves the file; a clip file takes the entry's events and
+    /// loop.
     pub(crate) fn edit_clip_live(&mut self, clip: &str, edit: impl FnOnce(&mut ClipImport)) {
-        let k = match self.meta.model.clips.iter().position(|c| c.name == clip) {
-            Some(k) => k,
-            None => {
-                self.meta.model.clips.push(ClipImport {
-                    name: clip.to_owned(),
-                    ..ClipImport::default()
-                });
-                self.meta.model.clips.len() - 1
+        match &mut self.held {
+            Held::Meta(meta) => {
+                let clips = &mut meta.model.clips;
+                let k = match clips.iter().position(|c| c.name == clip) {
+                    Some(k) => k,
+                    None => {
+                        clips.push(ClipImport {
+                            name: clip.to_owned(),
+                            ..ClipImport::default()
+                        });
+                        clips.len() - 1
+                    }
+                };
+                edit(&mut clips[k]);
+                if clips[k].is_plain() {
+                    clips.remove(k);
+                }
             }
-        };
-        edit(&mut self.meta.model.clips[k]);
-        if self.meta.model.clips[k].is_plain() {
-            self.meta.model.clips.remove(k);
+            Held::Anim(anim) => {
+                let mut entry = ClipImport {
+                    name: clip.to_owned(),
+                    events: core::mem::take(&mut anim.events),
+                    once: anim.once,
+                    ..ClipImport::default()
+                };
+                edit(&mut entry);
+                anim.events = entry.events;
+                anim.once = entry.once;
+            }
         }
         self.given = false;
     }
@@ -92,18 +167,31 @@ impl EventsDoc {
         self.write(root)
     }
 
-    /// What the held events are now, written to the `.meta` under `root`: the text before
-    /// and after, or None when nothing changed.
+    /// The held file's text now.
+    fn text_now(&self) -> String {
+        match &self.held {
+            Held::Meta(meta) => meta.to_text(self.file),
+            Held::Anim(anim) => anim.to_text(self.file),
+        }
+    }
+
+    /// What is held now, written (the `.meta`, or the clip file) under `root`: the text
+    /// before and after, or None when nothing changed.
     ///
     /// # Errors
     ///
-    /// The `.meta` could not be written: the held events go back to what it holds.
+    /// The file could not be written: what is held goes back to what it holds.
     pub(crate) fn write(&mut self, root: &Path) -> Result<Option<(String, String)>, String> {
-        let after = self.meta.to_text(self.file);
+        let after = self.text_now();
         if after == self.text {
             return Ok(None);
         }
-        if let Err(e) = self.meta.write(&root.join(&self.path), self.file) {
+        let written = match &self.held {
+            Held::Meta(meta) => meta.write(&root.join(&self.path), self.file),
+            Held::Anim(_) => std::fs::write(root.join(&self.path), &after)
+                .map_err(|e| format!("{}: {e}", self.path)),
+        };
+        if let Err(e) = written {
             let text = core::mem::take(&mut self.text);
             self.put_text(root, &text).ok();
             return Err(e);
@@ -129,16 +217,27 @@ impl EventsDoc {
         self.write(root)
     }
 
-    /// The `.meta`'s text undo or redo put back: held, written and given to the player.
+    /// The file's text undo or redo put back: held, written and given to the player.
     ///
     /// # Errors
     ///
-    /// Not a `.meta`, or it could not be written.
+    /// Not a `.meta` (or a clip's file), or it could not be written.
     pub(crate) fn put_text(&mut self, root: &Path, text: &str) -> Result<(), String> {
-        let (meta, _) = AssetMeta::parse(text).map_err(|e| format!("{}.meta:{e}", self.path))?;
-        std::fs::write(AssetMeta::path(&root.join(&self.path)), text)
-            .map_err(|e| format!("{}.meta: {e}", self.path))?;
-        self.meta = meta;
+        match &self.held {
+            Held::Meta(_) => {
+                let (meta, _) =
+                    AssetMeta::parse(text).map_err(|e| format!("{}.meta:{e}", self.path))?;
+                std::fs::write(AssetMeta::path(&root.join(&self.path)), text)
+                    .map_err(|e| format!("{}.meta: {e}", self.path))?;
+                self.held = Held::Meta(meta);
+            }
+            Held::Anim(_) => {
+                let (anim, _) = AnimFile::parse(text).map_err(|e| format!("{}:{e}", self.path))?;
+                std::fs::write(root.join(&self.path), text)
+                    .map_err(|e| format!("{}: {e}", self.path))?;
+                self.held = Held::Anim(anim);
+            }
+        }
         text.clone_into(&mut self.text);
         self.given = false;
         Ok(())
@@ -363,7 +462,7 @@ mod tests {
         assert!(doc.edit(&dir, "Walk", |_| {}).unwrap().is_none());
         // Both removed: the clip leaves the file.
         doc.edit(&dir, "Walk", Vec::clear).unwrap();
-        assert!(doc.meta.model.clips.is_empty());
+        assert!(doc.meta().unwrap().model.clips.is_empty());
         assert!(!meta_text().contains("model.clips"), "{}", meta_text());
         // Undo's text put back: held and written.
         doc.put_text(&dir, &after).unwrap();

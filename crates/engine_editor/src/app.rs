@@ -711,6 +711,8 @@ struct FrameLists {
     clip_options: Vec<&'static str>,
     /// The active character's clips (ADR 0124's E12-1b).
     clip_rows: Vec<crate::shell::ClipRow<'static>>,
+    /// The tracks of the clip made in the editor the Animation tab shows (E12-4b).
+    track_rows: Vec<crate::shell::TrackRow<'static>>,
     /// The active character's joints (E12-1c).
     joint_rows: Vec<crate::shell::JointRow<'static>>,
 }
@@ -1528,6 +1530,34 @@ impl ClipFacts {
         }
     }
 
+    /// A clip made in the editor, `name` among its animator's clips (ADR 0124's E12-4b): its
+    /// file's length, frame rate and tracks; one that cannot be read says why.
+    fn own(name: &str, anim: Option<Result<engine_scene::AnimFile, String>>) -> Self {
+        let (duration, rate, facts) = match &anim {
+            Some(Ok(a)) => {
+                let rate = if a.rate > 0.0 { a.rate } else { 30.0 };
+                let tracks = a.tracks.len();
+                let s = if tracks == 1 { "" } else { "s" };
+                let facts = format!("{tracks} track{s} \u{b7} {rate:.0} frames a second");
+                (a.length.max(0.0), rate, facts)
+            }
+            Some(Err(e)) => (0.0, 30.0, format!("cannot be read: {e}")),
+            None => (0.0, 30.0, String::from("its file is not in the project")),
+        };
+        Self {
+            key: name.to_owned(),
+            name: name.to_owned(),
+            duration,
+            frames: ((duration * rate).round() as u32).max(1),
+            rate,
+            length: format!("{duration:.2} s"),
+            facts: facts.clone(),
+            seam: String::new(),
+            jumps: false,
+            sampled: facts,
+        }
+    }
+
     /// A rig's clips.
     fn of(rig: &engine_app::Rig) -> Vec<Self> {
         let names = rig.skeleton().names();
@@ -1601,6 +1631,12 @@ struct ClipsView {
     /// The time its text shows, and the text ("frame 18 / 48 · 0.75 s").
     shown: f32,
     time_text: String,
+    /// Clips made in the editor (ADR 0124's E12-4b): each clip's file, in the order of
+    /// `clips` (empty for a rig's); whether the chosen one plays (on the frame's time, the
+    /// player showing it on its entity) and when its last frame was.
+    own: Vec<AssetRef>,
+    playing: bool,
+    at: Option<Instant>,
 }
 
 impl ClipsView {
@@ -1617,6 +1653,9 @@ impl ClipsView {
             joints: String::new(),
             shown: f32::NAN,
             time_text: String::with_capacity(48),
+            own: Vec::new(),
+            playing: false,
+            at: None,
         }
     }
 
@@ -3036,6 +3075,9 @@ struct Editor {
     plants_asked: bool,
     anim_events: u64,
     events_due: Vec<(AssetId, Vec<ClipImport>)>,
+    /// Clip files (`.anim`) undo put back while the Animation tab held another, for the
+    /// player (E12-4b).
+    anims_due: Vec<(AssetId, engine_scene::AnimFile)>,
     renaming_file: Option<AssetId>,
     /// The file the inspector shows instead of the entities, with its import settings
     /// (E4-9): the dock's last pick, until the entity selection changes.
@@ -4059,6 +4101,7 @@ impl Editor {
             plants_asked: false,
             anim_events: 0,
             events_due: Vec::new(),
+            anims_due: Vec::new(),
             renaming_file: None,
             inspected: None,
             material_docs: Vec::new(),
@@ -6451,6 +6494,26 @@ impl Editor {
                     .map(|(name, &depth)| crate::shell::JointRow { name, depth }),
             );
         }
+        // A clip made in the editor's tracks (E12-4b), from the file the tab holds.
+        let mut track_rows: Vec<crate::shell::TrackRow<'_>> =
+            recycle(std::mem::take(&mut self.lists.track_rows));
+        if self.bottom == Some(ANIMATION_TAB)
+            && let Some(anim) = self
+                .clips
+                .as_ref()
+                .filter(|v| !v.own.is_empty())
+                .and(self.clip_events.as_ref())
+                .and_then(crate::clip_events::EventsDoc::anim)
+        {
+            track_rows.extend(
+                anim.tracks
+                    .iter()
+                    .map(|(target, track)| crate::shell::TrackRow {
+                        label: target,
+                        keys: &track.keys,
+                    }),
+            );
+        }
         let animation_view = (self.bottom == Some(ANIMATION_TAB)).then(|| {
             let chosen = self
                 .clips
@@ -6467,10 +6530,7 @@ impl Editor {
                     let (once, root) = self
                         .clip_events
                         .as_ref()
-                        .and_then(|d| d.clip(&c.name))
-                        .map_or((false, [true, false, true]), |s| {
-                            (s.once, [s.root_across, s.root_up, s.root_turn])
-                        });
+                        .map_or((false, [true, false, true]), |d| d.settings(&c.name));
                     crate::shell::AnimationView {
                         subject: &v.subject,
                         clip: &c.name,
@@ -6480,7 +6540,7 @@ impl Editor {
                                 .shown_model
                                 .as_ref()
                                 .is_some_and(|m| m.file == file && m.playing),
-                            ClipsOf::Entity(_) => self.in_place.is_some(),
+                            ClipsOf::Entity(_) => self.in_place.is_some() || v.playing,
                         },
                         looping: self.clip_loop,
                         speed: CLIP_SPEED_TEXTS[self.clip_speed],
@@ -6498,6 +6558,8 @@ impl Editor {
                         speed_label: self.joint_trail.as_ref().map_or("", |t| &t.label),
                         once,
                         root,
+                        own: !v.own.is_empty(),
+                        tracks: &track_rows,
                     }
                 }
                 None => crate::shell::AnimationView {
@@ -6522,6 +6584,8 @@ impl Editor {
                     speed_label: "",
                     once: false,
                     root: [true, false, true],
+                    own: false,
+                    tracks: &[],
                 },
             }
         });
@@ -6714,6 +6778,7 @@ impl Editor {
         self.lists.bus_options = recycle(bus_options);
         self.lists.clip_options = recycle(clip_options);
         self.lists.clip_rows = recycle(clip_rows);
+        self.lists.track_rows = recycle(track_rows);
         self.lists.joint_rows = recycle(joint_rows);
         self.joined = joined;
         self.lists.scenes = recycle(scenes);
@@ -18501,6 +18566,35 @@ impl Editor {
             {
                 log::warn!(target: "engine_editor", "{e}");
             }
+            // A clip made in the editor (E12-4b): its file, held by the Animation tab or read
+            // for the step, written back and given to the player.
+            let anim_path = self
+                .asset_db
+                .get(id)
+                .filter(|e| e.kind == engine_scene::AssetKind::Anim)
+                .map(|e| e.path.clone());
+            if let Some(path) = anim_path {
+                match self.clip_events.as_mut().filter(|d| d.file == id) {
+                    Some(doc) => {
+                        if let Err(e) = doc.put_text(&self.root, &text) {
+                            log::warn!(target: "engine_editor", "{e}");
+                        }
+                    }
+                    None => {
+                        let opened =
+                            crate::clip_events::EventsDoc::open_anim(&self.root, id, &path)
+                                .and_then(|mut doc| doc.put_text(&self.root, &text).map(|()| doc));
+                        match opened {
+                            Ok(doc) => {
+                                if let crate::clip_events::Held::Anim(anim) = doc.held {
+                                    self.anims_due.push((id, anim));
+                                }
+                            }
+                            Err(e) => log::warn!(target: "engine_editor", "{e}"),
+                        }
+                    }
+                }
+            }
             // A model's clip events (E12-3b-2): its `.meta`, held by the Animation tab or
             // read for the step, written back and given to the player.
             let model_path = self
@@ -18518,7 +18612,11 @@ impl Editor {
                     None => {
                         let mut doc = crate::clip_events::EventsDoc::open(&self.root, id, &path);
                         match doc.put_text(&self.root, &text) {
-                            Ok(()) => self.events_due.push((id, doc.meta.model.clips)),
+                            Ok(()) => {
+                                if let crate::clip_events::Held::Meta(meta) = doc.held {
+                                    self.events_due.push((id, meta.model.clips));
+                                }
+                            }
                             Err(e) => log::warn!(target: "engine_editor", "{e}"),
                         }
                     }
@@ -19419,6 +19517,7 @@ impl Editor {
         }
         if let Some(view) = self.clips.as_mut() {
             view.held = false;
+            view.playing = false;
             view.time = 0.0;
         }
     }
@@ -19447,6 +19546,16 @@ impl Editor {
     /// The Clips' ▶ or ■ (ADR 0124's E12-1b): the character plays in place from the
     /// playhead, or stops there, holding that pose.
     fn toggle_clip_play(&mut self) {
+        // A clip made in the editor (E12-4b): played on the frame's time, shown on its entity.
+        if let Some(view) = self.clips.as_mut().filter(|v| !v.own.is_empty()) {
+            view.playing = !view.playing;
+            view.at = None;
+            view.held = !view.playing;
+            if view.playing && !self.clip_loop && view.time >= view.length() {
+                view.time = 0.0;
+            }
+            return;
+        }
         if let Some(view) = self.clips.as_mut()
             && let ClipsOf::Asset(file) = view.of
         {
@@ -19486,6 +19595,7 @@ impl Editor {
         let Some(view) = self.clips.as_mut() else {
             return;
         };
+        view.playing = false;
         let Some(c) = view.clips.get(view.chosen) else {
             return;
         };
@@ -19570,7 +19680,8 @@ impl Editor {
                     *clip = (ClipsOf::Entity(*e) == view.of).then_some(i);
                 }
             }
-            None => view.held = true,
+            // A clip made in the editor that plays goes on playing, from its start.
+            None => view.held = !view.playing,
         }
     }
 
@@ -19601,6 +19712,34 @@ impl Editor {
     /// Animation tab shows its clips (a character's file, or the one picked in the dock);
     /// the pick let go when another clip is chosen.
     fn follow_clip_events(&mut self, world: &World) {
+        // A clip made in the editor (E12-4b): its own file holds its events and loop.
+        if let Some(v) = self.clips.as_ref().filter(|v| !v.own.is_empty()) {
+            let chosen = v.own.get(v.chosen).zip(v.clips.get(v.chosen));
+            let Some((&file, c)) = chosen else {
+                self.clip_events = None;
+                self.picked_event = None;
+                return;
+            };
+            if self.picked_on != c.name {
+                self.picked_on.clear();
+                self.picked_on.push_str(&c.name);
+                self.picked_event = None;
+            }
+            if self
+                .clip_events
+                .as_ref()
+                .is_some_and(|d| d.file == file.file)
+            {
+                return;
+            }
+            self.picked_event = None;
+            self.clip_events = self.asset_db.get(file.file).and_then(|entry| {
+                crate::clip_events::EventsDoc::open_anim(&self.root, file.file, &entry.path)
+                    .inspect_err(|e| log::warn!(target: "engine_editor", "{e}"))
+                    .ok()
+            });
+            return;
+        }
         let chosen = self.clips.as_ref().and_then(|v| {
             let file = match v.of {
                 ClipsOf::Asset(id) => Some(id),
@@ -19626,6 +19765,46 @@ impl Editor {
             .asset_db
             .get(file)
             .map(|entry| crate::clip_events::EventsDoc::open(&self.root, file, &entry.path));
+    }
+
+    /// The active entity's clips made in the editor (ADR 0124's E12-4b), where it has no
+    /// rig: its animator's `clips`, each file read when they change; the view kept while they
+    /// stay the same, so its choice and playhead do. Nothing for an entity without them.
+    fn follow_own_clips(&mut self, world: &World, active: Option<Entity>) {
+        let found = active.and_then(|e| Some((e, world.get::<engine_runtime::Animator>(e)?)));
+        let Some((e, animator)) = found.filter(|(_, a)| !a.clips.is_empty()) else {
+            self.clips = None;
+            return;
+        };
+        let same = self.clips.as_ref().is_some_and(|v| {
+            v.of == ClipsOf::Entity(e)
+                && v.own.len() == animator.clips.len()
+                && v.own
+                    .iter()
+                    .zip(&v.clips)
+                    .zip(&animator.clips)
+                    .all(|((file, c), (name, f))| file == f && c.key == *name)
+        });
+        if same {
+            return;
+        }
+        let mut facts = Vec::with_capacity(animator.clips.len());
+        let mut own = Vec::with_capacity(animator.clips.len());
+        for (name, file) in &animator.clips {
+            let anim = self
+                .asset_db
+                .get(file.file)
+                .map(|entry| engine_scene::AnimFile::load(&self.root.join(&entry.path)));
+            facts.push(ClipFacts::own(name, anim));
+            own.push(*file);
+        }
+        let mut view = ClipsView::new(ClipsOf::Entity(e), 0, facts);
+        view.own = own;
+        // The animator's clip first, as the inspector names it.
+        if let Some(k) = view.clips.iter().position(|c| c.key == animator.clip) {
+            view.chosen = k;
+        }
+        self.clips = Some(view);
     }
 
     /// The events clip `k`'s preview passed from `from` to `to` seconds this frame (ADR
@@ -19929,10 +20108,18 @@ impl Editor {
         // The clip events edited (E12-3b-2): given to the player, which fires them from its
         // next tick.
         if let Some(doc) = self.clip_events.as_mut().filter(|d| !d.given) {
-            player
-                .assets_mut()
-                .set_clip_events(doc.file, &doc.meta.model.clips);
+            match &doc.held {
+                crate::clip_events::Held::Meta(meta) => player
+                    .assets_mut()
+                    .set_clip_events(doc.file, &meta.model.clips),
+                crate::clip_events::Held::Anim(anim) => {
+                    player.assets_mut().set_anim_clip(doc.file, Some(anim));
+                }
+            }
             doc.given = true;
+        }
+        for (file, anim) in self.anims_due.drain(..) {
+            player.assets_mut().set_anim_clip(file, Some(&anim));
         }
         for (file, clips) in self.events_due.drain(..) {
             player.assets_mut().set_clip_events(file, &clips);
@@ -20060,7 +20247,7 @@ impl Editor {
                 }
             }
             None => {
-                self.clips = None;
+                self.follow_own_clips(player.world_mut(), active);
                 self.skeleton_view = None;
             }
         }
@@ -20164,12 +20351,48 @@ impl Editor {
             }
         }
         if self.in_place.is_none()
-            && let Some(view) = self.clips.as_ref().filter(|v| v.held)
+            && let Some(view) = self.clips.as_ref().filter(|v| v.held && v.own.is_empty())
             && let ClipsOf::Entity(e) = view.of
         {
             player.pose_model(e, Some((view.chosen, view.time)));
             self.posing.push(e);
         }
+        // A clip made in the editor (E12-4b): played on by the frame's time while it plays;
+        // shown on its entity while it plays or holds a moment, the Animation tab open and
+        // the game not playing. The player sets its fields for drawing only: the scene keeps
+        // its own values for everything that reads or writes it.
+        let mut preview = None;
+        let (speed, open) = (
+            CLIP_SPEEDS[self.clip_speed],
+            self.bottom == Some(ANIMATION_TAB) && self.play.is_none(),
+        );
+        if let Some(v) = self.clips.as_mut().filter(|v| !v.own.is_empty()) {
+            if v.playing {
+                let now = Instant::now();
+                let dt = v.at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+                v.at = Some(now);
+                let (length, from) = (v.length(), v.time);
+                let t = from + dt * speed;
+                if looping {
+                    v.time = t.rem_euclid(length.max(1e-6));
+                } else if t >= length {
+                    v.time = length;
+                    v.playing = false;
+                    v.held = true;
+                } else {
+                    v.time = t;
+                }
+                heard = Some((v.chosen, from, if looping { t } else { t.min(length) }));
+            }
+            if open
+                && (v.playing || v.held)
+                && let ClipsOf::Entity(e) = v.of
+                && let Some(&file) = v.own.get(v.chosen)
+            {
+                preview = Some((e, file, v.time));
+            }
+        }
+        player.preview_anim(preview);
         if let Some(view) = self.clips.as_mut() {
             view.refresh_time();
         }
@@ -30465,6 +30688,89 @@ mod tests {
             .cloned()
             .unwrap();
         assert!(held.once && held.root_up && held.root_across && held.root_turn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-4b: a door's clips made in the editor in the Animation tab. Its
+    /// animator's clips listed, the animator's own chosen; the chosen clip's tracks shown a
+    /// row each with its keys, its events and its loop toggle (no root motion, no feet);
+    /// Once written into the clip's file as an undo step and taken back; ▶ plays it, a step
+    /// holds it, ↓ chooses the next clip.
+    #[test]
+    fn the_animation_tab_shows_a_clip_made_in_the_editor() {
+        let (dir, mut world, mut ed, door) = drop_project("own-clips");
+        std::fs::create_dir_all(dir.join("animations")).unwrap();
+        let (open_id, shut_id) = (AssetId::new(), AssetId::new());
+        let mut opening = engine_scene::AnimFile::default();
+        opening.set_key("Transform.rotation", 0.0, &[0.0, 0.0, 0.0]);
+        opening.set_key("Transform.rotation", 1.0, &[0.0, 90.0, 0.0]);
+        opening.set_key("Lamp:PointLight.range", 0.5, &[4.0]);
+        opening.events.push(ClipEvent {
+            time: 0.9,
+            name: String::from("thud"),
+            ..ClipEvent::default()
+        });
+        let anim_file = dir.join("animations/door open.anim");
+        std::fs::write(&anim_file, opening.to_text(open_id)).unwrap();
+        let shutting = engine_scene::AnimFile {
+            length: 2.0,
+            ..engine_scene::AnimFile::default()
+        };
+        std::fs::write(
+            dir.join("animations/door shut.anim"),
+            shutting.to_text(shut_id),
+        )
+        .unwrap();
+        ed.asset_db.scan();
+        world.insert(
+            door,
+            engine_runtime::Animator::new("open")
+                .with_clip("open", AssetRef::file(open_id))
+                .with_clip("shut", AssetRef::file(shut_id)),
+        );
+        ed.select_only(door);
+        ed.bottom = Some(ANIMATION_TAB);
+        ed.follow_own_clips(&world, Some(door));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let view = ed.clips.as_ref().unwrap();
+        assert_eq!(view.own.len(), 2);
+        assert_eq!(
+            view.clips[view.chosen].name, "open",
+            "the animator's own first"
+        );
+        assert!(!texts(&ed, "Transform.rotation").is_empty(), "its tracks");
+        assert!(!texts(&ed, "Lamp:PointLight.range").is_empty());
+        assert!(!texts(&ed, "thud").is_empty(), "its events");
+        assert!(!texts(&ed, "Once").is_empty(), "its loop");
+        assert!(texts(&ed, "Across").is_empty(), "no root motion");
+        assert!(texts(&ed, "Mark Foot Plants").is_empty(), "no feet");
+        assert!(
+            !texts(&ed, "2 tracks \u{b7} 30 frames a second").is_empty(),
+            "its facts"
+        );
+        // Once: written into the clip's own file, an undo step, taken back.
+        ed.toggle_clip_setting(&mut world, 0);
+        let text = || std::fs::read_to_string(&anim_file).unwrap();
+        assert!(text().contains("once = true"), "{}", text());
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert!(!text().contains("once = true"), "{}", text());
+        assert!(text().contains("Transform.rotation"), "the rest kept");
+        // Played, held where a step leaves it, the next clip chosen.
+        ed.toggle_clip_play();
+        assert!(ed.clips.as_ref().unwrap().playing);
+        ed.step_frame(FrameStep::Last);
+        let view = ed.clips.as_ref().unwrap();
+        assert!(!view.playing && view.held);
+        assert!((view.time - 1.0).abs() < 1e-4, "{}", view.time);
+        ed.step_clip(1);
+        let view = ed.clips.as_ref().unwrap();
+        assert_eq!(view.clips[view.chosen].name, "shut");
+        assert!((view.length() - 2.0).abs() < 1e-6);
+        // Another entity, without clips: nothing shown.
+        ed.follow_own_clips(&world, None);
+        assert!(ed.clips.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
