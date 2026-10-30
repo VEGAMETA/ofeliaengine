@@ -62,6 +62,7 @@
 mod assets;
 pub mod bake;
 mod blockout;
+mod clip_events;
 pub mod dap;
 mod entry;
 mod game;

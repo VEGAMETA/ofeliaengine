@@ -1084,6 +1084,7 @@ impl Player {
         // Timers and tweens on the game's clock (ADR 0104), moved before each tick.
         let timing = engine_runtime::Timing::new(&mut world);
         let animators = engine_runtime::Animators::new(&mut world);
+        world.insert_resource(engine_runtime::AnimationEvents::new());
         let mut runtime = Runtime::<InstanceId>::new(world, settings.tick_hz);
         runtime.set_jobs(jobs.clone());
         let ring = UploadRing::new(&device, &mut allocator, in_flight, 32 << 20)
@@ -3386,9 +3387,11 @@ impl Player {
                             }
                         }
                         // The characters' clips move on, after the scripts' tick and before
-                        // the game's (ADR 0124's E12-2), their sockets with them.
+                        // the game's (ADR 0124's E12-2), their sockets with them; the events
+                        // they played past fire for the game now, for scripts next tick.
                         animators.advance(world, dt);
                         assets.borrow_mut().move_roots(world);
+                        assets.borrow_mut().fire_events(world);
                         assets.borrow_mut().place_sockets(world);
                         game_cell.borrow_mut().tick(world, dt);
                         if let Some(own) = own_physics.borrow_mut().as_mut()

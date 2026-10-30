@@ -6,7 +6,8 @@
 //! `find_child`, `children`, `has`, `parent`, a function of their own through `self:`),
 //! the spinning example (§5) as a system over a query of 1,000 entities, relays sending
 //! each other messages and setting timers, dice drawing the world's random numbers, and
-//! chimes reading their text props and writing one, every tick, through 600
+//! chimes reading their text props and writing one, and steppers hearing their clips'
+//! events (ADR 0124's E12-3b), every tick, through 600
 //! ticks and frames after a warm-up: the heap allocations made in the scripts' stages
 //! are counted (the physics steps between them are not). One test per file, so nothing
 //! else allocates concurrently.
@@ -229,6 +230,18 @@ end
 return Chime
 "#;
 
+/// Clips' events heard (ADR 0124's E12-3b): a name and its data, or none.
+const STEPPER: &str = r#"local Stepper = component("Stepper", { lefts = 0, lands = 0 })
+function Stepper.on_animation_event(self, name, data)
+    if name == "step" and data == "left" then
+        self.lefts += 1
+    elseif name == "land" and data == nil then
+        self.lands += 1
+    end
+end
+return Stepper
+"#;
+
 /// Watchers, each with a trigger, a ball falling through it and a floor named after it.
 const WATCHERS: usize = 10;
 
@@ -250,7 +263,9 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
     std::fs::write(dir.join("scripts/relay.luau"), RELAY).unwrap();
     std::fs::write(dir.join("scripts/dice.luau"), DICE).unwrap();
     std::fs::write(dir.join("scripts/chime.luau"), CHIME).unwrap();
+    std::fs::write(dir.join("scripts/stepper.luau"), STEPPER).unwrap();
     let mut world = World::new();
+    world.insert_resource(AnimationEvents::new());
     let mut scripts = Scripts::load(&mut world, &dir, &dir.join("scripts")).unwrap();
     let mut physics = ScenePhysics::new(&PhysicsSettings {
         threads: 0,
@@ -372,6 +387,15 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
             chime
         })
         .collect();
+    let steppers: Vec<Entity> = (0..10)
+        .map(|_| {
+            let stepper = world.spawn((Transform::IDENTITY,));
+            assert!(scripts.add(&mut world, stepper, "Stepper"));
+            stepper
+        })
+        .collect();
+    // Each stepper's clip fires a step and a landing every tick, as the player fires them.
+    let texts: [std::sync::Arc<str>; 4] = ["step", "left", "land", ""].map(std::sync::Arc::from);
     let started = std::time::Instant::now();
 
     let spinners: Vec<Entity> = (0..1000)
@@ -417,6 +441,18 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
                 kind: engine_input::EventKind::MouseMotion { dx: 1.0, dy: 2.0 },
             });
             input.sample_tick(now);
+        }
+        if let Some(fired) = world.resource_mut::<AnimationEvents>() {
+            fired.clear();
+            for &entity in &steppers {
+                for (name, data) in [(&texts[0], &texts[1]), (&texts[2], &texts[3])] {
+                    fired.push(AnimationEvent {
+                        entity,
+                        name: std::sync::Arc::clone(name),
+                        data: std::sync::Arc::clone(data),
+                    });
+                }
+            }
         }
         let before = counting::allocations();
         scripts.tick_with(world, dt, Some(&physics));
@@ -548,6 +584,31 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
         };
         assert_eq!(rings, 840.0, "a chime stopped");
         assert_eq!(said, "ui/chime.ogg");
+    }
+    // The steppers heard every tick's step and landing.
+    let id = scripts.component("Stepper").unwrap();
+    let engine_reflect::TypeKind::Struct(stepper_fields) =
+        &world.components().type_info(id).unwrap().kind
+    else {
+        unreachable!()
+    };
+    let at = |name: &str| {
+        stepper_fields
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .offset
+    };
+    for &s in &steppers {
+        let base = world.get_raw(s, id).unwrap().as_ptr();
+        // SAFETY: Stepper's `lefts` and `lands`, f32s at their offsets.
+        let heard = unsafe {
+            (
+                base.add(at("lefts")).cast::<f32>().read_unaligned(),
+                base.add(at("lands")).cast::<f32>().read_unaligned(),
+            )
+        };
+        assert_eq!(heard, (840.0, 840.0), "a stepper missed its events");
     }
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(counted, 0, "allocations in 600 ticks of scripts");

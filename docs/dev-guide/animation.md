@@ -94,6 +94,65 @@ world.spawn((Model::new(mesh, material), Animator::new("Walk")));
 
 In the editor its `clip` is a list of the character's clips.
 
+### Clip events: footsteps and other moments
+
+A clip's events are moments its model's `.meta` names (ADR 0124's E12-3b): a footstep at
+0.25 s, a sword's swing at 0.6 s. The `.meta` keeps them beside the file, so a new export
+from Blender keeps them too:
+
+```
+model.clips.0.name = "Walk"
+model.clips.0.events.0.time = 0.25
+model.clips.0.events.0.name = "step"
+model.clips.0.events.0.data = "left"
+model.clips.0.events.0.sound = "sounds/step.wav"
+model.clips.0.events.1.time = 0.75
+model.clips.0.events.1.name = "step"
+model.clips.0.events.1.data = "right"
+```
+
+- **A clip by its name in the file.** An unnamed one goes by the name the editor shows it
+  by (`Clip 2`). `data` is optional text for whoever hears the event; `sound` is optional
+  too.
+- **Fired in the ticks.** Each tick, once the animators move on, every character fires the
+  events its clip passed over the tick. That holds at any speed: backwards (the latest
+  first), and several loops in one tick if the clip is short and fast. An event at a
+  clip's very start fires as the clip starts.
+- **One clip fires through a cross-fade:** the one that weighs more, so a fade never
+  doubles a footstep. The clip fading out fires until the new one passes half the fade.
+- **Rust reads them in the same tick,** in the `AnimationEvents` resource:
+
+  ```rust
+  fn tick(&mut self, world: &mut World, _dt: f32) {
+      let Some(events) = world.resource::<AnimationEvents>() else { return };
+      for e in events.fired() {
+          if &*e.name == "step" {
+              // e.entity stepped; e.data says which foot.
+          }
+      }
+  }
+  ```
+
+  The list holds the last tick's events only. Characters come in the order of their
+  entities, each one's events in the order played.
+- **Scripts on the character hear them in the next tick,** as
+  `on_animation_event(self, name, data)` (`data` is `nil` when empty):
+
+  ```lua
+  function Steps.on_animation_event(self, name, data)
+      if name == "step" then
+          self.steps += 1
+      end
+  end
+  ```
+
+- **An event's sound plays where the character stands,** as an `AudioSource3D` that
+  despawns at its end. Not while the network replays ticks.
+- **What it costs:** about 17 ns a character a tick on ref-1 (1,000 walkers: 17 µs);
+  nothing for characters whose clips have no events. No allocation while events fire;
+  a sound played allocates its source, as any sound spawned does.
+- A pose the editor holds fires nothing, and nothing fires while the world stands still.
+
 ### Sockets: things that follow a joint
 
 A `JointAttachment` on an entity right under a character makes it a socket on one of the

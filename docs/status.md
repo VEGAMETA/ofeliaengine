@@ -879,6 +879,12 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-3b-1, clip events** (#PR, ADR 0124's as-built): a model's `.meta` names moments
+    of its clips (time, name, data, sound). Each tick fires those its play passed (any
+    speed, backwards, several loops; through a fade only the heavier clip) into
+    `AnimationEvents` for the game's tick; scripts hear `on_animation_event(name, data)` in
+    the next tick; a sound plays where the character stands. 17 ns a character a tick, 0
+    allocations.
   - **E12-3a, the Animation tab's timeline** (#461, ADR 0124's as-built): Alt+N shows the
     Clips' chosen clip on a timeline, for the selected character or the picked model file.
     Its ruler numbers the frames and scrubs; ←/→ step frames, Home/End go to the ends,
@@ -1126,8 +1132,8 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    the rest of E12-3 (events with sounds, a joint's trail and speed curve, Mark Foot Plants,
-    loop and root motion settings), E12-4 (keys) and E12-5 (graphs).
+    the rest of E12-3 (the tab's events row, a joint's trail and speed curve, Mark Foot
+    Plants, loop and root motion settings), E12-4 (keys) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
     questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a
     (decisions in ticks, poses every frame), 3c (cross-fade or inertialization per

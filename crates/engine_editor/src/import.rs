@@ -86,7 +86,7 @@ impl Inspected {
             id,
             path,
             kind,
-            meta,
+            meta: meta.clone(),
             saved: meta,
             selection,
             drag: None,
@@ -167,10 +167,13 @@ mod tests {
     fn settings_reset_one_at_a_time() {
         let meta = chosen(AssetMeta::default(), 1);
         let meta = AssetMeta {
-            model: engine_scene::ModelImport { scale: 0.01 },
+            model: engine_scene::ModelImport {
+                scale: 0.01,
+                ..engine_scene::ModelImport::default()
+            },
             ..meta
         };
-        let back = reset(meta, Setting::Scale);
+        let back = reset(meta.clone(), Setting::Scale);
         assert_eq!(back.model.scale, 1.0);
         assert_eq!(
             back.texture.compression,

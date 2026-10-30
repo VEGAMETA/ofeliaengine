@@ -55,7 +55,9 @@ mod skinned;
 mod timing;
 
 pub use activity::{ActivityEpoch, ActivityPropagation, Disabled, Inactive, is_inactive};
-pub use animator::{Animator, Animators, JointAttachment, RootMotion};
+pub use animator::{
+    AnimationEvent, AnimationEvents, Animator, Animators, JointAttachment, RootMotion,
+};
 pub use camera::{Camera, CameraView, MainCamera, look_rotation};
 pub use engine_physics::ecs::FixedStep;
 pub use extract::{Derived, ExtractStats, MeshRenderer, RenderExtract, SceneSink};

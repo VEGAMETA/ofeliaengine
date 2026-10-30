@@ -584,6 +584,49 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-3b-1, 2026-10-30): clip events
+
+- **The `.meta`** (`engine_scene::ModelImport::clips`, as question 7 has it): a
+  `ClipImport` per clip with events, found by its name in the file (an unnamed one as
+  `Clip 2`), its `ClipEvent`s each a time, a name, data (text for whoever hears it) and a
+  sound's path. The writer drops lines equal to the defaults' by path, not by place: a list
+  with items writes more lines than the defaults' empty one, and the pairing by place cut
+  everything after it. `AssetMeta` and `ModelImport` are no longer `Copy`.
+- **Firing** (`engine_app::clip_events`, `Assets::fire_events`): after `move_roots` in each
+  tick, every character fires the events its clip passed over the tick's span, `[from, to)`
+  forward and `(to, from]` backwards, every loop between (64 at most). Through a cross-fade
+  the clip that weighs more fires (the clip fading out until the fade passes half), as the
+  ADR has it; sync groups' leaders come with the graphs (E12-5).
+- **`AnimationEvents`** (engine_runtime, a resource the player keeps): the tick's events
+  (entity, name, data; names shared as `Arc<str>`), characters in entity order. It keeps
+  its room between ticks rather than a fixed ring: no event is dropped, and a steady game
+  allocates nothing. `ticks()` tells one tick's events from the next.
+- **Scripts:** `on_animation_event(self, name, data)` on the character's instances, in the
+  next tick's script stage after the contacts, each tick's events once; names made into
+  Luau strings once each (`data` nil when empty). Windows (`in_window`) come with the
+  graphs.
+- **Sounds:** an event's sound spawns an `AudioSource3D` despawned at its end where the
+  character stands (not while the network re-simulates); it follows nothing.
+- **Live edits:** `Assets::set_clip_events(file, clips)` swaps a file's events in place of
+  its `.meta`'s (the editor's row, E12-3b-2); a reload reads the `.meta` again.
+- **Cost** (ref-1, release, the Radeon's frame thread, 1,000 walkers each passing three
+  events a loop): 17 µs a tick, 17 ns a character, with the characters' list made again
+  only when the skinned models change (47.5 µs while it was collected, sorted and looked
+  up every tick); 0.2 µs without events.
+- **Tests:**
+  - the spans (forward from the start, across the loop, two and a half loops, backwards,
+    paused, a moment on a tick's border fired once) and clips found by name or number;
+  - the `.meta`'s round trip with nested events;
+  - walkers firing their Walk's events into `AnimationEvents` over 128 ticks: forward,
+    backwards and at three times exactly as played, a restart under a half-second fade
+    never doubling a step, the left step's sound standing in the world, and events set in
+    place of the file's firing from the next tick;
+  - a character's script hearing each tick's events once, data nil when empty;
+  - 0 allocations: skinned characters firing eight events a loop, and ten scripts hearing
+    two events a tick (both builds).
+- **Left (E12-3b-2):** the Animation tab's events row (E adds one at the playhead, drags,
+  Delete, the sound field, written to the `.meta` with undo).
+
 ## As built (E12-3a, 2026-10-30): the Animation tab's timeline
 
 - **The tab** (the bottom bar's fifth, Alt+N, "View: Animation") shows the Clips' chosen

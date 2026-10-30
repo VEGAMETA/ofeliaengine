@@ -46,6 +46,7 @@
 //!   time it is asked for, every mesh of the file at once, on a thread of its own (convex
 //!   parts can take seconds). A built-in mesh's is its own shape.
 
+use crate::clip_events::{ModelEvents, crossed};
 use crate::loading::{Done, Job, Loader, Made};
 use crate::skins::Look;
 use engine_assets::colliders::{ColliderRules, Motion, cook_node_colliders};
@@ -67,8 +68,11 @@ use engine_render::mesh::{GeometryPool, MeshId, OwnedMeshData};
 use engine_render::skinning::{SkinId, SkinnedId, SkinnedMeshData, Skinning};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_rhi::{Allocator, Bindless, Device, Wrap};
-use engine_runtime::{Animator, Derived, JointAttachment, MeshRenderer, RootMotion, SkinnedMesh};
-use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef};
+use engine_runtime::{
+    AnimationEvent, AnimationEvents, Animator, Derived, JointAttachment, MeshRenderer, RootMotion,
+    SkinnedMesh,
+};
+use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, ClipImport};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -844,6 +848,14 @@ pub struct Assets {
     /// Each skinned model's instances of its skin.
     owned: HashMap<Entity, Owned>,
     posing: crate::skins::Posing,
+    /// Each model file's clips' events (ADR 0124's E12-3b), read from its `.meta` once; the
+    /// characters with any (not held by the editor) by entity, with their rigs and events,
+    /// made again when `events_dirty` says the skinned models changed; the sounds a tick's
+    /// events play.
+    clip_events: HashMap<AssetId, Arc<ModelEvents>>,
+    event_characters: Vec<(Entity, Arc<crate::skins::Rig>, Arc<ModelEvents>)>,
+    events_dirty: bool,
+    event_sounds: Vec<(Entity, Arc<str>)>,
     /// The editor's model preview's skin (ADR 0124's E12-1b).
     preview_skin: Option<PreviewSkin>,
 }
@@ -863,6 +875,9 @@ struct Owned {
     instances: Vec<SkinnedId>,
     meshes: Vec<MeshId>,
     rig: Arc<crate::skins::Rig>,
+    /// Its file, and that file's clips' events (E12-3b).
+    file: AssetId,
+    events: Arc<ModelEvents>,
     /// What it shows: a clip's moment, the clip fading out under it (E12-2b), its root
     /// motion taken out or not (E12-2c).
     look: Look,
@@ -940,6 +955,21 @@ fn tick_motion(rig: &crate::skins::Rig, animator: &Animator) -> Option<(Vec3, f3
         None => main,
     };
     Some(rig.mesh_motion(motion))
+}
+
+/// The clip whose events an [`Animator`]'s last tick fires (ADR 0124's E12-3b), and the span
+/// of it the tick played: its clip, but through a cross-fade the clip fading out while that
+/// one still weighs more, so a fade never doubles a footstep. None for a rig without clips.
+fn played_span(rig: &crate::skins::Rig, animator: &Animator) -> Option<(usize, f32, f32)> {
+    let names = rig.clips().iter().map(crate::RigClip::name);
+    let (k, from, to) = if animator.fade > 0.0 && animator.weight(1.0) < 0.5 {
+        let k = named_clip(names, &animator.from_clip);
+        (k, animator.from_previous, animator.from_time)
+    } else {
+        let k = named_clip(names, &animator.clip);
+        (k, animator.previous, animator.time)
+    };
+    (k < rig.clips().len()).then_some((k, from, to))
 }
 
 /// The clip an animator names among a rig's clip names (ADR 0124's E12-2): by its name in
@@ -1032,6 +1062,10 @@ impl Assets {
             retired_skins: Vec::new(),
             owned: HashMap::new(),
             posing: crate::skins::Posing::default(),
+            clip_events: HashMap::new(),
+            event_characters: Vec::new(),
+            events_dirty: false,
+            event_sounds: Vec::new(),
             preview_skin: None,
         }
     }
@@ -1168,6 +1202,7 @@ impl Assets {
             keep
         });
         self.building_skins.retain(|(a, _)| a.file != file);
+        self.clip_events.remove(&file);
         let (meshes, materials) = (&mut self.stale_meshes, &mut self.stale_materials);
         self.meshes.retain(|asset, &mut mesh| {
             let keep = asset.file != file;
@@ -2639,6 +2674,8 @@ impl Assets {
                     }
                 }
             }
+            let events = self.model_events(model.mesh.file, file);
+            self.events_dirty = true;
             self.owned.insert(
                 e,
                 Owned {
@@ -2646,6 +2683,8 @@ impl Assets {
                     instances,
                     meshes,
                     rig,
+                    file: model.mesh.file,
+                    events,
                     look: Look::default(),
                     held: false,
                     posed: false,
@@ -2734,6 +2773,7 @@ impl Assets {
         skinning: &mut Skinning,
         geometry: &mut GeometryPool,
     ) {
+        self.events_dirty = true;
         let Some(owned) = self.owned.remove(&e) else {
             return;
         };
@@ -2884,6 +2924,93 @@ impl Assets {
         }
     }
 
+    /// The clips' events the tick just run played past (ADR 0124's E12-3b), into the world's
+    /// [`AnimationEvents`] in place of the last tick's: per character with an [`Animator`],
+    /// in the order of their entities, the events of its clip (through a cross-fade, the
+    /// clip that weighs more) over the tick's span of play. An event with a sound plays it
+    /// where the character stands, but while the network plays ticks again. A pose the
+    /// editor holds fires nothing. Called in each tick after the roots move.
+    pub(crate) fn fire_events(&mut self, world: &mut World) {
+        let Some(mut fired) = world.resource_mut::<AnimationEvents>().map(core::mem::take) else {
+            return;
+        };
+        fired.clear();
+        if core::mem::take(&mut self.events_dirty) {
+            self.event_characters.clear();
+            self.event_characters.extend(
+                self.owned
+                    .iter()
+                    .filter(|(_, o)| !o.held && !o.events.is_empty())
+                    .map(|(&e, o)| (e, Arc::clone(&o.rig), Arc::clone(&o.events))),
+            );
+            self.event_characters.sort_unstable_by_key(|c| c.0);
+        }
+        if !self.event_characters.is_empty() {
+            engine_profiler::zone!("app::Assets::fire_events");
+            let mut sounds = core::mem::take(&mut self.event_sounds);
+            for (e, rig, events) in &self.event_characters {
+                let e = *e;
+                let Some(animator) = world.get::<Animator>(e) else {
+                    continue;
+                };
+                let Some((k, from, to)) = played_span(rig, animator) else {
+                    continue;
+                };
+                let clip = &rig.clips()[k];
+                let events = events.of_clip(clip.name(), k);
+                crossed(events, clip.duration(), from, to, |event| {
+                    fired.push(AnimationEvent {
+                        entity: e,
+                        name: Arc::clone(&event.name),
+                        data: Arc::clone(&event.data),
+                    });
+                    if let Some(sound) = &event.sound {
+                        sounds.push((e, Arc::clone(sound)));
+                    }
+                });
+            }
+            let again = engine_net::Resimulating::now(world);
+            for (e, sound) in sounds.drain(..) {
+                if again {
+                    continue;
+                }
+                let at = world
+                    .get::<GlobalTransform>(e)
+                    .map_or(Vec3::ZERO, |g| Vec3::from(g.0.translation));
+                world.spawn((
+                    Transform::from_translation(at),
+                    GlobalTransform(Affine3A::from_translation(at)),
+                    crate::AudioSource3D::new(&sound).despawned_at_end(),
+                ));
+            }
+            self.event_sounds = sounds;
+        }
+        if let Some(events) = world.resource_mut::<AnimationEvents>() {
+            *events = fired;
+        }
+    }
+
+    /// The clips' events of model file `file` as `clips` say (ADR 0124's E12-3b), in place of
+    /// its `.meta`'s until the file is read again: what the editor sets as it edits them. Its
+    /// characters fire them from the next tick.
+    pub fn set_clip_events(&mut self, file: AssetId, clips: &[ClipImport]) {
+        let events = Arc::new(ModelEvents::new(clips));
+        for owned in self.owned.values_mut().filter(|o| o.file == file) {
+            owned.events = Arc::clone(&events);
+        }
+        self.clip_events.insert(file, events);
+        self.events_dirty = true;
+    }
+
+    /// File `id`'s clips' events (ADR 0124's E12-3b), read from its `.meta` (`file`'s) once.
+    fn model_events(&mut self, id: AssetId, file: &GltfFile) -> Arc<ModelEvents> {
+        let events = self
+            .clip_events
+            .entry(id)
+            .or_insert_with(|| Arc::new(ModelEvents::new(&file.meta.model.clips)));
+        Arc::clone(events)
+    }
+
     /// The skinned models' [`Animator`]s' poses this frame (ADR 0124's E12-2): each one's
     /// clip at the frame's moment `alpha` of the way from the last tick to the next, but
     /// where the editor holds the pose; a model without one rests. The clip's length goes
@@ -2923,6 +3050,7 @@ impl Assets {
             return;
         }
         let frame = self.frame;
+        let before = self.owned.len();
         self.owned.retain(|&e, owned| {
             let alive = world.contains(e);
             if !alive {
@@ -2932,6 +3060,7 @@ impl Assets {
             }
             alive
         });
+        self.events_dirty |= self.owned.len() != before;
         let posing = &mut self.posing;
         for owned in self.owned.values_mut().filter(|o| !o.posed) {
             let palette = posing.palette(&owned.rig, owned.look);
@@ -3140,6 +3269,7 @@ impl Assets {
         let Some(owned) = self.owned.get_mut(&e) else {
             return false;
         };
+        self.events_dirty |= owned.held != pose.is_some();
         owned.held = pose.is_some();
         let look = Look::at(pose);
         if owned.look != look {
@@ -3392,7 +3522,10 @@ mod tests {
         // Its import setting: no scale in a `.meta` of defaults; one written scales it.
         assert_eq!(file.meta, AssetMeta::default());
         let meta = AssetMeta {
-            model: engine_scene::ModelImport { scale: 0.5 },
+            model: engine_scene::ModelImport {
+                scale: 0.5,
+                ..engine_scene::ModelImport::default()
+            },
             ..AssetMeta::default()
         };
         meta.write(&dir.join("yard.glb"), id).unwrap();
