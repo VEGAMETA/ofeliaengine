@@ -506,8 +506,21 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
     - **◆**, after a field's ↺, keys that field alone. It is filled where a key lies at the
       playhead, outlined where the clip moves the field, and dim where the field could be
       keyed (numbers and rotations).
+    - **Keys on the tracks** (the dope sheet):
+      - A click on a key's mark picks it (Ctrl adds or takes away); picked keys show larger
+        and lighter.
+      - A drag on an empty part of the tracks draws a box that picks the keys inside it
+        (Shift or Ctrl adds them to those picked).
+      - Dragging a picked key moves all the picked keys by whole frames; hold Shift to move
+        them freely. A key moved onto another takes its place, and Escape during the drag
+        puts them back.
+      - **Delete** deletes the picked keys (a track left empty goes too). **Ctrl+C** copies
+        them; **Ctrl+V** pastes them from the playhead, into this clip or another with
+        tracks of the same names. Each of these is one step of undo.
+    - **Length:** typed after Once in the header, in seconds (whole frames). Keys past the
+      end stay in the file.
     - Not yet: a character's own clips beside its model's, and keys on the entity's children
-      (from the dope sheet). Until then a new clip lasts one second.
+      (they come from the file); the Curves view comes next.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

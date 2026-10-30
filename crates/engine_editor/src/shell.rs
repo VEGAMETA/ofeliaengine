@@ -735,7 +735,18 @@ pub struct AnimationView<'a> {
     pub new_clip: bool,
     /// The clip's name typed as soon as it shows (a clip just made).
     pub clip_autofocus: bool,
+    /// The picked keys (E12-4c): their tracks and places, sorted; lit.
+    pub picked_keys: &'a [(usize, usize)],
+    /// A box being drawn over the tracks (E12-4c): its corners in the tracks' own pixels
+    /// (x0, y0, x1, y1).
+    pub key_box: Option<[f32; 4]>,
+    /// A clip made in the editor's length in seconds, typed in the header ("1.00").
+    pub length_text: &'a str,
 }
+
+/// From one track's row to the next in the Animation tab (E12-4c): 16 pixels and a gap of
+/// 2, what the editor finds the track under the pointer by.
+pub const TRACK_PITCH: f32 = 18.0;
 
 /// A track of a clip made in the editor, as the Animation tab shows it (ADR 0124's E12-4b):
 /// what it moves and its keys.
@@ -1305,6 +1316,15 @@ pub struct ShellResponse {
     pub anim_delete_clip: bool,
     /// The clip's name field was left: typed in (true) or cancelled.
     pub anim_clip_name: Option<bool>,
+    /// A key's mark pressed, dragged or let go (E12-4c): its track, its place in it, and the
+    /// tracks' node (where the pointer lies along the clip).
+    pub anim_key: Option<(usize, usize, WaveUse)>,
+    /// The tracks pressed, dragged over or let go where no key is: a box (E12-4c).
+    pub anim_tracks: Option<WaveUse>,
+    /// The tracks' node (E12-4c), 0 without tracks.
+    pub anim_tracks_area: u64,
+    /// The clip's length field was left: typed in (true) or cancelled (E12-4c).
+    pub anim_length: Option<bool>,
     /// One of the clip's settings was clicked (E12-3e): 0 once, 1 across, 2 up, 3 turn.
     pub anim_clip_setting: Option<u8>,
     /// Their bar was pressed, dragged along or let go.
@@ -5972,6 +5992,24 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                     if label_button(ui, "once", "Once", view.once, p.accent, p) {
                         out.anim_clip_setting = Some(0);
                     }
+                    // A clip made in the editor: its length typed (E12-4c).
+                    if view.own {
+                        text(ui, "length", "length", SMALL, p.text_dim);
+                        let style = Style {
+                            size: [Size::Fixed(44.0), Size::Fixed(20.0)],
+                            padding: [5.0, 0.0, 5.0, 0.0],
+                            radius: 3.0,
+                            background: Some(p.field),
+                            align_cross: Align::Center,
+                            ..Style::default()
+                        };
+                        let look = field_look(p, style, "", false);
+                        let r = ui.text_field("clip_length", view.length_text, &look);
+                        if r.committed || r.cancelled {
+                            out.anim_length = Some(r.committed);
+                        }
+                        text(ui, "seconds", "s", SMALL, p.text_dim);
+                    }
                     // A clip made in the editor has no root to move by.
                     if !view.own {
                         text(ui, "root", "root motion:", SMALL, p.text_dim);
@@ -6152,49 +6190,120 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
             }
         }
         // A clip made in the editor's tracks (E12-4b): a row each, its name at the left and a
-        // mark where each of its keys is, along the ruler.
-        for (k, track) in view.tracks.iter().enumerate().take(TRACKS) {
-            ui.push_id(k as u64);
-            ui.container(
-                "track",
+        // mark where each of its keys is, along the ruler. A press on a mark picks it and a
+        // drag moves the picked keys; one elsewhere draws a box (E12-4c).
+        if !view.tracks.is_empty() {
+            let mut hit: Option<(usize, usize, bool, bool, bool)> = None;
+            let area = ui.container(
+                "tracks",
                 Style {
-                    size: [Size::Grow(1.0), Size::Fixed(16.0)],
-                    radius: 3.0,
-                    clip: true,
-                    background: Some(p.field),
+                    size: [Size::Grow(1.0), Size::Fit],
+                    direction: Direction::Column,
+                    gap: TRACK_PITCH - 16.0,
                     ..Style::default()
                 },
                 |ui| {
-                    for (j, key) in track.keys.iter().enumerate() {
-                        ui.push_id(j as u64);
-                        let x = (key.time / length).clamp(0.0, 1.0) * width;
+                    for (k, track) in view.tracks.iter().enumerate().take(TRACKS) {
+                        ui.push_id(k as u64);
                         ui.container(
-                            "key",
+                            "track",
                             Style {
-                                size: [Size::Fixed(7.0), Size::Fixed(7.0)],
-                                radius: 1.0,
-                                background: Some(p.accent),
-                                placed: Some([(x - 3.5).clamp(0.0, (width - 7.0).max(0.0)), 4.5]),
+                                size: [Size::Grow(1.0), Size::Fixed(16.0)],
+                                radius: 3.0,
+                                clip: true,
+                                background: Some(p.field),
+                                ..Style::default()
+                            },
+                            |ui| {
+                                ui.container(
+                                    "label",
+                                    Style {
+                                        size: [Size::Fit, Size::Fit],
+                                        placed: Some([6.0, 0.0]),
+                                        ..Style::default()
+                                    },
+                                    |ui| {
+                                        text(ui, "text", track.label, SMALL, p.text_dim);
+                                    },
+                                );
+                                for (j, key) in track.keys.iter().enumerate() {
+                                    ui.push_id(j as u64);
+                                    let picked = view.picked_keys.binary_search(&(k, j)).is_ok();
+                                    let side = if picked { 9.0 } else { 7.0 };
+                                    let x = (key.time / length).clamp(0.0, 1.0) * width;
+                                    let mark = ui.container(
+                                        "key",
+                                        Style {
+                                            size: [Size::Fixed(side), Size::Fixed(side)],
+                                            radius: 1.0,
+                                            background: Some(if picked {
+                                                p.text
+                                            } else {
+                                                p.accent
+                                            }),
+                                            placed: Some([
+                                                (x - side / 2.0)
+                                                    .clamp(0.0, (width - side).max(0.0)),
+                                                (16.0 - side) / 2.0,
+                                            ]),
+                                            ..Style::default()
+                                        },
+                                        |_| {},
+                                    );
+                                    let used = ui.sense(mark, false);
+                                    if used.pressed || used.active || used.released {
+                                        hit =
+                                            Some((k, j, used.pressed, used.active, used.released));
+                                    }
+                                    ui.pop_id();
+                                }
+                            },
+                        );
+                        ui.pop_id();
+                    }
+                    // The box being drawn, over the tracks.
+                    if let Some([x0, y0, x1, y1]) = view.key_box {
+                        let [r, g, b, _] = p.accent;
+                        ui.container(
+                            "box",
+                            Style {
+                                size: [
+                                    Size::Fixed((x1 - x0).abs().max(1.0)),
+                                    Size::Fixed((y1 - y0).abs().max(1.0)),
+                                ],
+                                background: Some([r, g, b, 0.15]),
+                                border: Some((p.accent, 1.0)),
+                                placed: Some([x0.min(x1), y0.min(y1)]),
                                 ..Style::default()
                             },
                             |_| {},
                         );
-                        ui.pop_id();
                     }
-                    ui.container(
-                        "label",
-                        Style {
-                            size: [Size::Fit, Size::Fit],
-                            placed: Some([6.0, 0.0]),
-                            ..Style::default()
-                        },
-                        |ui| {
-                            text(ui, "text", track.label, SMALL, p.text_dim);
-                        },
-                    );
                 },
             );
-            ui.pop_id();
+            out.anim_tracks_area = area;
+            if let Some((k, j, pressed, held, released)) = hit {
+                out.anim_key = Some((
+                    k,
+                    j,
+                    WaveUse {
+                        node: area,
+                        pressed,
+                        held,
+                        released,
+                    },
+                ));
+            } else {
+                let used = ui.sense(area, false);
+                if used.pressed || used.active || used.released {
+                    out.anim_tracks = Some(WaveUse {
+                        node: area,
+                        pressed: used.pressed,
+                        held: used.active,
+                        released: used.released,
+                    });
+                }
+            }
         }
         out.anim_events = strip;
         if let Some((k, pressed, held, released)) = marked {

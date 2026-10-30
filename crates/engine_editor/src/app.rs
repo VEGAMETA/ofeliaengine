@@ -899,6 +899,10 @@ struct CommandIds {
     delete_clip: CommandId,
     /// K (E12-4b-2): the shown clip's fields keyed at the playhead.
     key_clip: CommandId,
+    /// Ctrl+C and Ctrl+V in the Animation tab (E12-4c): the picked keys copied, pasted at
+    /// the playhead.
+    key_copy: CommandId,
+    key_paste: CommandId,
     auto_play: CommandId,
     /// A material graph's nodes' previews on its canvas, or not (E10-4g).
     node_previews: CommandId,
@@ -1130,6 +1134,12 @@ fn commands() -> (Commands, CommandIds) {
             "Delete the Chosen Clip",
         ),
         key_clip: c.register("animation.key", "Animation", "Key the Clip's Fields"),
+        key_copy: c.register("animation.copy_keys", "Animation", "Copy the Picked Keys"),
+        key_paste: c.register(
+            "animation.paste_keys",
+            "Animation",
+            "Paste Keys at the Playhead",
+        ),
         auto_play: c.register("assets.auto_play", "Assets", "Auto Play Sounds"),
         node_previews: c.register("graph.node_previews", "Graph", "Node Previews"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
@@ -1244,6 +1254,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Space", ids.animation_play),
         ("E", ids.event_add),
         ("Delete", ids.event_delete),
+        ("Ctrl+C", ids.key_copy),
+        ("Ctrl+V", ids.key_paste),
     ]
     .map(|(chord, id)| (chord, id, ANIM_KEYS));
     let global = [
@@ -1490,6 +1502,8 @@ struct ClipFacts {
     jumps: bool,
     /// "sampled at 30 Hz" (the Animation tab's row, E12-3a).
     sampled: String,
+    /// A clip made in the editor's tracks (E12-4c: the facts follow its file); 0 for a rig's.
+    tracks: usize,
 }
 
 impl ClipFacts {
@@ -1541,22 +1555,23 @@ impl ClipFacts {
             },
             jumps,
             sampled: format!("sampled at {rate:.0} Hz"),
+            tracks: 0,
         }
     }
 
     /// A clip made in the editor, `name` among its animator's clips (ADR 0124's E12-4b): its
     /// file's length, frame rate and tracks; one that cannot be read says why.
     fn own(name: &str, anim: Option<Result<engine_scene::AnimFile, String>>) -> Self {
-        let (duration, rate, facts) = match &anim {
+        let (duration, rate, facts, tracks) = match &anim {
             Some(Ok(a)) => {
                 let rate = if a.rate > 0.0 { a.rate } else { 30.0 };
                 let tracks = a.tracks.len();
                 let s = if tracks == 1 { "" } else { "s" };
                 let facts = format!("{tracks} track{s} \u{b7} {rate:.0} frames a second");
-                (a.length.max(0.0), rate, facts)
+                (a.length.max(0.0), rate, facts, tracks)
             }
-            Some(Err(e)) => (0.0, 30.0, format!("cannot be read: {e}")),
-            None => (0.0, 30.0, String::from("its file is not in the project")),
+            Some(Err(e)) => (0.0, 30.0, format!("cannot be read: {e}"), 0),
+            None => (0.0, 30.0, String::from("its file is not in the project"), 0),
         };
         Self {
             key: name.to_owned(),
@@ -1569,6 +1584,7 @@ impl ClipFacts {
             seam: String::new(),
             jumps: false,
             sampled: facts,
+            tracks,
         }
     }
 
@@ -3094,6 +3110,20 @@ struct Editor {
     key_marks: Vec<(ComponentId, std::ops::Range<usize>, crate::shell::KeyMark)>,
     /// A clip made in the editor shows on the active entity: its fields get their ◆.
     key_shown: bool,
+    /// The keys picked on the Animation tab's tracks (E12-4c), sorted, and the clip file
+    /// they are in (let go when another shows).
+    picked_keys: Vec<crate::dope::KeyAt>,
+    picked_keys_in: Option<AssetId>,
+    /// Picked keys being dragged (E12-4c).
+    key_drag: Option<KeyDrag>,
+    /// A box drawn over the tracks (E12-4c): where it began and where the pointer is.
+    key_box: Option<([f32; 2], [f32; 2])>,
+    /// Keys Ctrl+C copied in the Animation tab (E12-4c).
+    copied_keys: Vec<crate::dope::CopiedKey>,
+    /// The tracks' node (E12-4c); the length field's text and the length it shows.
+    anim_tracks_area: u64,
+    length_text: String,
+    length_shown: f32,
     /// Mark Foot Plants asked for, done in the next `clips_frame` (E12-3d).
     plants_asked: bool,
     anim_events: u64,
@@ -4126,6 +4156,14 @@ impl Editor {
             key_fields: Vec::new(),
             key_marks: Vec::new(),
             key_shown: false,
+            picked_keys: Vec::new(),
+            picked_keys_in: None,
+            key_drag: None,
+            key_box: None,
+            copied_keys: Vec::new(),
+            anim_tracks_area: 0,
+            length_text: String::new(),
+            length_shown: f32::NAN,
             plants_asked: false,
             anim_events: 0,
             events_due: Vec::new(),
@@ -4906,6 +4944,8 @@ impl Editor {
         self.follow_clip_events(world);
         // The clip's keys beside the inspector's fields (E12-4b-2).
         self.follow_key_marks(world);
+        // A clip made in the editor: its facts, picked keys and length follow it (E12-4c).
+        self.follow_own_clip_facts();
         let properties = self.inspector.properties();
         let mut values: Vec<&str> = recycle(std::mem::take(&mut self.lists.values));
         let mut spans = std::mem::take(&mut self.lists.spans);
@@ -6622,6 +6662,17 @@ impl Editor {
                         tracks: &track_rows,
                         new_clip: !v.own.is_empty(),
                         clip_autofocus: !v.own.is_empty() && self.clip_autofocus,
+                        picked_keys: if v.own.is_empty() {
+                            &[]
+                        } else {
+                            &self.picked_keys
+                        },
+                        key_box: self.key_box.and_then(|(a, b)| {
+                            let r = self.ui.rect_of(self.anim_tracks_area)?;
+                            let [x, y] = r.pos;
+                            Some([a[0] - x, a[1] - y, b[0] - x, b[1] - y])
+                        }),
+                        length_text: &self.length_text,
                     }
                 }
                 None => crate::shell::AnimationView {
@@ -6654,6 +6705,9 @@ impl Editor {
                     tracks: &[],
                     new_clip: new_clip_offered,
                     clip_autofocus: false,
+                    picked_keys: &[],
+                    key_box: None,
+                    length_text: "",
                 },
             }
         });
@@ -7024,7 +7078,27 @@ impl Editor {
         }
         if let Some((k, used)) = response.anim_event {
             self.anim_focus = true;
+            if used.pressed {
+                self.picked_keys.clear();
+            }
             self.drag_event(world, k, used);
+        }
+        // The tracks' keys (E12-4c): picked and dragged, or boxed; the clip's length typed.
+        self.anim_tracks_area = response.anim_tracks_area;
+        if let Some((k, j, used)) = response.anim_key {
+            self.anim_focus = true;
+            if used.pressed {
+                self.press_key(k, j, used);
+            }
+        }
+        self.key_drag_frame(world);
+        if let Some(used) = response.anim_tracks {
+            self.anim_focus = true;
+            self.box_keys(used);
+        }
+        if response.anim_length == Some(true) {
+            let text = self.ui.edited_text().trim().to_owned();
+            self.set_clip_length(world, &text);
         }
         if response.anim_events_strip {
             self.anim_focus = true;
@@ -7595,6 +7669,17 @@ impl Editor {
         }
         self.asset_drag_frame(world, &response, game_view);
         self.row_drag_frame(world, &response);
+        // A drag of keys too (E12-4c): the clip as it was, those keys picked.
+        if self.ui.input().keys.contains(&UiKey::Escape)
+            && let Some(drag) = self.key_drag.take()
+        {
+            if drag.moved
+                && let Some(doc) = self.clip_events.as_mut().filter(|d| d.file == drag.file)
+            {
+                doc.edit_anim_live(|a| *a = drag.before);
+            }
+            self.picked_keys = drag.picked;
+        }
         // Escape during a drag puts the value back as it was.
         if self.ui.input().keys.contains(&UiKey::Escape)
             && let Some(drag) = self.drag.as_mut()
@@ -16911,7 +16996,16 @@ impl Editor {
         } else if id == ids.event_add {
             self.add_event(world);
         } else if id == ids.event_delete {
-            self.delete_event(world);
+            // The picked keys, where there are (E12-4c); else the picked event.
+            if self.picked_keys.is_empty() {
+                self.delete_event(world);
+            } else {
+                self.delete_keys(world);
+            }
+        } else if id == ids.key_copy {
+            self.copy_keys();
+        } else if id == ids.key_paste {
+            self.paste_keys(world);
         } else if id == ids.mark_foot_plants {
             // Done with the player, where the rig is (E12-3d).
             self.plants_asked = true;
@@ -20083,6 +20177,21 @@ impl Editor {
                 anim.set_key(target, time, &value[..*lanes]);
             }
         });
+        self.write_keys(world, name);
+        if let Some(v) = self.clips.as_mut() {
+            v.playing = false;
+            v.time = time;
+            v.held = true;
+        }
+    }
+
+    /// The clip file the Animation tab holds, as its keys' edits left it, written as undo step
+    /// `name` (ADR 0124's E12-4b-2, E12-4c); nothing when it did not change.
+    fn write_keys(&mut self, world: &mut World, name: &str) {
+        let Some(doc) = self.clip_events.as_mut() else {
+            return;
+        };
+        let file = doc.file;
         match doc.write(&self.root) {
             Ok(Some((before, after))) => {
                 self.history.begin(name, None);
@@ -20093,11 +20202,266 @@ impl Editor {
             Ok(None) => {}
             Err(e) => self.say(format!("Keys not saved: {e}")),
         }
-        if let Some(v) = self.clips.as_mut() {
-            v.playing = false;
-            v.time = time;
-            v.held = true;
+    }
+
+    /// The clip made in the editor the Animation tab holds (ADR 0124's E12-4c): its facts
+    /// (length, frames, tracks) follow its file as its keys and length change, the picked
+    /// keys keep to those it has (let go when another clip shows), and its length's text
+    /// follows (written anew only when the length changes).
+    fn follow_own_clip_facts(&mut self) {
+        let Some((file, anim)) = self
+            .clip_events
+            .as_ref()
+            .and_then(|d| Some((d.file, d.anim()?)))
+        else {
+            self.picked_keys.clear();
+            self.key_drag = None;
+            return;
+        };
+        if let Some(v) = self.clips.as_mut().filter(|v| !v.own.is_empty())
+            && let Some(c) = v.clips.get_mut(v.chosen)
+        {
+            let rate = if anim.rate > 0.0 { anim.rate } else { 30.0 };
+            if c.duration != anim.length.max(0.0) || c.rate != rate || c.tracks != anim.tracks.len()
+            {
+                let key = c.key.clone();
+                *c = ClipFacts::own(&key, Some(Ok(anim.clone())));
+            }
         }
+        if self.picked_keys_in != Some(file) {
+            self.picked_keys.clear();
+            self.picked_keys_in = Some(file);
+        }
+        crate::dope::still_there(anim, &mut self.picked_keys);
+        if self.length_shown != anim.length {
+            self.length_shown = anim.length;
+            self.length_text.clear();
+            let _ = write!(self.length_text, "{:.2}", anim.length);
+        }
+    }
+
+    /// A key's mark pressed on the Animation tab's tracks (ADR 0124's E12-4c): picked (Ctrl
+    /// adds it or takes it away), and the picked keys ready to be dragged
+    /// ([`Self::key_drag_frame`]).
+    fn press_key(&mut self, k: usize, j: usize, used: crate::shell::WaveUse) {
+        let (Some(r), Some([x, _])) = (self.ui.rect_of(used.node), self.ui.input().mouse) else {
+            return;
+        };
+        let ctrl = self.ui.input().ctrl;
+        let Some((file, anim)) = self
+            .clip_events
+            .as_ref()
+            .and_then(|d| Some((d.file, d.anim()?)))
+        else {
+            return;
+        };
+        let along = ((x - r.pos[0]) / r.size[0].max(1.0)).clamp(0.0, 1.0) * anim.length;
+        self.picked_event = None;
+        self.picked_keys_in = Some(file);
+        let at = self.picked_keys.binary_search(&(k, j));
+        if ctrl {
+            match at {
+                Ok(i) => {
+                    self.picked_keys.remove(i);
+                }
+                Err(i) => self.picked_keys.insert(i, (k, j)),
+            }
+            return;
+        }
+        if at.is_err() {
+            self.picked_keys.clear();
+            self.picked_keys.push((k, j));
+        }
+        self.key_drag = Some(KeyDrag {
+            before: anim.clone(),
+            picked: self.picked_keys.clone(),
+            file,
+            pressed: (k, j),
+            from: (x, along),
+            moved: false,
+            was_picked: at.is_ok(),
+        });
+    }
+
+    /// Picked keys dragged (ADR 0124's E12-4c), each frame by where the pointer is along the
+    /// tracks: past 3 pixels they move by whole frames (Shift: freely), held in memory and
+    /// given to the player; the button let go, they are written as one undo step. Let go
+    /// without moving on a key among others picked, that key is picked alone.
+    fn key_drag_frame(&mut self, world: &mut World) {
+        let Some(drag) = self.key_drag.as_mut() else {
+            return;
+        };
+        let input = self.ui.input();
+        let (down, shift, mouse) = (input.mouse_down, input.shift, input.mouse);
+        if let (Some(r), Some([x, _])) = (self.ui.rect_of(self.anim_tracks_area), mouse) {
+            drag.moved |= (x - drag.from.0).abs() >= 3.0;
+            if drag.moved {
+                let length = drag.before.length;
+                let along = ((x - r.pos[0]) / r.size[0].max(1.0)).clamp(0.0, 1.0) * length;
+                let mut dt = along - drag.from.1;
+                if !shift {
+                    let rate = drag.before.rate.max(1.0);
+                    dt = (dt * rate).round() / rate;
+                }
+                let (moved, now) = crate::dope::move_keys(&drag.before, &drag.picked, dt, length);
+                if let Some(doc) = self.clip_events.as_mut().filter(|d| d.file == drag.file) {
+                    doc.edit_anim_live(|a| *a = moved);
+                }
+                self.picked_keys = now;
+            }
+        }
+        if down {
+            return;
+        }
+        let Some(drag) = self.key_drag.take() else {
+            return;
+        };
+        if drag.moved {
+            self.write_keys(world, "Move Keys");
+        } else if drag.was_picked {
+            self.picked_keys.clear();
+            self.picked_keys.push(drag.pressed);
+        }
+    }
+
+    /// The tracks pressed and dragged over where no key is (ADR 0124's E12-4c): a box from
+    /// the press to the pointer; let go, the keys inside it picked (with Shift or Ctrl, added
+    /// to those picked). A click picks none.
+    fn box_keys(&mut self, used: crate::shell::WaveUse) {
+        let (Some(r), Some(at)) = (self.ui.rect_of(used.node), self.ui.input().mouse) else {
+            return;
+        };
+        let add = self.ui.input().shift || self.ui.input().ctrl;
+        if used.pressed {
+            self.key_box = Some((at, at));
+            self.picked_event = None;
+            if !add {
+                self.picked_keys.clear();
+            }
+            return;
+        }
+        let Some((from, _)) = self.key_box else {
+            return;
+        };
+        self.key_box = Some((from, at));
+        if !used.released {
+            return;
+        }
+        self.key_box = None;
+        let Some((file, anim)) = self
+            .clip_events
+            .as_ref()
+            .and_then(|d| Some((d.file, d.anim()?)))
+        else {
+            return;
+        };
+        let length = anim.length.max(1e-6);
+        let time = |x: f32| ((x - r.pos[0]) / r.size[0].max(1.0)).clamp(0.0, 1.0) * length;
+        let track = |y: f32| ((y - r.pos[1]) / crate::shell::TRACK_PITCH).max(0.0) as usize;
+        let tracks = track(from[1].min(at[1]))..=track(from[1].max(at[1]));
+        self.picked_keys_in = Some(file);
+        crate::dope::keys_in(
+            anim,
+            tracks,
+            time(from[0]),
+            time(at[0]),
+            &mut self.picked_keys,
+        );
+    }
+
+    /// Delete in the Animation tab with keys picked (ADR 0124's E12-4c): they go, a track
+    /// left without keys with them; one undo step.
+    fn delete_keys(&mut self, world: &mut World) {
+        let picked = std::mem::take(&mut self.picked_keys);
+        let Some(doc) = self
+            .clip_events
+            .as_mut()
+            .filter(|d| Some(d.file) == self.picked_keys_in)
+        else {
+            return;
+        };
+        let mut gone = 0;
+        doc.edit_anim_live(|a| gone = crate::dope::delete_keys(a, &picked));
+        self.write_keys(world, "Delete Keys");
+        let s = if gone == 1 { "" } else { "s" };
+        self.say(format!("{gone} key{s} deleted"));
+    }
+
+    /// Ctrl+C in the Animation tab (ADR 0124's E12-4c): the picked keys copied, each with its
+    /// distance from the first, for Ctrl+V to paste at the playhead (into this clip or
+    /// another with tracks of the same names).
+    fn copy_keys(&mut self) {
+        let Some(anim) = self
+            .clip_events
+            .as_ref()
+            .and_then(crate::clip_events::EventsDoc::anim)
+        else {
+            return;
+        };
+        if self.picked_keys.is_empty() {
+            self.say(String::from("Pick keys on the tracks to copy them"));
+            return;
+        }
+        self.copied_keys = crate::dope::copy_keys(anim, &self.picked_keys);
+        let n = self.copied_keys.len();
+        let s = if n == 1 { "" } else { "s" };
+        self.say(format!("{n} key{s} copied"));
+    }
+
+    /// Ctrl+V in the Animation tab (ADR 0124's E12-4c): the copied keys pasted from the
+    /// playhead's frame on, keeping their distances, into the tracks of their names (made
+    /// where missing; the clip grows to hold them), picked; one undo step.
+    fn paste_keys(&mut self, world: &mut World) {
+        if self.copied_keys.is_empty() {
+            self.say(String::from(
+                "No keys copied: Ctrl+C copies the picked keys",
+            ));
+            return;
+        }
+        let Some((_, file, time, _)) = self.shown_own_clip() else {
+            return;
+        };
+        let Some(doc) = self.clip_events.as_mut().filter(|d| d.file == file) else {
+            return;
+        };
+        let Some((rate, length)) = doc.anim().map(|a| (a.rate, a.length)) else {
+            return;
+        };
+        let time = crate::clip_events::on_frame(time, rate, length);
+        let copied = &self.copied_keys;
+        let mut now = Vec::new();
+        doc.edit_anim_live(|a| now = crate::dope::paste_keys(a, copied, time));
+        self.write_keys(world, "Paste Keys");
+        self.picked_keys = now;
+        self.picked_keys_in = Some(file);
+    }
+
+    /// The length typed in the Animation tab's header for a clip made in the editor (ADR
+    /// 0124's E12-4c): seconds (a sum or product as any typed number), as whole frames and
+    /// at least one; keys past it stay in the file (it plays to its length). One undo step.
+    fn set_clip_length(&mut self, world: &mut World, text: &str) {
+        let Some(current) = self
+            .clip_events
+            .as_ref()
+            .and_then(crate::clip_events::EventsDoc::anim)
+            .map(|a| (a.length, a.rate.max(1.0)))
+        else {
+            return;
+        };
+        let typed = text.trim().trim_end_matches('s').trim();
+        let seconds = match crate::expr::evaluate(typed, f64::from(current.0)) {
+            Ok(v) if v.is_finite() && v > 0.0 => v as f32,
+            _ => {
+                self.say(format!("Not a length: {text}"));
+                return;
+            }
+        };
+        let rate = current.1;
+        let seconds = (seconds * rate).round().max(1.0) / rate;
+        if let Some(doc) = self.clip_events.as_mut() {
+            doc.edit_anim_live(|a| a.length = seconds);
+        }
+        self.write_keys(world, "Clip Length");
     }
 
     /// Animation: New Clip (ADR 0124's E12-4b-1b): a clip made in the editor for the active
@@ -26394,6 +26758,23 @@ impl<G> EditorGame<G> {
         Some([r.pos[0], r.pos[1], r.size[0], r.size[1]])
     }
 
+    /// The Animation tab's tracks where the last frame drew them: x, y, width, height
+    /// (E12-4c, for tests); none without tracks.
+    pub fn animation_tracks(&self) -> Option<[f32; 4]> {
+        let shared = self.shared.borrow();
+        if shared.bottom != Some(ANIMATION_TAB) || shared.anim_tracks_area == 0 {
+            return None;
+        }
+        let r = shared.ui.rect_of(shared.anim_tracks_area)?;
+        Some([r.pos[0], r.pos[1], r.size[0], r.size[1]])
+    }
+
+    /// The keys picked on the Animation tab's tracks: their tracks and places (E12-4c, for
+    /// tests).
+    pub fn picked_keys(&self) -> Vec<(usize, usize)> {
+        self.shared.borrow().picked_keys.clone()
+    }
+
     /// Whether the picked model file's preview is drawn in its Clips, and whether it plays
     /// (ADR 0124's E12-1b): for tests.
     pub fn model_preview(&self) -> (bool, bool) {
@@ -26622,6 +27003,23 @@ impl<G: Game> Game for EditorGame<G> {
             game.ui(draw);
         }
     }
+}
+
+/// Picked keys dragged along the Animation tab's tracks (ADR 0124's E12-4c).
+#[derive(Debug)]
+struct KeyDrag {
+    /// The clip before the drag, the keys it moves there, and its file.
+    before: engine_scene::AnimFile,
+    picked: Vec<crate::dope::KeyAt>,
+    file: AssetId,
+    /// The key pressed.
+    pressed: crate::dope::KeyAt,
+    /// Where the pointer was pressed, and the time under it.
+    from: (f32, f32),
+    /// It went past 3 pixels.
+    moved: bool,
+    /// The key pressed was picked already: let go without moving, it is picked alone.
+    was_picked: bool,
 }
 
 /// Property `p`'s ◆ (ADR 0124's E12-4b-2) by the shown clip's fields `marks` (their bytes in
@@ -31411,6 +31809,108 @@ mod tests {
         );
         let names: Vec<&str> = ed.history.steps().map(|s| s.name()).collect();
         assert_eq!(names, ["New Clip", "Key Fields", "Key Field"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-4c: the dope sheet's editing of a clip made in the editor. Picked keys
+    /// moved as a drag leaves them (written when the button is up), deleted (a track left
+    /// without keys with them), copied and pasted at the playhead (the pasted ones picked),
+    /// and the clip's length typed: each one undo step, the four undone back to the file as
+    /// it was; the tab's facts follow the file.
+    #[test]
+    fn a_clips_keys_are_moved_deleted_copied_pasted_and_its_length_typed() {
+        let (dir, mut world, mut ed, boxed) = drop_project("dope");
+        std::fs::create_dir_all(dir.join("animations")).unwrap();
+        let id = AssetId::new();
+        let mut swing = engine_scene::AnimFile::default();
+        swing.set_key("Transform.rotation", 0.0, &[0.0, 0.0, 0.0]);
+        swing.set_key("Transform.rotation", 0.5, &[0.0, 45.0, 0.0]);
+        swing.set_key("Transform.rotation", 1.0, &[0.0, 90.0, 0.0]);
+        swing.set_key("Transform.scale", 0.5, &[1.0, 2.0, 1.0]);
+        let file = dir.join("animations/box swing.anim");
+        std::fs::write(&file, swing.to_text(id)).unwrap();
+        ed.asset_db.scan();
+        world.insert(
+            boxed,
+            engine_runtime::Animator::new("swing").with_clip("swing", AssetRef::file(id)),
+        );
+        ed.select_only(boxed);
+        ed.bottom = Some(ANIMATION_TAB);
+        ed.follow_own_clips(&world, Some(boxed));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let held = |ed: &Editor| ed.clip_events.as_ref().unwrap().anim().unwrap().clone();
+        let times = |ed: &Editor, track: &str| -> Vec<f32> {
+            held(ed).tracks[track].keys.iter().map(|k| k.time).collect()
+        };
+        let original = held(&ed);
+        assert_eq!(ed.length_text, "1.00");
+        // The tracks in the file's order: the turn (0), the scale (1). The turn's middle key
+        // and the scale's dragged 6 frames on, the button let go: one step.
+        ed.picked_keys = vec![(0, 1), (1, 0)];
+        let before = held(&ed);
+        let (moved, now) = crate::dope::move_keys(&before, &ed.picked_keys, 0.2, 1.0);
+        ed.clip_events
+            .as_mut()
+            .unwrap()
+            .edit_anim_live(|a| *a = moved);
+        ed.key_drag = Some(KeyDrag {
+            before,
+            picked: ed.picked_keys.clone(),
+            file: id,
+            pressed: (0, 1),
+            from: (0.0, 0.5),
+            moved: true,
+            was_picked: true,
+        });
+        ed.picked_keys = now;
+        ed.key_drag_frame(&mut world);
+        assert!(ed.key_drag.is_none(), "the button is up: done");
+        let text = || std::fs::read_to_string(&file).unwrap();
+        assert!((times(&ed, "Transform.rotation")[1] - 0.7).abs() < 1e-6);
+        assert_eq!(text(), held(&ed).to_text(id), "written");
+        // Deleted with Delete in the tab: the scale's only key takes its track with it.
+        ed.picked_keys = vec![(1, 0)];
+        let delete = ed.ids.event_delete;
+        ed.run(&mut world, delete);
+        assert!(!held(&ed).tracks.contains_key("Transform.scale"));
+        assert!(ed.picked_keys.is_empty());
+        // Copied, pasted at the playhead's frame 3: their distance kept, the pasted picked.
+        ed.picked_keys = vec![(0, 0), (0, 1)];
+        let (copy, paste) = (ed.ids.key_copy, ed.ids.key_paste);
+        ed.run(&mut world, copy);
+        {
+            let v = ed.clips.as_mut().unwrap();
+            v.time = 0.1;
+            v.held = true;
+        }
+        ed.run(&mut world, paste);
+        let pasted = times(&ed, "Transform.rotation");
+        assert_eq!(pasted.len(), 5, "{pasted:?}");
+        for (t, want) in pasted.iter().zip([0.0, 0.1, 0.7, 0.8, 1.0]) {
+            assert!((t - want).abs() < 1e-5, "{pasted:?}");
+        }
+        assert_eq!(ed.picked_keys, [(0, 1), (0, 3)], "the pasted ones picked");
+        // The length typed: 2 seconds; the tab's facts and the field follow.
+        ed.set_clip_length(&mut world, "1 + 1");
+        ed.update(&mut world);
+        assert_eq!(held(&ed).length, 2.0);
+        assert!((ed.clips.as_ref().unwrap().length() - 2.0).abs() < 1e-6);
+        assert_eq!(ed.length_text, "2.00");
+        let names: Vec<&str> = ed.history.steps().map(|s| s.name()).collect();
+        assert_eq!(
+            names,
+            ["Move Keys", "Delete Keys", "Paste Keys", "Clip Length"]
+        );
+        // All four undone: the file as it was.
+        let undo = ed.ids.undo;
+        for _ in 0..4 {
+            ed.run(&mut world, undo);
+        }
+        ed.update(&mut world);
+        assert_eq!(held(&ed), original);
+        assert_eq!(text(), original.to_text(id));
+        assert_eq!(ed.length_text, "1.00");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
