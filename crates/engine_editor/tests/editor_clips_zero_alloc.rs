@@ -4,7 +4,9 @@
 //! clip played in the engine's preview, drawn, read back and uploaded every frame, the
 //! Animation tab open with its clip's events marked (E12-3a, E12-3b-2); and a door's clip
 //! made in the editor playing in the tab, its tracks drawn and the player previewing it on
-//! the door every frame (E12-4b). The
+//! the door every frame (E12-4b); and the man's own clip keying one of his joints playing,
+//! his joints taking the pointer and the picked joint's rings laid out every frame
+//! (E12-4e-2). The
 //! measuring thread's allocations are counted; a failing measurement prints the stacks of
 //! its first ones. One test per file, so nothing else allocates on that thread.
 
@@ -273,6 +275,94 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
     for _ in 0..3 {
         frame(&mut player, &mut game, &mut overlay);
     }
+    // E12-4e-2: a clip of his own beside his model's, keying a joint of his; Tab over the
+    // view, a joint with a child picked, the clip played with the joint's rings shown.
+    alt_n(&mut game);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.run_command(player.world_mut(), "animation.new_clip"));
+    frame(&mut player, &mut game, &mut overlay);
+    key(&mut game, 0x0D, 0x1C);
+    for _ in 0..30 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let [vx, vy, vw, vh] = game.view_rect().expect("the view").map(|v| v as f32);
+    pointer(&mut game, [vx + vw * 0.5, vy + vh * 0.5], None);
+    // F frames him (the camera's flight over first), then Tab: his joints.
+    key(&mut game, 0x46, 0x21);
+    for _ in 0..90 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    key(&mut game, 0x09, 0x0F);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.picked_joint().1, "his joints take the pointer");
+    let (names, parents): (Vec<String>, Vec<Option<usize>>) = {
+        let skeleton = player.model_rig(man).unwrap().skeleton();
+        (
+            skeleton.names().to_vec(),
+            (0..skeleton.joint_count())
+                .map(|j| skeleton.parent(j))
+                .collect(),
+        )
+    };
+    let points: Vec<(usize, [f32; 2])> = (0..names.len())
+        .filter_map(|j| Some((j, game.screen_point(game.joint_point(&names[j])?)?)))
+        .collect();
+    let (_, at) = points
+        .iter()
+        .copied()
+        .find(|&(j, p)| {
+            p[0] > vx + 40.0
+                && p[0] < vx + vw - 40.0
+                && p[1] > vy + 40.0
+                && p[1] < vy + vh - 40.0
+                && parents.contains(&Some(j))
+        })
+        .expect("a joint with a child in the view");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, at, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.picked_joint().0.is_some(), "a joint picked");
+    assert!(game.run_command(player.world_mut(), "animation.key"));
+    for _ in 0..15 {
+        assert!(game.run_command(player.world_mut(), "animation.next_frame"));
+    }
+    assert!(game.run_command(player.world_mut(), "animation.key"));
+    // The pointer off the rings, the clip played on; the written clip's file found by the
+    // asset database's scan first (it allocates, once).
+    pointer(&mut game, [vx + 4.0, vy + 4.0], None);
+    assert!(game.run_command(player.world_mut(), "animation.play"));
+    let settle = std::time::Instant::now();
+    while settle.elapsed() < std::time::Duration::from_secs(3) {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    for _ in 0..120 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(
+        (0..3).any(|axis| game.gizmo_ring(axis).is_some()),
+        "its rings shown"
+    );
+    let shown = game.clips().1;
+    let posed = measured(&mut player, &mut game, &mut overlay);
+    assert_ne!(game.clips().1, shown, "his clip moved on");
+    println!("{posed} allocations in 240 frames of his own clip with a joint's rings");
+    assert!(game.run_command(player.world_mut(), "animation.play"));
+    // Tab over the view (smaller now, the tab's tracks under it) gives the pointer back.
+    let [vx, vy, vw, vh] = game.view_rect().expect("the view").map(|v| v as f32);
+    pointer(&mut game, [vx + vw * 0.5, vy + vh * 0.5], None);
+    key(&mut game, 0x09, 0x0F);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(!game.picked_joint().1, "Tab gives the pointer back");
+    alt_n(&mut game);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.animation_ruler().is_none(), "the tab shut again");
     // His file picked in the dock, its clip played in the engine's preview.
     let tile = game.text_at("CesiumMan.gltf").expect("the file listed");
     for pressed in [None, Some(true), Some(false)] {
@@ -338,7 +428,7 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
     assert!(game.model_preview().1, "still playing");
     assert_ne!(game.clips().1, shown, "the time moved on");
     println!("{previewed} allocations in 240 frames of a model's preview playing");
-    let allocations = in_place + previewed + own_clip + curves_drawn;
+    let allocations = in_place + previewed + own_clip + curves_drawn + posed;
     if allocations > 0
         && let Ok(traces) = TRACES.lock()
     {

@@ -906,7 +906,7 @@ fn euler_quat(e: &[f32; 4]) -> [f32; 4] {
 /// Quaternion `q` (x, y, z, w) as Euler angles in degrees as [`euler_quat`] makes them: of
 /// the two sets that make it, the one nearer `near`, each angle a whole number of turns from
 /// where it lands nearest `near`'s.
-fn euler_near(q: &[f32; 4], near: &[f32; 4]) -> [f32; 4] {
+pub fn euler_near(q: &[f32; 4], near: &[f32; 4]) -> [f32; 4] {
     let (yaw, pitch, roll) = Quat::from_array(*q).normalize().to_euler(EulerRot::YXZ);
     let a = [pitch.to_degrees(), yaw.to_degrees(), roll.to_degrees()];
     // The other set: pitch mirrored, yaw and roll a half turn on.

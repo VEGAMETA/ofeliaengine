@@ -116,6 +116,14 @@ impl Rig {
         &self.skeleton
     }
 
+    /// Where its skeleton's roots hang (ADR 0124's E12-4e-2): the space above them (the mesh
+    /// node's, the import scale applied) in which [`crate::Player::model_joints`] places the
+    /// joints. A clip's keys of a root joint are in this space, the others' in their
+    /// parent joint's.
+    pub fn root_place(&self) -> Affine3A {
+        self.root
+    }
+
     /// How root motion is read from a clip (ADR 0124's E12-2c): the motion of its topmost
     /// skin joint along the clip's own axes (E12-3e: by default across and about the mesh's
     /// up).

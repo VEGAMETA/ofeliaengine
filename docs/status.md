@@ -879,6 +879,14 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-4e-2, a character's joints posed in the view** (#475, ADR 0124's as-built):
+    - A character's own clips are listed after its model's in the Animation tab. Choosing
+      one shows its kind's tools, and New Clip is offered for characters too.
+    - In Tab's joint mode the picked joint gets rings in its own axes. A drag turns it,
+      keyed at the playhead as one step ("Pose <joint>"); Escape takes the drag back. K
+      keys the picked joint.
+    - 0 allocations with the rings laid out every frame while the clip plays. The clip's
+      time text follows the chosen clip.
   - **E12-4e-1, joints keyed in `.anim`** (#474, ADR 0124's as-built):
     - Tracks `@<joint>.<part>` key a character's joints. Its animator's own clip poses
       them over the rest pose, and the joints found once per model, not searched each
@@ -1199,8 +1207,8 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    the rest of E12-4 (4e-2: a character's joints posed in the view and keyed) and E12-5
-    (graphs).
+    E12-5 (graphs: `.agraph` states, transitions, blends, layers on E10's canvas); E12-4 is
+    done.
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
     questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a
     (decisions in ticks, poses every frame), 3c (cross-fade or inertialization per

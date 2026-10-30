@@ -1293,6 +1293,239 @@ fn a_selected_characters_clips_show_and_p_plays_it_in_place() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR 0124's E12-4e-2: a character's joint posed in the view keys his clip made in the
+/// editor. With the clip shown and a joint picked in Tab's joint mode, the joint has rings
+/// in its own axes; a ring dragged turns it (its child moves with it) and keys it at the
+/// playhead as one step of undo; K at another frame keys it there.
+#[test]
+fn a_characters_joint_turned_by_its_ring_is_keyed_in_his_clip() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets/CesiumMan");
+    if !source.join("CesiumMan.gltf").exists() {
+        println!(
+            "skipped: {} missing (tools/fetch-test-assets.ps1)",
+            source.display()
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("ofelia-editor-joint-keys-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    for file in ["CesiumMan.gltf", "CesiumMan_data.bin", "CesiumMan_img0.jpg"] {
+        std::fs::copy(source.join(file), dir.join("models").join(file)).unwrap();
+    }
+    let id = AssetMeta::ensure(&dir.join("models/CesiumMan.gltf")).unwrap();
+    let (mesh, material) = (
+        AssetRef::part(id, "Cesium_Man"),
+        AssetRef::part(id, "Cesium_Man-effect"),
+    );
+    let mut paths = engine_scene::AssetPaths::new();
+    paths.insert(mesh, "models/CesiumMan.gltf#Cesium_Man");
+    paths.insert(material, "models/CesiumMan.gltf#Cesium_Man-effect");
+    let mut world = World::new();
+    world.spawn((
+        SceneId::new(),
+        Name::new("Man"),
+        Transform::from_rotation(engine_core::math::Quat::from_rotation_x(
+            -core::f32::consts::FRAC_PI_2,
+        )),
+        Model::new(mesh, material),
+    ));
+    let options = engine_scene::SaveOptions {
+        id: Some(AssetId::new()),
+        assets: Some(&paths),
+        prefabs: None,
+    };
+    let mut text = String::new();
+    engine_scene::save_with(
+        &mut world,
+        &engine_scene::SceneRegistry::from_program(),
+        &options,
+        &mut text,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.scene"), &text).unwrap();
+    let (width, height) = (1280u32, 720u32);
+    let settings = PlayerSettings {
+        title: String::from("editor joint keys test"),
+        window: Window::Offscreen { width, height },
+        scene: Some("main.scene".into()),
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    let (mut game, mut overlay) =
+        engine_editor::editor(&mut player, &settings, |_| Ok(NoGame)).unwrap();
+    player.set_frame_time(Some(1.0 / 60.0));
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let man = engine_scene::find_named(player.world_mut(), "Man").expect("the man");
+    game.select(Some(man));
+    // F frames him; his skin is made in the background, then his Clips show.
+    tap(&mut game, 0x46, 0x21);
+    let started = Instant::now();
+    while game.clips().0.is_empty() && started.elapsed() < Duration::from_secs(20) {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(!game.clips().0.is_empty(), "his skin made");
+    // A clip made in the editor for him (E12-4b), shown at its start.
+    key(&mut game, 0x12, 0x38, true);
+    tap(&mut game, 0x4E, 0x31); // Alt+N
+    key(&mut game, 0x12, 0x38, false);
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.run_command(player.world_mut(), "animation.new_clip"));
+    frame(&mut player, &mut game, &mut overlay);
+    // Its name as offered (Enter), then shown after his model's clip.
+    tap(&mut game, 0x0D, 0x1C);
+    let settle = Instant::now();
+    while settle.elapsed() < Duration::from_secs(1) {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let (rows, chosen) = game.clips();
+    println!("his clips: {rows:?}, chosen {chosen:?}");
+    assert_eq!(rows.len(), 2, "his model's clip and his own: {rows:?}");
+    let clip_file = || {
+        let mut stack = vec![dir.clone()];
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x == "anim") {
+                    return path;
+                }
+            }
+        }
+        panic!("New Clip made no .anim file");
+    };
+    let clip_text = || std::fs::read_to_string(clip_file()).unwrap();
+    // Tab over the view: his joints. A joint with a child, alone in the view, picked.
+    let [vx, vy, vw, vh] = game.view_rect().expect("the view's rectangle");
+    let [vx, vy, vw, vh] = [vx as f32, vy as f32, vw as f32, vh as f32];
+    pointer(&mut game, [vx + vw * 0.5, vy + vh * 0.5], None);
+    tap(&mut game, 0x09, 0x0F);
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.picked_joint().1, "Tab enters his joints");
+    let (names, parents): (Vec<String>, Vec<Option<usize>>) = {
+        let skeleton = player.model_rig(man).unwrap().skeleton();
+        (
+            skeleton.names().to_vec(),
+            (0..skeleton.joint_count())
+                .map(|j| skeleton.parent(j))
+                .collect(),
+        )
+    };
+    let points: Vec<(usize, [f32; 2])> = (0..names.len())
+        .filter_map(|j| Some((j, game.screen_point(game.joint_point(&names[j])?)?)))
+        .collect();
+    let apart = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).hypot(a[1] - b[1]) >= 12.0;
+    let inside = |p: [f32; 2]| {
+        p[0] > vx + 40.0 && p[0] < vx + vw - 40.0 && p[1] > vy + 40.0 && p[1] < vy + vh - 40.0
+    };
+    let (joint, at) = points
+        .iter()
+        .copied()
+        .find(|&(j, p)| {
+            inside(p)
+                && parents.contains(&Some(j))
+                && points.iter().all(|&(k, q)| k == j || apart(p, q))
+        })
+        .expect("a joint with a child alone in the view");
+    let child = parents.iter().position(|&p| p == Some(joint)).unwrap();
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, at, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    assert_eq!(
+        game.picked_joint().0.as_deref(),
+        Some(names[joint].as_str()),
+        "the click picks the joint under it"
+    );
+    // His rings, about the joint's own axes: the one facing the camera most (drawn whole)
+    // dragged along itself, turning the joint across the view.
+    let (axis, (p, _)) = (0..3)
+        .filter_map(|axis| Some((axis, game.gizmo_ring(axis)?)))
+        .max_by_key(|(_, (_, pieces))| *pieces)
+        .expect("the picked joint's rings");
+    let center = game
+        .screen_point(game.joint_point(&names[joint]).unwrap())
+        .unwrap();
+    let out = [p[0] - center[0], p[1] - center[1]];
+    let length = out[0].hypot(out[1]).max(1.0);
+    let along = [-out[1] / length, out[0] / length];
+    let child_before = game.joint_point(&names[child]).unwrap();
+    pointer(&mut game, p, None);
+    frame(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, p, Some(true));
+    frame(&mut player, &mut game, &mut overlay);
+    for k in 1..=6 {
+        let s = k as f32 * 10.0;
+        pointer(&mut game, [p[0] + along[0] * s, p[1] + along[1] * s], None);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    pointer(
+        &mut game,
+        [p[0] + along[0] * 60.0, p[1] + along[1] * 60.0],
+        Some(false),
+    );
+    for _ in 0..4 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let target = format!("@{}.rotation", names[joint]);
+    let text = clip_text();
+    assert!(
+        text.contains(&format!("tracks[\"{target}\"]")),
+        "ring {axis}: {text}"
+    );
+    let moved = (game.joint_point(&names[child]).unwrap() - child_before).length();
+    println!(
+        "{} turned by ring {axis}: its child moved {moved:.4} m",
+        names[joint]
+    );
+    assert!(moved > 0.01, "the joint turned with its child: {moved} m");
+    // One step: undone, the track is gone and the child back where it was.
+    assert!(game.run_command(player.world_mut(), "edit.undo"));
+    for _ in 0..4 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let text = clip_text();
+    assert!(!text.contains(&target), "undone: {text}");
+    let back = (game.joint_point(&names[child]).unwrap() - child_before).length();
+    assert!(back < 1e-3, "back where it was: {back}");
+    // K at frame 10 keys the picked joint there, as the pose has it.
+    for _ in 0..10 {
+        assert!(game.run_command(player.world_mut(), "animation.next_frame"));
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.run_command(player.world_mut(), "animation.key"));
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let text = clip_text();
+    assert!(
+        text.contains(&format!("tracks[\"{target}\"].keys.0.time = 0.33")),
+        "{text}"
+    );
+    overlay.destroy(&mut player).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ADR 0124's E12-1b: a skinned model file picked in the dock shows its clips in the
 /// inspector under the engine's preview of it; ▶ plays the chosen clip there (the picture
 /// changes from moment to moment) and ■ stops it where it is (the picture stays).
