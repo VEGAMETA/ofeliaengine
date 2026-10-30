@@ -445,6 +445,9 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
         typed in the row under the strip. **Delete** or its **✕** removes it.
       - Every change is written to the model's `.meta` at once and is one step of undo.
         A game playing in the editor hears it from its next tick.
+      - **Their sounds play in the previews:** the dock's model playing its clip, and P
+        playing a character in place, play an event's sound as they pass it, on the same
+        bus as the dock's sound previews (one at a time).
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

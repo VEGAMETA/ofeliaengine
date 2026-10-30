@@ -135,6 +135,32 @@ pub(crate) fn add_event(events: &mut Vec<ClipEvent>, event: ClipEvent) -> usize 
     at
 }
 
+/// Calls `each` for the events (in time order) of a clip `length` seconds long that play
+/// from `from` to `to` passed, as the editor's previews play it (E12-3b-3): forward,
+/// `from <= t < to`; `to` may run past the clip's end into its loops (64 at most).
+pub(crate) fn passed<'a>(
+    events: &'a [ClipEvent],
+    length: f32,
+    from: f32,
+    to: f32,
+    mut each: impl FnMut(&'a ClipEvent),
+) {
+    if events.is_empty() || length <= 0.0 || to <= from || !from.is_finite() || !to.is_finite() {
+        return;
+    }
+    let first = (from / length).floor();
+    let loops = (((to / length).floor() - first) as i64).min(64);
+    for m in 0..=loops {
+        let start = (first + m as f32) * length;
+        for e in events.iter().filter(|e| e.time <= length) {
+            let t = start + e.time;
+            if t >= from && t < to {
+                each(e);
+            }
+        }
+    }
+}
+
 /// `time` on the clip's nearest frame at `rate` samples a second, within its `length`.
 pub(crate) fn on_frame(time: f32, rate: f32, length: f32) -> f32 {
     let time = time.clamp(0.0, length.max(0.0));
@@ -218,6 +244,23 @@ mod tests {
             (after.as_str(), meta_text().as_str())
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E12-3b-3: the events a preview's frame passed, across the loop too; none standing
+    /// still.
+    #[test]
+    fn a_previews_frame_passes_the_events_it_played() {
+        let events = [event(0.0, "a"), event(0.25, "b"), event(0.75, "c")];
+        let names = |from: f32, to: f32| {
+            let mut out = Vec::new();
+            passed(&events, 1.0, from, to, |e| out.push(e.name.clone()));
+            out
+        };
+        assert_eq!(names(0.0, 0.3), ["a", "b"]);
+        assert_eq!(names(0.3, 0.7), Vec::<String>::new());
+        assert_eq!(names(0.7, 1.1), ["c", "a"], "across the loop");
+        assert_eq!(names(0.5, 0.5), Vec::<String>::new(), "standing still");
+        assert_eq!(names(0.9, 0.2), Vec::<String>::new(), "never backwards");
     }
 
     /// E12-3b-2: events kept in time order as they are added and moved; times on frames.

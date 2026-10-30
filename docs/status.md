@@ -879,6 +879,9 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-3b-3, event sounds in the previews** (#PR, ADR 0124's as-built): the dock's model
+    and P in place play an event's sound as they pass it, on the dock's preview bus. The
+    model's events are held whenever its Clips show.
   - **E12-3b-2, the Animation tab's events** (#463, ADR 0124's as-built): marks on a strip
     under the ruler. E adds one at the playhead with its name ready to type, and a drag
     moves it frame by frame. The row under the strip edits the name, data and sound;
@@ -1137,8 +1140,8 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    the rest of E12-3 (event sounds in the previews, a joint's trail and speed curve, Mark
-    Foot Plants, loop and root motion settings), E12-4 (keys) and E12-5 (graphs).
+    the rest of E12-3 (a joint's trail and speed curve, Mark Foot Plants, loop and root
+    motion settings), E12-4 (keys) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
     questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a
     (decisions in ticks, poses every frame), 3c (cross-fade or inertialization per
