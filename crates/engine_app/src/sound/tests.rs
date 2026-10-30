@@ -244,6 +244,63 @@ fn a_one_shot_stops_or_despawns_at_its_end() {
     assert!(bed.voice(once).is_some());
 }
 
+/// Without a device (it failed to start), sources play out unheard on the game's clock: a
+/// one-shot stops and one despawned at its end goes after its sound's length, not before;
+/// a loop keeps going round. A dedicated server keeps no entity per sound played.
+#[test]
+fn sounds_without_a_device_play_out_unheard() {
+    let mut bed = Bed::new("unheard", AudioSettings::default());
+    bed.sound.manual = false;
+    bed.sound.error = Some(String::from("no audio device"));
+    // 20 ms.
+    write_wav(&bed.folder.join("blip.wav"), 960);
+    let once = bed.world.spawn((AudioSource::new("blip.wav"),));
+    let gone = bed
+        .world
+        .spawn((AudioSource::new("blip.wav").despawned_at_end(),));
+    let looped = bed.world.spawn((AudioSource::new("blip.wav").looped(),));
+    // Read, then within its length: still playing.
+    bed.until(|b| b.source(once).position > 0.0);
+    assert!(bed.voice(once).is_none(), "no voice without a device");
+    assert!(bed.source(once).playing);
+    assert!(bed.world.contains(gone));
+    // Past its end: ended as its voice would have.
+    bed.frame(10);
+    bed.frame(10);
+    bed.frame(10);
+    assert!(!bed.source(once).playing);
+    assert_eq!(bed.source(once).position, 0.0);
+    assert!(!bed.world.contains(gone), "despawned at its end");
+    let looping = bed.source(looped);
+    assert!(
+        looping.playing && looping.position < 0.02,
+        "{}",
+        looping.position
+    );
+}
+
+/// With sound off, one-shots end at once and those despawned at their end go: nothing
+/// gathers in a headless run.
+#[test]
+fn sounds_with_sound_off_end_at_once() {
+    let settings = AudioSettings {
+        enabled: false,
+        ..AudioSettings::default()
+    };
+    let mut sound = Sound::new(&settings, &MixerFile::builtin());
+    let mut world = World::new();
+    let once = world.spawn((AudioSource::new("blip.wav"),));
+    let gone = world.spawn((AudioSource::new("blip.wav").despawned_at_end(),));
+    let looped = world.spawn((AudioSource::new("blip.wav").looped(),));
+    // The world kept still: nothing ends.
+    sound.update(&mut world, None, None, 0.016, false);
+    assert!(world.contains(gone));
+    sound.update(&mut world, None, None, 0.016, true);
+    assert!(!world.get::<AudioSource>(once).unwrap().playing);
+    assert!(!world.contains(gone));
+    assert!(world.get::<AudioSource>(looped).unwrap().playing);
+}
+
 #[test]
 fn a_paused_sound_goes_on_from_where_it_stopped_and_a_seek_moves_it() {
     let mut bed = Bed::new("pause", AudioSettings::default());
