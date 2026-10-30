@@ -278,13 +278,15 @@ pub enum AssetKind {
     Mixer,
     /// A material graph (`.mgraph`): a material type drawn as nodes (ADR 0123).
     Graph,
+    /// A clip made in the editor (`.anim`): keyed fields of an entity (ADR 0124's E12-4a).
+    Anim,
     /// A material graph's function (`.mfunc`): nodes called as one node (ADR 0123's
     /// E10-3g-2).
     Function,
 }
 
 /// Every kind with its name and extensions.
-const KINDS: [(AssetKind, &str, &[&str]); 12] = [
+const KINDS: [(AssetKind, &str, &[&str]); 13] = [
     (AssetKind::Scene, "scene", &["scene"]),
     (AssetKind::Material, "material", &["material"]),
     (AssetKind::Model, "model", &["glb", "gltf"]),
@@ -301,6 +303,7 @@ const KINDS: [(AssetKind, &str, &[&str]); 12] = [
     (AssetKind::Mixer, "mixer", &["mixer"]),
     (AssetKind::Graph, "graph", &["mgraph"]),
     (AssetKind::Function, "function", &["mfunc"]),
+    (AssetKind::Anim, "animation", &["anim"]),
 ];
 
 impl AssetKind {
@@ -340,7 +343,7 @@ impl AssetKind {
     pub fn own_id(self) -> bool {
         matches!(
             self,
-            Self::Scene | Self::Material | Self::Mixer | Self::Graph | Self::Function
+            Self::Scene | Self::Material | Self::Mixer | Self::Graph | Self::Function | Self::Anim
         )
     }
 }

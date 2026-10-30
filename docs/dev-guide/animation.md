@@ -167,6 +167,77 @@ model.clips.0.events.1.data = "right"
   a sound played allocates its source, as any sound spawned does.
 - A pose the editor holds fires nothing, and nothing fires while the world stands still.
 
+### Clips made in the editor: `.anim` files
+
+A clip doesn't need a skeleton. A door opening, a lamp flickering, a platform going up and
+down is a clip of keyed fields, an `.anim` file (ADR 0124's E12-4a). Any entity's
+`Animator` plays one by name from its `clips`:
+
+```rust
+use engine_app::prelude::*;
+
+let door = world.spawn((
+    Transform::IDENTITY,
+    Animator::new("open")
+        .with_clip("open", open_file)
+        .with_clip("shut", shut_file),
+));
+```
+
+```lua
+-- The door's trigger touched: it opens, or shuts again.
+function Door.on_touch(self, other)
+    self.Animator:play(if self.opened then "shut" else "open", 0.2)
+    self.opened = not self.opened
+end
+```
+
+The file is text in the scenes' grammar, one track per field it moves:
+
+```text
+[anim version=1 id=6f1c…]
+
+length = 1
+once = true
+tracks["Lamp:PointLight.range"].keys.0.time = 0
+tracks["Lamp:PointLight.range"].keys.0.value = [2]
+tracks["Lamp:PointLight.range"].keys.0.curve = Step
+tracks["Lamp:PointLight.range"].keys.1.time = 0.5
+tracks["Lamp:PointLight.range"].keys.1.value = [8]
+tracks["Transform.rotation"].keys.0.time = 0
+tracks["Transform.rotation"].keys.0.value = [0, 0, 0]
+tracks["Transform.rotation"].keys.1.time = 1
+tracks["Transform.rotation"].keys.1.value = [0, 90, 0]
+events.0.time = 0.9
+events.0.name = "thud"
+```
+
+- **What a track moves:** `Component.field`, as a `Tween`'s target (`Transform.translation`,
+  `Transform.scale.y`, `PointLight.color`), a number or up to four. A field of an entity
+  below the animated one comes after its names: `Lamp:` for a child named Lamp,
+  `Arm/Lamp:` for a grandchild.
+- **A key** holds the field's numbers. A rotation is keyed as the inspector shows it,
+  three Euler angles in degrees: the door's quarter turn is `[0, 90, 0]`, and a fan can
+  turn past 180 degrees between two keys.
+- **Curves:** a key eases into the next (`Smooth`, the default), goes straight
+  (`Linear`) or holds until it (`Step`). Smooth keys never overshoot: a curve stays
+  between its keys and is flat at a peak.
+- `once = true` holds the clip's end, as for an imported clip; without it, the clip
+  loops. Events work as an imported clip's (`on_animation_event`, sounds).
+- **When it runs:** each tick, after the animators move on, so gameplay and scripts read
+  the tick's values, saves keep them and the network sends them. A moved transform is drawn
+  smoothly between ticks.
+- **Through a fade** (`play(clip, fade)`), a field both clips key blends; one only the
+  clip fading out keys stays where it was left.
+- **A character with a model** plays its model's clips by their names; a name in `clips`
+  plays the file instead, and the model rests meanwhile (combining the two comes with
+  graphs).
+- **What it costs:** about 70 ns a door a tick with two tracks (1,000 doors: 70 µs on
+  ref-1), no allocation, also when an animator switches between clips it played before.
+- **While the editor edits** the world stands still and nothing is written: the door
+  shows the values the scene holds. Making and previewing these clips in the editor's
+  Animation tab comes next (E12-4b).
+
 ### Sockets: things that follow a joint
 
 A `JointAttachment` on an entity right under a character makes it a socket on one of the

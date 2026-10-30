@@ -64,11 +64,13 @@
 //! assert!(copy.get::<GlobalTransform>(loaded).is_some(), "companion added");
 //! ```
 
+mod anim;
 mod assets;
 pub mod database;
 pub mod prefab;
 pub mod text;
 
+pub use anim::{AnimFile, AnimKey, AnimTrack, KeyCurve, anim_target, split_anim_target};
 pub use assets::{AssetId, AssetPaths, AssetRef};
 pub use database::{
     AssetDatabase, AssetEntry, AssetKind, AssetMeta, ClipEvent, ClipImport, ModelImport,

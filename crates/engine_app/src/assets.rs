@@ -858,6 +858,8 @@ pub struct Assets {
     event_sounds: Vec<(Entity, Arc<str>)>,
     /// The editor's model preview's skin (ADR 0124's E12-1b).
     preview_skin: Option<PreviewSkin>,
+    /// The clips made in the editor (`.anim`, ADR 0124's E12-4a) and their animators.
+    fields: crate::field_clips::FieldClips,
 }
 
 /// A skinned mesh made (ADR 0124's E12-1a): a skin per part in `Skinning`, and its rig.
@@ -927,6 +929,10 @@ fn animator_pose(
     alpha: f32,
     table: &ModelEvents,
 ) -> Option<Shown> {
+    // One of its own clips (E12-4a) poses nothing: the model rests.
+    if animator.plays_own_clip() {
+        return None;
+    }
     let clips = rig.clips();
     let names = clips.iter().map(crate::RigClip::name);
     let k = named_clip(names.clone(), &animator.clip);
@@ -934,16 +940,17 @@ fn animator_pose(
     let play = clip_play(rig, table, k);
     let mut from = (0.0, false);
     let mut from_axes = crate::skins::Axes::default();
-    let fade = (animator.fade > 0.0).then(|| {
-        let f = named_clip(names, &animator.from_clip);
-        let from_play = clip_play(rig, table, f);
-        from = (
-            clips.get(f).map_or(0.0, crate::RigClip::duration),
-            from_play.once,
-        );
-        from_axes = from_play.axes;
-        (f, animator.from_at(alpha, from.0), animator.weight(alpha))
-    });
+    let fade =
+        (animator.fade > 0.0 && !animator.clips.contains_key(&animator.from_clip)).then(|| {
+            let f = named_clip(names, &animator.from_clip);
+            let from_play = clip_play(rig, table, f);
+            from = (
+                clips.get(f).map_or(0.0, crate::RigClip::duration),
+                from_play.once,
+            );
+            from_axes = from_play.axes;
+            (f, animator.from_at(alpha, from.0), animator.weight(alpha))
+        });
     let look = Look {
         pose: Some((k, animator.at(alpha, length))),
         fade,
@@ -962,11 +969,14 @@ fn tick_motion(
     animator: &Animator,
     table: &ModelEvents,
 ) -> Option<(Vec3, f32)> {
+    if animator.plays_own_clip() {
+        return None;
+    }
     let names = rig.clips().iter().map(crate::RigClip::name);
     let k = named_clip(names.clone(), &animator.clip);
     let axes = clip_play(rig, table, k).axes;
     let main = rig.clip_motion(k, animator.previous, animator.time, axes)?;
-    let from = (animator.fade > 0.0)
+    let from = (animator.fade > 0.0 && !animator.clips.contains_key(&animator.from_clip))
         .then(|| {
             let f = named_clip(names, &animator.from_clip);
             let axes = clip_play(rig, table, f).axes;
@@ -986,9 +996,15 @@ fn tick_motion(
 fn played_span(rig: &crate::skins::Rig, animator: &Animator) -> Option<(usize, f32, f32)> {
     let names = rig.clips().iter().map(crate::RigClip::name);
     let (k, from, to) = if animator.fade > 0.0 && animator.weight(1.0) < 0.5 {
+        if animator.clips.contains_key(&animator.from_clip) {
+            return None;
+        }
         let k = named_clip(names, &animator.from_clip);
         (k, animator.from_previous, animator.from_time)
     } else {
+        if animator.plays_own_clip() {
+            return None;
+        }
         let k = named_clip(names, &animator.clip);
         (k, animator.previous, animator.time)
     };
@@ -1090,6 +1106,7 @@ impl Assets {
             events_dirty: false,
             event_sounds: Vec::new(),
             preview_skin: None,
+            fields: crate::field_clips::FieldClips::default(),
         }
     }
 
@@ -1226,6 +1243,7 @@ impl Assets {
         });
         self.building_skins.retain(|(a, _)| a.file != file);
         self.clip_events.remove(&file);
+        self.fields.forget(file);
         let (meshes, materials) = (&mut self.stale_meshes, &mut self.stale_materials);
         self.meshes.retain(|asset, &mut mesh| {
             let keep = asset.file != file;
@@ -2970,7 +2988,7 @@ impl Assets {
             );
             self.event_characters.sort_unstable_by_key(|c| c.0);
         }
-        if !self.event_characters.is_empty() {
+        if !self.event_characters.is_empty() || !self.fields.fired.is_empty() {
             engine_profiler::zone!("app::Assets::fire_events");
             let mut sounds = core::mem::take(&mut self.event_sounds);
             for (e, rig, events) in &self.event_characters {
@@ -2994,6 +3012,17 @@ impl Assets {
                     }
                 });
             }
+            // Then the clips made in the editor's (E12-4a), in their tick's order.
+            for (e, event) in &self.fields.fired {
+                fired.push(AnimationEvent {
+                    entity: *e,
+                    name: Arc::clone(&event.name),
+                    data: Arc::clone(&event.data),
+                });
+                if let Some(sound) = &event.sound {
+                    sounds.push((*e, Arc::clone(sound)));
+                }
+            }
             let again = engine_net::Resimulating::now(world);
             for (e, sound) in sounds.drain(..) {
                 if again {
@@ -3013,6 +3042,22 @@ impl Assets {
         if let Some(events) = world.resource_mut::<AnimationEvents>() {
             *events = fired;
         }
+    }
+
+    /// One tick of the animators playing clips made in the editor (ADR 0124's E12-4a), after
+    /// the animators moved on: the fields they key written at the tick's moment, their
+    /// events kept for [`Self::fire_events`].
+    pub(crate) fn animate_fields(&mut self, world: &mut World) {
+        let (paths, root) = (&self.paths, &self.root);
+        self.fields
+            .tick(world, |asset| file_path(paths, asset).map(|p| root.join(p)));
+    }
+
+    /// Clip file `file` (an `.anim`) as the editor holds it (ADR 0124's E12-4a), read in
+    /// place of the file until `None` gives the file back: its animators follow from the
+    /// next tick.
+    pub fn set_anim_clip(&mut self, file: AssetId, anim: Option<&engine_scene::AnimFile>) {
+        self.fields.hold(file, anim);
     }
 
     /// The clips' events of model file `file` as `clips` say (ADR 0124's E12-3b), in place of

@@ -279,43 +279,105 @@ impl Tween {
     }
 }
 
-/// Finds where a tween writes: the component by its reflected name, the field by its path,
-/// a number or a vector of `f32`s.
-fn resolve(world: &mut World, target: &str) -> Resolved {
-    let (name, path) = target.split_once('.').unwrap_or((target, ""));
-    let Some(reflected) = find_reflected(name) else {
-        return Resolved::default();
-    };
-    let ReflectedKind::Component { id, .. } = reflected.kind else {
-        return Resolved::default();
-    };
-    let Some((offset, ty, _)) = reflected.info.path(path) else {
-        return Resolved::default();
-    };
-    let lanes = match ty.kind {
-        TypeKind::Primitive(Primitive::F32) => 1,
-        TypeKind::Struct(fields)
-            if (1..=4).contains(&fields.len())
-                && fields
-                    .iter()
-                    .all(|f| matches!(f.ty.kind, TypeKind::Primitive(Primitive::F32))) =>
-        {
-            fields.len() as u8
-        }
-        TypeKind::Array { element, len }
-            if (1..=4).contains(&len)
-                && matches!(element.kind, TypeKind::Primitive(Primitive::F32)) =>
-        {
-            len as u8
-        }
-        _ => return Resolved::default(),
-    };
-    Resolved {
-        component: Some(id(world)),
-        offset: offset as u32,
-        lanes,
-        tried: true,
+/// A field of a reflected component that tweens and clips write (ADR 0124's E12-4a): where
+/// it lies in its component and how many `f32`s it holds, found once from its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldRef {
+    component: ComponentId,
+    offset: u32,
+    lanes: u8,
+    rotation: bool,
+}
+
+impl FieldRef {
+    /// The field `target` names, `Component.path` (`Transform.translation`,
+    /// `Transform.scale.y`, `PointLight.color`): the component by its reflected name, the
+    /// field by its path, a number or a vector of up to four `f32`s. None for anything else.
+    pub fn find(world: &mut World, target: &str) -> Option<Self> {
+        let (name, path) = target.split_once('.').unwrap_or((target, ""));
+        let reflected = find_reflected(name)?;
+        let ReflectedKind::Component { id, .. } = reflected.kind else {
+            return None;
+        };
+        let (offset, ty, _) = reflected.info.path(path)?;
+        let lanes = match ty.kind {
+            TypeKind::Primitive(Primitive::F32) => 1,
+            TypeKind::Struct(fields)
+                if (1..=4).contains(&fields.len())
+                    && fields
+                        .iter()
+                        .all(|f| matches!(f.ty.kind, TypeKind::Primitive(Primitive::F32))) =>
+            {
+                fields.len() as u8
+            }
+            TypeKind::Array { element, len }
+                if (1..=4).contains(&len)
+                    && matches!(element.kind, TypeKind::Primitive(Primitive::F32)) =>
+            {
+                len as u8
+            }
+            _ => return None,
+        };
+        Some(Self {
+            component: id(world),
+            offset: offset as u32,
+            lanes,
+            rotation: ty.name == "Quat" && lanes == 4,
+        })
     }
+
+    /// How many `f32`s it holds (1 to 4).
+    pub fn lanes(&self) -> usize {
+        usize::from(self.lanes)
+    }
+
+    /// It is a rotation (a `Quat`: x, y, z, w).
+    pub fn is_rotation(&self) -> bool {
+        self.rotation
+    }
+
+    /// Its value in `entity`'s component into `out[..lanes]`; false when the entity lacks
+    /// the component.
+    pub fn read(&self, world: &World, entity: Entity, out: &mut [f32; 4]) -> bool {
+        let Some(ptr) = world.get_raw(entity, self.component) else {
+            return false;
+        };
+        // SAFETY: the offset and lanes came from the component's description: that many
+        // `f32`s lie there, inside the entity's live value.
+        unsafe {
+            let at = ptr.as_ptr().add(self.offset as usize).cast::<f32>();
+            for (i, v) in out.iter_mut().take(self.lanes()).enumerate() {
+                *v = at.add(i).read_unaligned();
+            }
+        }
+        true
+    }
+
+    /// `values[..lanes]` written into `entity`'s component (marked changed); false when the
+    /// entity lacks the component.
+    pub fn write(&self, world: &mut World, entity: Entity, values: &[f32]) -> bool {
+        let Some(ptr) = world.get_raw_mut(entity, self.component) else {
+            return false;
+        };
+        // SAFETY: as in `read`.
+        unsafe {
+            let at = ptr.as_ptr().add(self.offset as usize).cast::<f32>();
+            for (i, v) in values.iter().take(self.lanes()).enumerate() {
+                at.add(i).write_unaligned(*v);
+            }
+        }
+        true
+    }
+}
+
+/// Finds where a tween writes ([`FieldRef::find`]).
+fn resolve(world: &mut World, target: &str) -> Resolved {
+    FieldRef::find(world, target).map_or(Resolved::default(), |f| Resolved {
+        component: Some(f.component),
+        offset: f.offset,
+        lanes: f.lanes,
+        tried: true,
+    })
 }
 
 /// Moves the world's timers and tweens on; keeps its queries and buffers (no allocation
