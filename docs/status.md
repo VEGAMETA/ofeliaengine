@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-3a, the Animation tab's timeline** (#PR, ADR 0124's as-built): Alt+N shows the
+  - **E12-3a, the Animation tab's timeline** (#461, ADR 0124's as-built): Alt+N shows the
     Clips' chosen clip on a timeline, for the selected character or the picked model file.
     Its ruler numbers the frames and scrubs; ←/→ step frames, Home/End go to the ends,
     Space plays. It shares the Clips' playhead. 0 allocations while it draws.
