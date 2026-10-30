@@ -879,6 +879,13 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5e-1, the graph's tab live with the player** (#PR, ADR 0124's as-built): the tab
+    gives the player its graph as it changes (unsaved, in Play too); only what plays counts
+    (a state moved on the canvas changes nothing; a real change keeps each character in its
+    state by name). In Play the tab lights the watched character's state, how far it played
+    and the fade it goes through, and its bar and the inspector's Graph row say it
+    (`Fox: Walk · 0.17 s · from Idle 34 %`); `Player::graph_now` tells it, allocation-free.
+    Stop now starts every graph again (they went on from where Play left them).
   - **E12-5c-2, a graph's root motion, events and saves** (#485, ADR 0124's as-built): a
     graph character moved by its root motion (`Move`, `Report`) has it taken out of every
     clip it samples and moves by its base layer's clips' motions over each tick, blended
@@ -1266,8 +1273,8 @@ Last updated: 2026-10-28.
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
     E12-5d-2 (layers and masks on the canvas, blends drawn as points, machines in
-    machines, the character previewed in the corner) and 5e (the live state in Play); 5a
-    to 5c and 5d-1 are done, and E12-4.
+    machines, the character previewed in the corner) and 5e-2 (the parameters' live
+    values in Play, View: Animation States); 5a to 5c, 5d-1 and 5e-1 are done, and E12-4.
   - **Settled (2026-10-30, team decisions 1а 2а 3б 4а 5а):** Luau's strict mode stays opt-in
     (`--!strict`, which New Script writes); transitions drawn in the editor inertialize by
     default (the file's default stays a cross-fade); compacting inertialization's per-joint

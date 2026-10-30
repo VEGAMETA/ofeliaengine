@@ -67,7 +67,7 @@ pub use compress::{AdditiveBase, CompressSettings, CompressionStats, compress};
 pub use condition::{Condition, ConditionError, MAX_DEPTH, ParamSlot};
 pub use graph::{
     AnimGraph, ClipInfo, GraphDesc, GraphParamKind, GraphProblem, GraphState, GraphWork, LayerDesc,
-    MAX_LEAVES, MAX_PARAMS, NodeDesc, ParamDesc, Played, StateDesc, TransitionDesc,
+    MAX_LEAVES, MAX_PARAMS, MachineNow, NodeDesc, ParamDesc, Played, StateDesc, TransitionDesc,
 };
 pub use ik::{Fabrik, IkOutcome, LookAt, TwoBoneIk, rotate_joint};
 pub use jobs::for_each_parallel;

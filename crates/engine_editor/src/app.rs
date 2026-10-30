@@ -3205,6 +3205,14 @@ struct Editor {
     /// Clip files (`.anim`) undo put back while the Animation tab held another, for the
     /// player (E12-4b).
     anims_due: Vec<(AssetId, engine_scene::AnimFile)>,
+    /// Animation graph tabs closed since the last frame: their files given back to the
+    /// player (ADR 0124's E12-5e).
+    anim_closed: Vec<AssetId>,
+    /// In Play, what the active character's graph does (`Run · 0.42 s`), for the
+    /// inspector's Graph row (E12-5e); empty otherwise.
+    anim_status: String,
+    /// The character the shown graph tab watches in Play (E12-5e).
+    anim_watched: Option<Entity>,
     renaming_file: Option<AssetId>,
     /// The file the inspector shows instead of the entities, with its import settings
     /// (E4-9): the dock's last pick, until the entity selection changes.
@@ -4273,6 +4281,9 @@ impl Editor {
             anim_events: 0,
             events_due: Vec::new(),
             anims_due: Vec::new(),
+            anim_closed: Vec::new(),
+            anim_status: String::new(),
+            anim_watched: None,
             renaming_file: None,
             inspected: None,
             material_docs: Vec::new(),
@@ -5306,6 +5317,7 @@ impl Editor {
         self.skeleton_section = None;
         let mut sound_section = None;
         let scale_value: [&str; 1];
+        let graph_now: [Field<'_>; 1];
         let bus_values: [&str; 3];
         let snapshot_value: [&str; 1];
         self.mixer_section = None;
@@ -5822,6 +5834,22 @@ impl Editor {
                     removable: s.title != "Transform",
                 })
             }));
+            // In Play, what the active character's graph does (ADR 0124's E12-5e), after
+            // its components.
+            if !self.anim_status.is_empty() {
+                graph_now = [Field {
+                    name: "now",
+                    widget: Widget::Text(&self.anim_status),
+                    changed: false,
+                    key: None,
+                }];
+                sections.push(Section {
+                    title: "Graph",
+                    fields: &graph_now,
+                    script: "",
+                    removable: false,
+                });
+            }
             // The selected object's material file (E10-1c): its rows after its components.
             if let Some(doc) = self
                 .shown_material
@@ -13420,6 +13448,9 @@ impl Editor {
         if doc.function {
             self.function_ports.remove(&doc.id);
             self.callees_changed += 1;
+        }
+        if doc.anim.is_some() {
+            self.anim_closed.push(doc.id);
         }
         if doc.autosaved.is_some()
             && let Some(session) = &self.session
@@ -22054,6 +22085,65 @@ impl Editor {
         }
     }
 
+    /// Animation graphs live with the player (ADR 0124's E12-5e): each graph tab's file given
+    /// to the player as it changes, played in place of the file from the next tick (its
+    /// characters go on in the states they are in; what the canvas alone shows, a state's
+    /// place, changes nothing), and given back when its tab closes. In Play, what the
+    /// active character's graph does, for the inspector's Graph row, and the shown tab's
+    /// watched character for its canvas to light: the active one where it plays the tab's
+    /// graph, else the one watched before, else the first found. A steady frame allocates
+    /// nothing.
+    fn graphs_live_frame(&mut self, player: &mut Player) {
+        for id in self.anim_closed.drain(..) {
+            player.assets_mut().set_anim_graph(id, None);
+        }
+        for doc in &mut self.graphs {
+            let Some(anim) = doc.anim.as_deref_mut() else {
+                continue;
+            };
+            if anim.given != Some(doc.revision) {
+                player.assets_mut().set_anim_graph(doc.id, Some(&anim.file));
+                anim.given = Some(doc.revision);
+            }
+            anim.live.on = false;
+        }
+        let playing = self.play.is_some();
+        let active = self.selection.last().copied();
+        self.anim_status.clear();
+        if playing
+            && let Some(e) = active
+            && let Some(now) = player.graph_now(e)
+        {
+            crate::agraph::write_now(&mut self.anim_status, &now);
+        }
+        let shown = self.active_graph.and_then(|g| self.graphs.get_mut(g));
+        let Some((id, anim)) = shown.and_then(|d| Some((d.id, d.anim.as_deref_mut()?))) else {
+            self.anim_watched = None;
+            return;
+        };
+        if !playing {
+            self.anim_watched = None;
+            return;
+        }
+        let world = player.world();
+        let plays = |e: Entity| {
+            world
+                .get::<engine_runtime::Animator>(e)
+                .is_some_and(|a| a.graph.file == id)
+        };
+        let watched = active
+            .filter(|&e| plays(e))
+            .or_else(|| self.anim_watched.filter(|&e| plays(e)))
+            .or_else(|| player.skinned_models().find(|&e| plays(e)));
+        self.anim_watched = watched;
+        if let Some(e) = watched
+            && let Some(now) = player.graph_now(e)
+        {
+            let who = world.get::<Name>(e).map_or("a character", Name::as_str);
+            anim.live.set(who, &now);
+        }
+    }
+
     /// The characters in place, with the player (ADR 0124's E12-1b): the active entity's Clips
     /// made when it or its rig changed (once its skin is made); those playing in place moved
     /// on by the frame's time and posed (each one's clip found once); the active one posed at
@@ -27444,6 +27534,7 @@ impl<G> EditorGame<G> {
         // skeletons where those poses put them (E12-1c).
         shared.clips_frame(player);
         shared.skeletons_frame(player);
+        shared.graphs_live_frame(player);
         // Sound previews (E11-3b): what the editor asked, then the preview as it plays.
         match shared.preview_ask.take() {
             Some(PreviewAsk::Play {
@@ -27770,6 +27861,19 @@ impl<G> EditorGame<G> {
     /// costs a frame); for tests.
     pub fn profiler_scripts(&self) -> Vec<(String, String)> {
         self.shared.borrow().profiler_text.scripts.clone()
+    }
+
+    /// The shown graph tab's bar as it reads (`2 states · 1 transition · 100 %`; in Play,
+    /// after it, what the watched character's machine does, ADR 0124's E12-5e); for tests.
+    pub fn graph_bar(&self) -> String {
+        self.shared.borrow().graph_status.clone()
+    }
+
+    /// In Play, what the active character's animation graph does, as the inspector's Graph
+    /// row says it (`Walk · 0.42 s · from Idle 30 %`, ADR 0124's E12-5e); empty otherwise.
+    /// For tests.
+    pub fn graph_now(&self) -> String {
+        self.shared.borrow().anim_status.clone()
     }
 
     /// The Debugger panel's header as it reads (what stopped, where, the entity and the

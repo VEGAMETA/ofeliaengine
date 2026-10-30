@@ -64,7 +64,7 @@ pub enum GraphParamKind {
 }
 
 /// A graph as written ([`AnimGraph::cook`] makes it playable): its parts by index.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct GraphDesc {
     /// Its parameters.
     pub params: Vec<ParamDesc>,
@@ -79,7 +79,7 @@ pub struct GraphDesc {
 }
 
 /// A parameter.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParamDesc {
     /// Its name.
     pub name: String,
@@ -90,7 +90,7 @@ pub struct ParamDesc {
 }
 
 /// A layer.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LayerDesc {
     /// Its name.
     pub name: String,
@@ -108,7 +108,7 @@ pub struct LayerDesc {
 }
 
 /// A node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NodeDesc {
     /// A clip, by name, played at `speed`.
     Clip {
@@ -143,7 +143,7 @@ pub enum NodeDesc {
 }
 
 /// A state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StateDesc {
     /// Its name.
     pub name: String,
@@ -154,7 +154,7 @@ pub struct StateDesc {
 }
 
 /// A transition.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TransitionDesc {
     /// The state it leaves (none: any state of its destination's machine).
     pub from: Option<usize>,
@@ -327,6 +327,25 @@ pub struct Played {
     pub from: f32,
     /// Seconds into it where the tick's step ended.
     pub to: f32,
+}
+
+/// A layer's machine as a character's state has it now ([`AnimGraph::machine_now`], ADR
+/// 0124's E12-5e): what the editor shows of a running character.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MachineNow<'a> {
+    /// The state it is in, by name.
+    pub state: &'a str,
+    /// The state it cross-fades from, while it does (none once the fade is over, and through
+    /// an inertialization, which does not play its source).
+    pub from: Option<&'a str>,
+    /// How far into the transition it is, 0 to 1 (1 with none under way).
+    pub faded: f32,
+    /// Whether the transition under way inertializes.
+    pub inertial: bool,
+    /// Seconds into the state's pose, its clip's or blend's (from 0 again each loop).
+    pub seconds: f32,
+    /// The same as a share of the pose's length, 0 to 1.
+    pub progress: f32,
 }
 
 /// A machine's state at run time.
@@ -1005,6 +1024,104 @@ impl AnimGraph {
         self.states.get(usize::from(state)).map(|st| &*st.name)
     }
 
+    /// The first layer that plays a machine (the one an editor shows first, ADR 0124's
+    /// E12-5e); none in a graph of blends alone.
+    pub fn machine_layer(&self) -> Option<usize> {
+        self.layers.iter().position(|l| {
+            matches!(
+                self.nodes.get(usize::from(l.root)),
+                Some(NodeDef::Machine { .. })
+            )
+        })
+    }
+
+    /// Layer `layer`'s machine in character state `s` now (ADR 0124's E12-5e): its state, the
+    /// one it fades from and how far, and how far its state's pose has played. None for a
+    /// layer it has not, or one that plays no machine.
+    pub fn machine_now<'a>(&'a self, s: &GraphState, layer: usize) -> Option<MachineNow<'a>> {
+        let root = self.layers.get(layer)?.root;
+        let NodeDef::Machine { machine } = *self.nodes.get(usize::from(root))? else {
+            return None;
+        };
+        let ms = *s.machines.get(usize::from(machine))?;
+        let state = self.states.get(usize::from(ms.state))?;
+        let from = (ms.from != NONE)
+            .then(|| self.states.get(usize::from(ms.from)))
+            .flatten()
+            .map(|st| &*st.name);
+        let fading = from.is_some() || ms.inertial;
+        let faded = if fading && ms.fade > 0.0 {
+            (ms.faded / ms.fade).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let (progress, length) = self.pose_place(state.pose, s, 0);
+        Some(MachineNow {
+            state: &state.name,
+            from,
+            faded,
+            inertial: ms.inertial,
+            seconds: progress * length,
+            progress,
+        })
+    }
+
+    /// How far pose `pose` has played in state `s`, 0 to 1, and its length in seconds: a
+    /// clip's or blend's phase (a blend's length its clips' weighed together, as its phase
+    /// moves), a machine's its state's pose's (`depth` keeps a broken nesting finite).
+    fn pose_place(&self, pose: u16, s: &GraphState, depth: u32) -> (f32, f32) {
+        let place = |timed: u16| {
+            s.phase.get(usize::from(timed)).map_or(0.0, |&p| {
+                if p >= 1.0 {
+                    p.min(1.0)
+                } else {
+                    p.rem_euclid(1.0)
+                }
+            })
+        };
+        match self.nodes.get(usize::from(pose)) {
+            Some(&NodeDef::Clip { leaf, timed, .. }) => (
+                place(timed),
+                self.leaves.get(usize::from(leaf)).map_or(0.0, |l| l.length),
+            ),
+            Some(
+                &NodeDef::Blend1d { leaves, timed, .. } | &NodeDef::Blend2d { leaves, timed, .. },
+            ) => (place(timed), self.blend_length(leaves, s)),
+            Some(&NodeDef::Machine { machine }) if depth < 8 => {
+                let Some(state) = s
+                    .machines
+                    .get(usize::from(machine))
+                    .and_then(|ms| self.states.get(usize::from(ms.state)))
+                else {
+                    return (0.0, 0.0);
+                };
+                self.pose_place(state.pose, s, depth + 1)
+            }
+            _ => (0.0, 0.0),
+        }
+    }
+
+    /// A blend's length in state `s`: its clips' (`leaves`) weighed together over every layer,
+    /// as its phase moves on; its first's while none weighs.
+    #[inline]
+    fn blend_length(&self, (a, b): (u16, u16), s: &GraphState) -> f32 {
+        let leaves = self.leaves.len();
+        let (mut sum, mut weighed) = (0.0f32, 0.0f32);
+        for k in a..b {
+            let mut w = 0.0;
+            for l in 0..self.layers.len() {
+                w += s.leaf_weight[l * leaves + usize::from(k)];
+            }
+            sum += w;
+            weighed += w * self.leaves[usize::from(k)].length;
+        }
+        if sum > EPSILON {
+            weighed / sum
+        } else {
+            self.leaves[usize::from(a)].length
+        }
+    }
+
     /// One tick of `dt` seconds of character state `s`: its machines' transitions taken, its
     /// clips weighed and their phases moved on. Allocates nothing. Where a transition
     /// inertializes, [`Self::capture`] takes the pose it starts from before the next tick.
@@ -1099,23 +1216,7 @@ impl AnimGraph {
                     timed,
                     speed,
                     ..
-                } => {
-                    let (mut sum, mut weighed) = (0.0f32, 0.0f32);
-                    for k in a..b {
-                        let mut w = 0.0;
-                        for l in 0..self.layers.len() {
-                            w += s.leaf_weight[l * leaves + usize::from(k)];
-                        }
-                        sum += w;
-                        weighed += w * self.leaves[usize::from(k)].length;
-                    }
-                    let length = if sum > EPSILON {
-                        weighed / sum
-                    } else {
-                        self.leaves[usize::from(a)].length
-                    };
-                    (timed, speed, length)
-                }
+                } => (timed, speed, self.blend_length((a, b), s)),
                 NodeDef::Machine { .. } | NodeDef::Missing => continue,
             };
             let t = usize::from(timed);
@@ -2532,6 +2633,50 @@ mod tests {
         s.set(over, 3.0);
         assert_eq!(g.layer_weight(&s, 1), 1.0, "held to 1");
         assert_eq!(g.layer_weight(&s, 2), 0.0, "no such layer");
+    }
+
+    /// ADR 0124's E12-5e: what the editor shows of a running character: the state its machine
+    /// is in, the one it fades from and how far, how far the state's pose has played.
+    #[test]
+    fn a_graph_tells_where_its_machine_is() {
+        let (skeleton, _clips, angles) = rig();
+        let (g, problems) = AnimGraph::cook(&locomotion(), info(&angles), &skeleton);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut s = GraphState::new(&g);
+        let ticks = |s: &mut GraphState, n: usize| {
+            for _ in 0..n {
+                g.tick(s, 1.0 / 64.0);
+            }
+        };
+        ticks(&mut s, 16);
+        let now = g.machine_now(&s, 0).unwrap();
+        assert_eq!(
+            (now.state, now.from, now.faded, now.inertial),
+            ("Idle", None, 1.0, false)
+        );
+        assert!(
+            (now.seconds - 0.25).abs() < 1e-4 && (now.progress - 0.25).abs() < 1e-4,
+            "{now:?}"
+        );
+        // Moving: halfway through the quarter second's fade from Idle, an eighth into the
+        // blend (its clips a second long).
+        s.set(g.param("speed").unwrap(), 2.5);
+        ticks(&mut s, 8);
+        let now = g.machine_now(&s, 0).unwrap();
+        assert_eq!((now.state, now.from), ("Move", Some("Idle")));
+        assert!((now.faded - 0.5).abs() < 1e-3, "{now:?}");
+        assert!((now.progress - 0.125).abs() < 1e-3, "{now:?}");
+        // The fade over.
+        ticks(&mut s, 8);
+        let now = g.machine_now(&s, 0).unwrap();
+        assert_eq!((now.state, now.from, now.faded), ("Move", None, 1.0));
+        // A jump taken at once from any state, half played.
+        s.fire(g.param("jump").unwrap());
+        ticks(&mut s, 32);
+        let now = g.machine_now(&s, 0).unwrap();
+        assert_eq!((now.state, now.from), ("Jump", None));
+        assert!((now.seconds - 0.5).abs() < 1e-3, "{now:?}");
+        assert!(g.machine_now(&s, 1).is_none(), "no such layer");
     }
 
     /// ADR 0124's E12-5c-2: a layer's machine put straight into a state by its name (a loaded

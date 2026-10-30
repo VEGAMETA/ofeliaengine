@@ -3670,6 +3670,41 @@ fn a_fox_plays_an_animation_graph() {
     until(&mut player, &mut game, "Move");
     set(&mut player, speed, 0.0);
     until(&mut player, &mut game, "Idle");
+    // ADR 0124's E12-5e: where its machine is (`Player::graph_now`): Idle, the fade from
+    // Move over, a second and more into its clip.
+    let seconds = |player: &Player| player.graph_now(fox).map_or(-1.0, |n| n.seconds);
+    for _ in 0..240 {
+        if seconds(&player) > 1.0 {
+            break;
+        }
+        player.frame(&mut game).unwrap();
+    }
+    let now = player.graph_now(fox).unwrap();
+    assert_eq!((now.state, now.from, now.faded), ("Idle", None, 1.0));
+    assert!(now.seconds > 1.0 && now.progress > 0.0, "{now:?}");
+    // The editor's copy that only moves a state on its canvas, then the file given back as
+    // it is: the fox goes on in its clip, not from its start (its graph is not cooked anew).
+    let going_on = |player: &mut Player, game: &mut Still, why: &str| {
+        let before = seconds(player);
+        for _ in 0..4 {
+            player.frame(game).unwrap();
+        }
+        let after = seconds(player);
+        assert!(
+            after > before && after < before + 0.5,
+            "{why}: {before} then {after}"
+        );
+    };
+    let mut moved = graph.clone();
+    moved.states.get_mut("idle").unwrap().at = [400.0, 400.0];
+    player.assets_mut().set_anim_graph(graph_id, Some(&moved));
+    going_on(&mut player, &mut game, "a state moved on the canvas");
+    player.assets_mut().set_anim_graph(graph_id, None);
+    going_on(
+        &mut player,
+        &mut game,
+        "the file given back as the copy was",
+    );
     // The editor's copy of the graph in place of the file: its states made anew.
     let mut edited = graph.clone();
     edited.states.get_mut("idle").unwrap().name = "Rest".into();
