@@ -1671,9 +1671,13 @@ unless it says otherwise).
   fainter and the arrow it goes along carries a dot for how far. The bar says it, e.g.
   `Fox: Walk · 0.17 s · from Idle 34 %`, and the inspector's **Graph** section says the
   same for the selected character.
+- **Its parameters in Play** are listed in that **Graph** section as the graph has them
+  now. Drag or type a number, or click a flag: the value is **held** there for testing,
+  whatever the game's scripts set, until its ↺ lets it go or Play stops (the game's own
+  value comes back). A trigger's box fires it once.
 - **Not yet:** machines inside machines (Tab into one), layers and masks, blends drawn as
-  points, the character's preview in the corner, and the parameters' live values in Play
-  come with the next steps (ADR 0124's E12-5d-2 and E12-5e-2).
+  points, the character's preview in the corner, and every character's state labelled in
+  the viewport come with the next steps (ADR 0124's E12-5d-2 and E12-5e-2b).
 
 ## Autosave and the session
 

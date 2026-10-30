@@ -1236,6 +1236,10 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
     println!("the Graph row: {now}");
     assert!(now.starts_with("Walk \u{b7} "), "{now}");
     assert!(!now.contains("from"), "the fade is over: {now}");
+    // Its parameters below (E12-5e-2): `speed` at the tab's 1, not held.
+    let params = game.graph_params();
+    println!("its parameters: {params:?}");
+    assert_eq!(params, [(String::from("speed"), 1.0, false)]);
     // Stopped: nothing watched, nothing said.
     game.stop_playing(&mut player);
     for _ in 0..3 {
@@ -1244,6 +1248,7 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
     assert!(!game.playing());
     assert!(!game.graph_bar().contains("Fox:"), "{}", game.graph_bar());
     assert!(game.graph_now().is_empty());
+    assert!(game.graph_params().is_empty());
     // Its graph starts again, not from where Play left it (its state is the player's).
     let again = player.graph_now(fox).unwrap();
     println!("stopped: {again:?}");
