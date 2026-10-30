@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5e-2b, View: Animation States** (#PR, ADR 0124's as-built): every character
+  - **E12-5e-2b, View: Animation States** (#489, ADR 0124's as-built): every character
     labelled over its head with what it plays (its graph's state, or its clip and time);
     nothing paid while off. **E12-5e is done.**
   - **E12-5e-2a, a graph's parameters in Play** (#488, ADR 0124's as-built): the
