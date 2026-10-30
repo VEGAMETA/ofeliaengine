@@ -101,7 +101,8 @@ impl GraphNames {
 
 /// The definitions' first part: what does not depend on the program's components.
 const HEADER: &str = r#"-- types/ofelia.d.luau: the engine's scripting API (ADR 0114), made by the editor from
--- the program's components and the project's scripts. Do not edit: it is written again.
+-- the program's components, the project's scripts and its animation graphs' parameters.
+-- Do not edit: it is written again.
 
 -- A rotation: `q * v` rotates a vector, `a * b` composes.
 declare extern type Quat with

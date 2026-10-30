@@ -640,9 +640,10 @@ at it, so VS Code checks and completes your scripts the same way. The file is in
 - Lists, maps and asset references are not readable from scripts yet, and have no types.
 - An animator's `set` and `trigger` take the names of the parameters of your game's
   animation graphs (`.agraph` files): the types call them `AnimatorParam` and
-  `AnimatorTrigger` and are written again when a graph changes. Inside `set("…")` the
-  editor and VS Code offer them; in a `--!strict` script a misspelt one is underlined. A
-  name kept in a variable says what it is: `local name: AnimatorParam = "speed"`.
+  `AnimatorTrigger` and are written again when a graph changes. Inside `set("…")` they are
+  offered as you type; in a `--!strict` script a misspelt one is underlined (a script
+  without that line is nonstrict, where Luau does not check them). A name kept in a
+  variable says what it is: `local name: AnimatorParam = "speed"`.
 
 `input` reads the tick's view in a tick's hooks (`on_tick`, `on_start`, contacts, systems'
 `on_tick`), where a tap shorter than a tick still counts, and the frame's in `on_frame`.
