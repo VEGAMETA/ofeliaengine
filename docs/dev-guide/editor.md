@@ -485,7 +485,19 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
       undo. It has no root motion and no feet, so those buttons are not shown.
     - The row under the strip names its tracks and frame rate ("2 tracks · 30 frames a
       second").
-    - Making a clip (New Clip), and keys, come next (E12-4b and on).
+    - **New Clip** (the tab's button, or the command palette) makes one for the selected
+      entity: an `.anim` file in the dock's folder named after the entity and the clip
+      (`Door clip.anim`), among its animator's clips as `clip` and played by it (an
+      `Animator` is added when it has none), as one step of undo. The tab opens with the
+      clip's name ready to type. Undone, the file stays, as New Material's does.
+    - **Its name** is typed in the header: Enter renames it among the animator's clips (its
+      file keeps its name), one step of undo. A name another clip has is refused.
+    - **✕** (or Animation: Delete the Chosen Clip) takes the clip away from the animator,
+      one step of undo; its file stays in the project, for the dock to delete.
+    - A character's own clips, beside its model's, come later. Keys come next (E12-4b-2):
+      **K** keys the fields the clip moves (a clip without tracks: position, rotation and
+      scale), **◆** beside a field keys that one, and editing a field the clip moves keys
+      it at the playhead.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

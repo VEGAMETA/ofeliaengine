@@ -894,6 +894,9 @@ struct CommandIds {
     event_add: CommandId,
     event_delete: CommandId,
     mark_foot_plants: CommandId,
+    /// Clips made in the editor (E12-4b-1b): one made, the chosen one taken away.
+    new_clip: CommandId,
+    delete_clip: CommandId,
     auto_play: CommandId,
     /// A material graph's nodes' previews on its canvas, or not (E10-4g).
     node_previews: CommandId,
@@ -1117,6 +1120,12 @@ fn commands() -> (Commands, CommandIds) {
             "animation.mark_foot_plants",
             "Animation",
             "Mark Foot Plants",
+        ),
+        new_clip: c.register("animation.new_clip", "Animation", "New Clip"),
+        delete_clip: c.register(
+            "animation.delete_clip",
+            "Animation",
+            "Delete the Chosen Clip",
         ),
         auto_play: c.register("assets.auto_play", "Assets", "Auto Play Sounds"),
         node_previews: c.register("graph.node_previews", "Graph", "Node Previews"),
@@ -3071,6 +3080,8 @@ struct Editor {
     picked_on: String,
     event_drag: Option<(usize, f32, f32, bool)>,
     event_autofocus: bool,
+    /// A clip just made (E12-4b-1b): its name typed as soon as its field shows.
+    clip_autofocus: bool,
     /// Mark Foot Plants asked for, done in the next `clips_frame` (E12-3d).
     plants_asked: bool,
     anim_events: u64,
@@ -4098,6 +4109,7 @@ impl Editor {
             picked_on: String::new(),
             event_drag: None,
             event_autofocus: false,
+            clip_autofocus: false,
             plants_asked: false,
             anim_events: 0,
             events_due: Vec::new(),
@@ -6494,6 +6506,11 @@ impl Editor {
                     .map(|(name, &depth)| crate::shell::JointRow { name, depth }),
             );
         }
+        // New Clip (E12-4b-1b) for a selected entity without a rig: none of a model's clips
+        // shown (a character's own clips come later).
+        let new_clip_offered = self.active().is_some()
+            && self.shown_model.is_none()
+            && self.clips.as_ref().is_none_or(|v| !v.own.is_empty());
         // A clip made in the editor's tracks (E12-4b), from the file the tab holds.
         let mut track_rows: Vec<crate::shell::TrackRow<'_>> =
             recycle(std::mem::take(&mut self.lists.track_rows));
@@ -6560,13 +6577,19 @@ impl Editor {
                         root,
                         own: !v.own.is_empty(),
                         tracks: &track_rows,
+                        new_clip: !v.own.is_empty(),
+                        clip_autofocus: !v.own.is_empty() && self.clip_autofocus,
                     }
                 }
                 None => crate::shell::AnimationView {
                     subject: "",
                     clip: "",
-                    note: "Select a character, or pick a skinned model in the FileSystem \
-                           dock: its clips show here",
+                    note: if new_clip_offered {
+                        "No clips yet: New Clip makes one, keyed fields in a file of its own"
+                    } else {
+                        "Select a character, or pick a skinned model in the FileSystem dock: its \
+                         clips show here"
+                    },
                     playing: false,
                     looping: self.clip_loop,
                     speed: "",
@@ -6586,9 +6609,15 @@ impl Editor {
                     root: [true, false, true],
                     own: false,
                     tracks: &[],
+                    new_clip: new_clip_offered,
+                    clip_autofocus: false,
                 },
             }
         });
+        // The name field drawn with its focus: typed from now on.
+        if animation_view.is_some_and(|v| v.clip_autofocus) {
+            self.clip_autofocus = false;
+        }
         let mut clip_rows: Vec<crate::shell::ClipRow<'_>> =
             recycle(std::mem::take(&mut self.lists.clip_rows));
         if let Some(view) = &self.clips {
@@ -6966,6 +6995,17 @@ impl Editor {
         }
         if response.anim_mark_plants {
             self.plants_asked = true;
+        }
+        // Clips made in the editor (E12-4b-1b): made, renamed, taken away.
+        if response.anim_new_clip {
+            self.new_clip(world);
+        }
+        if response.anim_delete_clip {
+            self.delete_clip(world);
+        }
+        if response.anim_clip_name == Some(true) {
+            let name = self.ui.edited_text().trim().to_owned();
+            self.rename_clip(world, name);
         }
         if let Some(which) = response.anim_clip_setting {
             self.toggle_clip_setting(world, which);
@@ -16831,6 +16871,10 @@ impl Editor {
         } else if id == ids.mark_foot_plants {
             // Done with the player, where the rig is (E12-3d).
             self.plants_asked = true;
+        } else if id == ids.new_clip {
+            self.new_clip(world);
+        } else if id == ids.delete_clip {
+            self.delete_clip(world);
         } else if id == ids.node_previews {
             self.node_previews = !self.node_previews;
             self.write_session(world);
@@ -19765,6 +19809,137 @@ impl Editor {
             .asset_db
             .get(file)
             .map(|entry| crate::clip_events::EventsDoc::open(&self.root, file, &entry.path));
+    }
+
+    /// Animation: New Clip (ADR 0124's E12-4b-1b): a clip made in the editor for the active
+    /// entity. An `.anim` file in the dock's folder named after the entity and the clip
+    /// (`Door clip.anim`, a number after it when taken) goes among its animator's clips as
+    /// `clip` (`clip 2` when taken), chosen and played by it, as one undo step (the animator
+    /// added when it has none); the Animation tab opens with its name ready to type. The
+    /// file stays when the step is undone, as New Material's does.
+    fn new_clip(&mut self, world: &mut World) {
+        let Some(e) = self.active() else {
+            self.say(String::from("Select an entity to make a clip for"));
+            return;
+        };
+        let owner = world
+            .get::<Name>(e)
+            .map_or_else(|| String::from("Entity"), |n| n.as_str().to_owned());
+        let taken = |n: &str| {
+            world
+                .get::<engine_runtime::Animator>(e)
+                .is_some_and(|a| a.clips.contains_key(n))
+        };
+        let mut name = String::from("clip");
+        let mut k = 2;
+        while taken(&name) {
+            name = format!("clip {k}");
+            k += 1;
+        }
+        let folder = self.browser.folder.clone();
+        let path = unique_file(&self.root, &folder, &format!("{owner} {name}"), "anim");
+        let id = AssetId::new();
+        let text = engine_scene::AnimFile::default().to_text(id);
+        if let Err(why) = self.write_own_file(&path, id, &text) {
+            self.say(format!("{path} could not be written: {why}"));
+            return;
+        }
+        self.history.begin("New Clip", None);
+        self.history.touch(world, e);
+        if world.get::<engine_runtime::Animator>(e).is_none() {
+            world.insert(e, engine_runtime::Animator::new(&name));
+        }
+        if let Some(animator) = world.get_mut::<engine_runtime::Animator>(e) {
+            animator.clips.insert(name.clone(), AssetRef::file(id));
+            animator.clip.clone_from(&name);
+        }
+        self.history.commit(world);
+        self.bottom = Some(ANIMATION_TAB);
+        self.clip_autofocus = true;
+        self.say(format!(
+            "{path}: {owner}'s clip {name}, its name ready to type"
+        ));
+    }
+
+    /// A file of ours (its id inside, no `.meta`) written at `path` under the project and
+    /// known at once: scanned into the database, its path learnt for scenes and the player.
+    fn write_own_file(&mut self, path: &str, id: AssetId, text: &str) -> Result<(), String> {
+        let file = self.root.join(path);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&file, text).map_err(|e| e.to_string())?;
+        self.asset_db.scan();
+        self.refresh_browser();
+        let mut paths = AssetPaths::new();
+        paths.insert(AssetRef::file(id), path);
+        self.assets.extend(&paths);
+        self.pending_assets.extend(&paths);
+        Ok(())
+    }
+
+    /// The chosen clip made in the editor and its entity (E12-4b-1b), by its key among the
+    /// entity's animator's clips.
+    fn chosen_own_clip(&self) -> Option<(Entity, String)> {
+        let v = self.clips.as_ref().filter(|v| !v.own.is_empty())?;
+        let ClipsOf::Entity(e) = v.of else {
+            return None;
+        };
+        Some((e, v.clips.get(v.chosen)?.key.clone()))
+    }
+
+    /// The chosen clip made in the editor named `name` (E12-4b-1b): its key among its
+    /// animator's clips (and the animator's clip, where it was that one), one undo step; its
+    /// file keeps its name. An empty name, or one another clip has, changes nothing.
+    fn rename_clip(&mut self, world: &mut World, name: String) {
+        let Some((e, old)) = self.chosen_own_clip() else {
+            return;
+        };
+        if name.is_empty() || name == old {
+            return;
+        }
+        if world
+            .get::<engine_runtime::Animator>(e)
+            .is_some_and(|a| a.clips.contains_key(&name))
+        {
+            self.say(format!("There is a clip named {name} already"));
+            return;
+        }
+        self.history.begin("Rename Clip", None);
+        self.history.touch(world, e);
+        if let Some(animator) = world.get_mut::<engine_runtime::Animator>(e) {
+            if let Some(file) = animator.clips.remove(&old) {
+                animator.clips.insert(name.clone(), file);
+            }
+            if animator.clip == old {
+                animator.clip = name;
+            }
+        }
+        self.history.commit(world);
+    }
+
+    /// Animation: Delete the Chosen Clip (E12-4b-1b): taken from its animator's clips (the
+    /// animator then plays its first other one), one undo step. Its file stays: the dock
+    /// deletes files.
+    fn delete_clip(&mut self, world: &mut World) {
+        let Some((e, key)) = self.chosen_own_clip() else {
+            self.say(String::from(
+                "Choose a clip made in the editor in the Animation tab",
+            ));
+            return;
+        };
+        self.history.begin("Delete Clip", None);
+        self.history.touch(world, e);
+        if let Some(animator) = world.get_mut::<engine_runtime::Animator>(e) {
+            animator.clips.remove(&key);
+            if animator.clip == key {
+                animator.clip = animator.clips.keys().next().cloned().unwrap_or_default();
+            }
+        }
+        self.history.commit(world);
+        self.say(format!(
+            "Clip {key} taken away; its file stays in the project"
+        ));
     }
 
     /// The active entity's clips made in the editor (ADR 0124's E12-4b), where it has no
@@ -30771,6 +30946,79 @@ mod tests {
         // Another entity, without clips: nothing shown.
         ed.follow_own_clips(&world, None);
         assert!(ed.clips.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-4b-1b: New Clip on an entity without an animator writes an `.anim` in
+    /// the dock's folder, named after the entity, and gives the entity an animator playing
+    /// it, as one step undone and redone; the tab offers its name to type. Renamed, its key
+    /// and the animator's clip follow; deleted, the animator has no clips, its file stays.
+    #[test]
+    fn new_clip_makes_a_clip_file_that_is_renamed_and_deleted_with_undo() {
+        let (dir, mut world, mut ed, boxed) = drop_project("new-clip");
+        ed.select_only(boxed);
+        ed.bottom = Some(ANIMATION_TAB);
+        ed.update(&mut world);
+        assert!(!texts(&ed, "New Clip").is_empty(), "offered for the box");
+        let new_clip = ed.ids.new_clip;
+        ed.run(&mut world, new_clip);
+        let file = dir.join("props/Box clip.anim");
+        assert!(file.exists(), "in the dock's folder, named after the box");
+        let animator = world.get::<engine_runtime::Animator>(boxed).unwrap();
+        assert_eq!(animator.clip, "clip");
+        let id = animator.clips["clip"].file;
+        assert_eq!(
+            ed.asset_db.get(id).map(|e| e.kind),
+            Some(engine_scene::AssetKind::Anim)
+        );
+        assert!(ed.clip_autofocus, "its name ready to type");
+        let (undo, redo) = (ed.ids.undo, ed.ids.redo);
+        ed.run(&mut world, undo);
+        assert!(
+            world.get::<engine_runtime::Animator>(boxed).is_none(),
+            "undone: no animator"
+        );
+        assert!(file.exists(), "the file stays");
+        ed.run(&mut world, redo);
+        assert!(world.get::<engine_runtime::Animator>(boxed).is_some());
+        // Shown in the tab, renamed there.
+        ed.follow_own_clips(&world, Some(boxed));
+        ed.update(&mut world);
+        assert!(!ed.clip_autofocus, "the field took its focus");
+        ed.rename_clip(&mut world, String::from("open"));
+        let animator = world.get::<engine_runtime::Animator>(boxed).unwrap();
+        assert_eq!(animator.clip, "open");
+        assert!(animator.clips.contains_key("open") && !animator.clips.contains_key("clip"));
+        ed.follow_own_clips(&world, Some(boxed));
+        // A second clip, then the first deleted.
+        ed.run(&mut world, new_clip);
+        assert!(
+            dir.join("props/Box clip 2.anim").exists(),
+            "the file's name taken: a number after it"
+        );
+        let animator = world.get::<engine_runtime::Animator>(boxed).unwrap();
+        assert_eq!(
+            animator.clips.len(),
+            2,
+            "{:?}",
+            animator.clips.keys().collect::<Vec<_>>()
+        );
+        ed.follow_own_clips(&world, Some(boxed));
+        let chosen = ed.clips.as_ref().unwrap();
+        assert_eq!(
+            chosen.clips[chosen.chosen].key, "clip",
+            "the new one chosen"
+        );
+        let delete = ed.ids.delete_clip;
+        ed.run(&mut world, delete);
+        let animator = world.get::<engine_runtime::Animator>(boxed).unwrap();
+        assert_eq!(animator.clips.keys().collect::<Vec<_>>(), ["open"]);
+        assert_eq!(animator.clip, "open", "its first other clip played");
+        ed.run(&mut world, undo);
+        let animator = world.get::<engine_runtime::Animator>(boxed).unwrap();
+        assert_eq!(animator.clips.len(), 2);
+        let names: Vec<&str> = ed.history.steps().map(|s| s.name()).collect();
+        assert_eq!(names, ["New Clip", "Rename Clip", "New Clip"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
