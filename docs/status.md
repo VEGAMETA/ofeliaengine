@@ -2431,7 +2431,7 @@ grown, divide and conquer); the old labels stay in parentheses.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
-- **Fixed (2026-10-30, #PR): sounds spawned to end on their own never ended without an
+- **Fixed (2026-10-30, #481): sounds spawned to end on their own never ended without an
   audio device** (found by E12-3b-1's test): a source no device plays now plays out unheard
   on the game's clock and ends at its sound's length (stopped, looped or despawned, as its
   voice would have); a sound that failed to load or streams ends at once. With sound off,
@@ -2442,7 +2442,7 @@ grown, divide and conquer); the old labels stay in parentheses.
   E12-3b-1): `on_animation_event(name, data)` only for now; an event calling the function
   of its name as `send` does may be added beside it later (about an hour).
 
-- **Fixed (2026-10-30, #PR): a scene with no model drew the clear colour, not its sky**
+- **Fixed (2026-10-30, #481): a scene with no model drew the clear colour, not its sky**
   (found 2026-10-29 by E12-1a's test): the forward renderer's frame with nothing to draw
   cleared the target and stopped. It now draws the view's sky over the clear when the view
   has an environment (its background, or its atmosphere's sky and fog), as a frame with
