@@ -15,6 +15,7 @@ mod checker;
 mod clip_events;
 mod code;
 mod complete;
+mod dope;
 mod draw;
 mod drop;
 pub mod expr;

@@ -1972,6 +1972,54 @@ fn a_door_previews_its_clip_in_the_animation_tab_and_the_scene_keeps_its_values(
         saved.contains("Transform.rotation = (0, 0, 0, 1)"),
         "the scene's own rotation, not the clip's: {saved}"
     );
+    // The dope sheet (E12-4c): the last key dragged from the end to the middle by its mark,
+    // by whole frames; then a box over the middle picks it, and Delete takes it away.
+    let anim_file = dir.join("animations/door open.anim");
+    let keys_in_file = || {
+        let (anim, _) =
+            engine_scene::AnimFile::parse(&std::fs::read_to_string(&anim_file).unwrap()).unwrap();
+        anim.tracks["Transform.rotation"]
+            .keys
+            .iter()
+            .map(|k| k.time)
+            .collect::<Vec<f32>>()
+    };
+    let [tx, ty, tw, _] = game.animation_tracks().expect("the clip's tracks");
+    let row = ty + 8.0;
+    let last = [tx + tw - 3.5, row];
+    pointer(&mut game, last, None);
+    frame(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, last, Some(true));
+    frame(&mut player, &mut game, &mut overlay);
+    assert_eq!(game.picked_keys(), [(0, 1)], "picked by its mark");
+    for x in [tx + tw * 0.8, tx + tw * 0.6, tx + tw * 0.5] {
+        pointer(&mut game, [x, row], None);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    pointer(&mut game, [tx + tw * 0.5, row], Some(false));
+    frame(&mut player, &mut game, &mut overlay);
+    let moved = keys_in_file();
+    assert_eq!(moved.len(), 2, "{moved:?}");
+    assert!((moved[1] - 0.5).abs() < 1e-4, "on frame 15: {moved:?}");
+    assert_eq!(game.picked_keys(), [(0, 1)], "still picked");
+    // A click on empty track: none picked; a box from 0.3 to 0.7 s: the moved key.
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, [tx + tw * 0.3, row], pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(game.picked_keys().is_empty());
+    pointer(&mut game, [tx + tw * 0.3, row], Some(true));
+    frame(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, [tx + tw * 0.7, row + 4.0], None);
+    frame(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, [tx + tw * 0.7, row + 4.0], Some(false));
+    frame(&mut player, &mut game, &mut overlay);
+    assert_eq!(game.picked_keys(), [(0, 1)], "the box's key");
+    key(&mut game, 0x2E, 0x53, true);
+    frame(&mut player, &mut game, &mut overlay);
+    key(&mut game, 0x2E, 0x53, false);
+    frame(&mut player, &mut game, &mut overlay);
+    assert_eq!(keys_in_file(), [0.0], "deleted");
     // The tab shut (Alt+N again): drawn as the scene has it.
     key(&mut game, 0x12, 0x38, true);
     key(&mut game, 0x4E, 0x31, true);

@@ -584,6 +584,56 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-4c, 2026-10-30): the dope sheet's editing
+
+The Animation tab edits a clip made in the editor's keys on its tracks. The edits are
+functions of the clip (`dope.rs`: `move_keys`, `delete_keys`, `copy_keys`, `paste_keys`,
+`keys_in`); each one is held, given to the player and written as one undo step, as the
+events' edits are.
+
+- **Picking:**
+  - A press on a key's mark picks it; Ctrl adds it to those picked or takes it away.
+  - Picked keys are drawn larger and in the text's color: by size, not color alone.
+  - A key is known by its track's place among the clip's tracks and its own in the track.
+    The picked ones are let go when another clip shows, and dropped when undo takes their
+    keys away.
+- **A box:** a press on a track where no key is starts a box, drawn over the tracks; let go,
+  it picks the keys inside it. With Shift or Ctrl the box adds to those picked. A click
+  picks none.
+- **Moving:** past 3 pixels, a drag moves the picked keys together, by whole frames, and
+  with Shift freely (the owner's rule, UX note 13).
+  - They are held within the clip by the first and last of them.
+  - A key moved onto another of its track takes its place.
+  - The drag follows the pointer each frame (a mark's place changes as keys pass one
+    another) and ends with the button: one step, "Move Keys". Escape puts the clip back.
+- **Delete** in the tab deletes the picked keys ("Delete Keys"); with none picked, it
+  deletes the picked event, as before. A track left without keys goes with them.
+- **Ctrl+C and Ctrl+V** in the tab copy the picked keys, each keeping its distance from the
+  first, and paste them from the playhead's frame ("Paste Keys").
+  - They paste into the tracks of the same names, in this clip or another; tracks missing
+    are made, and the clip grows to hold the keys.
+  - The pasted keys are picked.
+- **The length** of a clip made in the editor is typed in the header after Once (seconds,
+  sums too, as any typed number): whole frames, at least one ("Clip Length"). Keys past it
+  stay in the file, so a longer length brings them back.
+- **The tab's facts follow the file:** a clip made in the editor's length, frames and track
+  count are read again when its keys or length change; before, they were read once, when
+  the tab showed it.
+- **Tests:**
+  - The dope sheet's: keys move together, held in the clip and replacing what they land on;
+    deleting takes an emptied track; copied keys paste at the playhead keeping their
+    distances (and curves) into this clip or one without the tracks; a box picks what it
+    covers.
+  - The editor's: a move written when the button is up; a delete taking the scale's
+    track; copy and paste at frame 3 picking the pasted keys; the length typed as "1 + 1";
+    each one step, the four undone back to the file.
+  - The door's GPU test, with the pointer: the last key's mark picks it and drags it from
+    the end to frame 15 in the file; a click on an empty track picks none; a box picks it;
+    Delete takes it away.
+- **Not yet:** keys' curves (the Curves view, E12-4d), and joints keyed in `.anim` (E12-4e).
+  Shift+click to extend, `,`/`.` and Alt with them, and F to frame the picked keys (UX note
+  8) come with the Curves view.
+
 ## As built (E12-4b-2, 2026-10-30): keys (K, ◆, editing a field the clip moves)
 
 - **The editor's frame drives the clip's fields** (`keying::Driving`, held by the
