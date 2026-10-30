@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-3b-3, event sounds in the previews** (#PR, ADR 0124's as-built): the dock's model
+  - **E12-3b-3, event sounds in the previews** (#464, ADR 0124's as-built): the dock's model
     and P in place play an event's sound as they pass it, on the dock's preview bus. The
     model's events are held whenever its Clips show.
   - **E12-3b-2, the Animation tab's events** (#463, ADR 0124's as-built): marks on a strip
