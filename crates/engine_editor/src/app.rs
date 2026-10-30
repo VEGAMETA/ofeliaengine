@@ -7954,7 +7954,7 @@ impl Editor {
             }
             (Setting::Compression, FieldAction::Choose(i)) => {
                 asset.open = None;
-                chosen(asset.meta, i)
+                chosen(asset.meta.clone(), i)
             }
             (Setting::Scale, FieldAction::Drag { travel, start, .. }) => {
                 if start || asset.drag.is_none() {
@@ -7974,7 +7974,7 @@ impl Editor {
                     asset.typing = true;
                     return;
                 }
-                Some((_, true)) => asset.meta,
+                Some((_, true)) => asset.meta.clone(),
                 None => return,
             },
             (Setting::Scale, FieldAction::Typed { commit, .. }) => {
@@ -7985,7 +7985,7 @@ impl Editor {
                 let text = self.ui.edited_text().trim().to_owned();
                 match crate::expr::evaluate(&text, f64::from(asset.meta.model.scale)) {
                     Ok(value) => {
-                        let mut meta = asset.meta;
+                        let mut meta = asset.meta.clone();
                         meta.model.scale = (value as f32).clamp(SCALES.0, SCALES.1);
                         meta
                     }
@@ -7995,7 +7995,7 @@ impl Editor {
                     }
                 }
             }
-            (_, FieldAction::Reset) => reset(asset.meta, setting),
+            (_, FieldAction::Reset) => reset(asset.meta.clone(), setting),
             _ => return,
         };
         self.write_import(meta);
@@ -8007,7 +8007,7 @@ impl Editor {
         let Some(asset) = self.inspected.as_mut() else {
             return;
         };
-        asset.meta = meta;
+        asset.meta = meta.clone();
         asset.refresh();
         if meta == asset.saved {
             return;
@@ -8026,7 +8026,7 @@ impl Editor {
                 self.say(format!("{name}: import settings saved, made again"));
             }
             Err(e) => {
-                asset.meta = asset.saved;
+                asset.meta = asset.saved.clone();
                 asset.refresh();
                 self.say(format!("Import settings not saved: {e}"));
             }

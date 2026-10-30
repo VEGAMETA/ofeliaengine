@@ -93,6 +93,7 @@ From Rust, `player.add_script(door, "Door")` gives one with its defaults.
 | `on_touch(self, other, point, normal)` | a body began touching the entity's body or its `Trigger`: `other` is its entity (`nil` for a body without one), the normal points toward it; at the start of the next tick |
 | `on_untouch(self, other)` | it stopped touching |
 | `on_load(self)` | a save was applied: your props hold the saved values (at the next tick, after `on_start` for an instance the load made) |
+| `on_animation_event(self, name, data)` | the entity's animator played past one of its clip's events (a footstep; see [animation](animation.md#clip-events-footsteps-and-other-moments)): at the start of the next tick; `data` is `nil` when the event has none |
 | `on_stop(self)` | once the component went from a living entity |
 
 - **Hooks run only while the world simulates:** in a game, and in the editor's Play.

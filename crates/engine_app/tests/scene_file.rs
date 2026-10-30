@@ -16,7 +16,7 @@ use engine_app::prelude::*;
 use engine_app::{AssetMeta, Assets, BakedBrush, PREVIEW_SIZE, PreviewRequest};
 use engine_render::material::MaterialTypeId;
 use engine_runtime::SkinnedMesh;
-use engine_scene::{AssetPaths, SaveOptions, SceneRegistry, save_with};
+use engine_scene::{AssetPaths, ClipEvent, ClipImport, SaveOptions, SceneRegistry, save_with};
 use std::time::{Duration, Instant};
 
 struct Still;
@@ -2238,6 +2238,215 @@ fn root_motion_moves_the_character_or_is_left_for_the_game() {
         at(&mut player, stander).translation,
         Vec3::new(6.0, 0.0, 0.0)
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Records each tick's clip events (ADR 0124's E12-3b), as a game's tick reads them, and
+/// how many event sounds stand in the world when a left step fires.
+#[derive(Default)]
+struct Listener {
+    heard: Vec<(Entity, String)>,
+    sounds_at_left_steps: Vec<usize>,
+}
+
+impl Game for Listener {
+    fn tick(&mut self, world: &mut World, _dt: f32) {
+        let Some(events) = world.resource::<AnimationEvents>() else {
+            return;
+        };
+        let mut left = false;
+        for e in events.fired() {
+            left |= &*e.data == "left";
+            self.heard.push((e.entity, format!("{}{}", e.name, e.data)));
+        }
+        if left {
+            let mut sounds = QueryState::<&engine_app::AudioSource3D>::new(world);
+            let n = sounds
+                .iter_readonly(world)
+                .filter(|s| s.source.sound == "sounds/step.wav")
+                .count();
+            self.sounds_at_left_steps.push(n);
+        }
+    }
+}
+
+/// ADR 0124's E12-3b: clip events. A walker's `.meta` names three moments of its Walk; each
+/// tick fires those its play passed, for the game's tick in `AnimationEvents`: forward,
+/// backwards, three loops in three seconds' ticks, and through a cross-fade only the clip
+/// that weighs more (no step doubled); the left step's sound stands where the walker does.
+/// Events set in place of the `.meta`'s fire from the next tick.
+#[test]
+fn clip_events_fire_over_each_ticks_play() {
+    let dir = std::env::temp_dir().join(format!("ofelia-clip-events-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    write_walker(&dir.join("models"));
+    // A short tone for the left step (16-bit mono at 48 kHz, a tenth of a second).
+    std::fs::create_dir_all(dir.join("sounds")).unwrap();
+    let samples: Vec<u8> = (0..4800)
+        .flat_map(|i: i32| (((i % 100) - 50) as i16 * 200).to_le_bytes())
+        .collect();
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    for v in [16u32, 1 | (1 << 16), 48_000, 96_000, 2 | (16 << 16)] {
+        wav.extend_from_slice(&v.to_le_bytes());
+    }
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&samples);
+    std::fs::write(dir.join("sounds/step.wav"), wav).unwrap();
+    let file = dir.join("models/walker.gltf");
+    let id = AssetMeta::ensure(&file).unwrap();
+    let event = |time: f32, name: &str, data: &str, sound: &str| ClipEvent {
+        time,
+        name: name.to_owned(),
+        data: data.to_owned(),
+        sound: sound.to_owned(),
+    };
+    let mut meta = AssetMeta::read(&file);
+    meta.model.clips.push(ClipImport {
+        name: String::from("Walk"),
+        events: vec![
+            event(0.75, "step", "right", ""),
+            event(0.0, "start", "", ""),
+            event(0.25, "step", "left", "sounds/step.wav"),
+        ],
+    });
+    std::fs::write(AssetMeta::path(&file), meta.to_text(id)).unwrap();
+    let mesh = AssetRef::part(id, "Walker");
+    let mut paths = AssetPaths::new();
+    paths.insert(mesh, "models/walker.gltf#Walker");
+    let settings = PlayerSettings {
+        title: String::from("clip events test"),
+        window: Window::Offscreen {
+            width: 128,
+            height: 128,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    player.assets_mut().add_paths(&paths);
+    let spawn = |player: &mut Player, x: f32, clip: &str, speed: f32| {
+        player.world_mut().spawn((
+            Transform::from_xyz(x, 0.0, 0.0),
+            Model::new(mesh, engine_app::builtin::MATERIAL),
+            Animator {
+                speed,
+                ..Animator::new(clip)
+            },
+        ))
+    };
+    let forward = spawn(&mut player, 0.0, "Walk", 1.0);
+    let backward = spawn(&mut player, 3.0, "Walk", -1.0);
+    let fast = spawn(&mut player, 6.0, "Walk", 3.0);
+    let faded = spawn(&mut player, 9.0, "Walk", 1.0);
+    let turner = spawn(&mut player, -3.0, "Turn", 1.0);
+    let walkers = [forward, backward, fast, faded, turner];
+    let mut game = Listener::default();
+    player.set_frame_time(Some(1.0 / 64.0));
+    let started = Instant::now();
+    while walkers.iter().any(|&e| player.model_rig(e).is_none()) {
+        assert!(started.elapsed() < Duration::from_secs(30), "no skin");
+        player.frame(&mut game).unwrap();
+    }
+    // All from their clips' start now, the events heard so far forgotten.
+    for &e in &walkers {
+        player.world_mut().get_mut::<Animator>(e).unwrap().time = 0.0;
+    }
+    game.heard.clear();
+    game.sounds_at_left_steps.clear();
+    let start = player.ticks_run();
+    while player.ticks_run() - start < 128 {
+        player.frame(&mut game).unwrap();
+        // After 40 ticks the faded walker starts its walk again over half a second.
+        if player.ticks_run() - start == 40 {
+            let a = player.world_mut().get_mut::<Animator>(faded).unwrap();
+            a.play("Walk", 0.5);
+        }
+    }
+    assert_eq!(player.ticks_run() - start, 128, "a tick a frame");
+    let of = |game: &Listener, e: Entity| -> Vec<String> {
+        game.heard
+            .iter()
+            .filter(|(by, _)| *by == e)
+            .map(|(_, what)| what.clone())
+            .collect()
+    };
+    let walk = ["start", "stepleft", "stepright"];
+    assert_eq!(of(&game, forward), [walk, walk].concat(), "two loops");
+    assert_eq!(
+        of(&game, backward),
+        [
+            "start",
+            "stepright",
+            "stepleft",
+            "start",
+            "stepright",
+            "stepleft"
+        ],
+        "backwards"
+    );
+    assert_eq!(of(&game, fast), walk.repeat(6), "six loops at three times");
+    // The old walk fires until the new one weighs more: its right step at 0.75 s, then the
+    // new walk's left step; never the new walk's start under the old one.
+    assert_eq!(
+        of(&game, faded),
+        [
+            "start",
+            "stepleft",
+            "stepright",
+            "stepleft",
+            "stepright",
+            "start",
+            "stepleft"
+        ],
+        "through the fade"
+    );
+    assert!(of(&game, turner).is_empty(), "Turn has no events");
+    println!(
+        "{} events heard over 128 ticks; sounds at left steps: {:?}",
+        game.heard.len(),
+        game.sounds_at_left_steps
+    );
+    // Left steps at ticks 6, 17, 27, 49, 57, 70, 81, 91, 113 and 121 (two at some).
+    assert_eq!(game.sounds_at_left_steps.len(), 10, "ticks with left steps");
+    assert!(
+        game.sounds_at_left_steps.iter().all(|&n| n >= 1),
+        "a left step's sound stands in the world: {:?}",
+        game.sounds_at_left_steps
+    );
+    // The editor's events in place of the file's: Turn halfway, Walk none.
+    player.assets_mut().set_clip_events(
+        id,
+        &[ClipImport {
+            name: String::from("Turn"),
+            events: vec![event(0.5, "halfway", "", "")],
+        }],
+    );
+    for &e in &walkers {
+        player.world_mut().get_mut::<Animator>(e).unwrap().time = 0.0;
+    }
+    game.heard.clear();
+    let start = player.ticks_run();
+    while player.ticks_run() - start < 64 {
+        player.frame(&mut game).unwrap();
+    }
+    let heard: Vec<(Entity, String)> = game.heard.clone();
+    assert_eq!(heard, [(turner, String::from("halfway"))]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

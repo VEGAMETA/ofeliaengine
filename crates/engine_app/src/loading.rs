@@ -667,12 +667,11 @@ fn run(job: Job, root: &Path, pool: Option<&ThreadPool>) -> Done {
                     // An image file's own settings, or its model's for one inside it (E4-9):
                     // one kept uncompressed skips the cache.
                     let settings = match &texture.source {
-                        TextureSource::Uri(uri) => AssetMeta::read(&file.dir.join(uri)),
-                        TextureSource::Embedded { .. } => file.meta,
+                        TextureSource::Uri(uri) => AssetMeta::read(&file.dir.join(uri)).texture,
+                        TextureSource::Embedded { .. } => file.meta.texture,
                     };
-                    let cache = cache.filter(|_| {
-                        settings.texture.compression != TextureCompression::Uncompressed
-                    });
+                    let cache =
+                        cache.filter(|_| settings.compression != TextureCompression::Uncompressed);
                     if let Some(texture) = cache
                         .as_deref()
                         .and_then(|cache| cached_texture(cache, &bytes, key.usage()))

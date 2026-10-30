@@ -5,7 +5,8 @@
 //! back every frame; and a second character played by its `Animator` (E12-2a), its clip on
 //! the ticks and its pose each frame, fading all along from the clip at another moment
 //! (E12-2b: two samples blended), the fade started again now and then, its root motion
-//! moving it (E12-2c: taken out of both poses, read over each tick). Khronos' CesiumMan
+//! moving it (E12-2c: taken out of both poses, read over each tick), its clip's events
+//! fired as it plays (E12-3b: eight a loop, from its model's `.meta`). Khronos' CesiumMan
 //! (`tools/fetch-test-assets.ps1`); skipped without it.
 //! One test per file, so nothing else allocates concurrently.
 
@@ -41,6 +42,24 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         std::fs::copy(source.join(file), dir.join(file)).unwrap();
     }
     let id = AssetMeta::ensure(&dir.join("CesiumMan.gltf")).unwrap();
+    // Its one clip (unnamed: `Clip 1`) steps eight times a loop.
+    let mut meta = AssetMeta::read(&dir.join("CesiumMan.gltf"));
+    meta.model.clips.push(engine_scene::ClipImport {
+        name: String::from("Clip 1"),
+        events: (0..8)
+            .map(|i| engine_scene::ClipEvent {
+                time: i as f32 * 0.25,
+                name: String::from("step"),
+                data: String::from(if i % 2 == 0 { "left" } else { "right" }),
+                sound: String::new(),
+            })
+            .collect(),
+    });
+    std::fs::write(
+        AssetMeta::path(&dir.join("CesiumMan.gltf")),
+        meta.to_text(id),
+    )
+    .unwrap();
     let (mesh, material) = (
         AssetRef::part(id, "Cesium_Man"),
         AssetRef::part(id, "Cesium_Man-effect"),
@@ -99,6 +118,7 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
     let mut time = 0.0f32;
     let mut pixels = Vec::new();
     let mut taken = 0u32;
+    let mut heard = 0usize;
     counting::assert_steady_state_each(
         &mut player,
         &mut game,
@@ -115,13 +135,18 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
                 beside: Some((0, length - time)),
             }));
             taken += u32::from(player.take_model_preview(&mut pixels));
+            heard += player
+                .world_mut()
+                .resource::<engine_runtime::AnimationEvents>()
+                .map_or(0, |e| e.fired().len());
             frames += 1;
             if frames.is_multiple_of(200) {
                 fade(player);
             }
         },
     );
-    println!("{taken} model previews taken");
+    println!("{taken} model previews taken, {heard} clip events heard");
+    assert!(heard > 0, "the walker's clip fired its events");
     assert!(taken > 100, "the live preview drawn as it played: {taken}");
     let walked = player
         .world_mut()

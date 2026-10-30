@@ -71,8 +71,8 @@ pub mod text;
 
 pub use assets::{AssetId, AssetPaths, AssetRef};
 pub use database::{
-    AssetDatabase, AssetEntry, AssetKind, AssetMeta, ModelImport, ScanReport, TextureCompression,
-    TextureImport,
+    AssetDatabase, AssetEntry, AssetKind, AssetMeta, ClipEvent, ClipImport, ModelImport,
+    ScanReport, TextureCompression, TextureImport,
 };
 pub use prefab::{KeptBlocks, PrefabFiles, PrefabInstance, PrefabPart, Prefabs};
 

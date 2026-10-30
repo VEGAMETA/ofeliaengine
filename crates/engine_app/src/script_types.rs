@@ -149,6 +149,7 @@ type ScriptComponent<P> = {
     on_touch: ((self: P & ScriptSelf, other: Entity?, point: vector, normal: vector) -> ())?,
     on_untouch: ((self: P & ScriptSelf, other: Entity?) -> ())?,
     on_load: ((self: P & ScriptSelf) -> ())?,
+    on_animation_event: ((self: P & ScriptSelf, name: string, data: string?) -> ())?,
     [string]: any,
 }
 

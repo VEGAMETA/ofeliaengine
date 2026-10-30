@@ -2,10 +2,13 @@
 //! [`Animators::advance`], which moves every animator on each tick (the player calls it
 //! after the scripts' tick and before `Game::tick`). Each rendered frame then poses the
 //! character at the frame's moment between the last two ticks ([`Animator::at`]). A
-//! [`JointAttachment`] under a character follows one of its joints (E12-1c).
+//! [`JointAttachment`] under a character follows one of its joints (E12-1c). The clips'
+//! events a tick played past are its [`AnimationEvents`] (E12-3b).
+
+use std::sync::Arc;
 
 use engine_core::math::Vec3;
-use engine_ecs::{QueryState, World, reflect_component};
+use engine_ecs::{Entity, QueryState, World, reflect_component};
 use engine_reflect::Reflect;
 
 /// What an [`Animator`] does with its clips' root motion (ADR 0124's E12-2c): its root
@@ -262,6 +265,70 @@ impl JointAttachment {
             joint: joint.to_owned(),
             ..Self::default()
         }
+    }
+}
+
+/// A clip's event a character's animator played past (ADR 0124's E12-3b): a moment its
+/// model's `.meta` names in the clip, as a footstep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnimationEvent {
+    /// The character: the entity with the [`Animator`].
+    pub entity: Entity,
+    /// The event's name ("footstep").
+    pub name: Arc<str>,
+    /// What else it tells ("left"); empty when nothing.
+    pub data: Arc<str>,
+}
+
+/// The clips' events the last tick fired (ADR 0124's E12-3b), a resource the player keeps.
+/// Each tick, once the animators move on, every character's clip fires the events its play
+/// over the tick passed (with every loop, backwards too): during a cross-fade only the clip
+/// that weighs more, so a fade never doubles a footstep. `Game::tick` reads them in the same
+/// tick; a script on the character hears each as `on_animation_event(name, data)` in the
+/// next tick's script stage. Characters fire in the order of their entities, each one's
+/// events in the order played. The list keeps its room from tick to tick, so a steady game
+/// allocates nothing for it.
+///
+/// ```ignore
+/// fn tick(&mut self, world: &mut World, _dt: f32) {
+///     let steps = world.resource::<AnimationEvents>().map_or(0, |e| e.fired().len());
+/// }
+/// ```
+#[derive(Debug, Default)]
+pub struct AnimationEvents {
+    fired: Vec<AnimationEvent>,
+    ticks: u64,
+}
+
+impl AnimationEvents {
+    /// Room for 256 events a tick before it grows.
+    pub fn new() -> Self {
+        Self {
+            fired: Vec::with_capacity(256),
+            ticks: 0,
+        }
+    }
+
+    /// The events the last tick fired.
+    pub fn fired(&self) -> &[AnimationEvent] {
+        &self.fired
+    }
+
+    /// How many ticks fired events into it so far (none or some): what tells a tick's events
+    /// from the next one's, the same events or not.
+    pub fn ticks(&self) -> u64 {
+        self.ticks
+    }
+
+    /// Forgets the last tick's events, for a new tick's (the player's, as it fires them).
+    pub fn clear(&mut self) {
+        self.fired.clear();
+        self.ticks += 1;
+    }
+
+    /// One more fired this tick.
+    pub fn push(&mut self, event: AnimationEvent) {
+        self.fired.push(event);
     }
 }
 

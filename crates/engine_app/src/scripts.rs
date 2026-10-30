@@ -72,6 +72,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// What a prop holds.
@@ -141,6 +142,7 @@ struct Hooks {
     touch: Option<Function>,
     untouch: Option<Function>,
     load: Option<Function>,
+    animation_event: Option<Function>,
     /// Whether its table has any function: a message's or a timer's hook makes instances.
     handlers: bool,
 }
@@ -155,6 +157,7 @@ impl Hooks {
             || self.stop.is_some()
             || self.touch.is_some()
             || self.untouch.is_some()
+            || self.animation_event.is_some()
     }
 }
 
@@ -442,12 +445,13 @@ enum Hook<'a> {
     Touch,
     Untouch,
     Load,
+    AnimationEvent,
     /// A message's or a timer's hook, by its name.
     Message(&'a mlua::LuaString),
 }
 
 /// The hooks a place is kept for, by [`Hook::slot`].
-const HOOKS: usize = 7;
+const HOOKS: usize = 8;
 
 impl Hook<'_> {
     /// Its place among a script's kept places; none for a message's.
@@ -460,6 +464,7 @@ impl Hook<'_> {
             Hook::Touch => 4,
             Hook::Untouch => 5,
             Hook::Load => 6,
+            Hook::AnimationEvent => 7,
             Hook::Message(_) => return None,
         })
     }
@@ -474,6 +479,7 @@ impl Hook<'_> {
             Hook::Touch => String::from("on_touch"),
             Hook::Untouch => String::from("on_untouch"),
             Hook::Load => String::from("on_load"),
+            Hook::AnimationEvent => String::from("on_animation_event"),
             Hook::Message(name) => name.to_string_lossy(),
         }
     }
@@ -625,6 +631,12 @@ pub struct Scripts {
     /// A step's contacts, copied out of the physics world before any is heard (scratch):
     /// no hook runs while the stage holds the physics world.
     contacts: Vec<Contact>,
+    /// The clips' events heard last ([`engine_runtime::AnimationEvents::ticks`]), a tick's
+    /// copied out before any is heard (scratch), and their names as Luau strings, made once
+    /// each (ADR 0124's E12-3b).
+    events_heard: u64,
+    events: Vec<engine_runtime::AnimationEvent>,
+    event_strings: Vec<(Arc<str>, mlua::LuaString)>,
     /// The memory categories given to components and systems so far (ADR 0114 §11).
     categories: u16,
 }
@@ -757,6 +769,9 @@ impl Scripts {
             needs: BTreeMap::new(),
             heard: (0, 0),
             contacts: Vec::new(),
+            events_heard: 0,
+            events: Vec::new(),
+            event_strings: Vec::new(),
             versions: HashMap::new(),
             categories: 0,
         };
@@ -1458,6 +1473,7 @@ impl Scripts {
         self.deliver_later();
         self.timers_due();
         self.touches();
+        self.animation_events();
         self.call_all(Stage::Tick, dt, 0.0);
         self.despawn_asked();
         self.close();
@@ -1942,6 +1958,107 @@ impl Scripts {
         }
         self.contacts = contacts;
         self.listening = listened;
+    }
+
+    /// The clips' events the last tick fired (ADR 0124's E12-3b), each heard as
+    /// `on_animation_event(name, data)` by the instances on its character whose component has
+    /// the hook, in the order fired; a tick's events are heard once.
+    fn animation_events(&mut self) {
+        let world = OPEN_WORLD.get();
+        if world.is_null() {
+            return;
+        }
+        // SAFETY: the stage's world, borrowed until the events are copied out.
+        let Some(fired) = unsafe { &*world }.resource::<engine_runtime::AnimationEvents>() else {
+            return;
+        };
+        if fired.ticks() == self.events_heard {
+            return;
+        }
+        self.events_heard = fired.ticks();
+        if fired.fired().is_empty() {
+            return;
+        }
+        let mut listened = core::mem::take(&mut self.listening);
+        listened.clear();
+        listened.extend(
+            (0..self.components.len())
+                .filter(|&k| self.components[k].hooks.animation_event.is_some()),
+        );
+        if listened.is_empty() {
+            self.listening = listened;
+            return;
+        }
+        let mut events = core::mem::take(&mut self.events);
+        events.clear();
+        events.extend_from_slice(fired.fired());
+        for event in &events {
+            for &k in &listened {
+                self.animation_event(event, k);
+                self.deliver();
+            }
+        }
+        events.clear();
+        self.events = events;
+        self.listening = listened;
+    }
+
+    /// Instance (`event.entity`, component `k`) hears a clip's event.
+    fn animation_event(&mut self, event: &engine_runtime::AnimationEvent, k: usize) {
+        let me = event.entity;
+        let key = (me.index(), k as u32);
+        let Some((e, inst)) = self.instances.get_mut(&key) else {
+            return;
+        };
+        if *e != me || inst.stopped {
+            return;
+        }
+        let this = inst.this.clone();
+        let started = core::mem::replace(&mut inst.started, true);
+        let c = &self.components[k];
+        if !started
+            && let Some(start) = c.hooks.start.clone()
+            && let Err(err) = call_for(&self.vm, me, c, Hook::Start, &start, this.clone())
+        {
+            self.stop(key, "on_start", me, &err);
+            return;
+        }
+        let Some(hook) = self.components[k].hooks.animation_event.clone() else {
+            return;
+        };
+        let Some(name) = self.event_string(&event.name) else {
+            return;
+        };
+        let data = if event.data.is_empty() {
+            Value::Nil
+        } else {
+            self.event_string(&event.data)
+                .map_or(Value::Nil, Value::String)
+        };
+        let c = &self.components[k];
+        let args = (this, name, data);
+        if let Err(err) = call_for(&self.vm, me, c, Hook::AnimationEvent, &hook, args) {
+            self.stop(key, "on_animation_event", me, &err);
+        }
+    }
+
+    /// `text` as a Luau string, made the first time it is asked for and kept: an event's
+    /// name heard again allocates nothing.
+    fn event_string(&mut self, text: &Arc<str>) -> Option<mlua::LuaString> {
+        if let Some((_, s)) = self
+            .event_strings
+            .iter()
+            .find(|(t, _)| Arc::ptr_eq(t, text) || **t == **text)
+        {
+            return Some(s.clone());
+        }
+        // Names made in a game are few; past this many, start again.
+        if self.event_strings.len() >= 256 {
+            self.event_strings.clear();
+        }
+        let s = self.vm.lua().create_string(&**text).ok()?;
+        self.event_strings.push((Arc::clone(text), s.clone()));
+        Some(s)
     }
 
     /// Instance (`me`, component `k`) hears a contact with `other` (`begin`: it began).
@@ -2529,6 +2646,7 @@ fn hooks_of(table: &Table) -> Hooks {
         touch: hook("on_touch"),
         untouch: hook("on_untouch"),
         load: hook("on_load"),
+        animation_event: hook("on_animation_event"),
         handlers,
     }
 }
@@ -4913,6 +5031,91 @@ return Walker
         );
         let a = world.get::<engine_runtime::Animator>(walker).unwrap();
         assert_eq!(a.clip, "Walk", "left as it was");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-3b: the clips' events a tick fired are heard in the next tick's stage
+    /// by the scripts on their characters, as `on_animation_event(name, data)` (data nil
+    /// when empty), each tick's once; a character without the script hears nothing.
+    #[test]
+    fn a_characters_script_hears_its_clips_events_once() {
+        let dir = project(
+            "animation-events",
+            &[(
+                "steps.luau",
+                r#"local Steps = component("Steps", { lefts = 0, rights = 0, plain = 0 })
+function Steps.on_animation_event(self, name, data)
+    if name ~= "step" then
+        return
+    end
+    if data == "left" then
+        self.lefts += 1
+    elseif data == "right" then
+        self.rights += 1
+    elseif data == nil then
+        self.plain += 1
+    end
+end
+return Steps
+"#,
+            )],
+        );
+        let mut world = World::new();
+        world.insert_resource(engine_runtime::AnimationEvents::new());
+        let mut scripts = load(&dir, &mut world);
+        let walker = world.spawn((Transform::IDENTITY,));
+        let other = world.spawn((Transform::IDENTITY,));
+        scripts.add(&mut world, walker, "Steps");
+        let fire = |world: &mut World, events: &[(Entity, &str, &str)]| {
+            let fired = world
+                .resource_mut::<engine_runtime::AnimationEvents>()
+                .unwrap();
+            fired.clear();
+            for &(entity, name, data) in events {
+                fired.push(engine_runtime::AnimationEvent {
+                    entity,
+                    name: Arc::from(name),
+                    data: Arc::from(data),
+                });
+            }
+        };
+        let id = scripts.component("Steps").unwrap();
+        let read = |world: &World, field: &str| {
+            let info = world.components().type_info(id).unwrap();
+            let TypeKind::Struct(fields) = &info.kind else {
+                unreachable!()
+            };
+            let f = fields.iter().find(|f| f.name == field).unwrap();
+            let base = world.get_raw(walker, id).unwrap().as_ptr();
+            // SAFETY: the walker's component, the field an f32 at its offset.
+            unsafe { base.add(f.offset).cast::<f32>().read_unaligned() }
+        };
+        let counts = |world: &World| {
+            (
+                read(world, "lefts"),
+                read(world, "rights"),
+                read(world, "plain"),
+            )
+        };
+        let dt = 1.0 / 64.0;
+        fire(
+            &mut world,
+            &[
+                (walker, "step", "left"),
+                (walker, "step", ""),
+                (other, "step", "right"),
+                (walker, "land", "right"),
+            ],
+        );
+        scripts.tick(&mut world, dt);
+        assert_eq!(counts(&world), (1.0, 0.0, 1.0));
+        // The same tick's events again: not heard twice.
+        scripts.tick(&mut world, dt);
+        assert_eq!(counts(&world), (1.0, 0.0, 1.0), "heard once");
+        fire(&mut world, &[(walker, "step", "right")]);
+        scripts.tick(&mut world, dt);
+        assert_eq!(counts(&world), (1.0, 1.0, 1.0));
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -24,7 +24,7 @@
 
 use crate::{AssetId, AssetPaths, AssetRef, LoadError, ValueReport};
 use engine_reflect::Reflect;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 /// texture.compression = Uncompressed
 /// model.scale = 0.01
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Default, Reflect)]
+#[derive(Debug, Clone, PartialEq, Default, Reflect)]
 pub struct AssetMeta {
     /// How an image is imported: an image file's own, or the images inside a model.
     pub texture: TextureImport,
@@ -66,17 +66,49 @@ pub enum TextureCompression {
 }
 
 /// How a model is imported (ADR 0108's E4-9).
-#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct ModelImport {
     /// Its meshes' positions multiplied by this: 0.01 for a file in centimeters.
     #[reflect(min = 0.0001, max = 10000.0)]
     pub scale: f32,
+    /// What the editor adds to its clips (ADR 0124's E12-3: question 7 keeps an imported
+    /// clip's settings in its model's `.meta`, so a new export keeps them): their events.
+    pub clips: Vec<ClipImport>,
 }
 
 impl Default for ModelImport {
     fn default() -> Self {
-        Self { scale: 1.0 }
+        Self {
+            scale: 1.0,
+            clips: Vec::new(),
+        }
     }
+}
+
+/// What a model's `.meta` adds to one of its clips (ADR 0124's E12-3b).
+#[derive(Debug, Clone, PartialEq, Default, Reflect)]
+pub struct ClipImport {
+    /// The clip, by its name in the file (an unnamed one by the name the editor shows it
+    /// by, `Clip 2`).
+    pub name: String,
+    /// Its events, in time order.
+    pub events: Vec<ClipEvent>,
+}
+
+/// A moment of a clip that something happens at (ADR 0124's E12-3b): when a character's
+/// animator plays past it, scripts hear `on_animation_event(name)` and its sound plays at
+/// the character.
+#[derive(Debug, Clone, PartialEq, Default, Reflect)]
+pub struct ClipEvent {
+    /// Seconds into the clip.
+    pub time: f32,
+    /// What it is called ("footstep").
+    pub name: String,
+    /// What else it tells scripts ("left"); empty: nothing.
+    pub data: String,
+    /// A sound played at the character when it happens, by its path in the project; empty:
+    /// none.
+    pub sound: String,
 }
 
 impl ModelImport {
@@ -117,10 +149,13 @@ impl AssetMeta {
             None,
             &mut defaults,
         );
+        // By path, not by place: a list with items writes more lines than the defaults'
+        // empty one, and every line after it would pair with the wrong default.
+        let defaults: HashSet<&str> = defaults.lines().collect();
         let mut out = String::with_capacity(all.len());
-        for (line, default) in all.lines().zip(defaults.lines()) {
+        for line in all.lines() {
             // The header and the blank line after it are the same in both.
-            if line.is_empty() || line.starts_with('[') || line != default {
+            if line.is_empty() || line.starts_with('[') || !defaults.contains(line) {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -965,7 +1000,10 @@ mod tests {
             texture: TextureImport {
                 compression: TextureCompression::Uncompressed,
             },
-            model: ModelImport { scale: 0.01 },
+            model: ModelImport {
+                scale: 0.01,
+                ..ModelImport::default()
+            },
         };
         let text = meta.to_text(id);
         assert_eq!(
@@ -979,17 +1017,49 @@ model.scale = 0.01
             )
         );
         let (read, report) = AssetMeta::parse(&text).unwrap();
-        assert_eq!((read, report.id), (meta, Some(id)));
+        assert_eq!((read, report.id), (meta.clone(), Some(id)));
         // One setting back to its default: its line goes.
         let back = AssetMeta {
             model: ModelImport::default(),
-            ..meta
+            ..meta.clone()
         };
         assert!(!back.to_text(id).contains("model.scale"));
         // A scale that is not a positive number applies as 1.
         for scale in [0.0, -2.0, f32::NAN] {
-            assert_eq!(ModelImport { scale }.applied_scale(), 1.0);
+            let model = ModelImport {
+                scale,
+                ..ModelImport::default()
+            };
+            assert_eq!(model.applied_scale(), 1.0);
         }
+        // A clip's events (ADR 0124's E12-3b) round the file.
+        let mut walking = meta.clone();
+        walking.model.clips.push(ClipImport {
+            name: String::from("Walk"),
+            events: vec![
+                ClipEvent {
+                    time: 0.25,
+                    name: String::from("footstep"),
+                    data: String::from("left"),
+                    sound: String::from("sounds/step.wav"),
+                },
+                ClipEvent {
+                    time: 0.75,
+                    name: String::from("footstep"),
+                    ..ClipEvent::default()
+                },
+            ],
+        });
+        let text = walking.to_text(id);
+        println!("{text}");
+        assert!(
+            text.contains("model.clips.0.events.0.data = \"left\"")
+                && text.contains("model.clips.0.events.0.sound = \"sounds/step.wav\"")
+                && text.contains("model.clips.0.events.1.time = 0.75"),
+            "{text}"
+        );
+        let (read, _) = AssetMeta::parse(&text).unwrap();
+        assert_eq!(read, walking, "{text}");
         // Without a `.meta`, or with a broken one: the defaults.
         let dir = temp("meta-read");
         let file = dir.join("props/sign.png");
