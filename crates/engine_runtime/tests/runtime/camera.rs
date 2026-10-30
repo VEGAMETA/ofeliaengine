@@ -162,3 +162,49 @@ fn the_camera_carries_its_settings() {
         (0.8, 0.5, 300.0)
     );
 }
+
+/// ADR 0125: an orthographic camera is a 2D view, neutral (colours as painted) unless it
+/// asks for the post chain, rendered at its pixel-art resolution and scaled by whole
+/// numbers.
+#[test]
+fn an_orthographic_camera_is_a_neutral_2d_view() {
+    use engine_render::post::ToneCurve;
+    let mut world = World::new();
+    let camera = world.spawn((
+        Transform::from_xyz(4.0, 2.0, 0.0),
+        Camera::pixel_art([320, 180], 16.0),
+    ));
+    let base = ViewSettings {
+        bloom: true,
+        curve: ToneCurve::Agx,
+        ..ViewSettings::default()
+    };
+    let mut cameras = CameraView::new(&mut world, base);
+    let main = cameras.resolve(&world).unwrap();
+    assert_eq!(
+        main.camera.orthographic,
+        Some(11.25),
+        "180 pixels at 16 a metre"
+    );
+    assert_eq!(main.camera.position, Vec3::new(4.0, 2.0, 0.0));
+    assert_eq!(main.settings.render_size, Some((320, 180)));
+    assert_eq!(main.settings.antialiasing.upscale, Upscale::Integer);
+    assert!(!main.settings.antialiasing.is_temporal());
+    assert_eq!(main.settings.curve, ToneCurve::None);
+    assert!(!main.settings.bloom && main.settings.grading.is_neutral());
+    assert_eq!(main.settings.exposure, Exposure::Fixed(1.0));
+    // Asked for, the player's post chain: glows.
+    world.get_mut::<Camera>(camera).unwrap().post_effects = 1;
+    let main = cameras.resolve(&world).unwrap();
+    assert_eq!(main.settings.curve, ToneCurve::Agx);
+    assert!(main.settings.bloom);
+    // Without a reference: the output's size, its antialiasing (none).
+    *world.get_mut::<Camera>(camera).unwrap() = Camera::orthographic(10.0);
+    let main = cameras.resolve(&world).unwrap();
+    assert_eq!(main.settings.render_size, None);
+    assert_eq!(main.settings.antialiasing, Antialiasing::OFF);
+    assert_eq!(main.camera.orthographic, Some(10.0));
+    // A perspective camera stays one.
+    assert!(!Camera::perspective(1.0, 0.1, 10.0).is_orthographic());
+    assert_eq!(Camera::default().projection, Camera::PERSPECTIVE);
+}
