@@ -299,6 +299,34 @@ pub struct AnimGraph {
     /// Whether each layer may inertialize (it plays such a machine).
     layer_inertial: Box<[bool]>,
     joints: usize,
+    /// The joint whose ground motion is root motion, and what of it each leaf's clip gives
+    /// with its root at its start ([`AnimGraph::set_root_motion`]; none for a leaf whose clip
+    /// was not given, all none before: nothing is taken out in place).
+    motion_root: usize,
+    leaf_motion: Box<[Option<LeafMotion>]>,
+}
+
+/// What a leaf's clip gives of root motion, and its root at its start.
+#[derive(Debug, Clone, Copy)]
+struct LeafMotion {
+    mode: crate::RootMotionMode,
+    start: crate::RootStart,
+}
+
+/// A clip a layer played over the last tick ([`AnimGraph::played`], ADR 0124's E12-5c-2):
+/// its index among the character's clips, its weight at the tick's end, and the span of it
+/// the tick played, `from..to` seconds (past its length on later loops; one that plays once
+/// held within it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Played {
+    /// The clip, as [`ClipInfo::index`] gave it.
+    pub clip: u16,
+    /// Its weight in its layer at the tick's end.
+    pub weight: f32,
+    /// Seconds into it where the tick's step began.
+    pub from: f32,
+    /// Seconds into it where the tick's step ended.
+    pub to: f32,
 }
 
 /// A machine's state at run time.
@@ -335,6 +363,8 @@ pub struct GraphState {
     leaf_weight_before: Box<[f32]>,
     /// Ticks since it was made: the first one has no tick before to blend from.
     ticked: bool,
+    /// Posed with root motion taken out ([`Self::set_in_place`]).
+    in_place: bool,
     /// The ticks' seconds so far, and the last tick's: where a frame between the last two
     /// ticks is.
     clock: f64,
@@ -763,9 +793,97 @@ impl AnimGraph {
             machine_inertial: Box::default(),
             layer_inertial: Box::default(),
             joints,
+            motion_root: 0,
+            leaf_motion: Box::default(),
         };
         graph.plan_inertia();
         (graph, problems)
+    }
+
+    /// Root motion for the rig it was cooked for (ADR 0124's E12-5c-2): joint `root`'s ground
+    /// motion, each clip's parts of it as `mode` says (by the clip's index), each clip's root
+    /// at its start read here once (`clip` gives the clips as [`Self::pose`]'s, `rest` is the
+    /// rig's rest pose). A character state set in place ([`GraphState::set_in_place`]) is
+    /// then posed with that motion taken out of every clip it samples, as a clip's
+    /// [`crate::remove_root_motion`] does, so its game moves it instead ([`Self::played`]
+    /// gives the spans to take it from).
+    pub fn set_root_motion<'c>(
+        &mut self,
+        root: usize,
+        mode: impl Fn(u16) -> crate::RootMotionMode,
+        clip: impl Fn(u16) -> Option<&'c CompressedClip>,
+        rest: &Pose,
+    ) {
+        self.motion_root = root;
+        self.leaf_motion = self
+            .leaves
+            .iter()
+            .map(|l| {
+                let mode = mode(l.clip);
+                let start = crate::root_motion_start(clip(l.clip)?, rest, root, mode)?;
+                Some(LeafMotion { mode, start })
+            })
+            .collect();
+    }
+
+    /// The clips layer `layer` played over character state `s`'s last tick, with their
+    /// weights at its end and the spans of them the tick played ([`Played`]): what a
+    /// character's root motion and its clips' events are taken from (ADR 0124's E12-5c-2).
+    /// Allocates nothing.
+    pub fn played<'a>(
+        &'a self,
+        s: &'a GraphState,
+        layer: usize,
+    ) -> impl Iterator<Item = Played> + 'a {
+        let leaves = self.leaves.len();
+        let weights = s
+            .leaf_weight
+            .get(layer * leaves..(layer + 1) * leaves)
+            .unwrap_or(&[]);
+        weights.iter().enumerate().filter_map(move |(k, &weight)| {
+            if weight <= EPSILON {
+                return None;
+            }
+            let def = self.leaves[k];
+            let t = usize::from(def.timed);
+            let (mut from, mut to) = (s.phase_stepped_from[t], s.phase[t]);
+            if def.once {
+                (from, to) = (from.clamp(0.0, 1.0), to.clamp(0.0, 1.0));
+            }
+            Some(Played {
+                clip: def.clip,
+                weight,
+                from: from * def.length,
+                to: to * def.length,
+            })
+        })
+    }
+
+    /// Layer `layer`'s machine put straight into its state named `name`, from its start, with
+    /// no blend: where a loaded save goes on from (ADR 0124's E12-5c-2: the animator keeps its
+    /// state's name). False, and nothing changed, for a name the machine has not.
+    pub fn resume_in(&self, s: &mut GraphState, layer: usize, name: &str) -> bool {
+        let Some(root) = self.layers.get(layer).map(|l| l.root) else {
+            return false;
+        };
+        let Some(&NodeDef::Machine { machine }) = self.nodes.get(usize::from(root)) else {
+            return false;
+        };
+        let Some(state) = self
+            .states
+            .iter()
+            .position(|st| st.machine == machine && &*st.name == name)
+        else {
+            return false;
+        };
+        let ms = &mut s.machines[usize::from(machine)];
+        ms.state = state as u16;
+        ms.from = NONE;
+        ms.faded = 0.0;
+        ms.fade = 0.0;
+        ms.inertial = false;
+        self.enter(state as u16, 0.0, s, 0);
+        true
     }
 
     /// Which machines may inertialize (an inertialized transition; a fade into a state that
@@ -849,6 +967,26 @@ impl AnimGraph {
     /// How many layers play.
     pub fn layer_count(&self) -> usize {
         self.layers.len()
+    }
+
+    /// How much of layer `layer` character state `s` shows now, 0 to 1: its weight, or its
+    /// weight parameter's value (0 for a layer it has not). A layer at 0 shows nothing, so
+    /// its clips' events need not fire (ADR 0124's E12-5c-2).
+    pub fn layer_weight(&self, s: &GraphState, layer: usize) -> f32 {
+        self.layers.get(layer).map_or(0.0, |l| self.weight_of(l, s))
+    }
+
+    /// Layer `layer`'s weight in state `s`: its own, or its parameter's (0 to 1).
+    fn weight_of(&self, layer: &LayerDef, s: &GraphState) -> f32 {
+        if layer.weight_param == NONE {
+            layer.weight
+        } else {
+            s.params
+                .get(usize::from(layer.weight_param))
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0)
+        }
     }
 
     /// The joints of the rig it was cooked for.
@@ -1323,22 +1461,14 @@ impl AnimGraph {
         let decaying = now < s.decaying_until;
         let mut posed = false;
         for (l, layer) in self.layers.iter().enumerate() {
-            let weight = if layer.weight_param == NONE {
-                layer.weight
-            } else {
-                s.params
-                    .get(usize::from(layer.weight_param))
-                    .copied()
-                    .unwrap_or(0.0)
-                    .clamp(0.0, 1.0)
-            };
+            let weight = self.weight_of(layer, s);
             if weight <= EPSILON {
                 continue;
             }
             let range = l * leaves..(l + 1) * leaves;
             let weights = (&s.leaf_weight_before[range.clone()], &s.leaf_weight[range]);
             let phases = (&s.phase_before[..], &s.phase[..]);
-            if !self.layer_pose(l, weights, phases, alpha, &clip, rest, work) {
+            if !self.layer_pose(l, weights, phases, alpha, &clip, rest, work, s.in_place) {
                 continue;
             }
             if decaying
@@ -1380,8 +1510,10 @@ impl AnimGraph {
             dt,
             decaying_until,
             inertia,
+            in_place,
             ..
         } = s;
+        let in_place = *in_place;
         let Some(i) = inertia.as_deref_mut() else {
             return false;
         };
@@ -1405,7 +1537,16 @@ impl AnimGraph {
             // The source at the transition and a step before, as the frames showed it.
             let mut shown = true;
             for (k, alpha) in [1.0 - SOURCE_STEP, 1.0].into_iter().enumerate() {
-                shown &= self.layer_pose(l, weights, (earlier, before), alpha, &clip, rest, work);
+                shown &= self.layer_pose(
+                    l,
+                    weights,
+                    (earlier, before),
+                    alpha,
+                    &clip,
+                    rest,
+                    work,
+                    in_place,
+                );
                 if decay.carry {
                     let back = (1.0 - alpha) * i.source_dt;
                     decay_pose(&decay.joints, decay.carried - back, &mut work.layer);
@@ -1426,6 +1567,7 @@ impl AnimGraph {
                     &clip,
                     rest,
                     work,
+                    in_place,
                 );
                 std::mem::swap(&mut work.layer, &mut work.held[2 + k]);
             }
@@ -1470,6 +1612,7 @@ impl AnimGraph {
         clip: &impl Fn(u16) -> Option<&'c CompressedClip>,
         rest: &Pose,
         work: &mut GraphWork,
+        in_place: bool,
     ) -> bool {
         let Some(layer) = self.layers.get(l) else {
             return false;
@@ -1497,14 +1640,14 @@ impl AnimGraph {
             return false;
         }
         let chosen = &chosen[..count];
-        self.sample_leaves(chosen, phases, alpha, false, clip, rest, work);
+        self.sample_leaves(chosen, phases, alpha, false, clip, rest, work, in_place);
         blend_sampled(chosen, rest, work, false);
         if layer.additive {
             // The difference from the clips' first frames (prepared once, else sampled).
             if self.references.len() == self.leaves.len() {
                 self.blend_references(chosen, rest, work);
             } else {
-                self.sample_leaves(chosen, phases, alpha, true, clip, rest, work);
+                self.sample_leaves(chosen, phases, alpha, true, clip, rest, work, false);
                 blend_sampled(chosen, rest, work, true);
             }
             let GraphWork {
@@ -1594,6 +1737,7 @@ impl AnimGraph {
     /// `alpha` of the way between `phases` (every clip's and blend's at the last two ticks),
     /// or at their first frames (`first`). A clip `clip` lacks samples as the rest pose.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn sample_leaves<'c>(
         &self,
         chosen: &[(u16, f32)],
@@ -1603,6 +1747,7 @@ impl AnimGraph {
         clip: &impl Fn(u16) -> Option<&'c CompressedClip>,
         rest: &Pose,
         work: &mut GraphWork,
+        in_place: bool,
     ) {
         for (slot, &(leaf, _)) in chosen.iter().enumerate() {
             let def = self.leaves[usize::from(leaf)];
@@ -1623,6 +1768,10 @@ impl AnimGraph {
                         p * def.length
                     };
                     c.sample(time, rest, pose);
+                    // Root motion taken out, for the game to move the character by it.
+                    if in_place && let Some(Some(m)) = self.leaf_motion.get(usize::from(leaf)) {
+                        crate::remove_root_motion_since(pose, self.motion_root, m.mode, m.start);
+                    }
                 }
                 None => pose.copy_from(rest),
             }
@@ -2009,6 +2158,7 @@ impl GraphState {
             leaf_weight: vec![0.0; leaves].into_boxed_slice(),
             leaf_weight_before: vec![0.0; leaves].into_boxed_slice(),
             ticked: false,
+            in_place: false,
             clock: 0.0,
             dt: 0.0,
             phase_earlier: earlier(timed),
@@ -2050,6 +2200,13 @@ impl GraphState {
     /// Parameter `slot`'s value (0 for none).
     pub fn get(&self, slot: u16) -> f32 {
         self.params.get(usize::from(slot)).copied().unwrap_or(0.0)
+    }
+
+    /// Posed with root motion taken out of every clip (ADR 0124's E12-5c-2, its graph's
+    /// [`AnimGraph::set_root_motion`]): what a character whose game moves it by its root
+    /// motion is set to; else the motion stays in the pose.
+    pub fn set_in_place(&mut self, on: bool) {
+        self.in_place = on;
     }
 
     /// Parameter `slot` set to `value` (a flag's 0 or 1).
@@ -2236,6 +2393,161 @@ mod tests {
             &mut out,
         );
         arm(&out)
+    }
+
+    /// A root walking 1 m along x over its second-long clip, and a child.
+    fn walker() -> (Skeleton, CompressedClip) {
+        let (skeleton, _) = Skeleton::new(&[
+            JointDesc {
+                name: "hips".into(),
+                parent: None,
+                rest: Transform::IDENTITY,
+            },
+            JointDesc {
+                name: "head".into(),
+                parent: Some(0),
+                rest: Transform::new(Vec3::Y, engine_core::math::Quat::IDENTITY, Vec3::ONE),
+            },
+        ])
+        .unwrap();
+        let times: Vec<f32> = (0..=10).map(|k| k as f32 / 10.0).collect();
+        let mut raw = RawClip {
+            name: "Walk".into(),
+            duration: 1.0,
+            joints: vec![Default::default(); 2],
+        };
+        raw.joints[0].translation = Some(RawTrack {
+            interpolation: Interpolation::Linear,
+            times: times.clone(),
+            values: times.iter().map(|&t| Vec3::new(t, 0.0, 0.0)).collect(),
+        });
+        (
+            skeleton.clone(),
+            compress(&raw, &skeleton, &CompressSettings::default()).0,
+        )
+    }
+
+    /// One machine of one state playing `Walk`, a second long, looping.
+    fn walking() -> GraphDesc {
+        GraphDesc {
+            layers: vec![LayerDesc {
+                name: "Base".into(),
+                root: 0,
+                weight: 1.0,
+                ..LayerDesc::default()
+            }],
+            nodes: vec![
+                NodeDesc::Machine { entry: 0 },
+                NodeDesc::Clip {
+                    clip: "Walk".into(),
+                    speed: 1.0,
+                },
+            ],
+            states: vec![StateDesc {
+                name: "Walk".into(),
+                machine: 0,
+                pose: 1,
+            }],
+            ..GraphDesc::default()
+        }
+    }
+
+    /// ADR 0124's E12-5c-2: the clips a layer played over the last tick, with the span the
+    /// tick's step covered (what root motion and events are read over); and a character set
+    /// in place posed with its root's ground motion taken out of every clip it samples.
+    #[test]
+    fn a_graph_tells_its_ticks_spans_and_poses_in_place() {
+        let (skeleton, walk) = walker();
+        let info = |name: &str| {
+            (name == "Walk").then_some(ClipInfo {
+                index: 0,
+                length: 1.0,
+                once: false,
+            })
+        };
+        let (mut g, problems) = AnimGraph::cook(&walking(), info, &skeleton);
+        assert!(problems.is_empty(), "{problems:?}");
+        let clips = [walk];
+        g.set_root_motion(
+            0,
+            |_| crate::RootMotionMode::default(),
+            |k| clips.get(usize::from(k)),
+            skeleton.rest(),
+        );
+        let mut s = GraphState::new(&g);
+        for _ in 0..16 {
+            g.tick(&mut s, 1.0 / 64.0);
+        }
+        let played: Vec<Played> = g.played(&s, 0).collect();
+        assert_eq!(played.len(), 1);
+        let p = played[0];
+        assert_eq!((p.clip, p.weight), (0, 1.0));
+        assert!(
+            (p.from - 15.0 / 64.0).abs() < 1e-6 && (p.to - 16.0 / 64.0).abs() < 1e-6,
+            "{p:?}"
+        );
+        assert_eq!(g.played(&s, 1).count(), 0, "no such layer");
+        // Posed: the root a quarter of the way along, or kept at its start in place.
+        let mut work = GraphWork::new(skeleton.joint_count());
+        let mut out = Pose::identity(skeleton.joint_count());
+        let mut root_x = |s: &GraphState| {
+            g.pose(
+                s,
+                1.0,
+                |k| clips.get(usize::from(k)),
+                skeleton.rest(),
+                &mut work,
+                &mut out,
+            );
+            out.translations[0].x
+        };
+        assert!((root_x(&s) - 0.25).abs() < 1e-3, "{}", root_x(&s));
+        s.set_in_place(true);
+        assert!(root_x(&s).abs() < 1e-4, "in place: {}", root_x(&s));
+        // How much of each layer shows (a layer at 0 fires no events): its weight, or its
+        // weight parameter's value held to 0..1.
+        let mut desc = walking();
+        desc.params.push(ParamDesc {
+            name: "over".into(),
+            ..ParamDesc::default()
+        });
+        desc.nodes.push(NodeDesc::Clip {
+            clip: "Walk".into(),
+            speed: 1.0,
+        });
+        desc.layers.push(LayerDesc {
+            name: "Over".into(),
+            root: 2,
+            weight_param: Some("over".into()),
+            ..LayerDesc::default()
+        });
+        let (g, problems) = AnimGraph::cook(&desc, info, &skeleton);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut s = GraphState::new(&g);
+        let over = g.param("over").unwrap();
+        assert_eq!(g.layer_weight(&s, 0), 1.0);
+        assert_eq!(g.layer_weight(&s, 1), 0.0, "its parameter at 0");
+        s.set(over, 0.4);
+        assert!((g.layer_weight(&s, 1) - 0.4).abs() < 1e-6);
+        s.set(over, 3.0);
+        assert_eq!(g.layer_weight(&s, 1), 1.0, "held to 1");
+        assert_eq!(g.layer_weight(&s, 2), 0.0, "no such layer");
+    }
+
+    /// ADR 0124's E12-5c-2: a layer's machine put straight into a state by its name (a loaded
+    /// save goes on there); a name it has not changes nothing.
+    #[test]
+    fn a_graph_resumes_in_a_state_by_name() {
+        let (skeleton, _clips, angles) = rig();
+        let (g, problems) = AnimGraph::cook(&locomotion(), info(&angles), &skeleton);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut s = GraphState::new(&g);
+        assert!(g.resume_in(&mut s, 0, "Jump"));
+        g.tick(&mut s, 1.0 / 64.0);
+        assert_eq!(g.state_name(&s, 0), Some("Jump"));
+        assert!(!g.resume_in(&mut s, 0, "Swim"));
+        assert!(!g.resume_in(&mut s, 7, "Jump"), "no such layer");
+        assert_eq!(g.state_name(&s, 0), Some("Jump"));
     }
 
     /// An exit time within a tick's step of a looping clip's end is passed when the step

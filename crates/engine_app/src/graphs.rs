@@ -177,14 +177,16 @@ impl Graphs {
     }
 
     /// Graph file `id` cooked for rig `rig` of model file `model` (once per rig): `clip`
-    /// finds a clip the graph names among the rig's. What cannot be cooked is told once (the
-    /// rest still plays); none for a file not read.
+    /// finds a clip the graph names among the rig's, `motion` gives a clip's (by its index)
+    /// root motion's parts (E12-5c-2). What cannot be cooked is told once (the rest still
+    /// plays); none for a file not read.
     pub(crate) fn cook(
         &mut self,
         id: AssetId,
         rig: &Arc<Rig>,
         model: AssetId,
         clip: impl Fn(&str) -> Option<ClipInfo>,
+        motion: impl Fn(u16) -> engine_anim::RootMotionMode,
     ) -> Option<Arc<Cooked>> {
         let key = (id, Arc::as_ptr(rig) as usize);
         if let Some(cooked) = self.cooked.get(&key) {
@@ -193,10 +195,9 @@ impl Graphs {
         let file = Arc::clone(self.files.get(&id)?.as_ref()?);
         let clips = rig.clips();
         let (mut graph, problems) = AnimGraph::cook(&file.desc, clip, rig.skeleton());
-        graph.prepare(
-            |k| clips.get(usize::from(k)).map(crate::RigClip::compressed),
-            rig.skeleton().rest(),
-        );
+        let compressed = |k: u16| clips.get(usize::from(k)).map(crate::RigClip::compressed);
+        graph.prepare(compressed, rig.skeleton().rest());
+        graph.set_root_motion(rig.motion_root(), motion, compressed, rig.skeleton().rest());
         for p in &problems {
             log::warn!(
                 target: "engine_app",

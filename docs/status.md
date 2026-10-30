@@ -879,6 +879,14 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5c-2, a graph's root motion, events and saves** (#PR, ADR 0124's as-built): a
+    graph character moved by its root motion (`Move`, `Report`) has it taken out of every
+    clip it samples and moves by its base layer's clips' motions over each tick, blended
+    by weight: the generated walker's graph crosses 1.25 m in 80 ticks exactly as the
+    clip's walker. In each layer that shows, the heaviest clip fires its events. A save
+    keeps the state by name; a loaded character (or a graph edited while it plays) goes
+    on in it. Posing in place costs 0.07–0.1 µs a character a frame (+2 %, each clip's
+    start read once at the cook). 0 allocations.
   - **The canvas's defaults and an exit-time fix** (#484): transitions drawn on the canvas
     inertialize and New Animation Graph is given to the selected characters (the team's
     2a, 4a); an exit time within a tick's step of a looping clip's end is taken (it never
@@ -907,7 +915,7 @@ Last updated: 2026-10-28.
     - Each frame poses from the graph between ticks (sockets and `model_joints` too); a
       graph that cannot be read shows the rest pose; the editor's copy plays in place of
       the file. 0 allocations (CesiumMan with a graph character beside the others).
-    - Root motion, events and saves of a graph: 5c-2.
+    - Root motion, events and saves of a graph: 5c-2 (#PR).
   - **E12-5b-2, inertialized transitions** (#483, ADR 0124's as-built, research note's new
     section): Bollo's inertialization (no patents found, 2026-10-30), the destination at
     full strength from its first frame; a blend cut short goes on from the pose shown, with
@@ -1257,8 +1265,9 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    E12-5c-2 (a graph's root motion, events and saves), the scripts' calls (in parallel),
-    then 5d (the canvas, in parallel) and 5e; E12-4 is done.
+    E12-5d-2 (layers and masks on the canvas, blends drawn as points, machines in
+    machines, the character previewed in the corner) and 5e (the live state in Play); 5a
+    to 5c and 5d-1 are done, and E12-4.
   - **Settled (2026-10-30, team decisions 1а 2а 3б 4а 5а):** Luau's strict mode stays opt-in
     (`--!strict`, which New Script writes); transitions drawn in the editor inertialize by
     default (the file's default stays a cross-fade); compacting inertialization's per-joint

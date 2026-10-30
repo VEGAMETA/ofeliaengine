@@ -6,10 +6,12 @@
 //! them is in a cross-fade at any time (and some fades are cut short: those go on as
 //! inertializations): the ticks (64 a second), the captures after them and the frames
 //! apart, the frames on one thread and on the job system. `--inertialize` makes the two
-//! transitions inertialized (ADR 0124's E12-5b-2).
+//! transitions inertialized (ADR 0124's E12-5b-2); `--in-place` poses every character with
+//! its root's ground motion taken out of each clip it samples, as one the game moves by its
+//! root motion is (E12-5c-2).
 //!
 //! `cargo run -p engine_anim --release --example graph_bench -- [--frames N] [--workers N]
-//! [--inertialize] [--unprepared]`
+//! [--inertialize] [--in-place] [--unprepared]`
 
 #![allow(clippy::unwrap_used, clippy::print_stdout, clippy::cast_precision_loss)]
 
@@ -237,12 +239,21 @@ fn main() {
     if !args.iter().any(|a| a == "--unprepared") {
         graph.prepare(|k| clips.get(usize::from(k)), skeleton.rest());
     }
+    let in_place = args.iter().any(|a| a == "--in-place");
+    if in_place {
+        graph.set_root_motion(
+            0,
+            |_| RootMotionMode::default(),
+            |k| clips.get(usize::from(k)),
+            skeleton.rest(),
+        );
+    }
     let slot = |name: &str| graph.param(name).unwrap();
     let (across, ahead, wave, lean) = (slot("across"), slot("ahead"), slot("wave"), slot("lean"));
     let pool = ThreadPool::builder().workers(workers).build().unwrap();
     println!(
-        "{} joints, {} clips; {frames} frames, ticks at 64 Hz, {workers} workers; {}; {} bytes \
-         a character's state",
+        "{} joints, {} clips; {frames} frames, ticks at 64 Hz, {workers} workers; {}{}; {} \
+         bytes a character's state",
         skeleton.joint_count(),
         clips.len(),
         if inertialize {
@@ -250,6 +261,7 @@ fn main() {
         } else {
             "cross-faded transitions"
         },
+        if in_place { ", in place" } else { "" },
         GraphState::new(&graph).size_bytes(),
     );
     println!(
@@ -260,6 +272,7 @@ fn main() {
         let mut characters: Vec<Character> = (0..n)
             .map(|i| {
                 let mut state = GraphState::new(&graph);
+                state.set_in_place(in_place);
                 state.set(wave, if i % 3 == 0 { 1.0 } else { 0.0 });
                 state.set(lean, 0.5);
                 Character {

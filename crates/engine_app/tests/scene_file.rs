@@ -2120,7 +2120,8 @@ fn write_walker(dir: &std::path::Path) {
 /// ADR 0124's E12-2c: root motion. A walker moved by its animator crosses the ground as its
 /// clip does while its pose stays on the spot; one that reports it stays put and leaves the
 /// motion in its animator; one turned by its clip turns; one that keeps the motion in its
-/// pose walks off its spot and back each loop.
+/// pose walks off its spot and back each loop. E12-5c-2: one whose animation graph plays
+/// the walk crosses as the clip's walker does, its pose on the spot too.
 #[test]
 fn root_motion_moves_the_character_or_is_left_for_the_game() {
     let dir = std::env::temp_dir().join(format!("ofelia-root-motion-{}", std::process::id()));
@@ -2167,10 +2168,56 @@ fn root_motion_moves_the_character_or_is_left_for_the_game() {
     let reporter = spawn(&mut player, 3.0, "Walk", RootMotion::Report);
     let turner = spawn(&mut player, -3.0, "Turn", RootMotion::Move);
     let stander = spawn(&mut player, 6.0, "Walk", RootMotion::InPose);
+    // A graph of one state playing Walk (as the editor holds a graph it edits).
+    let graph_id = AssetId::new();
+    let mut graph = engine_scene::AnimGraphFile::default();
+    graph.layers.insert(
+        "base".into(),
+        engine_scene::LayerFile {
+            name: "Base".into(),
+            root: "m".into(),
+            ..engine_scene::LayerFile::default()
+        },
+    );
+    graph.nodes.insert(
+        "m".into(),
+        engine_scene::NodeFile {
+            kind: engine_scene::NodeKind::Machine,
+            entry: "walk".into(),
+            ..engine_scene::NodeFile::default()
+        },
+    );
+    graph.nodes.insert(
+        "c".into(),
+        engine_scene::NodeFile {
+            clip: "Walk".into(),
+            speed: 1.0,
+            ..engine_scene::NodeFile::default()
+        },
+    );
+    graph.states.insert(
+        "walk".into(),
+        engine_scene::StateFile {
+            name: "Walk".into(),
+            machine: "m".into(),
+            pose: "c".into(),
+            ..engine_scene::StateFile::default()
+        },
+    );
+    player.assets_mut().set_anim_graph(graph_id, Some(&graph));
+    let grapher = player.world_mut().spawn((
+        Transform::from_xyz(-6.0, 0.0, 0.0),
+        Model::new(mesh, engine_app::builtin::MATERIAL),
+        Animator {
+            graph: AssetRef::file(graph_id),
+            root_motion: RootMotion::Move,
+            ..Animator::default()
+        },
+    ));
     let mut game = Still;
     player.set_frame_time(Some(1.0 / 64.0));
     let started = Instant::now();
-    while [mover, reporter, turner, stander]
+    while [mover, reporter, turner, stander, grapher]
         .iter()
         .any(|&e| player.model_rig(e).is_none())
     {
@@ -2204,6 +2251,7 @@ fn root_motion_moves_the_character_or_is_left_for_the_game() {
         Vec3::from(joints[hips].translation)
     };
     let (mover_start, turner_start) = (at(&mut player, mover), at(&mut player, turner));
+    let grapher_start = at(&mut player, grapher);
     let ticks_start = player.ticks_run();
     let mut stander_hips = Vec::new();
     for _ in 0..80 {
@@ -2213,6 +2261,11 @@ fn root_motion_moves_the_character_or_is_left_for_the_game() {
         assert!(
             h.x.abs() < 1e-3 && h.z.abs() < 1e-3,
             "moved off the spot: {h}"
+        );
+        let h = hips_at(&mut player, grapher);
+        assert!(
+            h.x.abs() < 1e-3 && h.z.abs() < 1e-3,
+            "the graph's walker moved off the spot: {h}"
         );
         stander_hips.push(hips_at(&mut player, stander).z);
         let a = animator(&mut player, reporter);
@@ -2229,6 +2282,16 @@ fn root_motion_moves_the_character_or_is_left_for_the_game() {
     assert!(
         (moved - Vec3::new(0.0, 0.0, ticks / 64.0)).length() < 2e-3,
         "crossed as its clip does: {moved} in {ticks} ticks"
+    );
+    let graphed = at(&mut player, grapher).translation - grapher_start.translation;
+    println!("the graph's walker moved {graphed}");
+    assert!(
+        (graphed - moved).length() < 2e-3,
+        "the graph's walker crossed as the clip's: {graphed} against {moved}"
+    );
+    assert_eq!(
+        player.world_mut().get::<Animator>(grapher).unwrap().state,
+        "Walk"
     );
     assert_eq!(
         at(&mut player, reporter).translation,
@@ -3457,6 +3520,19 @@ fn a_fox_plays_an_animation_graph() {
             ..Animator::default()
         },
     ));
+    // A second fox saved in Alert (as a save keeps an animator's state): it goes on there
+    // (E12-5c-2), not at the entry.
+    world.spawn((
+        SceneId::new(),
+        Name::new("Saved fox"),
+        Transform::from_xyz(2.0, 0.0, 0.0).with_scale(Vec3::splat(0.01)),
+        Model::new(mesh, material),
+        Animator {
+            graph: AssetRef::file(graph_id),
+            state: String::from("Alert"),
+            ..Animator::default()
+        },
+    ));
     let options = SaveOptions {
         id: Some(AssetId::new()),
         assets: Some(&paths),
@@ -3523,6 +3599,13 @@ fn a_fox_plays_an_animation_graph() {
     let rest = joints(&mut player);
     assert!(player.pose_model(fox, None));
     player.frame(&mut game).unwrap();
+    // The saved fox went on in Alert.
+    let saved = find_named(player.world_mut(), "Saved fox").unwrap();
+    assert_eq!(
+        player.world_mut().get::<Animator>(saved).unwrap().state,
+        "Alert",
+        "resumed where it was saved"
+    );
     // Its entry state named; its parameters at the graph's values (by name: lean, look,
     // speed), none set.
     let a = animator(&mut player);
