@@ -19,7 +19,7 @@ pub use engine_input::{Binding, GamepadButton, Input, InputMap, Key, MouseButton
 pub use engine_render::material::{MaterialDesc, MaterialId};
 pub use engine_render::mesh::{MeshId, cube};
 pub use engine_runtime::{
-    Animator, Camera, Disabled, Ease, JointAttachment, MeshRenderer, PointLight, Repeat, SpotLight,
-    Sun, Timer, Tween, look_rotation,
+    Animator, Camera, Disabled, Ease, JointAttachment, MeshRenderer, PointLight, Repeat,
+    RootMotion, SpotLight, Sun, Timer, Tween, look_rotation,
 };
 pub use engine_scene::{AssetId, AssetRef, Name, SceneId, find_named};

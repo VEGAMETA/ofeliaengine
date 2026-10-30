@@ -545,4 +545,97 @@ fn root_motion_moves_the_character_not_the_pose() {
     );
     assert!((t.translation.y - 0.1 * (1.3f32 * 6.0).sin()).abs() < 1e-3);
     assert!(rotation_angle(yaw_of(t.rotation), Quat::IDENTITY) < 1e-3);
+    // Over a span of play (ADR 0124's E12-2c): wrapping as often as it must, backwards
+    // undoing the forward motion.
+    let over = root_motion_over(&clip, &skeleton, 0, 1.5, 2.5, mode);
+    assert!((over.translation - wrapped.translation).length() < 1e-5);
+    let twice = root_motion_over(&clip, &skeleton, 0, 0.0, 4.0, mode);
+    assert!((twice.translation - whole.then(whole).translation).length() < 1e-3);
+    let back = root_motion_over(&clip, &skeleton, 0, 2.5, 1.5, mode);
+    let undone = over.then(back);
+    assert!(undone.translation.length() < 1e-4, "{undone:?}");
+    assert!(rotation_angle(undone.rotation, Quat::IDENTITY) < 1e-4);
+    assert_eq!(
+        root_motion_over(&clip, &skeleton, 0, 1.0, 1.0, mode),
+        RootMotion::NONE
+    );
+    // Blended by direction and length; the turn read about the up.
+    let side = RootMotion {
+        translation: Vec3::new(0.0, 0.0, 3.0),
+        rotation: Quat::from_rotation_y(-0.5),
+    };
+    let half = RootMotion::blend(m, side, 0.5);
+    let direction = (Vec3::X + Vec3::Z).normalize();
+    assert!(
+        (half.translation - direction * 2.25).length() < 1e-3,
+        "{half:?}"
+    );
+    assert!((m.angle_about(Vec3::Y) - core::f32::consts::FRAC_PI_4).abs() < 1e-3);
+    assert!((side.angle_about(Vec3::Y) + 0.5).abs() < 1e-5);
+    let none = RootMotion::blend(m, side, 0.0);
+    assert!(
+        (none.translation - m.translation).length() < 1e-5
+            && rotation_angle(none.rotation, m.rotation) < 1e-5
+    );
+}
+
+/// E12-2c: a root under an armature standing Z up: its ground is x and y, its turn about z.
+#[test]
+fn root_motion_follows_the_characters_up() {
+    let skeleton = chain(2);
+    let mut raw = RawClip {
+        name: "walk".into(),
+        duration: 1.0,
+        joints: vec![RawJointTracks::default(); 2],
+    };
+    let times: Vec<f32> = (0..=30).map(|k| k as f32 / 30.0).collect();
+    raw.joints[0].translation = Some(RawTrack {
+        interpolation: Interpolation::Linear,
+        times: times.clone(),
+        values: times
+            .iter()
+            .map(|&t| Vec3::new(0.0, 2.0 * t, 0.1 * (t * 6.0).sin()))
+            .collect(),
+    });
+    raw.joints[0].rotation = Some(RawTrack {
+        interpolation: Interpolation::Linear,
+        times: times.clone(),
+        values: times
+            .iter()
+            .map(|&t| Quat::from_rotation_z(0.5 * t))
+            .collect(),
+    });
+    let (clip, _) = compress(&raw, &skeleton, &CompressSettings::default());
+    let mode = RootMotionMode {
+        up: Vec3::Z,
+        ..RootMotionMode::default()
+    };
+    let m = root_motion(&clip, &skeleton, 0, 0.0, 1.0, false, mode);
+    assert!(
+        (m.translation - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-3,
+        "{m:?}"
+    );
+    assert!((m.angle_about(Vec3::Z) - 0.5).abs() < 1e-3);
+    // Read with +Y up, the same clip crosses no ground.
+    let flat = root_motion(
+        &clip,
+        &skeleton,
+        0,
+        0.0,
+        1.0,
+        false,
+        RootMotionMode::default(),
+    );
+    assert!(flat.translation.y.abs() < 1e-3, "{flat:?}");
+    // Taken out of the pose: x and y back at the start, the bob along z kept.
+    let mut pose = Pose::identity(2);
+    clip.sample(0.7, skeleton.rest(), &mut pose);
+    remove_root_motion(&mut pose, &clip, &skeleton, 0, mode);
+    let t = pose.get(0);
+    assert!(
+        t.translation.x.abs() < 1e-3 && t.translation.y.abs() < 1e-3,
+        "{t:?}"
+    );
+    assert!((t.translation.z - 0.1 * (0.7f32 * 6.0).sin()).abs() < 1e-3);
+    assert!(rotation_angle(twist_of(t.rotation, Vec3::Z), Quat::IDENTITY) < 1e-3);
 }

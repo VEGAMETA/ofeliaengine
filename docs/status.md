@@ -879,6 +879,12 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-2c, root motion** (#PR, ADR 0124's as-built): `Animator::root_motion` keeps a
+    clip's ground motion in the pose (the default), moves the entity by it each tick
+    (`Move`), or leaves it in `moved` and `turned` for the game's controller (`Report`).
+    It is read from the skin's topmost joint against the file's up (glTF's +Y), blended
+    through fades, and taken out of the pose. On both GPUs a generated walker crosses
+    1.25 m in 80 ticks with its hips on the spot. 0 allocations.
   - **E12-2b, cross-fades and `animator:play`** (#457, ADR 0124's as-built):
     `Animator::play(clip, fade)` starts a clip and fades from what played. Both clips move
     on in the ticks; each frame blends the two poses by the fade's weight between ticks;
@@ -1105,9 +1111,9 @@ Last updated: 2026-10-28.
     front do nothing. `-ShowWindows` lets a run's windows be seen.
   - **Next** (the owner's order: materials first of the tools, then animation and 2D;
     E10 is done): E12, animation, by [ADR 0124](adr/0124-animation-graphs.md) (accepted
-    2026-10-29, every question as recommended). E12-1a, E12-1b-1, E12-1b-2, E12-1c, E12-2a
-    and E12-2b are done; next the rest of E12-2 (layers, root motion, the animator's other
-    script calls), E12-1b-3 (↑/↓ through clips, two side by side, the floor under root motion and
+    2026-10-29, every question as recommended). E12-1a, E12-1b-1, E12-1b-2, E12-1c, E12-2a,
+    E12-2b and E12-2c are done; next the rest of E12-2 (layers, the animator's other script
+    calls), E12-1b-3 (↑/↓ through clips, two side by side, the floor under root motion and
     the root's path), E12-3 (the Animation tab), E12-4 (keys) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
     questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a

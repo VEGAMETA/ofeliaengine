@@ -72,8 +72,25 @@ world.spawn((Model::new(mesh, material), Animator::new("Walk")));
     in fades out from where it is.
   - The fade is saved with the entity, so a load goes on fading. The fields are hidden in
     the editor.
-- Scripts reach it as any component: `self.Animator.speed = 2`. The rest of its calls
-  (`set`, `trigger`, `state`) come with the rest of E12-2.
+- **Root motion** (E12-2c): a clip that crosses the ground (a walk made moving forward,
+  not on a treadmill) can move the character instead of its pose. `root_motion` says how:
+  - `InPose` (the default): the motion stays in the pose, as the clip was made. The
+    character walks off its spot and jumps back each loop.
+  - `Move`: each tick the clip's ground motion over the tick moves the entity's
+    `Transform`, and its turn turns it. The pose keeps the root on the spot (its height and
+    tilt stay in the pose), so the character goes exactly as far as the clip says.
+  - `Report`: the same motion is taken out of the pose, but the entity stays put. Each tick
+    the animator's `moved` (in the entity's parent's space) and `turned` (radians about the
+    character's up) hold it, for your character controller to move a capsule by.
+  - The root is the skin's topmost joint. The ground is the file's: across and about
+    glTF's +Y in its scene, wherever its armature or mesh nodes are turned.
+  - Through a fade the two clips' motions blend by the fade's weight. A pose the editor
+    holds moves nothing, and nothing moves while the world stands still.
+  - The editor's Clips show each clip's root speed (E12-1b): near 0 for a clip made in
+    place, which has no motion to take out.
+- Scripts reach it as any component: `self.Animator.speed = 2`,
+  `self.Animator.root_motion = "Move"`, and `self.Animator.moved` after a tick. The rest
+  of its calls (`set`, `trigger`, `state`) come with the rest of E12-2.
 
 In the editor its `clip` is a list of the character's clips.
 

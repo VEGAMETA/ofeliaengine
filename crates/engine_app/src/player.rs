@@ -3384,6 +3384,7 @@ impl Player {
                         // The characters' clips move on, after the scripts' tick and before
                         // the game's (ADR 0124's E12-2), their sockets with them.
                         animators.advance(world, dt);
+                        assets.borrow_mut().move_roots(world);
                         assets.borrow_mut().place_sockets(world);
                         game_cell.borrow_mut().tick(world, dt);
                         if let Some(own) = own_physics.borrow_mut().as_mut()

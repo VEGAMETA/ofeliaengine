@@ -537,6 +537,63 @@ allocation with transitions and events every tick; the same events at the same t
   `state`, `on_animation_event`), sync by the cycle's fraction (question 4a, with the
   graphs), and a joined client's animators.
 
+## As built (E12-2c, 2026-10-30): root motion
+
+- **`Animator::root_motion`** (saved, shown): `RootMotion::InPose` (the default), `Move`
+  or `Report`. `moved` and `turned` (not saved) hold the last tick's motion.
+- **Where the motion is read** (`Rig`, made with the skin):
+  - the root is the skin's topmost joint;
+  - the motion is read in its parent's space, with the frame from there into the mesh's
+    space (the rest pose's);
+  - up is the file's, glTF's +Y in its scene. The skeleton holds every ancestor of its
+    joints, so its space is the scene's. An armature or mesh node turned otherwise (Khronos'
+    CesiumMan stands Z up under a turned node) still crosses the scene's ground. The mesh's
+    own +Y would have read its hips' bob as ground.
+- **`engine_anim`:**
+  - `RootMotionMode` gains `up` (+Y by default): horizontal, vertical and yaw are measured
+    against it, and `twist_of` is the yaw's general form;
+  - `root_motion_over` reads a span of play with any number of wraps, and backwards as the
+    forward motion undone (`RootMotion::inverse`);
+  - `RootMotion::blend` blends by direction and length (ozz's way), and `angle_about` gives
+    the turn.
+- **Ticks** (`Assets::move_roots`, after the animators move on and before the sockets are
+  placed):
+  - each character whose animator takes the motion out reads its clip over the tick's
+    span (`previous..time`, unwrapped);
+  - through a fade it also reads the clip fading out over its own span, and blends the two
+    by the fade's weight;
+  - the motion goes into the mesh's space, seen from the clip's first moment's facing
+    (the pose keeps that facing), then into the parent's space through the entity's
+    `Transform`;
+  - `Move` adds it to the translation and turns the rotation about the mesh's up.
+- **Frames:** the pose takes the motion out of each sampled clip (`remove_root_motion`)
+  before any fade blends them. The root keeps its height and tilt. The sockets read the same
+  pose. `Look` (a clip's moment, the fade, the motion taken out or not) now carries what a
+  skinned model shows.
+- **Tests:**
+  - `engine_anim`:
+    - spans that wrap twice, and backwards spans that undo forward ones;
+    - the blend's direction and length, and the turn read about the up;
+    - a root under an armature standing Z up: its ground is x and y, and read with +Y up
+      the same clip crosses none;
+  - every test rig: up seen from the root's parent is the mesh's up; each clip's motion over
+    its whole length crosses as far as its root speed says and stays on the ground; the
+    root stays on its spot with the motion taken out;
+  - on both GPUs, a walker generated in the test: a box skinned to two joints, `Walk` 1 m a
+    second along +z, `Turn` a quarter a second:
+    - `Move` crossed 1.25 m in 80 ticks, while every frame's hips stayed within 1 mm of
+      the spot;
+    - `Report` stayed put and reported 1/64 m each tick;
+    - `Turn` turned a quarter a second on the spot;
+    - `InPose` walked its loop in place;
+  - a script sets `root_motion` by name;
+  - 0 allocations with a character's root motion moving it every tick (both builds).
+- **Left:**
+  - per-clip root motion settings (vertical, no yaw), with the Animation tab's loop
+    settings in the model's `.meta` (E12-3);
+  - the floor moving under root motion in the editor's previews (E12-1b-3);
+  - layers, the animator's other script calls, graphs (E12-2d and on, E12-5).
+
 ## Consequences
 
 - New source files: `.agraph` and `.anim`, and a section in models' `.meta`; a new component

@@ -4866,6 +4866,7 @@ function Walker.on_tick(self, dt)
     self.ticks += 1
     if self.ticks == 2 then
         self.Animator:play("Walk")
+        self.Animator.root_motion = "Report"
     elseif self.ticks == 3 then
         self.Animator:play(5, 1)
     end
@@ -4894,6 +4895,11 @@ return Walker
         assert_eq!(
             (a.clip.as_str(), a.from_clip.as_str(), a.fade),
             ("Walk", "", 0.0)
+        );
+        assert_eq!(
+            a.root_motion,
+            engine_runtime::RootMotion::Report,
+            "set by name"
         );
         assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
         scripts.tick(&mut world, dt);
