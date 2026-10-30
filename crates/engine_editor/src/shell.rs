@@ -695,6 +695,12 @@ pub struct AnimationView<'a> {
     pub picked_event: Option<usize>,
     /// Its name typed as soon as it shows (an event just added).
     pub event_autofocus: bool,
+    /// The picked joint's speed through the clip (E12-3c): each frame's step over the
+    /// longest, a bar each (none without a picked joint); and its text ("Hips: the longest
+    /// step 3.1 cm, frame 17 to 18").
+    pub speeds: &'a [f32],
+    /// See `speeds`.
+    pub speed_label: &'a str,
 }
 
 /// A joint of the inspector's Skeleton (ADR 0124's E12-1c): its name and how deep below
@@ -1239,6 +1245,8 @@ pub struct ShellResponse {
     pub anim_events_strip: bool,
     /// The events' strip's node this frame (0 when it is not drawn).
     pub anim_events: u64,
+    /// The picked joint's speed curve's node this frame (E12-3c; 0 when it is not drawn).
+    pub anim_curve: u64,
     /// Typing the picked event's name (0), data (1) or sound (2) ended: kept or not.
     pub anim_event_text: Option<(u8, bool)>,
     /// The events' + was clicked: one at the playhead.
@@ -5789,8 +5797,9 @@ fn mark_glyph(look: MarkLook) -> &'static str {
 /// The Animation tab's panel (ADR 0124's E12-3a, [`AnimationView`]).
 fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut ShellResponse) {
     const RULER: f32 = 22.0;
+    let tall = if view.speeds.is_empty() { 150.0 } else { 182.0 };
     let panel = Style {
-        size: [Size::Grow(1.0), Size::Fixed(150.0)],
+        size: [Size::Grow(1.0), Size::Fixed(tall)],
         direction: Direction::Column,
         padding: [8.0, 4.0, 8.0, 4.0],
         gap: 4.0,
@@ -5971,6 +5980,50 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                 }
             },
         );
+        // The picked joint's speed (E12-3c): a bar a frame, a step far longer than its
+        // neighbours a pop; a press or a drag scrubs there, as the ruler does.
+        if !view.speeds.is_empty() {
+            let n = view.speeds.len() as f32;
+            let curve = ui.container(
+                "speed",
+                Style {
+                    size: [Size::Grow(1.0), Size::Fixed(28.0)],
+                    radius: 3.0,
+                    clip: true,
+                    background: Some(p.field),
+                    ..Style::default()
+                },
+                |ui| {
+                    for (k, &s) in view.speeds.iter().enumerate() {
+                        let s = s.clamp(0.0, 1.0);
+                        let h = (s * 24.0).max(1.0);
+                        let (x0, x1) = (k as f32 / n * width, (k + 1) as f32 / n * width);
+                        ui.push_id(k as u64);
+                        ui.container(
+                            "bar",
+                            Style {
+                                size: [Size::Fixed((x1 - x0 - 1.0).max(1.0)), Size::Fixed(h)],
+                                background: Some(if s > 0.999 { p.warning } else { p.text_dim }),
+                                placed: Some([x0, 26.0 - h]),
+                                ..Style::default()
+                            },
+                            |_| {},
+                        );
+                        ui.pop_id();
+                    }
+                },
+            );
+            out.anim_curve = curve;
+            let used = ui.sense(curve, false);
+            if used.pressed || used.active || used.released {
+                out.anim_scrub = Some(WaveUse {
+                    node: curve,
+                    pressed: used.pressed,
+                    held: used.active,
+                    released: used.released,
+                });
+            }
+        }
         out.anim_events = strip;
         if let Some((k, pressed, held, released)) = marked {
             out.anim_event = Some((
@@ -6000,6 +6053,9 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                 text(ui, "subject", view.subject, SMALL, p.text);
                 text(ui, "joints", view.joints, SMALL, p.text_dim);
                 text(ui, "sampled", view.sampled, SMALL, p.text_dim);
+                if !view.speed_label.is_empty() {
+                    text(ui, "speed", view.speed_label, SMALL, p.text_dim);
+                }
             },
         );
         // The picked event's name, data and sound, typed in place (E12-3b-2); without one,

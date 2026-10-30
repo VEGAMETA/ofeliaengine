@@ -175,6 +175,27 @@ impl Rig {
         &self.clips
     }
 
+    /// Joint `joint`'s place in the model's space at each of clip `k`'s samples (ADR 0124's
+    /// E12-3c), its root motion left in: the path the editor's trail draws and its speed
+    /// curve is read from. Empty for a clip or a joint it has not.
+    pub fn joint_path(&self, k: usize, joint: usize, out: &mut Vec<Vec3>) {
+        out.clear();
+        let Some(clip) = self.clips.get(k) else {
+            return;
+        };
+        if joint >= self.skeleton.joint_count() {
+            return;
+        }
+        let mut posing = Posing::default();
+        let (rate, duration) = (clip.sample_rate().max(1e-6), clip.duration());
+        for s in 0..clip.sample_count() {
+            let t = (s as f32 / rate).min(duration);
+            if let Some(m) = posing.joints(self, Look::at(Some((k, t)))).get(joint) {
+                out.push(Vec3::from(m.translation));
+            }
+        }
+    }
+
     /// From the skeleton's space into the mesh node's, the import scale applied: its
     /// inverse stands the skinned mesh as its file's scene does.
     pub(crate) fn root(&self) -> Affine3A {
