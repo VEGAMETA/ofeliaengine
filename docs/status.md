@@ -2442,10 +2442,12 @@ grown, divide and conquer); the old labels stay in parentheses.
   E12-3b-1): `on_animation_event(name, data)` only for now; an event calling the function
   of its name as `send` does may be added beside it later (about an hour).
 
-- **A scene with no model draws the clear colour, not its sky** (found 2026-10-29 by
-  E12-1a's test, not looked into): with its only model removed, CesiumMan's test scene
-  drew a uniform dark blue; with a floor beside him, the sky drew. Something skips the
-  view when no instance is drawn.
+- **Fixed (2026-10-30, #PR): a scene with no model drew the clear colour, not its sky**
+  (found 2026-10-29 by E12-1a's test): the forward renderer's frame with nothing to draw
+  cleared the target and stopped. It now draws the view's sky over the clear when the view
+  has an environment (its background, or its atmosphere's sky and fog), as a frame with
+  something in it does where nothing covers the sky (`an_empty_scene_still_draws_its_sky`:
+  1 colour before, 370 after, no validation errors).
 
 - **Fixed (2026-10-29): a material type's reload compiled two or three times** (found
   with E10-3f-2, 2026-10-28; #446): the entry points, the node previews' apart with their
