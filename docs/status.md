@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-3d, Mark Foot Plants** (#PR, ADR 0124's as-built): the Animation tab's button
+  - **E12-3d, Mark Foot Plants** (#466, ADR 0124's as-built): the Animation tab's button
     (or the command) puts `footstep` events, `left` and `right`, where each foot touches
     down on the chosen clip, in place of the ones marked before; one undo step. Feet by
     name, else each named side's lowest joint.
