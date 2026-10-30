@@ -2431,11 +2431,12 @@ grown, divide and conquer); the old labels stay in parentheses.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
-- **Sounds spawned to end on their own never end without an audio device** (found
-  2026-10-30 by E12-3b-1's test): an `AudioSource3D` despawned at its end (a clip event's
-  sound, a script's `audio.play_at`) stays in the world while no device plays it, so a
-  dedicated server or a headless run gathers one entity per sound. The sound system
-  should end them by their length when no voice plays them.
+- **Fixed (2026-10-30, #PR): sounds spawned to end on their own never ended without an
+  audio device** (found by E12-3b-1's test): a source no device plays now plays out unheard
+  on the game's clock and ends at its sound's length (stopped, looped or despawned, as its
+  voice would have); a sound that failed to load or streams ends at once. With sound off,
+  sounds playing once end at once. A dedicated server or a headless run keeps no entity
+  per sound.
 
 - **Clip events as hooks of their names** (team decision, 2026-10-30, ADR 0124's
   E12-3b-1): `on_animation_event(name, data)` only for now; an event calling the function
