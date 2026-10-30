@@ -498,6 +498,45 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left:** a socket deeper than right under its character; the drag's highlight of the
   joint under the pointer is the joint mode's own (no tree line).
 
+## As built (E12-2b, 2026-10-30): cross-fades and `animator:play`
+
+- **`Animator::play(clip, fade)`:** starts `clip` from 0 and fades from what played over
+  `fade` seconds; a fade of 0 or less switches at once.
+  - The clip that played becomes `from_clip`, at its `time` (`from_time`).
+  - A `play` during a fade drops the clip that was fading out, and the clip that was
+    fading in fades out from where it is. A cross-fade, not inertialization: question 3c
+    leaves that per transition, for the graphs.
+- **State:** `from_clip`, `from_time`, `fade` and `faded` are hidden (saved, not shown),
+  so a load goes on fading. `from_length`, `from_previous` and `faded_previous` are not
+  saved; they mirror `length` and `previous`.
+- **Ticks:** both clips move on by `dt × speed`, each wrapped at its own length; `faded`
+  grows by `dt` (held while paused). The fade ends the tick after `faded` reaches `fade`,
+  so the last frames between ticks still blend toward weight 1.
+- **Frames:** the new clip's weight is `faded / fade`, between the last two ticks as the
+  times are. `Posing` samples both clips and blends them with two normal layers
+  (`engine_anim::Blender`, its weights 1 − w and w) into a third pose kept with the
+  others: sized once for the largest rig, so blending allocates nothing. A weight of 1
+  skips the second sample. Sockets take the same blended pose in the tick.
+- **Scripts:** `Animator` views have `play(clip: string, fade: number?)`. It is matched
+  through the same `__namecall` atoms as `Transform`'s methods, and the `.d.luau` types
+  declare it. A clip that is not text, or a fade that is not a number, is the script's
+  error.
+- **Tests:**
+  - ticks of a fade: both clips move on, the weight between ticks, the end the tick after,
+    a fade cut short by another, a switch at once;
+  - a fade's blend on every test rig, where the skin is: weight 0 is the clip fading out,
+    weight 1 the other (exactly), and halfway is neither;
+  - a script's `play` with and without a fade, and the error for a name that is not text;
+  - the types: `play` declared, the hidden fields left out;
+  - on both GPUs, the Fox fading from Survey into Run over half a second. Midway, the
+    drawn pose is neither clip and nearer each than they are to each other. A save then
+    keeps the fade, and once the fade is over Run alone is drawn;
+  - 0 allocations with a fade going on all along and started again every 200 frames (both
+    GPUs, and the tracy build).
+- **Left:** layers, root motion, the animator's other script calls (`set`, `trigger`,
+  `state`, `on_animation_event`), sync by the cycle's fraction (question 4a, with the
+  graphs), and a joined client's animators.
+
 ## Consequences
 
 - New source files: `.agraph` and `.anim`, and a section in models' `.meta`; a new component

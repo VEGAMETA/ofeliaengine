@@ -3,8 +3,9 @@
 //! clip sampled, the skeleton's model transforms and the palette made, the instance's
 //! palette set; the editor's live model preview of it playing too (E12-1b), drawn and read
 //! back every frame; and a second character played by its `Animator` (E12-2a), its clip on
-//! the ticks and its pose each frame. Khronos' CesiumMan (`tools/fetch-test-assets.ps1`);
-//! skipped without it.
+//! the ticks and its pose each frame, fading all along from the clip at another moment
+//! (E12-2b: two samples blended), the fade started again now and then. Khronos' CesiumMan
+//! (`tools/fetch-test-assets.ps1`); skipped without it.
 //! One test per file, so nothing else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
@@ -79,6 +80,16 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         player.frame(&mut game).unwrap();
     }
     let length = player.model_rig(man).unwrap().clips()[0].duration();
+    let fade = |player: &mut engine_app::Player| {
+        if let Some(animator) = player
+            .world_mut()
+            .get_mut::<engine_runtime::Animator>(walker)
+        {
+            animator.play("", 1000.0);
+        }
+    };
+    fade(&mut player);
+    let mut frames = 0u32;
     // The editor's live model preview of the same model plays too (ADR 0124's E12-1b): its
     // pose and turn change every frame, so it is drawn and read back every frame.
     let mut time = 0.0f32;
@@ -98,6 +109,10 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
                 pose: Some((0, time)),
             }));
             taken += u32::from(player.take_model_preview(&mut pixels));
+            frames += 1;
+            if frames.is_multiple_of(200) {
+                fade(player);
+            }
         },
     );
     println!("{taken} model previews taken");
@@ -108,6 +123,12 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         .unwrap()
         .time;
     println!("the animator's clip at {walked:.3} s");
+    let fading = player
+        .world_mut()
+        .get::<engine_runtime::Animator>(walker)
+        .unwrap()
+        .fade;
+    assert_eq!(fading, 1000.0, "faded all along");
     // Still skinned: the same entities drawn by their instances.
     let world = player.world_mut();
     let mut skinned = QueryState::<(Entity, &engine_runtime::SkinnedMesh)>::new(world);

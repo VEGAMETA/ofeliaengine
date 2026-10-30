@@ -243,6 +243,7 @@ struct Methods {
     forward: c_int,
     right: c_int,
     up: c_int,
+    play: c_int,
     with: c_int,
     without: c_int,
     send: c_int,
@@ -265,6 +266,7 @@ impl Methods {
             forward: a("forward"),
             right: a("right"),
             up: a("up"),
+            play: a("play"),
             with: a("with"),
             without: a("without"),
             send: a("send"),
@@ -445,6 +447,8 @@ pub(crate) struct Tables {
     methods: Methods,
     /// `Transform`'s id, whose views have its methods.
     pub(crate) transform: Option<ComponentId>,
+    /// `Animator`'s, likewise (ADR 0124's E12-2b).
+    pub(crate) animator: Option<ComponentId>,
     /// Each script component's table (what its module declared, its own functions on it)
     /// by the component's index, as a registry reference: `self:open()` calls
     /// `Door.open(self)`.
@@ -481,6 +485,7 @@ impl Default for Tables {
             kept: vec![Kept::default(); VIEW_CACHE].into_boxed_slice(),
             methods: Methods::new(),
             transform: None,
+            animator: None,
             own: HashMap::new(),
             despawns: Vec::new(),
             search: Vec::new(),
@@ -1979,12 +1984,71 @@ unsafe extern "C-unwind" fn view_namecall(state: *mut ffi::lua_State) -> c_int {
         {
             return n;
         }
+        if let Some(id) = (*tables).animator
+            && (*view).id == id
+            && (*view).offset == 0
+            && let Some(n) = animator_method(
+                state,
+                world,
+                (*tables).methods,
+                (*view).entity,
+                method,
+                atom,
+            )
+        {
+            return n;
+        }
         let text = std::ffi::CStr::from_ptr(method)
             .to_string_lossy()
             .into_owned();
         let message = format!("{} has no method `{text}`", (*view).info.name);
         drop(text);
         raise(state, message)
+    }
+}
+
+/// `Animator`'s methods on its views (ADR 0124's E12-2b): `play(clip, fade)`, the clip by
+/// its name, fading from what plays over `fade` seconds (none without one).
+///
+/// # Safety
+///
+/// A C function's state; the world is the stage's.
+unsafe fn animator_method(
+    state: *mut ffi::lua_State,
+    world: *mut World,
+    m: Methods,
+    e: Entity,
+    method: *const c_char,
+    atom: c_int,
+) -> Option<c_int> {
+    // SAFETY: as the caller says; the string is the stack's while this runs.
+    unsafe {
+        if !is_named(method, atom, m.play, b"play") {
+            return None;
+        }
+        let usage = "play takes a clip's name, then a fade in seconds (optional)";
+        let fade = match ffi::lua_type(state, 3) {
+            ffi::LUA_TNONE | ffi::LUA_TNIL => 0.0,
+            ffi::LUA_TNUMBER => ffi::lua_tonumberx(state, 3, core::ptr::null_mut()) as f32,
+            _ => raise(state, String::from(usage)),
+        };
+        if ffi::lua_type(state, 2) != ffi::LUA_TSTRING {
+            raise(state, String::from(usage));
+        }
+        let mut len = 0usize;
+        let text = ffi::lua_tolstring(state, 2, &mut len);
+        let Ok(clip) = core::str::from_utf8(core::slice::from_raw_parts(text.cast::<u8>(), len))
+        else {
+            raise(state, String::from(usage));
+        };
+        let Some(animator) = (*world).get_mut::<engine_runtime::Animator>(e) else {
+            raise(
+                state,
+                String::from("the entity is gone, or lost its animator"),
+            );
+        };
+        animator.play(clip, fade);
+        Some(0)
     }
 }
 

@@ -171,6 +171,10 @@ A `Transform` has methods too:
 | `t:look_at(point, up?)` | turns it so its forward points at `point` (in its parent's space), `up` (y by default) up |
 | `t:forward()`, `t:right()`, `t:up()` | its −z, x and y, in its parent's space |
 
+So does an `Animator` ([animation](animation.md)): `self.Animator:play("Run", 0.25)` plays
+the character's clip `Run` from its start, fading from what played over a quarter of a
+second (at once without a fade).
+
 ```luau
 -- A turret: turns toward the player, its barrel a child named "Barrel".
 local Turret = component("Turret", { reach = 20 })

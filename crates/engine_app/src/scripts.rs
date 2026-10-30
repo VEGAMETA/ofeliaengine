@@ -720,6 +720,7 @@ impl Scripts {
             }
         }
         tables.transform = names.by_name.get("Transform").map(|&(id, _)| id);
+        tables.animator = names.by_name.get("Animator").map(|&(id, _)| id);
         vm.lua().set_app_data(names);
         vm.lua().set_app_data(Clock::default());
         vm.lua().set_app_data(Mailbox::default());
@@ -4846,6 +4847,66 @@ return NoColon
         ] {
             assert!(reported.contains(&line), "{line} in {reported:?}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E12-2b: a script plays an animator's clip, fading from what plays, or at once; a
+    /// clip's name that is not text is the script's error.
+    #[test]
+    fn a_script_plays_an_animators_clip_with_a_fade() {
+        let dir = project(
+            "animator",
+            &[(
+                "walker.luau",
+                r#"local Walker = component("Walker", { ticks = 0 })
+function Walker.on_start(self)
+    self.Animator:play("Run", 0.25)
+end
+function Walker.on_tick(self, dt)
+    self.ticks += 1
+    if self.ticks == 2 then
+        self.Animator:play("Walk")
+    elseif self.ticks == 3 then
+        self.Animator:play(5, 1)
+    end
+end
+return Walker
+"#,
+            )],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        let walker = world.spawn((
+            Transform::IDENTITY,
+            engine_runtime::Animator {
+                time: 0.5,
+                ..engine_runtime::Animator::new("Survey")
+            },
+        ));
+        scripts.add(&mut world, walker, "Walker");
+        let dt = 1.0 / 64.0;
+        scripts.tick(&mut world, dt);
+        let a = world.get::<engine_runtime::Animator>(walker).unwrap();
+        assert_eq!((a.clip.as_str(), a.from_clip.as_str()), ("Run", "Survey"));
+        assert_eq!((a.fade, a.from_time, a.time), (0.25, 0.5, 0.0));
+        scripts.tick(&mut world, dt);
+        let a = world.get::<engine_runtime::Animator>(walker).unwrap();
+        assert_eq!(
+            (a.clip.as_str(), a.from_clip.as_str(), a.fade),
+            ("Walk", "", 0.0)
+        );
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+        scripts.tick(&mut world, dt);
+        assert!(
+            scripts
+                .reported
+                .iter()
+                .any(|r| r.contains("play takes a clip's name")),
+            "{:?}",
+            scripts.reported
+        );
+        let a = world.get::<engine_runtime::Animator>(walker).unwrap();
+        assert_eq!(a.clip, "Walk", "left as it was");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
