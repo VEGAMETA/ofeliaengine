@@ -598,8 +598,9 @@ allocation with transitions and events every tick; the same events at the same t
 - **Settled by the team (2026-10-30):** Any State's place stays in its machine node's `at`
   (5a); New Animation Graph is to give the new graph to the selected characters' `Animator`
   (4a), as New Material gives its material to the selected models; transitions drawn in the
-  editor are to inertialize by default, the file's default staying a cross-fade (2a). The
-  last two come with E12-5d-2.
+  editor are to inertialize by default, the file's default staying a cross-fade (2a). Both
+  built at once after the canvas (#PR): `drawn_transition` sets `inertialize`, and New
+  Animation Graph sets the selected animators' `graph` in one step.
 
 ## As built (E12-5c, scripts, 2026-10-30): the scripts' calls on a graph
 
