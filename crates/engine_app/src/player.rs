@@ -603,8 +603,8 @@ pub struct Player {
     /// last error, said once.
     own_physics: Option<crate::ScenePhysics>,
     physics_error: Option<String>,
-    /// The 2D world (ADR 0125): the sprites' poses before the last tick, the canvas a 2D
-    /// view's frame records, the project's sorting layers.
+    /// The 2D world (ADR 0125): the sprites' poses before and after the ticks that moved
+    /// them, the canvas a 2D view's frame records, the project's sorting layers.
     sprites: crate::sprites::Sprites,
 }
 

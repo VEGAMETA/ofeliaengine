@@ -841,5 +841,10 @@ mod tests {
         let sprite = Sprite::default();
         assert_eq!(sprite.color, [1.0; 4]);
         assert_eq!(bytemuck::bytes_of(&sprite).len(), 72);
+        // A game's network schema takes them as any plain component (ADR 0125).
+        let schema = engine_net::NetSchema::new(1)
+            .replicate::<Sprite>()
+            .replicate::<SortGroup>();
+        assert_eq!(schema.component_count(), 2);
     }
 }

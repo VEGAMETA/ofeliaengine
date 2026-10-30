@@ -44,10 +44,10 @@ impl Game for Walkers {
         self.query
             .get_or_insert_with(|| QueryState::new(world))
             .for_each(world, |(t, walk)| {
-                for k in 0..2 {
-                    t.translation[k] += walk.0[k] * dt;
-                    if t.translation[k].abs() > half[k] {
-                        walk.0[k] = -walk.0[k];
+                for (k, (speed, edge)) in walk.0.iter_mut().zip(half).enumerate() {
+                    t.translation[k] += *speed * dt;
+                    if t.translation[k].abs() > edge {
+                        *speed = -*speed;
                     }
                 }
             });
