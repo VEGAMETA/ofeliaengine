@@ -584,6 +584,43 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5c, scripts, 2026-10-30): the scripts' calls on a graph
+
+- **`animator:set(name, value)` and `animator:trigger(name)`** on `Animator` views (`engine_app::script_views`), matched through the same `__namecall` atoms as `play`.
+  - The name is read in place from the stack. Its slot is found in the world's `GraphParams` for the animator's `graph`: one hash lookup and a scan of at most 16 names.
+  - `Animator::set_slot` / `fire_slot` write it and mark it in `params_set`; a slot past the 16 does nothing.
+  - `set` takes a number, or a boolean (1 or 0).
+- **Errors** are the script's at its line:
+  - an animator playing no graph;
+  - a name its graph lacks, with the names it has of the call's kind (``Animator's graph has no parameter `sped` (it has: armed, speed)``);
+  - a trigger set, or a number or flag fired, naming the right call;
+  - a value or name of the wrong type.
+- **A graph the player has not read yet** (`GraphParams::knows`) drops the call. The player reads every graph an animator names at each tick's start (E12-5c-1), so only a graph given in the same tick is not read yet.
+- **`animator.state`** reads the hidden field through the views' text path: kept strings, nothing made while it stays. Writing it is refused (``Animator.state is read-only …``).
+- **Types** (`engine_app::script_types`):
+  - `GraphNames` holds the project's graphs' parameter names, sorted and each once. `add_text` reads a file's header and `params[…]` lines only.
+  - `definitions_with(&names)` declares `export type AnimatorParam` (numbers, flags and whole numbers) and `AnimatorTrigger` (triggers) as unions of string choices, `string` without names.
+  - On `Animator` it declares `set(self, name: AnimatorParam, value: number | boolean)`, `trigger(self, name: AnimatorTrigger)` and `state: string`.
+- **The editor makes the types again when the project's graphs change:**
+  - `AssetDatabase::revision()` counts scans that found a file new, written anew, moved or gone.
+  - A frame compares it; a new revision hashes the graph entries; a new hash reads the graph files.
+  - The new `types/ofelia.d.luau` is written and given to the checker.
+- **Completion inside the quotes:**
+  - Luau offers string choices only inside a closed string, and the editor closes no quotes. So the completion's question closes, at the caret, a string the caret's line leaves open (`complete::open_quote`).
+  - `set("s` offers `speed`; before, Luau answered as at an expression with every global.
+- **The checker** (Luau's old solver) underlines a misspelt or wrong-kind name at its string in `--!strict` scripts, as New Script writes them: `Expected this to be '"armed" | "speed"', but got '"sped"'`. Nonstrict scripts (no mode line, Luau's default) report nothing for it.
+- **Measured** (`scripts::tests::measure_animator_graph_calls --ignored`, release, ref-1; 10,000 calls a tick minus an empty loop; medians of 51 ticks, four runs):
+  - `set` 69–75 ns, `trigger` 66–71 ns, `state` 51–58 ns;
+  - 0 allocations in 600 ticks with ten riders setting, firing and reading every tick.
+- **Tests:**
+  - the binding's slots, errors, state and missing graph;
+  - the riders in `zero_alloc_scripts`;
+  - the types' unions;
+  - the analysis in strict and nonstrict, and completion in closed and typed-open strings;
+  - the editor: completion as typed, a misspelt name underlined, and the types following a graph written anew;
+  - the player: a script taking the Fox's graph Idle → Move → Alert → Idle by name.
+- **Left:** `animator:in_window(name)`, with clip windows.
+
 ## As built (E12-5c-1, 2026-10-30): the player plays graphs
 
 - **The `Animator`** names its graph in `graph` (an `.agraph`; none plays `clip` as before).

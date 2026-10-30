@@ -879,6 +879,12 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5c, the scripts' calls on a graph** (#480, ADR 0124's as-built):
+    `self.Animator:set("speed", 3.5)` (a number or a boolean), `self.Animator:trigger("jump")`
+    and `self.Animator.state` (read-only), with errors naming the graph's parameters of the
+    call's kind; about 70 ns a call, 0 allocations. The project's graphs' parameter names
+    are string choices in the generated Luau types (`AnimatorParam`, `AnimatorTrigger`):
+    completed inside the quotes, and a misspelt one underlined in `--!strict` scripts.
   - **E12-5c-1, the player plays graphs** (#479, ADR 0124's as-built):
     - `Animator.graph` names an `.agraph`; the player reads it once, cooks it per rig
       (clips by name among the model's), and gives each character a state at its entry.
