@@ -1203,6 +1203,21 @@ fn a_selected_characters_clips_show_and_p_plays_it_in_place() {
         frame(&mut player, &mut game, &mut overlay);
     }
     let played = game.clip_time().unwrap();
+    // E12-3d: Mark Foot Plants finds his feet with no foot in their names: the rest pose's
+    // lowest joints apart, sided by their names (`leg_joint_L_5`, `leg_joint_R_5`).
+    let mark = game
+        .text_at("Mark Foot Plants")
+        .expect("the tab's Mark Foot Plants");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, mark, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    let meta = std::fs::read_to_string(dir.join("models/CesiumMan.gltf.meta")).unwrap();
+    let lefts = meta.matches("data = \"left\"").count();
+    let rights = meta.matches("data = \"right\"").count();
+    println!("his foot plants: {lefts} left, {rights} right");
+    assert!(lefts >= 1 && rights >= 1, "{meta}");
     println!("the curve's middle: {played:.3} s of {length:.3} s");
     assert!(
         (played - length * 0.5).abs() < 0.05,
@@ -1630,6 +1645,45 @@ fn a_skinned_model_picked_in_the_dock_shows_its_clips_under_its_preview() {
         );
     };
     println!("the event's sound: {heard}");
+    // E12-3d: the tab's › to Walk, then Mark Foot Plants: a footstep where each hind foot
+    // (the Fox's feet by name) touches down, written to the `.meta`.
+    let next = game
+        .texts_at(engine_editor::icons::NEXT)
+        .into_iter()
+        .filter(|p| p[1] > 500.0)
+        .min_by(|a, b| a[0].total_cmp(&b[0]))
+        .expect("the tab's ›");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, next, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    let mark = game
+        .text_at("Mark Foot Plants")
+        .expect("the tab's Mark Foot Plants");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, mark, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    let text = meta();
+    println!("{text}");
+    let walk = text
+        .lines()
+        .find(|l| l.ends_with("name = \"Walk\""))
+        .and_then(|l| l.strip_suffix(".name = \"Walk\""))
+        .expect("Walk's events in the .meta")
+        .to_owned();
+    let sides: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with(&format!("{walk}.events.")) && l.contains(".data = "))
+        .filter_map(|l| l.split(" = ").nth(1))
+        .collect();
+    println!("Walk's foot plants: {sides:?}");
+    assert!(
+        sides.contains(&"\"left\"") && sides.contains(&"\"right\""),
+        "a left and a right footstep: {sides:?}"
+    );
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

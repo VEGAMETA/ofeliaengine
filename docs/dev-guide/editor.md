@@ -456,6 +456,14 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
         its neighbours; the tallest is lit. The row beside names the longest step, its
         frames and its speed ("leg_joint_L_2: the longest step 5.2 cm, frame 4 to 5").
       - A click or a drag on the bars puts the playhead there.
+    - **Mark Foot Plants** (the tab's button, or the command palette) puts a `footstep`
+      event, data `left` or `right`, where each foot touches down in the chosen clip, in
+      place of the footsteps it marked before; one step of undo.
+      - The feet are the joints named for a foot (`foot`, else `ankle`). Without those, it
+        takes the lowest joint of each side the names give (`leg_joint_L_5`). The status
+        bar names the feet it used.
+      - A touch-down is where the foot comes down into the lowest fifth of its height in
+        the clip; a loop's footstep across its end is marked once.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

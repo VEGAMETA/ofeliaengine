@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use engine_core::math::Vec3;
 use engine_scene::{AssetId, AssetMeta, ClipEvent, ClipImport};
 
 /// A model file's `.meta`, held while its clips show (see the module).
@@ -161,6 +162,115 @@ pub(crate) fn passed<'a>(
     }
 }
 
+/// Which side a joint's name says it is on (ADR 0124's E12-3d): `left` or `right` in it, or
+/// an `L` or `R` part of it (`leg_joint_L_5`, `foot.R`).
+fn side_of(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("left") {
+        return Some("left");
+    }
+    if lower.contains("right") {
+        return Some("right");
+    }
+    let parts = || lower.split(|c: char| !c.is_ascii_alphanumeric());
+    if parts().any(|p| p == "l") {
+        Some("left")
+    } else if parts().any(|p| p == "r") {
+        Some("right")
+    } else {
+        None
+    }
+}
+
+/// A skeleton's feet with their sides (ADR 0124's E12-3d), from its joints' `names` and
+/// their places in the rest pose (`rest`, `up` the model's up): the first joint named for a
+/// foot on each side (`foot`, else `ankle`); else the rest pose's lowest joint of each side
+/// the names give; else the lowest joint and the lowest one well apart from it (the first
+/// left).
+pub(crate) fn find_feet(names: &[String], rest: &[Vec3], up: Vec3) -> Vec<(usize, &'static str)> {
+    for word in ["foot", "ankle"] {
+        let mut feet: Vec<(usize, &'static str)> = Vec::new();
+        for (j, name) in names.iter().enumerate() {
+            if !name.to_ascii_lowercase().contains(word) {
+                continue;
+            }
+            if let Some(side) = side_of(name)
+                && !feet.iter().any(|&(_, s)| s == side)
+            {
+                feet.push((j, side));
+            }
+        }
+        if feet.len() == 2 {
+            return feet;
+        }
+    }
+    let height = |p: Vec3| p.dot(up);
+    let flat = |p: Vec3| p - up * p.dot(up);
+    let lowest = |of: &mut dyn Iterator<Item = usize>| {
+        of.min_by(|&a, &b| height(rest[a]).total_cmp(&height(rest[b])))
+    };
+    // Sides from the names: each side's lowest joint.
+    let named = |side: &str| {
+        let mut of =
+            (0..rest.len()).filter(|&j| names.get(j).and_then(|n| side_of(n)) == Some(side));
+        lowest(&mut of)
+    };
+    if let (Some(left), Some(right)) = (named("left"), named("right")) {
+        return vec![(left, "left"), (right, "right")];
+    }
+    let Some(low) = lowest(&mut (0..rest.len())) else {
+        return Vec::new();
+    };
+    let (lo, hi) = rest.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &p| {
+        (lo.min(height(p)), hi.max(height(p)))
+    });
+    let apart = 0.1 * (hi - lo).max(1e-3);
+    let other = (0..rest.len())
+        .filter(|&j| (flat(rest[j]) - flat(rest[low])).length() >= apart)
+        .min_by(|&a, &b| height(rest[a]).total_cmp(&height(rest[b])));
+    let Some(other) = other else {
+        return vec![(low, "left")];
+    };
+    let side =
+        |j: usize, other: &'static str| names.get(j).and_then(|n| side_of(n)).unwrap_or(other);
+    let first = side(low, "left");
+    let second = side(other, if first == "left" { "right" } else { "left" });
+    vec![(low, first), (other, second)]
+}
+
+/// The moments a foot touches down in a clip (ADR 0124's E12-3d), from its path (a place a
+/// sample at `rate` samples a second, `up` the model's up): where it comes down into the
+/// lowest fifth of its height's range. Its speed is no guide: in a clip made in place a
+/// planted foot slides back nearly as fast as it swings. A clip whose ends meet (a loop)
+/// leaves its last sample, its first again, out, and does not mark its start when the foot
+/// was already down before its end.
+pub(crate) fn foot_plants(path: &[Vec3], up: Vec3, rate: f32) -> Vec<f32> {
+    let n = path.len();
+    if n < 3 || rate <= 0.0 {
+        return Vec::new();
+    }
+    let heights: Vec<f32> = path.iter().map(|p| p.dot(up)).collect();
+    let (lo, hi) = heights
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
+    if hi - lo < 1e-4 {
+        return Vec::new();
+    }
+    let down = |s: usize| heights[s] <= lo + 0.2 * (hi - lo);
+    let looped = (path[0] - path[n - 1]).length() <= 0.05 * (hi - lo);
+    let last = if looped { n - 1 } else { n };
+    (0..last)
+        .filter(|&s| {
+            let before = match s {
+                0 => looped && down(n - 2),
+                _ => down(s - 1),
+            };
+            down(s) && !before
+        })
+        .map(|s| s as f32 / rate)
+        .collect()
+}
+
 /// `time` on the clip's nearest frame at `rate` samples a second, within its `length`.
 pub(crate) fn on_frame(time: f32, rate: f32, length: f32) -> f32 {
     let time = time.clamp(0.0, length.max(0.0));
@@ -261,6 +371,105 @@ mod tests {
         assert_eq!(names(0.7, 1.1), ["c", "a"], "across the loop");
         assert_eq!(names(0.5, 0.5), Vec::<String>::new(), "standing still");
         assert_eq!(names(0.9, 0.2), Vec::<String>::new(), "never backwards");
+    }
+
+    /// A foot walking in place: down and sliding back for `down` samples, then up and
+    /// swinging forward, `cycles` times; its first and last places the same.
+    fn walking_foot(cycles: usize, down: usize, up: usize, shift: usize) -> Vec<Vec3> {
+        let period = down + up;
+        let mut path: Vec<Vec3> = (0..cycles * period)
+            .map(|s| {
+                let k = (s + shift) % period;
+                if k < down {
+                    Vec3::new(0.0, 0.0, 0.2 - 0.4 * k as f32 / down as f32)
+                } else {
+                    let f = (k - down) as f32 / up as f32;
+                    let lift = (f * core::f32::consts::PI).sin() * 0.15;
+                    Vec3::new(0.0, lift, -0.2 + 0.4 * f)
+                }
+            })
+            .collect();
+        path.push(path[0]);
+        path
+    }
+
+    /// E12-3d: a foot's touch-downs: one a cycle where it comes down, none for a foot that
+    /// never lifts; a loop down across its end marks the touch-down inside, not its start.
+    #[test]
+    fn a_foots_touch_downs_are_where_it_comes_down() {
+        let up = Vec3::Y;
+        let path = walking_foot(2, 10, 10, 0);
+        let plants = foot_plants(&path, up, 20.0);
+        assert_eq!(plants, [0.0, 1.0], "a touch-down a cycle");
+        // Down across the loop's end: its touch-down is inside, not at the start.
+        let shifted = walking_foot(2, 10, 10, 5);
+        let plants = foot_plants(&shifted, up, 20.0);
+        assert_eq!(plants, [0.75, 1.75], "{plants:?}");
+        // A foot that never lifts marks nothing.
+        let still = vec![Vec3::new(0.0, 0.0, 0.1); 20];
+        assert!(foot_plants(&still, up, 20.0).is_empty());
+    }
+
+    /// E12-3d: feet found by their names and sides (the Fox's), else the rest pose's two
+    /// lowest joints apart (CesiumMan's), sided by their names.
+    #[test]
+    fn feet_are_found_by_name_or_as_the_lowest_joints_apart() {
+        let names: Vec<String> = [
+            "b_Hip_01",
+            "b_LeftLeg01_015",
+            "b_LeftFoot01_017",
+            "b_LeftFoot02_018",
+            "b_RightFoot01_021",
+        ]
+        .map(String::from)
+        .to_vec();
+        let rest = vec![Vec3::ZERO; names.len()];
+        assert_eq!(
+            find_feet(&names, &rest, Vec3::Y),
+            [(2, "left"), (4, "right")]
+        );
+        let names: Vec<String> = ["torso", "leg_joint_L_5", "leg_joint_R_5", "leg_joint_R_3"]
+            .map(String::from)
+            .to_vec();
+        let rest = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.1, 0.02, 0.0),
+            Vec3::new(-0.1, 0.0, 0.0),
+            Vec3::new(-0.1, 0.4, 0.0),
+        ];
+        assert_eq!(
+            find_feet(&names, &rest, Vec3::Y),
+            [(1, "left"), (2, "right")]
+        );
+        // Each side's lowest by name, though a joint of the same leg lies well apart.
+        let names: Vec<String> = ["leg_joint_L_3", "leg_joint_L_5", "leg_joint_R_5"]
+            .map(String::from)
+            .to_vec();
+        let rest = vec![
+            Vec3::new(0.1, 0.05, 0.4),
+            Vec3::new(0.1, 0.0, 0.0),
+            Vec3::new(-0.1, 0.01, 0.0),
+        ];
+        assert_eq!(
+            find_feet(&names, &rest, Vec3::Y),
+            [(1, "left"), (2, "right")]
+        );
+        // No sides in the names: the lowest and the lowest well apart (a tenth of the
+        // skeleton's height).
+        let names: Vec<String> = ["a", "b", "c", "head"].map(String::from).to_vec();
+        let rest = vec![
+            Vec3::new(0.1, 0.0, 0.0),
+            Vec3::new(0.1, 0.01, 0.01),
+            Vec3::new(-0.1, 0.02, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        assert_eq!(
+            find_feet(&names, &rest, Vec3::Y),
+            [(0, "left"), (2, "right")]
+        );
+        assert_eq!(side_of("foot.L"), Some("left"));
+        assert_eq!(side_of("mixamorig:RightFoot"), Some("right"));
+        assert_eq!(side_of("tail"), None);
     }
 
     /// E12-3b-2: events kept in time order as they are added and moved; times on frames.

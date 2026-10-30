@@ -116,7 +116,8 @@ model.clips.0.events.1.data = "right"
   too.
 - **Made in the editor:** the Animation tab's strip adds, moves, names and removes them,
   writing the `.meta` with undo ([editor guide](editor.md)); the lines above are what it
-  writes.
+  writes. Its Mark Foot Plants puts `footstep` events (`left`, `right`) where the feet
+  touch down.
 - **Fired in the ticks.** Each tick, once the animators move on, every character fires the
   events its clip passed over the tick. That holds at any speed: backwards (the latest
   first), and several loops in one tick if the clip is short and fast. An event at a

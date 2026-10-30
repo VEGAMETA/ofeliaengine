@@ -891,6 +891,7 @@ struct CommandIds {
     animation_play: CommandId,
     event_add: CommandId,
     event_delete: CommandId,
+    mark_foot_plants: CommandId,
     auto_play: CommandId,
     /// A material graph's nodes' previews on its canvas, or not (E10-4g).
     node_previews: CommandId,
@@ -1109,6 +1110,11 @@ fn commands() -> (Commands, CommandIds) {
             "animation.delete_event",
             "Animation",
             "Delete the Picked Event",
+        ),
+        mark_foot_plants: c.register(
+            "animation.mark_foot_plants",
+            "Animation",
+            "Mark Foot Plants",
         ),
         auto_play: c.register("assets.auto_play", "Assets", "Auto Play Sounds"),
         node_previews: c.register("graph.node_previews", "Graph", "Node Previews"),
@@ -3026,6 +3032,8 @@ struct Editor {
     picked_on: String,
     event_drag: Option<(usize, f32, f32, bool)>,
     event_autofocus: bool,
+    /// Mark Foot Plants asked for, done in the next `clips_frame` (E12-3d).
+    plants_asked: bool,
     anim_events: u64,
     events_due: Vec<(AssetId, Vec<ClipImport>)>,
     renaming_file: Option<AssetId>,
@@ -4048,6 +4056,7 @@ impl Editor {
             picked_on: String::new(),
             event_drag: None,
             event_autofocus: false,
+            plants_asked: false,
             anim_events: 0,
             events_due: Vec::new(),
             renaming_file: None,
@@ -6876,6 +6885,9 @@ impl Editor {
         }
         if response.anim_event_delete {
             self.delete_event(world);
+        }
+        if response.anim_mark_plants {
+            self.plants_asked = true;
         }
         if let Some(bar) = response.clip_scrub {
             self.scrub_clip(bar);
@@ -16735,6 +16747,9 @@ impl Editor {
             self.add_event(world);
         } else if id == ids.event_delete {
             self.delete_event(world);
+        } else if id == ids.mark_foot_plants {
+            // Done with the player, where the rig is (E12-3d).
+            self.plants_asked = true;
         } else if id == ids.node_previews {
             self.node_previews = !self.node_previews;
             self.write_session(world);
@@ -19631,6 +19646,76 @@ impl Editor {
         });
     }
 
+    /// Mark Foot Plants (ADR 0124's E12-3d): on the chosen clip, a `footstep` event (data
+    /// `left` or `right`) where each foot touches down, in place of the ones marked before;
+    /// one undo step. The feet are found by their names, else as the rest pose's lowest
+    /// joints ([`crate::clip_events::find_feet`]).
+    fn mark_foot_plants(&mut self, player: &mut Player) {
+        let Some((clip, ..)) = self.events_clip() else {
+            self.say(String::from(
+                "Mark Foot Plants: select a character or pick a model file in the dock",
+            ));
+            return;
+        };
+        let Some(view) = self.clips.as_ref() else {
+            return;
+        };
+        let k = view.chosen;
+        let rig = match view.of {
+            ClipsOf::Entity(e) => player.model_rig(e),
+            ClipsOf::Asset(_) => player.model_preview_rig(),
+        };
+        let Some(rig) = rig else {
+            self.say(String::from(
+                "Mark Foot Plants: the model is still being made",
+            ));
+            return;
+        };
+        let up = rig.up();
+        let mut rest = Vec::new();
+        rig.rest_places(&mut rest);
+        let feet = crate::clip_events::find_feet(rig.skeleton().names(), &rest, up);
+        let rate = rig
+            .clips()
+            .get(k)
+            .map_or(30.0, engine_app::RigClip::sample_rate);
+        let mut marks: Vec<(f32, &'static str)> = Vec::new();
+        let mut path = Vec::new();
+        for &(joint, side) in &feet {
+            rig.joint_path(k, joint, &mut path);
+            marks.extend(
+                crate::clip_events::foot_plants(&path, up, rate)
+                    .into_iter()
+                    .map(|t| (t, side)),
+            );
+        }
+        let feet_named: Vec<String> = feet
+            .iter()
+            .filter_map(|&(j, _)| rig.skeleton().names().get(j).cloned())
+            .collect();
+        if feet.is_empty() {
+            self.say(format!("Mark Foot Plants: no feet found on {clip}"));
+            return;
+        }
+        let count = marks.len();
+        self.edit_events(player.world_mut(), "Mark Foot Plants", &clip, |events| {
+            events.retain(|e| !(e.name == "footstep" && (e.data == "left" || e.data == "right")));
+            for (time, side) in marks {
+                let event = ClipEvent {
+                    time,
+                    name: String::from("footstep"),
+                    data: String::from(side),
+                    ..ClipEvent::default()
+                };
+                crate::clip_events::add_event(events, event);
+            }
+        });
+        self.say(format!(
+            "{count} foot plants marked on {clip} ({})",
+            feet_named.join(", ")
+        ));
+    }
+
     /// The chosen clip's name as its model's `.meta` names it, its length in seconds and its
     /// samples a second (ADR 0124's E12-3b-2).
     fn events_clip(&self) -> Option<(String, f32, f32)> {
@@ -19802,6 +19887,9 @@ impl Editor {
         }
         for (file, clips) in self.events_due.drain(..) {
             player.assets_mut().set_clip_events(file, &clips);
+        }
+        if core::mem::take(&mut self.plants_asked) {
+            self.mark_foot_plants(player);
         }
         let active = self
             .selection

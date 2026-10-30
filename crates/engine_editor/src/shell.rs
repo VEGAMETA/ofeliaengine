@@ -1253,6 +1253,8 @@ pub struct ShellResponse {
     pub anim_event_add: bool,
     /// The picked event's ✕ was clicked.
     pub anim_event_delete: bool,
+    /// Mark Foot Plants was clicked (E12-3d).
+    pub anim_mark_plants: bool,
     /// Their bar was pressed, dragged along or let go.
     pub clip_scrub: Option<WaveUse>,
     /// Their model's preview was pressed, dragged or let go: it turns.
@@ -6075,6 +6077,9 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                 let Some((k, e)) = picked else {
                     if panel_button(ui, "add", icons::PLUS, false, p) {
                         out.anim_event_add = true;
+                    }
+                    if label_button(ui, "plants", "Mark Foot Plants", false, p.accent, p) {
+                        out.anim_mark_plants = true;
                     }
                     let hint = "E adds an event at the playhead; drag a mark to move it";
                     text(ui, "hint", hint, SMALL, p.text_dim);
