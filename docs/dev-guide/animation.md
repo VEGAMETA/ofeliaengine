@@ -304,6 +304,28 @@ transitions["t1"].when = "speed > 0.1"
     write `0 < speed and speed < 2`) is reported with where it is.
 - Ids are short random strings and names are labels, so renaming a state touches nothing
   else; lines at their defaults are left out and everything is sorted, so merges stay small.
+- **From Rust** (the player does this for you from E12-5c): describe the graph
+  (`engine_anim::GraphDesc`), cook it for a rig, give each character a `GraphState`:
+
+```rust
+use engine_anim::{AnimGraph, ClipInfo, GraphState, GraphWork};
+
+let (mut graph, problems) = AnimGraph::cook(&desc, |name| clip_info(name), &skeleton);
+graph.prepare(|k| clips.get(usize::from(k)), skeleton.rest()); // additive layers' references
+let speed = graph.param("speed").unwrap();
+let mut state = GraphState::new(&graph);
+let mut work = GraphWork::new(skeleton.joint_count());
+// Each tick: parameters set, transitions taken, phases moved on.
+state.set(speed, 3.0);
+graph.tick(&mut state, 1.0 / 64.0);
+// Each frame: the pose between the last two ticks.
+graph.pose(&state, alpha, |k| clips.get(usize::from(k)), skeleton.rest(), &mut work, &mut pose);
+```
+
+- **What it costs** (ref-1, a 52-joint humanoid, idle and a nine-clip 2D blend, an
+  upper-body layer and an additive lean): about 0.1 µs a character a tick and 4.5 µs a frame
+  on one thread; 10,000 characters' frames in 5.7 ms on 16 workers. Nothing is allocated
+  after `GraphState::new` and `GraphWork::new`.
 
 ### Sockets: things that follow a joint
 
