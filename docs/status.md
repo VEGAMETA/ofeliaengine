@@ -1441,10 +1441,12 @@ decisions). In short:
 
 ## 3. What is done (merged to main)
 
-Estimate of 2026-10-28 (after E9-1a-2): the technical core about **94 %** done, the editor
-about **63 %** of its fifteen phases (E1 to E8 done but E8's rename, E9 and E10 begun),
-Luau about **70 %** (scripting v1 done; the debugger's stops, DAP and the scripts'
-profiling left), the whole engine about **84 %** (2026-10-22: 94 %, 57 %, 45 % and 80 %;
+Estimate of 2026-10-30 (after E12-4b-1): the technical core about **94 %** done, the editor
+about **80 %** of its fifteen phases (E1 to E11 done but E8's rename; E12, animation, about
+60 %: characters, clips, events, the timeline and `.anim` files done, keys, curves and graphs
+left; E13 2D and E14 the rest ahead), Luau about **88 %** (scripting v1, the debugger with
+VS Code and the scripts' profiling done), the whole engine about **90 %** (2026-10-28, after
+E9-1a-2: 94 %, 63 %, 70 % and 84 %; 2026-10-22: 94 %, 57 %, 45 % and 80 %;
 2026-10-20: 93 % and 66 %; 2026-10-17: 92 % and 61 %; 2026-10-11: 74 % and 50 %). What comes after the base (queue item 10: terrain, water,
 foliage, HLOD and impostors, VST3 hosting) is not counted.
 
