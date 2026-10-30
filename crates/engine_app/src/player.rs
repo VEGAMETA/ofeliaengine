@@ -1385,6 +1385,7 @@ impl Player {
         self.assets.pose_preview(
             preview.and_then(|p| p.pose),
             preview.is_some_and(|p| p.floor.is_some()),
+            preview.and_then(|p| p.beside),
         );
         self.previews.set_live(preview);
     }
