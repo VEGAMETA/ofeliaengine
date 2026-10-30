@@ -6462,12 +6462,15 @@ impl Editor {
                         .clip_events
                         .as_ref()
                         .map_or(&[][..], |d| d.events(&c.name));
-                    let settings = self
+                    // How it plays (E12-3e), read in place: a copy of its entry would
+                    // allocate its name and events every frame.
+                    let (once, root) = self
                         .clip_events
                         .as_ref()
                         .and_then(|d| d.clip(&c.name))
-                        .cloned()
-                        .unwrap_or_default();
+                        .map_or((false, [true, false, true]), |s| {
+                            (s.once, [s.root_across, s.root_up, s.root_turn])
+                        });
                     crate::shell::AnimationView {
                         subject: &v.subject,
                         clip: &c.name,
@@ -6493,8 +6496,8 @@ impl Editor {
                         event_autofocus: self.event_autofocus,
                         speeds: self.joint_trail.as_ref().map_or(&[][..], |t| &t.speeds),
                         speed_label: self.joint_trail.as_ref().map_or("", |t| &t.label),
-                        once: settings.once,
-                        root: [settings.root_across, settings.root_up, settings.root_turn],
+                        once,
+                        root,
                     }
                 }
                 None => crate::shell::AnimationView {
