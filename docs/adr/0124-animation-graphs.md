@@ -584,6 +584,73 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5b, 2026-10-30): the graph's runtime in `engine_anim`
+
+- **What a graph is made from:** `engine_anim::GraphDesc`, its parts by index (parameters,
+  layers, nodes, states, transitions), names for clips, parameters and joints. `engine_anim`
+  knows nothing of files: the player turns an `.agraph` into one (5c).
+- **Cooked per rig:** `AnimGraph::cook(desc, clip, skeleton)` binds clip names (a
+  `ClipInfo`: its index among the character's clips, its length, whether it plays once) and
+  mask joints, compiles the conditions, and lays everything out flat (`u16` indices, boxed
+  slices).
+  - Transitions are grouped by source, each machine's "from any state" group first, every
+    group in priority order and then as written.
+  - Blends' clips become leaves: a `Blend1d`'s sorted along its parameter, a `Blend2d`'s
+    triangulated at cook (our own Bowyer–Watson).
+  - Masks are filled per joint down each named joint's subtree, deeper names over their
+    ancestors'.
+  - What cannot be cooked is left out and named (`GraphProblem`): a clip or joint the rig
+    lacks, a condition that does not compile, a 17th parameter, a reference out of range.
+    The rest still plays: a state whose clip is missing shows the rest pose.
+- **A character's state:** `GraphState::new(graph)` allocates once: 16 parameter values,
+  each machine's state and fade, each clip's and blend's phase now and at the tick before,
+  each layer's leaves' weights now and before. `set`, `get`, `fire` (a trigger counts up
+  until a transition takes it).
+- **A tick** (`AnimGraph::tick`), the same at any frame rate:
+  - each machine takes up to four transitions in a row, at the tick's start: from any state
+    first (never into the state it is in), then its state's, the first whose exit time has
+    passed (in the loop for one that loops) and whose condition holds; its triggers are used
+    up; the destination starts at its offset or the fraction the source played; a machine
+    shown by a state starts at its entry;
+  - its fade then moves on by the tick (a fade begun now is `dt` in at its end);
+  - every clip is weighed top down (layers, machines' fades, blends' weights), and the
+    weighed clips' and blends' phases move on. A blend moves at its clips' lengths weighed
+    together, so its clips stay in step.
+  - Phases are unwrapped fractions (past 1 on later loops, whole loops dropped from both
+    readings past 1,024), so a frame between two ticks blends across a loop's seam.
+- **A frame** (`AnimGraph::pose`): each layer's leaves sampled at their phases and weights
+  between the last two ticks (`alpha`), the heaviest 16 when more, blended by one
+  `Blender::blend`; then stacked over the rest pose: a normal layer moves what is below
+  toward its pose by its weight times each joint's mask weight; an additive one adds its
+  difference from its clips' first frames.
+  - `AnimGraph::prepare` samples those first frames once per rig; without it they are
+    sampled every frame (15 % of the benchmark's frame).
+  - `GraphWork::new(joints)` holds the poses a frame works in; nothing is allocated.
+- **A transition taken while its machine still fades** drops the state fading out (the
+  inertialized hand-over is a later step), as do `inertialize` transitions for now: they
+  cross-fade.
+- **Measured** (`cargo run -p engine_anim --release --example graph_bench`, ref-1): a
+  52-joint humanoid of synthetic clips (every joint turning in each), idle and a 3×3 blend
+  of nine clips over two parameters cross-faded both ways, an upper-body layer masked to the
+  spine, an additive lean; wishes changing every quarter second so a quarter of the
+  characters is in a fade:
+  - a tick: 0.10–0.13 µs a character;
+  - a frame: 4.4–4.5 µs a character on one thread (5.2–5.3 without `prepare`);
+  - 10,000 characters' frames on 16 workers: 5.7 ms (100: 0.30 ms, 1,000: 0.79 ms).
+- **Tests:** states by their parameters (a fade in, a blend halved, a trigger taken and
+  used up, an exit time's moment within two ticks); 1D blends between their two points and
+  clamped outside, 2D blends by barycentric weights inside and the nearest edge outside;
+  masks (the arm alone, then the root alone); the cook's problems named with the rest still
+  playing; a frame between ticks between their weights; an additive layer adding a turning
+  clip's difference (and nothing for a still one), prepared first frames posing alike;
+  Delaunay; and no allocation in 800 ticks and frames of 32 characters with fades, triggers,
+  a 2D blend, a masked and an additive layer (`tests/graph_zero_alloc.rs`).
+- **The scripts' calls** were settled by the team (2026-10-30): (a)
+  `animator:set(name, value)`, `animator:trigger(name)`, `animator.state`,
+  `animator:in_window(name)`, **with completion**: the project's graphs' parameter names go
+  into the generated Luau types as string choices, so the editor and VS Code offer
+  `"speed"` in `set` and the triggers in `trigger`, and underline a misspelt one.
+
 ## As built (E12-5a, 2026-10-30): the `.agraph` file and transition conditions
 
 E12-5 is taken in five steps: **5a** the file and the conditions (this one); **5b** the

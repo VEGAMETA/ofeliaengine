@@ -52,6 +52,7 @@ mod bytes;
 mod clip;
 mod compress;
 mod condition;
+mod graph;
 mod ik;
 mod jobs;
 mod model;
@@ -64,6 +65,10 @@ pub use blend::{Blender, Layer, LayerMode};
 pub use clip::{Channel, CompressedClip, SEGMENT_SAMPLES};
 pub use compress::{AdditiveBase, CompressSettings, CompressionStats, compress};
 pub use condition::{Condition, ConditionError, MAX_DEPTH, ParamSlot};
+pub use graph::{
+    AnimGraph, ClipInfo, GraphDesc, GraphParamKind, GraphProblem, GraphState, GraphWork, LayerDesc,
+    MAX_LEAVES, MAX_PARAMS, NodeDesc, ParamDesc, StateDesc, TransitionDesc,
+};
 pub use ik::{Fabrik, IkOutcome, LookAt, TwoBoneIk, rotate_joint};
 pub use jobs::for_each_parallel;
 pub use model::{local_to_model, rows, skinning_matrices, update_model_range};
