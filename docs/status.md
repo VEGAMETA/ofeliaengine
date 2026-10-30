@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-3b-2, the Animation tab's events** (#PR, ADR 0124's as-built): marks on a strip
+  - **E12-3b-2, the Animation tab's events** (#463, ADR 0124's as-built): marks on a strip
     under the ruler. E adds one at the playhead with its name ready to type, and a drag
     moves it frame by frame. The row under the strip edits the name, data and sound;
     Delete removes. Each change is written to the model's `.meta` as an undo step and given
