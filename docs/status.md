@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-3e, each clip's loop and root motion** (#PR, ADR 0124's as-built): a clip's
+  - **E12-3e, each clip's loop and root motion** (#467, ADR 0124's as-built): a clip's
     `.meta` entry says whether it plays once (the animator holds its end) and which of its
     root's motion root motion takes (across, up, turn). The Animation tab's header toggles
     them with undo. **E12-3 is done.**
