@@ -35,8 +35,8 @@ use engine_anim::{Condition, ConditionError, MachineNow};
 use engine_core::math::{Vec2, Vec4};
 use engine_render2d::{Canvas, Order, Quad};
 use engine_scene::{
-    AnimGraphFile, AssetId, BlendPoint, LayerFile, NodeFile, NodeKind, ParamFile, ParamKind,
-    StateFile, TransitionFile,
+    AnimGraphFile, AssetId, BlendPoint, LayerBlend, LayerFile, NodeFile, NodeKind, ParamFile,
+    ParamKind, StateFile, TransitionFile,
 };
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -76,6 +76,9 @@ const EDGE_COLOR: Vec4 = Vec4::new(0.155, 0.43, 0.91, 1.0);
 pub(crate) const POSE_KINDS: [&str; 3] = ["Clip", "Blend1d", "Blend2d"];
 /// What a parameter can hold, in the inspector's lists.
 pub(crate) const PARAM_KINDS: [&str; 4] = ["Float", "Bool", "Int", "Trigger"];
+
+/// How a layer goes over the layers before it (ADR 0124's E12-5d-2b).
+pub(crate) const LAYER_BLENDS: [&str; 2] = ["Normal", "Additive"];
 /// A blend's clips' rows' names, by place (`clip 9` on are all `clip`).
 const CLIP_ROWS: [&str; 8] = [
     "clip 1", "clip 2", "clip 3", "clip 4", "clip 5", "clip 6", "clip 7", "clip 8",
@@ -318,6 +321,12 @@ pub(crate) enum AnimRow {
     Offset,
     KeepPhase,
     Inertialize,
+    /// With nothing selected, the layer shown (ADR 0124's E12-5d-2b): its name, how it goes
+    /// over the layers before it, its weight, and the parameter that sets it instead.
+    LayerName,
+    LayerBlend,
+    LayerWeight,
+    LayerWeightParam,
     /// With nothing selected, parameter `k` (in their names' order): its name, kind and
     /// starting value.
     ParamName(usize),
@@ -331,7 +340,10 @@ impl AnimRow {
     /// Its name in the inspector.
     pub(crate) fn name(self) -> &'static str {
         match self {
-            Self::Name | Self::ParamName(_) => "name",
+            Self::Name | Self::ParamName(_) | Self::LayerName => "name",
+            Self::LayerBlend => "blend",
+            Self::LayerWeight => "weight",
+            Self::LayerWeightParam => "weight from",
             Self::Entry => "entry",
             Self::Pose => "plays",
             Self::Clip => "clip",
@@ -377,6 +389,9 @@ pub(crate) enum AnimSection {
     /// The state or the transition selected alone (titled by [`AnimDoc::title`]), or several
     /// selected (no rows).
     Selected,
+    /// With nothing selected, the layer shown (ADR 0124's E12-5d-2b), titled by
+    /// [`AnimDoc::layer_title`]: its × deletes it, its ↑ and ↓ move it among the layers.
+    Layer,
     /// Parameter `k`, titled by its name; its × deletes it.
     Param(usize),
     /// Adding a parameter.
@@ -438,7 +453,12 @@ pub(crate) fn write_now(out: &mut String, now: &MachineNow<'_>) {
 pub(crate) struct AnimDoc {
     /// The file.
     pub(crate) file: AnimGraphFile,
-    /// The machine the canvas shows, by id (empty without one).
+    /// The layer shown (ADR 0124's E12-5d-2b), by id: the one chosen on the bar, else the
+    /// first playing a machine (empty without layers); and the layers' ids in their order.
+    pub(crate) layer: String,
+    pub(crate) layer_ids: Vec<String>,
+    /// The machine the canvas shows, by id (empty without one): the shown layer's root,
+    /// where it is one.
     pub(crate) machine: String,
     /// The selected states and transitions, by id, and whether the Any State box is.
     pub(crate) selected: BTreeSet<String>,
@@ -466,6 +486,8 @@ impl AnimDoc {
     pub(crate) fn new(file: AnimGraphFile) -> Self {
         let mut doc = Self {
             file,
+            layer: String::new(),
+            layer_ids: Vec::new(),
             machine: String::new(),
             selected: BTreeSet::new(),
             transitions: BTreeSet::new(),
@@ -487,7 +509,16 @@ impl AnimDoc {
     /// each state showing it), the others on the graph; then each condition that does not
     /// compile.
     pub(crate) fn refresh(&mut self) {
-        self.machine = shown_machine(&self.file);
+        self.layer_ids.clear();
+        self.layer_ids.extend(
+            self.file
+                .layers_in_order()
+                .iter()
+                .map(|(id, _)| (*id).to_owned()),
+        );
+        let layer = shown_layer(&self.file, &self.layer).unwrap_or_default();
+        self.layer = layer;
+        self.machine = shown_machine(&self.file, &self.layer);
         self.marks.clear();
         for (what, why) in self.file.problems() {
             let on = match what.split_once(' ') {
@@ -931,6 +962,15 @@ impl AnimDoc {
             sections.push((AnimSection::Selected, 0, 0));
             return;
         }
+        if self.file.layers.contains_key(&self.layer) {
+            rows.extend([
+                AnimRow::LayerName,
+                AnimRow::LayerBlend,
+                AnimRow::LayerWeight,
+                AnimRow::LayerWeightParam,
+            ]);
+            sections.push((AnimSection::Layer, 0, rows.len()));
+        }
         for (k, p) in self.file.params.values().enumerate() {
             let from = rows.len();
             rows.extend([AnimRow::ParamName(k), AnimRow::ParamKind(k)]);
@@ -942,6 +982,37 @@ impl AnimDoc {
         let from = rows.len();
         rows.push(AnimRow::AddParam);
         sections.push((AnimSection::Add, from, rows.len()));
+    }
+
+    /// The layer shown (ADR 0124's E12-5d-2b).
+    pub(crate) fn shown_layer(&self) -> Option<&LayerFile> {
+        self.file.layers.get(&self.layer)
+    }
+
+    /// The shown layer's place among the layers in their order (the player's layer index).
+    pub(crate) fn layer_index(&self) -> Option<usize> {
+        self.layer_ids.iter().position(|id| *id == self.layer)
+    }
+
+    /// The shown layer's place among the layers the player cooks: those before it whose root
+    /// node the graph has (the cook leaves out a layer playing nothing), for its live state.
+    pub(crate) fn cooked_layer_index(&self) -> Option<usize> {
+        let k = self.layer_index()?;
+        let plays = |id: &String| {
+            self.file
+                .layers
+                .get(id)
+                .is_some_and(|l| self.file.nodes.contains_key(&l.root))
+        };
+        Some(self.layer_ids[..k].iter().filter(|id| plays(id)).count())
+    }
+
+    /// The shown layer's section's title into `out`: `Layer · Base`.
+    pub(crate) fn layer_title(&self, out: &mut String) {
+        out.clear();
+        if let Some(l) = self.shown_layer() {
+            let _ = write!(out, "Layer \u{b7} {}", l.name);
+        }
     }
 
     /// The inspected state's pose when it is a blend (ADR 0124's E12-5d-2a): what the
@@ -979,6 +1050,7 @@ impl AnimDoc {
             | AnimRow::PointClip(_)
             | AnimRow::AddPoint
             | AnimRow::When
+            | AnimRow::LayerName
             | AnimRow::ParamName(_) => RowLook::Text,
             AnimRow::Entry => RowLook::Check(self.inspected_state().is_some_and(|id| {
                 let machine = self.file.states.get(id).map_or("", |s| s.machine.as_str());
@@ -991,12 +1063,16 @@ impl AnimDoc {
             AnimRow::Pose
             | AnimRow::BlendParam
             | AnimRow::BlendParamY
+            | AnimRow::LayerBlend
+            | AnimRow::LayerWeightParam
             | AnimRow::ParamKind(_)
             | AnimRow::AddParam => RowLook::Choice,
             AnimRow::Problem => RowLook::Problem,
-            AnimRow::Speed | AnimRow::Blend | AnimRow::Exit | AnimRow::Offset => {
-                RowLook::Numbers(1, false)
-            }
+            AnimRow::Speed
+            | AnimRow::Blend
+            | AnimRow::Exit
+            | AnimRow::Offset
+            | AnimRow::LayerWeight => RowLook::Numbers(1, false),
             AnimRow::Priority => RowLook::Numbers(1, true),
             AnimRow::PointAt(_) => {
                 let wide = self.pose().is_some_and(|n| n.kind == NodeKind::Blend2d);
@@ -1026,6 +1102,18 @@ impl AnimDoc {
                     .filter(|(_, p)| matches!(p.kind, ParamKind::Float | ParamKind::Int))
                     .map(|(name, _)| name.as_str()),
             ),
+            AnimRow::LayerBlend => out.extend(LAYER_BLENDS),
+            // None first: the layer's own weight.
+            AnimRow::LayerWeightParam => {
+                out.push("none");
+                out.extend(
+                    self.file
+                        .params
+                        .iter()
+                        .filter(|(_, p)| matches!(p.kind, ParamKind::Float | ParamKind::Int))
+                        .map(|(name, _)| name.as_str()),
+                );
+            }
             _ => {}
         }
     }
@@ -1045,6 +1133,7 @@ impl AnimDoc {
             AnimRow::Exit => one(self.transition().map_or(0.0, |t| t.exit)),
             AnimRow::Offset => one(self.transition().map_or(0.0, |t| t.offset)),
             AnimRow::ParamValue(k) => one(self.param(k).map_or(0.0, |(_, p)| p.value)),
+            AnimRow::LayerWeight => one(self.shown_layer().map_or(1.0, |l| l.weight)),
             _ => [0.0; 4],
         }
     }
@@ -1072,6 +1161,14 @@ impl AnimDoc {
                 .param(k)
                 .is_some_and(|(_, p)| p.kind != ParamKind::Float),
             AnimRow::ParamValue(k) => self.param(k).is_some_and(|(_, p)| p.value != 0.0),
+            AnimRow::LayerBlend => self
+                .shown_layer()
+                .is_some_and(|l| l.blend != LayerBlend::Normal),
+            AnimRow::LayerWeight => self.shown_layer().is_some_and(|l| l.weight != 1.0),
+            AnimRow::LayerWeightParam => self
+                .shown_layer()
+                .is_some_and(|l| !l.weight_param.is_empty()),
+            AnimRow::LayerName => false,
             AnimRow::Name
             | AnimRow::Entry
             | AnimRow::Pose
@@ -1108,7 +1205,19 @@ impl AnimDoc {
                 | AnimRow::Priority
                 | AnimRow::Exit
                 | AnimRow::Offset
+                | AnimRow::LayerWeight
                 | AnimRow::ParamValue(_) => graph::value_text(text, &numbers[k..=k]),
+                AnimRow::LayerName => {
+                    text.push_str(self.shown_layer().map_or("", |l| l.name.as_str()));
+                }
+                AnimRow::LayerBlend => text.push_str(match self.shown_layer().map(|l| l.blend) {
+                    Some(LayerBlend::Additive) => "Additive",
+                    _ => "Normal",
+                }),
+                AnimRow::LayerWeightParam => {
+                    let name = self.shown_layer().map_or("", |l| l.weight_param.as_str());
+                    text.push_str(if name.is_empty() { "none" } else { name });
+                }
                 AnimRow::Name => text.push_str(state.map_or("", |s| s.name.as_str())),
                 AnimRow::Pose => text.push_str(match pose.map(|n| n.kind) {
                     Some(NodeKind::Clip) => "Clip",
@@ -1245,19 +1354,139 @@ fn state_name<'a>(file: &'a AnimGraphFile, id: &'a str) -> &'a str {
     }
 }
 
-/// The machine the canvas shows: the first layer's root that is one (`layers_in_order`);
-/// none without one.
-fn shown_machine(file: &AnimGraphFile) -> String {
-    file.layers_in_order()
+/// The layer the canvas shows (ADR 0124's E12-5d-2b): `chosen` while the graph has it, else
+/// the first (`layers_in_order`) playing a machine, else the first; none without layers.
+fn shown_layer(file: &AnimGraphFile, chosen: &str) -> Option<String> {
+    if file.layers.contains_key(chosen) {
+        return Some(chosen.to_owned());
+    }
+    let layers = file.layers_in_order();
+    layers
         .iter()
-        .map(|(_, l)| l.root.as_str())
-        .find(|root| {
-            file.nodes
-                .get(*root)
-                .is_some_and(|n| n.kind == NodeKind::Machine)
-        })
+        .find(|(_, l)| is_machine(file, &l.root))
+        .or(layers.first())
+        .map(|(id, _)| (*id).to_owned())
+}
+
+/// Node `id` is a state machine.
+fn is_machine(file: &AnimGraphFile, id: &str) -> bool {
+    file.nodes
+        .get(id)
+        .is_some_and(|n| n.kind == NodeKind::Machine)
+}
+
+/// The machine the canvas shows: layer `layer`'s root where it is one; none otherwise.
+fn shown_machine(file: &AnimGraphFile, layer: &str) -> String {
+    file.layers
+        .get(layer)
+        .map(|l| l.root.as_str())
+        .filter(|root| is_machine(file, root))
         .unwrap_or("")
         .to_owned()
+}
+
+/// The layer whose root is node `root`, by id.
+fn layer_of(file: &AnimGraphFile, root: &str) -> Option<String> {
+    file.layers
+        .iter()
+        .find(|(_, l)| l.root == root)
+        .map(|(id, _)| id.clone())
+}
+
+/// A name no layer of `file` has: `Base` for its first, else `Layer`, `Layer 2`…
+fn fresh_layer_name(file: &AnimGraphFile) -> String {
+    let taken = |n: &str| file.layers.values().any(|l| l.name == n);
+    if file.layers.is_empty() && !taken("Base") {
+        return String::from("Base");
+    }
+    if !taken("Layer") {
+        return String::from("Layer");
+    }
+    (2..)
+        .map(|k| format!("Layer {k}"))
+        .find(|n| !taken(n))
+        .unwrap_or_default()
+}
+
+/// A layer put over `file`'s others (ADR 0124's E12-5d-2b), named by [`fresh_layer_name`],
+/// playing a machine of its own whose entry state, Idle, plays a clip not named yet, the
+/// machine's Any State box above and left of it: its id.
+fn insert_layer(file: &mut AnimGraphFile) -> String {
+    let machine = fresh_id(file);
+    file.nodes.insert(
+        machine.clone(),
+        NodeFile {
+            kind: NodeKind::Machine,
+            at: [-180.0, -90.0],
+            ..NodeFile::default()
+        },
+    );
+    let order = file
+        .layers
+        .values()
+        .map(|l| l.order.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+    let name = fresh_layer_name(file);
+    let layer = fresh_id(file);
+    file.layers.insert(
+        layer.clone(),
+        LayerFile {
+            name,
+            order,
+            root: machine.clone(),
+            ..LayerFile::default()
+        },
+    );
+    let clip = fresh_id(file);
+    file.nodes.insert(clip.clone(), NodeFile::default());
+    let idle = fresh_id(file);
+    file.states.insert(
+        idle.clone(),
+        StateFile {
+            name: String::from("Idle"),
+            machine: machine.clone(),
+            pose: clip,
+            at: [0.0, 0.0],
+        },
+    );
+    if let Some(m) = file.nodes.get_mut(&machine) {
+        m.entry = idle;
+    }
+    layer
+}
+
+/// Node `id` and what only it plays taken out of `file` (a layer deleted, ADR 0124's
+/// E12-5d-2b): a machine's states with their poses and every transition into or out of
+/// them. A node another layer or state still plays stays.
+fn remove_tree(file: &mut AnimGraphFile, id: &str) {
+    let used =
+        file.layers.values().any(|l| l.root == id) || file.states.values().any(|s| s.pose == id);
+    if used {
+        return;
+    }
+    let Some(node) = file.nodes.remove(id) else {
+        return;
+    };
+    if node.kind != NodeKind::Machine {
+        return;
+    }
+    let states: Vec<String> = file
+        .states
+        .iter()
+        .filter(|(_, s)| s.machine == id)
+        .map(|(k, _)| k.clone())
+        .collect();
+    file.transitions
+        .retain(|_, t| !states.contains(&t.to) && !states.contains(&t.from));
+    let poses: Vec<String> = states
+        .iter()
+        .filter_map(|k| file.states.remove(k))
+        .map(|s| s.pose)
+        .collect();
+    for pose in poses {
+        remove_tree(file, &pose);
+    }
 }
 
 /// What pose `pose` plays, as its state's box says it, into `out`: a clip's name, `Blend1d
@@ -1499,39 +1728,7 @@ fn fresh_param(file: &AnimGraphFile, kind: ParamKind) -> String {
 /// it.
 pub(crate) fn starter() -> AnimGraphFile {
     let mut file = AnimGraphFile::default();
-    let machine = fresh_id(&file);
-    file.nodes.insert(
-        machine.clone(),
-        NodeFile {
-            kind: NodeKind::Machine,
-            at: [-180.0, -90.0],
-            ..NodeFile::default()
-        },
-    );
-    let layer = fresh_id(&file);
-    file.layers.insert(
-        layer,
-        LayerFile {
-            name: String::from("Base"),
-            root: machine.clone(),
-            ..LayerFile::default()
-        },
-    );
-    let clip = fresh_id(&file);
-    file.nodes.insert(clip.clone(), NodeFile::default());
-    let idle = fresh_id(&file);
-    file.states.insert(
-        idle.clone(),
-        StateFile {
-            name: String::from("Idle"),
-            machine: machine.clone(),
-            pose: clip,
-            at: [0.0, 0.0],
-        },
-    );
-    if let Some(m) = file.nodes.get_mut(&machine) {
-        m.entry = idle;
-    }
+    insert_layer(&mut file);
     file
 }
 
@@ -1541,12 +1738,16 @@ pub(crate) fn starter() -> AnimGraphFile {
 /// id.
 fn insert_state(
     file: &mut AnimGraphFile,
+    shown: &str,
     kind: StateKind,
     at: [f32; 2],
     from: Option<&Source>,
 ) -> String {
     let at = at.map(f32::round);
-    let mut machine = shown_machine(file);
+    let mut machine = shown.to_owned();
+    if !is_machine(file, &machine) {
+        machine.clear();
+    }
     if machine.is_empty() {
         machine = fresh_id(file);
         file.nodes.insert(
@@ -1717,8 +1918,19 @@ impl GraphDoc {
     ) -> Option<Outcome> {
         let corner = [at[0] - STATE_WIDTH * 0.5, at[1] - STATE_HEIGHT * 0.5];
         let mut made = String::new();
-        let (before, after) = self.edit_anim(|f| made = insert_state(f, kind, corner, from))?;
+        let shown = self.anim.as_deref()?.machine.clone();
+        let (before, after) =
+            self.edit_anim(|f| made = insert_state(f, &shown, kind, corner, from))?;
         let anim = self.anim.as_deref_mut()?;
+        // A machine made for it (the layer shown played none): its layer shown.
+        let machine = anim.file.states.get(&made).map(|s| s.machine.clone());
+        if let Some(layer) = machine.and_then(|m| layer_of(&anim.file, &m))
+            && layer != anim.layer
+        {
+            anim.layer = layer;
+            anim.refresh();
+            anim.laid_out = None;
+        }
         anim.clear_selection();
         anim.selected.insert(made);
         Some(Outcome::Edited {
@@ -2027,6 +2239,7 @@ impl GraphDoc {
         let anim = self.anim.as_deref()?;
         let state = anim.inspected_state().map(str::to_owned);
         let transition = anim.inspected_transition().map(str::to_owned);
+        let layer = anim.layer.clone();
         let param = match row {
             AnimRow::ParamValue(k) => anim.param(k).map(|(n, p)| (n.to_owned(), p.kind)),
             _ => None,
@@ -2045,6 +2258,11 @@ impl GraphDoc {
                     .and_then(|n| n.points.get_mut(k))
                 {
                     p.at = [values[0], values[1]];
+                }
+            }
+            AnimRow::LayerWeight => {
+                if let Some(l) = f.layers.get_mut(&layer) {
+                    l.weight = v.clamp(0.0, 1.0);
                 }
             }
             AnimRow::Blend | AnimRow::Priority | AnimRow::Exit | AnimRow::Offset => {
@@ -2092,8 +2310,27 @@ impl GraphDoc {
         };
         let state = anim.inspected_state().map(str::to_owned);
         let transition = anim.inspected_transition().map(str::to_owned);
+        let layer = anim.layer.clone();
         let trimmed = text.trim();
         match row {
+            AnimRow::LayerName => {
+                if trimmed.is_empty() {
+                    return Err(String::from("A layer has a name: the bar shows it"));
+                }
+                let taken = anim
+                    .file
+                    .layers
+                    .iter()
+                    .any(|(k, l)| *k != layer && l.name == trimmed);
+                if taken {
+                    return Err(format!("Another layer is named {trimmed}"));
+                }
+                Ok(self.edit_anim(|f| {
+                    if let Some(l) = f.layers.get_mut(&layer) {
+                        trimmed.clone_into(&mut l.name);
+                    }
+                }))
+            }
             AnimRow::Name => {
                 let Some(id) = state else {
                     return Ok(None);
@@ -2269,6 +2506,7 @@ impl GraphDoc {
     pub(crate) fn anim_choose(&mut self, row: AnimRow, i: usize) -> Option<(String, String)> {
         let anim = self.anim.as_deref()?;
         let state = anim.inspected_state().map(str::to_owned);
+        let layer = anim.layer.clone();
         let mut options = Vec::new();
         anim.options(row, &mut options);
         let picked = options.get(i).map(|s| (*s).to_owned())?;
@@ -2329,6 +2567,24 @@ impl GraphDoc {
                 let name = fresh_param(f, kind);
                 f.params.insert(name, ParamFile { kind, value: 0.0 });
             }
+            AnimRow::LayerBlend => {
+                if let Some(l) = f.layers.get_mut(&layer) {
+                    l.blend = if picked == "Additive" {
+                        LayerBlend::Additive
+                    } else {
+                        LayerBlend::Normal
+                    };
+                }
+            }
+            AnimRow::LayerWeightParam => {
+                if let Some(l) = f.layers.get_mut(&layer) {
+                    if i == 0 {
+                        l.weight_param.clear();
+                    } else {
+                        l.weight_param = picked;
+                    }
+                }
+            }
             _ => {}
         })
     }
@@ -2347,7 +2603,16 @@ impl GraphDoc {
             _ => None,
         };
         let defaults = TransitionFile::default();
+        let layer = anim.layer.clone();
         self.edit_anim(|f| {
+            if let Some(l) = f.layers.get_mut(&layer) {
+                match row {
+                    AnimRow::LayerBlend => l.blend = LayerBlend::Normal,
+                    AnimRow::LayerWeight => l.weight = 1.0,
+                    AnimRow::LayerWeightParam => l.weight_param.clear(),
+                    _ => {}
+                }
+            }
             if let Some(n) = state.as_deref().and_then(|s| Self::anim_pose_mut(f, s)) {
                 match row {
                     AnimRow::Clip => n.clip.clear(),
@@ -2379,6 +2644,82 @@ impl GraphDoc {
                     AnimRow::ParamKind(_) => p.kind = ParamKind::Float,
                     AnimRow::ParamValue(_) => p.value = 0.0,
                     _ => {}
+                }
+            }
+        })
+    }
+
+    /// Layer `k` (in their order) shown on the canvas (ADR 0124's E12-5d-2b): its machine,
+    /// nothing selected, framed anew. Not a step: what the tab shows.
+    pub(crate) fn show_layer(&mut self, k: usize) {
+        let Some(anim) = self.anim.as_deref_mut() else {
+            return;
+        };
+        let Some(id) = anim.layer_ids.get(k).cloned() else {
+            return;
+        };
+        if anim.layer == id {
+            return;
+        }
+        anim.layer = id;
+        anim.clear_selection();
+        anim.refresh();
+        anim.laid_out = None;
+        self.framed = false;
+    }
+
+    /// A layer added over the others (the bar's +; ADR 0124's E12-5d-2b): `Layer` (numbered
+    /// when taken), playing a machine of its own whose entry state, Idle, plays a clip not
+    /// named yet; shown. A step.
+    pub(crate) fn add_layer(&mut self) -> Option<Outcome> {
+        let mut made = String::new();
+        let (before, after) = self.edit_anim(|f| made = insert_layer(f))?;
+        let anim = self.anim.as_deref_mut()?;
+        anim.layer = made;
+        anim.clear_selection();
+        anim.refresh();
+        anim.laid_out = None;
+        self.framed = false;
+        Some(Outcome::Edited {
+            name: "Add Layer",
+            before,
+            after,
+        })
+    }
+
+    /// The layer shown deleted, its section's × (ADR 0124's E12-5d-2b): with what only it
+    /// plays (its machine's states, their poses and transitions); the first left shown.
+    pub(crate) fn delete_layer(&mut self) -> Option<(String, String)> {
+        let id = self.anim.as_deref()?.layer.clone();
+        let edit = self.edit_anim(|f| {
+            if let Some(layer) = f.layers.remove(&id) {
+                remove_tree(f, &layer.root);
+            }
+        });
+        if let Some(anim) = self.anim.as_deref_mut() {
+            anim.clear_selection();
+            anim.laid_out = None;
+        }
+        self.framed = false;
+        edit
+    }
+
+    /// The layer shown moved one place earlier (`true`: under the one before it) or later
+    /// among the layers, its section's ↑ or ↓ (ADR 0124's E12-5d-2b): every layer's order
+    /// numbered again from 0. A step; nothing at either end.
+    pub(crate) fn move_layer(&mut self, earlier: bool) -> Option<(String, String)> {
+        let anim = self.anim.as_deref()?;
+        let k = anim.layer_index()?;
+        let j = if earlier { k.checked_sub(1)? } else { k + 1 };
+        if j >= anim.layer_ids.len() {
+            return None;
+        }
+        let mut ids = anim.layer_ids.clone();
+        ids.swap(k, j);
+        self.edit_anim(|f| {
+            for (n, id) in ids.iter().enumerate() {
+                if let Some(l) = f.layers.get_mut(id) {
+                    l.order = u32::try_from(n).unwrap_or(u32::MAX);
                 }
             }
         })
@@ -3179,6 +3520,166 @@ mod tests {
         round_trip(&start);
     }
 
+    /// ADR 0124's E12-5d-2b: layers one at a time on the canvas. A layer added (a machine
+    /// of its own whose Idle is its entry) is shown and is a step; its section's rows set
+    /// its name (refused empty or taken), blend, weight (held within 0 to 1) and weight's
+    /// parameter, each a step; it moves under the base and back; the base shown again shows
+    /// its machine; a state added goes into the layer shown; the layer deleted takes what
+    /// only it plays, and undo brings it back.
+    #[test]
+    fn layers_show_one_at_a_time_and_edit_as_steps() {
+        let mut d = doc();
+        assert_eq!(anim(&d).layer, "base");
+        assert_eq!(anim(&d).layer_ids, ["base"]);
+        let base_text = d.text.clone();
+        let Some(Outcome::Edited { before, after, .. }) = d.add_layer() else {
+            panic!("a step");
+        };
+        assert_eq!(before, base_text);
+        assert_ne!(after, before);
+        let a = anim(&d);
+        assert_eq!(a.layer_ids.len(), 2);
+        assert_eq!(a.layer_index(), Some(1), "the new layer shown");
+        let layer = a.shown_layer().unwrap();
+        assert_eq!(layer.name, "Layer");
+        assert_eq!(layer.order, 1);
+        assert_eq!(a.machine, layer.root);
+        assert_eq!(a.file.states_of(&a.machine).count(), 1, "its Idle");
+        assert!(!d.framed, "framed anew");
+        // Its section, with nothing selected, before the parameters'.
+        let (mut rows, mut sections) = (Vec::new(), Vec::new());
+        a.rows(&mut rows, &mut sections);
+        assert_eq!(
+            rows[..4],
+            [
+                AnimRow::LayerName,
+                AnimRow::LayerBlend,
+                AnimRow::LayerWeight,
+                AnimRow::LayerWeightParam
+            ]
+        );
+        assert_eq!(sections[0], (AnimSection::Layer, 0, 4));
+        let mut title = String::new();
+        a.layer_title(&mut title);
+        assert_eq!(title, "Layer \u{b7} Layer");
+        assert!(d.anim_set_text(AnimRow::LayerName, " ").is_err());
+        assert!(
+            d.anim_set_text(AnimRow::LayerName, "Base").is_err(),
+            "taken"
+        );
+        assert!(
+            d.anim_set_text(AnimRow::LayerName, "Upper")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            d.anim_set_numbers(AnimRow::LayerWeight, [0.5, 0.0, 0.0, 0.0])
+                .is_some()
+        );
+        assert!(
+            d.anim_set_numbers(AnimRow::LayerWeight, [1.5, 0.0, 0.0, 0.0])
+                .is_some()
+        );
+        assert_eq!(
+            anim(&d).shown_layer().unwrap().weight,
+            1.0,
+            "held within 0 to 1"
+        );
+        assert!(
+            d.anim_set_numbers(AnimRow::LayerWeight, [0.25, 0.0, 0.0, 0.0])
+                .is_some()
+        );
+        let options = |d: &GraphDoc, row| {
+            let mut out = Vec::new();
+            anim(d).options(row, &mut out);
+            out.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        };
+        assert_eq!(options(&d, AnimRow::LayerBlend), ["Normal", "Additive"]);
+        assert!(d.anim_choose(AnimRow::LayerBlend, 1).is_some());
+        assert_eq!(
+            options(&d, AnimRow::LayerWeightParam),
+            ["none", "speed"],
+            "a trigger sets no weight"
+        );
+        assert!(d.anim_choose(AnimRow::LayerWeightParam, 1).is_some());
+        let l = anim(&d).shown_layer().unwrap();
+        assert_eq!(
+            (l.name.as_str(), l.weight, l.blend, l.weight_param.as_str()),
+            ("Upper", 0.25, LayerBlend::Additive, "speed")
+        );
+        let mut texts = Vec::new();
+        for (k, row) in [
+            AnimRow::LayerBlend,
+            AnimRow::LayerWeight,
+            AnimRow::LayerWeightParam,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            anim(&d).row_texts(row, &mut texts, k);
+            assert!(anim(&d).changed(row), "{row:?}");
+        }
+        assert_eq!(texts, ["Additive", "0.25", "speed"]);
+        assert!(d.anim_reset(AnimRow::LayerWeightParam).is_some());
+        assert!(anim(&d).shown_layer().unwrap().weight_param.is_empty());
+        // Under the base and back; nothing at the end.
+        let upper = anim(&d).layer.clone();
+        assert!(d.move_layer(true).is_some());
+        assert_eq!(anim(&d).layer_ids, [upper.clone(), String::from("base")]);
+        assert_eq!(anim(&d).layer, upper, "still shown");
+        assert!(d.move_layer(true).is_none(), "first already");
+        assert!(d.move_layer(false).is_some());
+        assert_eq!(anim(&d).layer_ids, [String::from("base"), upper.clone()]);
+        // The base shown again: its machine; a state added goes into the layer shown.
+        d.show_layer(0);
+        assert_eq!(anim(&d).layer, "base");
+        assert_eq!(anim(&d).machine, "m");
+        d.show_layer(1);
+        let machine = anim(&d).machine.clone();
+        assert!(d.add_state(StateKind::Clip, [400.0, 0.0], None).is_some());
+        assert_eq!(anim(&d).file.states_of(&machine).count(), 2);
+        assert_eq!(
+            anim(&d).file.states_of("m").count(),
+            2,
+            "the base's untouched"
+        );
+        // Deleted: its machine, its states and their poses go; the base is shown.
+        let before = d.text.clone();
+        let (nodes, states) = (anim(&d).file.nodes.len(), anim(&d).file.states.len());
+        let (_, after) = d.delete_layer().unwrap();
+        let a = anim(&d);
+        assert_eq!(a.layer_ids, ["base"]);
+        assert_eq!(a.layer, "base");
+        assert_eq!(a.machine, "m");
+        assert!(!a.file.nodes.contains_key(&machine));
+        assert_eq!(a.file.states.len(), states - 2);
+        assert_eq!(a.file.nodes.len(), nodes - 3, "the machine and two poses");
+        assert_ne!(after, before);
+        // Undone: back.
+        d.put_text(&before).unwrap();
+        assert_eq!(anim(&d).layer_ids.len(), 2);
+        assert!(anim(&d).file.nodes.contains_key(&machine));
+    }
+
+    /// A layer playing nothing is left out of the cook: the shown layer's live state is read
+    /// at its place among those that play (ADR 0124's E12-5d-2b).
+    #[test]
+    fn a_layer_playing_nothing_is_not_counted_for_the_live_state() {
+        let mut f = file();
+        f.layers.insert(
+            String::from("aaa"),
+            LayerFile {
+                name: String::from("Ghost"),
+                root: String::from("nothing"),
+                ..LayerFile::default()
+            },
+        );
+        let d = GraphDoc::new_anim(AssetId::new(), "anim/hero.agraph", f, AssetPaths::new());
+        assert_eq!(anim(&d).layer, "base", "the first playing a machine");
+        assert_eq!(anim(&d).layer_index(), Some(1));
+        assert_eq!(anim(&d).cooked_layer_index(), Some(0));
+    }
+
     /// A state's rows: its name (refused empty or taken), its clip, its pace, what it plays
     /// (a blend's parameters and clips, one added, one emptied away); each undone.
     #[test]
@@ -3298,15 +3799,17 @@ mod tests {
         assert_eq!(anim(&d).look(AnimRow::Inertialize), RowLook::Check(true));
         d.anim_reset(AnimRow::Inertialize).unwrap();
         assert!(!anim(&d).file.transitions["t1"].inertialize);
-        // The parameters, with nothing selected: a section each, then Add.
+        // With nothing selected: the layer shown (E12-5d-2b), the parameters a section
+        // each, then Add.
         anim_mut(&mut d).clear_selection();
         anim(&d).rows(&mut rows, &mut sections);
         assert_eq!(
             sections,
             [
-                (AnimSection::Param(0), 0, 2),
-                (AnimSection::Param(1), 2, 5),
-                (AnimSection::Add, 5, 6)
+                (AnimSection::Layer, 0, 4),
+                (AnimSection::Param(0), 4, 6),
+                (AnimSection::Param(1), 6, 9),
+                (AnimSection::Add, 9, 10)
             ]
         );
         assert_eq!(anim(&d).param(0).unwrap().0, "jump");

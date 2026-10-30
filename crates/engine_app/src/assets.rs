@@ -3965,6 +3965,17 @@ impl Assets {
         graph.machine_now(&play.state, graph.machine_layer()?)
     }
 
+    /// [`Self::graph_now`] of layer `layer` (in the layers' order; ADR 0124's E12-5d-2b):
+    /// none where it plays no machine.
+    pub(crate) fn graph_now_in(
+        &self,
+        e: Entity,
+        layer: usize,
+    ) -> Option<engine_anim::MachineNow<'_>> {
+        let play = self.owned.get(&e)?.graph.as_ref()?;
+        play.cooked.graph.machine_now(&play.state, layer)
+    }
+
     /// Entity `e`'s skinned model's joints where its pose puts them (ADR 0124's E12-1c), in
     /// the entity's space, into `out` (its room kept). False for a model drawn without a
     /// skin, or before its skin is made.

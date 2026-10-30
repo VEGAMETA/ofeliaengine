@@ -879,6 +879,12 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5d-2b-1, a graph's layers** (#492, ADR 0124's as-built): a chip per layer on the
+    graph's bar (the shown one's machine on the canvas, + adds a layer with its own
+    machine), the shown layer's section with nothing selected (name, blend, weight, weight
+    from; × deletes it with what only it plays, ↑ ↓ reorder), each a step; in Play the bar
+    follows the shown layer (`Player::graph_now_in`). Masks next, as a joint tree with check
+    boxes (team decision 2026-10-30, а).
   - **E12-5d-2a, blends drawn as points** (#490, ADR 0124's as-built): a blend's state
     inspected shows its clips on a line or on a plane between Delaunay triangles, the
     values marked and each clip's weight there (the tick's own weighing, now shared as
@@ -1307,10 +1313,10 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    E12-5d-2b to 2d (layers and masks on the canvas, machines in machines, the character
-    previewed in the corner), the last of E12; 5a to 5c, 5d-1, 5d-2a and 5e are done, and
-    E12-4. E13 (2D) has begun: E13-1a, sprites in scenes, is done (#491); E13-1b, the
-    editor's 2D view, follows E12. No agents from now on (the owner, 2026-10-30).
+    E12-5d-2b-2 to 2d (layer masks, machines in machines, the character previewed in the
+    corner), the last of E12; 5a to 5c, 5d-1, 5d-2a, 5d-2b-1 and 5e are done, and E12-4.
+    E13 (2D) has begun: E13-1a, sprites in scenes, is done (#491); E13-1b, the editor's 2D
+    view, follows E12. No agents from now on (the owner, 2026-10-30).
   - **Settled (2026-10-30, ADR 0125 accepted, team decisions 1а 2а 3а 4а 5в 6а 7а 8а 9а
     10а):** 2D entities in the one world (the XY plane); metres, 16 pixels a metre by
     default; tile cells in the scene by rows of 32-cell chunks through a palette; terrain

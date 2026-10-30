@@ -1128,6 +1128,12 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
              states[\"walk\"].name = \"Walk\"\nstates[\"walk\"].pose = \"cw\"\n\
              states[\"move\"].at = [320, 200]\nstates[\"move\"].machine = \"m\"\n\
              states[\"move\"].name = \"Move\"\nstates[\"move\"].pose = \"b\"\n\
+             layers[\"upper\"].name = \"Upper\"\nlayers[\"upper\"].order = 1\n\
+             layers[\"upper\"].root = \"u\"\nlayers[\"upper\"].weight = 0.25\n\
+             nodes[\"u\"].kind = Machine\nnodes[\"u\"].entry = \"look\"\n\
+             nodes[\"cl\"].clip = \"Survey\"\n\
+             states[\"look\"].machine = \"u\"\nstates[\"look\"].name = \"Look\"\n\
+             states[\"look\"].pose = \"cl\"\n\
              transitions[\"t1\"].from = \"idle\"\ntransitions[\"t1\"].to = \"walk\"\n\
              transitions[\"t1\"].when = \"speed > 0.1\"\ntransitions[\"t1\"].blend = 0.5\n"
         )
@@ -1284,6 +1290,24 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
         said.contains("none of Fox's clips here crosses the ground")
             && said.ends_with("Walk, Run keep their places"),
         "{said}"
+    );
+    // The graph's second layer shown (E12-5d-2b): the bar says its machine's state.
+    game.show_graph_layer(1);
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let bar = game.graph_bar();
+    println!("the second layer: {bar}");
+    assert!(
+        bar.starts_with("1 state") && bar.contains("Fox: Look \u{b7} "),
+        "{bar}"
+    );
+    game.show_graph_layer(0);
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(
+        game.graph_bar().contains("Fox: Walk \u{b7} "),
+        "{}",
+        game.graph_bar()
     );
     // View: Animation States (E12-5e-2b): the fox's label says the same over its head.
     assert!(game.anim_labels().is_empty(), "off by default");

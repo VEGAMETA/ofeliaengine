@@ -1686,8 +1686,16 @@ unless it says otherwise).
   Graph section holds them. **Place by Speed** (**by Velocity** for a 2D blend) puts each
   clip at how fast its root crosses the ground, read from a character playing the graph;
   clips made in place keep theirs.
-- **Not yet:** machines inside machines (Tab into one), layers and masks, and the
-  character's preview in the corner come with the next steps (ADR 0124's E12-5d-2).
+- **Layers:** the bar shows a chip per layer after the file's path; click one to see its
+  state machine on the canvas, or **+** to add a layer over the others (with its own
+  machine and an Idle state). With nothing selected, the inspector leads with the shown
+  layer's section: its name, **blend** (Normal, or Additive over the layers before it),
+  **weight**, and **weight from** (a number parameter that sets the weight instead). Its ×
+  deletes the layer with its states; ↑ and ↓ move it under or over the others. In Play the
+  bar follows the shown layer's state.
+- **Not yet:** layer masks (the joints a layer plays: a joint tree with check boxes),
+  machines inside machines (Tab into one), and the character's preview in the corner come
+  with the next steps (ADR 0124's E12-5d-2).
 
 ## Autosave and the session
 
