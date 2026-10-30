@@ -88,6 +88,9 @@ pub enum Source {
     /// A glTF file, relative to [`test_assets`] (fetched by
     /// `tools/fetch-test-assets.ps1`), cooked through the derived data cache in its `.ddc`.
     Gltf(PathBuf),
+    /// A 2D scene (ADR 0125) drawn by the player through a pixel-art camera: its images
+    /// painted by the test (`crate::sprites`). Needs no files.
+    Sprites,
 }
 
 /// One fixed view of a scene and what the frame includes.
@@ -903,6 +906,11 @@ pub(crate) fn load(
             cooked: None,
             procedural: procedural(subsurface, glossy_floor),
         }),
+        // Drawn by `crate::sprites`, not loaded here.
+        Source::Sprites => Ok(Loaded {
+            cooked: None,
+            procedural: Vec::new(),
+        }),
         Source::Gltf(path) => {
             let path = test_assets().join(path);
             let Ok(bytes) = std::fs::read(&path) else {
@@ -1304,6 +1312,9 @@ impl GenerationImages {
 /// On Vulkan errors and, with validation, on validation errors.
 #[allow(clippy::too_many_lines)]
 pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
+    if matches!(shot.source, Source::Sprites) {
+        return crate::sprites::render(shot, options);
+    }
     if shot.player {
         return crate::player::render(shot, options);
     }
@@ -2063,6 +2074,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                     near,
                     far,
                     cut: accumulated == Some(0),
+                    orthographic: None,
                 },
             ),
         };

@@ -655,3 +655,107 @@ The two notes' questions, merged. An answer can be one line, such as "1a, 2a, 3a
       from Rust only. Cost: no destructible tiles or level changes from Luau until later.
     - c. **Fields only.** Cost: anything with tiles needs Rust.
     - Recommendation: a.
+
+## As built (E13-1a, 2026-10-30): sprites in scenes and the player's 2D pass
+
+The runtime half of E13-1; the editor's 2D view (pan, whole-number zooms, grids, picking,
+the 2D gizmo, images dropped as sprites) is E13-1b.
+
+- **`engine_app::Sprite`** (`sprites.rs`), plain data (`bytemuck::Pod`) so a game's
+  `NetSchema::replicate::<Sprite>()` takes it; reflected, so scenes, saves and scripts take
+  it as any component:
+  - `image: AssetRef`, `frame: u32` (E13-2's slices and clips; a slice draws its whole
+    image until then), `color: [f32; 4]` (linear, straight alpha, HDR allowed; the
+    inspector's color hint), `flip_x`, `flip_y`, `size: Vec2` (a 0 takes the image's
+    pixels over its pixels a metre), `mode` (`SIMPLE`, `SLICED`, `TILED`: E13-2's, drawn
+    simple until then), `layer: i16`, `order: i16`, `hidden`. On-off fields are `u32` (0
+    off), as `Camera`'s are: a `bool` would make it not plain data.
+  - `AssetId` and `AssetRef` are `bytemuck::Pod` (`repr(C)` of `u64`s): plain-data
+    components may name assets.
+- **`SortGroup { layer, order }`**: its subtree sorts as one sprite at its place among the
+  rest (its layer; its own entity's y on a layer sorting by y, else its `order`); its
+  sprites are drawn together in the order of their own `order` (then the order they were
+  recorded in), so two characters standing at the same y never interleave. A group inside
+  a group sorts on its own (Unity's nesting is left for later).
+- **`SortingFile`** (`.sorting`, version 1, the editor's grammar): `layers[<number>].name`
+  and `layers[<number>].y_sort`, keyed by the layer's number (a sprite's `layer`), so
+  adding one adds lines. `PlayerSettings::sorting` names it (`main.sorting` under the
+  project, as `AudioSettings::layout` names the mixer); without it every layer sorts by
+  order; `Player::asset_changed` reads it again and `Player::set_sorting` takes the
+  editor's. Not yet an `AssetKind`: the editor's browser matches every kind, and E13-1b
+  adds it with the editor's side.
+- **An image's `.meta`** gains `sprite.pixels_per_unit` (16), `sprite.pivot` (`[0.5,
+  0.5]`, shares of its width and height from its bottom-left corner) and `sprite.filter`
+  (`Nearest`, or `Linear` for painted and high-resolution art), written only when not the
+  defaults; slices, borders and clips come as more lines of the section (E13-2).
+- **The orthographic `Camera`** (`engine_runtime`): `projection` (`PERSPECTIVE` 0,
+  `ORTHOGRAPHIC` 1), `height` (metres from the image's bottom edge to its top),
+  `reference` (`[0, 0]`: the output's size) and `post_effects`;
+  `Camera::orthographic(height)` (its planes a kilometre before and behind it, no
+  antialiasing) and `Camera::pixel_art(reference, pixels_per_unit)` (the height that makes
+  a pixel of art a pixel of the reference). `ViewCamera::orthographic` and
+  `ViewCamera::camera_2d` in `engine_frame`; UI placed on the camera follows its
+  projection.
+- **Neutral 2D views:** `ToneCurve::None` is the tone mapper's pass-through (no entry point
+  gains code; the output clips: an 8-bit image at white, an HDR display at its peak).
+  `CameraView` gives an orthographic camera `ToneCurve::None`, no bloom and no grading
+  unless `post_effects` is set (then the player's own), its exposure (1 for the
+  constructors) and, with a reference, `render_size` and `Upscale::Integer`. Color vision
+  correction stays the player's: with no curve the grading LUT is built by `gradeLutNone`,
+  an entry point of its own made the first time such a view grades.
+- **`FrameRenderer::prepare_2d` and `add_view_2d`:** a 2D view's canvas drawn into the
+  scene's HDR color at the render size over the view's clear color, in place of the scene
+  passes; then exposure, the upscale (integer), bloom and tone mapping as any view's. An
+  empty canvas declares no 2D pass, only the clear. Its depth is cleared to the far plane
+  for UI placed in the world, a pass the graph culls when nothing reads it. A 2D view keeps
+  no temporal antialiasing (a temporal upscale falls back to bilinear), no MSAA, no frame
+  generation or motion vectors, no shadow cache, occlusion state, reflections, depth of
+  field or motion blur: nothing of theirs is made for it. The 2D renderer for the HDR
+  format is made with the first 2D view (`Renderer2d` with its existing shaders).
+- **The player:** when the main camera is orthographic, each frame shows the sprite images
+  made by now (`Assets::show_sprite_images`, after the texture pool's frame start) and
+  records the canvas (`Sprites::record`), then `add_view_2d`; `FrameReport::sprites` is its
+  CPU time, `Player::sprites_recorded` what it drew and culled. A perspective main camera
+  records nothing and declares no 2D pass.
+  - **Between ticks:** `Runtime::frame_with` (and `frame_driven_with`) call the player's
+    extraction after each tick's, the transforms propagated: the sprites and sort groups in
+    chunks whose `GlobalTransform` changed keep their pose before and after the tick and
+    the tick they moved in, as `RenderExtract` keeps its instances'; a frame draws each at
+    its pose `alpha` of the way between them when it moved in the last tick, else where it
+    is. A sprite is drawn once a tick has placed it (its world transform propagated), as an
+    instance is. A joined client's frame draws them where its frame put them.
+  - **Recording:** a table by entity index keeps the poses and each sprite's image slot
+    (compared by `AssetRef`, so a frame looks nothing up by hash); each sprite's quad is
+    its image's size over its pixels a metre (or its own), its pivot at its entity, flips as
+    UVs, its image's sampler; culled by the view's rectangle (turned with the camera); keyed
+    `Order { layer, key }` with key `-y` on a layer sorting by y, else `order`; a sort
+    group's sprites gathered and drawn after the rest, each group together in its own order.
+  - **Images:** `Assets::sprite_slot` reads the image's `.meta` on first use and gives the
+    loader a `Job::Image` (the material images' path: decoded with its levels in the
+    background, compressed where the editor's cache is unless the `.meta` says
+    uncompressed); a file read again re-reads its settings and loads again (it is not drawn
+    for the frames its new texture takes). The frame asks for new sprites' images before
+    the models' sync, so the frame that waits for its assets waits for them too.
+- **Measured** (ref-1, release, `engine_app` examples/sprite_bench.rs: n 16-pixel sprites
+  moving every tick on a layer sorted by y, an offscreen 1920 × 1080 output, medians of 300
+  frames; `docs/perf/history.md`). The 2D pass at 1080p: 1,000 / 10,000 / 100,000 sprites
+  17 / 89 / 728 µs on the RTX, 336 / 966 / 7,395 µs on the Radeon; at a pixel-art 640 × 360
+  shown at 3×: 12 / 71 / 623 µs and 98 / 717 / 7,114 µs. Recording them: 20–25 / 187–208 /
+  2,019–2,597 µs of CPU (20–26 ns a sprite: the estimate's 15–20 with the poses read). A
+  thousand moving sprites, some culled, some in sort groups, allocate nothing
+  (`tests/zero_alloc_sprites.rs`, both GPUs).
+- **Tests:** every 8-bit value of a painted image reaches an 8-bit sRGB output exactly
+  through the neutral 2D view, the scene's half-float target and 2× integer scaling (1,024
+  pixels on each GPU); layers, order, y and sort groups by pixel; half a metre a frame for
+  a metre a tick at two frames a tick; a perspective view with sprites declares no 2D pass
+  and records nothing, an empty 2D view the clear alone; sprites, sort groups and pixel-art
+  cameras through scene files and saves; the golden shot `sprites_2d` (per vendor); the
+  tone mapper's GPU test with `ToneCurve::None`, plain and graded.
+- **Left (E13-1b and later):**
+  - the editor's 2D view and tools; `.sorting` as an asset kind in the editor's browser;
+  - slices, flipbooks, sliced and tiled modes (E13-2); tile maps (E13-3);
+  - recording on several jobs (ADR 0015's next step) past ten thousand sprites;
+  - a sprite image read again is not drawn until its new texture is made;
+  - 3D models in an orthographic view, and sprites in a perspective one, wait for an ADR
+    of their own;
+  - the pixel-perfect camera's sub-pixel smoothing (E13-7).

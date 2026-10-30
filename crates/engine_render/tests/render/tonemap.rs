@@ -162,7 +162,13 @@ fn check_tone_map_with(graded: bool, visions: &[(&'static str, ColorVision)]) {
     let tonemap = Tonemap::new(&device, &bindless, FORMAT).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
-    let mut lut = graded.then(|| GradingLut::new(&device, &mut allocator, &bindless).unwrap());
+    let mut lut = graded.then(|| {
+        let mut lut = GradingLut::new(&device, &mut allocator, &bindless).unwrap();
+        // The LUT without a curve's own pipeline (ADR 0125).
+        lut.prepare_curve(&device, &bindless, ToneCurve::None)
+            .unwrap();
+        lut
+    });
     // SAFETY: plain object creation.
     let (pool, cmd) = unsafe {
         let pool = d
@@ -246,6 +252,7 @@ fn check_tone_map_with(graded: bool, visions: &[(&'static str, ColorVision)]) {
                 ToneCurve::PbrNeutral,
                 ToneCurve::Agx,
                 ToneCurve::Aces,
+                ToneCurve::None,
             ]
             .map(|curve| (c, curve))
         })
@@ -450,9 +457,10 @@ fn check_tone_map_with(graded: bool, visions: &[(&'static str, ColorVision)]) {
                 );
             }
             // The highlight roll-off never passes the peak (a color vision correction
-            // may: it adds to what the deficiency loses).
+            // may: it adds to what the deficiency loses; no curve leaves it to the output).
             if tone_map
                 && vision.is_off()
+                && curve != ToneCurve::None
                 && let OutputEncoding::Linear { white } = encoding
             {
                 assert!(got[..3].iter().all(|&c| c <= peak * white * 1.0001));

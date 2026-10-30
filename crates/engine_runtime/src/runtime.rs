@@ -163,7 +163,26 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
         elapsed: f64,
         input: &I,
         scene: &mut S,
+        tick: impl FnMut(&mut World, &I, f32),
+        present: impl FnMut(&mut World, &I, f32),
+    ) -> FrameStages
+    where
+        S: SceneSink<Id = Id>,
+    {
+        self.frame_with(elapsed, input, scene, tick, |_| {}, present)
+    }
+
+    /// [`Self::frame`], `extracted(world)` called after each tick's extraction: where an
+    /// extraction of the caller's own keeps what each tick moved, the world's transforms
+    /// propagated (the player's sprites, ADR 0125, interpolated between ticks as the
+    /// scene's instances are).
+    pub fn frame_with<S, I>(
+        &mut self,
+        elapsed: f64,
+        input: &I,
+        scene: &mut S,
         mut tick: impl FnMut(&mut World, &I, f32),
+        mut extracted: impl FnMut(&mut World),
         mut present: impl FnMut(&mut World, &I, f32),
     ) -> FrameStages
     where
@@ -194,6 +213,7 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
             self.extract
                 .sync_on(&mut self.world, scene, self.jobs.as_deref());
             self.lights.sync(&mut self.world);
+            extracted(&mut self.world);
             stages.extract_us += us(start);
         }
         let start = Instant::now();
@@ -225,8 +245,25 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
         &mut self,
         input: &I,
         scene: &mut S,
+        tick: impl FnMut(&mut World, &I, f32),
+        drive: impl FnOnce(&mut World, &mut dyn FnMut(&mut World, f32)) -> Driven,
+        present: impl FnMut(&mut World, &I, f32),
+    ) -> FrameStages
+    where
+        S: SceneSink<Id = Id>,
+    {
+        self.frame_driven_with(input, scene, tick, drive, |_| {}, present)
+    }
+
+    /// [`Self::frame_driven`], `extracted(world)` called after the frame's extraction (see
+    /// [`Self::frame_with`]).
+    pub fn frame_driven_with<S, I>(
+        &mut self,
+        input: &I,
+        scene: &mut S,
         mut tick: impl FnMut(&mut World, &I, f32),
         drive: impl FnOnce(&mut World, &mut dyn FnMut(&mut World, f32)) -> Driven,
+        mut extracted: impl FnMut(&mut World),
         mut present: impl FnMut(&mut World, &I, f32),
     ) -> FrameStages
     where
@@ -271,6 +308,7 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
         let start = Instant::now();
         extract.sync_on(world, scene, jobs.as_deref());
         lights.sync(world);
+        extracted(world);
         stages.extract_us += us(start);
         let start = Instant::now();
         present(world, input, driven.alpha);

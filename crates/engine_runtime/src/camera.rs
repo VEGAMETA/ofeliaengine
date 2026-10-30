@@ -1,5 +1,7 @@
 //! Cameras that render (ADR 0072): a [`Camera`] component on an entity, read every
-//! rendered frame by a [`CameraView`] into the frame renderer's camera and settings.
+//! rendered frame by a [`CameraView`] into the frame renderer's camera and settings. An
+//! orthographic camera's view is a 2D view (ADR 0125): the frame renderer draws the 2D
+//! world in it, its colours as painted unless the camera asks for the post chain.
 
 use engine_core::math::Quat;
 use engine_ecs::{
@@ -10,12 +12,18 @@ use engine_frame::{
     ViewCamera, ViewKind, ViewSettings,
 };
 use engine_reflect::Reflect;
+use engine_render::grading::ColorGrading;
 use engine_render::motion_blur::MotionBlurSettings;
+use engine_render::post::ToneCurve;
 use engine_render::postfx::ExposureSettings;
 
 /// A camera that renders: its projection, exposure and antialiasing. Put it on an entity
 /// with a [`Transform`] (it looks down its −Z axis, +Y up). The active camera with the
 /// highest `priority` is the main view ([`CameraView`]).
+///
+/// An orthographic camera ([`Self::orthographic`], [`Self::pixel_art`]) is a 2D camera
+/// (ADR 0125): left unturned it looks down −Z onto the XY plane, y up, and its view draws
+/// the 2D world (sprites), not the 3D one. Turn it about Z only.
 ///
 /// The player's camera is moved every rendered frame (ADR 0019's addendum): write its
 /// `Transform` in `Runtime::frame`'s `present` step, from the latest input. The renderer
@@ -54,11 +62,30 @@ pub struct Camera {
     /// A cinematic camera's motion blur (ADR 0096): the share of the frame its shutter is
     /// open (0.5: film's 180°); 0 none. A gameplay camera has none, whatever this holds.
     pub shutter: f32,
+    /// The projection (ADR 0125): [`Self::PERSPECTIVE`] (0, through `fov_y`) or
+    /// [`Self::ORTHOGRAPHIC`] (1, through `height`): a 2D view.
+    pub projection: u32,
+    /// An orthographic camera's view: the world units (metres) it shows from the image's
+    /// bottom edge to its top; its width follows the image's aspect.
+    pub height: f32,
+    /// An orthographic camera's pixel-art resolution (ADR 0125): its view renders at this
+    /// size and is shown at the largest whole multiple of it that fits the output,
+    /// centered, black around (ADR 0016). `[0, 0]`: the output's size.
+    pub reference: [u32; 2],
+    /// Nonzero: an orthographic camera's view goes through the post chain of the player's
+    /// view settings (bloom, the tone curve, grading), for glows. Zero (the default): its
+    /// colours reach the screen as they were painted (no curve, no bloom, no grading).
+    pub post_effects: u32,
 }
 
 reflect_component!(pod Camera);
 
 impl Camera {
+    /// [`Self::projection`]'s perspective.
+    pub const PERSPECTIVE: u32 = 0;
+    /// [`Self::projection`]'s orthographic: a 2D view (ADR 0125).
+    pub const ORTHOGRAPHIC: u32 = 1;
+
     /// An active perspective camera: `fov_y` radians, planes at `near` and `far`, fixed
     /// exposure 1, the engine's TAAU at the output size.
     pub fn perspective(fov_y: f32, near: f32, far: f32) -> Self {
@@ -75,7 +102,48 @@ impl Camera {
             active: 1,
             cut_generation: 0,
             shutter: 0.0,
+            projection: Self::PERSPECTIVE,
+            height: 0.0,
+            reference: [0, 0],
+            post_effects: 0,
         }
+    }
+
+    /// An active orthographic camera (ADR 0125) showing `height` metres from the bottom of
+    /// the image to its top, at the output's size: a 2D view, neutral (colours as painted,
+    /// fixed exposure 1, no antialiasing: sprites keep their hard edges), its planes a
+    /// kilometre before and behind it.
+    pub fn orthographic(height: f32) -> Self {
+        Self {
+            projection: Self::ORTHOGRAPHIC,
+            height,
+            near: -1000.0,
+            far: 1000.0,
+            antialiasing: encode_antialiasing(Antialiasing::OFF),
+            ..Self::perspective(0.0, -1000.0, 1000.0)
+        }
+    }
+
+    /// A pixel-art camera (ADR 0125): [`Self::orthographic`] rendering at `reference`
+    /// pixels, each a pixel of art drawn at `pixels_per_unit` pixels a metre (an image's
+    /// `.meta` setting, 16 by default), shown at the largest whole multiple that fits the
+    /// output.
+    pub fn pixel_art(reference: [u32; 2], pixels_per_unit: f32) -> Self {
+        Self {
+            reference,
+            ..Self::orthographic(reference[1] as f32 / pixels_per_unit.max(f32::MIN_POSITIVE))
+        }
+    }
+
+    /// Whether it is orthographic: a 2D view (ADR 0125).
+    pub fn is_orthographic(&self) -> bool {
+        self.projection == Self::ORTHOGRAPHIC
+    }
+
+    /// Its pixel-art resolution, if it has one ([`Self::reference`]).
+    pub fn reference_size(&self) -> Option<(u32, u32)> {
+        let [width, height] = self.reference;
+        (width > 0 && height > 0).then_some((width, height))
     }
 
     /// This camera with `antialiasing` at `quality`.
@@ -273,8 +341,11 @@ impl CameraView {
         };
         let cut = self.current != Some((entity, camera.cut_generation));
         self.current = Some((entity, camera.cut_generation));
-        let mut view =
-            ViewCamera::from_rigid(rotation, position, camera.fov_y, camera.near, camera.far);
+        let mut view = if camera.is_orthographic() {
+            ViewCamera::orthographic(rotation, position, camera.height, camera.near, camera.far)
+        } else {
+            ViewCamera::from_rigid(rotation, position, camera.fov_y, camera.near, camera.far)
+        };
         view.cut = cut;
         let exposure = if camera.auto_exposure != 0 {
             Exposure::Auto(ExposureSettings {
@@ -284,17 +355,53 @@ impl CameraView {
         } else {
             Exposure::Fixed(camera.exposure)
         };
+        let settings = ViewSettings {
+            antialiasing: camera.antialiasing(),
+            quality: camera.quality(),
+            exposure,
+            kind: camera.view_kind(),
+            ..self.base
+        };
         Some(MainCamera {
             entity,
             camera: view,
-            settings: ViewSettings {
-                antialiasing: camera.antialiasing(),
-                quality: camera.quality(),
-                exposure,
-                kind: camera.view_kind(),
-                ..self.base
+            settings: if camera.is_orthographic() {
+                settings_2d(&camera, settings)
+            } else {
+                settings
             },
         })
+    }
+}
+
+/// A 2D view's settings (ADR 0125) from `camera` and the 3D view's `settings`: neutral
+/// (no tone curve, bloom or grading) unless the camera asks for the post chain; at its
+/// pixel-art resolution, scaled by whole numbers, when it has one. The rest of what a 2D
+/// view does not use the frame renderer leaves out (`FrameRenderer::prepare_2d`).
+fn settings_2d(camera: &Camera, settings: ViewSettings) -> ViewSettings {
+    let reference = camera.reference_size();
+    let neutral = camera.post_effects == 0;
+    ViewSettings {
+        antialiasing: match reference {
+            Some(_) => Antialiasing {
+                upscale: Upscale::Integer,
+                ..settings.antialiasing
+            },
+            None => settings.antialiasing,
+        },
+        render_size: reference.or(settings.render_size),
+        curve: if neutral {
+            ToneCurve::None
+        } else {
+            settings.curve
+        },
+        bloom: settings.bloom && !neutral,
+        grading: if neutral {
+            ColorGrading::default()
+        } else {
+            settings.grading
+        },
+        ..settings
     }
 }
 

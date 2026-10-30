@@ -138,3 +138,16 @@ void gradeLut(uint3 id : SV_DispatchThreadID)
         v = gt3(v, push.peak);
     g_volume_images[push.lut][id] = float4(color_vision(v, push.params), 1.0);
 }
+
+// `gradeLut` for a view without a tone curve (`ToneCurve::None`, ADR 0125: a 2D view's
+// colors as painted, the output clipping them): the graded color, then the color vision
+// transform. An entry point of its own, so `gradeLut` keeps its code.
+[shader("compute")]
+[numthreads(4, 4, 4)]
+void gradeLutNone(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= push.size))
+        return;
+    float3 v = lut_linear(float3(id) / float(push.size - 1));
+    g_volume_images[push.lut][id] = float4(color_vision(grade(max(v, 0.0), push.params), push.params), 1.0);
+}

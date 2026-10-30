@@ -34,6 +34,8 @@ use engine_rhi::ash::vk;
 use engine_rhi::{Allocator, Bindless, Device, RhiError};
 
 const GRADE_LUT: &[u8] = include_bytes!("../shaders/grading.gradeLut.spv");
+/// The LUT of a view without a tone curve (ADR 0125), an entry point of its own.
+const GRADE_LUT_NONE: &[u8] = include_bytes!("../shaders/grading.gradeLutNone.spv");
 
 /// Texels per side of the graded LUT (ADR 0094: measured against the curves).
 pub const LUT_SIZE: u32 = 48;
@@ -348,6 +350,8 @@ fn curve_flag(curve: ToneCurve) -> u32 {
         ToneCurve::PbrNeutral => 16,
         ToneCurve::Agx => 32,
         ToneCurve::Aces => 64,
+        // `gradeLutNone`'s: the flag only keys what the LUT holds.
+        ToneCurve::None => 128,
     }
 }
 
@@ -361,6 +365,9 @@ fn curve_flag(curve: ToneCurve) -> u32 {
 pub struct GradingLut {
     device: engine_rhi::ash::Device,
     shader: ComputeShader<Push>,
+    /// The LUT without a tone curve (`ToneCurve::None`, ADR 0125), made the first time a
+    /// view of it grades ([`Self::prepare_curve`]).
+    none: Option<ComputeShader<Push>>,
     image: Image,
     /// What the LUT holds: a hash of the grading, the curve and the peak.
     built: Cell<Option<u64>>,
@@ -399,15 +406,41 @@ impl GradingLut {
         Ok(Self {
             device: device.raw().clone(),
             shader,
+            none: None,
             image,
             built: Cell::new(None),
         })
     }
 
+    /// Makes what building the LUT with `curve` needs: the pipeline without a tone curve
+    /// (`ToneCurve::None`) the first time it is asked for. Call it before
+    /// [`Self::add_passes`] with that curve.
+    ///
+    /// # Errors
+    ///
+    /// When the pipeline cannot be made.
+    pub fn prepare_curve(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        curve: ToneCurve,
+    ) -> Result<(), RhiError> {
+        if curve == ToneCurve::None && self.none.is_none() {
+            let [shader] = ComputeSource::create_all(
+                device,
+                bindless,
+                [ComputeSource::new(GRADE_LUT_NONE, c"gradeLutNone", &[])?],
+            )?;
+            self.none = Some(shader);
+        }
+        Ok(())
+    }
+
     /// Declares the LUT's build when `grading`, `curve`, `peak` or `color_vision` differ
     /// from what it holds, and returns it for [`crate::post::Composite::grading`] (whose
     /// `curve` and `peak` must be these). `None` when the upload ring has no room for its
-    /// parameters (the composite then tone-maps without grading).
+    /// parameters, or for `ToneCurve::None` before [`Self::prepare_curve`] (the composite
+    /// then tone-maps without grading).
     #[allow(clippy::too_many_arguments)]
     pub fn add_passes<'g>(
         &'g self,
@@ -426,6 +459,10 @@ impl GradingLut {
             ),
             color_vision.key(),
         );
+        let shader = match curve {
+            ToneCurve::None => self.none.as_ref()?,
+            _ => &self.shader,
+        };
         let stale = self.built.get() != Some(key);
         let params = if stale {
             Some(ring.push(&[grading.params(color_vision)])?)
@@ -444,7 +481,7 @@ impl GradingLut {
             let built = &self.built;
             fg.add_compute("grading lut", bindless)
                 .write(lut, Access::StorageWrite(ShaderStages::COMPUTE))
-                .dispatch(&self.shader, Dispatch::Threads([LUT_SIZE; 3]), move |_| {
+                .dispatch(shader, Dispatch::Threads([LUT_SIZE; 3]), move |_| {
                     // It holds this once the pass is recorded.
                     built.set(Some(key));
                     Some(push)

@@ -65,6 +65,11 @@ impl core::fmt::Display for AssetId {
     }
 }
 
+// SAFETY: `repr(C)` of two `u64`s: no padding, and every bit pattern is an id.
+unsafe impl engine_ecs::bytemuck::Zeroable for AssetId {}
+// SAFETY: as above; `Copy` and `'static`.
+unsafe impl engine_ecs::bytemuck::Pod for AssetId {}
+
 /// A reference to an asset: a file, or a part inside one (a glTF's mesh or material).
 ///
 /// Plain data, so components holding it stay copyable and undoable. The part is kept as
@@ -79,6 +84,12 @@ pub struct AssetRef {
     /// name.
     pub part: u64,
 }
+
+// SAFETY: `repr(C)` of an `AssetId` (two `u64`s) and a `u64`: no padding, and every bit
+// pattern is a reference (plain data components that name assets, as a sprite's image).
+unsafe impl engine_ecs::bytemuck::Zeroable for AssetRef {}
+// SAFETY: as above; `Copy` and `'static`.
+unsafe impl engine_ecs::bytemuck::Pod for AssetRef {}
 
 impl AssetRef {
     /// No asset.

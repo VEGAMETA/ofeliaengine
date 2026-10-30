@@ -16,3 +16,4 @@ pub mod golden;
 mod player;
 pub mod registers;
 pub mod scene;
+mod sprites;
