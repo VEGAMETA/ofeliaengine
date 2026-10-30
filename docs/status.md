@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-4e-1, joints keyed in `.anim`** (#PR, ADR 0124's as-built):
+  - **E12-4e-1, joints keyed in `.anim`** (#474, ADR 0124's as-built):
     - Tracks `@<joint>.<part>` key a character's joints. Its animator's own clip poses
       them over the rest pose, and the joints found once per model, not searched each
       frame.
