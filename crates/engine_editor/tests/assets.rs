@@ -1509,6 +1509,67 @@ fn a_skinned_model_picked_in_the_dock_shows_its_clips_under_its_preview() {
     key(&mut game, 0x11, 0x1D, false);
     frame(&mut player, &mut game, &mut overlay);
     assert!(meta().contains("events.0.name = \"event\""), "{}", meta());
+    // E12-3b-3: its sound typed into the row (after a click on its mark picks it); played
+    // from a few frames before it, the preview passes it and plays its sound.
+    let mut wav = Vec::new();
+    let samples: Vec<u8> = (0..9600)
+        .flat_map(|i: i32| (((i % 100) - 50) as i16 * 200).to_le_bytes())
+        .collect();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    for v in [16u32, 1 | (1 << 16), 48_000, 96_000, 2 | (16 << 16)] {
+        wav.extend_from_slice(&v.to_le_bytes());
+    }
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&samples);
+    std::fs::write(dir.join("step.wav"), wav).unwrap();
+    let mark = game.text_at("event").expect("its mark");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, mark, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let field = game
+        .text_at("sound: a path in the project")
+        .expect("the picked event's sound field");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, field, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    for c in "step.wav".chars() {
+        game.event(&WindowEvent {
+            window: WindowId(0),
+            time: Instant::now(),
+            kind: WindowEventKind::Char(c),
+        });
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    tap(&mut game, &mut player, &mut overlay, 0x0D, 0x1C); // Enter
+    assert!(
+        meta().contains("events.0.sound = \"step.wav\""),
+        "{}",
+        meta()
+    );
+    for _ in 0..3 {
+        tap(&mut game, &mut player, &mut overlay, 0x25, 0x4B); // ←
+    }
+    tap(&mut game, &mut player, &mut overlay, 0x20, 0x39); // Space: play
+    let started = Instant::now();
+    let heard = loop {
+        frame(&mut player, &mut game, &mut overlay);
+        let file = player
+            .sound_preview()
+            .map(|s| s.file.to_string_lossy().into_owned());
+        if let Some(file) = file.filter(|f| f.ends_with("step.wav")) {
+            break file;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the event's sound played"
+        );
+    };
+    println!("the event's sound: {heard}");
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

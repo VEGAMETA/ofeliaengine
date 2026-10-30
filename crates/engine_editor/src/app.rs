@@ -4803,10 +4803,9 @@ impl Editor {
         {
             self.open_mixer();
         }
-        // The Animation tab's events (E12-3b-2): the Clips' model file's `.meta` held.
-        if self.bottom == Some(ANIMATION_TAB) {
-            self.follow_clip_events(world);
-        }
+        // The Clips' model file's clip events (E12-3b-2): its `.meta` held, for the
+        // Animation tab and for the previews' event sounds (E12-3b-3).
+        self.follow_clip_events(world);
         let properties = self.inspector.properties();
         let mut values: Vec<&str> = recycle(std::mem::take(&mut self.lists.values));
         let mut spans = std::mem::take(&mut self.lists.spans);
@@ -19585,6 +19584,40 @@ impl Editor {
             .map(|entry| crate::clip_events::EventsDoc::open(&self.root, file, &entry.path));
     }
 
+    /// The events clip `k`'s preview passed from `from` to `to` seconds this frame (ADR
+    /// 0124's E12-3b-3): the last one's sound played on the editor's preview bus, as the
+    /// dock plays a sound (one at a time, the next one cutting it).
+    fn play_event_sounds(&mut self, k: usize, from: f32, to: f32) {
+        let (Some(view), Some(doc)) = (self.clips.as_ref(), self.clip_events.as_ref()) else {
+            return;
+        };
+        let Some(c) = view.clips.get(k) else {
+            return;
+        };
+        let mut sound: Option<&str> = None;
+        crate::clip_events::passed(doc.events(&c.name), c.duration, from, to, |e| {
+            if !e.sound.is_empty() {
+                sound = Some(&e.sound);
+            }
+        });
+        let Some(sound) = sound else {
+            return;
+        };
+        let file = self.root.join(sound);
+        let id = self.asset_db.find(sound).map(|e| e.id);
+        self.preview_ask = Some(PreviewAsk::Play {
+            file,
+            from: 0.0,
+            looping: false,
+        });
+        self.preview = id.map(|id| Previewing {
+            id,
+            position: 0.0,
+            length: None,
+            heard: false,
+        });
+    }
+
     /// The chosen clip's name as its model's `.meta` names it, its length in seconds and its
     /// samples a second (ADR 0124's E12-3b-2).
     fn events_clip(&self) -> Option<(String, f32, f32)> {
@@ -19766,6 +19799,9 @@ impl Editor {
         // while its Clips play or hold (Auto Play starts its first clip once they are
         // known), its newest pixels taken.
         let (looping, speed) = (self.clip_loop, CLIP_SPEEDS[self.clip_speed]);
+        // The span of the shown clip a preview played this frame, for its events' sounds
+        // (E12-3b-3).
+        let mut heard = None;
         match self.shown_model.as_mut() {
             Some(m) => {
                 let mut view = self
@@ -19800,6 +19836,7 @@ impl Editor {
                         }
                         let to = if looping { t } else { t.min(length) };
                         walked = Some((v.chosen, from, to));
+                        heard = Some((v.chosen, from, to));
                     }
                     (m.playing || v.held).then_some((v.chosen, v.time))
                 });
@@ -19893,6 +19930,7 @@ impl Editor {
             let now = Instant::now();
             let dt = play.at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
             play.at = Some(now);
+            let before = play.start + play.played;
             play.played += dt * CLIP_SPEEDS[self.clip_speed];
             let time = play.start + play.played;
             let wanted = play.clip.as_deref();
@@ -19923,6 +19961,8 @@ impl Editor {
                     .filter(|v| v.of == ClipsOf::Entity(*e) && v.chosen == k)
                 {
                     v.time = t;
+                    let to = if looping { time } else { time.min(length) };
+                    heard = Some((k, before, to));
                 }
                 true
             });
@@ -19945,6 +19985,9 @@ impl Editor {
         }
         if let Some(view) = self.clips.as_mut() {
             view.refresh_time();
+        }
+        if let Some((k, from, to)) = heard {
+            self.play_event_sounds(k, from, to);
         }
         self.posing.sort_unstable();
         for &e in &self.posed {
@@ -29996,6 +30039,68 @@ mod tests {
         assert_eq!(ed.picked_event, None);
         ed.run(&mut world, undo);
         assert!(meta().contains("events.0.name = \"step\""), "{}", meta());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E12-3b-3: a preview's frame that passed an event with a sound plays it on the preview
+    /// bus (across the loop too); one that passed only an event without a sound, or none,
+    /// plays nothing.
+    #[test]
+    fn a_previews_frame_plays_the_sounds_of_the_events_it_passed() {
+        let (dir, mut world, mut ed, _) = drop_project("event-sounds");
+        let crate_id = ed.asset_db.find("props/crate.gltf").unwrap().id;
+        ed.clips = Some(ClipsView::new(
+            ClipsOf::Asset(crate_id),
+            1,
+            vec![ClipFacts::new(
+                0,
+                "Walk",
+                1.0,
+                31,
+                30.0,
+                3000,
+                1e-4,
+                1.5,
+                (2e-4, "hips"),
+            )],
+        ));
+        ed.update(&mut world);
+        assert!(
+            ed.clip_events.is_some(),
+            "held with the Clips, the tab shut"
+        );
+        ed.edit_events(&mut world, "Add Events", "Walk", |events| {
+            let step = ClipEvent {
+                time: 0.25,
+                name: String::from("step"),
+                sound: String::from("sounds/step.wav"),
+                ..ClipEvent::default()
+            };
+            crate::clip_events::add_event(events, step);
+            let mark = ClipEvent {
+                time: 0.5,
+                name: String::from("mark"),
+                ..ClipEvent::default()
+            };
+            crate::clip_events::add_event(events, mark);
+        });
+        ed.preview_ask = None;
+        ed.play_event_sounds(0, 0.4, 0.6);
+        assert!(ed.preview_ask.is_none(), "an event without a sound");
+        ed.play_event_sounds(0, 0.3, 0.4);
+        assert!(ed.preview_ask.is_none(), "none passed");
+        ed.play_event_sounds(0, 0.9, 1.3);
+        match &ed.preview_ask {
+            Some(PreviewAsk::Play {
+                file,
+                from,
+                looping,
+            }) => {
+                assert!(file.ends_with("sounds/step.wav"), "{}", file.display());
+                assert_eq!((*from, *looping), (0.0, false));
+            }
+            _ => panic!("the step's sound played across the loop"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

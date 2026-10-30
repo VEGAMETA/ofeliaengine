@@ -584,6 +584,28 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-3b-3, 2026-10-30): event sounds in the editor's previews
+
+- **Which events play:** each frame, the span of the shown clip a preview played is found.
+  For the dock's model, that is the span its floor already walks by. For a character
+  played in place (P), it is the span of the Clips' character. Its events go through
+  `clip_events::passed` (forward, with loops), and the last one with a sound plays.
+- **Where it plays:** through the dock's preview slot (`PreviewAsk::Play`, the editor's bus
+  straight to the master, one at a time); the dock shows it when the sound is a project
+  asset. This is the UX note's "sounds play in every preview".
+- **Held with the Clips:** the Clips' model file's `.meta` is held whenever Clips show, not
+  only while the Animation tab does, so the previews hear its events.
+- **Tests:**
+  - **Unit:** the spans a preview's frame passes (across the loop, never backwards).
+  - **A frame:** one that passed an event with a sound asks for it, across the loop too.
+    One that passed only an event without a sound, or none, asks for nothing.
+  - **GPU, the Fox in the dock:** a click on the mark picks it, and `step.wav` is typed
+    into its sound field (written to the `.meta`). Three frames back and Space: the
+    preview passes it and plays `step.wav`.
+  - 0 allocations unchanged (both builds).
+- **Left:** a sound dropped from the dock onto the sound field; sounds that overlap
+  rather than cut each other (the preview slot plays one).
+
 ## As built (E12-3b-2, 2026-10-30): the Animation tab's events
 
 - **The strip** under the ruler (`AnimationView::events`): a mark and a name per event of
