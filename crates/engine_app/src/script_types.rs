@@ -14,14 +14,19 @@
 //!   booleans, `vector` (a `Vec3`, `Vec3A` or `Vec2`), `Quat`, `Entity?`, strings, an enum's
 //!   variants by name, and structs of those. Fields of other kinds (lists, maps, options,
 //!   asset references) are left out: scripts cannot read them yet.
+//! - **The project's animation graphs** (ADR 0124's E12-5c) name what `Animator:set` and
+//!   `Animator:trigger` take: their parameters' names as string choices ([`GraphNames`],
+//!   [`definitions_with`]), so the checker completes them inside the quotes and underlines
+//!   a misspelt one.
 
 use engine_reflect::{Primitive, TypeInfo, TypeKind};
-use std::collections::BTreeMap;
+use engine_scene::{AnimGraphFile, ParamKind};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// Names the definitions give their own types; a component of one of these names is left
 /// out (it would shadow them).
-const RESERVED: [&str; 10] = [
+const RESERVED: [&str; 12] = [
     "Entity",
     "Quat",
     "ScriptSelf",
@@ -32,11 +37,72 @@ const RESERVED: [&str; 10] = [
     "Query",
     "Script",
     "Asset",
+    "AnimatorParam",
+    "AnimatorTrigger",
 ];
+
+/// The parameters' names of the project's animation graphs (`.agraph` files, ADR 0124's
+/// E12-5c), each once and sorted: what the definitions' `AnimatorParam` (numbers, flags and
+/// whole numbers: `Animator:set`) and `AnimatorTrigger` (`Animator:trigger`) choose from. A
+/// name that is a trigger in one graph and a number in another is in both.
+///
+/// ```ignore
+/// let mut names = GraphNames::default();
+/// names.add_text(&std::fs::read_to_string("hero.agraph")?)?;
+/// let types = engine_app::script_types::definitions_with(&names);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GraphNames {
+    /// Numbers', flags' and whole numbers' names.
+    pub params: BTreeSet<String>,
+    /// Triggers' names.
+    pub triggers: BTreeSet<String>,
+}
+
+impl GraphNames {
+    /// Graph `graph`'s parameters' names added.
+    pub fn add(&mut self, graph: &AnimGraphFile) {
+        for (name, param) in &graph.params {
+            let names = if param.kind == ParamKind::Trigger {
+                &mut self.triggers
+            } else {
+                &mut self.params
+            };
+            if !names.contains(name) {
+                names.insert(name.clone());
+            }
+        }
+    }
+
+    /// The parameters' names of the graph file whose text is `text` added: its header and
+    /// its `params[…]` lines are read, not its nodes, states or transitions.
+    ///
+    /// # Errors
+    ///
+    /// Not a graph's file, a newer one, or a bad parameter line (with its number).
+    pub fn add_text(&mut self, text: &str) -> Result<(), String> {
+        // The other lines left empty, so a bad line keeps its number.
+        let mut kept = String::with_capacity(4096);
+        let mut header = true;
+        for line in text.lines() {
+            let s = line.trim();
+            let content = !s.is_empty() && !s.starts_with('#');
+            if content && (header || s.starts_with("params[")) {
+                kept.push_str(s);
+            }
+            header &= !content;
+            kept.push('\n');
+        }
+        let (graph, _) = AnimGraphFile::parse(&kept).map_err(|e| e.to_string())?;
+        self.add(&graph);
+        Ok(())
+    }
+}
 
 /// The definitions' first part: what does not depend on the program's components.
 const HEADER: &str = r#"-- types/ofelia.d.luau: the engine's scripting API (ADR 0114), made by the editor from
--- the program's components and the project's scripts. Do not edit: it is written again.
+-- the program's components, the project's scripts and its animation graphs' parameters.
+-- Do not edit: it is written again.
 
 -- A rotation: `q * v` rotates a vector, `a * b` composes.
 declare extern type Quat with
@@ -126,11 +192,66 @@ const TRANSFORM_METHODS: &str = r#"    -- Turns it by `angle` radians about `axi
     function up(self): vector
 "#;
 
-/// `Animator`'s methods on its views (ADR 0124's E12-2b).
+/// `Animator`'s methods on its views (ADR 0124's E12-2b), its graph's (E12-5c), and its
+/// graph's state, a field the inspector hides.
 const ANIMATOR_METHODS: &str = r#"    -- Plays clip `clip` (its name in the model's file) from its start, fading from what
     -- plays now over `fade` seconds (at once without one).
     function play(self, clip: string, fade: number?): ()
+    -- Sets parameter `name` of its graph to `value` (a number; a flag: true or false), for
+    -- its transitions and blends. An error when it plays no graph or the graph lacks it.
+    function set(self, name: AnimatorParam, value: number | boolean): ()
+    -- Fires trigger `name` of its graph: it holds until a transition takes it.
+    function trigger(self, name: AnimatorTrigger): ()
+    -- The state its graph's first layer is in, by name (empty without a graph): the player
+    -- writes it each tick, after the scripts' tick. Read it; writing it is an error.
+    state: string
 "#;
+
+/// The project's graphs' parameters' names as `AnimatorParam` and `AnimatorTrigger`:
+/// unions of string choices, `string` without any.
+fn declare_graph_names(names: &GraphNames, out: &mut String) {
+    out.push_str(
+        "\n-- The parameters of the project's animation graphs (`.agraph` files): `Animator:set`\n\
+         -- takes their names, `Animator:trigger` their triggers'. Written again when a graph\n\
+         -- changes. A name kept in a variable says so: `local name: AnimatorParam = \"speed\"`.\n",
+    );
+    for (alias, names) in [
+        ("AnimatorParam", &names.params),
+        ("AnimatorTrigger", &names.triggers),
+    ] {
+        let choices: Vec<String> = names.iter().filter_map(|n| luau_string(n)).collect();
+        let one_line = choices.iter().map(|c| c.len() + 3).sum::<usize>() <= 80;
+        if choices.is_empty() {
+            let _ = writeln!(out, "export type {alias} = string");
+        } else if one_line {
+            let _ = writeln!(out, "export type {alias} = {}", choices.join(" | "));
+        } else {
+            let _ = writeln!(
+                out,
+                "export type {alias} =\n    {}",
+                choices.join("\n    | ")
+            );
+        }
+    }
+}
+
+/// `name` as a Luau string (`"speed"`, its quotes and backslashes escaped); none for a name
+/// with a control character, which no script writes.
+fn luau_string(name: &str) -> Option<String> {
+    if name.chars().any(char::is_control) {
+        return None;
+    }
+    let mut s = String::with_capacity(name.len() + 2);
+    s.push('"');
+    for c in name.chars() {
+        if c == '"' || c == '\\' {
+            s.push('\\');
+        }
+        s.push(c);
+    }
+    s.push('"');
+    Some(s)
+}
 
 /// The definitions' last part: the libraries.
 const LIBRARIES: &str = r#"
@@ -289,8 +410,15 @@ declare function warn(...: any): ()
 
 /// The definitions of the engine's scripting API for the program as it runs: its
 /// reflected components and the script components declared so far
-/// ([`engine_ecs::runtime_types`]), sorted by name.
+/// ([`engine_ecs::runtime_types`]), sorted by name. An animator's parameters are any
+/// string here: [`definitions_with`] names a project's.
 pub fn definitions() -> String {
+    definitions_with(&GraphNames::default())
+}
+
+/// [`definitions`], with the project's animation graphs' parameters' names as what
+/// `Animator:set` and `Animator:trigger` take (ADR 0124's E12-5c).
+pub fn definitions_with(graphs: &GraphNames) -> String {
     let mut components: BTreeMap<&'static str, &'static TypeInfo> = BTreeMap::new();
     // The program's components are globals too (`Transform`), scripts' are not.
     let mut program: Vec<&'static str> = Vec::new();
@@ -313,6 +441,7 @@ pub fn definitions() -> String {
     });
     let mut out = String::with_capacity(16 * 1024);
     out.push_str(HEADER);
+    declare_graph_names(graphs, &mut out);
     let mut declared: Vec<&'static str> = Vec::new();
     for info in components.values() {
         declare_struct(info, &mut declared, &mut out);
@@ -477,5 +606,124 @@ mod tests {
                 && !animator.contains("from_clip"),
             "{animator:?}"
         );
+    }
+
+    /// The text of an `.agraph` with parameters `params` (a name and its kind), and a
+    /// machine, a state and a transition that are not read for them.
+    fn graph_text(params: &[(&str, ParamKind)]) -> String {
+        use engine_scene::{NodeFile, NodeKind, ParamFile, StateFile, TransitionFile};
+        let mut g = AnimGraphFile::default();
+        for &(name, kind) in params {
+            g.params
+                .insert(name.to_owned(), ParamFile { kind, value: 0.0 });
+        }
+        g.nodes.insert(
+            String::from("m0"),
+            NodeFile {
+                kind: NodeKind::Machine,
+                entry: String::from("idle"),
+                ..NodeFile::default()
+            },
+        );
+        g.states.insert(
+            String::from("idle"),
+            StateFile {
+                name: String::from("Idle"),
+                machine: String::from("m0"),
+                ..StateFile::default()
+            },
+        );
+        g.transitions.insert(
+            String::from("t1"),
+            TransitionFile {
+                to: String::from("idle"),
+                when: String::from("speed > 1"),
+                ..TransitionFile::default()
+            },
+        );
+        g.to_text(engine_scene::AssetId::new(), None)
+    }
+
+    /// ADR 0124's E12-5c: an animator's `set` and `trigger` take the project's graphs'
+    /// parameters' names as string choices, sorted and each once; any string without
+    /// graphs. Its graph's `state` is declared though hidden.
+    #[test]
+    fn an_animators_graph_calls_take_the_projects_parameter_names() {
+        let declared = |text: &str| -> String {
+            text.split("declare extern type Animator with\n")
+                .nth(1)
+                .and_then(|rest| rest.split("end\n").next())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let text = definitions();
+        assert!(
+            text.contains("export type AnimatorParam = string\n")
+                && text.contains("export type AnimatorTrigger = string\n"),
+            "{text}"
+        );
+        let animator = declared(&text);
+        for line in [
+            "function set(self, name: AnimatorParam, value: number | boolean): ()",
+            "function trigger(self, name: AnimatorTrigger): ()",
+            "    state: string\n",
+        ] {
+            assert!(animator.contains(line), "{line} in {animator:?}");
+        }
+        assert!(!animator.contains("params"), "{animator:?}");
+
+        // Two graphs: `speed` in both, `jump` a trigger in one and a flag in the other.
+        let mut names = GraphNames::default();
+        names
+            .add_text(&graph_text(&[
+                ("speed", ParamKind::Float),
+                ("jump", ParamKind::Trigger),
+                ("armed", ParamKind::Bool),
+            ]))
+            .unwrap();
+        names
+            .add_text(&graph_text(&[
+                ("speed", ParamKind::Float),
+                ("weapon", ParamKind::Int),
+                ("jump", ParamKind::Bool),
+            ]))
+            .unwrap();
+        // Quotes in a name are escaped; a control character leaves it out.
+        names.triggers.insert(String::from("say \"hi\""));
+        names.triggers.insert(String::from("two\nlines"));
+        let text = definitions_with(&names);
+        assert!(
+            text.contains(
+                "export type AnimatorParam = \"armed\" | \"jump\" | \"speed\" | \"weapon\"\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("export type AnimatorTrigger = \"jump\" | \"say \\\"hi\\\"\"\n"),
+            "{text}"
+        );
+        // Many names: one a line.
+        let mut many = GraphNames::default();
+        for i in 0..20 {
+            many.params.insert(format!("parameter_{i:02}"));
+        }
+        let text = definitions_with(&many);
+        assert!(
+            text.contains(
+                "export type AnimatorParam =\n    \"parameter_00\"\n    | \"parameter_01\"\n"
+            ),
+            "{text}"
+        );
+        // A file that is not a graph's says so; a bad parameter line keeps its number.
+        assert!(
+            GraphNames::default()
+                .add_text("[scene version=1]\n")
+                .is_err()
+        );
+        let mut bad = graph_text(&[("speed", ParamKind::Float)]);
+        bad.push_str("params[\"x\"].kind = Sideways\n");
+        let line = bad.lines().count();
+        let why = GraphNames::default().add_text(&bad).unwrap_err();
+        assert!(why.contains(&line.to_string()), "line {line}: {why}");
     }
 }

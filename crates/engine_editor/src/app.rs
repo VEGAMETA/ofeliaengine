@@ -3436,6 +3436,13 @@ struct Editor {
     /// version it was made at.
     script_types: String,
     script_types_at: Option<u64>,
+    /// The project's animation graphs' parameters' names in those definitions (ADR 0124's
+    /// E12-5c): what an animator's `set` and `trigger` take. Looked for again at a new
+    /// revision of the asset database, read again when the graph files' ids, paths, sizes
+    /// or times (hashed here) changed.
+    graph_names: engine_app::script_types::GraphNames,
+    graph_names_at: Option<u64>,
+    graph_files: Option<u64>,
     /// The active brush's side handles (ADR 0110 E2b-3c), the one under the pointer, and
     /// a side being dragged.
     handles: Handles,
@@ -4399,6 +4406,9 @@ impl Editor {
             script_files: ScriptFiles::default(),
             script_types: String::new(),
             script_types_at: None,
+            graph_names: engine_app::script_types::GraphNames::default(),
+            graph_names_at: None,
+            graph_files: None,
             handles: Handles::default(),
             hovered_side: None,
             side_drag: None,
@@ -12352,7 +12362,17 @@ impl Editor {
                 version: script.doc.version(),
             };
             let at = (start.line as u32, start.col as u32);
-            checker.complete(&script.module(), script.doc.text(), stamp, at);
+            let mut text = script.doc.text();
+            // A string being typed is closed at the caret for the question, so Luau answers
+            // with its string choices (an animator's parameters, ADR 0124's E12-5c) and not
+            // with every global.
+            if script.language == Language::Luau
+                && let Some(quote) = complete::open_quote(script.doc.line(head.line), head.col)
+            {
+                let before: usize = (0..head.line).map(|l| script.doc.line(l).len() + 1).sum();
+                text.insert(before + head.col, quote);
+            }
+            checker.complete(&script.module(), text, stamp, at);
             script.completing = Some(Completing::new(start));
         }
         // Open while the caret is in its word, narrowed to what is typed of it.
@@ -12935,16 +12955,17 @@ impl Editor {
     }
 
     /// The engine's scripting API as Luau definitions (E7-2), made again when the scripts
-    /// declared other components: given to Luau's checker (the open scripts checked
-    /// again), and written as `types/ofelia.d.luau` for luau-lsp when the project has
-    /// scripts.
+    /// declared other components or the project's animation graphs other parameters
+    /// (ADR 0124's E12-5c): given to Luau's checker (the open scripts checked again), and
+    /// written as `types/ofelia.d.luau` for luau-lsp when the project has scripts.
     fn refresh_script_types(&mut self) {
         let version = engine_ecs::runtime_types_version();
-        if self.script_types_at == Some(version) {
+        let graphs = self.refresh_graph_names();
+        if self.script_types_at == Some(version) && !graphs {
             return;
         }
         self.script_types_at = Some(version);
-        let text = engine_app::script_types::definitions();
+        let text = engine_app::script_types::definitions_with(&self.graph_names);
         if text == self.script_types {
             return;
         }
@@ -12974,6 +12995,48 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// The project's animation graphs' parameters' names (ADR 0124's E12-5c), read again
+    /// once a scan of the asset database found a graph file new, written anew, moved or
+    /// gone (not every frame: a revision's compare, then a hash of the graphs' entries):
+    /// whether they changed. Only each graph's header and parameters' lines are read.
+    fn refresh_graph_names(&mut self) -> bool {
+        use std::hash::{Hash, Hasher};
+        let revision = self.asset_db.revision();
+        if self.graph_names_at == Some(revision) {
+            return false;
+        }
+        self.graph_names_at = Some(revision);
+        let graphs: Vec<&engine_scene::AssetEntry> = self
+            .asset_db
+            .entries()
+            .iter()
+            .filter(|e| e.kind == engine_scene::AssetKind::AnimGraph)
+            .collect();
+        let mut key = std::hash::DefaultHasher::new();
+        for e in &graphs {
+            (e.id, &e.path, e.size, e.modified).hash(&mut key);
+        }
+        let key = Some(key.finish());
+        if self.graph_files == key {
+            return false;
+        }
+        self.graph_files = key;
+        let mut names = engine_app::script_types::GraphNames::default();
+        for e in graphs {
+            let read = std::fs::read_to_string(self.root.join(&e.path))
+                .map_err(|why| why.to_string())
+                .and_then(|text| names.add_text(&text));
+            if let Err(why) = read {
+                log::warn!(target: "engine_editor", "{}: its parameters for the script types: {why}", e.path);
+            }
+        }
+        if names == self.graph_names {
+            return false;
+        }
+        self.graph_names = names;
+        true
     }
 
     /// The checkers' frame (E8-3b, E10-2a): each open tab's text given to its language's
@@ -37750,6 +37813,229 @@ return Coin
                 .any(|d| d.severity == engine_luau_analysis::Severity::Error && d.start.0 == 3),
             "{found:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rider's script (ADR 0124's E12-5c) in mode `mode` (`--!strict\n`, or none), setting
+    /// parameter `set` and firing trigger `fire` of its animator's graph, reading its state.
+    fn rider_script(mode: &str, set: &str, fire: &str) -> String {
+        format!(
+            "{mode}local Rider = component(\"Rider\", {{}})\n\
+             function Rider.on_tick(self, dt: number)\n    \
+             self.Animator:set(\"{set}\", 1)\n    \
+             self.Animator:trigger(\"{fire}\")\n    \
+             local state: string = self.Animator.state\n    \
+             print(state)\n\
+             end\n\
+             return Rider\n"
+        )
+    }
+
+    /// ADR 0124's E12-5c: with the project's graphs' parameters in the types, Luau's
+    /// analysis takes their names in `set` and `trigger`, underlines a misspelt one (in
+    /// `--!strict`) and completes them inside the quotes.
+    #[test]
+    fn graph_parameters_are_checked_and_completed_by_luaus_analysis() {
+        use crate::checker::Analyzer;
+        let dir = std::env::temp_dir().join(format!("ofelia-graph-types-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        let mut names = engine_app::script_types::GraphNames::default();
+        names.params.extend(["armed", "speed"].map(String::from));
+        names.triggers.insert(String::from("jump"));
+        let types = engine_app::script_types::definitions_with(&names);
+        let Some(mut luau) = crate::checker::LuauAnalyzer::new(&dir, &types) else {
+            panic!("Luau's analysis did not start");
+        };
+        assert!(luau.definitions_loaded(), "the definitions load");
+        // Right names, a flag set to a boolean: clean.
+        luau.set_source("rider", &rider_script("--!strict\n", "speed", "jump"));
+        let found = luau.check("rider");
+        assert!(found.is_empty(), "{found:?}");
+        let mut flag = rider_script("--!strict\n", "speed", "jump");
+        flag = flag.replace("set(\"speed\", 1)", "set(\"armed\", true)");
+        luau.set_source("rider", &flag);
+        let found = luau.check("rider");
+        assert!(found.is_empty(), "{found:?}");
+        // Misspelt, in strict mode: each underlined where it is (the string).
+        luau.set_source("rider", &rider_script("--!strict\n", "sped", "jmp"));
+        let found = luau.check("rider");
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(
+            (found[0].start, found[0].end),
+            ((3, 22), (3, 28)),
+            "{found:?}"
+        );
+        assert!(found[0].message.contains("\"sped\""), "{found:?}");
+        assert_eq!(found[1].start, (4, 26), "{found:?}");
+        assert!(found[1].message.contains("\"jmp\""), "{found:?}");
+        // A trigger set, a number fired: wrong too.
+        luau.set_source("rider", &rider_script("--!strict\n", "jump", "speed"));
+        assert_eq!(luau.check("rider").len(), 2);
+        // A script without `--!strict` is nonstrict, Luau's default: the old solver does
+        // not check these arguments there (the dev guide says so).
+        for mode in ["", "--!nonstrict\n"] {
+            luau.set_source("rider", &rider_script(mode, "sped", "jmp"));
+            let found = luau.check("rider");
+            assert!(found.is_empty(), "{mode:?}: {found:?}");
+        }
+        // Inside the quotes: the names of the call's kind, as they are written there.
+        let labels = |items: Vec<engine_luau_analysis::Completion>| {
+            let mut labels: Vec<String> = items
+                .into_iter()
+                .filter(|c| c.kind == engine_luau_analysis::CompletionKind::String)
+                .map(|c| c.label)
+                .collect();
+            labels.sort();
+            labels
+        };
+        luau.set_source("rider", &rider_script("--!strict\n", "", ""));
+        let set_at = "    self.Animator:set(\"".len() as u32;
+        assert_eq!(
+            labels(luau.complete("rider", 3, set_at)),
+            ["armed", "speed"]
+        );
+        let fire_at = "    self.Animator:trigger(\"".len() as u32;
+        assert_eq!(labels(luau.complete("rider", 4, fire_at)), ["jump"]);
+        // A string being typed, closed at the caret as the editor asks (`open_quote`): the
+        // same, whether the parenthesis is there yet or not.
+        for typed in ["set(\"s", "set(\"s)"] {
+            let line = format!("    self.Animator:{typed}");
+            let caret = "    self.Animator:set(\"s".len();
+            let quote = crate::complete::open_quote(&line, caret).unwrap();
+            let mut closed = line.clone();
+            closed.insert(caret, quote);
+            let text = rider_script("--!strict\n", "", "")
+                .replace("    self.Animator:set(\"\", 1)", &closed);
+            luau.set_source("rider", &text);
+            assert_eq!(
+                labels(luau.complete("rider", 3, set_at)),
+                ["armed", "speed"],
+                "{typed}"
+            );
+        }
+        // Left open, Luau answers as at an expression: every global, the names quoted.
+        let open = rider_script("--!strict\n", "", "").replace("set(\"\", 1)", "set(\"s");
+        luau.set_source("rider", &open);
+        let items = luau.complete("rider", 3, set_at);
+        assert!(items.len() > 20 && items.iter().any(|c| c.label == "\"speed\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-5c: the editor puts the parameters of the project's animation graphs
+    /// (from its asset database) into the script types: `types/ofelia.d.luau` names them,
+    /// the completion offers them as a name is typed inside `set(`, a misspelt one is
+    /// underlined, and both follow a graph written anew.
+    #[test]
+    fn the_projects_graph_parameters_are_offered_and_checked_in_scripts() {
+        use engine_scene::{AnimGraphFile, ParamFile, ParamKind};
+        let dir = project("graph-names");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::create_dir_all(dir.join("anims")).unwrap();
+        let id = AssetId::new();
+        let write_graph = |params: &[(&str, ParamKind)]| {
+            let mut g = AnimGraphFile::default();
+            for &(name, kind) in params {
+                g.params
+                    .insert(name.to_owned(), ParamFile { kind, value: 0.0 });
+            }
+            std::fs::write(dir.join("anims/hero.agraph"), g.to_text(id, None)).unwrap();
+        };
+        let hero = [
+            ("speed", ParamKind::Float),
+            ("armed", ParamKind::Bool),
+            ("jump", ParamKind::Trigger),
+        ];
+        write_graph(&hero);
+        let script = rider_script("--!strict\n", "speed", "jump").replace(
+            "    self.Animator:set(\"speed\", 1)",
+            "    self.Animator:set()",
+        );
+        std::fs::write(dir.join("scripts/rider.luau"), &script).unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        ed.update(&mut world);
+        assert!(
+            ed.script_types
+                .contains("export type AnimatorParam = \"armed\" | \"speed\"\n")
+                && ed
+                    .script_types
+                    .contains("export type AnimatorTrigger = \"jump\"\n"),
+            "{}",
+            ed.script_types
+        );
+        let written = std::fs::read_to_string(dir.join("types/ofelia.d.luau")).unwrap();
+        assert_eq!(written, ed.script_types, "written for luau-lsp");
+        // Frames that scan nothing new read no graph again.
+        let (at, files) = (ed.graph_names_at, ed.graph_files);
+        ed.update(&mut world);
+        assert_eq!((ed.graph_names_at, ed.graph_files), (at, files));
+
+        // Typed inside `set(`: a quote, then the name's first letter.
+        ed.open_script(&world, Path::new("scripts/rider.luau"), None);
+        ed.update(&mut world);
+        let caret = "    self.Animator:set(".len();
+        ed.scripts[0].doc.place(Pos::new(3, caret), false, false);
+        chars(&mut ed, "\"s");
+        ed.update(&mut world);
+        wait_for(&mut ed, &mut world, |ed| {
+            ed.scripts[0]
+                .completing
+                .as_ref()
+                .is_some_and(|l| l.answered)
+        });
+        let list = ed.scripts[0].completing.as_ref().unwrap();
+        let shown: Vec<&str> = list
+            .shown
+            .iter()
+            .map(|&i| list.items[i].label.as_str())
+            .collect();
+        assert_eq!(shown, ["speed"], "{:?}", list.items);
+        chord(&mut ed, &mut world, &[ENTER]);
+        assert_eq!(ed.scripts[0].doc.line(3), "    self.Animator:set(\"speed)");
+        // Closed, with its value: nothing found.
+        let end = ed.scripts[0].doc.line(3).len() - 1;
+        ed.scripts[0].doc.place(Pos::new(3, end), false, false);
+        chars(&mut ed, "\", 1");
+        ed.update(&mut world);
+        assert_eq!(
+            ed.scripts[0].doc.line(3),
+            "    self.Animator:set(\"speed\", 1)"
+        );
+        let checked = |ed: &Editor| {
+            let s = &ed.scripts[0];
+            s.found_for.is_some_and(|f| f.version == s.doc.version())
+        };
+        wait_for(&mut ed, &mut world, checked);
+        assert_eq!(ed.scripts[0].found, []);
+        // Misspelt: underlined where it is.
+        ed.scripts[0]
+            .doc
+            .select(Pos::new(3, caret + 1), Pos::new(3, caret + 6), false);
+        chars(&mut ed, "sped");
+        ed.update(&mut world);
+        wait_for(&mut ed, &mut world, checked);
+        let found = &ed.scripts[0].found;
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].start, (3, caret as u32), "{found:?}");
+        assert!(found[0].message.contains("\"sped\""), "{found:?}");
+
+        // The graph written anew with a parameter `sped`: the types follow, the finding goes.
+        write_graph(&[hero[0], hero[1], hero[2], ("sped", ParamKind::Float)]);
+        ed.asset_db.scan();
+        ed.update(&mut world);
+        assert!(
+            ed.script_types
+                .contains("export type AnimatorParam = \"armed\" | \"sped\" | \"speed\"\n"),
+            "{}",
+            ed.script_types
+        );
+        let written = std::fs::read_to_string(dir.join("types/ofelia.d.luau")).unwrap();
+        assert!(written.contains("\"sped\""));
+        wait_for(&mut ed, &mut world, |ed| {
+            checked(ed) && ed.scripts[0].found.is_empty()
+        });
+        assert_eq!(ed.scripts[0].found, []);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

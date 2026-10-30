@@ -407,6 +407,8 @@ pub struct AssetDatabase {
     gone: Vec<AssetEntry>,
     /// A file's path and what is wrong with it.
     problems: Vec<(String, String)>,
+    /// Scans that found a file new, written anew, moved or gone ([`Self::revision`]).
+    revision: u64,
 }
 
 /// The index's header.
@@ -461,6 +463,13 @@ impl AssetDatabase {
     /// What is wrong with files: unreadable ids, two files with one id.
     pub fn problems(&self) -> &[(String, String)] {
         &self.problems
+    }
+
+    /// How many scans found a file new, written anew, moved or gone: what something made
+    /// from the files (the editor's script types from the animation graphs' parameters)
+    /// compares with the count it was made at, to look at the files again only then.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Each file's path by its id (the whole file's reference): what scenes are written and
@@ -550,6 +559,9 @@ impl AssetDatabase {
         self.resolve_duplicates(&mut report);
         self.reindex();
         report.problems = self.problems.len();
+        if report.read > 0 || report.gone > 0 {
+            self.revision += 1;
+        }
         report
     }
 
@@ -1013,17 +1025,25 @@ mod tests {
             db.scan().changed.is_empty(),
             "new files are not changed ones"
         );
+        assert_eq!(db.revision(), 1, "a scan that found files");
         let crate_id = db.find("props/crate.glb").unwrap().id;
         // Written anew: named, its id kept. The rock, untouched, is not.
         std::fs::write(dir.join("props/crate.glb"), b"glTF crate, bigger").unwrap();
         let report = db.scan();
         assert_eq!(report.changed, [crate_id], "{report:?}");
         assert_eq!(db.find("props/crate.glb").unwrap().id, crate_id);
+        assert_eq!(db.revision(), 2);
         assert!(db.scan().changed.is_empty(), "once");
+        assert_eq!(db.revision(), 2, "a scan that found nothing new");
         // Moved: not written anew.
         std::fs::rename(dir.join("props/rock.png"), dir.join("rock.png")).unwrap();
         std::fs::rename(dir.join("props/rock.png.meta"), dir.join("rock.png.meta")).unwrap();
         assert!(db.scan().changed.is_empty());
+        assert_eq!(db.revision(), 3, "a move counts");
+        // Gone.
+        std::fs::remove_file(dir.join("rock.png")).unwrap();
+        db.scan();
+        assert_eq!(db.revision(), 4, "a file gone counts");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

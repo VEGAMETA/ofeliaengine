@@ -67,6 +67,7 @@ pub mod dap;
 mod entry;
 mod field_clips;
 mod game;
+mod graphs;
 mod loading;
 mod net;
 mod overlay;

@@ -2480,6 +2480,96 @@ impl ForwardRenderer {
     }
 
     /// The multisampled pipelines for `samples`, when made.
+    /// A frame with nothing to draw ([`empty_frame`]), with the view's sky over it where it
+    /// has an environment: its background, or its atmosphere's sky and fog (ADR 0046, ADR
+    /// 0069), as a frame with something in it draws where nothing covers the sky. So a
+    /// scene emptied of its models still shows its sky. `None` when `ring` is full.
+    fn empty_frame<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        bindless: &'g Bindless,
+        view: &ForwardView<'g>,
+    ) -> Option<ForwardPasses> {
+        if view.environment.is_none() {
+            return Some(empty_frame(fg, view, false));
+        }
+        let setup = self.setup(fg, view);
+        let imported = self.import(fg, ring, bindless, view, &setup)?;
+        // This frame's jitter, before the empty frame moves the view's frame on.
+        let (_, _, clip_from_world) = jittered(view, &setup.depth_desc);
+        let passes = empty_frame(fg, view, true);
+        let Some(env) = imported.environment else {
+            return Some(passes);
+        };
+        let (color, depth) = (view.color, view.depth);
+        let samples = setup.depth_desc.samples;
+        let ms = if samples == vk::SampleCountFlags::TYPE_1 {
+            None
+        } else {
+            Some(self.msaa_pipelines(samples)?)
+        };
+        if let Some(atmosphere) = env.atmosphere {
+            let composite = ready(ms.map_or(&self.composite, |m| &m.composite))?;
+            crate::atmosphere::add_composite_pass(
+                fg,
+                bindless,
+                composite,
+                color,
+                depth,
+                &env,
+                &atmosphere,
+            );
+            return Some(passes);
+        }
+        // What the sky's fragment reads of the frame (`skyFragment` in `forward.slang`).
+        // SAFETY: `FrameData` holds numbers and arrays of them alone: all zero is one.
+        let mut frame: FrameData = unsafe { core::mem::zeroed() };
+        frame.depth_size = [setup.depth_desc.width, setup.depth_desc.height];
+        frame.world_from_clip = clip_from_world.inverse().to_cols_array();
+        frame.linear_sampler = Bindless::sampler(SamplerKind::LinearClamp);
+        frame.environment = 1;
+        frame.sky_cube = env.background_index;
+        frame.sky_turn = env.background_turn;
+        frame.env_intensity = env.intensity;
+        frame.sun_disk = if env.sun_disk {
+            crate::environment::SUN_DISK_COS
+        } else {
+            2.0
+        };
+        frame.to_light = (-view.light.direction.normalize_or(Vec3::NEG_Y))
+            .extend(0.0)
+            .to_array();
+        frame.light_color = env
+            .sun_color
+            .unwrap_or(view.light.color)
+            .extend(0.0)
+            .to_array();
+        let frame = ring.push(&[frame])?;
+        let base = Push {
+            frame,
+            ..bytemuck::Zeroable::zeroed()
+        };
+        let sky = ms.map_or(&self.sky, |m| &m.sky);
+        fg.add_pass("sky")
+            .color(color, LoadOp::Load, StoreOp::Store)
+            .depth_read_only(depth)
+            .read(env.background, Access::Sampled(ShaderStages::FRAGMENT))
+            .execute(move |ctx| {
+                let area = ctx.render_area();
+                // SAFETY: recording inside the pass's rendering scope; the frame constants
+                // are in the ring.
+                unsafe {
+                    sky.bind(ctx.cmd);
+                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
+                    set_viewport(ctx.device, ctx.cmd, area);
+                    bindless.push_constants(ctx.cmd, push_bytes(&base));
+                    ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
+                }
+            });
+        Some(passes)
+    }
+
     fn msaa_pipelines(&self, samples: vk::SampleCountFlags) -> Option<&msaa::MsaaPipelines> {
         self.msaa[msaa_slot(samples)?].as_deref()
     }
@@ -3277,7 +3367,7 @@ impl ForwardRenderer {
     ) -> Option<ForwardPasses> {
         engine_profiler::zone!("render::forward::add_passes");
         if draws.is_empty() {
-            return Some(empty_frame(fg, view));
+            return self.empty_frame(fg, ring, bindless, view);
         }
         let mut setup = self.setup(fg, view);
         let imported = self.import(fg, ring, bindless, view, &setup)?;
@@ -3359,7 +3449,7 @@ impl ForwardRenderer {
     ) -> Option<ForwardPasses> {
         engine_profiler::zone!("render::forward::add_scene_passes");
         if scene.instances() == 0 {
-            return Some(empty_frame(fg, view));
+            return self.empty_frame(fg, ring, bindless, view);
         }
         let mut setup = self.setup(fg, view);
         let imported = self.import(fg, ring, bindless, view, &setup)?;
@@ -3758,8 +3848,13 @@ struct Setup {
 
 /// A frame with nothing to draw: the target is the clear color everywhere, so no motion
 /// shows. A temporal view still gets its (zero) motion vectors and a stored depth, and its
-/// state moves on, so a resolve after it needs no special case.
-fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPasses {
+/// state moves on, so a resolve after it needs no special case. `keep_depth`: the cleared
+/// depth is stored for a sky drawn after it ([`ForwardRenderer::empty_frame`]).
+fn empty_frame<'g>(
+    fg: &mut FrameGraph<'g>,
+    view: &ForwardView<'g>,
+    keep_depth: bool,
+) -> ForwardPasses {
     let (color, depth) = (view.color, view.depth);
     let load = view.clear.map_or(LoadOp::Load, LoadOp::Clear);
     let depth_clear = LoadOp::Clear([1.0, 0.0, 0.0, 0.0]);
@@ -3785,7 +3880,7 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
     if let Some(velocity) = velocity {
         pass = pass.color(velocity, LoadOp::Clear([0.0; 4]), StoreOp::Store);
     }
-    let depth_store = if velocity.is_some() {
+    let depth_store = if velocity.is_some() || keep_depth {
         StoreOp::Store
     } else {
         StoreOp::DontCare

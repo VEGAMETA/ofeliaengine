@@ -56,7 +56,8 @@ mod timing;
 
 pub use activity::{ActivityEpoch, ActivityPropagation, Disabled, Inactive, is_inactive};
 pub use animator::{
-    AnimationEvent, AnimationEvents, Animator, Animators, JointAttachment, RootMotion,
+    AnimationEvent, AnimationEvents, Animator, Animators, GraphParams, JointAttachment,
+    MAX_GRAPH_PARAMS, RootMotion,
 };
 pub use camera::{Camera, CameraView, MainCamera, look_rotation};
 pub use engine_physics::ecs::FixedStep;

@@ -51,6 +51,10 @@ world.spawn((
   - `PlayMode::Once` stops it (`playing` turns false, `position` goes back to 0);
   - `Loop` starts it over;
   - `Despawn` removes its entity.
+  - **Without a device** (none plugged in, or it failed to start) sounds still end: each one
+    plays out unheard on the game's clock and ends at its length as above. One whose file
+    failed to load, or a long streamed one, ends at once. With sound off
+    (`AudioSettings::enabled = false`, a dedicated server) a sound playing once ends at once.
 - **Who hears:** the main camera, or the entity with an `AudioListener` (a third-person
   character's head).
 - **Saves keep every source with its position:** after a load each sound goes on from

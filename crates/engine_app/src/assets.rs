@@ -69,8 +69,8 @@ use engine_render::skinning::{SkinId, SkinnedId, SkinnedMeshData, Skinning};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_rhi::{Allocator, Bindless, Device, Wrap};
 use engine_runtime::{
-    AnimationEvent, AnimationEvents, Animator, Derived, JointAttachment, MeshRenderer, RootMotion,
-    SkinnedMesh,
+    AnimationEvent, AnimationEvents, Animator, Derived, JointAttachment, MAX_GRAPH_PARAMS,
+    MeshRenderer, RootMotion, SkinnedMesh,
 };
 use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, ClipImport};
 use std::collections::{HashMap, HashSet};
@@ -860,6 +860,8 @@ pub struct Assets {
     preview_skin: Option<PreviewSkin>,
     /// The clips made in the editor (`.anim`, ADR 0124's E12-4a) and their animators.
     fields: crate::field_clips::FieldClips,
+    /// The animation graphs animators play (`.agraph`, ADR 0124's E12-5c).
+    graphs: crate::graphs::Graphs,
 }
 
 /// A skinned mesh made (ADR 0124's E12-1a): a skin per part in `Skinning`, and its rig.
@@ -881,10 +883,13 @@ struct Owned {
     file: AssetId,
     events: Arc<ModelEvents>,
     /// What it shows: a clip's moment, the clip fading out under it (E12-2b), its root
-    /// motion taken out or not (E12-2c).
+    /// motion taken out or not (E12-2c); or its animation graph (E12-5c).
     look: Look,
     held: bool,
     posed: bool,
+    /// Its play of the animation graph its animator names (E12-5c), once it is cooked for its
+    /// rig.
+    graph: Option<crate::graphs::GraphPlay>,
 }
 
 /// The editor's model preview's skin (ADR 0124's E12-1b): the mesh and material it shows,
@@ -1048,18 +1053,124 @@ fn played_span(rig: &crate::skins::Rig, animator: &Animator) -> Option<(usize, f
 /// the file, an unnamed one by the name the editor shows it by (`Clip 2` for the second);
 /// the first for a name none has.
 fn named_clip<'a>(names: impl Iterator<Item = &'a str> + Clone, name: &str) -> usize {
-    names
-        .clone()
-        .position(|n| n == name)
-        .or_else(|| {
-            let k = name
-                .strip_prefix("Clip ")?
-                .parse::<usize>()
-                .ok()?
-                .checked_sub(1)?;
-            names.clone().nth(k).filter(|n| n.is_empty()).map(|_| k)
+    find_clip(names, name).unwrap_or(0)
+}
+
+/// The clip `name` names among a rig's clip names, as [`named_clip`] finds it; none for a
+/// name none has (an animation graph's clip the model lacks, E12-5c).
+fn find_clip<'a>(names: impl Iterator<Item = &'a str> + Clone, name: &str) -> Option<usize> {
+    names.clone().position(|n| n == name).or_else(|| {
+        let k = name
+            .strip_prefix("Clip ")?
+            .parse::<usize>()
+            .ok()?
+            .checked_sub(1)?;
+        names.clone().nth(k).filter(|n| n.is_empty()).map(|_| k)
+    })
+}
+
+/// What a character's animation graph does (ADR 0124's E12-5c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphSync {
+    /// Its animator names none: it plays its clip.
+    None,
+    /// It plays its graph.
+    Plays,
+    /// Its graph cannot be played (its file could not be read): it shows its rest pose.
+    Broken,
+}
+
+/// Character `owned`'s play of the animation graph `animator` names (ADR 0124's E12-5c)
+/// made, or checked when the graphs changed since: cooked for its rig (`path_of` a graph
+/// file's path), its state at its entry with the parameters its animator set, weighed once
+/// so a still world shows its first pose. Let go when the animator names none.
+fn sync_graph(
+    graphs: &mut crate::graphs::Graphs,
+    owned: &mut Owned,
+    animator: &Animator,
+    path_of: impl FnOnce(AssetId) -> Option<PathBuf>,
+) -> GraphSync {
+    let graph = animator.graph;
+    if graph == AssetRef::NONE {
+        if owned.graph.take().is_some() {
+            owned.posed = false;
+        }
+        return GraphSync::None;
+    }
+    let generation = graphs.generation();
+    if owned
+        .graph
+        .as_ref()
+        .is_some_and(|p| p.file == graph.file && p.generation == generation)
+    {
+        return GraphSync::Plays;
+    }
+    graphs.read(graph.file, || path_of(graph.file));
+    let (rig, table) = (&owned.rig, &owned.events);
+    let clip = |name: &str| {
+        let clips = rig.clips();
+        let k = find_clip(clips.iter().map(crate::RigClip::name), name)?;
+        Some(engine_anim::ClipInfo {
+            index: u16::try_from(k).ok()?,
+            length: clips[k].duration(),
+            once: clip_play(rig, table, k).once,
         })
-        .unwrap_or(0)
+    };
+    let Some(cooked) = graphs.cook(graph.file, rig, owned.file, clip) else {
+        if owned.graph.take().is_some() {
+            owned.posed = false;
+        }
+        return GraphSync::Broken;
+    };
+    match &mut owned.graph {
+        Some(play) if play.file == graph.file && Arc::ptr_eq(&play.cooked, &cooked) => {
+            play.generation = generation;
+        }
+        _ => {
+            let mut state = engine_anim::GraphState::new(&cooked.graph);
+            set_params(&mut state, animator, &cooked.graph);
+            cooked.graph.tick(&mut state, 0.0);
+            owned.graph = Some(crate::graphs::GraphPlay {
+                file: graph.file,
+                cooked,
+                state,
+                generation,
+            });
+            owned.posed = false;
+        }
+    }
+    GraphSync::Plays
+}
+
+/// The parameters `animator` set (ADR 0124's E12-5c, the slots its `params_set` marks) into
+/// `graph`'s state `state`; the others keep the graph's values.
+fn set_params(
+    state: &mut engine_anim::GraphState,
+    animator: &Animator,
+    graph: &engine_anim::AnimGraph,
+) {
+    let count = graph.params().count().min(MAX_GRAPH_PARAMS);
+    for (k, &value) in animator.params.iter().enumerate().take(count) {
+        if animator.params_set & (1 << k) != 0 {
+            state.set(k as u16, value);
+        }
+    }
+}
+
+/// Character `owned`'s joints as `look` shows them ([`crate::skins::Posing::joints`]), its
+/// animation graph's where `look` says so (E12-5c).
+fn joints_of<'p>(
+    posing: &'p mut crate::skins::Posing,
+    fields: &crate::field_clips::FieldClips,
+    owned: &Owned,
+    look: Look,
+) -> &'p [Affine3A] {
+    match (look.graph, &owned.graph) {
+        (Some(alpha), Some(play)) => {
+            posing.joints_graph(&owned.rig, &play.cooked.graph, &play.state, alpha)
+        }
+        _ => posing.joints(&owned.rig, look, own_clips(fields, &look)),
+    }
 }
 
 /// What a model's mesh is to skinning: drawn skinned (the file and the mesh's index), or
@@ -1140,6 +1251,7 @@ impl Assets {
             event_sounds: Vec::new(),
             preview_skin: None,
             fields: crate::field_clips::FieldClips::default(),
+            graphs: crate::graphs::Graphs::default(),
         }
     }
 
@@ -1277,6 +1389,7 @@ impl Assets {
         self.building_skins.retain(|(a, _)| a.file != file);
         self.clip_events.remove(&file);
         self.fields.forget(file);
+        self.graphs.forget(file);
         self.repose_showing(file);
         let (meshes, materials) = (&mut self.stale_meshes, &mut self.stale_materials);
         self.meshes.retain(|asset, &mut mesh| {
@@ -2763,6 +2876,7 @@ impl Assets {
                     look: Look::default(),
                     held: false,
                     posed: false,
+                    graph: None,
                 },
             );
         }
@@ -2902,22 +3016,27 @@ impl Assets {
                 .take_while(|(c, _)| *c == character)
                 .count();
             if let Some(owned) = self.owned.get(&character) {
+                let animator = world.get::<Animator>(character);
                 let look = if owned.held {
                     Look {
                         own: owned.look.own,
                         ..Look::at(owned.look.pose)
                     }
+                } else if owned.graph.is_some() && animator.is_some_and(Animator::plays_graph) {
+                    // Its graph at the tick's moment (E12-5c).
+                    Look {
+                        graph: Some(1.0),
+                        ..Look::default()
+                    }
                 } else {
-                    world
-                        .get::<Animator>(character)
+                    animator
                         .and_then(|animator| {
                             animator_pose(&owned.rig, animator, 1.0, &owned.events)
                         })
                         .map_or(Look::default(), |(look, _)| look)
                 };
                 let rig_id = Arc::as_ptr(&owned.rig) as usize as u64;
-                let own = own_clips(&self.fields, &look);
-                let joints = self.posing.joints(&owned.rig, look, own);
+                let joints = joints_of(&mut self.posing, &self.fields, owned, look);
                 let skeleton = owned.rig.skeleton();
                 for &(_, socket) in &self.socket_list[k..end] {
                     let Some(attachment) = world.get::<JointAttachment>(socket) else {
@@ -2970,7 +3089,8 @@ impl Assets {
                 continue;
             };
             let mode = animator.root_motion;
-            let motion = if owned.held || mode == RootMotion::InPose {
+            // An animation graph's root motion stays in its pose for now (E12-5c).
+            let motion = if owned.held || mode == RootMotion::InPose || animator.plays_graph() {
                 None
             } else {
                 tick_motion(&owned.rig, animator, &owned.events)
@@ -3034,6 +3154,10 @@ impl Assets {
                 let Some(animator) = world.get::<Animator>(e) else {
                     continue;
                 };
+                // An animation graph's clips fire nothing for now (E12-5c).
+                if animator.plays_graph() {
+                    continue;
+                }
                 let Some((k, from, to)) = played_span(rig, animator) else {
                     continue;
                 };
@@ -3151,6 +3275,73 @@ impl Assets {
         self.repose_showing(file);
     }
 
+    /// Graph file `file` (an `.agraph`) as the editor holds it while it edits it (ADR 0124's
+    /// E12-5c), read in place of the file until `None` gives the file back: the characters
+    /// playing it are cooked again from their next tick or frame, their states made anew.
+    pub fn set_anim_graph(&mut self, file: AssetId, graph: Option<&engine_scene::AnimGraphFile>) {
+        self.graphs.hold(file, graph);
+    }
+
+    /// The parameters of every animation graph an [`Animator`] names, known to scripts
+    /// before they run (ADR 0124's E12-5c): a graph file not read yet is read, its
+    /// parameters told to the world's [`engine_runtime::GraphParams`]. Called at each tick's
+    /// start.
+    pub(crate) fn know_graphs(&mut self, world: &mut World) {
+        let (paths, root) = (&self.paths, &self.root);
+        self.graphs.know(world, |id| {
+            file_path(paths, AssetRef::file(id)).map(|p| root.join(p))
+        });
+    }
+
+    /// One tick of the characters playing animation graphs (ADR 0124's E12-5c), after the
+    /// scripts' tick and before the game's: the parameters each one's animator set go in,
+    /// its transitions are taken and its clips move on by the tick times its animator's
+    /// speed (held while paused, or at a speed below 0), its parameters come back (a trigger a
+    /// transition took used up, those not set at the graph's values) and its first layer's
+    /// state is named in `Animator::state`. A pose the editor holds moves nothing; ticks the
+    /// network plays again move nothing (a graph's state is not part of what it rolls back).
+    pub(crate) fn tick_graphs(&mut self, world: &mut World, dt: f32) {
+        if self.owned.is_empty() || engine_net::Resimulating::now(world) {
+            return;
+        }
+        engine_profiler::zone!("app::Assets::tick_graphs");
+        let (graphs, paths, root) = (&mut self.graphs, &self.paths, &self.root);
+        for (&e, owned) in &mut self.owned {
+            if owned.held {
+                continue;
+            }
+            let Some(animator) = world.get::<Animator>(e) else {
+                continue;
+            };
+            let path_of = |id| file_path(paths, AssetRef::file(id)).map(|p| root.join(p));
+            if sync_graph(graphs, owned, animator, path_of) != GraphSync::Plays {
+                continue;
+            }
+            let (Some(play), Some(animator)) = (owned.graph.as_mut(), world.get_mut::<Animator>(e))
+            else {
+                continue;
+            };
+            let graph = &play.cooked.graph;
+            set_params(&mut play.state, animator, graph);
+            let step = if animator.paused {
+                0.0
+            } else {
+                dt * animator.speed
+            };
+            graph.tick(&mut play.state, step);
+            let count = graph.params().count().min(MAX_GRAPH_PARAMS);
+            for (k, value) in animator.params.iter_mut().enumerate().take(count) {
+                *value = play.state.get(k as u16);
+            }
+            let name = graph.state_name(&play.state, 0).unwrap_or_default();
+            if animator.state != name {
+                animator.state.clear();
+                animator.state.push_str(name);
+            }
+            owned.posed = false;
+        }
+    }
+
     /// The characters showing a clip of file `file` (an `.anim`, E12-4e) posed again: it
     /// changed.
     fn repose_showing(&mut self, file: AssetId) {
@@ -3171,6 +3362,8 @@ impl Assets {
         for owned in self.owned.values_mut().filter(|o| o.file == file) {
             owned.events = Arc::clone(&events);
         }
+        // Its graphs cooked again: a clip may play once now, or loop (E12-5c).
+        self.graphs.forget(file);
         self.clip_events.insert(file, events);
         self.events_dirty = true;
     }
@@ -3190,9 +3383,32 @@ impl Assets {
     /// back to the animator for the ticks to wrap its time at.
     fn animate(&mut self, world: &mut World, alpha: f32) {
         engine_profiler::zone!("app::Assets::animate");
+        let (graphs, paths, root) = (&mut self.graphs, &self.paths, &self.root);
         for (&e, owned) in &mut self.owned {
             if owned.held {
                 continue;
+            }
+            // An animation graph in place of a clip (E12-5c): posed from its state each frame.
+            if let Some(animator) = world.get::<Animator>(e) {
+                let path_of = |id| file_path(paths, AssetRef::file(id)).map(|p| root.join(p));
+                match sync_graph(graphs, owned, animator, path_of) {
+                    GraphSync::None => {}
+                    GraphSync::Plays => {
+                        owned.look = Look {
+                            graph: Some(alpha),
+                            ..Look::default()
+                        };
+                        owned.posed = false;
+                        continue;
+                    }
+                    GraphSync::Broken => {
+                        if owned.look != Look::default() {
+                            owned.look = Look::default();
+                            owned.posed = false;
+                        }
+                        continue;
+                    }
+                }
             }
             let shown = world
                 .get::<Animator>(e)
@@ -3255,8 +3471,15 @@ impl Assets {
         self.events_dirty |= self.owned.len() != before;
         let (posing, fields) = (&mut self.posing, &self.fields);
         for owned in self.owned.values_mut().filter(|o| !o.posed) {
-            let own = own_clips(fields, &owned.look);
-            let palette = posing.palette(&owned.rig, owned.look, own);
+            let palette = match (owned.look.graph, &owned.graph) {
+                (Some(alpha), Some(play)) => {
+                    posing.palette_graph(&owned.rig, &play.cooked.graph, &play.state, alpha)
+                }
+                _ => {
+                    let own = own_clips(fields, &owned.look);
+                    posing.palette(&owned.rig, owned.look, own)
+                }
+            };
             for &id in &owned.instances {
                 skinning.set_palette(id, palette);
             }
@@ -3445,8 +3668,7 @@ impl Assets {
             return false;
         };
         out.clear();
-        let own = own_clips(&self.fields, &owned.look);
-        out.extend_from_slice(self.posing.joints(&owned.rig, owned.look, own));
+        out.extend_from_slice(joints_of(&mut self.posing, &self.fields, owned, owned.look));
         true
     }
 

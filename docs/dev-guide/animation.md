@@ -72,6 +72,36 @@ world.spawn((Model::new(mesh, material), Animator::new("Walk")));
     in fades out from where it is.
   - The fade is saved with the entity, so a load goes on fading. The fields are hidden in
     the editor.
+- **From scripts, its graph** (E12-5c): an animator whose `graph` names an `.agraph` takes
+  its parameters by name. In a tick's hook:
+
+  ```luau
+  local a = self.Animator
+  a:set("speed", vector.magnitude(input.vector("move")) * 4) -- a number
+  a:set("armed", self.armed)                                 -- a flag: true or false
+  if input.just_pressed("jump") then a:trigger("jump") end  -- held until a transition takes it
+  if a.state == "Fall" then self.falling += dt end           -- its first layer's state
+  ```
+
+  - `set` takes a number, or a boolean for a flag (`true` is 1). `trigger` fires a trigger:
+    it counts up until a transition whose condition names it goes.
+  - `state` is what the graph's step left: the player runs it after the scripts' tick, so
+    a parameter set in this tick changes the state the scripts read in the next one.
+    Writing `state` is an error.
+  - A name the graph lacks is an error listing the names it has of that kind
+    (``Animator's graph has no parameter `sped` (it has: armed, speed)``), as are `set` on
+    a trigger, `trigger` on a number or flag, and either call on an animator without a
+    graph.
+  - The player reads every graph an animator names before the scripts' next tick. Until
+    then (an animator given a graph in this very tick) the calls do nothing.
+  - **Completion:** the editor puts the parameters of the project's graphs in the script
+    types (`AnimatorParam`, `AnimatorTrigger`), written again when an `.agraph` changes.
+    The editor offers `speed` as you type inside `set("`, and the triggers inside
+    `trigger("`; VS Code reads the same types. In a `--!strict` script (New Script's) a
+    misspelt name is underlined; a script without that line is nonstrict, where Luau does
+    not check these names. A name kept in a variable says what it is to pass the check:
+    `local name: AnimatorParam = "speed"`.
+  - A call costs about 70 ns, a `state` read about 55 (ref-1); none allocates.
 - **Root motion** (E12-2c): a clip that crosses the ground (a walk made moving forward,
   not on a treadmill) can move the character instead of its pose. `root_motion` says how:
   - `InPose` (the default): the motion stays in the pose, as the clip was made. The
@@ -99,8 +129,8 @@ world.spawn((Model::new(mesh, material), Animator::new("Walk")));
   - The Animation tab's header sets them ("in the game: Once · root motion: Across Up
     Turn"), each an undo step written to the `.meta`.
 - Scripts reach it as any component: `self.Animator.speed = 2`,
-  `self.Animator.root_motion = "Move"`, and `self.Animator.moved` after a tick. The rest
-  of its calls (`set`, `trigger`, `state`) come with the rest of E12-2.
+  `self.Animator.root_motion = "Move"`, and `self.Animator.moved` after a tick; its
+  graph's calls are above.
 
 In the editor its `clip` is a list of the character's clips.
 
@@ -257,8 +287,30 @@ events.0.name = "thud"
 
 A graph says which clips a character plays as its parameters change: idle until it moves, a
 walk blended into a run by its speed, a jump when a script fires one (ADR 0124's E12-5). The
-file comes first (E12-5a); the player plays graphs from E12-5c and the editor draws them
-from E12-5d.
+player plays a graph an `Animator` names in its `graph` (E12-5c); the editor draws them from
+E12-5d.
+
+```rust
+world.spawn((
+    Model::new(mesh, material),
+    Animator { graph: AssetRef::file(graph_id), ..Animator::default() },
+));
+// In a tick: its parameters by name (`GraphParams` is a world resource).
+let slot = world.resource::<GraphParams>().unwrap().slot(graph_id, "speed");
+if let (Some((slot, false)), Some(animator)) = (slot, world.get_mut::<Animator>(fox)) {
+    animator.set_slot(slot, 3.5);
+}
+// After the tick: `animator.state` names the state its first layer is in.
+```
+
+- The parameters a game sets keep their values; the others follow the graph's (its starting
+  values until a transition changes them), and a trigger is back at 0 once a transition
+  took it. `params_set` marks which were set.
+- Scripts set them by name: `self.Animator:set("speed", 3.5)` and the rest of "From
+  scripts, its graph" above.
+- The graph plays at the animator's `speed`, held while it is `paused`.
+- For now its root motion stays in its pose, its clips fire no events, and a save does not
+  keep where it is (E12-5c-2).
 
 ```text
 [agraph version=1 id=…]

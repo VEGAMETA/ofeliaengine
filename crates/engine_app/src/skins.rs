@@ -14,9 +14,9 @@
 
 use crate::assets::{GltfFile, gltf_primitives};
 use engine_anim::{
-    Blender, CompressSettings, CompressedClip, Layer, LayerMode, Pose, RootMotion, RootMotionMode,
-    Skeleton, compress, local_to_model, remove_root_motion, root_motion_over, rotation_angle,
-    skinning_matrices, twist_of, yaw_of,
+    AnimGraph, Blender, CompressSettings, CompressedClip, GraphState, GraphWork, Layer, LayerMode,
+    Pose, RootMotion, RootMotionMode, Skeleton, compress, local_to_model, remove_root_motion,
+    root_motion_over, rotation_angle, skinning_matrices, twist_of, yaw_of,
 };
 use engine_assets::ImportedScene;
 use engine_assets::animation::{node_parents, raw_clip, shell_distances, skin_skeleton};
@@ -67,6 +67,11 @@ impl RigClip {
     /// Its length in seconds.
     pub fn duration(&self) -> f32 {
         self.clip.duration()
+    }
+
+    /// Its samples, compressed (what an animation graph samples, ADR 0124's E12-5c).
+    pub(crate) fn compressed(&self) -> &CompressedClip {
+        &self.clip
     }
 
     /// Its samples a second.
@@ -526,6 +531,9 @@ pub(crate) struct Look {
     /// The clip fading out when it is one of its animator's own clips (in place of `fade`),
     /// and the weight of what fades in.
     pub(crate) own_fade: Option<(OwnPose, f32)>,
+    /// Its animator's animation graph (ADR 0124's E12-5c) in place of all of the above, a
+    /// frame this far from its last tick to its next.
+    pub(crate) graph: Option<f32>,
 }
 
 /// One of an animator's own clips shown on its character (ADR 0124's E12-4e): the clip's file
@@ -559,6 +567,10 @@ pub(crate) struct Posing {
     blender_joints: usize,
     model: Vec<Affine3A>,
     palette: Vec<[f32; 12]>,
+    /// Where animation graphs' poses are worked out (ADR 0124's E12-5c), and the joints it
+    /// has room for (a graph of a smaller rig poses in it too).
+    graph_work: Option<GraphWork>,
+    graph_joints: usize,
 }
 
 impl Posing {
@@ -650,6 +662,35 @@ impl Posing {
         true
     }
 
+    /// `rig`'s local pose as `graph` (cooked for it) shows character state `state` a frame
+    /// `alpha` of the way from its last tick to its next (ADR 0124's E12-5c), into
+    /// `self.pose`: false for the rest pose (nothing plays).
+    fn local_graph(
+        &mut self,
+        rig: &Rig,
+        graph: &AnimGraph,
+        state: &GraphState,
+        alpha: f32,
+    ) -> bool {
+        let rest = rig.skeleton.rest();
+        let n = rest.len();
+        if self.graph_joints < n {
+            self.graph_work = None;
+        }
+        let work = self.graph_work.get_or_insert_with(|| GraphWork::new(n));
+        self.graph_joints = self.graph_joints.max(n);
+        let sampled = self.pose.get_or_insert_with(|| Pose::identity(n));
+        let clips = &rig.clips;
+        graph.pose(
+            state,
+            alpha,
+            |k| clips.get(usize::from(k)).map(|c| &c.clip),
+            rest,
+            work,
+            sampled,
+        )
+    }
+
     /// `rig`'s skinning matrices as `look` shows it ([`Self::local`]), its rest pose's
     /// without a clip or for one it has not.
     pub(crate) fn palette<'a>(
@@ -658,7 +699,27 @@ impl Posing {
         look: Look,
         own: [Option<&crate::field_clips::FieldClip>; 2],
     ) -> &'a [[f32; 12]] {
-        if !self.local(rig, look, own) {
+        let posed = self.local(rig, look, own);
+        self.skinned(rig, posed)
+    }
+
+    /// `rig`'s skinning matrices as `graph` shows `state` ([`Self::local_graph`]), its rest
+    /// pose's while nothing plays.
+    pub(crate) fn palette_graph<'a>(
+        &'a mut self,
+        rig: &'a Rig,
+        graph: &AnimGraph,
+        state: &GraphState,
+        alpha: f32,
+    ) -> &'a [[f32; 12]] {
+        let posed = self.local_graph(rig, graph, state, alpha);
+        self.skinned(rig, posed)
+    }
+
+    /// `rig`'s skinning matrices for the local pose in `self.pose` (`posed`), else its rest
+    /// pose's.
+    fn skinned<'a>(&'a mut self, rig: &'a Rig, posed: bool) -> &'a [[f32; 12]] {
+        if !posed {
             return &rig.rest;
         }
         let Some(sampled) = self.pose.as_ref() else {
@@ -691,11 +752,29 @@ impl Posing {
         look: Look,
         own: [Option<&crate::field_clips::FieldClip>; 2],
     ) -> &'a [Affine3A] {
+        let posed = self.local(rig, look, own);
+        self.placed(rig, posed)
+    }
+
+    /// `rig`'s joints where `graph` puts them for `state` ([`Self::local_graph`]), as
+    /// [`Self::joints`] places them.
+    pub(crate) fn joints_graph<'a>(
+        &'a mut self,
+        rig: &Rig,
+        graph: &AnimGraph,
+        state: &GraphState,
+        alpha: f32,
+    ) -> &'a [Affine3A] {
+        let posed = self.local_graph(rig, graph, state, alpha);
+        self.placed(rig, posed)
+    }
+
+    /// `rig`'s joints for the local pose in `self.pose` (`posed`), else its rest pose's.
+    fn placed<'a>(&'a mut self, rig: &Rig, posed: bool) -> &'a [Affine3A] {
         let n = rig.skeleton.joint_count();
         if self.model.len() < n {
             self.model.resize(n, Affine3A::IDENTITY);
         }
-        let posed = self.local(rig, look, own);
         let local = match (posed, self.pose.as_ref()) {
             (true, Some(sampled)) => sampled,
             _ => rig.skeleton.rest(),

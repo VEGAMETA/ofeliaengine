@@ -4426,6 +4426,84 @@ return SpinHook
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// ADR 0124's E12-5c's measurement (`--release -- --ignored --nocapture`): an
+    /// animator's `set` (a number and a flag), `trigger` and `state` read by scripts, a
+    /// hundred in each hook of 100 instances (10,000 calls a tick), less a loop as long
+    /// without the call; medians of 51 ticks.
+    #[test]
+    #[ignore = "a measurement"]
+    fn measure_animator_graph_calls() {
+        let hook = |name: &str, body: &str| {
+            (
+                format!("{}.luau", name.to_lowercase()),
+                format!(
+                    "local {name} = component(\"{name}\", {{}})\n\
+                     function {name}.on_tick(self, dt)\n    local a = self.Animator\n    \
+                     for i = 1, 100 do {body} end\nend\nreturn {name}\n"
+                ),
+            )
+        };
+        let files = [
+            hook("Bare", ""),
+            hook("Setter", "a:set(\"speed\", i)"),
+            hook("Flagger", "a:set(\"armed\", true)"),
+            hook("Firer", "a:trigger(\"jump\")"),
+            hook("Reader", "local _ = a.state"),
+        ];
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(f, t)| (f.as_str(), t.as_str()))
+            .collect();
+        let dir = project("measure-graph", &files);
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let run = |name: &str| {
+            let mut world = World::new();
+            let mut scripts = load(&dir, &mut world);
+            let graph = engine_scene::AssetId::new();
+            let mut params = engine_runtime::GraphParams::default();
+            params.insert(graph, [("armed", false), ("jump", true), ("speed", false)]);
+            world.insert_resource(params);
+            for _ in 0..100 {
+                let e = world.spawn((
+                    Transform::IDENTITY,
+                    engine_runtime::Animator {
+                        graph: engine_scene::AssetRef::file(graph),
+                        state: String::from("Idle"),
+                        ..engine_runtime::Animator::default()
+                    },
+                ));
+                assert!(scripts.add(&mut world, e, name));
+            }
+            scripts.tick(&mut world, 1.0 / 64.0);
+            let times: Vec<f64> = (0..51)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    scripts.tick(&mut world, 1.0 / 64.0);
+                    t.elapsed().as_secs_f64() * 1e6
+                })
+                .collect();
+            assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
+            median(times)
+        };
+        let bare = run("Bare");
+        println!("| what | per | median |");
+        println!("|---|---|---:|");
+        println!("| 100 instances, a hook each with an empty loop of 100 | tick | {bare:.1} µs |");
+        for (name, what) in [
+            ("Setter", "`a:set(\"speed\", i)`"),
+            ("Flagger", "`a:set(\"armed\", true)`"),
+            ("Firer", "`a:trigger(\"jump\")`"),
+            ("Reader", "`a.state`"),
+        ] {
+            let t = run(name);
+            println!("| {what} | call | {:.1} ns |", (t - bare) * 1e3 / 10_000.0);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn script_components_are_saved_in_scene_files_and_loaded_from_them() {
         use engine_scene::{SaveOptions, SceneId, SceneRegistry};
@@ -5031,6 +5109,146 @@ return Walker
         );
         let a = world.get::<engine_runtime::Animator>(walker).unwrap();
         assert_eq!(a.clip, "Walk", "left as it was");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-5c: a script sets and fires its animator's graph's parameters by name,
+    /// in the slots the graph names them in, and reads the state the player wrote. Each
+    /// mistake raises an error saying what is wrong (caught here with `pcall`); a call before
+    /// the player read the graph does nothing; an animator without a graph raises.
+    #[test]
+    fn a_script_sets_and_fires_its_animators_graph_parameters() {
+        let dir = project(
+            "graph-calls",
+            &[(
+                "driver.luau",
+                r#"local Driver = component("Driver", { ticks = 0, seen = prop.string(""), said = prop.string("") })
+
+local function try(f: () -> ()): string
+    local ok, why = pcall(f)
+    return if ok then "ok" else tostring(why)
+end
+
+function Driver.on_tick(self, dt)
+    self.ticks += 1
+    local a = self.Animator
+    local said = {}
+    if self.ticks == 1 then
+        table.insert(said, try(function()
+            a:set("speed", 3.5)
+            a:set("armed", true)
+            a:trigger("jump")
+            a:trigger("jump")
+        end))
+    else
+        self.seen = a.state
+        for _, f in {
+            function() a:set("armed", false) end,
+            function() a:set("sped", 1) end,
+            function() a:set("jump", 1) end,
+            function() a:trigger("speed") end,
+            function() a:trigger("jmp") end,
+            function() a:set("speed", "fast") end,
+            function() a:trigger(5) end,
+            function() a.state = "Run" end,
+        } do
+            table.insert(said, try(f))
+        end
+    end
+    self.said = table.concat(said, "\n")
+end
+return Driver
+"#,
+            )],
+        );
+        let mut world = World::new();
+        let mut scripts = load(&dir, &mut world);
+        // The hero's graph read by the player: its parameters by slot, sorted by name.
+        let (read, unread) = (engine_scene::AssetId::new(), engine_scene::AssetId::new());
+        let mut params = engine_runtime::GraphParams::default();
+        params.insert(read, [("armed", false), ("jump", true), ("speed", false)]);
+        world.insert_resource(params);
+        let animator = |graph| engine_runtime::Animator {
+            graph,
+            ..engine_runtime::Animator::default()
+        };
+        let file = engine_scene::AssetRef::file;
+        let hero = world.spawn((Transform::IDENTITY, animator(file(read))));
+        let early = world.spawn((Transform::IDENTITY, animator(file(unread))));
+        let plain = world.spawn((Transform::IDENTITY, animator(engine_scene::AssetRef::NONE)));
+        for e in [hero, early, plain] {
+            assert!(scripts.add(&mut world, e, "Driver"));
+        }
+        let said = |world: &World, scripts: &Scripts, e: Entity| -> Vec<String> {
+            read_text(world, scripts, e, "Driver", "said")
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        };
+        let params = |world: &World, e: Entity| -> [f32; 4] {
+            let p = world.get::<engine_runtime::Animator>(e).unwrap().params;
+            [p[0], p[1], p[2], p[3]]
+        };
+        scripts.tick(&mut world, 1.0 / 64.0);
+        assert_eq!(said(&world, &scripts, hero), ["ok"]);
+        assert_eq!(
+            params(&world, hero),
+            [1.0, 2.0, 3.5, 0.0],
+            "armed, jump, speed"
+        );
+        assert_eq!(said(&world, &scripts, early), ["ok"], "dropped");
+        assert_eq!(params(&world, early), [0.0; 4]);
+        let plain_said = said(&world, &scripts, plain);
+        assert!(
+            plain_said[0].contains(
+                "this Animator plays no graph (its `graph` is none): it has no parameter \
+                 `speed` to set"
+            ),
+            "{plain_said:?}"
+        );
+
+        // The player wrote the state its graph's first layer is in.
+        world
+            .get_mut::<engine_runtime::Animator>(hero)
+            .unwrap()
+            .state = String::from("Idle");
+        scripts.tick(&mut world, 1.0 / 64.0);
+        assert_eq!(read_text(&world, &scripts, hero, "Driver", "seen"), "Idle");
+        assert_eq!(
+            params(&world, hero),
+            [0.0, 2.0, 3.5, 0.0],
+            "armed set false"
+        );
+        let hero_said = said(&world, &scripts, hero);
+        let expected = [
+            "ok",
+            "Animator's graph has no parameter `sped` (it has: armed, speed)",
+            "`jump` is a trigger of the Animator's graph: fire it with `trigger(\"jump\")`, \
+             not `set`",
+            "`speed` is not a trigger of the Animator's graph: set it with \
+             `set(\"speed\", value)`",
+            "Animator's graph has no trigger `jmp` (it has: jump)",
+            "set takes a parameter's name, then a number or a boolean",
+            "trigger takes a trigger's name",
+            "Animator.state is read-only: the player writes its graph's state each tick",
+        ];
+        assert_eq!(hero_said.len(), expected.len(), "{hero_said:?}");
+        for (said, expected) in hero_said.iter().zip(expected) {
+            assert!(said.contains(expected), "{said:?} against {expected:?}");
+        }
+        // At the script's line.
+        assert!(hero_said[1].starts_with("driver:"), "{:?}", hero_said[1]);
+        assert_eq!(
+            world.get::<engine_runtime::Animator>(hero).unwrap().state,
+            "Idle",
+            "not written"
+        );
+        // Not read yet: every name goes, a value of the wrong kind still raises.
+        let early_said = said(&world, &scripts, early);
+        assert_eq!(&early_said[..5], ["ok"; 5], "{early_said:?}");
+        assert!(early_said[5].contains("set takes"), "{early_said:?}");
+        assert_eq!(read_text(&world, &scripts, early, "Driver", "seen"), "");
+        assert!(scripts.reported.is_empty(), "{:?}", scripts.reported);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
