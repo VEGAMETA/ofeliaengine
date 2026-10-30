@@ -165,6 +165,8 @@ fn a_steady_shell_frame_does_not_allocate() {
                 lock: None,
             },
             changed: true,
+
+            key: None,
         },
         Field {
             name: "Rotation",
@@ -175,11 +177,15 @@ fn a_steady_shell_frame_does_not_allocate() {
                 lock: None,
             },
             changed: true,
+
+            key: None,
         },
         Field {
             name: "Visible",
             widget: Widget::Check(Some(true)),
             changed: false,
+
+            key: None,
         },
         Field {
             name: "Mode",
@@ -189,6 +195,8 @@ fn a_steady_shell_frame_does_not_allocate() {
                 missing: false,
             },
             changed: false,
+
+            key: None,
         },
     ];
     let sections = [Section {

@@ -34,7 +34,7 @@
 use engine_ecs::{Children, ComponentId, Entity, Parent, QueryState, World};
 use engine_reflect::{TypeInfo, TypeKind};
 use engine_scene::text::ReadRefs;
-use engine_scene::{AssetId, SceneId};
+use engine_scene::{AnimFile, AssetId, SceneId};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -282,6 +282,8 @@ pub struct History {
     dropped: Vec<(u32, u64)>,
     /// Files' texts the last undo, redo, revert or cancel put back ([`Self::take_files`]).
     put_back: Vec<(AssetId, Arc<str>)>,
+    /// The clip the editor previews, driving fields through its frame ([`Self::drive`]).
+    driving: crate::keying::Driving,
 }
 
 /// The world as it was, kept to put it back (ADR 0107 E3: Play runs on the scene's world,
@@ -501,7 +503,50 @@ impl History {
             doc: 0,
             dropped: Vec::new(),
             put_back: Vec::new(),
+            driving: crate::keying::Driving::default(),
         }
+    }
+
+    /// The editor's frame begins with a clip made in the editor previewed on `entity` (ADR
+    /// 0124's E12-4b-2): clip file `file`, holding `anim`, gives each field its tracks key its
+    /// value at `time` seconds until [`Self::undrive`]. Meanwhile steps record the scene's
+    /// own values of those fields, and with `keying` an action that changes one keys it at
+    /// `time` in the action's own step, the clip's text before and after as a file's change
+    /// ([`Self::change_file`]); undo and redo leave them holding the clip's values.
+    pub fn drive(
+        &mut self,
+        world: &mut World,
+        entity: Entity,
+        file: AssetId,
+        anim: &AnimFile,
+        time: f32,
+        keying: bool,
+    ) {
+        self.driving.begin(world, entity, file, anim, time, keying);
+    }
+
+    /// The editor's frame ends: the fields [`Self::drive`] drove get the scene's values back.
+    /// The clip's file and the clip as the frame's actions keyed it, when they did, for the
+    /// editor to hold and write (the steps have its text already).
+    pub fn undrive(&mut self, world: &mut World) -> Option<(AssetId, &AnimFile)> {
+        self.driving.end(world)
+    }
+
+    /// The driven clip's file changed outside an action this frame (a key made by K):
+    /// actions key it no more until the next frame drives it again.
+    pub fn drive_changed(&mut self) {
+        self.driving.changed();
+    }
+
+    /// The scene written whole while a clip drives fields ([`Self::drive`]): the scene's
+    /// values given to them; what they held, for [`Self::drive_back`] once it is written.
+    pub fn scene_values(&self, world: &mut World) -> Vec<[f32; 4]> {
+        self.driving.all_in(world)
+    }
+
+    /// What [`Self::scene_values`] took, given back.
+    pub fn drive_back(&self, world: &mut World, held: &[[f32; 4]]) {
+        self.driving.all_back(world, held);
     }
 
     /// Steps from now on are document `doc`'s: the scene the editor shows (its tabs share
@@ -768,7 +813,18 @@ impl History {
         }
     }
 
-    fn snapshot(&mut self, world: &World, entity: Entity) -> EntityState {
+    /// `entity`'s state as steps record it: a field a previewed clip drives with the
+    /// scene's value ([`Self::drive`]).
+    fn snapshot(&mut self, world: &mut World, entity: Entity) -> EntityState {
+        let driven = self.driving.scene_in(world, entity);
+        let state = self.record(world, entity);
+        if driven {
+            self.driving.scene_out(world, entity);
+        }
+        state
+    }
+
+    fn record(&mut self, world: &World, entity: Entity) -> EntityState {
         let skip = Skip::of(world);
         let mut components = Vec::new();
         let ids: Vec<ComponentId> = world
@@ -855,6 +911,20 @@ impl History {
             }
         }
         let mut files = open.files;
+        // A previewed clip (ADR 0124's E12-4b-2): what the action changed of the fields it
+        // drives keyed at the playhead, in this step.
+        let seen = &open.seen;
+        let touched = |e: Entity| world.get::<SceneId>(e).is_some_and(|id| seen.contains(id));
+        if let Some((file, before, after)) = self.driving.key(world, touched) {
+            match files.iter_mut().find(|f| f.file == file) {
+                Some(f) => f.after = Arc::from(after),
+                None => files.push(FileChange {
+                    file,
+                    before: Arc::from(before),
+                    after: Arc::from(after),
+                }),
+            }
+        }
         files.retain(|f| f.before != f.after);
         if changes.is_empty() && files.is_empty() {
             return false;
@@ -930,6 +1000,8 @@ impl History {
             })
             .collect();
         apply(world, &mut self.codecs, &changes, true);
+        self.driving
+            .restored(world, |id| changes.iter().any(|c| c.id == id));
     }
 
     /// Takes back the last step if it has merge key `merge` (a drag cancelled with
@@ -945,6 +1017,8 @@ impl History {
         };
         self.bytes -= t.bytes;
         apply(world, &mut self.codecs, &t.changes, true);
+        self.driving
+            .restored(world, |id| t.changes.iter().any(|c| c.id == id));
         put_back(&mut self.put_back, &t.files, true);
         true
     }
@@ -962,6 +1036,8 @@ impl History {
         let t = self.undo.pop_back()?;
         self.bytes -= t.bytes;
         apply(world, &mut self.codecs, &t.changes, true);
+        self.driving
+            .restored(world, |id| t.changes.iter().any(|c| c.id == id));
         put_back(&mut self.put_back, &t.files, true);
         let name = t.name.clone();
         self.redo.push(t);
@@ -974,6 +1050,8 @@ impl History {
         self.open = None;
         let t = self.redo.pop()?;
         apply(world, &mut self.codecs, &t.changes, false);
+        self.driving
+            .restored(world, |id| t.changes.iter().any(|c| c.id == id));
         put_back(&mut self.put_back, &t.files, false);
         let name = t.name.clone();
         self.bytes += t.bytes;

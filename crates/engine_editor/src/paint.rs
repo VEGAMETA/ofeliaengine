@@ -33,6 +33,10 @@ const CACHE_SOFT_LIMIT: usize = 4096;
 const STALE_FRAMES: u64 = 120;
 /// The text bytes and glyphs a layout has room for at least.
 const LAYOUT_ROOM: usize = 32;
+/// Below this many layouts out of use, a frame that laid texts out takes those long out of
+/// use for the next: a frame that needs several new texts at once (the numbers of a vector
+/// a clip moves) finds enough instead of running out halfway.
+const SPARE_LOW: usize = 64;
 
 /// Fonts, laid-out strings and the glyph atlas of the UI.
 pub struct UiText {
@@ -189,12 +193,12 @@ impl LayoutCache {
     /// its room in use the map rehashes them away in place when its room runs out, never by
     /// growing into a larger table (which allocates, at a frame the hash's seed decides).
     /// The layouts out of use have room for as many as the map keeps before it drops them
-    /// (taken out of use only below that), so many going out of use at once allocate
-    /// nothing.
+    /// (taken out of use only below that) beside the few left when more are taken
+    /// ([`SPARE_LOW`]), so many going out of use at once allocate nothing.
     fn new() -> Self {
         Self {
             map: HashMap::with_capacity(2 * CACHE_SOFT_LIMIT),
-            spare: Vec::with_capacity(CACHE_SOFT_LIMIT),
+            spare: Vec::with_capacity(CACHE_SOFT_LIMIT + SPARE_LOW),
             ..Self::default()
         }
     }
@@ -262,15 +266,15 @@ impl LayoutCache {
     }
 
     /// Ends a frame: drops what went unused this frame and the last, once the cache is big;
-    /// after a frame that laid texts out with no spare layout left, takes those long out of
-    /// use for the next ([`STALE_FRAMES`]; the map keeps its capacity: nothing freed or
-    /// allocated).
+    /// after a frame that laid texts out with few spare layouts left ([`SPARE_LOW`]), takes
+    /// those long out of use for the next ([`STALE_FRAMES`]; the map keeps its capacity:
+    /// nothing freed or allocated).
     fn end_frame(&mut self) {
         if self.map.len() > CACHE_SOFT_LIMIT {
             let keep_from = self.frame.saturating_sub(1);
             self.map.retain(|_, e| e.frame >= keep_from);
         } else if self.missed
-            && self.spare.is_empty()
+            && self.spare.len() < SPARE_LOW
             && let Some(before) = self.frame.checked_sub(STALE_FRAMES)
         {
             let spare = &mut self.spare;

@@ -454,6 +454,24 @@ pub struct Field<'a> {
     pub widget: Widget<'a>,
     /// It differs from its type's default: a reset button (↺) follows it.
     pub changed: bool,
+    /// Its ◆ in the clip the Animation tab shows (ADR 0124's E12-4b-2), after the reset
+    /// button; none while no clip made in the editor shows on the entity.
+    pub key: Option<KeyMark>,
+}
+
+/// A field's key in the clip the Animation tab shows (ADR 0124's E12-4b-2): its ◆, filled
+/// where a key lies at the playhead (by shape, not color alone); a click keys the field.
+/// Ordered by how much it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum KeyMark {
+    /// It cannot be keyed (not numbers): its place kept, so fields line up.
+    None,
+    /// It can be keyed; the clip does not move it.
+    Keyable,
+    /// The clip moves it; no key at the playhead.
+    Animated,
+    /// A key at the playhead.
+    Here,
 }
 
 /// A row of the command palette.
@@ -530,6 +548,8 @@ pub enum FieldAction {
     },
     /// The reset button (↺): back to the type's default.
     Reset,
+    /// The field's ◆ (ADR 0124's E12-4b-2): keyed at the playhead.
+    Key,
     /// The field's lock was clicked: shut or opened.
     Lock,
     /// The checkbox was clicked.
@@ -4724,6 +4744,36 @@ fn inspector_dock(
                                 );
                                 if field.changed && ui.sense(id, false).clicked {
                                     action = Some(FieldAction::Reset);
+                                }
+                                // The clip's ◆ (E12-4b-2), while one shows on the entity.
+                                if let Some(mark) = field.key {
+                                    let keys = mark != KeyMark::None;
+                                    let hovered = keys && ui.is_hovered(ui.id("key"));
+                                    let id = ui.container(
+                                        "key",
+                                        Style {
+                                            size: [Size::Fixed(18.0), Size::Fixed(18.0)],
+                                            radius: 3.0,
+                                            background: hovered.then_some(p.field_hover),
+                                            align_main: Align::Center,
+                                            align_cross: Align::Center,
+                                            ..Style::default()
+                                        },
+                                        |ui| {
+                                            let (glyph, color) = match mark {
+                                                KeyMark::None => ("", p.text_dim),
+                                                KeyMark::Keyable => (icons::KEY_EMPTY, p.text_dim),
+                                                KeyMark::Animated => (icons::KEY_EMPTY, p.accent),
+                                                KeyMark::Here => (icons::KEY, p.accent),
+                                            };
+                                            if keys {
+                                                text(ui, "icon", glyph, 12.0, color);
+                                            }
+                                        },
+                                    );
+                                    if keys && ui.sense(id, false).clicked {
+                                        action = Some(FieldAction::Key);
+                                    }
                                 }
                             },
                         );

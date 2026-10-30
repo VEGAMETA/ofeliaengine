@@ -247,7 +247,9 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
         pointer(&mut game, play, pressed);
         frame(&mut player, &mut game, &mut overlay);
     }
-    for _ in 0..120 {
+    // The inspector shows the clip's values as they move (E12-4b-2): new numbers every
+    // frame, whose layouts are reused once long out of use (2 s): measured past that.
+    for _ in 0..300 {
         frame(&mut player, &mut game, &mut overlay);
     }
     let shown = game.clips().1;

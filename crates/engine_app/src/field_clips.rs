@@ -14,7 +14,9 @@ use std::sync::Arc;
 use engine_core::math::{EulerRot, Quat};
 use engine_ecs::{Entity, QueryState, World};
 use engine_runtime::{Animator, FieldRef};
-use engine_scene::{AnimFile, AnimTrack, AssetId, AssetRef, KeyCurve, Name, split_anim_target};
+use engine_scene::{
+    AnimFile, AnimTrack, AssetId, AssetRef, KeyCurve, Name, anim_target, split_anim_target,
+};
 
 use crate::clip_events::{EventDef, crossed, event_defs};
 
@@ -619,6 +621,149 @@ fn write(world: &mut World, target: &Target, value: &[f32; 4], lanes: usize) {
     }
 }
 
+/// A clip made in the editor where the editor edits it (ADR 0124's E12-4b-2): the fields its
+/// tracks key on an entity and their values at a moment, for the editor to show them while
+/// it edits and key what is changed. Laid out again only when the clip changes; its targets
+/// looked up each time (a few names along a short path), allocating nothing.
+#[derive(Debug, Default)]
+pub struct ClipFields {
+    /// The clip as last laid out.
+    file: Option<AnimFile>,
+    clip: Option<FieldClip>,
+    /// Each laid out track's target in the file.
+    targets: Vec<String>,
+}
+
+/// A field a clip made in the editor keys, and its value at a moment
+/// ([`ClipFields::sample`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipField {
+    /// Its track's place among the clip's ([`ClipFields::target`]).
+    pub track: usize,
+    /// The entity whose field it is.
+    pub entity: Entity,
+    /// The field.
+    pub field: FieldRef,
+    /// Its track keys a rotation as three Euler angles in degrees.
+    pub euler: bool,
+    /// Numbers a key.
+    pub lanes: usize,
+    /// Its value as the field holds it (a rotation's quaternion: x, y, z, w).
+    pub value: [f32; 4],
+    /// Its value as the track keys it.
+    pub keyed: [f32; 4],
+}
+
+impl ClipField {
+    /// What its track keys for the field's value `now` (as the field holds it): a rotation's
+    /// Euler angles nearest the ones it has at the moment, so no key turns a whole turn
+    /// from its neighbours.
+    pub fn key_of(&self, now: &[f32; 4]) -> [f32; 4] {
+        if self.euler {
+            euler_near(now, &self.keyed)
+        } else {
+            *now
+        }
+    }
+}
+
+impl ClipFields {
+    /// Clip `anim`'s fields on `entity` at `time` seconds (held within the clip), in `out`:
+    /// those whose entity and field are found and hold what the track keys.
+    pub fn sample(
+        &mut self,
+        world: &mut World,
+        entity: Entity,
+        anim: &AnimFile,
+        time: f32,
+        out: &mut Vec<ClipField>,
+    ) {
+        if self.file.as_ref() != Some(anim) {
+            let clip = FieldClip::new(anim);
+            self.targets.clear();
+            self.targets
+                .extend(clip.tracks.iter().map(|t| anim_target(&t.below, &t.field)));
+            self.clip = Some(clip);
+            self.file = Some(anim.clone());
+        }
+        out.clear();
+        let Some(clip) = &self.clip else {
+            return;
+        };
+        let t = time.clamp(0.0, clip.length);
+        for (track, laid) in clip.tracks.iter().enumerate() {
+            let Some(target) = below(world, entity, &laid.below) else {
+                continue;
+            };
+            let Some(field) = FieldRef::find(world, &laid.field) else {
+                continue;
+            };
+            let euler = field.is_rotation() && laid.lanes == 3;
+            if !euler && field.lanes() != laid.lanes {
+                continue;
+            }
+            let mut keyed = [0.0f32; 4];
+            laid.sample(t, &mut keyed);
+            let value = if euler { euler_quat(&keyed) } else { keyed };
+            out.push(ClipField {
+                track,
+                entity: target,
+                field,
+                euler,
+                lanes: laid.lanes,
+                value,
+                keyed,
+            });
+        }
+    }
+
+    /// The target in the file of track `track` ([`ClipField::track`]); empty for none.
+    pub fn target(&self, track: usize) -> &str {
+        self.targets.get(track).map_or("", String::as_str)
+    }
+}
+
+/// Field `field`'s value `raw` (as the field holds it) as a new track keys it, and its numbers
+/// a key: a rotation as three Euler angles in degrees (ADR 0124's E12-4a), anything else as it
+/// is.
+pub fn key_value(field: FieldRef, raw: &[f32; 4]) -> ([f32; 4], usize) {
+    if field.is_rotation() {
+        (euler_near(raw, &[0.0; 4]), 3)
+    } else {
+        (*raw, field.lanes())
+    }
+}
+
+/// Euler angles in degrees (pitch about X, yaw about Y, roll about Z) as the quaternion they
+/// make, applied yaw first as the inspector shows them.
+fn euler_quat(e: &[f32; 4]) -> [f32; 4] {
+    let [pitch, yaw, roll] = [e[0], e[1], e[2]].map(f32::to_radians);
+    Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll).to_array()
+}
+
+/// Quaternion `q` (x, y, z, w) as Euler angles in degrees as [`euler_quat`] makes them: of
+/// the two sets that make it, the one nearer `near`, each angle a whole number of turns from
+/// where it lands nearest `near`'s.
+fn euler_near(q: &[f32; 4], near: &[f32; 4]) -> [f32; 4] {
+    let (yaw, pitch, roll) = Quat::from_array(*q).normalize().to_euler(EulerRot::YXZ);
+    let a = [pitch.to_degrees(), yaw.to_degrees(), roll.to_degrees()];
+    // The other set: pitch mirrored, yaw and roll a half turn on.
+    let b = [180.0 - a[0], a[1] + 180.0, a[2] + 180.0];
+    let wrap = |v: f32, to: f32| v + 360.0 * ((to - v) / 360.0).round();
+    let nearest = |set: [f32; 3]| {
+        let w = [
+            wrap(set[0], near[0]),
+            wrap(set[1], near[1]),
+            wrap(set[2], near[2]),
+        ];
+        let d = (w[0] - near[0]).abs() + (w[1] - near[1]).abs() + (w[2] - near[2]).abs();
+        (w, d)
+    };
+    let ((wa, da), (wb, db)) = (nearest(a), nearest(b));
+    let w = if db < da { wb } else { wa };
+    [w[0], w[1], w[2], 0.0]
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::float_cmp)]
@@ -906,6 +1051,65 @@ mod tests {
             "the scene's own"
         );
         assert_eq!(world.get::<PointLight>(lamp).unwrap().range, 3.0);
+    }
+
+    /// ADR 0124's E12-4b-2: the editor's sampler finds a clip's fields on an entity and a
+    /// child and gives their values at a moment both as the fields hold them and as the
+    /// tracks key them; a rotation edited past half a turn keys the angles nearest the ones
+    /// the track has, and a new track's rotation keys its plain angles.
+    #[test]
+    fn the_editors_sampler_gives_a_clips_fields_and_keys_edits_near_them() {
+        use engine_core::math::Vec3;
+        use engine_ecs::Transform;
+        use engine_runtime::PointLight;
+        let mut world = World::new();
+        let door = world.spawn((Transform::IDENTITY,));
+        let lamp = world.spawn((Name::new("Lamp"), PointLight::new(Vec3::ONE, 3.0)));
+        world.set_parent(lamp, Some(door)).unwrap();
+        let mut anim = AnimFile::default();
+        anim.set_key("Transform.rotation", 0.0, &[0.0, 170.0, 0.0]);
+        anim.set_key("Transform.rotation", 1.0, &[0.0, 190.0, 0.0]);
+        anim.set_key("Lamp:PointLight.range", 0.0, &[8.0]);
+        anim.set_key("Missing:PointLight.range", 0.0, &[1.0]);
+        let mut fields = ClipFields::default();
+        let mut out = Vec::new();
+        fields.sample(&mut world, door, &anim, 0.5, &mut out);
+        assert_eq!(out.len(), 2, "the missing child's track left out");
+        let turn = out.iter().find(|f| f.entity == door).unwrap();
+        assert!(turn.euler && turn.lanes == 3);
+        assert!((turn.keyed[1] - 180.0).abs() < 1e-3, "{:?}", turn.keyed);
+        let q = Quat::from_array(turn.value);
+        assert!(q.angle_between(Quat::from_rotation_y(core::f32::consts::PI)) < 1e-3);
+        assert_eq!(fields.target(turn.track), "Transform.rotation");
+        let range = out.iter().find(|f| f.entity == lamp).unwrap();
+        assert_eq!((range.value[0], range.lanes), (8.0, 1));
+        assert_eq!(fields.target(range.track), "Lamp:PointLight.range");
+        // Turned on to 200 degrees: the quaternion's own angles say -160, the key 200.
+        let edited = Quat::from_rotation_y(200f32.to_radians()).to_array();
+        let key = turn.key_of(&edited);
+        assert!((key[1] - 200.0).abs() < 1e-2, "{key:?}");
+        assert!(key[0].abs() < 1e-2 && key[2].abs() < 1e-2, "{key:?}");
+        // A new track: plain angles, three of them.
+        let field = FieldRef::find(&mut world, "Transform.rotation").unwrap();
+        let (key, lanes) = key_value(field, &Quat::from_rotation_x(0.5).to_array());
+        assert_eq!(lanes, 3);
+        assert!((key[0] - 0.5f32.to_degrees()).abs() < 1e-3, "{key:?}");
+        // Every turn comes back as itself through its angles.
+        for (y, p, r) in [
+            (10.0f32, 80.0f32, -30.0f32),
+            (-120.0, -45.0, 170.0),
+            (90.0, 0.0, 0.0),
+        ] {
+            let q = Quat::from_euler(
+                EulerRot::YXZ,
+                y.to_radians(),
+                p.to_radians(),
+                r.to_radians(),
+            );
+            let e = euler_near(&q.to_array(), &[p, y, r, 0.0]);
+            assert!((e[0] - p).abs() < 1e-2 && (e[1] - y).abs() < 1e-2, "{e:?}");
+            assert!(Quat::from_array(euler_quat(&e)).angle_between(q) < 1e-3);
+        }
     }
 
     #[test]

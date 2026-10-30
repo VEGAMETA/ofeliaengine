@@ -246,16 +246,19 @@ fn main() {
             name: "Position",
             widget: numbers(&["0.5", "0.9", "2"]),
             changed: true,
+            key: None,
         },
         Field {
             name: "Rotation",
             widget: numbers(&["0", "45", "0"]),
             changed: true,
+            key: None,
         },
         Field {
             name: "Scale",
             widget: scaled(&["1", "1", "1"]),
             changed: false,
+            key: None,
         },
     ];
     let body = [
@@ -263,16 +266,19 @@ fn main() {
             name: "Speed",
             widget: one(&["6.5"]),
             changed: true,
+            key: None,
         },
         Field {
             name: "Jump height",
             widget: one(&["1.4"]),
             changed: false,
+            key: None,
         },
         Field {
             name: "Mass",
             widget: one(&["72"]),
             changed: false,
+            key: None,
         },
         Field {
             name: "Gravity",
@@ -282,6 +288,7 @@ fn main() {
                 missing: false,
             },
             changed: false,
+            key: None,
         },
     ];
     let script = [
@@ -289,11 +296,13 @@ fn main() {
             name: "Source",
             widget: Widget::Text("player.luau"),
             changed: false,
+            key: None,
         },
         Field {
             name: "Hot reload",
             widget: Widget::Check(Some(true)),
             changed: true,
+            key: None,
         },
     ];
     let physics = [
@@ -301,11 +310,13 @@ fn main() {
             name: "Layer",
             widget: Widget::Text("Characters"),
             changed: false,
+            key: None,
         },
         Field {
             name: "Collides with",
             widget: Widget::Text("World, Enemies"),
             changed: false,
+            key: None,
         },
     ];
     let inspector = [

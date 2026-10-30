@@ -792,3 +792,98 @@ fn a_files_text_is_a_step_too() {
     assert_eq!(&*h.take_files()[0].1, "metallic = 0");
     assert_eq!(h.steps().count(), 1);
 }
+
+/// ADR 0124's E12-4b-2: a clip driving a door's turn through the editor's frames. A drag of
+/// the turn keys the clip at the playhead in the drag's one step and changes nothing of the
+/// scene, whose turn is back as each frame ends; undo and redo hand the clip's text back. A
+/// move of the door, which the clip does not key, is an ordinary step recorded with the
+/// scene's turn; a scene written in a frame has the scene's turn; a reverted drag keys
+/// nothing.
+#[test]
+fn a_driven_clip_keys_what_an_action_changes_and_steps_keep_the_scenes_values() {
+    use engine_core::math::{EulerRot, Quat};
+    let mut w = World::new();
+    let mut h = History::new();
+    let file = engine_scene::AssetId::new();
+    let door = spawn(&mut w, 0.0);
+    let yaw = |w: &World| {
+        let (y, _, _) = w
+            .get::<Transform>(door)
+            .unwrap()
+            .rotation
+            .to_euler(EulerRot::YXZ);
+        y.to_degrees()
+    };
+    let mut anim = engine_scene::AnimFile::default();
+    anim.set_key("Transform.rotation", 0.0, &[0.0, 0.0, 0.0]);
+    anim.set_key("Transform.rotation", 1.0, &[0.0, 90.0, 0.0]);
+    let first = anim.to_text(file);
+    // Two frames of one drag, the clip at half a second.
+    for to in [60.0f32, 70.0] {
+        h.drive(&mut w, door, file, &anim, 0.5, true);
+        assert!(yaw(&w) > 44.9, "the clip's turn shows: {}", yaw(&w));
+        h.begin("Rotate", Some(1));
+        h.touch(&mut w, door);
+        w.get_mut::<Transform>(door).unwrap().rotation = Quat::from_rotation_y(to.to_radians());
+        assert!(h.commit(&mut w), "a key is a step");
+        let (keyed_file, keyed) = h.undrive(&mut w).unwrap();
+        assert_eq!(keyed_file, file);
+        anim = keyed.clone();
+        assert!(yaw(&w).abs() < 1e-3, "the scene's turn back: {}", yaw(&w));
+    }
+    let k = anim.key_at("Transform.rotation", 0.5).unwrap();
+    let key = &anim.tracks["Transform.rotation"].keys[k];
+    assert!((key.value[1] - 70.0).abs() < 1e-2, "{:?}", key.value);
+    assert_eq!(h.steps().count(), 1, "one drag, one step");
+    assert_eq!(
+        h.steps().next().unwrap().entity_count(),
+        0,
+        "the scene unchanged"
+    );
+    assert!(h.undo(&mut w).is_some());
+    assert_eq!(&*h.take_files()[0].1, first, "the clip as it was");
+    assert!(yaw(&w).abs() < 1e-3);
+    assert!(h.redo(&mut w).is_some());
+    assert_eq!(&*h.take_files()[0].1, anim.to_text(file));
+    // A move: the scene's position changes, recorded with the scene's turn.
+    h.drive(&mut w, door, file, &anim, 0.5, true);
+    h.begin("Move", None);
+    h.touch(&mut w, door);
+    w.get_mut::<Transform>(door).unwrap().translation.x = 3.0;
+    assert!(h.commit(&mut w));
+    // A scene written now has the scene's turn.
+    let held = h.scene_values(&mut w);
+    assert!(yaw(&w).abs() < 1e-3);
+    h.drive_back(&mut w, &held);
+    assert!((yaw(&w) - 70.0).abs() < 1e-2, "the clip's again");
+    assert!(h.undrive(&mut w).is_none(), "nothing keyed");
+    assert!(h.undo(&mut w).is_some());
+    let t = w.get::<Transform>(door).unwrap();
+    assert_eq!(t.translation.x, 0.0);
+    assert!(yaw(&w).abs() < 1e-3, "the turn as the scene had it");
+    // A drag reverted (Escape): its key goes with its step.
+    h.drive(&mut w, door, file, &anim, 0.5, true);
+    h.begin("Rotate", Some(2));
+    h.touch(&mut w, door);
+    w.get_mut::<Transform>(door).unwrap().rotation = Quat::from_rotation_y(1.0);
+    assert!(h.commit(&mut w));
+    assert!(h.revert(&mut w, 2));
+    assert_eq!(
+        &*h.take_files()[0].1,
+        anim.to_text(file),
+        "the clip put back"
+    );
+    assert!(
+        h.undrive(&mut w).is_none(),
+        "nothing keyed after the revert"
+    );
+    assert!(yaw(&w).abs() < 1e-3);
+    // While the clip plays, an edit of its turn is not kept.
+    h.drive(&mut w, door, file, &anim, 0.5, false);
+    h.begin("Rotate", None);
+    h.touch(&mut w, door);
+    w.get_mut::<Transform>(door).unwrap().rotation = Quat::from_rotation_y(1.0);
+    assert!(!h.commit(&mut w), "no step");
+    assert!(h.undrive(&mut w).is_none());
+    assert!(yaw(&w).abs() < 1e-3);
+}

@@ -28,6 +28,7 @@ pub mod icons;
 mod import;
 pub mod input;
 pub mod inspector;
+mod keying;
 mod marked;
 mod material;
 mod mixer;
