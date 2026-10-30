@@ -306,6 +306,8 @@ if let (Some((slot, false)), Some(animator)) = (slot, world.get_mut::<Animator>(
 - The parameters a game sets keep their values; the others follow the graph's (its starting
   values until a transition changes them), and a trigger is back at 0 once a transition
   took it. `params_set` marks which were set.
+- Scripts set them by name: `self.Animator:set("speed", 3.5)` and the rest of "From
+  scripts, its graph" above.
 - The graph plays at the animator's `speed`, held while it is `paused`.
 - For now its root motion stays in its pose, its clips fire no events, and a save does not
   keep where it is (E12-5c-2).
