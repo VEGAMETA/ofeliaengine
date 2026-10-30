@@ -904,6 +904,12 @@ Last updated: 2026-10-28.
       graph that cannot be read shows the rest pose; the editor's copy plays in place of
       the file. 0 allocations (CesiumMan with a graph character beside the others).
     - Root motion, events and saves of a graph: 5c-2.
+  - **E12-5b-2, inertialized transitions** (#483, ADR 0124's as-built, research note's new
+    section): Bollo's inertialization (no patents found, 2026-10-30), the destination at
+    full strength from its first frame; a blend cut short goes on from the pose shown, with
+    no pop (3e-8 rad) and its speed kept (1.3 %). A transition's pose is captured once after
+    the tick that took it (8 µs); frames unchanged (4.3–4.6 µs a character). About 7 KB a
+    52-joint character in graphs that inertialize (compacting postponed, 3б). 0 allocations.
   - **E12-5b, the graph's runtime** (#477, ADR 0124's as-built):
     - `engine_anim::AnimGraph` is a graph cooked per rig into flat arrays. `GraphState` is
       each character's state.
