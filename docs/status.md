@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-3b-1, clip events** (#PR, ADR 0124's as-built): a model's `.meta` names moments
+  - **E12-3b-1, clip events** (#462, ADR 0124's as-built): a model's `.meta` names moments
     of its clips (time, name, data, sound). Each tick fires those its play passed (any
     speed, backwards, several loops; through a fade only the heavier clip) into
     `AnimationEvents` for the game's tick; scripts hear `on_animation_event(name, data)` in
