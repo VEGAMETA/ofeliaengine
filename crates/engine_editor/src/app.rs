@@ -184,6 +184,9 @@ const GRAPH_KEYS: KeyContext = KeyContext::Panel(4);
 /// The inspector's Clips' keys after a press in them (ADR 0124's E12-1b-3): the arrows move
 /// through the clips.
 const CLIPS_KEYS: KeyContext = KeyContext::Panel(5);
+/// The Animation tab's keys after a press in it (E12-3a): the arrows step a frame, Home and
+/// End go to the clip's ends, Space plays or stops it.
+const ANIM_KEYS: KeyContext = KeyContext::Panel(6);
 
 /// What a part shows while the selected entities hold different values there.
 const MIXED: &str = "—";
@@ -197,6 +200,8 @@ const PROFILER_TAB: usize = 5;
 const DEBUGGER_TAB: usize = 2;
 /// The bottom bar's Audio tab: the mixer (E11-1).
 const AUDIO_TAB: usize = 3;
+/// The bottom bar's Animation tab: the Clips' chosen clip on a timeline (ADR 0124's E12-3a).
+const ANIMATION_TAB: usize = 4;
 
 /// How many closed scenes "Reopen Closed Scene" can bring back.
 const CLOSED_KEPT: usize = 20;
@@ -878,6 +883,12 @@ struct CommandIds {
     preview_sound: CommandId,
     clip_next: CommandId,
     clip_previous: CommandId,
+    animation: CommandId,
+    frame_next: CommandId,
+    frame_previous: CommandId,
+    frame_first: CommandId,
+    frame_last: CommandId,
+    animation_play: CommandId,
     auto_play: CommandId,
     /// A material graph's nodes' previews on its canvas, or not (E10-4g).
     node_previews: CommandId,
@@ -1081,6 +1092,12 @@ fn commands() -> (Commands, CommandIds) {
         preview_sound: c.register("assets.preview", "Assets", "Play or Stop the Picked Sound"),
         clip_next: c.register("clips.next", "Clips", "Next Clip"),
         clip_previous: c.register("clips.previous", "Clips", "Previous Clip"),
+        animation: c.register("view.animation", "View", "Animation"),
+        frame_next: c.register("animation.next_frame", "Animation", "Next Frame"),
+        frame_previous: c.register("animation.previous_frame", "Animation", "Previous Frame"),
+        frame_first: c.register("animation.first_frame", "Animation", "First Frame"),
+        frame_last: c.register("animation.last_frame", "Animation", "Last Frame"),
+        animation_play: c.register("animation.play", "Animation", "Play or Stop the Clip"),
         auto_play: c.register("assets.auto_play", "Assets", "Auto Play Sounds"),
         node_previews: c.register("graph.node_previews", "Graph", "Node Previews"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
@@ -1187,6 +1204,14 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
     .map(|(chord, id)| (chord, id, DOCK_KEYS));
     let clips = [("ArrowDown", ids.clip_next), ("ArrowUp", ids.clip_previous)]
         .map(|(chord, id)| (chord, id, CLIPS_KEYS));
+    let anim = [
+        ("ArrowRight", ids.frame_next),
+        ("ArrowLeft", ids.frame_previous),
+        ("Home", ids.frame_first),
+        ("End", ids.frame_last),
+        ("Space", ids.animation_play),
+    ]
+    .map(|(chord, id)| (chord, id, ANIM_KEYS));
     let global = [
         ("Ctrl+Z", ids.undo),
         ("Ctrl+Y", ids.redo),
@@ -1220,6 +1245,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         // VS Code's Run and Debug view.
         ("Ctrl+Shift+D", ids.debugger),
         ("Alt+A", ids.mixer),
+        ("Alt+N", ids.animation),
         ("P", ids.hear),
         ("Ctrl+P", ids.find),
         ("Ctrl+R", ids.restart),
@@ -1322,6 +1348,7 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         .chain(tree)
         .chain(dock)
         .chain(clips)
+        .chain(anim)
         .chain(code)
         .chain(graph)
     {
@@ -1425,6 +1452,8 @@ struct ClipFacts {
     facts: String,
     seam: String,
     jumps: bool,
+    /// "sampled at 30 Hz" (the Animation tab's row, E12-3a).
+    sampled: String,
 }
 
 impl ClipFacts {
@@ -1475,6 +1504,7 @@ impl ClipFacts {
                 format!("loops within {}", length_text(seam))
             },
             jumps,
+            sampled: format!("sampled at {rate:.0} Hz"),
         }
     }
 
@@ -1513,6 +1543,15 @@ fn floor_walked(floor: [f32; 3], moved: Vec3, turned: f32) -> [f32; 3] {
     [back.x, back.z, yaw]
 }
 
+/// Where the Animation tab's keys move the playhead (ADR 0124's E12-3a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameStep {
+    Next,
+    Previous,
+    First,
+    Last,
+}
+
 /// Whose clips the inspector's Clips show (ADR 0124's E12-1b): a character of the scene, or
 /// a model file picked in the dock (shown by the engine's live preview).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1535,6 +1574,10 @@ struct ClipsView {
     beside: Option<usize>,
     time: f32,
     held: bool,
+    /// Whose clips, as the Animation tab names them (its file's name, or the character's),
+    /// found once; and "24 joints" (E12-3a).
+    subject: String,
+    joints: String,
     /// The time its text shows, and the text ("frame 18 / 48 · 0.75 s").
     shown: f32,
     time_text: String,
@@ -1550,6 +1593,8 @@ impl ClipsView {
             beside: None,
             time: 0.0,
             held: false,
+            subject: String::new(),
+            joints: String::new(),
             shown: f32::NAN,
             time_text: String::with_capacity(48),
         }
@@ -2948,6 +2993,9 @@ struct Editor {
     clips_focus: bool,
     /// The picked model's floor holds still under its clips (E12-1b-3's In Place).
     clip_in_place: bool,
+    /// The Animation tab's keys after a press in it (E12-3a), and its ruler's node (tests).
+    anim_focus: bool,
+    anim_ruler: u64,
     renaming_file: Option<AssetId>,
     /// The file the inspector shows instead of the entities, with its import settings
     /// (E4-9): the dock's last pick, until the entity selection changes.
@@ -3958,6 +4006,8 @@ impl Editor {
             dock_focus: false,
             clips_focus: false,
             clip_in_place: false,
+            anim_focus: false,
+            anim_ruler: 0,
             renaming_file: None,
             inspected: None,
             material_docs: Vec::new(),
@@ -4769,6 +4819,28 @@ impl Editor {
         let mut fields: Vec<Field<'_>> = recycle(std::mem::take(&mut self.lists.fields));
         let mut bus_options: Vec<&str> = recycle(std::mem::take(&mut self.lists.bus_options));
         bus_options.extend(self.bus_choices.iter().map(String::as_str));
+        // The Animation tab's timeline (ADR 0124's E12-3a) names whose clips they are:
+        // found once, before the lists below borrow the Clips.
+        if self.bottom == Some(ANIMATION_TAB)
+            && let Some(view) = self.clips.as_mut().filter(|v| v.subject.is_empty())
+        {
+            view.subject = match view.of {
+                ClipsOf::Entity(e) => world
+                    .get::<Name>(e)
+                    .map_or_else(|| String::from("Character"), |n| n.as_str().to_owned()),
+                ClipsOf::Asset(file) => self.asset_db.get(file).map_or_else(
+                    || String::from("Model"),
+                    |entry| {
+                        entry
+                            .path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&entry.path)
+                            .to_owned()
+                    },
+                ),
+            };
+        }
         // An animator's clip field (ADR 0124's E12-2): the active character's clips.
         let mut clip_options: Vec<&str> = recycle(std::mem::take(&mut self.lists.clip_options));
         if let Some(view) = self
@@ -6325,6 +6397,47 @@ impl Editor {
                     .map(|(name, &depth)| crate::shell::JointRow { name, depth }),
             );
         }
+        let animation_view = (self.bottom == Some(ANIMATION_TAB)).then(|| {
+            let chosen = self
+                .clips
+                .as_ref()
+                .and_then(|v| Some((v, v.clips.get(v.chosen)?)));
+            match chosen {
+                Some((v, c)) => crate::shell::AnimationView {
+                    subject: &v.subject,
+                    clip: &c.name,
+                    note: "",
+                    playing: match v.of {
+                        ClipsOf::Asset(file) => self
+                            .shown_model
+                            .as_ref()
+                            .is_some_and(|m| m.file == file && m.playing),
+                        ClipsOf::Entity(_) => self.in_place.is_some(),
+                    },
+                    looping: self.clip_loop,
+                    speed: CLIP_SPEED_TEXTS[self.clip_speed],
+                    time: &v.time_text,
+                    frames: c.frames,
+                    playhead: v.playhead(),
+                    joints: &v.joints,
+                    sampled: &c.sampled,
+                },
+                None => crate::shell::AnimationView {
+                    subject: "",
+                    clip: "",
+                    note: "Select a character, or pick a skinned model in the FileSystem \
+                           dock: its clips show here",
+                    playing: false,
+                    looping: self.clip_loop,
+                    speed: "",
+                    time: "",
+                    frames: 0,
+                    playhead: 0.0,
+                    joints: "",
+                    sampled: "",
+                },
+            }
+        });
         let mut clip_rows: Vec<crate::shell::ClipRow<'_>> =
             recycle(std::mem::take(&mut self.lists.clip_rows));
         if let Some(view) = &self.clips {
@@ -6441,6 +6554,7 @@ impl Editor {
             history: self.history_shown.then_some(history_rows.as_slice()),
             profiler: profiler_view,
             mixer: mixer_view,
+            animation: animation_view,
             debugger: debugger_view,
             playing,
             paused: self.play.as_ref().is_some_and(|p| p.paused),
@@ -6657,6 +6771,23 @@ impl Editor {
         }
         if response.clip_in_place {
             self.clip_in_place = !self.clip_in_place;
+        }
+        // The Animation tab (E12-3a): the Clips' own, on its timeline.
+        self.anim_ruler = response.anim_ruler;
+        if response.anim_play {
+            self.toggle_clip_play();
+        }
+        if response.anim_loop {
+            self.clip_loop = !self.clip_loop;
+        }
+        if response.anim_speed {
+            self.clip_speed = (self.clip_speed + 1) % CLIP_SPEEDS.len();
+        }
+        if let Some(by) = response.anim_clip_step {
+            self.step_clip(by);
+        }
+        if let Some(ruler) = response.anim_scrub {
+            self.scrub_clip(ruler);
         }
         if let Some(bar) = response.clip_scrub {
             self.scrub_clip(bar);
@@ -6925,6 +7056,7 @@ impl Editor {
                 1 => self.run(world, self.ids.tasks),
                 DEBUGGER_TAB => self.run(world, self.ids.debugger),
                 AUDIO_TAB => self.run(world, self.ids.mixer),
+                ANIMATION_TAB => self.run(world, self.ids.animation),
                 PROFILER_TAB => self.run(world, self.ids.profiler),
                 _ => self.say(String::from(
                     "Only the Output, the Tasks, the Debugger, the Audio mixer and the Profiler \
@@ -6978,6 +7110,7 @@ impl Editor {
             self.tree_focus = response.tree_hovered;
             self.dock_focus = response.listing_hovered;
             self.clips_focus = response.clips_hovered;
+            self.anim_focus = response.anim_hovered;
             // Anywhere but in the code, the keys are the editor's again.
             if response.code == 0 || !self.ui.hovers(response.code) {
                 self.code_focus = false;
@@ -7284,6 +7417,8 @@ impl Editor {
             Some(DOCK_KEYS)
         } else if self.clips_focus && self.clips.is_some() {
             Some(CLIPS_KEYS)
+        } else if self.anim_focus && self.bottom == Some(ANIMATION_TAB) {
+            Some(ANIM_KEYS)
         } else {
             None
         };
@@ -16492,6 +16627,22 @@ impl Editor {
         } else if id == ids.clip_next || id == ids.clip_previous {
             // The Clips' arrows (E12-1b-3).
             self.step_clip(if id == ids.clip_next { 1 } else { -1 });
+        } else if id == ids.animation {
+            self.bottom = if self.bottom == Some(ANIMATION_TAB) {
+                None
+            } else {
+                Some(ANIMATION_TAB)
+            };
+        } else if id == ids.frame_next {
+            self.step_frame(FrameStep::Next);
+        } else if id == ids.frame_previous {
+            self.step_frame(FrameStep::Previous);
+        } else if id == ids.frame_first {
+            self.step_frame(FrameStep::First);
+        } else if id == ids.frame_last {
+            self.step_frame(FrameStep::Last);
+        } else if id == ids.animation_play {
+            self.toggle_clip_play();
         } else if id == ids.node_previews {
             self.node_previews = !self.node_previews;
             self.write_session(world);
@@ -19176,6 +19327,36 @@ impl Editor {
         self.start_in_place(vec![(e, Some(chosen))]);
     }
 
+    /// The Clips' playhead a frame on or back, or at the clip's first or last frame (ADR
+    /// 0124's E12-3a): the clip stops there, held, as a scrub holds it.
+    fn step_frame(&mut self, to: FrameStep) {
+        if let Some(view) = self.clips.as_ref()
+            && let ClipsOf::Asset(file) = view.of
+            && let Some(m) = self.shown_model.as_mut().filter(|m| m.file == file)
+        {
+            m.playing = false;
+        }
+        self.in_place = None;
+        let Some(view) = self.clips.as_mut() else {
+            return;
+        };
+        let Some(c) = view.clips.get(view.chosen) else {
+            return;
+        };
+        let rate = c.rate.max(1e-6);
+        let frame = (view.time * rate).round() as i64;
+        let last = i64::from(c.frames);
+        let frame = match to {
+            FrameStep::Next => frame + 1,
+            FrameStep::Previous => frame - 1,
+            FrameStep::First => 0,
+            FrameStep::Last => last,
+        }
+        .clamp(0, last);
+        view.time = (frame as f32 / rate).min(c.duration);
+        view.held = true;
+    }
+
     /// The clip after (`by` 1) or before (-1) the chosen one in the Clips (ADR 0124's
     /// E12-1b-3), chosen as a click on its row chooses it; a picked file's plays at once with
     /// Auto Play, as the dock's sounds do.
@@ -19371,7 +19552,9 @@ impl Editor {
                     .as_ref()
                     .is_none_or(|v| v.of != of || v.rig != at)
                 {
-                    self.clips = Some(ClipsView::new(of, at, ClipFacts::of(rig)));
+                    let mut view = ClipsView::new(of, at, ClipFacts::of(rig));
+                    view.joints = format!("{} joints", rig.skeleton().joint_count());
+                    self.clips = Some(view);
                 }
                 // The active character's skeleton for the inspector (E12-1c).
                 if let ClipsOf::Entity(e) = of {
@@ -24932,6 +25115,23 @@ impl<G> EditorGame<G> {
     /// The clip played beside the chosen one (ADR 0124's E12-1b-3b): for tests.
     pub fn beside_clip(&self) -> Option<usize> {
         self.shared.borrow().clips.as_ref().and_then(|v| v.beside)
+    }
+
+    /// The Clips' playhead in seconds, and whether the Animation tab is open with its ruler
+    /// where the last frame drew it (ADR 0124's E12-3a): for tests.
+    pub fn clip_time(&self) -> Option<f32> {
+        self.shared.borrow().clips.as_ref().map(|v| v.time)
+    }
+
+    /// The Animation tab's ruler where the last frame drew it: x, y, width, height (E12-3a,
+    /// for tests).
+    pub fn animation_ruler(&self) -> Option<[f32; 4]> {
+        let shared = self.shared.borrow();
+        if shared.bottom != Some(ANIMATION_TAB) || shared.anim_ruler == 0 {
+            return None;
+        }
+        let r = shared.ui.rect_of(shared.anim_ruler)?;
+        Some([r.pos[0], r.pos[1], r.size[0], r.size[1]])
     }
 
     /// Whether the picked model file's preview is drawn in its Clips, and whether it plays
@@ -33037,6 +33237,58 @@ mod tests {
         ed.run(&mut world, previous);
         ed.run(&mut world, previous);
         assert_eq!(chosen(&ed), Some((0, true)), "the first stays the first");
+    }
+
+    /// E12-3a: the Animation tab's ruler's numbers as far apart as they read, and its frame
+    /// steps held at the clip's ends; Alt+N's command opens and closes the tab.
+    #[test]
+    fn the_animation_tab_steps_frames_and_spaces_its_numbers() {
+        assert_eq!(crate::shell::ruler_step(30, 600.0), 5);
+        assert_eq!(crate::shell::ruler_step(300, 600.0), 50);
+        assert_eq!(crate::shell::ruler_step(4, 600.0), 1);
+        let mut world = World::new();
+        let mut ed = draw_editor("animation-tab", &mut world);
+        let man = world.spawn((SceneId::new(), Name::new("Man"), Transform::IDENTITY));
+        ed.clips = Some(ClipsView::new(
+            ClipsOf::Entity(man),
+            1,
+            vec![ClipFacts::new(
+                0,
+                "Walk",
+                1.0,
+                31,
+                30.0,
+                3000,
+                1e-4,
+                1.5,
+                (2e-4, "hips"),
+            )],
+        ));
+        let time = |ed: &Editor| ed.clips.as_ref().map(|v| (v.time * 30.0).round() as i32);
+        let ids = (
+            ed.ids.frame_next,
+            ed.ids.frame_previous,
+            ed.ids.frame_first,
+            ed.ids.frame_last,
+        );
+        ed.run(&mut world, ids.0);
+        ed.run(&mut world, ids.0);
+        assert_eq!(time(&ed), Some(2), "two frames on");
+        ed.run(&mut world, ids.1);
+        assert_eq!(time(&ed), Some(1));
+        ed.run(&mut world, ids.3);
+        assert_eq!(time(&ed), Some(30), "the last frame");
+        ed.run(&mut world, ids.0);
+        assert_eq!(time(&ed), Some(30), "held at the end");
+        ed.run(&mut world, ids.2);
+        ed.run(&mut world, ids.1);
+        assert_eq!(time(&ed), Some(0), "held at the start");
+        assert!(ed.clips.as_ref().is_some_and(|v| v.held), "held there");
+        let animation = ed.ids.animation;
+        ed.run(&mut world, animation);
+        assert_eq!(ed.bottom, Some(ANIMATION_TAB));
+        ed.run(&mut world, animation);
+        assert_eq!(ed.bottom, None);
     }
 
     /// E12-1b-3b: a Ctrl+click on a picked file's clip plays it beside the chosen one; again,

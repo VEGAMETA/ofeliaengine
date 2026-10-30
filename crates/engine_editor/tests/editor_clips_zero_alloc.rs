@@ -217,9 +217,29 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
         pointer(&mut game, play, pressed);
         frame(&mut player, &mut game, &mut overlay);
     }
+    // The Animation tab open (ADR 0124's E12-3a): its timeline drawn every frame too.
+    for (virtual_key, scancode, pressed) in [
+        (0x12, 0x38, true),
+        (0x4E, 0x31, true),
+        (0x4E, 0x31, false),
+        (0x12, 0x38, false),
+    ] {
+        game.event(&WindowEvent {
+            window: WindowId(0),
+            time: std::time::Instant::now(),
+            kind: WindowEventKind::Key {
+                virtual_key,
+                scancode,
+                extended: false,
+                pressed,
+                repeat: false,
+            },
+        });
+    }
     for _ in 0..240 {
         frame(&mut player, &mut game, &mut overlay);
     }
+    assert!(game.animation_ruler().is_some(), "the Animation tab open");
     // The dock's thumbnails made first: each is a drawing of a frame of its own.
     for _ in 0..1200 {
         if ["CesiumMan.gltf", "CesiumMan_img0.jpg"]

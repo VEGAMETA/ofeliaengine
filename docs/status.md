@@ -879,6 +879,10 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-3a, the Animation tab's timeline** (#PR, ADR 0124's as-built): Alt+N shows the
+    Clips' chosen clip on a timeline, for the selected character or the picked model file.
+    Its ruler numbers the frames and scrubs; ←/→ step frames, Home/End go to the ends,
+    Space plays. It shares the Clips' playhead. 0 allocations while it draws.
   - **E12-1b-3b, two clips side by side** (#460, ADR 0124's as-built): a Ctrl+click on a
     picked file's clip plays it beside the chosen one in the preview, at the same fraction
     of its length, framed with it on the one floor. 0 allocations. The root's path on the
@@ -1122,7 +1126,8 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    E12-3 (the Animation tab), E12-4 (keys) and E12-5 (graphs).
+    the rest of E12-3 (events with sounds, a joint's trail and speed curve, Mark Foot Plants,
+    loop and root motion settings), E12-4 (keys) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
     questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a
     (decisions in ticks, poses every frame), 3c (cross-fade or inertialization per

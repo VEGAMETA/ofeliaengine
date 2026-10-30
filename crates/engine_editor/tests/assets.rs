@@ -1410,6 +1410,49 @@ fn a_skinned_model_picked_in_the_dock_shows_its_clips_under_its_preview() {
     }
     println!("side by side: {} pixels changed", differ(&one, &two));
     assert!(differ(&one, &two) >= 300, "two in the preview");
+    // E12-3a: Alt+N opens the Animation tab; a press on its ruler's middle puts the
+    // playhead at the clip's middle; → after it steps a frame on.
+    key(&mut game, 0x12, 0x38, true);
+    key(&mut game, 0x4E, 0x31, true);
+    frame(&mut player, &mut game, &mut overlay);
+    key(&mut game, 0x4E, 0x31, false);
+    key(&mut game, 0x12, 0x38, false);
+    frame(&mut player, &mut game, &mut overlay);
+    frame(&mut player, &mut game, &mut overlay);
+    let [x, y, w, h] = game.animation_ruler().expect("the Animation tab's ruler");
+    let middle = [x + w * 0.5, y + h * 0.5];
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, middle, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let length = 3.4167f32;
+    let at = game.clip_time().unwrap();
+    println!("the ruler's middle: {at:.3} s of Survey's {length} s");
+    assert!((at - length * 0.5).abs() < 0.1, "the clip's middle: {at}");
+    key(&mut game, 0x27, 0x4D, true);
+    frame(&mut player, &mut game, &mut overlay);
+    key(&mut game, 0x27, 0x4D, false);
+    frame(&mut player, &mut game, &mut overlay);
+    let stepped = game.clip_time().unwrap();
+    println!("→: {stepped:.4} s");
+    if let Ok(out) = std::env::var("ENGINE_EDITOR_ANIMATION_PNG") {
+        let rgba = player
+            .capture_overlaid(&mut game, Some(&mut overlay))
+            .unwrap()
+            .unwrap();
+        let png = engine_render::png::encode_png(
+            width,
+            height,
+            engine_render::png::PngFormat::Rgba,
+            &rgba,
+        )
+        .unwrap();
+        std::fs::write(out, png).unwrap();
+    }
+    assert!(
+        stepped > at && stepped - at < 0.1,
+        "a frame on: {at} then {stepped}"
+    );
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

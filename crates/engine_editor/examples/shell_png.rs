@@ -516,6 +516,7 @@ fn main() {
             snapshot: "Mix",
             snapshots: None,
         }),
+        animation: None,
         debugger: None,
         history: None,
         playing,

@@ -423,6 +423,18 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
       fraction of its length: compare two takes, or check that a walk and a run plant the
       same foot first. Its row is marked in a paler colour. Ctrl+click it again to take it
       away; choosing it makes it the chosen one.
+  - **The Animation tab** (Alt+N, or the bottom bar) shows the same chosen clip on a
+    timeline. It works for the selected character, or for the model file picked in the
+    dock.
+    - **Its header:** ↑ and ↓ step to the clip before or after; then whose clips they are
+      and the clip, ▶ or ■, the loop, the speed, and where the playhead is ("frame 165 /
+      328 · 1.72 s").
+    - **Its ruler** numbers the frames as far apart as they read. A press or a drag on it
+      puts the playhead there and holds the pose.
+    - **Its row** names the character with its joints and the clip's sample rate.
+    - After a click in the tab, **←** and **→** step one frame (the clip stops there),
+      **Home** and **End** go to the first and last frames, and **Space** plays or stops.
+    - The tab and the Clips share one playhead: what one shows, the other does.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.
