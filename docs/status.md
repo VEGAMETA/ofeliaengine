@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-1b-3a, the preview's floor, In Place, the arrows** (#PR, ADR 0124's as-built):
+  - **E12-1b-3a, the preview's floor, In Place, the arrows** (#459, ADR 0124's as-built):
     a picked model file's preview stands on the blockout's grid. A clip that crosses the
     ground walks on its spot while the floor goes by under it; In Place holds the floor
     still. After a click in the Clips, ↓ and ↑ move through the clips. 0 allocations.
