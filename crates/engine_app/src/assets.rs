@@ -47,6 +47,7 @@
 //!   parts can take seconds). A built-in mesh's is its own shape.
 
 use crate::loading::{Done, Job, Loader, Made};
+use crate::skins::Look;
 use engine_assets::colliders::{ColliderRules, Motion, cook_node_colliders};
 use engine_assets::material_file::{ParamValue, TextureEncoding, TypedMaterial};
 use engine_assets::{
@@ -66,7 +67,7 @@ use engine_render::mesh::{GeometryPool, MeshId, OwnedMeshData};
 use engine_render::skinning::{SkinId, SkinnedId, SkinnedMeshData, Skinning};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_rhi::{Allocator, Bindless, Device, Wrap};
-use engine_runtime::{Animator, Derived, JointAttachment, MeshRenderer, SkinnedMesh};
+use engine_runtime::{Animator, Derived, JointAttachment, MeshRenderer, RootMotion, SkinnedMesh};
 use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -862,9 +863,9 @@ struct Owned {
     instances: Vec<SkinnedId>,
     meshes: Vec<MeshId>,
     rig: Arc<crate::skins::Rig>,
-    pose: Option<(usize, f32)>,
-    /// The clip fading out under it (an animator's fade, E12-2b).
-    fade: crate::skins::Fade,
+    /// What it shows: a clip's moment, the clip fading out under it (E12-2b), its root
+    /// motion taken out or not (E12-2c).
+    look: Look,
     held: bool,
     posed: bool,
 }
@@ -883,9 +884,9 @@ struct PreviewSkin {
 }
 
 /// What an animator shows a frame (ADR 0124's E12-2): its clip at its moment, the clip
-/// fading out under it (at its own moment, with the first's weight), and the two clips'
-/// lengths.
-type Shown = ((usize, f32), crate::skins::Fade, (f32, f32));
+/// fading out under it (at its own moment, with the first's weight), its root motion taken
+/// out or not; and the two clips' lengths.
+type Shown = (Look, (f32, f32));
 
 /// What an animator shows a frame `alpha` of the way from its last tick to its next
 /// ([`Shown`]); None for a rig without clips.
@@ -904,7 +905,33 @@ fn animator_pose(rig: &crate::skins::Rig, animator: &Animator, alpha: f32) -> Op
             animator.weight(alpha),
         )
     });
-    Some(((k, animator.at(alpha, length)), fade, (length, from_length)))
+    let look = Look {
+        pose: Some((k, animator.at(alpha, length))),
+        fade,
+        in_place: animator.root_motion != RootMotion::InPose,
+    };
+    Some((look, (length, from_length)))
+}
+
+/// The root motion an [`Animator`]'s last tick played (ADR 0124's E12-2c), in its rig's
+/// mesh space: how far its root crossed the ground, and its turn about the mesh's up in
+/// radians. Through a fade the two clips' motions blend by the fade's weight. None for a
+/// rig without clips.
+fn tick_motion(rig: &crate::skins::Rig, animator: &Animator) -> Option<(Vec3, f32)> {
+    let names = rig.clips().iter().map(crate::RigClip::name);
+    let k = named_clip(names.clone(), &animator.clip);
+    let main = rig.clip_motion(k, animator.previous, animator.time)?;
+    let from = (animator.fade > 0.0)
+        .then(|| {
+            let f = named_clip(names, &animator.from_clip);
+            rig.clip_motion(f, animator.from_previous, animator.from_time)
+        })
+        .flatten();
+    let motion = match from {
+        Some(from) => engine_anim::RootMotion::blend(from, main, animator.weight(1.0)),
+        None => main,
+    };
+    Some(rig.mesh_motion(motion))
 }
 
 /// The clip an animator names among a rig's clip names (ADR 0124's E12-2): by its name in
@@ -2611,8 +2638,7 @@ impl Assets {
                     instances,
                     meshes,
                     rig,
-                    pose: None,
-                    fade: None,
+                    look: Look::default(),
                     held: false,
                     posed: false,
                 },
@@ -2753,16 +2779,16 @@ impl Assets {
                 .take_while(|(c, _)| *c == character)
                 .count();
             if let Some(owned) = self.owned.get(&character) {
-                let (pose, fade) = if owned.held {
-                    (owned.pose, None)
+                let look = if owned.held {
+                    Look::at(owned.look.pose)
                 } else {
                     world
                         .get::<Animator>(character)
                         .and_then(|animator| animator_pose(&owned.rig, animator, 1.0))
-                        .map_or((None, None), |(pose, fade, _)| (Some(pose), fade))
+                        .map_or(Look::default(), |(look, _)| look)
                 };
                 let rig_id = Arc::as_ptr(&owned.rig) as usize as u64;
-                let joints = self.posing.joints(&owned.rig, pose, fade);
+                let joints = self.posing.joints(&owned.rig, look);
                 let skeleton = owned.rig.skeleton();
                 for &(_, socket) in &self.socket_list[k..end] {
                     let Some(attachment) = world.get::<JointAttachment>(socket) else {
@@ -2799,6 +2825,57 @@ impl Assets {
         }
     }
 
+    /// The characters' root motion over the tick just run (ADR 0124's E12-2c). Where an
+    /// [`Animator`] takes it out of the pose (`RootMotion::Move` or `Report`), its clips'
+    /// ground motion over the tick (blended through a fade) goes into its `moved` and
+    /// `turned`, `moved` in the entity's parent's space; `Move` also moves the entity's
+    /// `Transform` by them. A pose the editor holds moves nothing. Called in each tick
+    /// after the animators move on, before the sockets are placed.
+    pub(crate) fn move_roots(&mut self, world: &mut World) {
+        if self.owned.is_empty() {
+            return;
+        }
+        engine_profiler::zone!("app::Assets::move_roots");
+        for (&e, owned) in &self.owned {
+            let Some(animator) = world.get::<Animator>(e) else {
+                continue;
+            };
+            let mode = animator.root_motion;
+            let motion = if owned.held || mode == RootMotion::InPose {
+                None
+            } else {
+                tick_motion(&owned.rig, animator)
+            };
+            let Some((moved, turned)) = motion else {
+                if (animator.moved != Vec3::ZERO || animator.turned != 0.0)
+                    && let Some(animator) = world.get_mut::<Animator>(e)
+                {
+                    animator.moved = Vec3::ZERO;
+                    animator.turned = 0.0;
+                }
+                continue;
+            };
+            let Some(&t) = world.get::<Transform>(e) else {
+                continue;
+            };
+            let moved = t.rotation * (t.scale * moved);
+            if let Some(animator) = world.get_mut::<Animator>(e) {
+                animator.moved = moved;
+                animator.turned = turned;
+            }
+            if mode == RootMotion::Move
+                && (moved != Vec3::ZERO || turned != 0.0)
+                && let Some(t) = world.get_mut::<Transform>(e)
+            {
+                t.translation += moved;
+                if turned != 0.0 {
+                    let turn = Quat::from_axis_angle(owned.rig.mesh_up(), turned);
+                    t.rotation = (t.rotation * turn).normalize();
+                }
+            }
+        }
+    }
+
     /// The skinned models' [`Animator`]s' poses this frame (ADR 0124's E12-2): each one's
     /// clip at the frame's moment `alpha` of the way from the last tick to the next, but
     /// where the editor holds the pose; a model without one rests. The clip's length goes
@@ -2813,7 +2890,7 @@ impl Assets {
                 .get::<Animator>(e)
                 .and_then(|animator| animator_pose(&owned.rig, animator, alpha));
             // The clips' lengths back to the animator, for its ticks to wrap at.
-            if let Some((_, _, (length, from_length))) = shown
+            if let Some((_, (length, from_length))) = shown
                 && world.get::<Animator>(e).is_some_and(|a| {
                     a.length != length || (a.fade > 0.0 && a.from_length != from_length)
                 })
@@ -2824,10 +2901,9 @@ impl Assets {
                     animator.from_length = from_length;
                 }
             }
-            let (pose, fade) = shown.map_or((None, None), |(pose, fade, _)| (Some(pose), fade));
-            if owned.pose != pose || owned.fade != fade {
-                owned.pose = pose;
-                owned.fade = fade;
+            let look = shown.map_or(Look::default(), |(look, _)| look);
+            if owned.look != look {
+                owned.look = look;
                 owned.posed = false;
             }
         }
@@ -2850,7 +2926,7 @@ impl Assets {
         });
         let posing = &mut self.posing;
         for owned in self.owned.values_mut().filter(|o| !o.posed) {
-            let palette = posing.palette(&owned.rig, owned.pose, owned.fade);
+            let palette = posing.palette(&owned.rig, owned.look);
             for &id in &owned.instances {
                 skinning.set_palette(id, palette);
             }
@@ -2967,7 +3043,7 @@ impl Assets {
         if !p.posed
             && let (Some((id, _)), Some(rig)) = (p.instance, p.rig.as_ref())
         {
-            skinning.set_palette(id, self.posing.palette(rig, p.pose, None));
+            skinning.set_palette(id, self.posing.palette(rig, Look::at(p.pose)));
             p.posed = true;
         }
     }
@@ -2985,7 +3061,7 @@ impl Assets {
             return false;
         };
         out.clear();
-        out.extend_from_slice(self.posing.joints(&owned.rig, owned.pose, owned.fade));
+        out.extend_from_slice(self.posing.joints(&owned.rig, owned.look));
         true
     }
 
@@ -3003,9 +3079,9 @@ impl Assets {
             return false;
         };
         owned.held = pose.is_some();
-        if owned.pose != pose || owned.fade.is_some() {
-            owned.pose = pose;
-            owned.fade = None;
+        let look = Look::at(pose);
+        if owned.look != look {
+            owned.look = look;
             owned.posed = false;
         }
         true

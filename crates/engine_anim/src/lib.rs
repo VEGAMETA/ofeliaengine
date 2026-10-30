@@ -67,7 +67,9 @@ pub use jobs::for_each_parallel;
 pub use model::{local_to_model, rows, skinning_matrices, update_model_range};
 pub use pose::{Pose, Transform, nlerp, rotation_angle};
 pub use raw::{Interpolation, Keyed, RawClip, RawJointTracks, RawTrack};
-pub use root_motion::{RootMotion, RootMotionMode, remove_root_motion, root_motion, yaw_of};
+pub use root_motion::{
+    RootMotion, RootMotionMode, remove_root_motion, root_motion, root_motion_over, twist_of, yaw_of,
+};
 pub use skeleton::{JointDesc, MAX_JOINTS, NO_PARENT, Skeleton, SkeletonError};
 
 /// A cooked skeleton or clip that cannot be read: not one, another version, damaged.

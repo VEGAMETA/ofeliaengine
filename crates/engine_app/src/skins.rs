@@ -14,12 +14,13 @@
 
 use crate::assets::{GltfFile, gltf_primitives};
 use engine_anim::{
-    Blender, CompressSettings, CompressedClip, Layer, LayerMode, Pose, Skeleton, compress,
-    local_to_model, rotation_angle, skinning_matrices, yaw_of,
+    Blender, CompressSettings, CompressedClip, Layer, LayerMode, Pose, RootMotion, RootMotionMode,
+    Skeleton, compress, local_to_model, remove_root_motion, root_motion_over, rotation_angle,
+    skinning_matrices, twist_of, yaw_of,
 };
 use engine_assets::ImportedScene;
 use engine_assets::animation::{node_parents, raw_clip, shell_distances, skin_skeleton};
-use engine_core::math::{Affine3A, Quat, Vec3};
+use engine_core::math::{Affine3A, Quat, Vec3, Vec3A};
 use engine_render::mesh::OwnedMeshData;
 
 /// What poses a skinned mesh (see the module).
@@ -35,6 +36,13 @@ pub struct Rig {
     /// The rest pose's skinning matrices.
     rest: Vec<[f32; 12]>,
     clips: Vec<RigClip>,
+    /// Root motion's joint (ADR 0124's E12-2c): the topmost skin joint, whose ground motion
+    /// it is; the frame from that joint's parent's space into the mesh's (the rest pose's);
+    /// and up, the file's (glTF's +Y in its scene), seen from the parent and in the mesh.
+    motion_root: usize,
+    motion_frame: Affine3A,
+    motion_up: Vec3,
+    mesh_up: Vec3,
 }
 
 /// One of a skinned mesh's clips: an animation of its file that moves its skeleton, with
@@ -106,6 +114,46 @@ impl Rig {
     /// The skeleton.
     pub fn skeleton(&self) -> &Skeleton {
         &self.skeleton
+    }
+
+    /// How root motion is read from its clips (ADR 0124's E12-2c): the ground motion of its
+    /// topmost skin joint, across and about the mesh's up.
+    pub(crate) fn motion_mode(&self) -> RootMotionMode {
+        RootMotionMode {
+            up: self.motion_up,
+            ..RootMotionMode::default()
+        }
+    }
+
+    /// Clip `k`'s root motion over `from..to` seconds of play (wrapping at its end,
+    /// backwards when `to < from`), in its root joint's parent's space as the pose shows it
+    /// with the motion taken out: the root kept facing as at the clip's first moment. None
+    /// for a clip it has not.
+    pub(crate) fn clip_motion(&self, k: usize, from: f32, to: f32) -> Option<RootMotion> {
+        let clip = &self.clips.get(k)?.clip;
+        let (root, mode) = (self.motion_root, self.motion_mode());
+        let motion = root_motion_over(clip, &self.skeleton, root, from, to, mode);
+        let first = clip.sample_joint(root, 0.0, self.skeleton.rest().get(root));
+        let facing = twist_of(first.rotation, mode.up);
+        Some(RootMotion {
+            translation: facing * motion.translation,
+            rotation: motion.rotation,
+        })
+    }
+
+    /// A root motion from [`Self::clip_motion`] in the mesh's space: the root's crossing of
+    /// the ground, and its turn about [`Self::mesh_up`] in radians.
+    pub(crate) fn mesh_motion(&self, motion: RootMotion) -> (Vec3, f32) {
+        (
+            self.motion_frame.transform_vector3(motion.translation),
+            motion.angle_about(self.motion_up),
+        )
+    }
+
+    /// Up in the mesh's space (ADR 0124's E12-2c): the file's, glTF's +Y in its scene, which
+    /// is the mesh's own +Y unless the mesh hangs under a node turned otherwise.
+    pub(crate) fn mesh_up(&self) -> Vec3 {
+        self.mesh_up
     }
 
     /// The file's clips that move its skeleton, in the file's order.
@@ -274,6 +322,18 @@ pub(crate) fn build(
         .iter()
         .min()
         .map_or(0, |&j| usize::from(j));
+    // Root motion's frame (E12-2c): the top joint's parent where the rest pose holds it, in
+    // the mesh's space. Up is the file's: the skeleton holds every ancestor of its joints, so
+    // its space is the glTF scene's, +Y up; `root` takes that into the mesh's.
+    let motion_frame = skeleton.skeleton.parent(top).map_or(root, |p| model[p]);
+    let unit = |v: Vec3A| {
+        Vec3::from(v)
+            .try_normalize()
+            .filter(|v| v.is_finite())
+            .unwrap_or(Vec3::Y)
+    };
+    let mesh_up = unit(root.matrix3 * Vec3A::Y);
+    let motion_up = unit(motion_frame.matrix3.inverse() * (root.matrix3 * Vec3A::Y));
     let clips = (0..scene.animations.len())
         .filter_map(|a| raw_clip(scene, a, &skeleton))
         .map(|raw| {
@@ -303,6 +363,10 @@ pub(crate) fn build(
             root,
             rest,
             clips,
+            motion_root: top,
+            motion_frame,
+            motion_up,
+            mesh_up,
         },
     )))
 }
@@ -357,6 +421,26 @@ fn ends(
 /// weight (the rest is this one's).
 pub(crate) type Fade = Option<(usize, f32, f32)>;
 
+/// What a skinned model shows (ADR 0124's E12-2): a clip at a moment (none: its rest pose),
+/// the clip fading out under it, and whether its root motion is taken out of the pose (the
+/// animator moving the character by it instead, E12-2c).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct Look {
+    pub(crate) pose: Option<(usize, f32)>,
+    pub(crate) fade: Fade,
+    pub(crate) in_place: bool,
+}
+
+impl Look {
+    /// A clip's moment as made (its root motion in it), or the rest pose.
+    pub(crate) fn at(pose: Option<(usize, f32)>) -> Self {
+        Self {
+            pose,
+            ..Self::default()
+        }
+    }
+}
+
 /// Where poses are made, kept between frames: sized for the largest rig posed, so posing
 /// allocates nothing after the first.
 #[derive(Debug, Default)]
@@ -371,21 +455,30 @@ pub(crate) struct Posing {
 }
 
 impl Posing {
-    /// `rig`'s local pose at `pose` (a clip and a time in it, held at its ends), faded from
-    /// `fade`, into `self.pose`: false for the rest pose (no clip, or one it has not).
-    fn local(&mut self, rig: &Rig, pose: Option<(usize, f32)>, fade: Fade) -> bool {
-        let Some((clip, time)) = pose.filter(|&(c, _)| c < rig.clips.len()) else {
+    /// `rig`'s local pose as `look` shows it (a clip and a time in it, held at its ends,
+    /// faded from the clip fading out, its root motion taken out or not), into `self.pose`:
+    /// false for the rest pose (no clip, or one it has not).
+    fn local(&mut self, rig: &Rig, look: Look) -> bool {
+        let Some((clip, time)) = look.pose.filter(|&(c, _)| c < rig.clips.len()) else {
             return false;
         };
         let rest = rig.skeleton.rest();
         let n = rest.len();
+        let (root, mode) = (rig.motion_root, rig.motion_mode());
         let sampled = self.pose.get_or_insert_with(|| Pose::identity(n));
         rig.clips[clip].clip.sample(time, rest, sampled);
-        if let Some((from, from_time, weight)) =
-            fade.filter(|&(c, _, w)| c < rig.clips.len() && w < 1.0)
+        if look.in_place {
+            remove_root_motion(sampled, &rig.clips[clip].clip, &rig.skeleton, root, mode);
+        }
+        if let Some((from, from_time, weight)) = look
+            .fade
+            .filter(|&(c, _, w)| c < rig.clips.len() && w < 1.0)
         {
             let other = self.from.get_or_insert_with(|| Pose::identity(n));
             rig.clips[from].clip.sample(from_time, rest, other);
+            if look.in_place {
+                remove_root_motion(other, &rig.clips[from].clip, &rig.skeleton, root, mode);
+            }
             if self.blender_joints < n {
                 self.blender = Blender::new(n);
                 self.blender_joints = n;
@@ -412,15 +505,10 @@ impl Posing {
         true
     }
 
-    /// `rig`'s skinning matrices at `pose` faded from `fade` ([`Self::local`]), its rest
-    /// pose's without one or for a clip it has not.
-    pub(crate) fn palette<'a>(
-        &'a mut self,
-        rig: &'a Rig,
-        pose: Option<(usize, f32)>,
-        fade: Fade,
-    ) -> &'a [[f32; 12]] {
-        if !self.local(rig, pose, fade) {
+    /// `rig`'s skinning matrices as `look` shows it ([`Self::local`]), its rest pose's
+    /// without a clip or for one it has not.
+    pub(crate) fn palette<'a>(&'a mut self, rig: &'a Rig, look: Look) -> &'a [[f32; 12]] {
+        if !self.local(rig, look) {
             return &rig.rest;
         }
         let Some(sampled) = self.pose.as_ref() else {
@@ -444,20 +532,15 @@ impl Posing {
         &self.palette[..joints]
     }
 
-    /// `rig`'s joints where `pose` puts them (its rest pose without one, or for a clip it
-    /// has not), in the skeleton's order: in the mesh node's space with the import scale
-    /// applied, where the skinned vertices are (ADR 0124's E12-1c).
-    pub(crate) fn joints<'a>(
-        &'a mut self,
-        rig: &Rig,
-        pose: Option<(usize, f32)>,
-        fade: Fade,
-    ) -> &'a [Affine3A] {
+    /// `rig`'s joints where `look` puts them ([`Self::local`]; its rest pose without a clip,
+    /// or for one it has not), in the skeleton's order: in the mesh node's space with the
+    /// import scale applied, where the skinned vertices are (ADR 0124's E12-1c).
+    pub(crate) fn joints<'a>(&'a mut self, rig: &Rig, look: Look) -> &'a [Affine3A] {
         let n = rig.skeleton.joint_count();
         if self.model.len() < n {
             self.model.resize(n, Affine3A::IDENTITY);
         }
-        let posed = self.local(rig, pose, fade);
+        let posed = self.local(rig, look);
         let local = match (posed, self.pose.as_ref()) {
             (true, Some(sampled)) => sampled,
             _ => rig.skeleton.rest(),
@@ -628,7 +711,7 @@ mod tests {
             let mut posing = Posing::default();
             let clip = &rig.clips()[0];
             let palette = posing
-                .palette(&rig, Some((0, clip.duration() * 0.5)), None)
+                .palette(&rig, Look::at(Some((0, clip.duration() * 0.5))))
                 .to_vec();
             let moved = (0..part.mesh.positions.len()).step_by(step).any(|v| {
                 (skinned(part, &palette, v) - skinned(part, &rig.rest, v)).length() > 1e-4 * reach
@@ -638,10 +721,10 @@ mod tests {
             // E12-1c): each skin joint's place times its inverse bind matrix.
             let mut again = vec![[0.0f32; 12]; rig.joints.len()];
             for pose in [None, Some((0, clip.duration() * 0.5))] {
-                let joints = posing.joints(&rig, pose, None).to_vec();
+                let joints = posing.joints(&rig, Look::at(pose)).to_vec();
                 assert_eq!(joints.len(), rig.skeleton.joint_count());
                 skinning_matrices(&joints, &rig.joints, &rig.inverse_bind, &mut again);
-                let palette = posing.palette(&rig, pose, None);
+                let palette = posing.palette(&rig, Look::at(pose));
                 let same = palette.iter().zip(&again).all(|(a, b)| {
                     a.iter()
                         .zip(b)
@@ -653,7 +736,11 @@ mod tests {
             // between, between them; where the skin is.
             let (early, late) = (clip.duration() * 0.1, clip.duration() * 0.5);
             let posed = |posing: &mut Posing, fade: Fade| {
-                posing.palette(&rig, Some((0, late)), fade).to_vec()
+                let look = Look {
+                    fade,
+                    ..Look::at(Some((0, late)))
+                };
+                posing.palette(&rig, look).to_vec()
             };
             let off = |a: &[[f32; 12]], b: &[[f32; 12]]| {
                 (0..part.mesh.positions.len())
@@ -661,7 +748,7 @@ mod tests {
                     .map(|v| (skinned(part, a, v) - skinned(part, b, v)).length())
                     .fold(0.0f32, f32::max)
             };
-            let at_early = posing.palette(&rig, Some((0, early)), None).to_vec();
+            let at_early = posing.palette(&rig, Look::at(Some((0, early)))).to_vec();
             let at_late = posed(&mut posing, None);
             let apart = off(&at_early, &at_late);
             assert!(
@@ -678,9 +765,58 @@ mod tests {
                 to_early > 0.1 * apart && to_late > 0.1 * apart,
                 "{path}: halfway is neither ({to_early}, {to_late} of {apart})"
             );
+            // Root motion (E12-2c): up seen from the root's parent is the mesh's up; a clip's
+            // motion over its whole length crosses the ground as far as its root speed says;
+            // taken out of the pose, the root stays where the clip's first moment has it.
+            let up = rig.mesh_up();
+            let seen = rig
+                .motion_frame
+                .transform_vector3(rig.motion_up)
+                .normalize();
+            assert!(
+                (seen - up).length() < 1e-4 && (up.length() - 1.0).abs() < 1e-5,
+                "{path}: up {up}, from the root's parent {seen}"
+            );
+            let ground = |v: Vec3| v - up * v.dot(up);
+            for (k, c) in rig.clips().iter().enumerate() {
+                let motion = rig.clip_motion(k, 0.0, c.duration()).unwrap();
+                let (moved, turned) = rig.mesh_motion(motion);
+                let crossed = ground(moved).length();
+                println!(
+                    "{path} {}: root motion {moved} ({crossed} at {} a second), turn {turned}",
+                    c.name(),
+                    c.root_speed()
+                );
+                assert!(
+                    (crossed - c.root_speed() * c.duration()).abs() <= 1e-3 * reach.max(crossed),
+                    "{path} {}: {crossed} against {} a second",
+                    c.name(),
+                    c.root_speed()
+                );
+                assert!(
+                    moved.dot(up).abs() <= 1e-4 * reach,
+                    "{path}: on the ground: {moved}"
+                );
+            }
+            let in_place = |posing: &mut Posing, time: f32| {
+                let look = Look {
+                    in_place: true,
+                    ..Look::at(Some((0, time)))
+                };
+                let joint = posing.joints(&rig, look)[rig.motion_root];
+                Vec3::from(joint.translation)
+            };
+            let (start, later) = (in_place(&mut posing, 0.0), in_place(&mut posing, late));
+            assert!(
+                ground(later - start).length() < 1e-3 * reach,
+                "{path}: the root kept in place: {start} then {later}"
+            );
             // No clip, or one it has not: the rest pose.
-            assert_eq!(posing.palette(&rig, None, None), &rig.rest[..]);
-            assert_eq!(posing.palette(&rig, Some((99, 0.0)), None), &rig.rest[..]);
+            assert_eq!(posing.palette(&rig, Look::default()), &rig.rest[..]);
+            assert_eq!(
+                posing.palette(&rig, Look::at(Some((99, 0.0)))),
+                &rig.rest[..]
+            );
         }
     }
 

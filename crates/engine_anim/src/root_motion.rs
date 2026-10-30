@@ -8,23 +8,27 @@ use crate::skeleton::Skeleton;
 use engine_core::math::{Quat, Vec3, Vec3A};
 
 /// Which parts of the root's motion are extracted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RootMotionMode {
-    /// Horizontal translation (x and z: +Y is up).
+    /// Horizontal translation (across `up`).
     pub horizontal: bool,
-    /// Vertical translation (y).
+    /// Vertical translation (along `up`).
     pub vertical: bool,
-    /// Rotation about +Y (yaw).
+    /// Rotation about `up` (yaw).
     pub yaw: bool,
+    /// The character's up in the space of the root joint's parent, of length 1: +Y unless
+    /// the root hangs under a node turned otherwise (an armature exported standing Z up).
+    pub up: Vec3,
 }
 
 impl Default for RootMotionMode {
-    /// Ground motion: horizontal translation and yaw (jumps stay in the pose).
+    /// Ground motion: horizontal translation and yaw (jumps stay in the pose), +Y up.
     fn default() -> Self {
         Self {
             horizontal: true,
             vertical: false,
             yaw: true,
+            up: Vec3::Y,
         }
     }
 }
@@ -53,11 +57,57 @@ impl RootMotion {
             rotation: (self.rotation * b.rotation).normalize(),
         }
     }
+
+    /// The motion that undoes this one, in the frame where this one ends: a clip played
+    /// backwards moves by its forward motion undone.
+    pub fn inverse(self) -> RootMotion {
+        let rotation = self.rotation.conjugate();
+        RootMotion {
+            translation: -(rotation * self.translation),
+            rotation,
+        }
+    }
+
+    /// Two motions blended, `b` by `w` (ozz's way, for clips fading into each other):
+    /// the direction and the length of the translations, and the rotations, each between
+    /// the two.
+    pub fn blend(a: RootMotion, b: RootMotion, w: f32) -> RootMotion {
+        let w = w.clamp(0.0, 1.0);
+        let (la, lb) = (a.translation.length(), b.translation.length());
+        let unit = |t: Vec3, l: f32| if l > 1e-12 { t / l } else { Vec3::ZERO };
+        let direction =
+            (unit(a.translation, la) * (1.0 - w) + unit(b.translation, lb) * w).normalize_or_zero();
+        RootMotion {
+            translation: direction * (la + (lb - la) * w),
+            rotation: a.rotation.slerp(b.rotation, w).normalize(),
+        }
+    }
+
+    /// Its turn about `up` (of length 1) in radians, counterclockwise seen from above:
+    /// within ±π.
+    pub fn angle_about(self, up: Vec3) -> f32 {
+        let q = twist_of(self.rotation, up);
+        let a = 2.0 * Vec3::new(q.x, q.y, q.z).dot(up).atan2(q.w);
+        if a > core::f32::consts::PI {
+            a - core::f32::consts::TAU
+        } else if a < -core::f32::consts::PI {
+            a + core::f32::consts::TAU
+        } else {
+            a
+        }
+    }
 }
 
 /// The rotation of `q` about +Y (the twist of a swing-twist decomposition).
 pub fn yaw_of(q: Quat) -> Quat {
-    let twist = Quat::from_xyzw(0.0, q.y, 0.0, q.w);
+    twist_of(q, Vec3::Y)
+}
+
+/// The rotation of `q` about `axis` (of length 1): the twist of a swing-twist
+/// decomposition.
+pub fn twist_of(q: Quat, axis: Vec3) -> Quat {
+    let along = axis * Vec3::new(q.x, q.y, q.z).dot(axis);
+    let twist = Quat::from_xyzw(along.x, along.y, along.z, q.w);
     if twist.length_squared() < 1e-12 {
         Quat::IDENTITY
     } else {
@@ -68,13 +118,16 @@ pub fn yaw_of(q: Quat) -> Quat {
 /// The extracted parts of a root transform: its reference for [`RootMotionMode`].
 fn extracted(t: &Transform, mode: RootMotionMode) -> (Vec3, Quat) {
     let p = Vec3::from(t.translation);
-    let translation = Vec3::new(
-        if mode.horizontal { p.x } else { 0.0 },
-        if mode.vertical { p.y } else { 0.0 },
-        if mode.horizontal { p.z } else { 0.0 },
-    );
+    let vertical = mode.up * p.dot(mode.up);
+    let mut translation = Vec3::ZERO;
+    if mode.horizontal {
+        translation += p - vertical;
+    }
+    if mode.vertical {
+        translation += vertical;
+    }
     let rotation = if mode.yaw {
-        yaw_of(t.rotation)
+        twist_of(t.rotation, mode.up)
     } else {
         Quat::IDENTITY
     };
@@ -112,6 +165,49 @@ pub fn root_motion(
     } else {
         motion_between(&at(from), &at(to), mode)
     }
+}
+
+/// The root motion of `clip` over `from..to` seconds of play for joint `root`, the times
+/// not wrapped: a span past the clip's end goes on from its start (as often as it wraps),
+/// and `to < from` plays it backwards. In the character's frame at `from`, as
+/// [`root_motion`]'s.
+pub fn root_motion_over(
+    clip: &CompressedClip,
+    skeleton: &Skeleton,
+    root: usize,
+    from: f32,
+    to: f32,
+    mode: RootMotionMode,
+) -> RootMotion {
+    let length = clip.duration();
+    if length <= 0.0 || from == to || !(from.is_finite() && to.is_finite()) {
+        return RootMotion::NONE;
+    }
+    if to < from {
+        return root_motion_over(clip, skeleton, root, to, from, mode).inverse();
+    }
+    // A span more than a few loops long (a tick of a very short clip played fast) moves by
+    // whole loops, then the rest.
+    let mut motion = RootMotion::NONE;
+    let mut start = from;
+    for _ in 0..64 {
+        if start >= to {
+            break;
+        }
+        let base = (start / length).floor() * length;
+        let end = to.min(base + length);
+        motion = motion.then(root_motion(
+            clip,
+            skeleton,
+            root,
+            start - base,
+            end - base,
+            false,
+            mode,
+        ));
+        start = end;
+    }
+    motion
 }
 
 /// Removes the extracted motion from `pose`'s root joint: its extracted parts are reset

@@ -1954,6 +1954,293 @@ fn an_animator_fades_from_one_clip_into_another() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A walker made for the root motion tests (ADR 0124's E12-2c), written as `walker.gltf`
+/// and `walker.bin` into `dir`: a box skinned to two joints, its hips 1 m up and its head
+/// half a metre above. Clip `Walk` crosses 1 m of ground along +z in its second, the hips
+/// bobbing; clip `Turn` turns them a quarter about +y on the spot in its second.
+fn write_walker(dir: &std::path::Path) {
+    use engine_core::math::{Mat4, Quat, Vec3};
+    let mut bin: Vec<u8> = Vec::new();
+    let mut views = Vec::new();
+    let mut accessors = Vec::new();
+    let mut add = |bin: &mut Vec<u8>, bytes: Vec<u8>, accessor: serde_json::Value| {
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        views.push(serde_json::json!({
+            "buffer": 0, "byteOffset": bin.len(), "byteLength": bytes.len()
+        }));
+        bin.extend_from_slice(&bytes);
+        let mut accessor = accessor;
+        accessor["bufferView"] = serde_json::json!(views.len() - 1);
+        accessors.push(accessor);
+        accessors.len() - 1
+    };
+    let floats = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
+    // The box: its four lower corners on the hips, its four upper ones on the head.
+    let (lo, hi) = (Vec3::new(-0.3, 0.0, -0.2), Vec3::new(0.3, 1.6, 0.2));
+    let corners: Vec<Vec3> = (0..8)
+        .map(|k| {
+            Vec3::new(
+                if k & 1 == 0 { lo.x } else { hi.x },
+                if k & 2 == 0 { lo.y } else { hi.y },
+                if k & 4 == 0 { lo.z } else { hi.z },
+            )
+        })
+        .collect();
+    let centre = (lo + hi) * 0.5;
+    let positions: Vec<f32> = corners.iter().flat_map(|c| c.to_array()).collect();
+    let normals: Vec<f32> = corners
+        .iter()
+        .flat_map(|c| (*c - centre).normalize().to_array())
+        .collect();
+    let joints: Vec<u8> = (0..8u16)
+        .flat_map(|k| {
+            let j: u16 = if k & 2 == 0 { 0 } else { 1 };
+            [j, 0, 0, 0].into_iter().flat_map(u16::to_le_bytes)
+        })
+        .collect();
+    let weights: Vec<f32> = (0..8).flat_map(|_| [1.0, 0.0, 0.0, 0.0]).collect();
+    let faces: [[u16; 4]; 6] = [
+        [0, 2, 3, 1],
+        [4, 5, 7, 6],
+        [0, 1, 5, 4],
+        [2, 6, 7, 3],
+        [0, 4, 6, 2],
+        [1, 3, 7, 5],
+    ];
+    let indices: Vec<u8> = faces
+        .iter()
+        .flat_map(|f| [f[0], f[1], f[2], f[0], f[2], f[3]])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let position = add(
+        &mut bin,
+        floats(&positions),
+        serde_json::json!({"componentType": 5126, "count": 8, "type": "VEC3",
+            "min": lo.to_array(), "max": hi.to_array()}),
+    );
+    let normal = add(
+        &mut bin,
+        floats(&normals),
+        serde_json::json!({"componentType": 5126, "count": 8, "type": "VEC3"}),
+    );
+    let joint = add(
+        &mut bin,
+        joints,
+        serde_json::json!({"componentType": 5123, "count": 8, "type": "VEC4"}),
+    );
+    let weight = add(
+        &mut bin,
+        floats(&weights),
+        serde_json::json!({"componentType": 5126, "count": 8, "type": "VEC4"}),
+    );
+    let index = add(
+        &mut bin,
+        indices,
+        serde_json::json!({"componentType": 5123, "count": 36, "type": "SCALAR"}),
+    );
+    let inverse_bind: Vec<f32> = [Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 1.5, 0.0)]
+        .iter()
+        .flat_map(|at| Mat4::from_translation(-*at).to_cols_array())
+        .collect();
+    let binds = add(
+        &mut bin,
+        floats(&inverse_bind),
+        serde_json::json!({"componentType": 5126, "count": 2, "type": "MAT4"}),
+    );
+    let times: Vec<f32> = (0..=30).map(|k| k as f32 / 30.0).collect();
+    let time = add(
+        &mut bin,
+        floats(&times),
+        serde_json::json!({"componentType": 5126, "count": times.len(), "type": "SCALAR",
+            "min": [0.0], "max": [1.0]}),
+    );
+    let walk: Vec<f32> = times
+        .iter()
+        .flat_map(|&t| {
+            let bob = 0.02 * (t * core::f32::consts::TAU * 2.0).sin();
+            [0.0, 1.0 + bob, t]
+        })
+        .collect();
+    let walk = add(
+        &mut bin,
+        floats(&walk),
+        serde_json::json!({"componentType": 5126, "count": times.len(), "type": "VEC3"}),
+    );
+    let turn: Vec<f32> = times
+        .iter()
+        .flat_map(|&t| Quat::from_rotation_y(t * core::f32::consts::FRAC_PI_2).to_array())
+        .collect();
+    let turn = add(
+        &mut bin,
+        floats(&turn),
+        serde_json::json!({"componentType": 5126, "count": times.len(), "type": "VEC4"}),
+    );
+    let gltf = serde_json::json!({
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0, 1]}],
+        "nodes": [
+            {"name": "Walker", "mesh": 0, "skin": 0},
+            {"name": "Hips", "translation": [0.0, 1.0, 0.0], "children": [2]},
+            {"name": "Head", "translation": [0.0, 0.5, 0.0]}
+        ],
+        "meshes": [{"name": "Walker", "primitives": [{
+            "attributes": {"POSITION": position, "NORMAL": normal,
+                "JOINTS_0": joint, "WEIGHTS_0": weight},
+            "indices": index
+        }]}],
+        "skins": [{"joints": [1, 2], "inverseBindMatrices": binds}],
+        "animations": [
+            {"name": "Walk",
+                "samplers": [{"input": time, "output": walk, "interpolation": "LINEAR"}],
+                "channels": [{"sampler": 0, "target": {"node": 1, "path": "translation"}}]},
+            {"name": "Turn",
+                "samplers": [{"input": time, "output": turn, "interpolation": "LINEAR"}],
+                "channels": [{"sampler": 0, "target": {"node": 1, "path": "rotation"}}]}
+        ],
+        "accessors": accessors,
+        "bufferViews": views,
+        "buffers": [{"uri": "walker.bin", "byteLength": bin.len()}]
+    });
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("walker.bin"), &bin).unwrap();
+    std::fs::write(
+        dir.join("walker.gltf"),
+        serde_json::to_string_pretty(&gltf).unwrap(),
+    )
+    .unwrap();
+}
+
+/// ADR 0124's E12-2c: root motion. A walker moved by its animator crosses the ground as its
+/// clip does while its pose stays on the spot; one that reports it stays put and leaves the
+/// motion in its animator; one turned by its clip turns; one that keeps the motion in its
+/// pose walks off its spot and back each loop.
+#[test]
+fn root_motion_moves_the_character_or_is_left_for_the_game() {
+    let dir = std::env::temp_dir().join(format!("ofelia-root-motion-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    write_walker(&dir.join("models"));
+    let id = AssetMeta::ensure(&dir.join("models/walker.gltf")).unwrap();
+    let mesh = AssetRef::part(id, "Walker");
+    let mut paths = AssetPaths::new();
+    paths.insert(mesh, "models/walker.gltf#Walker");
+    let settings = PlayerSettings {
+        title: String::from("root motion test"),
+        window: Window::Offscreen {
+            width: 128,
+            height: 128,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    player.assets_mut().add_paths(&paths);
+    let spawn = |player: &mut Player, x: f32, clip: &str, root_motion: RootMotion| {
+        player.world_mut().spawn((
+            Transform::from_xyz(x, 0.0, 0.0),
+            Model::new(mesh, engine_app::builtin::MATERIAL),
+            Animator {
+                root_motion,
+                ..Animator::new(clip)
+            },
+        ))
+    };
+    let mover = spawn(&mut player, 0.0, "Walk", RootMotion::Move);
+    let reporter = spawn(&mut player, 3.0, "Walk", RootMotion::Report);
+    let turner = spawn(&mut player, -3.0, "Turn", RootMotion::Move);
+    let stander = spawn(&mut player, 6.0, "Walk", RootMotion::InPose);
+    let mut game = Still;
+    player.set_frame_time(Some(1.0 / 64.0));
+    let started = Instant::now();
+    while [mover, reporter, turner, stander]
+        .iter()
+        .any(|&e| player.model_rig(e).is_none())
+    {
+        assert!(started.elapsed() < Duration::from_secs(30), "no skin");
+        player.frame(&mut game).unwrap();
+    }
+    let rig = player.model_rig(mover).unwrap();
+    let hips = rig.skeleton().find("Hips").unwrap();
+    let speed = rig.clips()[0].root_speed();
+    println!("Walk's root speed {speed} a second");
+    assert!((speed - 1.0).abs() < 1e-3, "{speed}");
+    let at = |player: &mut Player, e| *player.world_mut().get::<Transform>(e).unwrap();
+    let animator = |player: &mut Player, e| player.world_mut().get::<Animator>(e).unwrap().clone();
+    let hips_at = |player: &mut Player, e| {
+        let mut joints = Vec::new();
+        assert!(player.model_joints(e, &mut joints));
+        Vec3::from(joints[hips].translation)
+    };
+    let (mover_start, turner_start) = (at(&mut player, mover), at(&mut player, turner));
+    let ticks_start = player.ticks_run();
+    let mut stander_hips = Vec::new();
+    for _ in 0..80 {
+        player.frame(&mut game).unwrap();
+        // The pose keeps the hips on the spot: only the bob moves them.
+        let h = hips_at(&mut player, mover);
+        assert!(
+            h.x.abs() < 1e-3 && h.z.abs() < 1e-3,
+            "moved off the spot: {h}"
+        );
+        stander_hips.push(hips_at(&mut player, stander).z);
+        let a = animator(&mut player, reporter);
+        assert!(
+            (a.moved - Vec3::new(0.0, 0.0, 1.0 / 64.0)).length() < 5e-4 && a.turned.abs() < 1e-4,
+            "a tick's motion reported: {} {}",
+            a.moved,
+            a.turned
+        );
+    }
+    let ticks = (player.ticks_run() - ticks_start) as f32;
+    let moved = at(&mut player, mover).translation - mover_start.translation;
+    println!("moved {moved} in {ticks} ticks");
+    assert!(
+        (moved - Vec3::new(0.0, 0.0, ticks / 64.0)).length() < 2e-3,
+        "crossed as its clip does: {moved} in {ticks} ticks"
+    );
+    assert_eq!(
+        at(&mut player, reporter).translation,
+        Vec3::new(3.0, 0.0, 0.0)
+    );
+    // Turned a quarter a second about its up, on the spot.
+    let turned = at(&mut player, turner);
+    let expected =
+        turner_start.rotation * Quat::from_rotation_y(ticks / 64.0 * core::f32::consts::FRAC_PI_2);
+    assert!(
+        turned.rotation.angle_between(expected) < 2e-3,
+        "{:?} against {expected:?}",
+        turned.rotation
+    );
+    assert!((turned.translation - Vec3::new(-3.0, 0.0, 0.0)).length() < 1e-3);
+    // Kept in the pose: the stander's hips walk the clip and go back each loop.
+    let (low, high) = stander_hips
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &z| (lo.min(z), hi.max(z)));
+    assert!(
+        low < 0.1 && high > 0.9,
+        "walked its loop in place: {low}..{high}"
+    );
+    assert_eq!(
+        at(&mut player, stander).translation,
+        Vec3::new(6.0, 0.0, 0.0)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ADR 0124's E12-1c: a socket under a character (`JointAttachment`) follows its joint:
 /// where the joint is in the pose held, through the animator's clip as it plays, and what
 /// hangs under the socket with it; standing still, it stands; a joint the skeleton lacks

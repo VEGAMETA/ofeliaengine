@@ -4,7 +4,8 @@
 //! palette set; the editor's live model preview of it playing too (E12-1b), drawn and read
 //! back every frame; and a second character played by its `Animator` (E12-2a), its clip on
 //! the ticks and its pose each frame, fading all along from the clip at another moment
-//! (E12-2b: two samples blended), the fade started again now and then. Khronos' CesiumMan
+//! (E12-2b: two samples blended), the fade started again now and then, its root motion
+//! moving it (E12-2c: taken out of both poses, read over each tick). Khronos' CesiumMan
 //! (`tools/fetch-test-assets.ps1`); skipped without it.
 //! One test per file, so nothing else allocates concurrently.
 
@@ -61,7 +62,10 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
     let walker = player.world_mut().spawn((
         Transform::from_xyz(1.0, -1.0, -3.0),
         Model::new(mesh, material),
-        engine_runtime::Animator::new(""),
+        engine_runtime::Animator {
+            root_motion: engine_runtime::RootMotion::Move,
+            ..engine_runtime::Animator::new("")
+        },
     ));
     // A socket in his hand, a cube in it (E12-1c): placed every tick.
     let hand = player.world_mut().spawn((

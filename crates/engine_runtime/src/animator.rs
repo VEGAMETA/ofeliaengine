@@ -4,8 +4,25 @@
 //! character at the frame's moment between the last two ticks ([`Animator::at`]). A
 //! [`JointAttachment`] under a character follows one of its joints (E12-1c).
 
+use engine_core::math::Vec3;
 use engine_ecs::{QueryState, World, reflect_component};
 use engine_reflect::Reflect;
+
+/// What an [`Animator`] does with its clips' root motion (ADR 0124's E12-2c): its root
+/// joint's crossing of the ground and its turn about the character's up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+#[repr(u8)]
+pub enum RootMotion {
+    /// Left in the pose, as the clip was made: a walk that crosses the ground goes back to
+    /// where it started each loop.
+    #[default]
+    InPose = 0,
+    /// Taken out of the pose, and moves the entity's `Transform` each tick.
+    Move = 1,
+    /// Taken out of the pose, and left in `moved` and `turned` each tick for the game to
+    /// move the character by (a character controller).
+    Report = 2,
+}
 
 /// A character's animation (ADR 0124's E12-2): its skinned model plays the clip named here,
 /// looped. Its time moves on each tick by the tick's length times `speed` (none while
@@ -28,6 +45,8 @@ pub struct Animator {
     /// Seconds into the clip. The player moves it each tick (saves keep it, so a load goes
     /// on from there); setting it moves the clip there.
     pub time: f32,
+    /// What its clips' root motion does (E12-2c).
+    pub root_motion: RootMotion,
     /// The clip fading out while `clip` fades in ([`Self::play`], ADR 0124's E12-2b): its
     /// name, kept while `fade` is above 0. Saved, so a load goes on fading.
     #[reflect(hidden)]
@@ -59,6 +78,13 @@ pub struct Animator {
     /// A tick set `previous` since the animator was made or loaded.
     #[reflect(skip)]
     pub ticked: bool,
+    /// The last tick's root motion taken out of the pose (`RootMotion::Move` or `Report`):
+    /// how far the character crossed the ground, in its parent's space.
+    #[reflect(skip)]
+    pub moved: Vec3,
+    /// Likewise, its turn about its own up, in radians (counterclockwise seen from above).
+    #[reflect(skip)]
+    pub turned: f32,
 }
 
 reflect_component!(Animator);
@@ -70,6 +96,7 @@ impl Default for Animator {
             speed: 1.0,
             paused: false,
             time: 0.0,
+            root_motion: RootMotion::InPose,
             from_clip: String::new(),
             from_time: 0.0,
             fade: 0.0,
@@ -80,6 +107,8 @@ impl Default for Animator {
             faded_previous: 0.0,
             previous: 0.0,
             ticked: false,
+            moved: Vec3::ZERO,
+            turned: 0.0,
         }
     }
 }
