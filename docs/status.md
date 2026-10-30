@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-4d, curves** (#PR, ADR 0124's as-built):
+  - **E12-4d, curves** (#473, ADR 0124's as-built):
     - The Animation tab's Curves view (switch or C) draws the picked keys' tracks as lines,
       a color for each number, with the keys as points.
     - A point is dragged in time (whole frames, Shift freely) and in value, with the range
