@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5b, the graph's runtime** (#PR, ADR 0124's as-built):
+  - **E12-5b, the graph's runtime** (#477, ADR 0124's as-built):
     - `engine_anim::AnimGraph` is a graph cooked per rig into flat arrays. `GraphState` is
       each character's state.
     - A tick takes the transitions (from any first, priority, exit time, triggers used up,
