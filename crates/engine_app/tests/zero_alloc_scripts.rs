@@ -6,11 +6,12 @@
 //! `find_child`, `children`, `has`, `parent`, a function of their own through `self:`),
 //! the spinning example (§5) as a system over a query of 1,000 entities, relays sending
 //! each other messages and setting timers, dice drawing the world's random numbers, and
-//! chimes reading their text props and writing one, and steppers hearing their clips'
-//! events (ADR 0124's E12-3b), every tick, through 600
-//! ticks and frames after a warm-up: the heap allocations made in the scripts' stages
-//! are counted (the physics steps between them are not). One test per file, so nothing
-//! else allocates concurrently.
+//! chimes reading their text props and writing one, steppers hearing their clips' events
+//! (ADR 0124's E12-3b), and riders setting and firing their animators' graphs' parameters
+//! by name and reading their states (E12-5c), every tick, through 600 ticks and frames
+//! after a warm-up: the heap allocations made in the scripts' stages are counted (the
+//! physics steps between them are not). One test per file, so nothing else allocates
+//! concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -242,12 +243,41 @@ end
 return Stepper
 "#;
 
+/// An animator's graph driven by name (ADR 0124's E12-5c): a number, a flag and a trigger
+/// set and fired every tick, and the state the player wrote read.
+const RIDER: &str = r#"--!strict
+local Rider = component("Rider", { idles = 0 })
+function Rider.on_tick(self, dt: number)
+    local a = self.Animator
+    a:set("speed", 3.5)
+    a:set("armed", true)
+    a:trigger("jump")
+    if a.state == "Idle" then
+        self.idles += 1
+    end
+end
+return Rider
+"#;
+
 /// Watchers, each with a trigger, a ball falling through it and a floor named after it.
 const WATCHERS: usize = 10;
 
 /// Strollers, each with a camera and an arm; walkers, each with a camera.
 const STROLLERS: usize = 10;
 const WALKERS: usize = 10;
+
+/// Number prop `name` of script component `component` on `e`.
+fn read_f32_of(world: &World, scripts: &Scripts, e: Entity, component: &str, name: &str) -> f32 {
+    let id = scripts.component(component).unwrap();
+    let engine_reflect::TypeKind::Struct(fields) = &world.components().type_info(id).unwrap().kind
+    else {
+        unreachable!()
+    };
+    let at = fields.iter().find(|f| f.name == name).unwrap().offset;
+    let base = world.get_raw(e, id).unwrap().as_ptr();
+    // SAFETY: a number prop (f32) at its offset in the component's live value.
+    unsafe { base.add(at).cast::<f32>().read_unaligned() }
+}
 
 #[test]
 fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
@@ -264,8 +294,14 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
     std::fs::write(dir.join("scripts/dice.luau"), DICE).unwrap();
     std::fs::write(dir.join("scripts/chime.luau"), CHIME).unwrap();
     std::fs::write(dir.join("scripts/stepper.luau"), STEPPER).unwrap();
+    std::fs::write(dir.join("scripts/rider.luau"), RIDER).unwrap();
     let mut world = World::new();
     world.insert_resource(AnimationEvents::new());
+    // The riders' graph, as the player reads it: its parameters by slot, sorted by name.
+    let graph = engine_scene::AssetId::new();
+    let mut params = engine_runtime::GraphParams::default();
+    params.insert(graph, [("armed", false), ("jump", true), ("speed", false)]);
+    world.insert_resource(params);
     let mut scripts = Scripts::load(&mut world, &dir, &dir.join("scripts")).unwrap();
     let mut physics = ScenePhysics::new(&PhysicsSettings {
         threads: 0,
@@ -392,6 +428,20 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
             let stepper = world.spawn((Transform::IDENTITY,));
             assert!(scripts.add(&mut world, stepper, "Stepper"));
             stepper
+        })
+        .collect();
+    let riders: Vec<Entity> = (0..10)
+        .map(|_| {
+            let rider = world.spawn((
+                Transform::IDENTITY,
+                Animator {
+                    graph: engine_scene::AssetRef::file(graph),
+                    state: String::from("Idle"),
+                    ..Animator::default()
+                },
+            ));
+            assert!(scripts.add(&mut world, rider, "Rider"));
+            rider
         })
         .collect();
     // Each stepper's clip fires a step and a landing every tick, as the player fires them.
@@ -609,6 +659,13 @@ fn the_engines_api_for_scripts_allocates_nothing_in_steady_state() {
             )
         };
         assert_eq!(heard, (840.0, 840.0), "a stepper missed its events");
+    }
+    // The riders set their numbers and flags and fired their trigger every tick (nothing
+    // took it), and read the state.
+    for &r in &riders {
+        let a = world.get::<Animator>(r).unwrap();
+        assert_eq!(&a.params[..3], &[1.0, 840.0, 3.5], "armed, jump, speed");
+        assert_eq!(read_f32_of(&world, &scripts, r, "Rider", "idles"), 840.0);
     }
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(counted, 0, "allocations in 600 ticks of scripts");

@@ -1089,6 +1089,8 @@ impl Player {
         let timing = engine_runtime::Timing::new(&mut world);
         let animators = engine_runtime::Animators::new(&mut world);
         world.insert_resource(engine_runtime::AnimationEvents::new());
+        // The animation graphs' parameters by name, for scripts (ADR 0124's E12-5c).
+        world.insert_resource(engine_runtime::GraphParams::default());
         let mut runtime = Runtime::<InstanceId>::new(world, settings.tick_hz);
         runtime.set_jobs(jobs.clone());
         let ring = UploadRing::new(&device, &mut allocator, in_flight, 32 << 20)
@@ -3401,6 +3403,9 @@ impl Player {
                             host.host_tick_start(world, Instant::now());
                         }
                         timing.advance(world, dt);
+                        // The graphs animators name known before the scripts run, so they
+                        // find their parameters (ADR 0124's E12-5c).
+                        assets.borrow_mut().know_graphs(world);
                         if let Some(scripts) = scripts_cell.borrow_mut().as_mut() {
                             let game = game_cell.borrow();
                             let own = own_physics.borrow();
@@ -3430,6 +3435,7 @@ impl Player {
                         // the game's (ADR 0124's E12-2), their sockets with them; the events
                         // they played past fire for the game now, for scripts next tick.
                         animators.advance(world, dt);
+                        assets.borrow_mut().tick_graphs(world, dt);
                         assets.borrow_mut().animate_fields(world);
                         assets.borrow_mut().move_roots(world);
                         assets.borrow_mut().fire_events(world);

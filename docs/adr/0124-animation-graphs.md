@@ -584,6 +584,88 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5c, scripts, 2026-10-30): the scripts' calls on a graph
+
+- **`animator:set(name, value)` and `animator:trigger(name)`** on `Animator` views (`engine_app::script_views`), matched through the same `__namecall` atoms as `play`.
+  - The name is read in place from the stack. Its slot is found in the world's `GraphParams` for the animator's `graph`: one hash lookup and a scan of at most 16 names.
+  - `Animator::set_slot` / `fire_slot` write it and mark it in `params_set`; a slot past the 16 does nothing.
+  - `set` takes a number, or a boolean (1 or 0).
+- **Errors** are the script's at its line:
+  - an animator playing no graph;
+  - a name its graph lacks, with the names it has of the call's kind (``Animator's graph has no parameter `sped` (it has: armed, speed)``);
+  - a trigger set, or a number or flag fired, naming the right call;
+  - a value or name of the wrong type.
+- **A graph the player has not read yet** (`GraphParams::knows`) drops the call. The player reads every graph an animator names at each tick's start (E12-5c-1), so only a graph given in the same tick is not read yet.
+- **`animator.state`** reads the hidden field through the views' text path: kept strings, nothing made while it stays. Writing it is refused (``Animator.state is read-only …``).
+- **Types** (`engine_app::script_types`):
+  - `GraphNames` holds the project's graphs' parameter names, sorted and each once. `add_text` reads a file's header and `params[…]` lines only.
+  - `definitions_with(&names)` declares `export type AnimatorParam` (numbers, flags and whole numbers) and `AnimatorTrigger` (triggers) as unions of string choices, `string` without names.
+  - On `Animator` it declares `set(self, name: AnimatorParam, value: number | boolean)`, `trigger(self, name: AnimatorTrigger)` and `state: string`.
+- **The editor makes the types again when the project's graphs change:**
+  - `AssetDatabase::revision()` counts scans that found a file new, written anew, moved or gone.
+  - A frame compares it; a new revision hashes the graph entries; a new hash reads the graph files.
+  - The new `types/ofelia.d.luau` is written and given to the checker.
+- **Completion inside the quotes:**
+  - Luau offers string choices only inside a closed string, and the editor closes no quotes. So the completion's question closes, at the caret, a string the caret's line leaves open (`complete::open_quote`).
+  - `set("s` offers `speed`; before, Luau answered as at an expression with every global.
+- **The checker** (Luau's old solver) underlines a misspelt or wrong-kind name at its string in `--!strict` scripts, as New Script writes them: `Expected this to be '"armed" | "speed"', but got '"sped"'`. Nonstrict scripts (no mode line, Luau's default) report nothing for it.
+- **Measured** (`scripts::tests::measure_animator_graph_calls --ignored`, release, ref-1; 10,000 calls a tick minus an empty loop; medians of 51 ticks, four runs):
+  - `set` 69–75 ns, `trigger` 66–71 ns, `state` 51–58 ns;
+  - 0 allocations in 600 ticks with ten riders setting, firing and reading every tick.
+- **Tests:**
+  - the binding's slots, errors, state and missing graph;
+  - the riders in `zero_alloc_scripts`;
+  - the types' unions;
+  - the analysis in strict and nonstrict, and completion in closed and typed-open strings;
+  - the editor: completion as typed, a misspelt name underlined, and the types following a graph written anew;
+  - the player: a script taking the Fox's graph Idle → Move → Alert → Idle by name.
+- **Left:** `animator:in_window(name)`, with clip windows.
+
+## As built (E12-5c-1, 2026-10-30): the player plays graphs
+
+- **The `Animator`** names its graph in `graph` (an `.agraph`; none plays `clip` as before).
+  Its parameters are `params`, by slot (a slot is a parameter's place among the graph's
+  names in their order); `params_set` marks the slots set by `set`/`trigger` (or
+  `set_slot`/`fire_slot`); the others follow the graph's values, its starting ones until a
+  transition changes them, so a graph edited later moves its defaults with it. `state` is
+  the first layer's state by name.
+- **A graph file** (`engine_app::graphs`) is read the first time an animator names it (or
+  taken from the editor while it edits it, `Assets::set_anim_graph`, as clips are) and
+  turned into a `GraphDesc`: ids become indices (layers by `order`, the rest by id); a
+  machine without an entry starts in its first state, a state without a name is named by
+  its id, an id that names nothing becomes an index out of range for the cook to name.
+- **Its parameters reach scripts before they run:** at each tick's start the player passes
+  over the animators and reads each graph not read yet, telling its names to the world's
+  `GraphParams`; a run of animators naming one graph looks it up once. So a script's
+  `set` finds its slot even on the tick its character appeared, before its model loads.
+- **Cooked once per rig** (file × rig, the rig kept alive by the cache): the clips found by
+  name among the model's (`Clip 2` for an unnamed second, as `Animator::clip`), each one's
+  length and whether its `.meta` plays it once; the additive layers' references prepared.
+  What cannot be cooked is told once in the log. A model read again or its clip settings
+  edited cook its graphs again; a graph file written anew is read and cooked again.
+- **Each character** gets a `GraphState` when it plays a graph: its entry states, the
+  parameters its animator set put in, weighed once (a tick of 0 s), so a still world (the
+  editor) shows its first pose. A cooked graph or file that changed makes a new state; a
+  generation number makes the check one comparison a character.
+- **A tick** (after the scripts' and the animators', before the game's): the set parameters
+  go in, the graph ticks by `dt` times the animator's `speed` (held while `paused`, or at a
+  speed below 0: graphs do not play backwards), every parameter comes back (a trigger a
+  transition took is 0 again), and the first layer's state is written to `state` (its room
+  kept). Ticks the network plays again move nothing: a graph's state is the player's, not
+  part of what the network rolls back.
+- **A frame** poses each character from its graph between its last two ticks
+  (`Posing::palette_graph`, one `GraphWork` sized for the largest rig); sockets and
+  `Player::model_joints` take the same pose (sockets at the tick's moment).
+- **A graph that cannot be read** shows the rest pose (and is told once in the log).
+- **Not yet:** a graph's root motion stays in its pose and its clips fire no events (5c-2,
+  with saves of its state); its clips are the model's, not the animator's own `.anim`
+  clips; inertialized transitions cross-fade (5b-2, in parallel).
+- **Measured:** 0 allocations in 607 frames of CesiumMan's `zero_alloc_skins` with a fourth
+  character playing a graph (two states cross-faded by a number set every 120 frames, a
+  trigger from any state every 90, a layer masked to an arm, an additive one), next to the
+  others; the Fox GPU test on the Radeon goes Idle → Move → Alert → Move → Idle by its
+  parameters, the editor's copy renaming a state, a missing graph at the rest pose.
+
 ## As built (E12-5b, 2026-10-30): the graph's runtime in `engine_anim`
 
 - **What a graph is made from:** `engine_anim::GraphDesc`, its parts by index (parameters,

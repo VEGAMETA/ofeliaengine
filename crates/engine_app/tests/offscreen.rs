@@ -68,3 +68,42 @@ fn an_offscreen_player_captures_its_frames() {
     );
     assert_eq!(report.errors, 0, "{:#?}", report.first_errors);
 }
+
+/// A scene with nothing in it still draws its sky (status §6, found by ADR 0124's E12-1a
+/// test): with every model gone the frame has no instance, and the view's environment is
+/// drawn over its clear, not the clear colour alone.
+#[test]
+fn an_empty_scene_still_draws_its_sky() {
+    let (width, height) = (160u32, 120u32);
+    let Some((mut player, mut game)) = common::player_with(|settings| {
+        settings.window = Window::Offscreen { width, height };
+        settings.validation = Some(true);
+    }) else {
+        return;
+    };
+    let world = player.world_mut();
+    let mut drawn =
+        engine_ecs::QueryState::<(engine_ecs::Entity, &engine_runtime::MeshRenderer)>::new(world);
+    let models: Vec<engine_ecs::Entity> = drawn.iter_readonly(world).map(|(e, _)| e).collect();
+    assert!(!models.is_empty());
+    for e in models {
+        world.despawn(e);
+    }
+    for _ in 0..10 {
+        player.frame(&mut game).unwrap();
+    }
+    let rgba = player.capture(&mut game).unwrap().unwrap();
+    let distinct: std::collections::BTreeSet<[u8; 4]> = rgba
+        .chunks_exact(4)
+        .map(|p| [p[0], p[1], p[2], p[3]])
+        .collect();
+    let (top, bottom) = (&rgba[..4], &rgba[rgba.len() - 4..]);
+    println!("{} colors; top {top:?}, bottom {bottom:?}", distinct.len());
+    assert!(
+        distinct.len() > 10,
+        "{} colors: the sky, not the clear colour",
+        distinct.len()
+    );
+    let report = player.validation_report();
+    assert_eq!(report.errors, 0, "{:#?}", report.first_errors);
+}

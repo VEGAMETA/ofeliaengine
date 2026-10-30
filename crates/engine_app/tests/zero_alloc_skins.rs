@@ -10,7 +10,9 @@
 //! clips made in the editor (E12-4a: its turn and its lamp's range keyed, an event, a fade
 //! between two clips now and then); and a character playing a clip made in the editor that
 //! keys its joints (E12-4e: its arms and neck turned over its rest pose, a joint it lacks
-//! left out), fading into its model's clip and back now and then. Khronos' CesiumMan
+//! left out), fading into its model's clip and back now and then; and a character playing an
+//! animation graph (E12-5c: two states cross-faded by a number set now and then, a trigger
+//! taken from any state, a layer masked to an arm and an additive one). Khronos' CesiumMan
 //! (`tools/fetch-test-assets.ps1`); skipped without it.
 //! One test per file, so nothing else allocates concurrently.
 
@@ -23,7 +25,10 @@ mod counting;
 use engine_app::{AssetMeta, Model};
 use engine_core::math::Vec3;
 use engine_ecs::{Entity, QueryState, Transform};
-use engine_scene::{AnimFile, AssetId, AssetPaths, AssetRef, ClipEvent, Name};
+use engine_scene::{
+    AnimFile, AnimGraphFile, AssetId, AssetPaths, AssetRef, ClipEvent, LayerBlend, LayerFile, Name,
+    NodeFile, NodeKind, ParamFile, ParamKind, StateFile, TransitionFile,
+};
 use std::time::{Duration, Instant};
 
 #[global_allocator]
@@ -156,6 +161,32 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         Model::new(mesh, material),
         engine_runtime::Animator::new("wave").with_clip("wave", AssetRef::file(wave_file)),
     ));
+    // A character playing an animation graph (E12-5c), as the editor holds it.
+    let graph_file = AssetId::new();
+    player
+        .assets_mut()
+        .set_anim_graph(graph_file, Some(&dance_graph()));
+    let dancer = player.world_mut().spawn((
+        Transform::from_xyz(-2.0, -1.0, -3.0),
+        Model::new(mesh, material),
+        engine_runtime::Animator {
+            graph: AssetRef::file(graph_file),
+            ..engine_runtime::Animator::default()
+        },
+    ));
+    // Its parameters by name: jump, speed.
+    let (jump, speed) = (0u16, 1u16);
+    let dance = |player: &mut engine_app::Player, fast: Option<bool>| {
+        if let Some(animator) = player
+            .world_mut()
+            .get_mut::<engine_runtime::Animator>(dancer)
+        {
+            match fast {
+                Some(fast) => animator.set_slot(speed, if fast { 1.0 } else { 0.0 }),
+                None => animator.fire_slot(jump),
+            };
+        }
+    };
     let wave_to = |player: &mut engine_app::Player, clip: &str| {
         if let Some(animator) = player
             .world_mut()
@@ -173,6 +204,7 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
     while player.model_rig(man).is_none()
         || player.model_rig(walker).is_none()
         || player.model_rig(waver).is_none()
+        || player.model_rig(dancer).is_none()
     {
         assert!(started.elapsed() < Duration::from_secs(30), "no skin");
         player.frame(&mut game).unwrap();
@@ -216,6 +248,15 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
             player.frame(&mut game).unwrap();
         }
     }
+    // The dancer's states each shown once before counting (their names' room grown).
+    for fast in [Some(true), None, Some(false)] {
+        dance(&mut player, fast);
+        for _ in 0..40 {
+            player.frame(&mut game).unwrap();
+        }
+    }
+    let mut fast = false;
+    let mut states = [0u32; 2];
     let mut waving = true;
     let mut frames = 0u32;
     let mut creaks = 0usize;
@@ -253,6 +294,16 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
             if frames.is_multiple_of(200) {
                 fade(player);
             }
+            if frames.is_multiple_of(120) {
+                fast = !fast;
+                dance(player, Some(fast));
+            }
+            if frames.is_multiple_of(90) {
+                dance(player, None);
+            }
+            if let Some(animator) = player.world_mut().get::<engine_runtime::Animator>(dancer) {
+                states[usize::from(animator.state == "Fast")] += 1;
+            }
             if frames.is_multiple_of(100) {
                 waving = !waving;
                 wave_to(player, if waving { "wave" } else { "" });
@@ -268,6 +319,14 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         },
     );
     println!("{taken} model previews taken, {heard} clip events heard, {creaks} creaks");
+    println!(
+        "the dancer: {} frames walking, {} fast",
+        states[0], states[1]
+    );
+    assert!(
+        states[0] > 0 && states[1] > 0,
+        "both states shown: {states:?}"
+    );
     assert!(heard > 0, "the walker's clip fired its events");
     assert!(creaks > 0, "the door's clip fired its event");
     let range = player
@@ -292,6 +351,95 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
     // Still skinned: the same entities drawn by their instances.
     let world = player.world_mut();
     let mut skinned = QueryState::<(Entity, &engine_runtime::SkinnedMesh)>::new(world);
-    assert_eq!(skinned.iter_readonly(world).count(), 3);
+    assert_eq!(skinned.iter_readonly(world).count(), 4);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The dancer's graph: his clip walking and twice as fast, cross-faded by `speed`; `jump`
+/// back to walking from any state; a layer of the clip on his right arm at half weight, and
+/// an additive one of it at a third.
+fn dance_graph() -> AnimGraphFile {
+    let mut graph = AnimGraphFile::default();
+    graph.params.insert(
+        "speed".into(),
+        ParamFile {
+            kind: ParamKind::Float,
+            value: 0.0,
+        },
+    );
+    graph.params.insert(
+        "jump".into(),
+        ParamFile {
+            kind: ParamKind::Trigger,
+            value: 0.0,
+        },
+    );
+    let layer = |order: u32, root: &str| LayerFile {
+        name: root.into(),
+        order,
+        root: root.into(),
+        ..LayerFile::default()
+    };
+    graph.layers.insert("base".into(), layer(0, "m"));
+    graph.layers.insert(
+        "arm".into(),
+        LayerFile {
+            weight: 0.5,
+            mask: [("Skeleton_arm_joint_R".to_owned(), 1.0)].into(),
+            ..layer(1, "slow")
+        },
+    );
+    graph.layers.insert(
+        "lean".into(),
+        LayerFile {
+            weight: 0.3,
+            blend: LayerBlend::Additive,
+            ..layer(2, "slow")
+        },
+    );
+    graph.nodes.insert(
+        "m".into(),
+        NodeFile {
+            kind: NodeKind::Machine,
+            entry: "walk".into(),
+            ..NodeFile::default()
+        },
+    );
+    for (node, speed) in [("slow", 1.0), ("fast", 2.0)] {
+        graph.nodes.insert(
+            node.into(),
+            NodeFile {
+                clip: "Clip 1".into(),
+                speed,
+                ..NodeFile::default()
+            },
+        );
+    }
+    for (state, name, pose) in [("walk", "Walk", "slow"), ("run", "Fast", "fast")] {
+        graph.states.insert(
+            state.into(),
+            StateFile {
+                name: name.into(),
+                machine: "m".into(),
+                pose: pose.into(),
+                ..StateFile::default()
+            },
+        );
+    }
+    for (id, from, to, when) in [
+        ("t1", "walk", "run", "speed > 0.5"),
+        ("t2", "run", "walk", "speed <= 0.5"),
+        ("t3", "", "walk", "jump"),
+    ] {
+        graph.transitions.insert(
+            id.into(),
+            TransitionFile {
+                from: from.into(),
+                to: to.into(),
+                when: when.into(),
+                ..TransitionFile::default()
+            },
+        );
+    }
+    graph
 }

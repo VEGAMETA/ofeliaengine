@@ -879,6 +879,23 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5c, the scripts' calls on a graph** (#480, ADR 0124's as-built):
+    `self.Animator:set("speed", 3.5)` (a number or a boolean), `self.Animator:trigger("jump")`
+    and `self.Animator.state` (read-only), with errors naming the graph's parameters of the
+    call's kind; about 70 ns a call, 0 allocations. The project's graphs' parameter names
+    are string choices in the generated Luau types (`AnimatorParam`, `AnimatorTrigger`):
+    completed inside the quotes, and a misspelt one underlined in `--!strict` scripts.
+  - **E12-5c-1, the player plays graphs** (#479, ADR 0124's as-built):
+    - `Animator.graph` names an `.agraph`; the player reads it once, cooks it per rig
+      (clips by name among the model's), and gives each character a state at its entry.
+    - Each tick: the parameters the animator set (`params_set`) go in, the graph ticks at
+      the animator's speed, all parameters come back (triggers used up), `state` names the
+      first layer's state. Before the scripts run, every named graph's parameters are known
+      in `GraphParams`, so `set` works on a character's first tick.
+    - Each frame poses from the graph between ticks (sockets and `model_joints` too); a
+      graph that cannot be read shows the rest pose; the editor's copy plays in place of
+      the file. 0 allocations (CesiumMan with a graph character beside the others).
+    - Root motion, events and saves of a graph: 5c-2.
   - **E12-5b, the graph's runtime** (#477, ADR 0124's as-built):
     - `engine_anim::AnimGraph` is a graph cooked per rig into flat arrays. `GraphState` is
       each character's state.
@@ -1222,8 +1239,8 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    E12-5c (the `Animator` playing a graph in the player, its scripts' calls), then 5d and
-    5e; E12-4 is done.
+    E12-5c-2 (a graph's root motion, events and saves), the scripts' calls (in parallel),
+    then 5d (the canvas, in parallel) and 5e; E12-4 is done.
   - **Settled (2026-10-30, team decision «а»):** the scripts' calls on a graph are
     `animator:set("speed", 3.5)`, `animator:trigger("jump")`, `animator.state`,
     `animator:in_window("hit")`, with completion: the project's graphs' parameter names go
@@ -2420,20 +2437,23 @@ grown, divide and conquer); the old labels stay in parentheses.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
-- **Sounds spawned to end on their own never end without an audio device** (found
-  2026-10-30 by E12-3b-1's test): an `AudioSource3D` despawned at its end (a clip event's
-  sound, a script's `audio.play_at`) stays in the world while no device plays it, so a
-  dedicated server or a headless run gathers one entity per sound. The sound system
-  should end them by their length when no voice plays them.
+- **Fixed (2026-10-30, #481): sounds spawned to end on their own never ended without an
+  audio device** (found by E12-3b-1's test): a source no device plays now plays out unheard
+  on the game's clock and ends at its sound's length (stopped, looped or despawned, as its
+  voice would have); a sound that failed to load or streams ends at once. With sound off,
+  sounds playing once end at once. A dedicated server or a headless run keeps no entity
+  per sound.
 
 - **Clip events as hooks of their names** (team decision, 2026-10-30, ADR 0124's
   E12-3b-1): `on_animation_event(name, data)` only for now; an event calling the function
   of its name as `send` does may be added beside it later (about an hour).
 
-- **A scene with no model draws the clear colour, not its sky** (found 2026-10-29 by
-  E12-1a's test, not looked into): with its only model removed, CesiumMan's test scene
-  drew a uniform dark blue; with a floor beside him, the sky drew. Something skips the
-  view when no instance is drawn.
+- **Fixed (2026-10-30, #481): a scene with no model drew the clear colour, not its sky**
+  (found 2026-10-29 by E12-1a's test): the forward renderer's frame with nothing to draw
+  cleared the target and stopped. It now draws the view's sky over the clear when the view
+  has an environment (its background, or its atmosphere's sky and fog), as a frame with
+  something in it does where nothing covers the sky (`an_empty_scene_still_draws_its_sky`:
+  1 colour before, 370 after, no validation errors).
 
 - **Fixed (2026-10-29): a material type's reload compiled two or three times** (found
   with E10-3f-2, 2026-10-28; #446): the entry points, the node previews' apart with their

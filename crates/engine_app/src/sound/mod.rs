@@ -1651,6 +1651,10 @@ impl Sound {
         simulating: bool,
     ) {
         if self.audio.is_none() {
+            // Sound is off: the game's one-shots end at once.
+            if simulating {
+                self.end_unheard(world);
+            }
             return;
         }
         engine_profiler::zone!("app::Sound::update");
@@ -1690,9 +1694,11 @@ impl Sound {
         }
         self.make_queries(world);
         let live = self.manual || self.output.is_some();
+        // No device will play them (it failed to start): they play out unheard.
+        let unheard = !self.manual && self.error.is_some();
         let listener = self.listen(world, camera, dt, live, false);
         self.stamp = self.stamp.wrapping_add(1);
-        let wanted = self.follow_sources(world, dt, live);
+        let wanted = self.follow_sources(world, dt, live, unheard);
         if wanted {
             self.want_output();
         }
@@ -1937,9 +1943,43 @@ impl Sound {
         Some(position)
     }
 
-    /// Keeps every source's voice in step; returns whether any wants to play (the device
-    /// is then opened).
-    fn follow_sources(&mut self, world: &mut World, dt: f64, live: bool) -> bool {
+    /// Sound is off ([`AudioSettings::enabled`]): every source playing once ends at once, as
+    /// though its sound were empty (stopped, or despawned where it asked to be), so a game's
+    /// one-shots do not gather on a dedicated server; looping ones stay as they are.
+    fn end_unheard(&mut self, world: &mut World) {
+        self.make_queries(world);
+        let Some(queries) = self.queries.as_mut() else {
+            return;
+        };
+        let despawn = &mut self.despawn;
+        let mut end = |entity: Entity, source: &mut AudioSource| {
+            if !source.playing {
+                return;
+            }
+            match source.mode {
+                PlayMode::Once => {
+                    source.playing = false;
+                    source.position = 0.0;
+                }
+                PlayMode::Loop => {}
+                PlayMode::Despawn => despawn.push(entity),
+            }
+        };
+        queries
+            .plain
+            .for_each(world, |(entity, source)| end(entity, source));
+        queries
+            .placed
+            .for_each(world, |(entity, source, _)| end(entity, &mut source.source));
+        for entity in self.despawn.drain(..) {
+            world.despawn(entity);
+        }
+    }
+
+    /// Keeps every source's voice in step (`unheard`: no device will play them, so they
+    /// play out on the game's clock, [`play_unheard`]); returns whether any wants to play
+    /// (the device is then opened).
+    fn follow_sources(&mut self, world: &mut World, dt: f64, live: bool, unheard: bool) -> bool {
         let Self {
             settings,
             audio,
@@ -1961,6 +2001,7 @@ impl Sound {
         let mut ctx = Ctx {
             audio,
             live,
+            unheard,
             buses,
             loader,
             sounds,
@@ -2024,6 +2065,7 @@ impl Sound {
         let mut ctx = Ctx {
             audio,
             live,
+            unheard: false,
             buses,
             loader,
             sounds,
@@ -2431,6 +2473,8 @@ impl Sound {
 struct Ctx<'a> {
     audio: &'a mut Audio,
     live: bool,
+    /// No device will play: sources play out on the game's clock ([`play_unheard`]).
+    unheard: bool,
     buses: &'a [Bus],
     loader: &'a Loader,
     sounds: &'a mut Sounds,
@@ -2502,11 +2546,48 @@ fn follow(
             ctx.wanted = true;
             if ctx.live {
                 start(ctx, track, source, placed);
+            } else if ctx.unheard {
+                play_unheard(ctx, track, entity, source);
             }
         }
     }
     track.written = source.position;
     track.at = at;
+}
+
+/// A source no device will play (it failed to start): its position moves on by the frame's
+/// length, and at its sound's end it ends as its voice would have (stopped, looped or
+/// despawned), so a sound despawned at its end ends and a game waiting for one to finish
+/// waits as long. One whose sound is still read waits for it; one whose sound failed, or is
+/// streamed (its length is the stream's, read only to play it), ends at once.
+fn play_unheard(ctx: &mut Ctx<'_>, track: &Track, entity: Entity, source: &mut AudioSource) {
+    let state = track
+        .sound
+        .and_then(|id| ctx.sounds.entries.get(id as usize))
+        .map(|e| &e.state);
+    let length = match state {
+        Some(State::Loading) => return,
+        Some(State::Clip(clip)) => clip.duration(),
+        Some(State::Long { .. } | State::Failed) | None => 0.0,
+    };
+    source.position += ctx.dt;
+    if source.position < length {
+        return;
+    }
+    match source.mode {
+        PlayMode::Once => {
+            source.playing = false;
+            source.position = 0.0;
+        }
+        PlayMode::Loop => {
+            source.position = if length > 0.0 {
+                source.position % length
+            } else {
+                0.0
+            };
+        }
+        PlayMode::Despawn => ctx.despawn.push(entity),
+    }
 }
 
 /// Starts a source's voice where its component is, once its sound is ready.
