@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5d-2b-2, layer masks** (#PR, ADR 0124's as-built; the team's а): a Mask section
+  - **E12-5d-2b-2, layer masks** (#493, ADR 0124's as-built; the team's а): a Mask section
     after the shown layer's, the skeleton of a character playing the graph with a check
     box a joint (its subtree in or out, one step), the picked joint's weight typed; the
     mask written its shortest way (every joint in is the empty mask).
