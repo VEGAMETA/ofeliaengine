@@ -618,9 +618,12 @@ allocation with transitions and events every tick; the same events at the same t
   - dim where the field can be keyed (one to four numbers, or a rotation);
   - absent for the rest.
 - **Text layouts** of numbers that change every frame (the inspector following a playing
-  clip) are reused once fewer than 64 are spare, not only when none is (`paint::SPARE_LOW`).
-  Several new texts a frame never run out halfway: 0 allocations in 240 frames of a door's
-  clip playing, measured past the layouts' 2 s.
+  clip, six new texts a frame) need layouts back sooner than the 2 s a layout waits to be
+  laid out into again: with fewer than 64 spare (`paint::SPARE_LOW`) after a frame that laid
+  texts out, those long out of use come back first, then those unused this frame and the
+  last, then new ones are made up to 64. Taken back only at 2 s, the spare ones hung near
+  none and a frame with one more new text than came back allocated (4 to 8 allocations in
+  240 frames, more under the gate's load); now 0, also under load and on both GPUs.
 - **Tests:**
   - The history's: a drag's two frames key 60 then 70 degrees in one step, with the scene's
     turn back each frame; undo and redo hand the clip's text back; a move is recorded with

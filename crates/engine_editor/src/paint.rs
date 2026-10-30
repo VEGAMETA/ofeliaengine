@@ -33,9 +33,11 @@ const CACHE_SOFT_LIMIT: usize = 4096;
 const STALE_FRAMES: u64 = 120;
 /// The text bytes and glyphs a layout has room for at least.
 const LAYOUT_ROOM: usize = 32;
-/// Below this many layouts out of use, a frame that laid texts out takes those long out of
-/// use for the next: a frame that needs several new texts at once (the numbers of a vector
-/// a clip moves) finds enough instead of running out halfway.
+/// Layouts out of use kept at hand: below this many, a frame that laid texts out takes back
+/// those long out of use, then those unused this frame and the last, then makes new ones,
+/// so a frame that needs several new texts at once (the numbers of a vector a clip moves
+/// every frame) never runs out halfway, and texts that change every frame make none in
+/// steady state.
 const SPARE_LOW: usize = 64;
 
 /// Fonts, laid-out strings and the glyph atlas of the UI.
@@ -160,6 +162,15 @@ struct CachedLayout {
 }
 
 impl CachedLayout {
+    /// A layout with no text, its buffers with room for a short one ([`LAYOUT_ROOM`]).
+    fn with_room() -> Self {
+        Self {
+            text: String::with_capacity(LAYOUT_ROOM),
+            glyphs: Vec::with_capacity(LAYOUT_ROOM),
+            ..Self::empty()
+        }
+    }
+
     /// A layout with no text and no buffers (nothing allocated).
     const fn empty() -> Self {
         Self {
@@ -265,26 +276,35 @@ impl LayoutCache {
         entry
     }
 
-    /// Ends a frame: drops what went unused this frame and the last, once the cache is big;
-    /// after a frame that laid texts out with few spare layouts left ([`SPARE_LOW`]), takes
-    /// those long out of use for the next ([`STALE_FRAMES`]; the map keeps its capacity:
-    /// nothing freed or allocated).
+    /// Ends a frame: drops what went unused this frame and the last, once the cache is big.
+    /// After a frame that laid texts out with few spare layouts left ([`SPARE_LOW`]), takes
+    /// those long out of use for the next ([`STALE_FRAMES`]), then, still short, those
+    /// unused this frame and the last, then makes new ones up to it (the map keeps its
+    /// capacity: nothing freed; made only while texts outgrow what was ever kept).
     fn end_frame(&mut self) {
         if self.map.len() > CACHE_SOFT_LIMIT {
             let keep_from = self.frame.saturating_sub(1);
             self.map.retain(|_, e| e.frame >= keep_from);
-        } else if self.missed
-            && self.spare.len() < SPARE_LOW
-            && let Some(before) = self.frame.checked_sub(STALE_FRAMES)
-        {
-            let spare = &mut self.spare;
-            self.map.retain(|_, e| {
-                if e.frame >= before {
-                    return true;
+        } else if self.missed && self.spare.len() < SPARE_LOW {
+            for unused in [STALE_FRAMES, 1] {
+                let Some(before) = self.frame.checked_sub(unused) else {
+                    continue;
+                };
+                if self.spare.len() >= SPARE_LOW {
+                    break;
                 }
-                spare.push(core::mem::replace(e, CachedLayout::empty()));
-                false
-            });
+                let spare = &mut self.spare;
+                self.map.retain(|_, e| {
+                    if e.frame >= before {
+                        return true;
+                    }
+                    spare.push(core::mem::replace(e, CachedLayout::empty()));
+                    false
+                });
+            }
+            while self.spare.len() < SPARE_LOW {
+                self.spare.push(CachedLayout::with_room());
+            }
         }
         self.missed = false;
         self.frame += 1;

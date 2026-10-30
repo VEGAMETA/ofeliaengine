@@ -885,7 +885,8 @@ Last updated: 2026-10-28.
     - An edit of one of those fields keys it at the playhead's frame, in the edit's own step.
     - K keys the clip's fields (an empty clip: position, rotation, scale); ◆ beside an
       inspector field keys that one.
-    - Text layouts are reused once fewer than 64 are spare.
+    - Text layouts come back sooner when few are spare (unused this frame and the last),
+      64 kept at hand: texts that change every frame allocate nothing.
   - **E12-4b-1b, New Clip, renaming and deleting clips** (#470, ADR 0124's as-built): New
     Clip makes an `.anim` in the dock's folder for the selected entity (an `Animator` added
     when missing), one undo step; the header's name field renames a clip, ✕ takes it away.
