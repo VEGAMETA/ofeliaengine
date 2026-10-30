@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-4b-2, keys** (#PR, ADR 0124's as-built):
+  - **E12-4b-2, keys** (#471, ADR 0124's as-built):
     - The editor's frame runs with a previewed clip's fields holding its values, while undo,
       saves and prefabs record the scene's.
     - An edit of one of those fields keys it at the playhead's frame, in the edit's own step.
