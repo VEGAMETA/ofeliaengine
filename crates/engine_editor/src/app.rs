@@ -14592,6 +14592,12 @@ impl Editor {
         let look = anim.look(row);
         let numbers = anim.numbers(row);
         let name = row.name();
+        // A list with nothing to choose (a blend's parameter while the graph has no number).
+        let nothing = look == RowLook::Choice && {
+            let mut options = Vec::new();
+            anim.options(row, &mut options);
+            options.is_empty()
+        };
         match event.action {
             FieldAction::Drag {
                 part,
@@ -14677,6 +14683,12 @@ impl Editor {
                 Err(why) => self.say(why.to_owned()),
             },
             FieldAction::Open => {
+                if nothing {
+                    self.say(String::from(
+                        "A blend follows a number: add a Float or Int parameter first (the                          parameters show with nothing selected)",
+                    ));
+                    return;
+                }
                 self.node_choice = (self.node_choice != Some(k)).then_some(k);
             }
             FieldAction::Choose(i) => {
