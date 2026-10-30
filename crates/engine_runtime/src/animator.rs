@@ -186,10 +186,7 @@ impl Animator {
     /// trigger (fired by [`Self::trigger`], not set).
     pub fn set(&mut self, params: &GraphParams, name: &str, value: f32) -> bool {
         match params.slot(self.graph.file, name) {
-            Some((slot, false)) => {
-                self.params[usize::from(slot)] = value;
-                true
-            }
+            Some((slot, false)) => self.set_slot(slot, value),
             _ => false,
         }
     }
@@ -198,12 +195,31 @@ impl Animator {
     /// the graph has no such trigger.
     pub fn trigger(&mut self, params: &GraphParams, name: &str) -> bool {
         match params.slot(self.graph.file, name) {
-            Some((slot, true)) => {
-                self.params[usize::from(slot)] += 1.0;
-                true
-            }
+            Some((slot, true)) => self.fire_slot(slot),
             _ => false,
         }
+    }
+
+    /// The parameter in slot `slot` of its graph set to `value`: what [`Self::set`] does
+    /// once it found the slot, for a caller that found it itself (the scripts' binding,
+    /// which reads [`GraphParams`] and then writes the animator). False for a slot past the
+    /// last ([`MAX_GRAPH_PARAMS`]), which holds nothing.
+    pub fn set_slot(&mut self, slot: u16, value: f32) -> bool {
+        let Some(param) = self.params.get_mut(usize::from(slot)) else {
+            return false;
+        };
+        *param = value;
+        true
+    }
+
+    /// The trigger in slot `slot` of its graph fired, as [`Self::trigger`] fires it once it
+    /// found the slot. False for a slot past the last.
+    pub fn fire_slot(&mut self, slot: u16) -> bool {
+        let Some(param) = self.params.get_mut(usize::from(slot)) else {
+            return false;
+        };
+        *param += 1.0;
+        true
     }
 
     /// Plays clip `clip` from its start, fading from what plays now over `fade` seconds (at
@@ -404,6 +420,12 @@ impl GraphParams {
     ) {
         let params = params.into_iter().map(|(n, t)| (n.into(), t)).collect();
         self.graphs.insert(graph, params);
+    }
+
+    /// Whether graph file `graph`'s parameters are known (the player read the graph), none
+    /// or some: what tells a name the graph lacks from a graph not read yet.
+    pub fn knows(&self, graph: engine_scene::AssetId) -> bool {
+        self.graphs.contains_key(&graph)
     }
 
     /// Parameter `name` of graph file `graph`: its slot and whether it is a trigger.
@@ -655,5 +677,15 @@ mod tests {
         assert!(!a.set(&params, "sped", 1.0));
         assert!(!Animator::default().plays_graph());
         assert_eq!(params.of(graph).len(), 2);
+        // By slot, as the scripts' binding sets them: a slot past the last holds nothing.
+        assert!(a.set_slot(0, 1.5) && a.fire_slot(1));
+        assert_eq!(&a.params[..2], &[1.5, 3.0]);
+        assert!(!a.set_slot(MAX_GRAPH_PARAMS as u16, 1.0));
+        assert!(!a.fire_slot(u16::MAX));
+        // A graph read with no parameters is known; one not read yet is not.
+        let empty = engine_scene::AssetId::new();
+        params.insert(empty, []);
+        assert!(params.knows(graph) && params.knows(empty));
+        assert!(!params.knows(engine_scene::AssetId::new()));
     }
 }

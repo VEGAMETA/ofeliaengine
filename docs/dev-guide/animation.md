@@ -72,6 +72,35 @@ world.spawn((Model::new(mesh, material), Animator::new("Walk")));
     in fades out from where it is.
   - The fade is saved with the entity, so a load goes on fading. The fields are hidden in
     the editor.
+- **From scripts, its graph** (E12-5c): an animator whose `graph` names an `.agraph` takes
+  its parameters by name.
+
+  ```luau
+  function Hero.on_tick(self, dt: number)
+      local a = self.Animator
+      a:set("speed", vector.magnitude(input.vector("move")) * 4) -- a number
+      a:set("armed", self.armed) -- a flag: true or false
+      if input.just_pressed("jump") then a:trigger("jump") end -- held until a transition takes it
+      if a.state == "Fall" then self.falling += dt end -- the first layer's state, by name
+  end
+  ```
+
+  - `set` takes a number, or a boolean for a flag (`true` is 1). `trigger` fires a trigger:
+    it counts up until a transition whose condition names it goes.
+  - `state` is what the graph's step left: the player runs it after the scripts' tick, so
+    a parameter set in this tick changes the state the scripts read in the next one.
+    Writing `state` is an error.
+  - A name the graph lacks is an error that lists the names it has (``Animator's graph has
+    no parameter `sped` (it has: armed, speed)``), as are `set` on a trigger, `trigger` on
+    a number or flag, and either call on an animator without a graph.
+  - The player reads every graph an animator names before the scripts' next tick. Until
+    then (an animator given a graph in this very tick) the calls do nothing.
+  - **Completion:** the editor puts the parameters of the project's graphs in the script
+    types (`AnimatorParam`, `AnimatorTrigger`), written again when an `.agraph` changes. It
+    and VS Code offer `speed` inside `set("…")` and the triggers inside `trigger("…")`; in a
+    `--!strict` script a misspelt name is underlined. A name kept in a variable is
+    annotated to pass: `local name: AnimatorParam = "speed"`.
+  - Each call costs about 70 ns, `state` about 50 (ref-1); none allocates.
 - **Root motion** (E12-2c): a clip that crosses the ground (a walk made moving forward,
   not on a treadmill) can move the character instead of its pose. `root_motion` says how:
   - `InPose` (the default): the motion stays in the pose, as the clip was made. The
@@ -99,8 +128,8 @@ world.spawn((Model::new(mesh, material), Animator::new("Walk")));
   - The Animation tab's header sets them ("in the game: Once · root motion: Across Up
     Turn"), each an undo step written to the `.meta`.
 - Scripts reach it as any component: `self.Animator.speed = 2`,
-  `self.Animator.root_motion = "Move"`, and `self.Animator.moved` after a tick. The rest
-  of its calls (`set`, `trigger`, `state`) come with the rest of E12-2.
+  `self.Animator.root_motion = "Move"`, and `self.Animator.moved` after a tick; its
+  graph's calls are above.
 
 In the editor its `clip` is a list of the character's clips.
 
