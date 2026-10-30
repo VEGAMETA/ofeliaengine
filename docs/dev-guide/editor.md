@@ -1591,7 +1591,14 @@ selection, the zoom, and the first thing that does not hold together.
 
 **Animation: New Animation Graph** (Ctrl+Shift+P) writes `New Animation Graph.agraph` in the
 dock's folder and opens it: a base layer playing a machine whose entry state, Idle, plays a
-clip not named yet (marked as a problem until you name it in the inspector).
+clip not named yet (marked as a problem until you name it in the inspector). The selected
+characters' animators get it at once, in one step (as New Material gives its material to
+the selected models).
+
+Transitions drawn on the canvas **inertialize** by default: the state they go to plays at
+full strength at once, and the pose it leaves fades into it without a pop (uncheck
+**inertialize** for a cross-fade; a transition written by hand in the file cross-fades
+unless it says otherwise).
 
 - **The canvas** shows the first layer's state machine:
   - each state is a box: its name, and under it what it plays (`Walk`, `Blend1d speed:

@@ -1551,16 +1551,21 @@ fn insert_state(
     }
     if let Some(from) = from {
         let t = fresh_id(file);
-        file.transitions.insert(
-            t,
-            TransitionFile {
-                from: from.id().to_owned(),
-                to: id.clone(),
-                ..TransitionFile::default()
-            },
-        );
+        file.transitions.insert(t, drawn_transition(from.id(), &id));
     }
     id
+}
+
+/// A transition drawn on the canvas from state `from` (empty: Any State) to `to`: the file's
+/// defaults, but inertialized (team decision 2026-10-30, ADR 0124's E12-5d-1: the
+/// destination plays at full strength at once; the file's own default stays a cross-fade).
+fn drawn_transition(from: &str, to: &str) -> TransitionFile {
+    TransitionFile {
+        from: from.to_owned(),
+        to: to.to_owned(),
+        inertialize: true,
+        ..TransitionFile::default()
+    }
 }
 
 /// States `states` taken out of `file` with every transition from or into them (and the
@@ -1675,14 +1680,8 @@ impl GraphDoc {
         let mut made = String::new();
         let (before, after) = self.edit_anim(|f| {
             made = fresh_id(f);
-            f.transitions.insert(
-                made.clone(),
-                TransitionFile {
-                    from: from.id().to_owned(),
-                    to: to.to_owned(),
-                    ..TransitionFile::default()
-                },
-            );
+            f.transitions
+                .insert(made.clone(), drawn_transition(from.id(), to));
         })?;
         let anim = self.anim.as_deref_mut()?;
         anim.clear_selection();
@@ -2885,6 +2884,7 @@ mod tests {
         let made = &anim(&d).file.transitions[&t];
         assert_eq!((made.from.as_str(), made.to.as_str()), ("idle", "walk"));
         assert_eq!(made.blend, 0.25);
+        assert!(made.inertialize, "drawn transitions inertialize (team, 2a)");
         assert!(
             t.len() == 4 && t.chars().all(|c| c.is_ascii_hexdigit()),
             "{t}"
@@ -2915,7 +2915,7 @@ mod tests {
                 .file
                 .transitions
                 .values()
-                .any(|t| t.from == "idle" && t.to == new)
+                .any(|t| t.from == "idle" && t.to == new && t.inertialize)
         );
         // A click on an arrow selects it alone.
         d.relayout(&mut measure);

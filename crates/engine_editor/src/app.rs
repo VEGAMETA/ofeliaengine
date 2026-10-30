@@ -14769,9 +14769,10 @@ impl Editor {
 
     /// "Animation: New Animation Graph" (ADR 0124 E12-5d-1): an animation graph in the
     /// dock's folder (`New Animation Graph.agraph`, numbered when taken): a base layer
-    /// playing a machine whose entry state, Idle, plays a clip not named yet; it opens in
-    /// its tab.
-    fn new_animation_graph(&mut self, world: &World) {
+    /// playing a machine whose entry state, Idle, plays a clip not named yet; given to the
+    /// selected characters' animators in one step, as New Material gives its material to
+    /// the selected models (team decision 2026-10-30, 4a); it opens in its tab.
+    fn new_animation_graph(&mut self, world: &mut World) {
         let folder = self.browser.folder.clone();
         let path = unique_file(&self.root, &folder, "New Animation Graph", "agraph");
         let id = AssetId::new();
@@ -14780,10 +14781,30 @@ impl Editor {
             self.say(format!("{path} could not be written: {e}"));
             return;
         }
+        let targets: Vec<Entity> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|&e| world.get::<engine_runtime::Animator>(e).is_some())
+            .collect();
+        let mut given = 0;
+        if !targets.is_empty() {
+            let mut value = String::new();
+            AssetRef::file(id).write(Some(&self.assets), &mut value);
+            match self.set_on(world, &targets, "Animator.graph", &value) {
+                Ok(()) => given = targets.len(),
+                Err(why) => self.say(format!("Animator.graph: {why}")),
+            }
+        }
         self.open_graph(world, Path::new(&path));
+        let to = match given {
+            0 => String::new(),
+            1 => String::from(", given to the selected character"),
+            n => format!(", given to the {n} selected characters"),
+        };
         self.say(format!(
-            "{path}: Idle plays no clip yet (the inspector names it); Space adds a state, a \
-             drag from a state's edge a transition"
+            "{path}{to}: Idle plays no clip yet (the inspector names it); Space adds a state, \
+             a drag from a state's edge a transition"
         ));
     }
 
@@ -42214,13 +42235,36 @@ return Coin
         assert_eq!(ed.graphs.len(), 1, "opened again by the undo");
         assert!(ed.graphs[0].dirty() && ed.graphs[0].anim.is_some());
         assert!(anim(&ed).file.params.contains_key("flag"));
-        // New Animation Graph: written in the dock's folder, opened; Idle names no clip.
+        // New Animation Graph: written in the dock's folder, opened, given to the selected
+        // character's animator in one step (team decision 2026-10-30, 4a); Idle names no clip.
+        let fox = world.spawn((
+            SceneId::new(),
+            Name::new("Fox"),
+            engine_runtime::Animator::default(),
+        ));
+        ed.selection = vec![fox];
         let new = ed.ids.new_anim_graph;
         ed.run(&mut world, new);
         ed.update(&mut world);
         ed.update(&mut world);
         assert!(dir.join("New Animation Graph.agraph").is_file());
-        assert!(ed.asset_db.find("New Animation Graph.agraph").is_some());
+        let made = ed
+            .asset_db
+            .find("New Animation Graph.agraph")
+            .expect("found")
+            .id;
+        let graph_of = |world: &World| world.get::<engine_runtime::Animator>(fox).unwrap().graph;
+        assert_eq!(
+            graph_of(&world),
+            AssetRef::file(made),
+            "given to the selected fox"
+        );
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        assert_eq!(graph_of(&world), AssetRef::NONE, "one step, undone");
+        let redo = ed.ids.redo;
+        ed.run(&mut world, redo);
+        assert_eq!(graph_of(&world), AssetRef::file(made));
         assert_eq!(ed.active_graph, Some(1));
         assert!(
             ed.graph_status.starts_with("1 state \u{b7} 0 transitions"),

@@ -598,8 +598,9 @@ allocation with transitions and events every tick; the same events at the same t
 - **Settled by the team (2026-10-30):** Any State's place stays in its machine node's `at`
   (5a); New Animation Graph is to give the new graph to the selected characters' `Animator`
   (4a), as New Material gives its material to the selected models; transitions drawn in the
-  editor are to inertialize by default, the file's default staying a cross-fade (2a). The
-  last two come with E12-5d-2.
+  editor are to inertialize by default, the file's default staying a cross-fade (2a). Both
+  built at once after the canvas (#484): `drawn_transition` sets `inertialize`, and New
+  Animation Graph sets the selected animators' `graph` in one step.
 
 ## As built (E12-5c, scripts, 2026-10-30): the scripts' calls on a graph
 
@@ -758,6 +759,13 @@ allocation with transitions and events every tick; the same events at the same t
   (about 2.5–3 KB) is postponed until crowds need it.
 
 ## As built (E12-5b, 2026-10-30): the graph's runtime in `engine_anim`
+
+- **Fixed (2026-10-30, #484, found by E12-5b-2's work):** an exit time within a tick's step
+  of a looping clip's end was never taken: the check compared the phase with
+  `phase_before`, which the tick had just made equal to it. `GraphState` now keeps where
+  the last tick's step began (`phase_stepped_from`, written just before the phases move,
+  whole loops dropped from it too), and the check reads that: 0.99 on a 1 s clip at 64 Hz
+  is taken at the 65th tick (`an_exit_time_across_a_loops_seam_is_passed`).
 
 - **What a graph is made from:** `engine_anim::GraphDesc`, its parts by index (parameters,
   layers, nodes, states, transitions), names for clips, parameters and joints. `engine_anim`

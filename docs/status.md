@@ -879,6 +879,10 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **The canvas's defaults and an exit-time fix** (#484): transitions drawn on the canvas
+    inertialize and New Animation Graph is given to the selected characters (the team's
+    2a, 4a); an exit time within a tick's step of a looping clip's end is taken (it never
+    was: the check compared a phase with itself).
   - **E12-5d-1, the graph's canvas** (#482, ADR 0124's as-built): an `.agraph` opens in a
     tab of its own (double click in the dock, or Animation: New Animation Graph), the
     material graph's tab and history reused. The first layer's machine is drawn: states,
