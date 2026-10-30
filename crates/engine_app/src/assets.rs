@@ -45,6 +45,10 @@
 //!   mesh by its file's rules (`<file>.colliders.ron`): cooked in the background the first
 //!   time it is asked for, every mesh of the file at once, on a thread of its own (convex
 //!   parts can take seconds). A built-in mesh's is its own shape.
+//! - **A sprite's image** (ADR 0125, `crate::Sprite`) is an image file loaded as a glTF
+//!   material's textures are (in the background, compressed as its `.meta` says), with
+//!   its `.meta`'s sprite settings (pixels per unit, pivot, filter), read on first use and
+//!   again when the file is read again.
 
 use crate::clip_events::{ClipPlay, ModelEvents, crossed};
 use crate::loading::{Done, Job, Loader, Made};
@@ -56,7 +60,7 @@ use engine_assets::{
     TextureImage, TextureSource, TextureUsage, TextureWrap,
 };
 use engine_collision::{Collider, ColliderShape, Origin, Shape};
-use engine_core::math::{Affine3A, Quat, Vec3};
+use engine_core::math::{Affine3A, Quat, Vec2, Vec3};
 use engine_ecs::{Changed, Entity, GlobalTransform, QueryState, Transform, With, Without, World};
 use engine_reflect::Reflect;
 use engine_render::forward::{ForwardRenderer, MaterialTypeDesc};
@@ -67,12 +71,12 @@ use engine_render::material::{
 use engine_render::mesh::{GeometryPool, MeshId, OwnedMeshData};
 use engine_render::skinning::{SkinId, SkinnedId, SkinnedMeshData, Skinning};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
-use engine_rhi::{Allocator, Bindless, Device, Wrap};
+use engine_rhi::{Allocator, Bindless, Device, SamplerKind, Wrap};
 use engine_runtime::{
     AnimationEvent, AnimationEvents, Animator, Derived, JointAttachment, MAX_GRAPH_PARAMS,
     MeshRenderer, RootMotion, SkinnedMesh,
 };
-use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, ClipImport};
+use engine_scene::{AssetId, AssetMeta, AssetPaths, AssetRef, ClipImport, SpriteFilter};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -865,6 +869,141 @@ pub struct Assets {
     /// Graph parameters the editor holds for testing (ADR 0124's E12-5e): the character, the
     /// slot and the value, put in over what its animator says before each tick of its graph.
     held_params: Vec<(Entity, u16, f32)>,
+    /// Sprites' images (ADR 0125), each in the slot it got on first use, and the slots by
+    /// asset.
+    sprite_images: Vec<SpriteImageState>,
+    sprite_slots: HashMap<AssetRef, u32>,
+}
+
+/// A sprite's image (ADR 0125): its texture's key, its `.meta`'s sprite settings, and what
+/// a frame draws of it.
+struct SpriteImageState {
+    asset: AssetRef,
+    key: TextureKey,
+    settings: SpriteImage,
+    /// No path is known for it (said once): never drawn.
+    lost: bool,
+    /// This frame's: its settings with its texture's bindless index and size, once made.
+    shown: Option<SpriteImage>,
+}
+
+/// A sprite's image as a frame draws it (ADR 0125): its texture's bindless index, its size
+/// in pixels, and its `.meta`'s pixels a metre, pivot and sampler.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SpriteImage {
+    pub(crate) index: u32,
+    pub(crate) size: Vec2,
+    pub(crate) pixels_per_unit: f32,
+    pub(crate) pivot: Vec2,
+    pub(crate) sampler: SamplerKind,
+}
+
+impl Assets {
+    /// The slot of sprite image `asset` (ADR 0125), made the first time it is asked for:
+    /// its `.meta`'s sprite settings read, its texture loaded in the background. A part of
+    /// an image (a slice, E13-2) draws the whole image for now.
+    pub(crate) fn sprite_slot(&mut self, asset: AssetRef) -> u32 {
+        if let Some(&slot) = self.sprite_slots.get(&asset) {
+            return slot;
+        }
+        let slot = self.sprite_images.len() as u32;
+        let lost = self.paths.get(AssetRef::file(asset.file)).is_none() || asset.is_none();
+        if lost && !asset.is_none() {
+            log::warn!(
+                target: "engine_app::assets",
+                "sprite image {}: no path known for it; not drawn",
+                asset.file
+            );
+        }
+        let settings = self.sprite_settings(asset.file);
+        self.sprite_images.push(SpriteImageState {
+            asset,
+            key: TextureKey::new(asset.file, 0, TextureUsage::Color),
+            settings,
+            lost,
+            shown: None,
+        });
+        self.sprite_slots.insert(asset, slot);
+        self.load_sprite_image(slot as usize);
+        slot
+    }
+
+    /// Image `file`'s sprite settings from its `.meta` (the defaults without one), with no
+    /// texture yet.
+    fn sprite_settings(&self, file: AssetId) -> SpriteImage {
+        let meta = self
+            .paths
+            .get(AssetRef::file(file))
+            .map(|path| AssetMeta::read(&self.root.join(path)).sprite)
+            .unwrap_or_default();
+        SpriteImage {
+            index: u32::MAX,
+            size: Vec2::ZERO,
+            pixels_per_unit: meta.applied_pixels_per_unit(),
+            pivot: Vec2::from_array(meta.pivot),
+            sampler: match meta.filter {
+                SpriteFilter::Nearest => SamplerKind::NearestClamp,
+                SpriteFilter::Linear => SamplerKind::LinearClamp,
+            },
+        }
+    }
+
+    /// Gives the loader sprite image `slot`'s texture, unless it is made or being made.
+    fn load_sprite_image(&mut self, slot: usize) {
+        let Some(state) = self.sprite_images.get(slot) else {
+            return;
+        };
+        let key = state.key;
+        if state.lost || self.textures.contains_key(&key) || !self.decoding.insert(key) {
+            return;
+        }
+        let Some(path) = self.paths.get(AssetRef::file(key.file)) else {
+            return;
+        };
+        self.loader.give(Job::Image {
+            key,
+            path: self.root.join(path),
+            cache: self.cache.clone(),
+            generation: self.generation(key.file),
+        });
+    }
+
+    /// Each sprite image as this frame draws it (ADR 0125): its texture's bindless index
+    /// and size, once its texture is made and resident. Call it after the texture pool's
+    /// `begin_frame` (the indices are its).
+    pub(crate) fn show_sprite_images(&mut self, pool: &TexturePool) {
+        for state in &mut self.sprite_images {
+            state.shown = self
+                .textures
+                .get(&state.key)
+                .copied()
+                .flatten()
+                .and_then(|id| {
+                    let info = pool.info(id)?;
+                    Some(SpriteImage {
+                        index: pool.index(id)?,
+                        size: Vec2::new(info.width as f32, info.height as f32),
+                        ..state.settings
+                    })
+                });
+        }
+    }
+
+    /// Sprite image `slot` as this frame draws it ([`Self::show_sprite_images`]): `None`
+    /// while its texture is being made, or when it cannot be.
+    pub(crate) fn sprite_image(&self, slot: u32) -> Option<SpriteImage> {
+        self.sprite_images.get(slot as usize)?.shown
+    }
+
+    /// Sprite images known, and of those made.
+    pub fn sprite_images(&self) -> (usize, usize) {
+        let made = self
+            .sprite_images
+            .iter()
+            .filter(|s| self.textures.get(&s.key).is_some_and(Option::is_some))
+            .count();
+        (self.sprite_images.len(), made)
+    }
 }
 
 /// A skinned mesh made (ADR 0124's E12-1a): a skin per part in `Skinning`, and its rig.
@@ -1286,6 +1425,8 @@ impl Assets {
             fields: crate::field_clips::FieldClips::default(),
             graphs: crate::graphs::Graphs::default(),
             held_params: Vec::new(),
+            sprite_images: Vec::new(),
+            sprite_slots: HashMap::new(),
         }
     }
 
@@ -1484,6 +1625,13 @@ impl Assets {
             .collect();
         for e in using {
             world.mark_changed::<Model>(e);
+        }
+        // Its sprites' images: their settings read again, their textures made again.
+        for slot in 0..self.sprite_images.len() {
+            if self.sprite_images[slot].asset.file == file {
+                self.sprite_images[slot].settings = self.sprite_settings(file);
+                self.load_sprite_image(slot);
+            }
         }
     }
 

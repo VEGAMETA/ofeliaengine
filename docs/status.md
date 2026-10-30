@@ -899,6 +899,17 @@ Last updated: 2026-10-28.
     them; a number dragged or typed, a flag clicked is held for testing over what the
     game sets (after the scripts, before each graph tick; the animator keeps the game's
     value) until ↺ or Stop; a trigger clicked fires once.
+  - **E13-1a, sprites in scenes** (#491, agent Д; ADR 0125's as-built): the `Sprite`
+    component (image, frame, color, flips, size, mode, layer, order; plain data, so it
+    replicates) and `SortGroup`; the project's `.sorting` file (layer names, which sort by
+    y); a sprite section in an image's `.meta` (16 pixels a metre, pivot, nearest filter);
+    an orthographic `Camera` (`Camera::orthographic`, `Camera::pixel_art`: a reference size
+    integer-scaled) and `ToneCurve::None`; 2D views in `engine_frame` (the canvas at render
+    size in place of the scene passes, no temporal, shadow or reflection state); the
+    player's sprites interpolated between ticks, culled and sorted into one canvas.
+    10,000 moving sprites: 2D pass 89 µs RTX / 966 µs Radeon at 1080p, recorded in about
+    0.2 ms; 0 allocations at 1,000. Golden shot `sprites_2d` per vendor; registers
+    unchanged; the `-Perf` flags reproduce on main.
   - **E13 research: 2D scenes, tile maps and the 2D tools** (#487, agent Г; ADR 0125
     proposed): the runtime note (tile map renderers, auto-tiling, atlases, 2D lights, tile
     collision for Box2D v3, pixel-perfect cameras) and the UX note (Godot, Unity, LDtk,
@@ -1303,7 +1314,9 @@ Last updated: 2026-10-28.
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
     E12-5d-2b-2 to 2d (layer masks, machines in machines, the character previewed in the
-    corner), the last of E12; 5a to 5c, 5d-1, 5d-2a, 5d-2b-1 and 5e are done, and E12-4. E13 (2D) has begun: E13-1a's runtime by an agent.
+    corner), the last of E12; 5a to 5c, 5d-1, 5d-2a, 5d-2b-1 and 5e are done, and E12-4.
+    E13 (2D) has begun: E13-1a, sprites in scenes, is done (#491); E13-1b, the editor's 2D
+    view, follows E12. No agents from now on (the owner, 2026-10-30).
   - **Settled (2026-10-30, ADR 0125 accepted, team decisions 1а 2а 3а 4а 5в 6а 7а 8а 9а
     10а):** 2D entities in the one world (the XY plane); metres, 16 pixels a metre by
     default; tile cells in the scene by rows of 32-cell chunks through a palette; terrain

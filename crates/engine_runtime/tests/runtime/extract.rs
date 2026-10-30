@@ -773,3 +773,46 @@ fn step(
     p.run(w);
     x.sync(w, s);
 }
+
+/// `frame_with` calls the caller's extraction after each tick's, the tick's transforms
+/// propagated (the player's sprites, ADR 0125); a driven frame after its one extraction.
+#[test]
+fn the_callers_extraction_follows_each_ticks() {
+    let mut w = World::new();
+    let mover = renderable(&mut w, 0.0);
+    w.insert(mover, Spin(1.0));
+    let mut runtime = Runtime::<u32>::new(w, 64.0);
+    let mut s = Recorder::default();
+    let mut seen = Vec::new();
+    let stages = runtime.frame_with(
+        2.5 / 64.0,
+        &(),
+        &mut s,
+        |w, (), dt| {
+            let mut q = engine_ecs::QueryState::<(&mut Transform, &Spin)>::new(w);
+            q.for_each(w, |(t, spin)| t.translation.x += spin.0 * dt);
+        },
+        |w| seen.push(w.get::<GlobalTransform>(mover).unwrap().translation().x),
+        |_, _, _| {},
+    );
+    assert_eq!(stages.ticks, 2);
+    // Each after its tick's propagation: one tick's motion, then two.
+    assert_eq!(seen, [1.0 / 64.0, 2.0 / 64.0]);
+    let mut driven = 0;
+    runtime.frame_driven_with(
+        &(),
+        &mut s,
+        |_, (), _| {},
+        |w, step| {
+            step(w, 0.25);
+            step(w, 0.25);
+            engine_runtime::Driven {
+                alpha: 0.5,
+                tick: 9,
+            }
+        },
+        |_| driven += 1,
+        |_, _, _| {},
+    );
+    assert_eq!(driven, 1, "once, after the frame's extraction");
+}

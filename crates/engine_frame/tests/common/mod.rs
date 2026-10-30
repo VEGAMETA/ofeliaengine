@@ -693,5 +693,6 @@ pub fn camera(eye: Vec3, target: Vec3, cut: bool) -> ViewCamera {
         near: 0.1,
         far: 100.0,
         cut,
+        orthographic: None,
     }
 }

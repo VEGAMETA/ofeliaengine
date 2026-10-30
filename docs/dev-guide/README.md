@@ -13,7 +13,7 @@ Start with the **[quick start](quick-start.md)**: a game on screen in five minut
 | [assets.md](assets.md) | cooking glTF scenes into packs |
 | [rendering.md](rendering.md) | meshes, materials, lights, shadows, reflections, GI, post effects |
 | [shaders.md](shaders.md) | writing shaders and materials in Slang, building them, hot reload |
-| [2d.md](2d.md) | sprites, shapes and text in 2D |
+| [2d.md](2d.md) | 2D scenes (sprites, the orthographic camera, pixels a metre, sorting) and drawing sprites, shapes and text by hand |
 | [viewports.md](viewports.md) | several views: split screen, minimaps, a view in a texture |
 | [animation.md](animation.md) | skeletons, clips, blending, inverse kinematics |
 | [physics.md](physics.md) | bodies, gravity, queries, characters, rollback |

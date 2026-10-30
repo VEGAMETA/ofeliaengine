@@ -38,6 +38,8 @@ use std::path::{Path, PathBuf};
 ///
 /// texture.compression = Uncompressed
 /// model.scale = 0.01
+/// sprite.pixels_per_unit = 32
+/// sprite.pivot = [0.5, 0]
 /// ```
 #[derive(Debug, Clone, PartialEq, Default, Reflect)]
 pub struct AssetMeta {
@@ -45,6 +47,8 @@ pub struct AssetMeta {
     pub texture: TextureImport,
     /// How a model (a glTF file) is imported.
     pub model: ModelImport,
+    /// How an image is drawn as a sprite (ADR 0125).
+    pub sprite: SpriteImport,
 }
 
 /// How an image is imported (ADR 0108's E4-9).
@@ -63,6 +67,59 @@ pub enum TextureCompression {
     Auto,
     /// Kept as decoded, RGBA8: pixel art, gradients and text that BC7 would smudge.
     Uncompressed,
+}
+
+/// How an image is drawn as a sprite (ADR 0125, question 7: in the image's `.meta`): how
+/// many of its pixels make a metre, the point it stands on, how its pixels are sampled.
+/// Its slices, nine-slice borders and clips come as more lines of this section (E13-2).
+#[derive(Debug, Clone, PartialEq, Reflect)]
+pub struct SpriteImport {
+    /// How many of its pixels make a metre (16: a 16-pixel tile is a metre; 100 for
+    /// high-resolution art). Metres are the engine's unit in 2D as in 3D (ADR 0125,
+    /// question 2).
+    #[reflect(min = 0.001, max = 100000.0)]
+    pub pixels_per_unit: f32,
+    /// The point it stands on, as shares of its width and height from its bottom-left
+    /// corner: `[0.5, 0.5]` its centre, `[0.5, 0]` the middle of its bottom edge (feet, for
+    /// sorting by y).
+    pub pivot: [f32; 2],
+    /// How its pixels are sampled when drawn.
+    pub filter: SpriteFilter,
+}
+
+impl Default for SpriteImport {
+    fn default() -> Self {
+        Self {
+            pixels_per_unit: 16.0,
+            pivot: [0.5, 0.5],
+            filter: SpriteFilter::Nearest,
+        }
+    }
+}
+
+impl SpriteImport {
+    /// The pixels a metre to draw with: [`Self::pixels_per_unit`], or 16 for one that is
+    /// not a positive number.
+    pub fn applied_pixels_per_unit(&self) -> f32 {
+        if self.pixels_per_unit.is_finite() && self.pixels_per_unit > 0.0 {
+            self.pixels_per_unit
+        } else {
+            16.0
+        }
+    }
+}
+
+/// How a sprite's pixels are sampled (ADR 0125).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+#[repr(u8)]
+pub enum SpriteFilter {
+    /// Each screen pixel takes the nearest of the image's: pixel art stays sharp (the
+    /// default, with 16 pixels a metre).
+    #[default]
+    Nearest,
+    /// Blended between the four nearest, and between mip levels when drawn smaller:
+    /// painted and high-resolution art.
+    Linear,
 }
 
 /// How a model is imported (ADR 0108's E4-9).
@@ -1068,6 +1125,11 @@ mod tests {
                 scale: 0.01,
                 ..ModelImport::default()
             },
+            sprite: SpriteImport {
+                pixels_per_unit: 32.0,
+                pivot: [0.5, 0.0],
+                filter: SpriteFilter::Linear,
+            },
         };
         let text = meta.to_text(id);
         assert_eq!(
@@ -1077,6 +1139,9 @@ mod tests {
 
 texture.compression = Uncompressed
 model.scale = 0.01
+sprite.pixels_per_unit = 32
+sprite.pivot = [0.5, 0]
+sprite.filter = Linear
 "
             )
         );

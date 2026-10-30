@@ -603,6 +603,9 @@ pub struct Player {
     /// last error, said once.
     own_physics: Option<crate::ScenePhysics>,
     physics_error: Option<String>,
+    /// The 2D world (ADR 0125): the sprites' poses before and after the ticks that moved
+    /// them, the canvas a 2D view's frame records, the project's sorting layers.
+    sprites: crate::sprites::Sprites,
 }
 
 /// The view in a window of its own (ADR 0107 E3-4: the editor's Play): the scene drawn
@@ -1080,6 +1083,9 @@ impl Player {
         let mut base = defaults.view_settings();
         base.screen_space_reflections = settings.screen_space_reflections;
         let cameras = CameraView::new(&mut world, base);
+        // The 2D world and the project's sorting layers (ADR 0125).
+        let sprites =
+            crate::sprites::Sprites::new(&mut world, &load_sorting(&sorting_path(settings)));
         let probe_entities = QueryState::new(&mut world);
         let gi_extract = GiExtract::new(&mut world);
         let mut scene = GpuScene::new(&device, &bindless, world.len() as u32 + 16, in_flight)
@@ -1243,6 +1249,7 @@ impl Player {
             scene_error: None,
             own_physics: None,
             physics_error: None,
+            sprites,
             assets: assets(settings),
             blockout: crate::Blockout::new(),
             scripts: None,
@@ -1580,6 +1587,22 @@ impl Player {
         if Path::new(path) == self.settings.audio.layout {
             self.reload_mixer_layout();
         }
+        // The sorting layers written anew: the next frame sorts by them (ADR 0125).
+        if Path::new(path) == self.settings.sorting {
+            self.set_sorting(&load_sorting(&sorting_path(&self.settings)));
+        }
+    }
+
+    /// The 2D world sorted by `sorting` from the next frame on (ADR 0125): the project's
+    /// sorting layers, as the editor holds them.
+    pub fn set_sorting(&mut self, sorting: &crate::SortingFile) {
+        self.sprites.set_sorting(sorting);
+    }
+
+    /// What the last 2D view's frame recorded (ADR 0125): the sprites drawn, and those its
+    /// view culled.
+    pub fn sprites_recorded(&self) -> (u32, u32) {
+        self.sprites.recorded
     }
 
     /// The mixer laid out as `layout` says (ADR 0121): what the editor's mixer panel
@@ -3329,6 +3352,9 @@ impl Player {
             // go of is drawn until then.
             let extracted = Cell::new(joined);
             let anim_kept = &mut self.anim_kept;
+            // The 2D world (ADR 0125): each tick's extraction keeps the poses of the sprites
+            // it moved; the frame asks for the images of new sprites.
+            let sprites = RefCell::new(&mut self.sprites);
             let present = |world: &mut World, (): &(), alpha: f32| {
                 // The preview drawn: the scene's own values back (see above).
                 for kept in anim_kept.drain(..) {
@@ -3370,6 +3396,11 @@ impl Player {
                 }
                 // As while paused: a game in the editor draws the editor's frame here.
                 game_cell.borrow_mut().present(world, alpha);
+                // New sprites' images (ADR 0125), given before the models' sync, so a frame
+                // waiting for its assets waits for them too.
+                sprites
+                    .borrow_mut()
+                    .request_images(world, &mut assets.borrow_mut());
                 // Models (ADR 0108): their meshes and materials reach the GPU this frame,
                 // the pools beginning theirs after the simulation.
                 assets.borrow_mut().sync(
@@ -3400,7 +3431,7 @@ impl Player {
                     if simulating {
                         timing.advance(world, elapsed as f32);
                     }
-                    self.runtime.frame_driven(
+                    self.runtime.frame_driven_with(
                         &(),
                         &mut self.scene,
                         |world, (), dt| {
@@ -3412,10 +3443,11 @@ impl Player {
                             game_cell.borrow_mut().tick(world, dt);
                         },
                         |world, step| client.client_frame(world, Instant::now(), step),
+                        |world| sprites.borrow_mut().end_tick(world),
                         present,
                     )
                 }
-                _ => self.runtime.frame(
+                _ => self.runtime.frame_with(
                     elapsed,
                     &(),
                     &mut self.scene,
@@ -3493,6 +3525,8 @@ impl Player {
                             host.host_tick_end(world, Instant::now());
                         }
                     },
+                    // The sprites' poses, as the tick left them (ADR 0125).
+                    |world| sprites.borrow_mut().end_tick(world),
                     present,
                 ),
             }
@@ -3696,21 +3730,26 @@ impl Player {
         let view = self
             .view
             .get_or_insert_with(|| View::new(&self.device, needed.next_power_of_two()));
-        self.renderer
-            .prepare(
-                view,
-                &view_settings,
-                (view_extent.width, view_extent.height),
-                PrepareContext {
-                    device: &self.device,
-                    allocator: &mut self.allocator,
-                    bindless: &self.bindless,
-                    materials: &mut self.materials,
-                    frame_number: frame.number,
-                    skinning: Some(&mut self.skinning),
-                },
-            )
-            .map_err(AppError::at("the view"))?;
+        // An orthographic main camera's view is a 2D view (ADR 0125): its sprites instead
+        // of the scene passes.
+        let two_d = camera.is_orthographic();
+        let prepare = PrepareContext {
+            device: &self.device,
+            allocator: &mut self.allocator,
+            bindless: &self.bindless,
+            materials: &mut self.materials,
+            frame_number: frame.number,
+            skinning: Some(&mut self.skinning),
+        };
+        let output_size = (view_extent.width, view_extent.height);
+        let prepared = if two_d {
+            self.renderer
+                .prepare_2d(view, &view_settings, output_size, prepare)
+        } else {
+            self.renderer
+                .prepare(view, &view_settings, output_size, prepare)
+        }
+        .map_err(AppError::at("the view"))?;
         // A preview asked for, once its parts are made (ADR 0112): one a frame.
         self.previews.collect(frame.number);
         let preview = self.previews.pick(
@@ -4027,6 +4066,23 @@ impl Player {
                 load: LoadOp::DontCare,
             };
             let view_frame = match generated {
+                // A 2D view (ADR 0125): the sprites recorded at the frame's pose between the
+                // last two ticks (a joined client's at its newest), with the images made
+                // by now; no frame generation (sprites have no motion vectors yet).
+                _ if two_d => {
+                    let t = Instant::now();
+                    self.assets.show_sprite_images(&self.textures);
+                    let canvas = self.sprites.record(
+                        &self.runtime.world,
+                        &mut self.assets,
+                        if joined { 1.0 } else { stages.alpha },
+                        crate::sprites::ViewRect::of(&camera, prepared.render),
+                    );
+                    report.sprites = us(t);
+                    self.renderer
+                        .add_view_2d(&mut fg, &mut context, view, canvas, &camera, view_target)
+                        .map_err(AppError::at("the view's passes"))?
+                }
                 Some((_, generated_target)) => self
                     .renderer
                     .add_view_generating(
@@ -5130,6 +5186,28 @@ fn say_once(last: &mut Option<String>, said: &str) {
         log::warn!(target: "engine_app::player", "the player's physics: {said}");
         *last = Some(said.to_owned());
     }
+}
+
+/// Where the project's sorting layers are (ADR 0125): `PlayerSettings::sorting` under the
+/// project.
+fn sorting_path(settings: &PlayerSettings) -> PathBuf {
+    settings
+        .project
+        .as_deref()
+        .unwrap_or(Path::new(""))
+        .join(&settings.sorting)
+}
+
+/// The sorting layers from the file at `path` (ADR 0125): none without one, and when it
+/// cannot be read (said in the log): every layer then sorts by order.
+fn load_sorting(path: &Path) -> crate::SortingFile {
+    if !path.is_file() {
+        return crate::SortingFile::default();
+    }
+    crate::SortingFile::load(path).unwrap_or_else(|e| {
+        log::warn!(target: "engine_app::sprites", "{e}: every layer sorts by order");
+        crate::SortingFile::default()
+    })
 }
 
 /// Where the mixer's layout file is: `AudioSettings::layout` under the project.
