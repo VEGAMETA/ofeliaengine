@@ -429,6 +429,12 @@ impl GraphParams {
         self.graphs.insert(graph, params);
     }
 
+    /// Whether graph file `graph`'s parameters are known (the player read the graph), none
+    /// or some: what tells a name the graph lacks from a graph not read yet.
+    pub fn knows(&self, graph: engine_scene::AssetId) -> bool {
+        self.graphs.contains_key(&graph)
+    }
+
     /// Parameter `name` of graph file `graph`: its slot and whether it is a trigger.
     pub fn slot(&self, graph: engine_scene::AssetId, name: &str) -> Option<(u16, bool)> {
         let params = self.graphs.get(&graph)?;
@@ -681,5 +687,13 @@ mod tests {
         assert!(!a.set(&params, "sped", 1.0));
         assert!(!Animator::default().plays_graph());
         assert_eq!(params.of(graph).len(), 2);
+        // By slot, as the scripts' binding sets them.
+        assert!(a.set_slot(0, 1.5) && a.fire_slot(1));
+        assert_eq!(&a.params[..2], &[1.5, 3.0]);
+        // A graph read with no parameters is known; one not read yet is not.
+        let empty = engine_scene::AssetId::new();
+        params.insert(empty, []);
+        assert!(params.knows(graph) && params.knows(empty));
+        assert!(!params.knows(engine_scene::AssetId::new()));
     }
 }

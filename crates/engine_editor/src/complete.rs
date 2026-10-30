@@ -177,6 +177,49 @@ pub(crate) fn word_start(doc: &Document, at: Pos) -> Pos {
     Pos::new(at.line, col)
 }
 
+/// The quote that closes the Luau string the caret at byte `col` of `line` is in, when the
+/// line leaves that string open (as it is while typed: the editor closes no quotes). The
+/// completion's question closes it at the caret, so Luau answers as inside a string (its
+/// string choices: an animator's parameters, ADR 0124's E12-5c), not as at an expression
+/// (every global). None outside a string, in a closed one, and after what this does not
+/// read: a comment, a long string, an interpolated string.
+pub(crate) fn open_quote(line: &str, col: usize) -> Option<char> {
+    let bytes = line.as_bytes();
+    let col = col.min(bytes.len());
+    let mut open: Option<u8> = None;
+    let mut i = 0;
+    // Up to the caret: the string it is in, if any.
+    while i < col {
+        let b = bytes[i];
+        match open {
+            // The escaped byte is skipped.
+            Some(_) if b == b'\\' => i += 1,
+            Some(q) if b == q => open = None,
+            Some(_) => {}
+            None => match b {
+                b'"' | b'\'' => open = Some(b),
+                b'-' if bytes.get(i + 1) == Some(&b'-') => return None,
+                b'`' => return None,
+                b'[' if matches!(bytes.get(i + 1), Some(b'[' | b'=')) => return None,
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    let quote = open?;
+    // After it: open unless it closes there.
+    let mut j = i;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => j += 1,
+            b if b == quote => return None,
+            _ => {}
+        }
+        j += 1;
+    }
+    Some(char::from(quote))
+}
+
 /// A completion's icon, VS Code's codicon for its kind.
 pub(crate) fn icon(c: &Completion) -> &'static str {
     match c.kind {
@@ -250,6 +293,42 @@ mod tests {
             list.key(Chord::key(Key::KeyA)),
             None,
             "typing goes on in the code"
+        );
+    }
+
+    /// E12-5c: a string the caret is in that its line leaves open is closed by its own
+    /// quote; a closed one, code, comments and strings this does not read are left.
+    #[test]
+    fn a_string_left_open_at_the_caret_is_closed_for_the_question() {
+        let at = |line: &str| open_quote(&line.replace('|', ""), line.find('|').unwrap());
+        assert_eq!(at("    a:set(\"sp|"), Some('"'));
+        assert_eq!(at("    a:set(\"sp|, 1)"), Some('"'), "no quote after it");
+        assert_eq!(at("    a:set('|"), Some('\''));
+        assert_eq!(at("    a:set(\"sp|\", 1)"), None, "closed after it");
+        assert_eq!(
+            at("    a:set(\"x\", 1) b(\"|"),
+            Some('"'),
+            "the second string"
+        );
+        assert_eq!(at("    a:set(\"x\", |"), None, "between strings");
+        assert_eq!(
+            at("    a:set(\"it\\\"s|"),
+            Some('"'),
+            "an escaped quote stays inside"
+        );
+        assert_eq!(
+            at("    a:set(\"it's|"),
+            Some('"'),
+            "the other quote is text"
+        );
+        assert_eq!(at("    t[\"ke|"), Some('"'), "a key");
+        assert_eq!(at("    -- set(\"sp|"), None, "a comment");
+        assert_eq!(at("    x = [[ set(\"sp|"), None, "a long string");
+        assert_eq!(at("    x = `{a(\"sp|"), None, "an interpolated string");
+        assert_eq!(
+            at("    local s = \"a -- b|"),
+            Some('"'),
+            "`--` inside a string"
         );
     }
 }

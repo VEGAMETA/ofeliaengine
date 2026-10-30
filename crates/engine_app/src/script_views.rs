@@ -20,9 +20,10 @@
 //! - **Methods** (ADR 0114 §3, E7-5a) are `__namecall`s, found by the method's atom: an
 //!   entity's (`has`, `add`, `remove`, `despawn`, `children`, `find_child`) on entities and
 //!   `self`, then the functions on `self`'s component's table (`self:open()` is
-//!   `Door.open(self)`); `Transform`'s (`rotate`, `look_at`, `forward`, `right`, `up`) on
-//!   its views. A component is named by its table (`Transform`, a script's `component`
-//!   table: its `name`) or by its name.
+//!   `Door.open(self)`); `Transform`'s (`rotate`, `look_at`, `forward`, `right`, `up`) and
+//!   `Animator`'s (`play`, and `set` and `trigger` on its graph's parameters) on their
+//!   views. A component is named by its table (`Transform`, a script's `component` table:
+//!   its `name`) or by its name.
 //! - **Queries** (E7-5c) are userdata of [`TAG_QUERY`]: `for e, a, b in q do` takes a
 //!   snapshot of what matches when the loop begins ([`query_iter`]); each step goes from
 //!   the entity before ([`query_next`]) and moves the query's views, one a column, to the
@@ -228,7 +229,8 @@ pub(crate) struct Slow {
     pub(crate) after: c_int,
 }
 
-/// The atoms of an entity's `parent` and methods, and of `Transform`'s methods.
+/// The atoms of an entity's `parent` and methods, and of `Transform`'s and `Animator`'s
+/// methods.
 #[derive(Debug, Clone, Copy)]
 struct Methods {
     parent: c_int,
@@ -244,6 +246,8 @@ struct Methods {
     right: c_int,
     up: c_int,
     play: c_int,
+    set: c_int,
+    trigger: c_int,
     with: c_int,
     without: c_int,
     send: c_int,
@@ -267,6 +271,8 @@ impl Methods {
             right: a("right"),
             up: a("up"),
             play: a("play"),
+            set: a("set"),
+            trigger: a("trigger"),
             with: a("with"),
             without: a("without"),
             send: a("send"),
@@ -1452,6 +1458,18 @@ unsafe extern "C-unwind" fn view_newindex(state: *mut ffi::lua_State) -> c_int {
         let Some(slot) = slot.filter(|_| !key.is_null()) else {
             return hand_over(state, (*tables).slow.view_newindex, 0);
         };
+        // An animator's graph's state is the player's to write, each tick (ADR 0124's
+        // E12-5c): only texts pay for the check.
+        if slot.fast == Fast::Text && Some((*view).id) == (*tables).animator && slot.name == "state"
+        {
+            raise(
+                state,
+                String::from(
+                    "Animator.state is read-only: the player writes its graph's state each \
+                     tick (set a parameter or fire a trigger to change it)",
+                ),
+            );
+        }
         let Some(base) = (*world).get_raw_mut((*view).entity, (*view).id) else {
             raise(
                 state,
@@ -2007,8 +2025,9 @@ unsafe extern "C-unwind" fn view_namecall(state: *mut ffi::lua_State) -> c_int {
     }
 }
 
-/// `Animator`'s methods on its views (ADR 0124's E12-2b): `play(clip, fade)`, the clip by
-/// its name, fading from what plays over `fade` seconds (none without one).
+/// `Animator`'s methods on its views: `play(clip, fade)` (ADR 0124's E12-2b), the clip by
+/// its name, fading from what plays over `fade` seconds (none without one); `set(name,
+/// value)` and `trigger(name)` on its graph's parameters (E12-5c, [`graph_param`]).
 ///
 /// # Safety
 ///
@@ -2023,6 +2042,11 @@ unsafe fn animator_method(
 ) -> Option<c_int> {
     // SAFETY: as the caller says; the string is the stack's while this runs.
     unsafe {
+        let set = is_named(method, atom, m.set, b"set");
+        if set || is_named(method, atom, m.trigger, b"trigger") {
+            graph_param(state, world, e, set);
+            return Some(0);
+        }
         if !is_named(method, atom, m.play, b"play") {
             return None;
         }
@@ -2049,6 +2073,121 @@ unsafe fn animator_method(
         };
         animator.play(clip, fade);
         Some(0)
+    }
+}
+
+/// `animator:set(name, value)` (`set`; a number, or a flag's `true` or `false`) or
+/// `animator:trigger(name)` (ADR 0124's E12-5c): the parameter's slot found by the name on
+/// the stack (read in place: nothing is made) in the [`engine_runtime::GraphParams`] of the
+/// animator's graph, then set or fired by the animator itself. Raises for an animator that
+/// plays no graph, a name its graph lacks (naming those it has of the call's kind), and a
+/// trigger set or a number fired. Does nothing while the player has not read the graph: it
+/// reads every graph an animator names before the scripts' next tick.
+///
+/// # Safety
+///
+/// A C function's state, the call's arguments from index 2; the world is the stage's.
+unsafe fn graph_param(state: *mut ffi::lua_State, world: *mut World, e: Entity, set: bool) {
+    // SAFETY: as the caller says. The name's bytes are the stack's while this runs; the
+    // world is read through a shared borrow that ends before the animator is written;
+    // nothing with a destructor is alive where an error is raised.
+    unsafe {
+        let usage = if set {
+            "set takes a parameter's name, then a number or a boolean"
+        } else {
+            "trigger takes a trigger's name"
+        };
+        let value = if set {
+            match ffi::lua_type(state, 3) {
+                ffi::LUA_TNUMBER => ffi::lua_tonumberx(state, 3, core::ptr::null_mut()) as f32,
+                ffi::LUA_TBOOLEAN => f32::from(u8::from(ffi::lua_toboolean(state, 3) != 0)),
+                _ => raise(state, String::from(usage)),
+            }
+        } else {
+            0.0
+        };
+        if ffi::lua_type(state, 2) != ffi::LUA_TSTRING {
+            raise(state, String::from(usage));
+        }
+        let mut len = 0usize;
+        let text = ffi::lua_tolstring(state, 2, &mut len);
+        let Ok(name) = core::str::from_utf8(core::slice::from_raw_parts(text.cast::<u8>(), len))
+        else {
+            raise(state, String::from(usage));
+        };
+        let gone = "the entity is gone, or lost its animator";
+        let slot = {
+            let w = &*world;
+            let Some(animator) = w.get::<engine_runtime::Animator>(e) else {
+                raise(state, String::from(gone));
+            };
+            if !animator.plays_graph() {
+                let message = if set {
+                    format!(
+                        "this Animator plays no graph (its `graph` is none): it has no \
+                         parameter `{name}` to set"
+                    )
+                } else {
+                    format!(
+                        "this Animator plays no graph (its `graph` is none): it has no \
+                         trigger `{name}` to fire"
+                    )
+                };
+                raise(state, message);
+            }
+            let graph = animator.graph.file;
+            let params = w.resource::<engine_runtime::GraphParams>();
+            match params.and_then(|p| p.slot(graph, name)) {
+                Some((slot, trigger)) if trigger != set => slot,
+                Some((_, true)) => raise(
+                    state,
+                    format!(
+                        "`{name}` is a trigger of the Animator's graph: fire it with \
+                         `trigger(\"{name}\")`, not `set`"
+                    ),
+                ),
+                Some((_, false)) => raise(
+                    state,
+                    format!(
+                        "`{name}` is not a trigger of the Animator's graph: set it with \
+                         `set(\"{name}\", value)`"
+                    ),
+                ),
+                None => match params.filter(|p| p.knows(graph)) {
+                    // Not read yet: the call is dropped.
+                    None => return,
+                    Some(p) => raise(state, unknown_param(p.of(graph), name, set)),
+                },
+            }
+        };
+        let Some(animator) = (*world).get_mut::<engine_runtime::Animator>(e) else {
+            raise(state, String::from(gone));
+        };
+        if set {
+            animator.set_slot(slot, value);
+        } else {
+            animator.fire_slot(slot);
+        }
+    }
+}
+
+/// The error for parameter `name`, which a graph of parameters `params` (by slot: a name and
+/// whether it is a trigger) lacks: the names it has of the call's kind, numbers and flags
+/// for `set`, triggers for `trigger`.
+fn unknown_param(params: &[(Box<str>, bool)], name: &str, set: bool) -> String {
+    let has: Vec<&str> = params
+        .iter()
+        .filter(|(_, trigger)| *trigger != set)
+        .map(|(n, _)| &**n)
+        .collect();
+    let what = if set { "parameter" } else { "trigger" };
+    if has.is_empty() {
+        format!("Animator's graph has no {what} `{name}` (it has none)")
+    } else {
+        format!(
+            "Animator's graph has no {what} `{name}` (it has: {})",
+            has.join(", ")
+        )
     }
 }
 

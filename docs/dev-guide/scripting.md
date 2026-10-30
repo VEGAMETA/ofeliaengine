@@ -174,7 +174,10 @@ A `Transform` has methods too:
 
 So does an `Animator` ([animation](animation.md)): `self.Animator:play("Run", 0.25)` plays
 the character's clip `Run` from its start, fading from what played over a quarter of a
-second (at once without a fade).
+second (at once without a fade). One that plays an animation graph takes the graph's
+parameters by name: `self.Animator:set("speed", 3.5)`, `self.Animator:set("armed", true)`
+and `self.Animator:trigger("jump")`; `self.Animator.state` reads the state its first layer
+is in.
 
 ```luau
 -- A turret: turns toward the player, its barrel a child named "Barrel".
@@ -635,6 +638,12 @@ at it, so VS Code checks and completes your scripts the same way. The file is in
 - A field named by one of Luau's reserved words (`Timer.repeat`) has no type: read it as
   `timer["repeat"]`.
 - Lists, maps and asset references are not readable from scripts yet, and have no types.
+- An animator's `set` and `trigger` take the names of the parameters of your game's
+  animation graphs (`.agraph` files): the types call them `AnimatorParam` and
+  `AnimatorTrigger` and are written again when a graph changes. Inside `set("…")` they are
+  offered as you type; in a `--!strict` script a misspelt one is underlined (a script
+  without that line is nonstrict, where Luau does not check them). A name kept in a
+  variable says what it is: `local name: AnimatorParam = "speed"`.
 
 `input` reads the tick's view in a tick's hooks (`on_tick`, `on_start`, contacts, systems'
 `on_tick`), where a tap shorter than a tick still counts, and the frame's in `on_frame`.
