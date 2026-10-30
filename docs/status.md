@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5d-2a, blends drawn as points** (#PR, ADR 0124's as-built): a blend's state
+  - **E12-5d-2a, blends drawn as points** (#490, ADR 0124's as-built): a blend's state
     inspected shows its clips on a line or on a plane between Delaunay triangles, the
     values marked and each clip's weight there (the tick's own weighing, now shared as
     `weigh_1d`/`weigh_2d`); a dot dragged is one step, a press previews values (holds them
