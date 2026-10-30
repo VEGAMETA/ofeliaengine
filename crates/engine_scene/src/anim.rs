@@ -191,6 +191,19 @@ pub fn anim_target(below: &str, field: &str) -> String {
     }
 }
 
+/// The target of a skinned model's joint (ADR 0124's E12-4e): `@Hips.rotation`, the joint
+/// by its name in the model (which may hold dots and colons: `mixamorig:Hips`) and its part
+/// after the last dot, `translation`, `rotation` or `scale`.
+pub fn joint_target(joint: &str, part: &str) -> String {
+    format!("@{joint}.{part}")
+}
+
+/// A joint's target's joint and part ([`joint_target`]); none for a field's.
+pub fn split_joint_target(target: &str) -> Option<(&str, &str)> {
+    let (joint, part) = target.strip_prefix('@')?.rsplit_once('.')?;
+    matches!(part, "translation" | "rotation" | "scale").then_some((joint, part))
+}
+
 /// A target's entity path below the animated entity (`""` for itself) and its
 /// `Component.field`.
 pub fn split_anim_target(target: &str) -> (&str, &str) {
@@ -280,5 +293,26 @@ mod tests {
             anim_target("Lamp", "PointLight.color"),
             "Lamp:PointLight.color"
         );
+    }
+
+    /// ADR 0124's E12-4e: a joint's target names the joint (dots and colons in its name
+    /// kept) and its part after the last dot; a field's target is none.
+    #[test]
+    fn a_joints_target_splits_into_its_joint_and_part() {
+        assert_eq!(
+            joint_target("mixamorig:Hips", "rotation"),
+            "@mixamorig:Hips.rotation"
+        );
+        assert_eq!(
+            split_joint_target("@mixamorig:Hips.rotation"),
+            Some(("mixamorig:Hips", "rotation"))
+        );
+        assert_eq!(
+            split_joint_target("@Bip01.L.scale"),
+            Some(("Bip01.L", "scale"))
+        );
+        assert_eq!(split_joint_target("@Hips.colour"), None, "not a part");
+        assert_eq!(split_joint_target("Transform.rotation"), None, "a field's");
+        assert_eq!(split_joint_target("Lamp:PointLight.range"), None);
     }
 }

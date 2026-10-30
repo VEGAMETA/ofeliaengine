@@ -8,8 +8,10 @@
 //! moving it (E12-2c: taken out of both poses, read over each tick), its clip's events
 //! fired as it plays (E12-3b: eight a loop, from its model's `.meta`); and a door playing
 //! clips made in the editor (E12-4a: its turn and its lamp's range keyed, an event, a fade
-//! between two clips now and then). Khronos' CesiumMan (`tools/fetch-test-assets.ps1`);
-//! skipped without it.
+//! between two clips now and then); and a character playing a clip made in the editor that
+//! keys its joints (E12-4e: its arms and neck turned over its rest pose, a joint it lacks
+//! left out), fading into its model's clip and back now and then. Khronos' CesiumMan
+//! (`tools/fetch-test-assets.ps1`); skipped without it.
 //! One test per file, so nothing else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
@@ -135,13 +137,43 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
         engine_runtime::PointLight::new(Vec3::ONE, 2.0),
     ));
     player.world_mut().set_parent(lamp, Some(door)).unwrap();
+    let wave_file = AssetId::new();
+    let mut wave = AnimFile::default();
+    for (joint, turn) in [
+        ("Skeleton_arm_joint_R", 70.0),
+        ("Skeleton_arm_joint_L__4_", -40.0),
+        ("Skeleton_neck_joint_1", 20.0),
+        ("Missing", 10.0),
+    ] {
+        let target = engine_scene::joint_target(joint, "rotation");
+        wave.set_key(&target, 0.0, &[0.0, 0.0, 0.0]);
+        wave.set_key(&target, 0.5, &[turn, turn, 0.0]);
+        wave.set_key(&target, 1.0, &[0.0, 0.0, 0.0]);
+    }
+    player.assets_mut().set_anim_clip(wave_file, Some(&wave));
+    let waver = player.world_mut().spawn((
+        Transform::from_xyz(2.0, -1.0, -3.0),
+        Model::new(mesh, material),
+        engine_runtime::Animator::new("wave").with_clip("wave", AssetRef::file(wave_file)),
+    ));
+    let wave_to = |player: &mut engine_app::Player, clip: &str| {
+        if let Some(animator) = player
+            .world_mut()
+            .get_mut::<engine_runtime::Animator>(waver)
+        {
+            animator.play(clip, 0.3);
+        }
+    };
     let switch = |player: &mut engine_app::Player, clip: &str| {
         if let Some(animator) = player.world_mut().get_mut::<engine_runtime::Animator>(door) {
             animator.play(clip, 0.25);
         }
     };
     let started = Instant::now();
-    while player.model_rig(man).is_none() || player.model_rig(walker).is_none() {
+    while player.model_rig(man).is_none()
+        || player.model_rig(walker).is_none()
+        || player.model_rig(waver).is_none()
+    {
         assert!(started.elapsed() < Duration::from_secs(30), "no skin");
         player.frame(&mut game).unwrap();
     }
@@ -162,6 +194,29 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
             player.frame(&mut game).unwrap();
         }
     }
+    // The waver's clip turns his right arm: its child away from where it rests.
+    let arm_child = {
+        let skeleton = player.model_rig(waver).unwrap().skeleton();
+        let arm = skeleton.find("Skeleton_arm_joint_R").unwrap();
+        (0..skeleton.joint_count())
+            .find(|&c| skeleton.parent(c) == Some(arm))
+            .unwrap()
+    };
+    let mut rest = Vec::new();
+    player.model_rig(waver).unwrap().rest_places(&mut rest);
+    let mut joints = Vec::new();
+    assert!(player.model_joints(waver, &mut joints));
+    let moved = (Vec3::from(joints[arm_child].translation) - rest[arm_child]).length();
+    println!("the waver's arm's child moved {moved:.4} from its rest");
+    assert!(moved > 1e-3, "posed by his own clip's joints");
+    // Both of his clips faded into once before counting.
+    for clip in ["", "wave"] {
+        wave_to(&mut player, clip);
+        for _ in 0..40 {
+            player.frame(&mut game).unwrap();
+        }
+    }
+    let mut waving = true;
     let mut frames = 0u32;
     let mut creaks = 0usize;
     let mut door_clip = "swing";
@@ -198,6 +253,10 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
             if frames.is_multiple_of(200) {
                 fade(player);
             }
+            if frames.is_multiple_of(100) {
+                waving = !waving;
+                wave_to(player, if waving { "wave" } else { "" });
+            }
             if frames.is_multiple_of(150) {
                 door_clip = if door_clip == "swing" {
                     "flicker"
@@ -233,6 +292,6 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
     // Still skinned: the same entities drawn by their instances.
     let world = player.world_mut();
     let mut skinned = QueryState::<(Entity, &engine_runtime::SkinnedMesh)>::new(world);
-    assert_eq!(skinned.iter_readonly(world).count(), 2);
+    assert_eq!(skinned.iter_readonly(world).count(), 3);
     let _ = std::fs::remove_dir_all(&dir);
 }

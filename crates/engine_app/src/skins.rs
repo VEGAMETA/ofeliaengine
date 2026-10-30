@@ -194,7 +194,7 @@ impl Rig {
     pub fn rest_places(&self, out: &mut Vec<Vec3>) {
         out.clear();
         let mut posing = Posing::default();
-        let joints = posing.joints(self, Look::default());
+        let joints = posing.joints(self, Look::default(), [None; 2]);
         out.extend(joints.iter().map(|m| Vec3::from(m.translation)));
     }
 
@@ -213,7 +213,10 @@ impl Rig {
         let (rate, duration) = (clip.sample_rate().max(1e-6), clip.duration());
         for s in 0..clip.sample_count() {
             let t = (s as f32 / rate).min(duration);
-            if let Some(m) = posing.joints(self, Look::at(Some((k, t)))).get(joint) {
+            if let Some(m) = posing
+                .joints(self, Look::at(Some((k, t))), [None; 2])
+                .get(joint)
+            {
                 out.push(Vec3::from(m.translation));
             }
         }
@@ -509,6 +512,22 @@ pub(crate) struct Look {
     pub(crate) fade: Fade,
     pub(crate) in_place: bool,
     pub(crate) axes: [Axes; 2],
+    /// One of its animator's own clips (E12-4e), its joints keyed over the rest pose in place
+    /// of a clip of the model's.
+    pub(crate) own: Option<OwnPose>,
+    /// The clip fading out when it is one of its animator's own clips (in place of `fade`),
+    /// and the weight of what fades in.
+    pub(crate) own_fade: Option<(OwnPose, f32)>,
+}
+
+/// One of an animator's own clips shown on its character (ADR 0124's E12-4e): the clip's file
+/// and the moment, an animator's running time (wrapped or held as the clip plays) or the
+/// editor's playhead (held within the clip).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct OwnPose {
+    pub(crate) file: engine_scene::AssetId,
+    pub(crate) time: f32,
+    pub(crate) playhead: bool,
 }
 
 impl Look {
@@ -535,62 +554,103 @@ pub(crate) struct Posing {
 }
 
 impl Posing {
-    /// `rig`'s local pose as `look` shows it (a clip and a time in it, held at its ends,
-    /// faded from the clip fading out, its root motion taken out or not), into `self.pose`:
-    /// false for the rest pose (no clip, or one it has not).
-    fn local(&mut self, rig: &Rig, look: Look) -> bool {
-        let Some((clip, time)) = look.pose.filter(|&(c, _)| c < rig.clips.len()) else {
-            return false;
-        };
+    /// `rig`'s local pose as `look` shows it, into `self.pose`: false for the rest pose (no
+    /// clip, or one it has not). What fades in is a clip of the model's at a time in it (held
+    /// at its ends, its root motion taken out or not), or one of its animator's own clips
+    /// (E12-4e; `own[0]` that clip as read) with the joints it keys over the rest pose (one
+    /// keying none: the rest pose). What fades out under it is either too (`own[1]`).
+    fn local(
+        &mut self,
+        rig: &Rig,
+        look: Look,
+        own: [Option<&crate::field_clips::FieldClip>; 2],
+    ) -> bool {
         let rest = rig.skeleton.rest();
         let n = rest.len();
         let root = rig.motion_root;
         let sampled = self.pose.get_or_insert_with(|| Pose::identity(n));
-        rig.clips[clip].clip.sample(time, rest, sampled);
-        if look.in_place {
-            let mode = rig.motion_mode_of(look.axes[0]);
-            remove_root_motion(sampled, &rig.clips[clip].clip, &rig.skeleton, root, mode);
-        }
-        if let Some((from, from_time, weight)) = look
+        let posed = if let Some(shown) = look.own {
+            match own[0].filter(|c| c.keys_joints()) {
+                Some(clip) => {
+                    sampled.copy_from(rest);
+                    clip.pose_joints(shown.time, shown.playhead, &rig.skeleton, sampled);
+                    true
+                }
+                None => false,
+            }
+        } else {
+            let Some((clip, time)) = look.pose.filter(|&(c, _)| c < rig.clips.len()) else {
+                return false;
+            };
+            rig.clips[clip].clip.sample(time, rest, sampled);
+            if look.in_place {
+                let mode = rig.motion_mode_of(look.axes[0]);
+                remove_root_motion(sampled, &rig.clips[clip].clip, &rig.skeleton, root, mode);
+            }
+            true
+        };
+        let other = self.from.get_or_insert_with(|| Pose::identity(n));
+        let weight = if let Some((from, from_time, weight)) = look
             .fade
             .filter(|&(c, _, w)| c < rig.clips.len() && w < 1.0)
         {
-            let other = self.from.get_or_insert_with(|| Pose::identity(n));
             rig.clips[from].clip.sample(from_time, rest, other);
             if look.in_place {
                 let mode = rig.motion_mode_of(look.axes[1]);
                 remove_root_motion(other, &rig.clips[from].clip, &rig.skeleton, root, mode);
             }
-            if self.blender_joints < n {
-                self.blender = Blender::new(n);
-                self.blender_joints = n;
+            weight
+        } else if let Some((shown, weight)) = look.own_fade.filter(|&(_, w)| w < 1.0) {
+            match own[1].filter(|c| c.keys_joints()) {
+                Some(clip) => {
+                    other.copy_from(rest);
+                    clip.pose_joints(shown.time, shown.playhead, &rig.skeleton, other);
+                }
+                // Out of the rest pose.
+                None if posed => other.copy_from(rest),
+                None => return false,
             }
-            let out = self.blended.get_or_insert_with(|| Pose::identity(n));
-            out.copy_from(rest);
-            let layers = [
-                Layer {
-                    pose: &*other,
-                    weight: 1.0 - weight,
-                    mask: None,
-                    mode: LayerMode::Normal,
-                },
-                Layer {
-                    pose: &*sampled,
-                    weight,
-                    mask: None,
-                    mode: LayerMode::Normal,
-                },
-            ];
-            self.blender.blend(rest, &layers, out);
-            core::mem::swap(sampled, out);
+            weight
+        } else {
+            return posed;
+        };
+        if !posed {
+            sampled.copy_from(rest);
         }
+        if self.blender_joints < n {
+            self.blender = Blender::new(n);
+            self.blender_joints = n;
+        }
+        let out = self.blended.get_or_insert_with(|| Pose::identity(n));
+        out.copy_from(rest);
+        let layers = [
+            Layer {
+                pose: &*other,
+                weight: 1.0 - weight,
+                mask: None,
+                mode: LayerMode::Normal,
+            },
+            Layer {
+                pose: &*sampled,
+                weight,
+                mask: None,
+                mode: LayerMode::Normal,
+            },
+        ];
+        self.blender.blend(rest, &layers, out);
+        core::mem::swap(sampled, out);
         true
     }
 
     /// `rig`'s skinning matrices as `look` shows it ([`Self::local`]), its rest pose's
     /// without a clip or for one it has not.
-    pub(crate) fn palette<'a>(&'a mut self, rig: &'a Rig, look: Look) -> &'a [[f32; 12]] {
-        if !self.local(rig, look) {
+    pub(crate) fn palette<'a>(
+        &'a mut self,
+        rig: &'a Rig,
+        look: Look,
+        own: [Option<&crate::field_clips::FieldClip>; 2],
+    ) -> &'a [[f32; 12]] {
+        if !self.local(rig, look, own) {
             return &rig.rest;
         }
         let Some(sampled) = self.pose.as_ref() else {
@@ -617,12 +677,17 @@ impl Posing {
     /// `rig`'s joints where `look` puts them ([`Self::local`]; its rest pose without a clip,
     /// or for one it has not), in the skeleton's order: in the mesh node's space with the
     /// import scale applied, where the skinned vertices are (ADR 0124's E12-1c).
-    pub(crate) fn joints<'a>(&'a mut self, rig: &Rig, look: Look) -> &'a [Affine3A] {
+    pub(crate) fn joints<'a>(
+        &'a mut self,
+        rig: &Rig,
+        look: Look,
+        own: [Option<&crate::field_clips::FieldClip>; 2],
+    ) -> &'a [Affine3A] {
         let n = rig.skeleton.joint_count();
         if self.model.len() < n {
             self.model.resize(n, Affine3A::IDENTITY);
         }
-        let posed = self.local(rig, look);
+        let posed = self.local(rig, look, own);
         let local = match (posed, self.pose.as_ref()) {
             (true, Some(sampled)) => sampled,
             _ => rig.skeleton.rest(),
@@ -793,7 +858,7 @@ mod tests {
             let mut posing = Posing::default();
             let clip = &rig.clips()[0];
             let palette = posing
-                .palette(&rig, Look::at(Some((0, clip.duration() * 0.5))))
+                .palette(&rig, Look::at(Some((0, clip.duration() * 0.5))), [None; 2])
                 .to_vec();
             let moved = (0..part.mesh.positions.len()).step_by(step).any(|v| {
                 (skinned(part, &palette, v) - skinned(part, &rig.rest, v)).length() > 1e-4 * reach
@@ -803,10 +868,10 @@ mod tests {
             // E12-1c): each skin joint's place times its inverse bind matrix.
             let mut again = vec![[0.0f32; 12]; rig.joints.len()];
             for pose in [None, Some((0, clip.duration() * 0.5))] {
-                let joints = posing.joints(&rig, Look::at(pose)).to_vec();
+                let joints = posing.joints(&rig, Look::at(pose), [None; 2]).to_vec();
                 assert_eq!(joints.len(), rig.skeleton.joint_count());
                 skinning_matrices(&joints, &rig.joints, &rig.inverse_bind, &mut again);
-                let palette = posing.palette(&rig, Look::at(pose));
+                let palette = posing.palette(&rig, Look::at(pose), [None; 2]);
                 let same = palette.iter().zip(&again).all(|(a, b)| {
                     a.iter()
                         .zip(b)
@@ -822,7 +887,7 @@ mod tests {
                     fade,
                     ..Look::at(Some((0, late)))
                 };
-                posing.palette(&rig, look).to_vec()
+                posing.palette(&rig, look, [None; 2]).to_vec()
             };
             let off = |a: &[[f32; 12]], b: &[[f32; 12]]| {
                 (0..part.mesh.positions.len())
@@ -830,7 +895,9 @@ mod tests {
                     .map(|v| (skinned(part, a, v) - skinned(part, b, v)).length())
                     .fold(0.0f32, f32::max)
             };
-            let at_early = posing.palette(&rig, Look::at(Some((0, early)))).to_vec();
+            let at_early = posing
+                .palette(&rig, Look::at(Some((0, early))), [None; 2])
+                .to_vec();
             let at_late = posed(&mut posing, None);
             let apart = off(&at_early, &at_late);
             assert!(
@@ -887,7 +954,7 @@ mod tests {
                     in_place: true,
                     ..Look::at(Some((0, time)))
                 };
-                let joint = posing.joints(&rig, look)[rig.motion_root];
+                let joint = posing.joints(&rig, look, [None; 2])[rig.motion_root];
                 Vec3::from(joint.translation)
             };
             let (start, later) = (in_place(&mut posing, 0.0), in_place(&mut posing, late));
@@ -896,9 +963,12 @@ mod tests {
                 "{path}: the root kept in place: {start} then {later}"
             );
             // No clip, or one it has not: the rest pose.
-            assert_eq!(posing.palette(&rig, Look::default()), &rig.rest[..]);
             assert_eq!(
-                posing.palette(&rig, Look::at(Some((99, 0.0)))),
+                posing.palette(&rig, Look::default(), [None; 2]),
+                &rig.rest[..]
+            );
+            assert_eq!(
+                posing.palette(&rig, Look::at(Some((99, 0.0))), [None; 2]),
                 &rig.rest[..]
             );
         }
@@ -999,6 +1069,142 @@ mod tests {
             "raise: seam {seam} against {expected}"
         );
         assert_eq!(skeleton.names()[joint], "arm");
+    }
+
+    /// ADR 0124's E12-4e: a clip made in the editor keying a joint poses the rig over its rest
+    /// pose: that joint turned as keyed (its children carried with it), the joints it does
+    /// not key at rest; a clip keying no joint leaves the rest pose's palette.
+    #[test]
+    fn a_clip_made_in_the_editor_poses_the_joints_it_keys() {
+        let Some(file) = sample("CesiumMan/CesiumMan.gltf", 1.0) else {
+            return;
+        };
+        let mesh = (0..file.scene.meshes.len())
+            .find(|&m| skinned_node(&file.scene, m).is_some())
+            .unwrap();
+        let (_, rig) = build(&file, mesh, false).unwrap().unwrap();
+        let skeleton = rig.skeleton();
+        // A joint with a child: turned 90 degrees about up at a second.
+        let joint = (0..skeleton.joint_count())
+            .find(|&j| (0..skeleton.joint_count()).any(|c| skeleton.parent(c) == Some(j)))
+            .unwrap();
+        let child = (0..skeleton.joint_count())
+            .find(|&c| skeleton.parent(c) == Some(joint))
+            .unwrap();
+        let name = skeleton.names()[joint].clone();
+        let mut anim = engine_scene::AnimFile::default();
+        let target = engine_scene::joint_target(&name, "rotation");
+        anim.set_key(&target, 0.0, &[0.0, 0.0, 0.0]);
+        anim.set_key(&target, 1.0, &[0.0, 90.0, 0.0]);
+        let clip = crate::field_clips::FieldClip::new(&anim);
+        assert!(clip.keys_joints());
+        let file_id = engine_scene::AssetId::new();
+        let look = |t: f32| Look {
+            own: Some(OwnPose {
+                file: file_id,
+                time: t,
+                playhead: true,
+            }),
+            ..Look::default()
+        };
+        let mut posing = Posing::default();
+        let rest = posing.joints(&rig, Look::default(), [None; 2]).to_vec();
+        let at_end = posing.joints(&rig, look(1.0), [Some(&clip), None]).to_vec();
+        // The joint's own turn: its local rotation as keyed, at the playhead's end.
+        let mut pose = engine_anim::Pose::identity(skeleton.joint_count());
+        pose.copy_from(skeleton.rest());
+        clip.pose_joints(1.0, true, skeleton, &mut pose);
+        let keyed = Quat::from_rotation_y(90f32.to_radians());
+        assert!(pose.rotations[joint].angle_between(keyed) < 1e-3);
+        // An animator's time half way: 45 degrees; at 1 s the looping clip begins again.
+        clip.pose_joints(0.5, false, skeleton, &mut pose);
+        let half = Quat::from_rotation_y(45f32.to_radians());
+        assert!(pose.rotations[joint].angle_between(half) < 1e-3);
+        clip.pose_joints(1.0, false, skeleton, &mut pose);
+        assert!(
+            pose.rotations[joint].angle_between(Quat::IDENTITY) < 1e-3,
+            "wrapped"
+        );
+        for j in (0..skeleton.joint_count()).filter(|&j| j != joint) {
+            assert_eq!(
+                pose.rotations[j],
+                skeleton.rest().rotations[j],
+                "joint {j} at rest"
+            );
+        }
+        // Its child moved with it (unless it sits on the joint), the root's place kept.
+        let moved =
+            (Vec3::from(at_end[child].translation) - Vec3::from(rest[child].translation)).length();
+        let offset = Vec3::from(skeleton.rest().translations[child]).length();
+        assert!(
+            offset < 1e-6 || moved > 1e-4 * offset,
+            "the child moved {moved}"
+        );
+        let root = (0..skeleton.joint_count())
+            .find(|&j| skeleton.parent(j).is_none())
+            .unwrap();
+        if root != joint {
+            assert!(
+                (Vec3::from(at_end[root].translation) - Vec3::from(rest[root].translation))
+                    .length()
+                    < 1e-5
+            );
+        }
+        // At the start the clip keys the rest's turn of none: the joint's local turn is 0.
+        clip.pose_joints(0.0, true, skeleton, &mut pose);
+        assert!(pose.rotations[joint].angle_between(Quat::IDENTITY) < 1e-4);
+        // A clip without joints' tracks: the rest pose's palette.
+        let mut fields = engine_scene::AnimFile::default();
+        fields.set_key("Transform.rotation", 0.0, &[0.0, 45.0, 0.0]);
+        let plain = crate::field_clips::FieldClip::new(&fields);
+        assert!(!plain.keys_joints());
+        assert_eq!(
+            posing.palette(&rig, look(0.5), [Some(&plain), None]),
+            &rig.rest[..]
+        );
+        // Fades (a clip of the animator's own into another, or out of the rest pose of one
+        // keying no joint): the joint's turn half way at half the weight.
+        let mut held = engine_scene::AnimFile::default();
+        held.set_key(&target, 0.0, &[0.0, 90.0, 0.0]);
+        let mut zero = engine_scene::AnimFile::default();
+        zero.set_key(&target, 0.0, &[0.0, 0.0, 0.0]);
+        let (held, zero) = (
+            crate::field_clips::FieldClip::new(&held),
+            crate::field_clips::FieldClip::new(&zero),
+        );
+        let shown = OwnPose {
+            file: file_id,
+            time: 0.0,
+            playhead: false,
+        };
+        let look = Look {
+            own: Some(shown),
+            own_fade: Some((shown, 0.5)),
+            ..Look::default()
+        };
+        let turn = |posing: &mut Posing, own: [Option<&crate::field_clips::FieldClip>; 2]| {
+            assert!(posing.local(&rig, look, own));
+            posing.pose.as_ref().unwrap().rotations[joint]
+        };
+        let half = Quat::from_rotation_y(45f32.to_radians());
+        let both = turn(&mut posing, [Some(&zero), Some(&held)]);
+        assert!(
+            both.angle_between(half) < 1e-3,
+            "between two of its own clips"
+        );
+        let rest_turn = skeleton.rest().rotations[joint];
+        let mid = rest_turn.slerp(Quat::from_rotation_y(90f32.to_radians()), 0.5);
+        let from_rest = turn(&mut posing, [Some(&plain), Some(&held)]);
+        assert!(
+            from_rest.angle_between(mid) < 1e-3,
+            "out of one keying no joint"
+        );
+        // Two keying no joint: the rest pose.
+        assert!(!posing.local(&rig, look, [Some(&plain), Some(&plain)]));
+        assert_eq!(
+            posing.palette(&rig, look, [Some(&plain), Some(&plain)]),
+            &rig.rest[..]
+        );
     }
 
     /// A plain mesh is not skinned.

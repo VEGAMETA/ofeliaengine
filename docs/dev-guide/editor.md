@@ -500,9 +500,12 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
       - A rotation keys the angles nearest the track's, so a door turned on past 180° keys
         200, not -160.
       - While the clip plays, an edit is not kept: stop it to key.
-    - **K** keys every field the clip moves at the playhead, with the values it shows. On a
-      clip without tracks it keys the entity's position, rotation and scale. A playing clip
-      stops there.
+    - **K** keys every field the clip moves at the playhead, with the values it shows, and
+      every joint it keys on a character, with the clip's values there. On a clip without
+      tracks it keys the entity's position, rotation and scale. A playing clip stops there.
+    - **A character's joints** keyed in the clip (tracks such as `@Hips.rotation`) are posed
+      by the preview, over the model's rest pose. Their tracks are edited on the dope sheet
+      and in the Curves view like any other.
     - **◆**, after a field's ↺, keys that field alone. It is filled where a key lies at the
       playhead, outlined where the clip moves the field, and dim where the field could be
       keyed (numbers and rotations).
@@ -526,8 +529,8 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
         or down.
       - With keys picked, **Smooth**, **Linear** and **Step** in the header set how the clip
         goes from each to its next key. Each change is one step of undo.
-    - Not yet: a character's own clips beside its model's, keys on the entity's children
-      (they come from the file), and tangent handles in the Curves view.
+    - Not yet: posing a character's joints in the view to key them, keys on the entity's
+      children (they come from the file), and tangent handles in the Curves view.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

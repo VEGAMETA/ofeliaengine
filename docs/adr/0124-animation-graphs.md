@@ -584,6 +584,70 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-4e-1, 2026-10-30): joints keyed in `.anim`
+
+E12-4e is taken in two steps: **4e-1** the joints' tracks in the file, played and previewed
+(this one); **4e-2** posing a character's joints in the editor (joint mode's gizmo keying
+them, K on a picked joint).
+
+- **A joint's track** is named `@<joint>.<part>`: `@mixamorig:Hips.rotation`, the joint by its
+  name in the model (dots and colons kept; the part follows the last dot), the part
+  `translation`, `rotation` or `scale` (`engine_scene::joint_target`, `split_joint_target`).
+  - Its keys are in the joint's parent's space, as the model's clips have them. A rotation
+    is three Euler angles in degrees, as a field's (four numbers: a quaternion, as glTF
+    has it), and a scale is one number (uniform) or three.
+  - A clip may key fields and joints together. The fields' tracks and the joints' are laid
+    out apart (`FieldClip::tracks`, `FieldClip::joints`), so the fields' bindings, the
+    editor's sampler and its keying never see a joint as a field.
+- **The pose:** a character's animator playing one of its own clips poses the joints it
+  keys over the rest pose, the joints it does not key at rest (`FieldClip::pose_joints`,
+  `Posing::local`). A clip keying no joint leaves the rest pose, as before.
+  - A joint is found by its name once per model: each track remembers where it found its
+    joint, checked by name before it is used, so characters of one model search nothing
+    each frame. A joint the model lacks is left out.
+- **Fades across clips of both kinds:** `animator:play(clip, fade)` blends the two poses
+  whichever each one is: own into own, a model's clip into an own one and back
+  (`Look::own_fade` beside `Look::fade`, `animator_pose` makes both). An own clip keying
+  no joint fades as the rest pose.
+  - An own clip moves nothing by root motion, so through a fade into or out of one the
+    model's clip's motion fades with its weight (`RootMotion::blend` with `NONE`).
+  - The own clips' lengths are told to the animator by their ticks, as before; the
+    model's by the frame, as before.
+  - An animator with own clips stays among the fields' ticks while it plays its model's
+    clips. It used to drop out and be bound anew when it came back, which allocated at
+    every switch; now going from an own clip to a model's and back allocates nothing.
+- **The editor's preview:** the Animation tab showing an own clip on a character poses its
+  joints at the playhead, held within the clip (its end shows the last keys, also for a
+  clip that loops). It is let go when the tab, the clip or the entity changes, and the
+  animator's pose comes back. A key changed in the tab is drawn at once
+  (`Assets::set_anim_clip` reposes the characters showing that file); so is a file
+  changed on disk.
+  - The dope sheet and the Curves view list the joints' tracks by their targets, and their
+    keys are picked, moved, copied and curved as any track's.
+  - **K** keys the clip's joints too, with the values the clip has at the playhead; the
+    message counts fields and joints ("2 fields and 3 joints keyed at 0.50 s").
+- **Measured:** 0 allocations in 654 frames with a character playing an own clip that keys
+  three joints (and one its model lacks), fading into its model's clip and back every 100
+  frames. That is a new character in the skinned models' zero-allocation test, beside the
+  door with its two own clips.
+- **Tests:**
+  - **Targets:** split at the last dot, names with dots and colons kept; a field's target
+    and an unknown part are not a joint's.
+  - **The pose** (CesiumMan): the keyed joint turned 90 degrees at the playhead's end, the
+    other joints at rest, its child moved and the root's place kept. An animator's time
+    half way gives 45 degrees, and 1 s wraps to the start of a looping clip.
+  - **Fades:** two own clips at half weight give 45 degrees between 0 and 90. One keying
+    no joint into one keying 90 gives the rest pose's turn half way to it. Two keying none
+    give the rest pose's palette.
+  - **The editor:** K keys a joint's track at the playhead with the clip's 45 degrees and
+    the field beside it, in one step; undone, the file is as before. The fields' sampler
+    sees the position alone.
+  - **GPU, the zero-allocation test:** the waver's arm's child 0.13 m from its rest place
+    at a third of his clip.
+- **Not yet:** posing joints in the editor (E12-4e-2); joints' keys on a model's clips
+  edited (an imported clip is read-only, as before); masks and layers that combine an own
+  clip with a model's (graphs, E12-5).
+
 ## As built (E12-4d, 2026-10-30): curves
 
 - **Dope Sheet | Curves** in the Animation tab's header (and C in the tab) switch a clip made
