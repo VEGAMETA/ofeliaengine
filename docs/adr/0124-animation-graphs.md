@@ -588,11 +588,17 @@ allocation with transitions and events every tick; the same events at the same t
     - `InPose` walked its loop in place;
   - a script sets `root_motion` by name;
   - 0 allocations with a character's root motion moving it every tick (both builds).
+- **E12-2 is done with this:** the plain `Animator` plays a clip, a cross-fade and root
+  motion, saved, with `play` for scripts. Under decision 1c the component plays a clip or
+  a cross-fade by itself; layers, masks and additive blends are a graph's (E12-5, over
+  `engine_anim`'s `Blender`, which blends them already). The animator's other script calls
+  need what they read: `set`, `trigger`, `state` and `in_window` a graph's parameters and
+  states (E12-5), `on_animation_event` the clips' events (E12-3).
 - **Left:**
   - per-clip root motion settings (vertical, no yaw), with the Animation tab's loop
     settings in the model's `.meta` (E12-3);
   - the floor moving under root motion in the editor's previews (E12-1b-3);
-  - layers, the animator's other script calls, graphs (E12-2d and on, E12-5).
+  - P in place still plays a clip as made, its root motion in the pose.
 
 ## Consequences
 
