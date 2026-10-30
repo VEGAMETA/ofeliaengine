@@ -23160,7 +23160,7 @@ impl Editor {
         self.anim_watched = watched;
         // The layer the canvas shows (E12-5d-2b).
         if let Some(e) = watched
-            && let Some(layer) = anim.layer_index()
+            && let Some(layer) = anim.cooked_layer_index()
             && let Some(now) = player.graph_now_in(e, layer)
         {
             let who = world.get::<Name>(e).map_or("a character", Name::as_str);

@@ -994,6 +994,19 @@ impl AnimDoc {
         self.layer_ids.iter().position(|id| *id == self.layer)
     }
 
+    /// The shown layer's place among the layers the player cooks: those before it whose root
+    /// node the graph has (the cook leaves out a layer playing nothing), for its live state.
+    pub(crate) fn cooked_layer_index(&self) -> Option<usize> {
+        let k = self.layer_index()?;
+        let plays = |id: &String| {
+            self.file
+                .layers
+                .get(id)
+                .is_some_and(|l| self.file.nodes.contains_key(&l.root))
+        };
+        Some(self.layer_ids[..k].iter().filter(|id| plays(id)).count())
+    }
+
     /// The shown layer's section's title into `out`: `Layer · Base`.
     pub(crate) fn layer_title(&self, out: &mut String) {
         out.clear();
@@ -3646,6 +3659,25 @@ mod tests {
         d.put_text(&before).unwrap();
         assert_eq!(anim(&d).layer_ids.len(), 2);
         assert!(anim(&d).file.nodes.contains_key(&machine));
+    }
+
+    /// A layer playing nothing is left out of the cook: the shown layer's live state is read
+    /// at its place among those that play (ADR 0124's E12-5d-2b).
+    #[test]
+    fn a_layer_playing_nothing_is_not_counted_for_the_live_state() {
+        let mut f = file();
+        f.layers.insert(
+            String::from("aaa"),
+            LayerFile {
+                name: String::from("Ghost"),
+                root: String::from("nothing"),
+                ..LayerFile::default()
+            },
+        );
+        let d = GraphDoc::new_anim(AssetId::new(), "anim/hero.agraph", f, AssetPaths::new());
+        assert_eq!(anim(&d).layer, "base", "the first playing a machine");
+        assert_eq!(anim(&d).layer_index(), Some(1));
+        assert_eq!(anim(&d).cooked_layer_index(), Some(0));
     }
 
     /// A state's rows: its name (refused empty or taken), its clip, its pace, what it plays
