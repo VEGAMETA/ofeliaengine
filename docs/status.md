@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-5c-2, a graph's root motion, events and saves** (#PR, ADR 0124's as-built): a
+  - **E12-5c-2, a graph's root motion, events and saves** (#485, ADR 0124's as-built): a
     graph character moved by its root motion (`Move`, `Report`) has it taken out of every
     clip it samples and moves by its base layer's clips' motions over each tick, blended
     by weight: the generated walker's graph crosses 1.25 m in 80 ticks exactly as the
@@ -915,7 +915,7 @@ Last updated: 2026-10-28.
     - Each frame poses from the graph between ticks (sockets and `model_joints` too); a
       graph that cannot be read shows the rest pose; the editor's copy plays in place of
       the file. 0 allocations (CesiumMan with a graph character beside the others).
-    - Root motion, events and saves of a graph: 5c-2 (#PR).
+    - Root motion, events and saves of a graph: 5c-2 (#485).
   - **E12-5b-2, inertialized transitions** (#483, ADR 0124's as-built, research note's new
     section): Bollo's inertialization (no patents found, 2026-10-30), the destination at
     full strength from its first frame; a blend cut short goes on from the pose shown, with
