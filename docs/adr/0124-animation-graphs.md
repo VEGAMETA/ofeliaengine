@@ -584,6 +584,36 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-5d-2b-1, 2026-10-30): a graph's layers on its bar and in the inspector
+
+- **The bar's chips:** an animation graph's tab shows a chip per layer after its path, in
+  their order, the one the canvas shows lit; a click shows that layer's machine (nothing
+  selected, framed anew; not a step: what the tab shows). **+** adds a layer over the
+  others, `Layer` (numbered when taken), playing a machine of its own whose entry state,
+  Idle, plays a clip not named yet; it is shown, and is one step. A state added (Space)
+  goes into the machine shown; where the shown layer plays none (a blend at its root), a
+  layer and a machine are made for it and shown.
+- **The layer's section:** with nothing selected the inspector leads with `Layer · Base`:
+  its **name** (refused empty or taken), **blend** (Normal or Additive over the layers
+  before it), **weight** (held within 0 to 1) and **weight from** (none, or a number
+  parameter whose value sets it instead), each a step, then the parameters. Its × deletes
+  the layer with what only it plays (its machine's states, their poses, the transitions
+  into or out of them; a node another layer or state plays stays), and the first left is
+  shown; ↑ and ↓ move it among the layers (every layer's `order` numbered again from 0).
+- **In Play** the bar and the canvas follow the watched character's machine of the layer
+  shown (`Player::graph_now_in(entity, layer)`, the layers in their order; `graph_now`
+  stays the first layer playing a machine, for the inspector's Graph row and View:
+  Animation States).
+- **Masks (team decision, 2026-10-30, «а»), the next step:** a layer's mask edited as the
+  skeleton's joint tree with a check box a joint (it and its subtree in or out, as Unity's
+  Avatar Mask and Godot's filters), a weight from 0 to 1 typed where a joint needs one,
+  the joints from a character playing the graph.
+- **Tests:** the document's (a layer added and shown, its rows each a step and their
+  refusals, moved under the base and back, a state added into the layer shown, deleted
+  with its machine, states and poses, undone); the editor's (the chips on the bar, a click
+  showing Upper's machine and section, × deleting it as one step, undone); the fox in Play
+  (the second layer's chip shows `Fox: Look · …`, the first's `Fox: Walk · …`).
+
 ## As built (E12-5d-2a, 2026-10-30): blends drawn as points
 
 - **The inspector's blend panel:** a state playing a blend, selected alone on the graph's
