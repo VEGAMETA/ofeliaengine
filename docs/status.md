@@ -879,6 +879,14 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5d-1, the graph's canvas** (#482, ADR 0124's as-built): an `.agraph` opens in a
+    tab of its own (double click in the dock, or Animation: New Animation Graph), the
+    material graph's tab and history reused. The first layer's machine is drawn: states,
+    the entry, Any State, transitions as arrows (both ways side by side, loops). States are
+    added by Space's search or by dropping an arrow on the canvas, moved, deleted with their
+    transitions; transitions drawn from a state's edge. The inspector edits states,
+    transitions (conditions compiled as typed, errors with their place) and parameters
+    (renames followed). Problems framed in red. 0 allocations in the tab's frames.
   - **E12-5c, the scripts' calls on a graph** (#480, ADR 0124's as-built):
     `self.Animator:set("speed", 3.5)` (a number or a boolean), `self.Animator:trigger("jump")`
     and `self.Animator.state` (read-only), with errors naming the graph's parameters of the
@@ -1241,6 +1249,11 @@ Last updated: 2026-10-28.
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
     E12-5c-2 (a graph's root motion, events and saves), the scripts' calls (in parallel),
     then 5d (the canvas, in parallel) and 5e; E12-4 is done.
+  - **Settled (2026-10-30, team decisions 1а 2а 3б 4а 5а):** Luau's strict mode stays opt-in
+    (`--!strict`, which New Script writes); transitions drawn in the editor inertialize by
+    default (the file's default stays a cross-fade); compacting inertialization's per-joint
+    decays is postponed; New Animation Graph gives the graph to the selected characters;
+    Any State's place stays in its machine node's `at`.
   - **Settled (2026-10-30, team decision «а»):** the scripts' calls on a graph are
     `animator:set("speed", 3.5)`, `animator:trigger("jump")`, `animator.state`,
     `animator:in_window("hit")`, with completion: the project's graphs' parameter names go
