@@ -3,10 +3,13 @@
 //! idle state and a moving state blending nine clips over two parameters, cross-faded both
 //! ways; an upper-body layer masked to the spine's subtree; an additive lean. 100, 1,000
 //! and 10,000 characters, their parameters changed every quarter second so a quarter of
-//! them is in a cross-fade at any time: the ticks (64 a second) and the frames apart, the
-//! frames on one thread and on the job system.
+//! them is in a cross-fade at any time (and some fades are cut short: those go on as
+//! inertializations): the ticks (64 a second), the captures after them and the frames
+//! apart, the frames on one thread and on the job system. `--inertialize` makes the two
+//! transitions inertialized (ADR 0124's E12-5b-2).
 //!
-//! `cargo run -p engine_anim --release --example graph_bench -- [--frames N] [--workers N]`
+//! `cargo run -p engine_anim --release --example graph_bench -- [--frames N] [--workers N]
+//! [--inertialize] [--unprepared]`
 
 #![allow(clippy::unwrap_used, clippy::print_stdout, clippy::cast_precision_loss)]
 
@@ -15,6 +18,10 @@ use engine_core::jobs::ThreadPool;
 use engine_core::math::{Quat, Vec3};
 use std::cell::RefCell;
 use std::time::Instant;
+
+/// The engine's allocator, as the player has it (ADR 0086).
+#[global_allocator]
+static ALLOCATOR: engine_core::alloc::EngineAllocator = engine_core::alloc::EngineAllocator::new();
 
 /// The humanoid: a root, a spine of three with a neck and head, two arms of four with five
 /// fingers of three, two legs of four.
@@ -91,8 +98,8 @@ fn clip(skeleton: &Skeleton, seed: f32) -> CompressedClip {
 }
 
 /// The locomotion graph: idle and a 3×3 blend over (across, ahead), an upper-body layer, an
-/// additive lean.
-fn locomotion() -> GraphDesc {
+/// additive lean; its transitions inertialized or cross-faded.
+fn locomotion(inertialize: bool) -> GraphDesc {
     let mut points = Vec::new();
     for (row, y) in [0.0, 1.0, 2.0].into_iter().enumerate() {
         for (col, x) in [-1.0, 0.0, 1.0].into_iter().enumerate() {
@@ -169,6 +176,7 @@ fn locomotion() -> GraphDesc {
                 to: 1,
                 when: "ahead > 0.1 or across * across > 0.01".into(),
                 blend: 0.25,
+                inertialize,
                 ..TransitionDesc::default()
             },
             TransitionDesc {
@@ -176,6 +184,7 @@ fn locomotion() -> GraphDesc {
                 to: 0,
                 when: "ahead <= 0.1 and across * across <= 0.01".into(),
                 blend: 0.25,
+                inertialize,
                 ..TransitionDesc::default()
             },
         ],
@@ -222,7 +231,8 @@ fn main() {
             once: false,
         })
     };
-    let (mut graph, problems) = AnimGraph::cook(&locomotion(), info, &skeleton);
+    let inertialize = args.iter().any(|a| a == "--inertialize");
+    let (mut graph, problems) = AnimGraph::cook(&locomotion(inertialize), info, &skeleton);
     assert!(problems.is_empty(), "{problems:?}");
     if !args.iter().any(|a| a == "--unprepared") {
         graph.prepare(|k| clips.get(usize::from(k)), skeleton.rest());
@@ -231,11 +241,21 @@ fn main() {
     let (across, ahead, wave, lean) = (slot("across"), slot("ahead"), slot("wave"), slot("lean"));
     let pool = ThreadPool::builder().workers(workers).build().unwrap();
     println!(
-        "{} joints, {} clips; {frames} frames, ticks at 64 Hz, {workers} workers",
+        "{} joints, {} clips; {frames} frames, ticks at 64 Hz, {workers} workers; {}; {} bytes \
+         a character's state",
         skeleton.joint_count(),
-        clips.len()
+        clips.len(),
+        if inertialize {
+            "inertialized transitions"
+        } else {
+            "cross-faded transitions"
+        },
+        GraphState::new(&graph).size_bytes(),
     );
-    println!("characters | tick µs/char | frame µs/char (1 thread) | frame ms ({workers} workers)");
+    println!(
+        "characters | tick µs/char | capture µs/char | µs/capture | frame µs/char (1 thread) | \
+         frame ms ({workers} workers)"
+    );
     for n in [100usize, 1_000, 10_000] {
         let mut characters: Vec<Character> = (0..n)
             .map(|i| {
@@ -250,6 +270,7 @@ fn main() {
             .collect();
         let dt = 1.0 / 64.0;
         let (mut tick_time, mut ticks) = (0.0f64, 0usize);
+        let (mut capture_time, mut captures) = (0.0f64, 0usize);
         let (mut frame_time, mut parallel_time) = (0.0f64, 0.0f64);
         let mut work = GraphWork::new(skeleton.joint_count());
         for frame in 0..frames {
@@ -277,6 +298,14 @@ fn main() {
                 }
                 tick_time += started.elapsed().as_secs_f64();
                 ticks += 1;
+                let started = Instant::now();
+                for c in &mut characters {
+                    let clip = |k: u16| clips.get(usize::from(k));
+                    if graph.capture(&mut c.state, clip, skeleton.rest(), &mut work) {
+                        captures += 1;
+                    }
+                }
+                capture_time += started.elapsed().as_secs_f64();
             }
             let alpha = (frame % 4) as f32 / 4.0;
             let started = Instant::now();
@@ -313,8 +342,11 @@ fn main() {
             .filter(|c| graph.state_name(&c.state, 0) == Some("Move"))
             .count();
         println!(
-            "{n:>10} | {:>12.3} | {:>24.3} | {:>12.3}   ({fading} moving)",
+            "{n:>10} | {:>12.3} | {:>15.3} | {:>10.2} | {:>24.3} | {:>12.3}   ({fading} moving, \
+             {captures} captures)",
             tick_time / ticks as f64 / n as f64 * 1e6,
+            capture_time / ticks as f64 / n as f64 * 1e6,
+            capture_time / captures.max(1) as f64 * 1e6,
             frame_time / frames as f64 / n as f64 * 1e6,
             parallel_time / frames as f64 * 1e3,
         );
