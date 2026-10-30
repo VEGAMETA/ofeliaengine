@@ -879,6 +879,16 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E13 research: 2D scenes, tile maps and the 2D tools** (#487, agent Г; ADR 0125
+    proposed): the runtime note (tile map renderers, auto-tiling, atlases, 2D lights, tile
+    collision for Box2D v3, pixel-perfect cameras) and the UX note (Godot, Unity, LDtk,
+    Tiled, Aseprite, Paper2D). Settled in the ADR: Box2D updated to 3.2.0 first (E13-5),
+    tile collision as chains per 32 × 32 chunk joined by ghost points, a neutral tone
+    curve for 2D views, palette keys hashed from their tiles, Aseprite read by our own
+    parser. Ten questions for the team (one world in XY, metres at 16 px, cells in the
+    scene by chunk rows, painted terrains kept, terrains then rules, flipbooks as
+    `Animator` clips, sprite settings in `.meta`, squares first, lights with shadows,
+    the scripts' 2D calls); E13 starts with the answers.
   - **E12-5e-1, the graph's tab live with the player** (#486, ADR 0124's as-built): the tab
     gives the player its graph as it changes (unsaved, in Play too); only what plays counts
     (a state moved on the canvas changes nothing; a real change keeps each character in its
