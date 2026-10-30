@@ -121,6 +121,7 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
                 ..engine_scene::ClipEvent::default()
             })
             .collect(),
+        ..engine_scene::ClipImport::default()
     });
     meta.write(&dir.join("CesiumMan.gltf"), id).unwrap();
     let (mesh, material) = (

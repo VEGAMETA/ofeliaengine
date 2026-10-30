@@ -54,6 +54,7 @@ fn frames_with_a_posed_skinned_model_do_not_allocate() {
                 sound: String::new(),
             })
             .collect(),
+        ..engine_scene::ClipImport::default()
     });
     std::fs::write(
         AssetMeta::path(&dir.join("CesiumMan.gltf")),

@@ -85,14 +85,45 @@ impl Default for ModelImport {
     }
 }
 
-/// What a model's `.meta` adds to one of its clips (ADR 0124's E12-3b).
-#[derive(Debug, Clone, PartialEq, Default, Reflect)]
+/// What a model's `.meta` adds to one of its clips (ADR 0124's E12-3b, E12-3e): its events
+/// and how it plays.
+#[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct ClipImport {
     /// The clip, by its name in the file (an unnamed one by the name the editor shows it
     /// by, `Clip 2`).
     pub name: String,
     /// Its events, in time order.
     pub events: Vec<ClipEvent>,
+    /// It plays once and holds its last moment (a death, a door opening); false: it loops.
+    pub once: bool,
+    /// What of its root's motion root motion takes out of the pose (E12-3e): its crossing of
+    /// the ground,
+    pub root_across: bool,
+    /// its rise and fall (a jump that lifts the character; off, the height stays in the
+    /// pose),
+    pub root_up: bool,
+    /// and its turn about up.
+    pub root_turn: bool,
+}
+
+impl Default for ClipImport {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            events: Vec::new(),
+            once: false,
+            root_across: true,
+            root_up: false,
+            root_turn: true,
+        }
+    }
+}
+
+impl ClipImport {
+    /// It says nothing beyond its name: no events, every setting its default.
+    pub fn is_plain(&self) -> bool {
+        self.events.is_empty() && !self.once && self.root_across && !self.root_up && self.root_turn
+    }
 }
 
 /// A moment of a clip that something happens at (ADR 0124's E12-3b): when a character's
@@ -1049,13 +1080,32 @@ model.scale = 0.01
                     ..ClipEvent::default()
                 },
             ],
+            ..ClipImport::default()
         });
+        // A clip with settings and no events (E12-3e).
+        walking.model.clips.push(ClipImport {
+            name: String::from("Jump"),
+            once: true,
+            root_up: true,
+            root_turn: false,
+            ..ClipImport::default()
+        });
+        assert!(!walking.model.clips[1].is_plain());
+        assert!(
+            ClipImport {
+                name: String::from("Idle"),
+                ..ClipImport::default()
+            }
+            .is_plain()
+        );
         let text = walking.to_text(id);
         println!("{text}");
         assert!(
             text.contains("model.clips.0.events.0.data = \"left\"")
                 && text.contains("model.clips.0.events.0.sound = \"sounds/step.wav\"")
-                && text.contains("model.clips.0.events.1.time = 0.75"),
+                && text.contains("model.clips.0.events.1.time = 0.75")
+                && text.contains("model.clips.1.once = true")
+                && text.contains("model.clips.1.root_up = true"),
             "{text}"
         );
         let (read, _) = AssetMeta::parse(&text).unwrap();

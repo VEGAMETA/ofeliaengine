@@ -78,7 +78,8 @@ world.spawn((Model::new(mesh, material), Animator::new("Walk")));
     character walks off its spot and jumps back each loop.
   - `Move`: each tick the clip's ground motion over the tick moves the entity's
     `Transform`, and its turn turns it. The pose keeps the root on the spot (its height and
-    tilt stay in the pose), so the character goes exactly as far as the clip says.
+    tilt stay in the pose unless the clip says `root_up`, below), so the character goes
+    exactly as far as the clip says.
   - `Report`: the same motion is taken out of the pose, but the entity stays put. Each tick
     the animator's `moved` (in the entity's parent's space) and `turned` (radians about the
     character's up) hold it, for your character controller to move a capsule by.
@@ -88,6 +89,15 @@ world.spawn((Model::new(mesh, material), Animator::new("Walk")));
     holds moves nothing, and nothing moves while the world stands still.
   - The editor's Clips show each clip's root speed (E12-1b): near 0 for a clip made in
     place, which has no motion to take out.
+- **How each clip plays** lives in its model's `.meta` too (E12-3e), beside its events:
+  - `once = true`: the clip plays once and holds its last moment (a death, a door
+    opening); the animator's `time` stops at the clip's end. Without it, the clip loops.
+  - `root_across`, `root_up`, `root_turn`: what of the root's motion root motion takes out
+    of the pose and moves the character by. The default is the ground's two: across and
+    the turn. `root_up` takes a jump's rise and fall as well (`moved` gets its height);
+    `root_turn = false` leaves a turn in the pose.
+  - The Animation tab's header sets them ("in the game: Once · root motion: Across Up
+    Turn"), each an undo step written to the `.meta`.
 - Scripts reach it as any component: `self.Animator.speed = 2`,
   `self.Animator.root_motion = "Move"`, and `self.Animator.moved` after a tick. The rest
   of its calls (`set`, `trigger`, `state`) come with the rest of E12-2.

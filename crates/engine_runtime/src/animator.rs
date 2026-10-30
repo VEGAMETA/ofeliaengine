@@ -81,6 +81,14 @@ pub struct Animator {
     /// A tick set `previous` since the animator was made or loaded.
     #[reflect(skip)]
     pub ticked: bool,
+    /// The clip plays once and holds its last moment (its model's `.meta` says so, ADR
+    /// 0124's E12-3e), as the player last found it: `time` stops at `length` instead of
+    /// wrapping.
+    #[reflect(skip)]
+    pub hold: bool,
+    /// Likewise for the clip fading out.
+    #[reflect(skip)]
+    pub from_hold: bool,
     /// The last tick's root motion taken out of the pose (`RootMotion::Move` or `Report`):
     /// how far the character crossed the ground, in its parent's space.
     #[reflect(skip)]
@@ -110,6 +118,8 @@ impl Default for Animator {
             faded_previous: 0.0,
             previous: 0.0,
             ticked: false,
+            hold: false,
+            from_hold: false,
             moved: Vec3::ZERO,
             turned: 0.0,
         }
@@ -134,6 +144,7 @@ impl Animator {
             self.from_time = self.time;
             self.from_previous = self.time;
             self.from_length = self.length;
+            self.from_hold = self.hold;
             self.fade = fade;
         } else {
             self.from_clip.clear();
@@ -146,6 +157,7 @@ impl Animator {
         self.time = 0.0;
         self.previous = 0.0;
         self.length = 0.0;
+        self.hold = false;
     }
 
     /// One tick of `dt` seconds: `time` moves on by `dt` times the speed (held while
@@ -155,14 +167,15 @@ impl Animator {
     /// after it reaches its length.
     pub fn advance(&mut self, dt: f32) {
         let step = if self.paused { 0.0 } else { dt * self.speed };
-        (self.previous, self.time) = wrapped(self.time, step, self.length);
+        (self.previous, self.time) = moved_on(self.time, step, self.length, self.hold);
         if self.fade > 0.0 && self.faded >= self.fade {
             self.from_clip.clear();
             self.fade = 0.0;
             self.faded = 0.0;
             self.faded_previous = 0.0;
         } else if self.fade > 0.0 {
-            (self.from_previous, self.from_time) = wrapped(self.from_time, step, self.from_length);
+            (self.from_previous, self.from_time) =
+                moved_on(self.from_time, step, self.from_length, self.from_hold);
             self.faded_previous = self.faded;
             if !self.paused {
                 self.faded = (self.faded + dt).min(self.fade);
@@ -175,7 +188,14 @@ impl Animator {
     /// to the next shows it: between the last two ticks' times, wrapped into the clip (its
     /// `time` before any tick).
     pub fn at(&self, alpha: f32, length: f32) -> f32 {
-        between(self.previous, self.time, self.ticked, alpha, length)
+        between(
+            self.previous,
+            self.time,
+            self.ticked,
+            alpha,
+            length,
+            self.hold,
+        )
     }
 
     /// Where the same frame shows the clip fading out, of `length` seconds.
@@ -186,6 +206,7 @@ impl Animator {
             self.ticked,
             alpha,
             length,
+            self.from_hold,
         )
     }
 
@@ -204,6 +225,15 @@ impl Animator {
     }
 }
 
+/// `time` moved on by `step`, wrapped into `length` once that is known (held at its ends for
+/// a clip that plays once, E12-3e), and the time before: `(previous, time)`.
+fn moved_on(time: f32, step: f32, length: f32, hold: bool) -> (f32, f32) {
+    if hold && length > 0.0 {
+        return (time, (time + step).clamp(0.0, length));
+    }
+    wrapped(time, step, length)
+}
+
 /// `time` moved on by `step` and wrapped into `length` once that is known, and the time
 /// before shifted alike: `(previous, time)`.
 fn wrapped(time: f32, step: f32, length: f32) -> (f32, f32) {
@@ -217,17 +247,19 @@ fn wrapped(time: f32, step: f32, length: f32) -> (f32, f32) {
 }
 
 /// A moment `alpha` of the way from `previous` to `time` (just `time` before any tick),
-/// wrapped into `length` (0 for a length not known).
-fn between(previous: f32, time: f32, ticked: bool, alpha: f32, length: f32) -> f32 {
+/// wrapped into `length` (0 for a length not known), or held within it (`hold`, E12-3e).
+fn between(previous: f32, time: f32, ticked: bool, alpha: f32, length: f32, hold: bool) -> f32 {
     let t = if ticked {
         previous + (time - previous) * alpha.clamp(0.0, 1.0)
     } else {
         time
     };
-    if length > 0.0 {
-        t.rem_euclid(length)
-    } else {
+    if length <= 0.0 {
         0.0
+    } else if hold {
+        t.clamp(0.0, length)
+    } else {
+        t.rem_euclid(length)
     }
 }
 
@@ -441,6 +473,39 @@ mod tests {
             (a.fade, a.from_clip.as_str(), a.weight(0.3)),
             (0.0, "", 1.0)
         );
+    }
+
+    /// ADR 0124's E12-3e: a clip that plays once stops at its end and holds it, frames
+    /// between its last ticks showing its end, not its start; backwards it holds its start;
+    /// a clip played after it loops again.
+    #[test]
+    fn a_clip_played_once_holds_its_end() {
+        let mut a = Animator {
+            length: 1.0,
+            hold: true,
+            ..Animator::new("Die")
+        };
+        for _ in 0..5 {
+            a.advance(0.25);
+        }
+        assert_eq!(a.time, 1.0, "held at its end");
+        assert_eq!(a.at(0.5, 1.0), 1.0, "its end, not its start");
+        a.speed = -1.0;
+        for _ in 0..6 {
+            a.advance(0.25);
+        }
+        assert_eq!(a.time, 0.0, "backwards, held at its start");
+        a.speed = 1.0;
+        a.play("Walk", 0.5);
+        assert!(
+            !a.hold && a.from_hold,
+            "the next clip loops; the fading one holds"
+        );
+        a.length = 1.0;
+        for _ in 0..5 {
+            a.advance(0.25);
+        }
+        assert_eq!(a.time, 0.25, "looped");
     }
 
     #[test]

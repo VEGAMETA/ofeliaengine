@@ -701,6 +701,11 @@ pub struct AnimationView<'a> {
     pub speeds: &'a [f32],
     /// See `speeds`.
     pub speed_label: &'a str,
+    /// How the clip plays in the game, by its model's `.meta` (E12-3e): once (held at its
+    /// end) or looped; root motion across the ground, up and down, its turn.
+    pub once: bool,
+    /// See `once`.
+    pub root: [bool; 3],
 }
 
 /// A joint of the inspector's Skeleton (ADR 0124's E12-1c): its name and how deep below
@@ -1255,6 +1260,8 @@ pub struct ShellResponse {
     pub anim_event_delete: bool,
     /// Mark Foot Plants was clicked (E12-3d).
     pub anim_mark_plants: bool,
+    /// One of the clip's settings was clicked (E12-3e): 0 once, 1 across, 2 up, 3 turn.
+    pub anim_clip_setting: Option<u8>,
     /// Their bar was pressed, dragged along or let go.
     pub clip_scrub: Option<WaveUse>,
     /// Their model's preview was pressed, dragged or let go: it turns.
@@ -5856,6 +5863,20 @@ fn animation_panel(ui: &mut Ui, view: &AnimationView<'_>, p: &Palette, out: &mut
                     );
                     if ui.sense(speed, false).clicked {
                         out.anim_speed = true;
+                    }
+                }
+                // How it plays in the game, written to its model's `.meta` (E12-3e).
+                if view.note.is_empty() {
+                    text(ui, "game", "in the game:", SMALL, p.text_dim);
+                    if label_button(ui, "once", "Once", view.once, p.accent, p) {
+                        out.anim_clip_setting = Some(0);
+                    }
+                    text(ui, "root", "root motion:", SMALL, p.text_dim);
+                    let axes = [("across", "Across"), ("up", "Up"), ("turn", "Turn")];
+                    for (i, (key, label)) in axes.into_iter().enumerate() {
+                        if label_button(ui, key, label, view.root[i], p.accent, p) {
+                            out.anim_clip_setting = Some(i as u8 + 1);
+                        }
                     }
                 }
                 ui.spacer("fill");

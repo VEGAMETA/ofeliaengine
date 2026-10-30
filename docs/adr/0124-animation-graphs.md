@@ -584,6 +584,47 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-3e, 2026-10-30): each clip's loop and root motion settings
+
+- **The `.meta`** (`ClipImport`): `once`, plus `root_across`, `root_up` and `root_turn`
+  beside the events. The default is a loop with the ground's root motion (across, turn);
+  question 7 has them in the model's `.meta`.
+  - `ClipImport::is_plain` says when an entry says nothing, and the editor drops such
+    entries from the file.
+  - An older `.meta` with events only reads the defaults.
+- **Once:** the player tells the `Animator` each frame whether its clip (and the one
+  fading out) plays once, as it tells it the clips' lengths (`hold`, `from_hold`).
+  - `advance` then holds `time` within the clip instead of wrapping it (backwards, at its
+    start).
+  - Frames between ticks show the end, not the start (`between` clamps instead of
+    wrapping).
+  - `play` lets the next clip loop again, the one fading out keeping its own.
+- **Root motion's axes:** `Look` carries each of its two clips' axes, and
+  `Rig::motion_mode_of(axes)` reads root motion along them.
+  - The same axes take the motion out of the pose (`Posing::local`) and move the character
+    (`tick_motion`, `clip_motion`), so a jump with `root_up` rises as the entity and stays
+    level in the pose.
+  - The preview's floor still uses the default axes.
+- **Settings and events share one table** (`ModelEvents`, `ClipPlay`), read from the
+  `.meta` and swapped by `Assets::set_clip_events`.
+- **The editor:** the Animation tab's header has "in the game: Once · root motion:
+  Across Up Turn", lit as the `.meta` says. Each toggle is an undo step through
+  `EventsDoc::edit_clip`, the events' document now a clip entry's.
+- **Tests:**
+  - **Unit:** a clip played once holds its end (frames between show the end; backwards
+    it holds its start; the next clip loops); the `.meta` round trip with a clip of
+    settings and no events.
+  - **The tab:** Once and Up toggled into the `.meta`, the steps undone back to no entry
+    and redone.
+  - **GPU, the walker:** by default `moved` has no rise and fall. Once with `root_up`, its
+    Walk holds at 1.0 s, `moved` reports the hips' bob (3.9 mm a tick at most) and then
+    nothing. Turn without `root_turn` keeps the entity facing as it stood. The events
+    and root motion tests pass as before.
+- **E12-3 is done:** the timeline, events with sounds, trails and speed curves, Mark Foot
+  Plants, and the clips' settings.
+- **Left:** the preview's own loop toggle still loops a clip set to once (the preview is
+  for watching).
+
 ## As built (E12-3d, 2026-10-30): Mark Foot Plants
 
 - **The command** (`animation.mark_foot_plants`, and the tab's button beside + while no
