@@ -879,7 +879,7 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
-  - **E12-4b-1b, New Clip, renaming and deleting clips** (#PR, ADR 0124's as-built): New
+  - **E12-4b-1b, New Clip, renaming and deleting clips** (#470, ADR 0124's as-built): New
     Clip makes an `.anim` in the dock's folder for the selected entity (an `Animator` added
     when missing), one undo step; the header's name field renames a clip, ✕ takes it away.
     **Team decision (2026-10-30):** K keys the fields the clip moves (an empty clip:
