@@ -64,12 +64,17 @@
 //! assert!(copy.get::<GlobalTransform>(loaded).is_some(), "companion added");
 //! ```
 
+mod agraph;
 mod anim;
 mod assets;
 pub mod database;
 pub mod prefab;
 pub mod text;
 
+pub use agraph::{
+    AnimGraphFile, BlendPoint, LayerBlend, LayerFile, NodeFile, NodeKind, ParamFile, ParamKind,
+    StateFile, TransitionFile,
+};
 pub use anim::{
     AnimFile, AnimKey, AnimTrack, KeyCurve, anim_target, joint_target, split_anim_target,
     split_joint_target,

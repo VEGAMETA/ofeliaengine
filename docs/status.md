@@ -879,6 +879,13 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-5a, the `.agraph` file and transition conditions** (#PR, ADR 0124's as-built):
+    - `engine_scene::AnimGraphFile` holds parameters, layers, nodes (clips, 1D and 2D
+      blends, machines), states and transitions, keyed by ids. Lines at their defaults are
+      left out, and `problems()` names broken references.
+    - `engine_anim::Condition` compiles `speed > 0.1 and grounded` to stack operations:
+      checked without allocating, triggers listed, errors with their places.
+    - E12-5's plan: 5b runtime, 5c player and scripts, 5d editor canvas, 5e live state.
   - **E12-4e-2, a character's joints posed in the view** (#475, ADR 0124's as-built):
     - A character's own clips are listed after its model's in the Animation tab. Choosing
       one shows its kind's tools, and New Clip is offered for characters too.
@@ -1207,8 +1214,13 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    E12-5 (graphs: `.agraph` states, transitions, blends, layers on E10's canvas); E12-4 is
-    done.
+    E12-5b (the graph's runtime in `engine_anim`), then 5c to 5e; E12-4 is done.
+  - **Asked (2026-10-30), for E12-5c:** the scripts' calls on a graph (the public scripting
+    API): a) `animator:set("speed", 3.5)`, `animator:trigger("jump")`, `animator.state`,
+    `animator:in_window("hit")` (recommended: one call each, about 0.1 µs, names cached); b)
+    calls by type (`set_number`, `set_flag`); c) parameters as fields
+    (`animator.params.speed = 3.5`: two calls a write, about 0.2 µs, a proxy object per
+    character or an allocation per access, and a Luau type per graph for completion).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
     questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a
     (decisions in ticks, poses every frame), 3c (cross-fade or inertialization per

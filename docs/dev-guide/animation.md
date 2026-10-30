@@ -253,6 +253,58 @@ events.0.name = "thud"
   a character the preview poses the joints the clip keys, and in Tab's joint mode the
   picked joint's rings turn it and key it (E12-4e-2).
 
+### Animation graphs: `.agraph` files
+
+A graph says which clips a character plays as its parameters change: idle until it moves, a
+walk blended into a run by its speed, a jump when a script fires one (ADR 0124's E12-5). The
+file comes first (E12-5a); the player plays graphs from E12-5c and the editor draws them
+from E12-5d.
+
+```text
+[agraph version=1 id=…]
+
+params["speed"].kind = Float
+params["jump"].kind = Trigger
+layers["base"].name = "Base"
+layers["base"].root = "m0"
+nodes["m0"].kind = Machine
+nodes["m0"].entry = "idle"
+nodes["c1"].clip = "Survey"
+nodes["b2"].kind = Blend1d
+nodes["b2"].param = "speed"
+nodes["b2"].points.0.clip = "Walk"
+nodes["b2"].points.1.at = [3.5, 0]
+nodes["b2"].points.1.clip = "Run"
+states["idle"].machine = "m0"
+states["idle"].name = "Idle"
+states["idle"].pose = "c1"
+states["move"].machine = "m0"
+states["move"].name = "Move"
+states["move"].pose = "b2"
+transitions["t1"].from = "idle"
+transitions["t1"].to = "move"
+transitions["t1"].when = "speed > 0.1"
+```
+
+- **Parameters** have a kind (`Float`, `Bool`, `Int`, `Trigger`) and a starting value.
+- **Layers** play a node each, the smallest `order` first, normal or additive, by a
+  weight, on the joints their mask names.
+- **Nodes:** a clip by name, a blend of clips along one parameter or two, or a state
+  machine. States show a node's pose; transitions go between a machine's states.
+- **A transition** goes when its condition holds (and, with an `exit` time, once the state
+  it leaves has played that much), blending over `blend` seconds (0.25), by a cross-fade or
+  by inertialization. Without `from` it leaves any state of its machine.
+- **Conditions** are expressions over the parameters:
+  - `speed > 0.1 and grounded`, `not crouch or speed < 2`, `jump`, `(a + b) * 2 >= 3`;
+  - comparisons `< <= > >= ==` and `~=` (or `!=`); `and`, `or`, `not` (or `&&`, `||`, `!`);
+    arithmetic `+ - * /`; `true`, `false`;
+  - `not` binds looser than a comparison, so `not speed > 1` means `not (speed > 1)`;
+  - a trigger is used up by the transition that takes it;
+  - a misspelt parameter, a missing value or parenthesis, or `0 < speed < 2` (compare once:
+    write `0 < speed and speed < 2`) is reported with where it is.
+- Ids are short random strings and names are labels, so renaming a state touches nothing
+  else; lines at their defaults are left out and everything is sorted, so merges stay small.
+
 ### Sockets: things that follow a joint
 
 A `JointAttachment` on an entity right under a character makes it a socket on one of the
