@@ -178,6 +178,29 @@ impl Rig {
         )
     }
 
+    /// Clip `k`'s root velocity (ADR 0124's E12-5d-2a): its root's crossing of the ground
+    /// from its first moment to its last, a second, in the model's units (as
+    /// [`RigClip::root_speed`]), as `[right, forward]` of the file's character: glTF's, which
+    /// faces +Z with its right along −X. What the editor's Place by Velocity puts a 2D
+    /// blend's clips at. None for a clip it has not.
+    pub fn clip_velocity(&self, k: usize) -> Option<[f32; 2]> {
+        let duration = self.clips.get(k)?.duration();
+        if duration <= 0.0 {
+            return Some([0.0; 2]);
+        }
+        let motion = self.clip_motion(k, 0.0, duration, Axes::default())?;
+        let (moved, _) = self.mesh_motion(motion);
+        let along = |v: Vec3A| {
+            Vec3::from(self.root.matrix3 * v)
+                .try_normalize()
+                .unwrap_or(Vec3::ZERO)
+        };
+        Some([
+            moved.dot(along(-Vec3A::X)) / duration,
+            moved.dot(along(Vec3A::Z)) / duration,
+        ])
+    }
+
     /// Up in the mesh's space (ADR 0124's E12-2c): the file's, glTF's +Y in its scene, which
     /// is the mesh's own +Y unless the mesh hangs under a node turned otherwise.
     pub(crate) fn mesh_up(&self) -> Vec3 {
@@ -1061,6 +1084,15 @@ mod tests {
                     "{path} {}: {crossed} against {} a second",
                     c.name(),
                     c.root_speed()
+                );
+                // Its velocity (E12-5d-2a): across and forward on the ground, as fast.
+                let [right, forward] = rig.clip_velocity(k).unwrap();
+                let fast = right.hypot(forward) * c.duration();
+                println!("{path} {}: velocity [{right}, {forward}]", c.name());
+                assert!(
+                    (fast - crossed).abs() <= 1e-3 * reach.max(crossed),
+                    "{path} {}: [{right}, {forward}] a second against {crossed} crossed",
+                    c.name()
                 );
                 assert!(
                     moved.dot(up).abs() <= 1e-4 * reach,

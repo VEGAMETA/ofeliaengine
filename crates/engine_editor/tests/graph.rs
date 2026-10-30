@@ -1119,10 +1119,15 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
              nodes[\"m\"].kind = Machine\nnodes[\"m\"].entry = \"idle\"\n\
              nodes[\"m\"].at = [-220, -120]\n\
              nodes[\"cs\"].clip = \"Survey\"\nnodes[\"cw\"].clip = \"Walk\"\n\
+             nodes[\"b\"].kind = Blend1d\nnodes[\"b\"].param = \"speed\"\n\
+             nodes[\"b\"].points.0.clip = \"Walk\"\n\
+             nodes[\"b\"].points.1.clip = \"Run\"\nnodes[\"b\"].points.1.at = [3, 0]\n\
              states[\"idle\"].machine = \"m\"\nstates[\"idle\"].name = \"Idle\"\n\
              states[\"idle\"].pose = \"cs\"\n\
              states[\"walk\"].at = [320, 0]\nstates[\"walk\"].machine = \"m\"\n\
              states[\"walk\"].name = \"Walk\"\nstates[\"walk\"].pose = \"cw\"\n\
+             states[\"move\"].at = [320, 200]\nstates[\"move\"].machine = \"m\"\n\
+             states[\"move\"].name = \"Move\"\nstates[\"move\"].pose = \"b\"\n\
              transitions[\"t1\"].from = \"idle\"\ntransitions[\"t1\"].to = \"walk\"\n\
              transitions[\"t1\"].when = \"speed > 0.1\"\ntransitions[\"t1\"].blend = 0.5\n"
         )
@@ -1208,7 +1213,7 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
     frame(&mut player, &mut game, &mut overlay);
     let bar = game.graph_bar();
     println!("editing: {bar}");
-    assert!(bar.starts_with("2 states"), "the tab is shown: {bar}");
+    assert!(bar.starts_with("3 states"), "the tab is shown: {bar}");
     assert!(
         !bar.contains("Fox:"),
         "nothing watched while editing: {bar}"
@@ -1240,6 +1245,59 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
     let params = game.graph_params();
     println!("its parameters: {params:?}");
     assert_eq!(params, [(String::from("speed"), 1.0, false)]);
+    // The blend panel (E12-5d-2a): Move's blend inspected in the tab, its values the fox's
+    // speed, a third of the way from Walk to Run.
+    assert!(game.blend_panel().is_none(), "nothing inspected");
+    game.select_graph_state("move");
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let (now, weights, live) = game.blend_panel().expect("the blend panel");
+    println!("the blend panel: {now}, {weights:?}, live {live}");
+    assert!(live && now == "speed 1.00", "{now}");
+    assert!(
+        (weights[0] - 2.0 / 3.0).abs() < 1e-3 && (weights[1] - 1.0 / 3.0).abs() < 1e-3,
+        "{weights:?}"
+    );
+    // A press at its right end holds the fox's speed there, past Run's 3: Run alone.
+    let [x, y, w, h] = game.blend_rect().expect("laid out");
+    pointer(&mut game, (x + w - 2.0) as i32, (y + h / 2.0) as i32);
+    frame(&mut player, &mut game, &mut overlay);
+    for pressed in [true, false] {
+        button(&mut game, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    for _ in 0..3 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let params = game.graph_params();
+    println!("held by the panel: {params:?}");
+    assert!(params[0].2 && params[0].1 > 3.0, "{params:?}");
+    let (_, weights, _) = game.blend_panel().unwrap();
+    assert!((weights[1] - 1.0).abs() < 1e-4, "Run alone: {weights:?}");
+    // Place by Speed: the fox's clips are made in place, so they keep their places.
+    assert!(game.run_command(player.world_mut(), "anim.place_blend"));
+    frame(&mut player, &mut game, &mut overlay);
+    let said = game.message().unwrap_or_default();
+    println!("Place by Speed: {said}");
+    assert!(
+        said.contains("none of Fox's clips here crosses the ground")
+            && said.ends_with("Walk, Run keep their places"),
+        "{said}"
+    );
+    // View: Animation States (E12-5e-2b): the fox's label says the same over its head.
+    assert!(game.anim_labels().is_empty(), "off by default");
+    assert!(game.run_command(player.world_mut(), "view.anim_states"));
+    for _ in 0..2 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    let labels = game.anim_labels();
+    println!("the labels: {labels:?}");
+    assert_eq!(labels.len(), 1, "{labels:?}");
+    assert!(labels[0].starts_with("Walk \u{b7} "), "{labels:?}");
+    assert!(game.run_command(player.world_mut(), "view.anim_states"));
+    frame(&mut player, &mut game, &mut overlay);
+    assert!(game.anim_labels().is_empty(), "hidden again");
     // Stopped: nothing watched, nothing said.
     game.stop_playing(&mut player);
     for _ in 0..3 {
@@ -1249,8 +1307,20 @@ fn an_animation_graphs_tab_plays_as_it_holds_it_and_tells_the_running_state() {
     assert!(!game.graph_bar().contains("Fox:"), "{}", game.graph_bar());
     assert!(game.graph_now().is_empty());
     assert!(game.graph_params().is_empty());
-    // Its graph starts again, not from where Play left it (its state is the player's).
+    // Its graph starts again, not from where Play left it (its state is the player's). It
+    // may come a few frames later under a gate's load (the fox made again by a late reload
+    // of the files the test copied): waited for, ten seconds at most.
+    let (started, mut waited) = (Instant::now(), 0);
+    while player.graph_now(fox).is_none() {
+        assert!(
+            started.elapsed().as_secs() < 10,
+            "the fox's graph does not start again"
+        );
+        frame(&mut player, &mut game, &mut overlay);
+        waited += 1;
+    }
     let again = player.graph_now(fox).unwrap();
+    println!("started again after {waited} more frames");
     println!("stopped: {again:?}");
     assert!(again.seconds < 0.05, "started again: {again:?}");
     overlay.destroy(&mut player).unwrap();

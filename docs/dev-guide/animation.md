@@ -22,8 +22,10 @@ player, with nothing to write (ADR 0124's E12-1a):
   rest pose, and the file's clips that move it, compressed. The model then draws in its
   rest pose. CesiumMan's took 36–41 ms.
 - `Player::model_rig(entity)` gives the rig: `rig.clips()` lists each clip's name, length,
-  samples, bytes and largest compression error. It is `None` for a model drawn without a
-  skin.
+  samples, bytes, largest compression error and root speed; `rig.clip_velocity(k)` gives
+  clip `k`'s root velocity as `[right, forward]` a second (glTF's character faces +Z),
+  what the editor's Place by Velocity puts a blend's clips at. It is `None` for a model
+  drawn without a skin.
 - `Player::pose_model(entity, Some((clip, seconds)))` holds the clip at that moment, held
   at its ends; `None` lets it go, back to its `Animator`'s pose (its rest pose without
   one). Nothing in the scene changes. This is what the editor uses to show a clip in

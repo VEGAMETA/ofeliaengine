@@ -10,7 +10,7 @@
 
 use engine_app::{Game, Player, PlayerSettings, Window};
 use engine_ecs::World;
-use engine_platform::window::{WindowEvent, WindowEventKind, WindowId};
+use engine_platform::window::{MouseButton, WindowEvent, WindowEventKind, WindowId};
 use engine_scene::AssetId;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::backtrace::Backtrace;
@@ -110,11 +110,13 @@ fn report(what: &str) -> usize {
 }
 
 /// An animation graph: Idle (the entry), Walk and Run, transitions both ways between Idle
-/// and Walk, one from Walk into Run, one from Any State whose condition does not compile.
+/// and Walk, one from Walk into Run, one from Any State whose condition does not compile;
+/// and Move, playing a 2D blend of five clips (ADR 0124's E12-5d-2a), inside the others'
+/// frame so the canvas frames them as before.
 fn hero() -> String {
     format!(
         "[agraph version=1 id={}]\n\n\
-         params[\"speed\"].kind = Float\n\
+         params[\"speed\"].kind = Float\nparams[\"dir\"].kind = Float\n\
          layers[\"base\"].name = \"Base\"\nlayers[\"base\"].root = \"m\"\n\
          nodes[\"m\"].kind = Machine\nnodes[\"m\"].entry = \"idle\"\n\
          nodes[\"m\"].at = [-220, -120]\n\
@@ -126,6 +128,15 @@ fn hero() -> String {
          states[\"walk\"].name = \"Walk\"\nstates[\"walk\"].pose = \"cw\"\n\
          states[\"run\"].at = [320, 200]\nstates[\"run\"].machine = \"m\"\n\
          states[\"run\"].name = \"Run\"\nstates[\"run\"].pose = \"cr\"\n\
+         nodes[\"b\"].kind = Blend2d\nnodes[\"b\"].param = \"dir\"\n\
+         nodes[\"b\"].param_y = \"speed\"\n\
+         nodes[\"b\"].points.0.clip = \"Idle\"\n\
+         nodes[\"b\"].points.1.clip = \"Walk\"\nnodes[\"b\"].points.1.at = [0, 1.5]\n\
+         nodes[\"b\"].points.2.clip = \"Run\"\nnodes[\"b\"].points.2.at = [0, 4]\n\
+         nodes[\"b\"].points.3.clip = \"Left\"\nnodes[\"b\"].points.3.at = [-1, 1.5]\n\
+         nodes[\"b\"].points.4.clip = \"Right\"\nnodes[\"b\"].points.4.at = [1, 1.5]\n\
+         states[\"move\"].at = [0, 200]\nstates[\"move\"].machine = \"m\"\n\
+         states[\"move\"].name = \"Move\"\nstates[\"move\"].pose = \"b\"\n\
          transitions[\"t1\"].from = \"idle\"\ntransitions[\"t1\"].to = \"walk\"\n\
          transitions[\"t1\"].when = \"speed > 0.1\"\n\
          transitions[\"t2\"].from = \"walk\"\ntransitions[\"t2\"].to = \"idle\"\n\
@@ -219,7 +230,23 @@ fn a_graph_tabs_frames_do_not_allocate() {
         (600, 150),
         (560, 415),
     ];
+    // The blend panel's (E12-5d-2a), as fractions of it: off its clips' dots, round the
+    // plane. A state to select before a frame, the button pressed or let go after its move.
+    const BLEND_SPOTS: [[f32; 2]; 6] = [
+        [0.3, 0.3],
+        [0.7, 0.3],
+        [0.95, 0.5],
+        [0.7, 0.8],
+        [0.3, 0.8],
+        [0.05, 0.5],
+    ];
+    let on_panel = std::cell::Cell::new(false);
+    let select = std::cell::Cell::new(None::<&str>);
+    let button = std::cell::Cell::new(None::<bool>);
     let mut frame = |n: usize, anim: bool, keys: &[(u16, u16, bool)]| {
+        if let Some(state) = select.take() {
+            game.select_graph_state(state);
+        }
         for &(vk, scancode, pressed) in keys {
             game.event(&WindowEvent {
                 window: WindowId(0),
@@ -233,7 +260,12 @@ fn a_graph_tabs_frames_do_not_allocate() {
                 },
             });
         }
-        let (x, y) = if anim {
+        let (x, y) = if on_panel.get()
+            && let Some([bx, by, bw, bh]) = game.blend_rect()
+        {
+            let [fx, fy] = BLEND_SPOTS[n % BLEND_SPOTS.len()];
+            ((bx + fx * bw) as i32, (by + fy * bh) as i32)
+        } else if anim {
             anim_spots[n % anim_spots.len()]
         } else {
             spots[n % spots.len()]
@@ -243,6 +275,16 @@ fn a_graph_tabs_frames_do_not_allocate() {
             time: std::time::Instant::now(),
             kind: WindowEventKind::CursorMoved { x, y },
         });
+        if let Some(pressed) = button.take() {
+            game.event(&WindowEvent {
+                window: WindowId(0),
+                time: std::time::Instant::now(),
+                kind: WindowEventKind::MouseButton {
+                    button: MouseButton::Left,
+                    pressed,
+                },
+            });
+        }
         player
             .frame_overlaid(&mut game, Some(&mut overlay))
             .unwrap();
@@ -297,6 +339,35 @@ fn a_graph_tabs_frames_do_not_allocate() {
     }
     COUNTING.with(|c| c.set(false));
     let anim = report("an animation graph's tab");
+    // Move selected: its blend's panel in the inspector (E12-5d-2a), its mark dragged round
+    // the plane (the weights and their texts each frame), measured alike.
+    select.set(Some("move"));
+    on_panel.set(true);
+    for n in 0..60 {
+        frame(n, true, &[]);
+    }
+    button.set(Some(true));
+    for n in 0..240 {
+        frame(n, true, &[]);
+    }
+    if let Ok(mut traces) = TRACES.lock() {
+        traces.clear();
+    }
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.with(|c| c.set(true));
+    for n in 0..240 {
+        frame(n, true, &[]);
+    }
+    COUNTING.with(|c| c.set(false));
+    let blend = report("a blend panel's mark dragged");
+    button.set(Some(false));
+    frame(0, true, &[]);
+    let (now, weights, _) = game.blend_panel().expect("the blend panel shown");
+    println!("the blend panel after the drag: {now}, {weights:?}");
+    assert!(
+        !now.starts_with("dir 0.00 \u{b7} speed 0.00"),
+        "the mark moved: {now}"
+    );
     // It was the animation graph's canvas that was measured: its entry's amber title bar.
     let shot = player
         .capture_overlaid(&mut game, Some(&mut overlay))
@@ -328,4 +399,5 @@ fn a_graph_tabs_frames_do_not_allocate() {
         "allocations in the material graph tab's frames"
     );
     assert_eq!(anim, 0, "allocations in the animation graph tab's frames");
+    assert_eq!(blend, 0, "allocations in the blend panel's frames");
 }

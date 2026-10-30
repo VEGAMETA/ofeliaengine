@@ -2229,6 +2229,14 @@ fn root_motion_moves_the_character_or_is_left_for_the_game() {
     let speed = rig.clips()[0].root_speed();
     println!("Walk's root speed {speed} a second");
     assert!((speed - 1.0).abs() < 1e-3, "{speed}");
+    // E12-5d-2a: its velocity as Place by Velocity reads it, forward (+z, glTF's front) a
+    // metre a second; Turn crosses no ground.
+    let v = rig.clip_velocity(0).unwrap();
+    assert!(v[0].abs() < 1e-3 && (v[1] - 1.0).abs() < 1e-3, "{v:?}");
+    let turn = rig.clips().iter().position(|c| c.name() == "Turn").unwrap();
+    let v = rig.clip_velocity(turn).unwrap();
+    assert!(v[0].hypot(v[1]) < 1e-3, "{v:?}");
+    assert!(rig.clip_velocity(9).is_none(), "a clip it has not");
     // ADR 0124's E12-3c: the hips' path through Walk, a place a sample, its root motion left
     // in: a metre along +z over its 31 samples, always forward.
     let mut path = Vec::new();

@@ -68,6 +68,7 @@ pub use condition::{Condition, ConditionError, MAX_DEPTH, ParamSlot};
 pub use graph::{
     AnimGraph, ClipInfo, GraphDesc, GraphParamKind, GraphProblem, GraphState, GraphWork, LayerDesc,
     MAX_LEAVES, MAX_PARAMS, MachineNow, NodeDesc, ParamDesc, Played, StateDesc, TransitionDesc,
+    delaunay, weigh_1d, weigh_2d,
 };
 pub use ik::{Fabrik, IkOutcome, LookAt, TwoBoneIk, rotate_joint};
 pub use jobs::for_each_parallel;

@@ -677,6 +677,16 @@ pub fn editor<G: Game>(
 /// The rooms of the lists a frame builds for the shell. Their rows and labels borrow the
 /// editor and the world, so the lists cannot stay between frames, but their room does
 /// ([`recycle`]): a steady frame makes nothing (ADR 0107 §8).
+/// A character's label with View: Animation States (ADR 0124's E12-5e-2b): whose, the point
+/// over its head, where that falls in the viewport (none off it), and what it plays.
+#[derive(Debug, Default)]
+struct AnimLabel {
+    entity: Entity,
+    head: Vec3,
+    at: Option<Vec2>,
+    text: String,
+}
+
 /// A parameter of the active character's graph in Play, as the inspector's Graph section
 /// shows it (ADR 0124's E12-5e-2): its name, kind, value as the last tick left it (or as the
 /// editor holds it), its number's text; its room kept from frame to frame.
@@ -758,6 +768,316 @@ struct FrameLists {
     track_rows: Vec<crate::shell::TrackRow<'static>>,
     /// The active character's joints (E12-1c).
     joint_rows: Vec<crate::shell::JointRow<'static>>,
+    /// The inspected blend's clips (ADR 0124's E12-5d-2a).
+    blend_dots: Vec<crate::shell::BlendDot<'static>>,
+}
+
+/// The inspector's blend panel (ADR 0124's E12-5d-2a): the shown animation graph's inspected
+/// state's 1D or 2D blend as its clips' places, a plane's triangles between them, and the
+/// parameters' values marked, each clip with its weight there (the graph's tick's weighing,
+/// [`engine_anim::weigh_1d`] and [`engine_anim::weigh_2d`]). Its room kept.
+#[derive(Debug, Default)]
+struct BlendView {
+    /// It shows this frame.
+    on: bool,
+    /// The graph, its revision and the state it was made from: remade when one changes.
+    graph: Option<AssetId>,
+    revision: u64,
+    state: String,
+    /// A 2D blend's (else a 1D's).
+    plane: bool,
+    /// Its parameters' names (up's empty for a 1D blend).
+    params: [String; 2],
+    /// Its clips' places in its parameters' values and their names, in its points' order.
+    places: Vec<[f32; 2]>,
+    names: Vec<String>,
+    /// A 1D blend's clips in their order along the line; a 2D blend's triangles.
+    order: Vec<usize>,
+    triangles: Vec<[usize; 3]>,
+    /// Its axes' ends, low to high (across, then up): its places with a margin, held while a
+    /// clip is dragged so the panel does not move under the pointer.
+    lo: [f32; 2],
+    hi: [f32; 2],
+    /// The values the editor previews while the game does not run (a press on the panel puts
+    /// the mark there); none: the parameters' starting values.
+    preview: Option<[f32; 2]>,
+    /// In Play, the watched character's values (its graph's parameters as its last tick left
+    /// them).
+    live: Option<[f32; 2]>,
+    /// The values marked, and each clip's weight there.
+    mark: [f32; 2],
+    weights: Vec<f32>,
+    /// What the shell is given: each clip's place on the panel (fractions), name and side,
+    /// a plane's triangles' corners, the mark, the axes' ends, the values.
+    dots: Vec<[f32; 2]>,
+    labels: Vec<String>,
+    flips: Vec<bool>,
+    corners: Vec<[f32; 2]>,
+    mark_at: [f32; 2],
+    axes: [String; 2],
+    now: String,
+    /// The panel's node, as the last frame laid it out.
+    area: u64,
+    /// A clip dragged or the mark.
+    drag: Option<BlendDrag>,
+}
+
+/// What a press on the blend panel drags (ADR 0124's E12-5d-2a).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BlendDrag {
+    /// A clip's dot: its place among the points, the step its moves make, where it was and
+    /// where the pointer pressed (in the blend's values).
+    Dot {
+        clip: usize,
+        merge: u64,
+        from: [f32; 2],
+        grab: [f32; 2],
+    },
+    /// The mark.
+    Mark,
+}
+
+impl BlendView {
+    /// Follows blend `node` of graph `graph` at `revision`, the pose of state `state`:
+    /// remade when one of them changed; another state's values start from its parameters'.
+    fn follow(
+        &mut self,
+        graph: AssetId,
+        revision: u64,
+        state: &str,
+        node: &engine_scene::NodeFile,
+    ) {
+        if self.graph == Some(graph) && self.revision == revision && self.state == state {
+            return;
+        }
+        if self.graph != Some(graph) || self.state != state {
+            self.preview = None;
+            self.drag = None;
+            self.state.clear();
+            self.state.push_str(state);
+        }
+        self.graph = Some(graph);
+        self.revision = revision;
+        let plane = node.kind == engine_scene::NodeKind::Blend2d;
+        self.plane = plane;
+        let up = if plane { node.param_y.as_str() } else { "" };
+        for (name, to) in [node.param.as_str(), up].into_iter().zip(&mut self.params) {
+            if to != name {
+                to.clear();
+                to.push_str(name);
+            }
+        }
+        self.places.clear();
+        self.places.extend(
+            node.points
+                .iter()
+                .map(|p| if plane { p.at } else { [p.at[0], 0.0] }),
+        );
+        let n = self.places.len();
+        self.names.resize_with(n, String::new);
+        for (to, p) in self.names.iter_mut().zip(&node.points) {
+            if *to != p.clip {
+                to.clear();
+                to.push_str(&p.clip);
+            }
+        }
+        self.order.clear();
+        self.order.extend(0..n);
+        let places = &self.places;
+        self.order
+            .sort_by(|&a, &b| places[a][0].total_cmp(&places[b][0]));
+        self.triangles = if plane {
+            engine_anim::delaunay(&self.places)
+        } else {
+            Vec::new()
+        };
+    }
+
+    /// Its axes' ends from its places: their extent with a margin (at least half a unit on
+    /// each side); held while a clip is dragged.
+    fn bounds(&mut self) {
+        if matches!(self.drag, Some(BlendDrag::Dot { .. })) {
+            return;
+        }
+        for a in 0..2 {
+            let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+            for p in &self.places {
+                lo = lo.min(p[a]);
+                hi = hi.max(p[a]);
+            }
+            if lo > hi {
+                (lo, hi) = (0.0, 0.0);
+            }
+            let pad = (0.15 * (hi - lo)).max(0.5);
+            self.lo[a] = lo - pad;
+            self.hi[a] = hi + pad;
+        }
+    }
+
+    /// Each clip's weight at the values marked: the running character's in Play, else the
+    /// previewed ones, else `starting` (its parameters' starting values).
+    fn weigh(&mut self, starting: [f32; 2]) {
+        self.mark = self.live.or(self.preview).unwrap_or(starting);
+        if !self.plane {
+            self.mark[1] = 0.0;
+        }
+        let n = self.places.len();
+        self.weights.clear();
+        self.weights.resize(n, 0.0);
+        let (places, order, weights) = (&self.places, &self.order, &mut self.weights);
+        if self.plane {
+            engine_anim::weigh_2d(
+                n,
+                |k| places[k],
+                self.triangles.iter().copied(),
+                self.mark,
+                |k, w| weights[k] += w,
+            );
+        } else {
+            engine_anim::weigh_1d(
+                n,
+                |k| places[order[k]][0],
+                self.mark[0],
+                |k, w| weights[order[k]] += w,
+            );
+        }
+    }
+
+    /// The panel's fractions of a place in the blend's values (0, 0 its top left corner; up
+    /// is up on a plane, a line's places in its middle).
+    fn fraction(&self, p: [f32; 2]) -> [f32; 2] {
+        let span = |a: usize| (self.hi[a] - self.lo[a]).max(1e-6);
+        let x = (p[0] - self.lo[0]) / span(0);
+        let y = if self.plane {
+            1.0 - (p[1] - self.lo[1]) / span(1)
+        } else {
+            0.5
+        };
+        [x, y]
+    }
+
+    /// The blend's values at the panel's fractions `f`.
+    fn value_at(&self, f: [f32; 2]) -> [f32; 2] {
+        let y = if self.plane {
+            self.lo[1] + (1.0 - f[1]) * (self.hi[1] - self.lo[1])
+        } else {
+            0.0
+        };
+        [self.lo[0] + f[0] * (self.hi[0] - self.lo[0]), y]
+    }
+
+    /// What the shell draws: the dots, their names with their weights, the triangles' corners,
+    /// the mark, the axes' ends and the values. Allocates nothing once its room is made.
+    fn texts(&mut self) {
+        use std::fmt::Write as _;
+        let n = self.places.len();
+        self.dots.clear();
+        for k in 0..n {
+            let at = self.fraction(self.places[k]);
+            self.dots.push(at);
+        }
+        self.corners.clear();
+        for t in 0..self.triangles.len() {
+            for c in self.triangles[t] {
+                let at = self.fraction(self.places[c]);
+                self.corners.push(at);
+            }
+        }
+        self.mark_at = self.fraction(self.mark);
+        self.flips.clear();
+        self.flips.resize(n, false);
+        if self.plane {
+            for k in 0..n {
+                self.flips[k] = self.dots[k][0] > 0.62;
+            }
+        } else {
+            for (rank, &k) in self.order.iter().enumerate() {
+                self.flips[k] = rank % 2 == 1;
+            }
+        }
+        self.labels.resize_with(n, String::new);
+        for k in 0..n {
+            let label = &mut self.labels[k];
+            label.clear();
+            let name = self.names[k].as_str();
+            label.push_str(if name.is_empty() { "(no clip)" } else { name });
+            let w = self.weights[k];
+            if n > 1 && w >= 0.005 {
+                let _ = write!(label, " {:.0} %", w * 100.0);
+            }
+        }
+        fn name(s: &str) -> &str {
+            if s.is_empty() { "no parameter" } else { s }
+        }
+        for a in 0..2 {
+            self.axes[a].clear();
+            if a == 0 || self.plane {
+                let _ = write!(
+                    self.axes[a],
+                    "{} {:.2} \u{2026} {:.2}{}",
+                    name(&self.params[a]),
+                    self.lo[a],
+                    self.hi[a],
+                    if a == 1 { " (up)" } else { "" }
+                );
+            }
+        }
+        self.now.clear();
+        let _ = write!(self.now, "{} {:.2}", name(&self.params[0]), self.mark[0]);
+        if self.plane {
+            let _ = write!(
+                self.now,
+                " \u{b7} {} {:.2}",
+                name(&self.params[1]),
+                self.mark[1]
+            );
+        }
+    }
+}
+
+/// A round step about a tenth of `span` (1, 2 or 5 times a power of ten): what Ctrl puts a
+/// blend's clip dragged on its panel on (ADR 0124's E12-5d-2a).
+fn round_step(span: f32) -> f32 {
+    let rough = (span / 10.0).max(1e-3);
+    let ten = 10f32.powf(rough.log10().floor());
+    [1.0f32, 2.0, 5.0, 10.0]
+        .into_iter()
+        .map(|m| m * ten)
+        .min_by(|a, b| (a - rough).abs().total_cmp(&(b - rough).abs()))
+        .unwrap_or(ten)
+}
+
+/// Clips slower than this (in the model's units a second) cross no ground for Place by
+/// Speed (ADR 0124's E12-5d-2a): idles, and clips made in place.
+const STILL: f32 = 0.05;
+
+/// Where Place by Speed puts a blend's clips (ADR 0124's E12-5d-2a): each point at its clip's
+/// root velocity (`velocity` of a clip's name: `[right, forward]` a second, none for a clip
+/// the rig has not), a 1D blend's at its speed and a 2D blend's at its velocity, to
+/// hundredths. Clips slower than [`STILL`] and those the rig has not keep their places and
+/// are listed.
+fn places_by_speed(
+    points: &[engine_scene::BlendPoint],
+    plane: bool,
+    velocity: impl Fn(&str) -> Option<[f32; 2]>,
+) -> (Vec<(usize, [f32; 2])>, Vec<&str>) {
+    let round = |v: f32| (v * 100.0).round() / 100.0;
+    let mut placed = Vec::new();
+    let mut kept = Vec::new();
+    for (k, p) in points.iter().enumerate() {
+        match velocity(&p.clip) {
+            Some([right, forward]) if right.hypot(forward) >= STILL => placed.push((
+                k,
+                if plane {
+                    [round(right), round(forward)]
+                } else {
+                    [round(right.hypot(forward)), p.at[1]]
+                },
+            )),
+            _ => kept.push(p.clip.as_str()),
+        }
+    }
+    (placed, kept)
 }
 
 /// What the tree's rows are collected with, kept between frames.
@@ -986,6 +1306,9 @@ struct CommandIds {
     /// Every character's skeleton over the viewport, not only the selected ones' (ADR
     /// 0124's E12-1c).
     skeletons: CommandId,
+    anim_states: CommandId,
+    /// The inspected blend's clips placed by their speeds (ADR 0124's E12-5d-2a).
+    place_blend: CommandId,
     /// Tab on a character: its joints take the pointer (ADR 0124's E12-1c).
     edit_joints: CommandId,
     /// View: Sound Ranges (E11-4c): every source's reach and every zone, dim.
@@ -1224,6 +1547,8 @@ fn commands() -> (Commands, CommandIds) {
         overlays: c.register("view.overlays", "View", "Overlays"),
         colliders: c.register("view.colliders", "View", "Colliders"),
         skeletons: c.register("view.skeletons", "View", "Skeletons"),
+        anim_states: c.register("view.anim_states", "View", "Animation States"),
+        place_blend: c.register("anim.place_blend", "Animation", "Place Blend by Speed"),
         edit_joints: c.register("anim.edit_joints", "Animation", "Edit Joints"),
         sound_ranges: c.register("view.sound_ranges", "View", "Sound Ranges"),
         docks_beside_code: c.register("view.docks_beside_code", "View", "Scene Docks Beside Code"),
@@ -3268,6 +3593,10 @@ struct Editor {
     /// player (`None` lets one go).
     live_holds: Vec<(Entity, u16)>,
     holds_due: Vec<(Entity, u16, Option<f32>)>,
+    /// The inspector's blend panel (ADR 0124's E12-5d-2a), and its Place by Speed asked for
+    /// (done with the player at hand).
+    blend: BlendView,
+    blend_place_asked: bool,
     renaming_file: Option<AssetId>,
     /// The file the inspector shows instead of the entities, with its import settings
     /// (E4-9): the dock's last pick, until the entity selection changes.
@@ -3537,6 +3866,14 @@ struct Editor {
     /// (else the selected ones' only); their sticks in the world, the selected ones' and
     /// the others', made each frame from the joints and the entities they are made for.
     show_skeletons: bool,
+    /// View: Animation States (ADR 0124's E12-5e-2b): every character's state labelled over
+    /// its head; the labels in use (`anim_label_count` of them, the rest's room kept), the
+    /// characters asked about and their joints.
+    show_anim_states: bool,
+    anim_labels: Vec<AnimLabel>,
+    anim_label_count: usize,
+    anim_label_of: Vec<Entity>,
+    anim_label_joints: Vec<Affine3A>,
     skeleton_lines: [Vec<[Vec3; 2]>; 2],
     skeleton_joints: Vec<Affine3A>,
     skeleton_of: Vec<Entity>,
@@ -4346,6 +4683,8 @@ impl Editor {
             live_drag: None,
             live_holds: Vec::new(),
             holds_due: Vec::new(),
+            blend: BlendView::default(),
+            blend_place_asked: false,
             renaming_file: None,
             inspected: None,
             material_docs: Vec::new(),
@@ -4497,6 +4836,11 @@ impl Editor {
             hint: String::new(),
             show_colliders: false,
             show_skeletons: false,
+            show_anim_states: false,
+            anim_labels: Vec::new(),
+            anim_label_count: 0,
+            anim_label_of: Vec::new(),
+            anim_label_joints: Vec::new(),
             skeleton_lines: Default::default(),
             skeleton_joints: Vec::new(),
             skeleton_of: Vec::new(),
@@ -5107,6 +5451,7 @@ impl Editor {
         let coding = self.code_frame();
         self.generated_frame();
         self.graph_status_frame();
+        self.blend_frame();
         // The Debugger panel's texts, while it is open (ADR 0119 E9-1b-3).
         if self.bottom == Some(DEBUGGER_TAB) {
             self.debug_text_frame(world);
@@ -7046,6 +7391,22 @@ impl Editor {
                 jumps: c.jumps,
             }));
         }
+        let mut blend_dots: Vec<crate::shell::BlendDot<'_>> =
+            recycle(std::mem::take(&mut self.lists.blend_dots));
+        if self.blend.on {
+            let b = &self.blend;
+            let picked = match b.drag {
+                Some(BlendDrag::Dot { clip, .. }) => Some(clip),
+                _ => None,
+            };
+            blend_dots.extend((0..b.dots.len()).map(|k| crate::shell::BlendDot {
+                at: b.dots[k],
+                label: &b.labels[k],
+                weight: b.weights[k],
+                flip: b.flips[k],
+                picked: picked == Some(k),
+            }));
+        }
         let model = ShellModel {
             scenes: &scenes,
             active_scene: active_tab,
@@ -7101,6 +7462,24 @@ impl Editor {
                     note: "Drawing…",
                 })
             }),
+            blend: self
+                .anim_section_at
+                .filter(|_| self.blend.on)
+                .map(|section| crate::shell::BlendPanel {
+                    section,
+                    plane: self.blend.plane,
+                    dots: &blend_dots,
+                    triangles: &self.blend.corners,
+                    mark: self.blend.mark_at,
+                    live: self.blend.live.is_some(),
+                    axes: [&self.blend.axes[0], &self.blend.axes[1]],
+                    now: &self.blend.now,
+                    place: if self.blend.plane {
+                        "Place by Velocity"
+                    } else {
+                        "Place by Speed"
+                    },
+                }),
             clips: self.clips_section.and_then(|section| {
                 let view = self.clips.as_ref()?;
                 let model = match view.of {
@@ -7234,6 +7613,8 @@ impl Editor {
         self.lists.graphs = recycle(graph_tabs);
         self.lists.graph_values = recycle(graph_values);
         self.lists.anim_options = recycle(anim_options);
+        self.lists.blend_dots = recycle(blend_dots);
+        self.blend.area = response.blend_area;
         self.listing = self
             .ui
             .rect_of(response.listing)
@@ -7347,6 +7728,17 @@ impl Editor {
         if let Some(turn) = response.material_turn {
             let pointer = self.input.cursor();
             self.turn_material_preview(turn, pointer);
+        }
+        // The blend panel (ADR 0124's E12-5d-2a): a clip dragged, the mark moved, Place by
+        // Speed asked for.
+        if let Some((k, used)) = response.blend_dot {
+            self.drag_blend_dot(world, k, used);
+        }
+        if let Some(used) = response.blend_mark {
+            self.move_blend_mark(used);
+        }
+        if response.blend_place {
+            self.blend_place_asked = true;
         }
         // The Clips (ADR 0124's E12-1b): a clip chosen, ▶ or ■, the loop, the speed, the bar.
         if let Some(i) = response.clip_pick {
@@ -9644,6 +10036,13 @@ impl Editor {
         };
         let view = ViewProj::new(&self.orbit, rect);
         let playing = self.play.is_some();
+        // View: Animation States (E12-5e-2b): each label over its character's head.
+        for label in &mut self.anim_labels[..self.anim_label_count] {
+            label.at = view
+                .screen(label.head)
+                .filter(|&at| view.contains(at))
+                .filter(|_| (label.head - view.eye).dot(view.forward) > 0.0);
+        }
         // Who hears when the scene has no listener (E11-4c): the game's main camera, the
         // active one of the highest priority, the lowest index among equals, as the
         // player picks it.
@@ -14643,6 +15042,256 @@ impl Editor {
     }
 
     /// The shown graph tab, where it is an animation graph's (ADR 0124 E12-5d-1).
+    /// The inspector's blend panel (ADR 0124's E12-5d-2a): the shown animation graph's
+    /// inspected state's blend, followed as it changes and weighed at the values marked.
+    fn blend_frame(&mut self) {
+        self.blend.on = false;
+        let Some(g) = self.anim_graph_shown() else {
+            return;
+        };
+        let doc = &self.graphs[g];
+        let Some(anim) = doc.anim() else {
+            return;
+        };
+        let (Some(node), Some(state)) = (anim.inspected_blend(), anim.inspected_state()) else {
+            return;
+        };
+        self.blend.follow(doc.id, doc.revision, state, node);
+        let start = |name: &str| anim.file.params.get(name).map_or(0.0, |p| p.value);
+        let starting = [start(&self.blend.params[0]), start(&self.blend.params[1])];
+        self.blend.bounds();
+        self.blend.weigh(starting);
+        self.blend.texts();
+        self.blend.on = true;
+    }
+
+    /// Where the pointer is on the blend panel's node `node`, in the blend's values.
+    fn blend_pointer(&self, node: u64) -> Option<[f32; 2]> {
+        let (r, [x, y]) = (self.ui.rect_of(node)?, self.ui.input().mouse?);
+        Some(self.blend.value_at([
+            (x - r.pos[0]) / r.size[0].max(1.0),
+            (y - r.pos[1]) / r.size[1].max(1.0),
+        ]))
+    }
+
+    /// A clip's dot on the blend panel pressed, dragged or let go (ADR 0124's E12-5d-2a): the
+    /// clip follows the pointer, to hundredths (Ctrl: on round steps of about a tenth of the
+    /// axis), its moves one step of the history.
+    fn drag_blend_dot(&mut self, world: &mut World, k: usize, used: crate::shell::WaveUse) {
+        let Some(g) = self.anim_graph_shown() else {
+            return;
+        };
+        if used.pressed {
+            let from = self.blend.places.get(k).copied().unwrap_or_default();
+            let grab = self.blend_pointer(used.node).unwrap_or(from);
+            self.gestures += 1;
+            self.blend.drag = Some(BlendDrag::Dot {
+                clip: k,
+                merge: self.gestures,
+                from,
+                grab,
+            });
+        } else if used.held
+            && let Some(BlendDrag::Dot {
+                clip,
+                merge,
+                from,
+                grab,
+            }) = self.blend.drag
+            && let Some(at) = self.blend_pointer(used.node)
+        {
+            let ctrl = self.input.ctrl();
+            let plane = self.blend.plane;
+            let mut to = from;
+            for a in 0..if plane { 2 } else { 1 } {
+                let v = from[a] + at[a] - grab[a];
+                let step = round_step(self.blend.hi[a] - self.blend.lo[a]);
+                to[a] = if ctrl {
+                    (v / step).round() * step
+                } else {
+                    (v * 100.0).round() / 100.0
+                };
+            }
+            if !plane {
+                // A line's clip keeps what its second number was.
+                to[1] = self.graphs[g]
+                    .anim()
+                    .and_then(|a| a.inspected_blend())
+                    .and_then(|n| n.points.get(clip))
+                    .map_or(0.0, |p| p.at[1]);
+            }
+            let edit = self.graphs[g].anim_set_numbers(
+                crate::agraph::AnimRow::PointAt(clip),
+                [to[0], to[1], 0.0, 0.0],
+            );
+            self.graph_edit(world, g, "Move Blend Clip", Some(merge), edit);
+        }
+        if used.released {
+            self.blend.drag = None;
+        }
+    }
+
+    /// The blend panel pressed, or dragged over, off its clips (ADR 0124's E12-5d-2a): the
+    /// mark goes to the pointer, within the panel. In Play the watched character's
+    /// parameters are held there (as the Graph section holds them: until ↺ lets them go or
+    /// Play stops); otherwise the panel previews those values. Not steps of the history.
+    fn move_blend_mark(&mut self, used: crate::shell::WaveUse) {
+        if used.released {
+            self.blend.drag = None;
+        }
+        if !(used.pressed || used.held) {
+            return;
+        }
+        let Some(mut at) = self.blend_pointer(used.node) else {
+            return;
+        };
+        self.blend.drag = Some(BlendDrag::Mark);
+        for (a, v) in at.iter_mut().enumerate() {
+            *v = v.clamp(self.blend.lo[a], self.blend.hi[a]);
+        }
+        if !self.blend.plane {
+            at[1] = 0.0;
+        }
+        let watched = self.anim_watched.filter(|_| self.play.is_some());
+        let Some((e, g)) = watched.zip(self.anim_graph_shown()) else {
+            self.blend.preview = Some(at);
+            return;
+        };
+        let Some(anim) = self.graphs[g].anim() else {
+            return;
+        };
+        let axes = if self.blend.plane { 2 } else { 1 };
+        for (a, &value) in at.iter().enumerate().take(axes) {
+            let name = self.blend.params[a].as_str();
+            let Some((slot, (_, p))) = anim
+                .file
+                .params
+                .iter()
+                .enumerate()
+                .find(|(_, (n, _))| n.as_str() == name)
+            else {
+                continue;
+            };
+            let slot = slot as u16;
+            let v = if p.kind == engine_scene::ParamKind::Int {
+                value.round()
+            } else {
+                value
+            };
+            if !self.live_holds.contains(&(e, slot)) {
+                self.live_holds.push((e, slot));
+            }
+            self.holds_due.push((e, slot, Some(v)));
+        }
+        // Shown at once, before the next tick says it.
+        self.blend.live = Some(at);
+    }
+
+    /// Place by Speed (a 1D blend) or by Velocity (a 2D one) on the blend panel (ADR 0124's
+    /// E12-5d-2a, Unity's Compute Positions): each clip of the inspected blend put at how
+    /// fast its root crosses the ground (a 2D blend's at its velocity: across to its right,
+    /// up forward), read from the rig of a character playing the graph (the one watched in
+    /// Play, the active one, or the first in the scene). Clips that cross no ground (idles,
+    /// clips made in place) or the rig has not keep their places. One step of the history.
+    fn place_blend_by_speed(&mut self, player: &mut Player) {
+        use std::fmt::Write as _;
+        let Some(g) = self.anim_graph_shown() else {
+            self.say(String::from(
+                "Place by Speed places a blend's clips: open an animation graph and select a \
+                 state playing a blend",
+            ));
+            return;
+        };
+        let id = self.graphs[g].id;
+        let Some(node) = self.graphs[g].anim().and_then(|a| a.inspected_blend()) else {
+            self.say(String::from(
+                "Place by Speed places a blend's clips: select a state playing a blend",
+            ));
+            return;
+        };
+        let plane = node.kind == engine_scene::NodeKind::Blend2d;
+        let points = node.points.clone();
+        let world = player.world();
+        let plays = |e: Entity| {
+            world
+                .get::<engine_runtime::Animator>(e)
+                .is_some_and(|a| a.graph.file == id)
+        };
+        let character = self
+            .anim_watched
+            .filter(|&e| plays(e))
+            .or_else(|| self.selection.last().copied().filter(|&e| plays(e)))
+            .or_else(|| player.skinned_models().find(|&e| plays(e)));
+        let Some((e, rig)) = character.and_then(|e| Some((e, player.model_rig(e)?))) else {
+            self.say(String::from(
+                "Place by Speed reads the clips of a character playing this graph: give one's \
+                 Animator this graph (its skin is made a moment after it shows)",
+            ));
+            return;
+        };
+        let who = world
+            .get::<Name>(e)
+            .map_or("the character", Name::as_str)
+            .to_owned();
+        let (placed, kept) = places_by_speed(&points, plane, |clip| {
+            let k = rig.clips().iter().position(|c| c.name() == clip)?;
+            rig.clip_velocity(k)
+        });
+        let mut said = String::new();
+        if placed.is_empty() {
+            let _ = write!(
+                said,
+                "{}: none of {who}'s clips here crosses the ground (made in place?), so",
+                if plane {
+                    "Place by Velocity"
+                } else {
+                    "Place by Speed"
+                }
+            );
+        } else {
+            let _ = write!(
+                said,
+                "Placed by {} from {who}'s clips:",
+                if plane { "velocity" } else { "speed" }
+            );
+            for (i, &(k, at)) in placed.iter().enumerate() {
+                let comma = if i == 0 { "" } else { "," };
+                let _ = if plane {
+                    write!(
+                        said,
+                        "{comma} {} at ({:.2}, {:.2})",
+                        points[k].clip, at[0], at[1]
+                    )
+                } else {
+                    write!(said, "{comma} {} at {:.2}", points[k].clip, at[0])
+                };
+            }
+            if !kept.is_empty() {
+                said.push(';');
+            }
+        }
+        match kept.len() {
+            0 => {}
+            1 => {
+                let _ = write!(said, " {} keeps its place", kept[0]);
+            }
+            _ => {
+                let _ = write!(said, " {} keep their places", kept.join(", "));
+            }
+        }
+        if !placed.is_empty() && !kept.is_empty() {
+            let _ = write!(said, " (crossing no ground, or not {who}'s)");
+        }
+        let name = if plane {
+            "Place by Velocity"
+        } else {
+            "Place by Speed"
+        };
+        let edit = self.graphs[g].place_points(&placed);
+        self.graph_edit(player.world_mut(), g, name, None, edit);
+        self.say(said);
+    }
+
     fn anim_graph_shown(&self) -> Option<usize> {
         self.active_graph
             .filter(|&g| self.graphs.get(g).is_some_and(|d| d.anim.is_some()))
@@ -14874,7 +15523,8 @@ impl Editor {
             FieldAction::Open => {
                 if nothing {
                     self.say(String::from(
-                        "A blend follows a number: add a Float or Int parameter first (the                          parameters show with nothing selected)",
+                        "A blend follows a number: add a Float or Int parameter first (the \
+                         parameters show with nothing selected)",
                     ));
                     return;
                 }
@@ -17886,6 +18536,15 @@ impl Editor {
                 "Sound ranges shown: every source's reach and every reverb zone, dim"
             } else {
                 "Sound ranges hidden"
+            }));
+        } else if id == ids.place_blend {
+            self.blend_place_asked = true;
+        } else if id == ids.anim_states {
+            self.show_anim_states = !self.show_anim_states;
+            self.say(String::from(if self.show_anim_states {
+                "Animation states shown: what every character plays, over its head"
+            } else {
+                "Animation states hidden"
             }));
         } else if id == ids.skeletons {
             self.show_skeletons = !self.show_skeletons;
@@ -22279,6 +22938,71 @@ impl Editor {
         }
     }
 
+    /// View: Animation States (ADR 0124's E12-5e-2b): a label for every character with an
+    /// animator, over its highest joint: its graph's machine as the canvas's bar says it
+    /// (`Walk · 0.42 s · from Idle 34 %`), or its clip and time (and the clip it fades
+    /// from). Their texts keep their room; placed on the screen by the next overlay pass.
+    fn anim_labels_frame(&mut self, player: &mut Player) {
+        self.anim_label_count = 0;
+        if !self.show_anim_states {
+            return;
+        }
+        self.anim_label_of.clear();
+        self.anim_label_of.extend(player.skinned_models());
+        // In the entities' order, so the labels keep their places frame to frame.
+        self.anim_label_of.sort_unstable();
+        for k in 0..self.anim_label_of.len() {
+            let e = self.anim_label_of[k];
+            let world = player.world();
+            let (Some(animator), Some(at)) = (
+                world.get::<engine_runtime::Animator>(e),
+                world.get::<GlobalTransform>(e).map(|g| g.0),
+            ) else {
+                continue;
+            };
+            if self.anim_labels.len() == self.anim_label_count {
+                self.anim_labels.push(AnimLabel::default());
+            }
+            let label = &mut self.anim_labels[self.anim_label_count];
+            label.entity = e;
+            label.at = None;
+            if animator.plays_graph() {
+                match player.graph_now(e) {
+                    Some(now) => crate::agraph::write_now(&mut label.text, &now),
+                    None => continue,
+                }
+            } else {
+                label.text.clear();
+                let _ = write!(
+                    label.text,
+                    "{} \u{b7} {:.2} s",
+                    animator.clip, animator.time
+                );
+                if animator.fade > 0.0 && !animator.from_clip.is_empty() {
+                    let _ = write!(
+                        label.text,
+                        " \u{b7} from {} {:.0} %",
+                        animator.from_clip,
+                        animator.weight(1.0) * 100.0
+                    );
+                }
+            }
+            // Over its head: its highest joint, else where it stands.
+            label.head = Vec3::from(at.translation);
+            if player.model_joints(e, &mut self.anim_label_joints) {
+                let top = self
+                    .anim_label_joints
+                    .iter()
+                    .map(|j| at.transform_point3(Vec3::from(j.translation)))
+                    .max_by(|a, b| a.y.total_cmp(&b.y));
+                if let Some(top) = top {
+                    label.head = top;
+                }
+            }
+            self.anim_label_count += 1;
+        }
+    }
+
     /// Animation graphs live with the player (ADR 0124's E12-5e): each graph tab's file given
     /// to the player as it changes, played in place of the file from the next tick (its
     /// characters go on in the states they are in; what the canvas alone shows, a state's
@@ -22291,6 +23015,7 @@ impl Editor {
         for id in self.anim_closed.drain(..) {
             player.assets_mut().set_anim_graph(id, None);
         }
+        self.blend.live = None;
         for doc in &mut self.graphs {
             let Some(anim) = doc.anim.as_deref_mut() else {
                 continue;
@@ -22306,6 +23031,7 @@ impl Editor {
         for (e, slot, value) in self.holds_due.drain(..) {
             player.hold_graph_param(e, slot, value);
         }
+        self.anim_labels_frame(player);
         if !playing {
             // The player lets its holds go at the run's end.
             self.live_holds.clear();
@@ -22362,6 +23088,23 @@ impl Editor {
             let who = world.get::<Name>(e).map_or("a character", Name::as_str);
             anim.live.set(who, &now);
         }
+        // The blend panel's values (E12-5d-2a): the watched character's.
+        if self.blend.on
+            && let Some(e) = watched
+            && let Some(params) = player.graph_params(e)
+        {
+            let mut found = [None; 2];
+            for (name, _, value) in params {
+                for (a, slot) in found.iter_mut().enumerate() {
+                    if name == self.blend.params[a] {
+                        *slot = Some(value);
+                    }
+                }
+            }
+            if let Some(x) = found[0] {
+                self.blend.live = Some([x, found[1].unwrap_or(0.0)]);
+            }
+        }
     }
 
     /// The characters in place, with the player (ADR 0124's E12-1b): the active entity's Clips
@@ -22391,6 +23134,9 @@ impl Editor {
         }
         if core::mem::take(&mut self.plants_asked) {
             self.mark_foot_plants(player);
+        }
+        if core::mem::take(&mut self.blend_place_asked) {
+            self.place_blend_by_speed(player);
         }
         let active = self
             .selection
@@ -28096,6 +28842,46 @@ impl<G> EditorGame<G> {
         self.shared.borrow().anim_status.clone()
     }
 
+    /// Selects state `state` alone on the shown animation graph's canvas, as a click on it
+    /// does (ADR 0124's E12-5d-2a); for tests.
+    pub fn select_graph_state(&mut self, state: &str) {
+        let mut shared = self.shared.borrow_mut();
+        let Some(g) = shared.anim_graph_shown() else {
+            return;
+        };
+        if let Some(anim) = shared.graphs[g].anim.as_deref_mut() {
+            anim.clear_selection();
+            anim.selected.insert(state.to_owned());
+        }
+    }
+
+    /// The inspector's blend panel as it shows (ADR 0124's E12-5d-2a): the values marked as
+    /// they read, each clip's weight there, and whether they are a running character's;
+    /// none while it is not shown. For tests.
+    pub fn blend_panel(&self) -> Option<(String, Vec<f32>, bool)> {
+        let shared = self.shared.borrow();
+        let b = &shared.blend;
+        b.on.then(|| (b.now.clone(), b.weights.clone(), b.live.is_some()))
+    }
+
+    /// Where the inspector's blend panel is in the window, `[x, y, width, height]` in logical
+    /// pixels, as the last frame laid it out; for tests.
+    pub fn blend_rect(&self) -> Option<[f32; 4]> {
+        let shared = self.shared.borrow();
+        let r = shared.ui.rect_of(shared.blend.area)?;
+        Some([r.pos[0], r.pos[1], r.size[0], r.size[1]])
+    }
+
+    /// View: Animation States' labels as they read (ADR 0124's E12-5e-2b), in the characters'
+    /// order; for tests.
+    pub fn anim_labels(&self) -> Vec<String> {
+        let shared = self.shared.borrow();
+        shared.anim_labels[..shared.anim_label_count]
+            .iter()
+            .map(|l| l.text.clone())
+            .collect()
+    }
+
     /// In Play, the active character's graph's parameters as the inspector's Graph section
     /// shows them (ADR 0124's E12-5e-2): each one's name, value and whether the editor holds
     /// it. For tests.
@@ -28723,6 +29509,19 @@ fn draw_overlays(editor: &mut Editor, rect: [u32; 4], glyphs: &GlyphTexture, can
         }
         if Some(icon.entity) == active {
             active_at = Some(icon.at);
+        }
+    }
+    // View: Animation States (E12-5e-2b): a label over each character's head.
+    for label in &editor.anim_labels[..editor.anim_label_count] {
+        if let Some(at) = label.at {
+            self::label(
+                &mut editor.text,
+                glyphs,
+                canvas,
+                at - Vec2::new(0.0, 18.0 * scale),
+                &label.text,
+                scale,
+            );
         }
     }
     // The active reverb zone's room and priority, under its icon; taken for the label's
@@ -42634,6 +43433,145 @@ return Coin
             .map(|s| s.name.as_str())
             .collect();
         assert!(states.contains(&"New State"), "{states:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-5d-2a: a 2D blend's clips on the inspector's panel, weighed at the
+    /// parameters' starting values as the graph's tick weighs them; a press off the dots
+    /// previews other values (no step); a clip's dot dragged moves it, one step undone as
+    /// one; Place by Speed's places from the clips' velocities, idles kept.
+    #[test]
+    fn a_blends_clips_lie_on_the_inspectors_panel_and_move_as_steps() {
+        let dir = project("blend-panel");
+        std::fs::create_dir_all(dir.join("anim")).unwrap();
+        std::fs::write(
+            dir.join("anim/hero.agraph"),
+            format!(
+                "[agraph version=1 id={}]\n\n\
+                 params[\"dir\"].kind = Float\n\
+                 params[\"speed\"].kind = Float\nparams[\"speed\"].value = 1\n\
+                 layers[\"base\"].name = \"Base\"\nlayers[\"base\"].root = \"m\"\n\
+                 nodes[\"m\"].kind = Machine\nnodes[\"m\"].entry = \"move\"\n\
+                 nodes[\"m\"].at = [-200, -100]\n\
+                 nodes[\"b\"].kind = Blend2d\nnodes[\"b\"].param = \"dir\"\n\
+                 nodes[\"b\"].param_y = \"speed\"\n\
+                 nodes[\"b\"].points.0.clip = \"Idle\"\n\
+                 nodes[\"b\"].points.1.clip = \"Walk\"\nnodes[\"b\"].points.1.at = [0, 1.5]\n\
+                 nodes[\"b\"].points.2.clip = \"Run\"\nnodes[\"b\"].points.2.at = [0, 4]\n\
+                 nodes[\"b\"].points.3.clip = \"Left\"\nnodes[\"b\"].points.3.at = [-1, 1.5]\n\
+                 nodes[\"b\"].points.4.clip = \"Right\"\nnodes[\"b\"].points.4.at = [1, 1.5]\n\
+                 states[\"move\"].machine = \"m\"\nstates[\"move\"].name = \"Move\"\n\
+                 states[\"move\"].pose = \"b\"\n",
+                AssetId::new()
+            ),
+        )
+        .unwrap();
+        let (mut world, mut ed) = start(&dir);
+        ed.open_assets();
+        ed.update(&mut world);
+        ed.open_graph(&world, Path::new("anim/hero.agraph"));
+        ed.update(&mut world);
+        assert!(!ed.blend.on, "nothing inspected yet");
+        ed.graphs[0]
+            .anim
+            .as_deref_mut()
+            .unwrap()
+            .selected
+            .insert(String::from("move"));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        assert!(ed.blend.on && ed.blend.plane);
+        assert_eq!(ed.blend.places.len(), 5);
+        assert_eq!(ed.blend.triangles.len(), 4, "{:?}", ed.blend.triangles);
+        // At (0, 1): between Idle and Walk, two thirds Walk's, as the tick weighs it.
+        let w = &ed.blend.weights;
+        assert!(
+            (w[1] - 2.0 / 3.0).abs() < 1e-4 && (w[0] - 1.0 / 3.0).abs() < 1e-4,
+            "{w:?}"
+        );
+        assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-4, "{w:?}");
+        assert_eq!(ed.blend.labels[1], "Walk 67 %");
+        assert_eq!(ed.blend.now, "dir 0.00 \u{b7} speed 1.00");
+        assert!(!texts(&ed, "Walk 67 %").is_empty(), "drawn by its dot");
+        assert!(!texts(&ed, "Place by Velocity").is_empty());
+        // A press near the right edge, off the dots: the values previewed there, no step.
+        let r = ed.ui.rect_of(ed.blend.area).expect("the panel");
+        let at = |f: [f32; 2]| [r.pos[0] + f[0] * r.size[0], r.pos[1] + f[1] * r.size[1]];
+        let steps = ed.history.steps().count();
+        let off = at([0.97, 0.62]);
+        mouse(&mut ed, off, None);
+        ed.update(&mut world);
+        mouse(&mut ed, off, Some(true));
+        ed.update(&mut world);
+        mouse(&mut ed, off, Some(false));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let previewed = ed.blend.preview.expect("previewed");
+        assert!(previewed[0] > 1.0, "{previewed:?}");
+        assert!(
+            ed.blend.weights[4] > 0.5,
+            "Right weighs most: {:?}",
+            ed.blend.weights
+        );
+        assert_eq!(ed.history.steps().count(), steps, "no step");
+        // Walk's dot dragged 30 px right: one step, its place moved by as much.
+        let walk = at(ed.blend.dots[1]);
+        let span = ed.blend.hi[0] - ed.blend.lo[0];
+        mouse(&mut ed, walk, None);
+        ed.update(&mut world);
+        mouse(&mut ed, walk, Some(true));
+        ed.update(&mut world);
+        for dx in [10.0, 20.0, 30.0] {
+            mouse(&mut ed, [walk[0] + dx, walk[1]], None);
+            ed.update(&mut world);
+        }
+        mouse(&mut ed, [walk[0] + 30.0, walk[1]], Some(false));
+        ed.update(&mut world);
+        ed.update(&mut world);
+        let point = |ed: &Editor| {
+            let a = anim(ed);
+            let state = &a.file.states["move"];
+            a.file.nodes[&state.pose].points[1].at
+        };
+        let moved = point(&ed);
+        let expected = 30.0 / r.size[0] * span;
+        assert!(
+            (moved[0] - expected).abs() < 0.02,
+            "{moved:?} against {expected}"
+        );
+        assert!((moved[1] - 1.5).abs() < 1e-6, "{moved:?}");
+        assert_eq!(
+            ed.history.steps().count(),
+            steps + 1,
+            "one step for the drag"
+        );
+        assert!(ed.blend.drag.is_none());
+        chord(&mut ed, &mut world, &[CTRL, Z]);
+        ed.update(&mut world);
+        assert_eq!(point(&ed), [0.0, 1.5], "undone as one");
+        // Place by Speed's places: a 2D blend's at the velocities, a 1D's at the speeds; the
+        // idle and a clip the rig has not kept.
+        let points = anim(&ed).file.nodes["b"].points.clone();
+        let velocity = |clip: &str| match clip {
+            "Idle" => Some([0.0, 0.01]),
+            "Walk" => Some([0.004, 1.426]),
+            "Run" => Some([0.0, 3.9]),
+            "Left" => Some([-1.2, 0.0]),
+            _ => None,
+        };
+        let (placed, kept) = places_by_speed(&points, true, velocity);
+        assert_eq!(
+            placed,
+            [(1, [0.0, 1.43]), (2, [0.0, 3.9]), (3, [-1.2, 0.0])]
+        );
+        assert_eq!(kept, ["Idle", "Right"]);
+        let (placed, _) = places_by_speed(&points, false, velocity);
+        assert_eq!(
+            placed[0],
+            (1, [1.43, 1.5]),
+            "a speed; its second number kept"
+        );
+        assert!((round_step(4.6) - 0.5).abs() < 1e-6 && (round_step(30.0) - 2.0).abs() < 1e-6);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
