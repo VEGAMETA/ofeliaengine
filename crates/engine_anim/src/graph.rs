@@ -282,6 +282,9 @@ pub struct AnimGraph {
     layers: Box<[LayerDef]>,
     nodes: Box<[NodeDef]>,
     machines: Box<[MachineDef]>,
+    /// Each description node's machine (`NONE` for a node that is none), by its place in the
+    /// description: where the editor finds a machine inside another's state (E12-5d-2c).
+    machine_of_node: Box<[u16]>,
     states: Box<[StateDef]>,
     transitions: Box<[TransitionDef]>,
     leaves: Box<[LeafDef]>,
@@ -802,6 +805,7 @@ impl AnimGraph {
             layers: layers.into_boxed_slice(),
             nodes: nodes.into_boxed_slice(),
             machines: machines.into_boxed_slice(),
+            machine_of_node: machine_of_node.into_boxed_slice(),
             states: states.into_boxed_slice(),
             transitions: transitions.into_boxed_slice(),
             leaves: leaves.into_boxed_slice(),
@@ -1043,6 +1047,27 @@ impl AnimGraph {
         let NodeDef::Machine { machine } = *self.nodes.get(usize::from(root))? else {
             return None;
         };
+        self.machine_state_now(s, machine)
+    }
+
+    /// [`Self::machine_now`] of the machine node `node` is (its place among the description's
+    /// nodes; ADR 0124's E12-5d-2c): a machine inside another's state as well as a layer's.
+    /// Its state is as its last tick left it (the entry's, at its start, until its state
+    /// first plays). Allocates nothing.
+    pub fn machine_now_of_node<'a>(
+        &'a self,
+        s: &GraphState,
+        node: usize,
+    ) -> Option<MachineNow<'a>> {
+        let machine = *self.machine_of_node.get(node)?;
+        if machine == NONE {
+            return None;
+        }
+        self.machine_state_now(s, machine)
+    }
+
+    /// Where machine `machine` is in state `s`.
+    fn machine_state_now<'a>(&'a self, s: &GraphState, machine: u16) -> Option<MachineNow<'a>> {
         let ms = *s.machines.get(usize::from(machine))?;
         let state = self.states.get(usize::from(ms.state))?;
         let from = (ms.from != NONE)
@@ -2715,6 +2740,40 @@ mod tests {
         assert_eq!((now.state, now.from), ("Jump", None));
         assert!((now.seconds - 0.5).abs() < 1e-3, "{now:?}");
         assert!(g.machine_now(&s, 1).is_none(), "no such layer");
+    }
+
+    /// ADR 0124's E12-5d-2c: a machine inside a state's pose is found by its node: its state
+    /// as its ticks leave it once its state plays; a node that is no machine has none.
+    #[test]
+    fn a_machine_inside_a_state_tells_where_it_is_by_its_node() {
+        let (skeleton, _clips, angles) = rig();
+        let mut desc = locomotion();
+        // Move plays a machine (node 4) whose one state, Walking, plays the blend.
+        desc.nodes.push(NodeDesc::Machine { entry: 3 });
+        desc.states[1].pose = 4;
+        desc.states.push(StateDesc {
+            name: "Walking".into(),
+            machine: 4,
+            pose: 2,
+        });
+        let (g, problems) = AnimGraph::cook(&desc, info(&angles), &skeleton);
+        assert!(problems.is_empty(), "{problems:?}");
+        let mut s = GraphState::new(&g);
+        s.set(g.param("speed").unwrap(), 2.5);
+        for _ in 0..32 {
+            g.tick(&mut s, 1.0 / 64.0);
+        }
+        assert_eq!(g.machine_now(&s, 0).unwrap().state, "Move");
+        let inner = g.machine_now_of_node(&s, 4).unwrap();
+        assert_eq!(inner.state, "Walking");
+        assert!(inner.seconds > 0.0, "{inner:?}");
+        assert_eq!(
+            g.machine_now_of_node(&s, 0).unwrap().state,
+            "Move",
+            "the layer's too"
+        );
+        assert!(g.machine_now_of_node(&s, 1).is_none(), "a clip's node");
+        assert!(g.machine_now_of_node(&s, 9).is_none(), "no such node");
     }
 
     /// ADR 0124's E12-5c-2: a layer's machine put straight into a state by its name (a loaded

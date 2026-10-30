@@ -773,6 +773,7 @@ struct FrameLists {
     /// A shown animation graph's layers' names (E12-5d-2b), and its shown layer's mask's
     /// joints.
     anim_layers: Vec<&'static str>,
+    anim_crumbs: Vec<&'static str>,
     mask_rows: Vec<crate::shell::MaskRow<'static>>,
 }
 
@@ -6967,6 +6968,7 @@ impl Editor {
         self.graph_anim
             .extend(self.graphs.iter().map(|d| d.anim.is_some()));
         let mut anim_layers: Vec<&str> = recycle(std::mem::take(&mut self.lists.anim_layers));
+        let mut anim_crumbs: Vec<&str> = recycle(std::mem::take(&mut self.lists.anim_crumbs));
         let mut shown_layer = 0;
         if let Some(anim) = self
             .active_graph
@@ -6979,6 +6981,7 @@ impl Editor {
                     .map(|id| anim.file.layers.get(id).map_or("", |l| l.name.as_str())),
             );
             shown_layer = anim.layer_index().unwrap_or(usize::MAX);
+            anim.crumbs(&mut anim_crumbs);
         }
         let graph_bar =
             self.active_graph
@@ -6990,6 +6993,7 @@ impl Editor {
                     layered: d.anim.is_some(),
                     layers: &anim_layers,
                     layer: shown_layer,
+                    crumbs: &anim_crumbs,
                     preview: self
                         .graph_preview
                         .as_ref()
@@ -7680,6 +7684,7 @@ impl Editor {
         self.lists.anim_options = recycle(anim_options);
         self.lists.blend_dots = recycle(blend_dots);
         self.lists.anim_layers = recycle(anim_layers);
+        self.lists.anim_crumbs = recycle(anim_crumbs);
         self.blend.area = response.blend_area;
         self.listing = self
             .ui
@@ -7830,6 +7835,11 @@ impl Editor {
             && let Some(g) = self.anim_graph_shown()
         {
             self.graphs[g].show_layer(k);
+        }
+        if let Some(k) = response.graph_crumb
+            && let Some(g) = self.anim_graph_shown()
+        {
+            self.graphs[g].leave_machine(k + 1);
         }
         if response.graph_add_layer
             && let Some(g) = self.anim_graph_shown()
@@ -18245,11 +18255,19 @@ impl Editor {
                 self.set_entry_state(world, g);
                 return;
             }
+            // Tab: into the selected state's machine, or back out (E12-5d-2c).
+            if id == ids.enter_function && canvas {
+                if let Err(why) = self.graphs[g].anim_tab()
+                    && !why.is_empty()
+                {
+                    self.say(why.to_owned());
+                }
+                return;
+            }
             let material = [
                 ids.duplicate,
                 ids.frame_nodes,
                 ids.make_function,
-                ids.enter_function,
                 ids.ungroup_function,
             ];
             if canvas && material.contains(&id) {
@@ -23273,8 +23291,8 @@ impl Editor {
         self.anim_watched = watched;
         // The layer the canvas shows (E12-5d-2b).
         if let Some(e) = watched
-            && let Some(layer) = anim.cooked_layer_index()
-            && let Some(now) = player.graph_now_in(e, layer)
+            && let Some(node) = anim.machine_node_index()
+            && let Some(now) = player.graph_now_node(e, node)
         {
             let who = world.get::<Name>(e).map_or("a character", Name::as_str);
             anim.live.set(who, &now);
