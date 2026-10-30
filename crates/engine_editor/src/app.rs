@@ -897,6 +897,8 @@ struct CommandIds {
     /// Clips made in the editor (E12-4b-1b): one made, the chosen one taken away.
     new_clip: CommandId,
     delete_clip: CommandId,
+    /// K (E12-4b-2): the shown clip's fields keyed at the playhead.
+    key_clip: CommandId,
     auto_play: CommandId,
     /// A material graph's nodes' previews on its canvas, or not (E10-4g).
     node_previews: CommandId,
@@ -1127,6 +1129,7 @@ fn commands() -> (Commands, CommandIds) {
             "Animation",
             "Delete the Chosen Clip",
         ),
+        key_clip: c.register("animation.key", "Animation", "Key the Clip's Fields"),
         auto_play: c.register("assets.auto_play", "Assets", "Auto Play Sounds"),
         node_previews: c.register("graph.node_previews", "Graph", "Node Previews"),
         make_prefab: c.register("scene.make_prefab", "Scene", "Make Prefab"),
@@ -1257,6 +1260,8 @@ fn keymap(ids: &CommandIds, preset: KeyPreset) -> (Keymap, HashMap<CommandId, St
         ("Ctrl+Shift+Tab", ids.previous_tab),
         ("Delete", ids.delete),
         ("H", ids.disable),
+        // Keys in the clip the Animation tab shows (E12-4b-2), over the view or the tab.
+        ("K", ids.key_clip),
         ("Ctrl+D", ids.duplicate),
         ("Ctrl+A", ids.add),
         ("Ctrl+Shift+A", ids.add_component),
@@ -3082,6 +3087,13 @@ struct Editor {
     event_autofocus: bool,
     /// A clip just made (E12-4b-1b): its name typed as soon as its field shows.
     clip_autofocus: bool,
+    /// The clip the Animation tab shows, sampled for K, ◆ and the inspector's marks
+    /// (E12-4b-2), and its fields on the active entity with their marks this frame.
+    key_sampler: engine_app::ClipFields,
+    key_fields: Vec<engine_app::ClipField>,
+    key_marks: Vec<(ComponentId, std::ops::Range<usize>, crate::shell::KeyMark)>,
+    /// A clip made in the editor shows on the active entity: its fields get their ◆.
+    key_shown: bool,
     /// Mark Foot Plants asked for, done in the next `clips_frame` (E12-3d).
     plants_asked: bool,
     anim_events: u64,
@@ -4110,6 +4122,10 @@ impl Editor {
             event_drag: None,
             event_autofocus: false,
             clip_autofocus: false,
+            key_sampler: engine_app::ClipFields::default(),
+            key_fields: Vec::new(),
+            key_marks: Vec::new(),
+            key_shown: false,
             plants_asked: false,
             anim_events: 0,
             events_due: Vec::new(),
@@ -4603,9 +4619,19 @@ impl Editor {
     }
 
     /// The frame's editing: the UI from the world, its edits and the shortcuts' commands
-    /// into the world, the camera from the viewport's drags.
-    #[allow(clippy::too_many_lines)]
+    /// into the world, the camera from the viewport's drags. A clip made in the editor that
+    /// the Animation tab previews drives the fields it keys through it (ADR 0124's E12-4b-2):
+    /// they hold its values at the playhead, an edit of one keys it there in the edit's own
+    /// undo step, and the scene's own values are back as it ends.
     fn update(&mut self, world: &mut World) {
+        self.drive_clip(world);
+        self.update_frame(world);
+        self.end_clip_drive(world);
+    }
+
+    /// The frame's editing (see [`Self::update`]).
+    #[allow(clippy::too_many_lines)]
+    fn update_frame(&mut self, world: &mut World) {
         // The frame's time, for flying: at most a tenth of a second, so a stall does not
         // throw the camera.
         let now = Instant::now();
@@ -4878,6 +4904,8 @@ impl Editor {
         // The Clips' model file's clip events (E12-3b-2): its `.meta` held, for the
         // Animation tab and for the previews' event sounds (E12-3b-3).
         self.follow_clip_events(world);
+        // The clip's keys beside the inspector's fields (E12-4b-2).
+        self.follow_key_marks(world);
         let properties = self.inspector.properties();
         let mut values: Vec<&str> = recycle(std::mem::take(&mut self.lists.values));
         let mut spans = std::mem::take(&mut self.lists.spans);
@@ -5111,6 +5139,7 @@ impl Editor {
                 name: self.inspector.name(p),
                 widget,
                 changed: p.changed,
+                key: self.key_shown.then(|| key_mark(p, &self.key_marks)),
             }
         }));
         let section_list = self.inspector.sections();
@@ -5184,6 +5213,7 @@ impl Editor {
                     name: row.name(colour),
                     widget,
                     changed: doc.changed(row),
+                    key: None,
                 });
             }
             self.graph_section = Some(sections.len());
@@ -5239,6 +5269,7 @@ impl Editor {
                     name: row.name(),
                     widget,
                     changed,
+                    key: None,
                 });
             }
             let bus_end = asset_fields.len();
@@ -5305,6 +5336,7 @@ impl Editor {
                         name,
                         widget,
                         changed,
+                        key: None,
                     });
                 }
                 self.part_spans.push((from, asset_fields.len()));
@@ -5324,11 +5356,13 @@ impl Editor {
                             lock: None,
                         },
                         changed: doc.sets_at(bus, &["sends", to]),
+                        key: None,
                     });
                     asset_fields.push(Field {
                         name: "before fader",
                         widget: Widget::Check(Some(send.pre_fader)),
                         changed: false,
+                        key: None,
                     });
                     self.part_spans.push((from, asset_fields.len()));
                     self.mixer_parts.push(MixerPart::Send(i));
@@ -5344,6 +5378,7 @@ impl Editor {
                     name: "name",
                     widget: Widget::Edit(doc.chosen.as_deref().unwrap_or("")),
                     changed: false,
+                    key: None,
                 });
                 asset_fields.push(Field {
                     name: "fade s",
@@ -5354,11 +5389,13 @@ impl Editor {
                         lock: None,
                     },
                     changed: false,
+                    key: None,
                 });
                 asset_fields.push(Field {
                     name: "sets",
                     widget: Widget::Text(&t[1]),
                     changed: false,
+                    key: None,
                 });
             }
             let snapshot_end = asset_fields.len();
@@ -5379,6 +5416,7 @@ impl Editor {
                             missing: false,
                         },
                         changed: false,
+                        key: None,
                     });
                 }
                 self.part_spans.push((from, asset_fields.len()));
@@ -5394,6 +5432,7 @@ impl Editor {
                         name,
                         widget: Widget::Text(value),
                         changed: false,
+                        key: None,
                     });
                 }
             }
@@ -5443,11 +5482,13 @@ impl Editor {
                 name: "path",
                 widget: Widget::Text(&asset.path),
                 changed: false,
+                key: None,
             });
             list.push(Field {
                 name: "kind",
                 widget: Widget::Text(asset.kind.name()),
                 changed: false,
+                key: None,
             });
             for &s in crate::import::settings(asset.kind) {
                 let widget = match s {
@@ -5468,6 +5509,7 @@ impl Editor {
                     name: s.name(asset.kind),
                     widget,
                     changed: asset.changed(s),
+                    key: None,
                 });
             }
             let imports = asset_fields.len();
@@ -5488,6 +5530,7 @@ impl Editor {
                     name,
                     widget: Widget::Text(value),
                     changed: false,
+                    key: None,
                 });
             }
             let facts = asset_fields.len();
@@ -8111,6 +8154,7 @@ impl Editor {
                 }
                 self.history.commit(world);
             }
+            FieldAction::Key => self.key_field(world, event.section, event.field),
             FieldAction::Reset => {
                 if !p.changed {
                     return;
@@ -13036,7 +13080,7 @@ impl Editor {
                     }
                 }
             }
-            FieldAction::Toggle | FieldAction::Lock | FieldAction::Play => {}
+            FieldAction::Toggle | FieldAction::Lock | FieldAction::Play | FieldAction::Key => {}
         }
     }
 
@@ -16875,6 +16919,8 @@ impl Editor {
             self.new_clip(world);
         } else if id == ids.delete_clip {
             self.delete_clip(world);
+        } else if id == ids.key_clip {
+            self.key_clip(world);
         } else if id == ids.node_previews {
             self.node_previews = !self.node_previews;
             self.write_session(world);
@@ -17218,8 +17264,11 @@ impl Editor {
             assets: Some(&self.assets),
             prefabs: Some(&prefabs),
         };
-        engine_scene::save_with(world, &registry, &options, &mut text)
-            .map_err(|e| e.to_string())?;
+        // A previewed clip's fields with the scene's values (E12-4b-2).
+        let held = self.history.scene_values(world);
+        let saved = engine_scene::save_with(world, &registry, &options, &mut text);
+        self.history.drive_back(world, &held);
+        saved.map_err(|e| e.to_string())?;
         Ok(text)
     }
 
@@ -18551,7 +18600,8 @@ impl Editor {
                     "{name}: drop an image from the FileSystem dock onto it"
                 ));
             }
-            FieldAction::Text { .. } | FieldAction::Lock | FieldAction::Play => {}
+            FieldAction::Text { .. } | FieldAction::Lock | FieldAction::Play | FieldAction::Key => {
+            }
         }
     }
 
@@ -19595,6 +19645,12 @@ impl Editor {
             view.playing = !view.playing;
             view.at = None;
             view.held = !view.playing;
+            // Stopped on its frame, where keys go (E12-4b-2).
+            if !view.playing
+                && let Some(c) = view.clips.get(view.chosen)
+            {
+                view.time = crate::clip_events::on_frame(view.time, c.rate, c.duration);
+            }
             if view.playing && !self.clip_loop && view.time >= view.length() {
                 view.time = 0.0;
             }
@@ -19744,6 +19800,12 @@ impl Editor {
         let along = ((x - r.pos[0]) / r.size[0].max(1.0)).clamp(0.0, 1.0);
         view.time = along * view.length();
         view.held = true;
+        // A clip made in the editor's playhead lands on its frames, where keys go (E12-4b-2).
+        if !view.own.is_empty()
+            && let Some(c) = view.clips.get(view.chosen)
+        {
+            view.time = crate::clip_events::on_frame(view.time, c.rate, c.duration);
+        }
         if let ClipsOf::Entity(_) = view.of
             && let Some(play) = self.in_place.as_mut()
         {
@@ -19809,6 +19871,233 @@ impl Editor {
             .asset_db
             .get(file)
             .map(|entry| crate::clip_events::EventsDoc::open(&self.root, file, &entry.path));
+    }
+
+    /// The clip made in the editor the Animation tab shows (ADR 0124's E12-4b-2): its entity,
+    /// its file and the playhead (on its frame unless it plays), while the tab is open and
+    /// the game not playing, the file held. Its clip, from the held file.
+    fn shown_own_clip(&self) -> Option<(Entity, AssetId, f32, bool)> {
+        let open = self.bottom == Some(ANIMATION_TAB) && self.play.is_none();
+        let v = self.clips.as_ref().filter(|v| open && !v.own.is_empty())?;
+        let (ClipsOf::Entity(e), Some(file)) = (v.of, v.own.get(v.chosen)) else {
+            return None;
+        };
+        let anim = self
+            .clip_events
+            .as_ref()
+            .filter(|d| d.file == file.file)
+            .and_then(crate::clip_events::EventsDoc::anim)?;
+        let time = if v.playing {
+            v.time
+        } else {
+            crate::clip_events::on_frame(v.time, anim.rate, anim.length)
+        };
+        Some((e, file.file, time, v.playing || v.held))
+    }
+
+    /// The clip the Animation tab previews drives the fields it keys through the editor's
+    /// frame (ADR 0124's E12-4b-2): as the player shows it, held at the playhead or playing.
+    /// Held, an edit of one of them keys it at the playhead; while it plays, an edit is not
+    /// kept.
+    fn drive_clip(&mut self, world: &mut World) {
+        let Some((e, file, time, shown)) = self.shown_own_clip() else {
+            return;
+        };
+        let playing = self.clips.as_ref().is_some_and(|v| v.playing);
+        let anim = self
+            .clip_events
+            .as_ref()
+            .and_then(crate::clip_events::EventsDoc::anim);
+        if let (true, Some(anim)) = (shown, anim) {
+            self.history.drive(world, e, file, anim, time, !playing);
+        }
+    }
+
+    /// The editor's frame ends (ADR 0124's E12-4b-2): the scene's values back in the fields
+    /// the clip drove; the keys the frame's edits made held for the tab and the player, and
+    /// written once no drag or keyboard transform goes on (their undo steps have them
+    /// already).
+    fn end_clip_drive(&mut self, world: &mut World) {
+        if let Some((file, anim)) = self.history.undrive(world)
+            && let Some(doc) = self.clip_events.as_mut().filter(|d| d.file == file)
+        {
+            doc.keyed(anim.clone());
+        }
+        let busy = self.ui.input().mouse_down || self.key_transform.is_some();
+        if !busy
+            && let Some(doc) = self.clip_events.as_mut().filter(|d| d.unwritten())
+            && let Err(e) = doc.write(&self.root)
+        {
+            self.say(format!("Keys not saved: {e}"));
+        }
+    }
+
+    /// The ◆ beside the active entity's fields (ADR 0124's E12-4b-2), while the Animation tab
+    /// shows a clip made in the editor on it: the fields the clip moves marked, filled where
+    /// a key lies at the playhead.
+    fn follow_key_marks(&mut self, world: &mut World) {
+        self.key_marks.clear();
+        let shown = self.shown_own_clip();
+        self.key_shown = shown.is_some_and(|(e, ..)| Some(e) == self.active());
+        let (Some((e, _, time, _)), true) = (shown, self.key_shown) else {
+            return;
+        };
+        let Some(anim) = self
+            .clip_events
+            .as_ref()
+            .and_then(crate::clip_events::EventsDoc::anim)
+        else {
+            return;
+        };
+        self.key_sampler
+            .sample(world, e, anim, time, &mut self.key_fields);
+        // While it plays the playhead lands between frames: keys are marked once it holds.
+        let playing = self.clips.as_ref().is_some_and(|v| v.playing);
+        for f in self.key_fields.iter().filter(|f| f.entity == e) {
+            let here = !playing
+                && anim
+                    .key_at(self.key_sampler.target(f.track), time)
+                    .is_some();
+            let mark = if here {
+                crate::shell::KeyMark::Here
+            } else {
+                crate::shell::KeyMark::Animated
+            };
+            let at = f.field.offset();
+            self.key_marks
+                .push((f.field.component(), at..at + 4 * f.field.lanes(), mark));
+        }
+    }
+
+    /// Animation: Key the Clip's Fields (K; ADR 0124's E12-4b-2, the team's decision): each
+    /// field the clip the Animation tab shows moves keyed at the playhead's frame with the
+    /// value it shows there; a clip without tracks keys its entity's position, rotation and
+    /// scale. One undo step; the clip then holds the playhead, shown on its entity.
+    fn key_clip(&mut self, world: &mut World) {
+        let Some((e, file, time, _)) = self.shown_own_clip() else {
+            self.say(String::from(
+                "K keys a clip made in the editor: choose one in the Animation tab (New Clip \
+                 makes one)",
+            ));
+            return;
+        };
+        let Some(anim) = self
+            .clip_events
+            .as_ref()
+            .and_then(crate::clip_events::EventsDoc::anim)
+        else {
+            return;
+        };
+        // On a frame, also while it plays (it stops there).
+        let time = crate::clip_events::on_frame(time, anim.rate, anim.length);
+        let mut keys: Vec<(String, [f32; 4], usize)> = Vec::new();
+        if anim.tracks.is_empty() {
+            for target in [
+                "Transform.translation",
+                "Transform.rotation",
+                "Transform.scale",
+            ] {
+                let Some(field) = engine_runtime::FieldRef::find(world, target) else {
+                    continue;
+                };
+                let mut raw = [0.0f32; 4];
+                if field.read(world, e, &mut raw) {
+                    let (key, lanes) = engine_app::key_value(field, &raw);
+                    keys.push((target.to_owned(), key, lanes));
+                }
+            }
+        } else {
+            let mut fields = Vec::new();
+            self.key_sampler.sample(world, e, anim, time, &mut fields);
+            keys.extend(fields.iter().map(|f| {
+                (
+                    self.key_sampler.target(f.track).to_owned(),
+                    f.keyed,
+                    f.lanes,
+                )
+            }));
+        }
+        if keys.is_empty() {
+            self.say(String::from(
+                "Nothing to key: the clip's fields are not on the entity",
+            ));
+            return;
+        }
+        let n = keys.len();
+        self.set_keys(world, "Key Fields", file, time, &keys);
+        self.say(format!("{n} fields keyed at {time:.2} s"));
+    }
+
+    /// ◆ beside field `field` of section `section` (ADR 0124's E12-4b-2): that field of the
+    /// active entity keyed at the playhead with the value it shows, in the clip the Animation
+    /// tab shows; one undo step.
+    fn key_field(&mut self, world: &mut World, section: usize, field: usize) {
+        let (Some((e, file, time, _)), Some((p, component))) =
+            (self.shown_own_clip(), self.shown_property(section, field))
+        else {
+            return;
+        };
+        let target = self.path_of(&p, component);
+        let Some(f) = engine_runtime::FieldRef::find(world, &target).filter(|_| !p.whole) else {
+            self.say(format!("{target} is not numbers: it cannot be keyed"));
+            return;
+        };
+        let mut raw = [0.0f32; 4];
+        if !f.read(world, e, &mut raw) {
+            return;
+        }
+        let Some(anim) = self
+            .clip_events
+            .as_ref()
+            .and_then(crate::clip_events::EventsDoc::anim)
+        else {
+            return;
+        };
+        let time = crate::clip_events::on_frame(time, anim.rate, anim.length);
+        // A rotation the clip moves keys the angles nearest its track's.
+        let mut fields = Vec::new();
+        self.key_sampler.sample(world, e, anim, time, &mut fields);
+        let (key, lanes) = match fields.iter().find(|c| c.entity == e && c.field == f) {
+            Some(c) => (c.key_of(&raw), c.lanes),
+            None => engine_app::key_value(f, &raw),
+        };
+        self.set_keys(world, "Key Field", file, time, &[(target, key, lanes)]);
+    }
+
+    /// Keys `keys` (target, value, its numbers) set at `time` seconds in clip file `file`,
+    /// the one the Animation tab holds, written as undo step `name` (ADR 0124's E12-4b-2);
+    /// the clip then holds the playhead there (stopped, if it played).
+    fn set_keys(
+        &mut self,
+        world: &mut World,
+        name: &str,
+        file: AssetId,
+        time: f32,
+        keys: &[(String, [f32; 4], usize)],
+    ) {
+        let Some(doc) = self.clip_events.as_mut().filter(|d| d.file == file) else {
+            return;
+        };
+        doc.edit_anim_live(|anim| {
+            for (target, value, lanes) in keys {
+                anim.set_key(target, time, &value[..*lanes]);
+            }
+        });
+        match doc.write(&self.root) {
+            Ok(Some((before, after))) => {
+                self.history.begin(name, None);
+                self.history.change_file(file, &before, &after);
+                self.history.commit(world);
+                self.history.drive_changed();
+            }
+            Ok(None) => {}
+            Err(e) => self.say(format!("Keys not saved: {e}")),
+        }
+        if let Some(v) = self.clips.as_mut() {
+            v.playing = false;
+            v.time = time;
+            v.held = true;
+        }
     }
 
     /// Animation: New Clip (ADR 0124's E12-4b-1b): a clip made in the editor for the active
@@ -20998,7 +21287,7 @@ impl Editor {
                     BusRow::Name => {}
                 }
             }
-            FieldAction::Lock | FieldAction::Pick | FieldAction::Play => {}
+            FieldAction::Lock | FieldAction::Pick | FieldAction::Play | FieldAction::Key => {}
         }
     }
 
@@ -22445,8 +22734,10 @@ impl Editor {
             assets: Some(&self.assets),
             prefabs: Some(&prefabs),
         };
-        engine_scene::save_subtree(world, registry, &options, root, &mut alone)
-            .map_err(|e| e.to_string())?;
+        let held = self.history.scene_values(world);
+        let saved = engine_scene::save_subtree(world, registry, &options, root, &mut alone);
+        self.history.drive_back(world, &held);
+        saved.map_err(|e| e.to_string())?;
         let mut scratch = World::new();
         let load = LoadOptions {
             prefabs: Some(&prefabs),
@@ -26333,6 +26624,40 @@ impl<G: Game> Game for EditorGame<G> {
     }
 }
 
+/// Property `p`'s ◆ (ADR 0124's E12-4b-2) by the shown clip's fields `marks` (their bytes in
+/// their components): the most any of them inside it says (a track of `scale.y` marks the
+/// scale), else whether it can be keyed (numbers: one to four `f32`s, or a rotation).
+fn key_mark(
+    p: &Property,
+    marks: &[(ComponentId, std::ops::Range<usize>, crate::shell::KeyMark)],
+) -> crate::shell::KeyMark {
+    let inside = p.offset..p.offset + p.ty.size;
+    if let Some(mark) = marks
+        .iter()
+        .filter(|(c, at, _)| *c == p.component && at.start >= inside.start && at.end <= inside.end)
+        .map(|(.., mark)| *mark)
+        .max()
+    {
+        return mark;
+    }
+    let f32s = |ty: &engine_reflect::TypeInfo| {
+        matches!(ty.kind, TypeKind::Primitive(engine_reflect::Primitive::F32))
+    };
+    let keyable = match p.ty.kind {
+        TypeKind::Primitive(engine_reflect::Primitive::F32) => true,
+        TypeKind::Struct(fields) => {
+            (1..=4).contains(&fields.len()) && fields.iter().all(|f| f32s(f.ty))
+        }
+        TypeKind::Array { element, len } => (1..=4).contains(&len) && f32s(element),
+        _ => false,
+    };
+    if keyable && !p.whole {
+        crate::shell::KeyMark::Keyable
+    } else {
+        crate::shell::KeyMark::None
+    }
+}
+
 /// The viewport's rectangle as a clip.
 fn clip_of(rect: [u32; 4]) -> ClipRect {
     ClipRect {
@@ -27338,6 +27663,7 @@ fn material_fields<'a>(
             name: row.name(),
             widget,
             changed: crate::material::changed(&doc.file, row, doc.base.as_ref().map(|(b, _)| b)),
+            key: None,
         });
     }
 }
@@ -30946,6 +31272,145 @@ mod tests {
         // Another entity, without clips: nothing shown.
         ed.follow_own_clips(&world, None);
         assert!(ed.clips.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0124's E12-4b-2 (the team's decision): a clip made in the editor previewed on a
+    /// box shows its turn through the editor's frame and marks it ◆ in the inspector; an edit
+    /// of the turn keys it at the playhead, in the edit's one undo step, the scene's turn
+    /// untouched (its text too). K on a clip without tracks keys position, rotation and
+    /// scale; ◆ beside the position keys it alone, at another frame.
+    #[test]
+    fn editing_a_previewed_clips_field_keys_it_and_the_scene_keeps_its_value() {
+        let (dir, mut world, mut ed, boxed) = drop_project("keys");
+        std::fs::create_dir_all(dir.join("animations")).unwrap();
+        let open_id = AssetId::new();
+        let mut opening = engine_scene::AnimFile::default();
+        opening.set_key("Transform.rotation", 0.0, &[0.0, 0.0, 0.0]);
+        opening.set_key("Transform.rotation", 1.0, &[0.0, 90.0, 0.0]);
+        let anim_file = dir.join("animations/box open.anim");
+        std::fs::write(&anim_file, opening.to_text(open_id)).unwrap();
+        ed.asset_db.scan();
+        world.insert(
+            boxed,
+            engine_runtime::Animator::new("open").with_clip("open", AssetRef::file(open_id)),
+        );
+        let yaw = |world: &World| {
+            let (y, _, _) = world
+                .get::<Transform>(boxed)
+                .unwrap()
+                .rotation
+                .to_euler(engine_core::math::EulerRot::YXZ);
+            y.to_degrees()
+        };
+        ed.select_only(boxed);
+        ed.bottom = Some(ANIMATION_TAB);
+        ed.follow_own_clips(&world, Some(boxed));
+        ed.update(&mut world);
+        // Held at half a second (frame 15): the turn marked, the clip moving it.
+        {
+            let v = ed.clips.as_mut().unwrap();
+            v.time = 0.5;
+            v.held = true;
+        }
+        ed.update(&mut world);
+        assert!(ed.key_shown);
+        assert_eq!(
+            ed.key_marks.iter().map(|m| m.2).collect::<Vec<_>>(),
+            [crate::shell::KeyMark::Animated]
+        );
+        assert!(yaw(&world).abs() < 1e-3, "the scene's turn between frames");
+        // An edit in a frame, as the inspector makes one: the turn set to 60 degrees.
+        ed.drive_clip(&mut world);
+        assert!(
+            (yaw(&world) - 45.0).abs() < 1e-2,
+            "the clip's turn in the frame"
+        );
+        let sixty = Quat::from_rotation_y(60f32.to_radians());
+        let value = format!("({}, {}, {}, {})", sixty.x, sixty.y, sixty.z, sixty.w);
+        ed.set_on(&mut world, &[boxed], "Transform.rotation", &value)
+            .unwrap();
+        ed.end_clip_drive(&mut world);
+        assert!(yaw(&world).abs() < 1e-3, "the scene's turn untouched");
+        let doc = ed.clip_events.as_ref().unwrap();
+        let anim = doc.anim().unwrap();
+        let k = anim
+            .key_at("Transform.rotation", 0.5)
+            .expect("keyed at the playhead");
+        let key = &anim.tracks["Transform.rotation"].keys[k];
+        assert!((key.value[1] - 60.0).abs() < 1e-2, "{:?}", key.value);
+        let text = || std::fs::read_to_string(&anim_file).unwrap();
+        assert_eq!(text(), anim.to_text(open_id), "written");
+        let saved = ed.scene_text(&mut world).unwrap();
+        assert!(
+            !saved.contains(&sixty.w.to_string()),
+            "the scene's turn saved: {saved}"
+        );
+        let names: Vec<&str> = ed.history.steps().map(|s| s.name()).collect();
+        assert_eq!(names, ["Set Transform.rotation"]);
+        ed.update(&mut world);
+        assert_eq!(
+            ed.key_marks.iter().map(|m| m.2).collect::<Vec<_>>(),
+            [crate::shell::KeyMark::Here],
+            "a key at the playhead now"
+        );
+        let undo = ed.ids.undo;
+        ed.run(&mut world, undo);
+        ed.update(&mut world);
+        let anim = ed.clip_events.as_ref().unwrap().anim().unwrap();
+        assert!(anim.key_at("Transform.rotation", 0.5).is_none(), "undone");
+        assert!(!text().contains("0.5"), "{}", text());
+        assert!(yaw(&world).abs() < 1e-3);
+        // A clip without tracks: K keys position, rotation and scale at its playhead.
+        let new_clip = ed.ids.new_clip;
+        ed.run(&mut world, new_clip);
+        ed.follow_own_clips(&world, Some(boxed));
+        ed.update(&mut world);
+        let key_clip = ed.ids.key_clip;
+        ed.run(&mut world, key_clip);
+        let anim = ed.clip_events.as_ref().unwrap().anim().unwrap();
+        let tracks: Vec<&str> = anim.tracks.keys().map(String::as_str).collect();
+        assert_eq!(
+            tracks,
+            [
+                "Transform.rotation",
+                "Transform.scale",
+                "Transform.translation"
+            ]
+        );
+        assert_eq!(
+            anim.tracks["Transform.translation"].keys[0].value,
+            [0.0, 0.0, -3.0]
+        );
+        assert_eq!(
+            anim.tracks["Transform.rotation"].keys[0].value.len(),
+            3,
+            "angles"
+        );
+        assert!(ed.clips.as_ref().unwrap().held, "shown on the box");
+        // ◆ beside the position at frame 10: that field alone keyed there.
+        {
+            let v = ed.clips.as_mut().unwrap();
+            v.time = 10.0 / 30.0;
+        }
+        ed.update(&mut world);
+        let at = (0..ed.shown_sections.len()).find_map(|s| {
+            (0..16).find_map(|f| {
+                let (p, c) = ed.shown_property(s, f)?;
+                (c == "Transform" && ed.inspector.name(&p) == "translation").then_some((s, f))
+            })
+        });
+        let (s, f) = at.expect("the position shown");
+        ed.key_field(&mut world, s, f);
+        let anim = ed.clip_events.as_ref().unwrap().anim().unwrap();
+        assert_eq!(anim.tracks["Transform.translation"].keys.len(), 2);
+        assert_eq!(
+            anim.tracks["Transform.rotation"].keys.len(),
+            1,
+            "the others not"
+        );
+        let names: Vec<&str> = ed.history.steps().map(|s| s.name()).collect();
+        assert_eq!(names, ["New Clip", "Key Fields", "Key Field"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -584,6 +584,61 @@ allocation with transitions and events every tick; the same events at the same t
 - **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
   facing drawn on the floor.
 
+## As built (E12-4b-2, 2026-10-30): keys (K, ◆, editing a field the clip moves)
+
+- **The editor's frame drives the clip's fields** (`keying::Driving`, held by the
+  `History`): while the Animation tab shows a clip made in the editor on its entity, held at
+  the playhead or playing, the frame begins with each field its tracks key holding the
+  clip's value there (`History::drive`, sampled by `engine_app::ClipFields`) and ends with
+  the scene's values back (`History::undrive`). The inspector shows the clip's values and a
+  drag starts from them, as Unity's animation mode drives its properties.
+  - **The scene keeps its values:** every record undo takes has the scene's values for
+    those fields (`History::snapshot`), and so has a scene or a prefab written in the frame
+    (`History::scene_values`, `drive_back`). Undo, redo, a revert or a cancel that puts an
+    entity back keeps what it put there as the scene's value and shows the clip's again.
+  - **An action that changes one keys it** at the playhead's frame, in the action's own
+    step: the clip's text before and after is a file's change (ADR 0120's `change_file`).
+    A drag is one step with its keys, Escape's revert takes them away, and undo hands the
+    clip's text back. A rotation keys the Euler angles nearest the ones its track has, so
+    no key turns a whole turn from its neighbours.
+  - **When keys reach the file:** they are held and given to the player at once; the file
+    is written once no drag or keyboard transform goes on.
+  - **While the clip plays** an edit of its fields is not kept: they hold the clip's values
+    each frame. Stop it to key.
+  - **The playhead lands on frames:** a clip made in the editor's playhead lands on its
+    frames (a scrub, ■), where keys go.
+- **K** (Animation: Key the Clip's Fields) keys each field the clip moves at the playhead's
+  frame with the value it shows there.
+  - A clip without tracks gets keys on position, rotation and scale (Blender's default set).
+  - It is one step ("Key Fields"), and a playing clip stops there.
+- **◆** follows each field's reset button while such a clip shows on the inspected entity
+  (`shell::KeyMark`). A click keys that field alone ("Key Field"). It is:
+  - filled where a key lies at the playhead;
+  - outlined where the clip moves the field (a track of `scale.y` marks the scale);
+  - dim where the field can be keyed (one to four numbers, or a rotation);
+  - absent for the rest.
+- **Text layouts** of numbers that change every frame (the inspector following a playing
+  clip, six new texts a frame) need layouts back sooner than the 2 s a layout waits to be
+  laid out into again: with fewer than 64 spare (`paint::SPARE_LOW`) after a frame that laid
+  texts out, those long out of use come back first, then those unused this frame and the
+  last, then new ones are made up to 64. Taken back only at 2 s, the spare ones hung near
+  none and a frame with one more new text than came back allocated (4 to 8 allocations in
+  240 frames, more under the gate's load); now 0, also under load and on both GPUs.
+- **Tests:**
+  - The history's: a drag's two frames key 60 then 70 degrees in one step, with the scene's
+    turn back each frame; undo and redo hand the clip's text back; a move is recorded with
+    the scene's turn, as is a scene written in a frame; a revert keys nothing, and nothing
+    is keyed while the clip plays.
+  - The editor's: the turn is marked ◆ and shown as the clip has it; an edit keys it at
+    frame 15 with the scene and its text untouched, one step that undo takes back; K on a
+    new clip keys the three fields; ◆ keys the position alone at frame 10.
+  - The sampler's: fields are found on an entity and on a child, and a turn edited past
+    half a turn keys 200, not -160.
+- **Not yet:**
+  - ◆ for a child's fields: select the animated entity; its children's tracks come from
+    the file, or from the dope sheet (E12-4c).
+  - A clip's length is its file's (1 s for a new one) until the dope sheet.
+
 ## As built (E12-4b-1b, 2026-10-30): New Clip, renaming and deleting clips
 
 - **New Clip** (`animation.new_clip`, the tab's button for a selected entity without a

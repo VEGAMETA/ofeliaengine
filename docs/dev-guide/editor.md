@@ -475,11 +475,10 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
     - **Its tracks** are rows under the events, one per field the clip moves
       (`Transform.rotation`, `Lamp:PointLight.range`), a mark at each key.
     - **The playhead shows the clip on its entity:** a press or a drag on the ruler, ←,
-      →, Home and End hold a moment; ▶ plays it. The door turns in the view as the clip
-      says, and the inspector, undo, a save and Play still see the scene's own values: the
-      clip is set only for drawing, and given back before anything else reads the world.
-      Shut the tab, choose another entity or press Escape and the door is drawn as the
-      scene has it.
+      →, Home and End hold a moment, on one of its frames; ▶ plays it. The door turns in
+      the view as the clip says, and the inspector shows the clip's values. Undo, a save
+      and Play still see the scene's own values. Shut the tab, choose another entity or
+      press Escape and the door is drawn as the scene has it.
     - **Once**, its events (E, drag, Delete, the row's fields) and their sounds work as
       for an imported clip, written into the clip's own file, each change one step of
       undo. It has no root motion and no feet, so those buttons are not shown.
@@ -494,10 +493,21 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
       file keeps its name), one step of undo. A name another clip has is refused.
     - **✕** (or Animation: Delete the Chosen Clip) takes the clip away from the animator,
       one step of undo; its file stays in the project, for the dock to delete.
-    - A character's own clips, beside its model's, come later. Keys come next (E12-4b-2):
-      **K** keys the fields the clip moves (a clip without tracks: position, rotation and
-      scale), **◆** beside a field keys that one, and editing a field the clip moves keys
-      it at the playhead.
+    - **Keys:** with the playhead held, **editing a field the clip moves keys it** at the
+      playhead's frame, and the scene keeps its own value. That is a drag in the view, a
+      typed number or a paste.
+      - The edit and its key are one step of undo; Escape during a drag takes both back.
+      - A rotation keys the angles nearest the track's, so a door turned on past 180° keys
+        200, not -160.
+      - While the clip plays, an edit is not kept: stop it to key.
+    - **K** keys every field the clip moves at the playhead, with the values it shows. On a
+      clip without tracks it keys the entity's position, rotation and scale. A playing clip
+      stops there.
+    - **◆**, after a field's ↺, keys that field alone. It is filled where a key lies at the
+      playhead, outlined where the clip moves the field, and dim where the field could be
+      keyed (numbers and rotations).
+    - Not yet: a character's own clips beside its model's, and keys on the entity's children
+      (from the dope sheet). Until then a new clip lasts one second.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

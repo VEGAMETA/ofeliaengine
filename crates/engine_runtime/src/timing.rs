@@ -336,6 +336,16 @@ impl FieldRef {
         self.rotation
     }
 
+    /// The component it lies in.
+    pub fn component(&self) -> ComponentId {
+        self.component
+    }
+
+    /// Its byte offset in the component.
+    pub fn offset(&self) -> usize {
+        self.offset as usize
+    }
+
     /// Its value in `entity`'s component into `out[..lanes]`; false when the entity lacks
     /// the component.
     pub fn read(&self, world: &World, entity: Entity, out: &mut [f32; 4]) -> bool {

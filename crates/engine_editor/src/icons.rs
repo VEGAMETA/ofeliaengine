@@ -162,6 +162,11 @@ pub const MENU_DOWN: &str = "\u{F035D}";
 pub const MIXED: &str = "\u{F0374}";
 /// Back to the default value (`md-undo`).
 pub const RESET: &str = "\u{F054C}";
+/// A field's key at the playhead of the clip the Animation tab shows (`md-cards_diamond`).
+pub const KEY: &str = "\u{F08CF}";
+/// A field that can be keyed, or that the clip moves without a key here
+/// (`md-cards_diamond_outline`).
+pub const KEY_EMPTY: &str = "\u{F101D}";
 /// Something needs a look (`md-alert`): a scene's file changed on disk since its unsaved
 /// changes.
 pub const ALERT: &str = "\u{F0026}";

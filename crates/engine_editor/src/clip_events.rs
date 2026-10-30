@@ -24,11 +24,15 @@ pub(crate) struct EventsDoc {
     pub(crate) file: AssetId,
     pub(crate) path: String,
     pub(crate) held: Held,
-    /// The written file's text as last read or written: what an edit's undo puts back.
+    /// The written file's text as last read or written (or as the undo steps of keys made
+    /// by editing have it, E12-4b-2): what an edit's undo puts back.
     text: String,
     /// The player has it as held ([`engine_app::Assets::set_clip_events`],
     /// [`engine_app::Assets::set_anim_clip`]).
     pub(crate) given: bool,
+    /// Keys made by editing are held and in their undo steps, not yet written: the file is
+    /// written once no drag goes on ([`Self::write`]).
+    unwritten: bool,
 }
 
 impl EventsDoc {
@@ -42,6 +46,7 @@ impl EventsDoc {
             held: Held::Meta(meta),
             text,
             given: true,
+            unwritten: false,
         }
     }
 
@@ -59,6 +64,7 @@ impl EventsDoc {
             held: Held::Anim(anim),
             text,
             given: true,
+            unwritten: false,
         })
     }
 
@@ -147,6 +153,32 @@ impl EventsDoc {
         self.given = false;
     }
 
+    /// The clip file held changed by `edit` in memory only (keys set by K or ◆, ADR 0124's
+    /// E12-4b-2), given to the player; [`Self::write`] writes it. Nothing for a `.meta`.
+    pub(crate) fn edit_anim_live(&mut self, edit: impl FnOnce(&mut AnimFile)) {
+        if let Held::Anim(anim) = &mut self.held {
+            edit(anim);
+            self.given = false;
+        }
+    }
+
+    /// The clip file as the frame's edits keyed it (ADR 0124's E12-4b-2): held and given to
+    /// the player, its text the one their undo steps end with; written by the next
+    /// [`Self::write`].
+    pub(crate) fn keyed(&mut self, anim: AnimFile) {
+        if let Held::Anim(_) = &self.held {
+            self.text = anim.to_text(self.file);
+            self.held = Held::Anim(anim);
+            self.given = false;
+            self.unwritten = true;
+        }
+    }
+
+    /// Keys made by editing wait to be written ([`Self::keyed`]).
+    pub(crate) fn unwritten(&self) -> bool {
+        self.unwritten
+    }
+
     /// Clip `clip`'s events changed by `edit` in memory only ([`Self::edit_clip_live`]).
     pub(crate) fn edit_live(&mut self, clip: &str, edit: impl FnOnce(&mut Vec<ClipEvent>)) {
         self.edit_clip_live(clip, |c| edit(&mut c.events));
@@ -183,7 +215,7 @@ impl EventsDoc {
     /// The file could not be written: what is held goes back to what it holds.
     pub(crate) fn write(&mut self, root: &Path) -> Result<Option<(String, String)>, String> {
         let after = self.text_now();
-        if after == self.text {
+        if after == self.text && !self.unwritten {
             return Ok(None);
         }
         let written = match &self.held {
@@ -195,6 +227,10 @@ impl EventsDoc {
             let text = core::mem::take(&mut self.text);
             self.put_text(root, &text).ok();
             return Err(e);
+        }
+        self.unwritten = false;
+        if after == self.text {
+            return Ok(None);
         }
         let before = core::mem::replace(&mut self.text, after.clone());
         Ok(Some((before, after)))
@@ -240,6 +276,7 @@ impl EventsDoc {
         }
         text.clone_into(&mut self.text);
         self.given = false;
+        self.unwritten = false;
         Ok(())
     }
 }

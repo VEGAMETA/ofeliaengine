@@ -237,8 +237,8 @@ events.0.name = "thud"
 - **While the editor edits** the world stands still and nothing is written: the door
   shows the values the scene holds. The Animation tab previews a clip on it (its
   playhead held or ▶), setting its fields for drawing only; the scene, its saves and undo
-  keep their own values (the [editor guide](editor.md) has the keys). Making a clip in the
-  editor (New Clip) and keying it come next (E12-4b).
+  keep their own values (the [editor guide](editor.md) has the keys). New Clip makes a
+  clip; K, ◆ and an edit of a field the clip moves key it at the playhead (E12-4b-2).
 
 ### Sockets: things that follow a joint
 
