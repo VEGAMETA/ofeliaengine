@@ -590,6 +590,7 @@ fn a_nodes_image_is_drawn_over_its_fill() {
             DrawCmd::Image { .. } => "image",
             DrawCmd::Text { .. } => "text",
             DrawCmd::Clip(_) => "clip",
+            DrawCmd::Line { .. } => "line",
         })
         .collect();
     let at = kinds.iter().position(|&k| k == "image").expect("drawn");
@@ -655,4 +656,72 @@ fn placed_nodes_leave_the_flow_but_draw_in_order_inside_the_clip() {
         .position(|c| matches!(c, DrawCmd::Text { .. }))
         .unwrap();
     assert!(at < texts, "before the text built after it");
+}
+
+/// A line through points given as fractions of its node's rectangle (a curve in the
+/// editor's Animation tab, ADR 0124's E12-4d): drawn piece by piece where the node is laid
+/// out, over its fill; its points kept for the frame alone.
+#[test]
+fn a_nodes_line_is_drawn_through_its_points_where_it_is_laid_out() {
+    let mut ui = Ui::new(Theme::default());
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let mut node = 0;
+    ui.begin_frame(&UiInput::default(), [300.0, 200.0]);
+    ui.container("panel", Style::default(), |ui| {
+        ui.container(
+            "before",
+            Style {
+                size: [Size::Fixed(10.0), Size::Fixed(20.0)],
+                ..Style::default()
+            },
+            |_| {},
+        );
+        node = ui.line(
+            "curve",
+            Style {
+                size: [Size::Fixed(100.0), Size::Fixed(50.0)],
+                background: Some([0.1, 0.1, 0.1, 1.0]),
+                ..Style::default()
+            },
+            &[[0.0, 1.0], [0.5, 0.0], [1.0, 0.5]],
+            red,
+            2.0,
+        );
+    });
+    let mut measure = MonospaceMeasure;
+    ui.end_frame(&mut measure);
+    let r = ui.rect_of(node).unwrap();
+    assert_eq!(r.pos, [10.0, 0.0]);
+    let lines: Vec<&DrawCmd> = ui
+        .last_frame()
+        .commands
+        .iter()
+        .filter(|c| matches!(c, DrawCmd::Line { .. }))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            &DrawCmd::Line {
+                a: [10.0, 50.0],
+                b: [60.0, 0.0],
+                width: 2.0,
+                color: red,
+            },
+            &DrawCmd::Line {
+                a: [60.0, 0.0],
+                b: [110.0, 25.0],
+                width: 2.0,
+                color: red,
+            },
+        ]
+    );
+    // The next frame without it: no line.
+    ui.begin_frame(&UiInput::default(), [300.0, 200.0]);
+    ui.end_frame(&mut measure);
+    assert!(
+        !ui.last_frame()
+            .commands
+            .iter()
+            .any(|c| matches!(c, DrawCmd::Line { .. }))
+    );
 }

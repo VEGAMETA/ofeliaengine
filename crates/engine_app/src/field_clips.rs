@@ -723,6 +723,30 @@ impl ClipFields {
     }
 }
 
+/// A track of a clip made in the editor laid out to be drawn (ADR 0124's E12-4d): its value at
+/// any moment as the clip plays it, for the Animation tab's Curves view.
+#[derive(Debug)]
+pub struct TrackCurve(Option<FieldTrack>);
+
+impl TrackCurve {
+    /// Track `track` laid out (none to draw without keys).
+    pub fn new(track: &AnimTrack) -> Self {
+        Self(FieldTrack::new("", track))
+    }
+
+    /// Numbers a key (0 without keys).
+    pub fn lanes(&self) -> usize {
+        self.0.as_ref().map_or(0, |t| t.lanes)
+    }
+
+    /// Its value `t` seconds into the clip in `out[..lanes]`, as the clip plays it there.
+    pub fn sample(&self, t: f32, out: &mut [f32; 4]) {
+        if let Some(track) = &self.0 {
+            track.sample(t, out);
+        }
+    }
+}
+
 /// Field `field`'s value `raw` (as the field holds it) as a new track keys it, and its numbers
 /// a key: a rotation as three Euler angles in degrees (ADR 0124's E12-4a), anything else as it
 /// is.

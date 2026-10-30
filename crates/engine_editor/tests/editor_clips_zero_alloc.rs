@@ -256,6 +256,18 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
     let own_clip = measured(&mut player, &mut game, &mut overlay);
     assert_ne!(game.clips().1, shown, "the door's clip moved on");
     println!("{own_clip} allocations in 240 frames of a door's clip made in the editor playing");
+    // Its Curves view (E12-4d), the clip playing on: its lines drawn every frame.
+    let curves = game.text_at("Curves").expect("the Curves view's switch");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, curves, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    for _ in 0..120 {
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert!(!game.curve_key_points().is_empty(), "the Curves view shown");
+    let curves_drawn = measured(&mut player, &mut game, &mut overlay);
+    println!("{curves_drawn} allocations in 240 frames of its Curves view");
     alt_n(&mut game);
     game.select(Some(man));
     for _ in 0..3 {
@@ -326,7 +338,7 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
     assert!(game.model_preview().1, "still playing");
     assert_ne!(game.clips().1, shown, "the time moved on");
     println!("{previewed} allocations in 240 frames of a model's preview playing");
-    let allocations = in_place + previewed + own_clip;
+    let allocations = in_place + previewed + own_clip + curves_drawn;
     if allocations > 0
         && let Ok(traces) = TRACES.lock()
     {
@@ -359,6 +371,10 @@ fn the_editors_frames_do_not_allocate_while_a_character_plays_in_place() {
     assert_eq!(
         own_clip, 0,
         "allocations while a clip made in the editor plays"
+    );
+    assert_eq!(
+        curves_drawn, 0,
+        "allocations while its Curves view is drawn"
     );
 }
 

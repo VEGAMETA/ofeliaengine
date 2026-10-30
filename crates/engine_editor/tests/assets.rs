@@ -2020,6 +2020,52 @@ fn a_door_previews_its_clip_in_the_animation_tab_and_the_scene_keeps_its_values(
     key(&mut game, 0x2E, 0x53, false);
     frame(&mut player, &mut game, &mut overlay);
     assert_eq!(keys_in_file(), [0.0], "deleted");
+    // The Curves view (E12-4d): the key's yaw dragged up by its point, then made a step.
+    let curves = game.text_at("Curves").expect("the Curves view's switch");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, curves, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    frame(&mut player, &mut game, &mut overlay);
+    let points = game.curve_key_points();
+    assert_eq!(points.len(), 3, "its three numbers: {points:?}");
+    // All three are 0, their points one on another: the one drawn last is pressed.
+    let yaw = points.iter().find(|p| p.2 == 1).expect("the yaw's point").3;
+    pointer(&mut game, yaw, None);
+    frame(&mut player, &mut game, &mut overlay);
+    pointer(&mut game, yaw, Some(true));
+    frame(&mut player, &mut game, &mut overlay);
+    for dy in [10.0, 20.0, 30.0] {
+        pointer(&mut game, [yaw[0], yaw[1] - dy], None);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    pointer(&mut game, [yaw[0], yaw[1] - 30.0], Some(false));
+    frame(&mut player, &mut game, &mut overlay);
+    let anim_now = || {
+        engine_scene::AnimFile::parse(&std::fs::read_to_string(&anim_file).unwrap())
+            .unwrap()
+            .0
+    };
+    let dragged = anim_now().tracks["Transform.rotation"].keys[0].clone();
+    assert_eq!(dragged.time, 0.0, "not moved in time");
+    let up = dragged.value.iter().filter(|&&v| v > 0.1).count();
+    let kept = dragged.value.iter().filter(|&&v| v == 0.0).count();
+    assert_eq!(
+        (up, kept),
+        (1, 2),
+        "one number dragged up: {:?}",
+        dragged.value
+    );
+    assert_eq!(game.picked_keys(), [(0, 0)]);
+    let step = game.text_at("Step").expect("the picked key's curves");
+    for pressed in [None, Some(true), Some(false)] {
+        pointer(&mut game, step, pressed);
+        frame(&mut player, &mut game, &mut overlay);
+    }
+    assert_eq!(
+        anim_now().tracks["Transform.rotation"].keys[0].curve,
+        engine_scene::KeyCurve::Step
+    );
     // The tab shut (Alt+N again): drawn as the scene has it.
     key(&mut game, 0x12, 0x38, true);
     key(&mut game, 0x4E, 0x31, true);

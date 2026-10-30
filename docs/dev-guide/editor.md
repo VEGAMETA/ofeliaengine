@@ -519,8 +519,15 @@ scene path from scene text, as one undoable step: for tests, scripts and the com
         tracks of the same names. Each of these is one step of undo.
     - **Length:** typed after Once in the header, in seconds (whole frames). Keys past the
       end stay in the file.
-    - Not yet: a character's own clips beside its model's, and keys on the entity's children
-      (they come from the file); the Curves view comes next.
+    - **Curves** (the header's switch, or C in the tab) shows the picked keys' tracks as
+      lines, every track with none picked: a line for each number (x red, y green, z blue)
+      with its keys as points.
+      - Drag a point to move its key in time (whole frames, Shift freely) and its number up
+        or down.
+      - With keys picked, **Smooth**, **Linear** and **Step** in the header set how the clip
+        goes from each to its next key. Each change is one step of undo.
+    - Not yet: a character's own clips beside its model's, keys on the entity's children
+      (they come from the file), and tangent handles in the Curves view.
 - A click answers a frame or two later: the editor draws the objects whose bounds reach the
   pixels around it once more, each pixel with the object it shows (ADR 0109). The pointer's
   pixel is drawn again whenever the pointer, the camera or the scene moves.

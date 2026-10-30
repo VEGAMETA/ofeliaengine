@@ -7,6 +7,8 @@ use std::ops::RangeInclusive;
 
 use engine_scene::{AnimFile, AnimKey, KeyCurve};
 
+use crate::shell::{CurveKey, CurveLane};
+
 /// A key: its track's place among the clip's tracks (in their order in the file), and its
 /// own in the track.
 pub(crate) type KeyAt = (usize, usize);
@@ -179,6 +181,134 @@ pub(crate) fn keys_in(
     out.sort_unstable();
 }
 
+/// The Curves view of `anim` (ADR 0124's E12-4d): each lane of the tracks `shown` says as a
+/// line in `lanes` through `points`, its keys as points in `keys`, all as fractions of the
+/// view (time along it to the clip's length, value down from the top of the range). The
+/// range of values drawn is `range` where given (held while a key is dragged), else the
+/// shown values' with a margin; it is returned. A smooth stretch is drawn through samples
+/// about 4 pixels apart for a view `width` wide, a linear one straight, a step flat to the
+/// next key and up. `curves` are the tracks laid out ([`engine_app::TrackCurve`]); `times`
+/// a list kept between frames (nothing allocated once the lists have room).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn curve_lines(
+    anim: &AnimFile,
+    curves: &[engine_app::TrackCurve],
+    shown: impl Fn(usize) -> bool,
+    width: f32,
+    range: Option<[f32; 2]>,
+    times: &mut Vec<f32>,
+    lanes: &mut Vec<CurveLane>,
+    points: &mut Vec<[f32; 2]>,
+    keys: &mut Vec<CurveKey>,
+) -> [f32; 2] {
+    lanes.clear();
+    points.clear();
+    keys.clear();
+    let length = anim.length.max(1e-6);
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    let mut value = [0.0f32; 4];
+    for (k, (track, curve)) in anim.tracks.values().zip(curves).enumerate() {
+        if !shown(k) || curve.lanes() == 0 {
+            continue;
+        }
+        // The moments its lines pass through.
+        times.clear();
+        if track.keys.first().is_some_and(|key| key.time > 0.0) {
+            times.push(0.0);
+        }
+        for (i, key) in track.keys.iter().enumerate() {
+            times.push(key.time);
+            let Some(next) = track.keys.get(i + 1) else {
+                continue;
+            };
+            let span = next.time - key.time;
+            match key.curve {
+                KeyCurve::Step => times.push(next.time - (span * 0.5).min(1e-4)),
+                KeyCurve::Linear => {}
+                KeyCurve::Smooth => {
+                    let m = ((span / length * width / 4.0) as usize).clamp(2, 24);
+                    times.extend((1..m).map(|s| key.time + span * s as f32 / m as f32));
+                }
+            }
+        }
+        if track.keys.last().is_some_and(|key| key.time < length) {
+            times.push(length);
+        }
+        for lane in 0..curve.lanes() {
+            let from = points.len() as u32;
+            for &t in times.iter() {
+                curve.sample(t, &mut value);
+                points.push([t, value[lane]]);
+                lo = lo.min(value[lane]);
+                hi = hi.max(value[lane]);
+            }
+            lanes.push(CurveLane {
+                track: k,
+                lane,
+                points: [from, points.len() as u32],
+            });
+            for (j, key) in track.keys.iter().enumerate() {
+                if let Some(&v) = key.value.get(lane) {
+                    keys.push(CurveKey {
+                        track: k,
+                        key: j,
+                        lane,
+                        at: [key.time, v],
+                    });
+                }
+            }
+        }
+    }
+    let [lo, hi] = range.unwrap_or_else(|| {
+        if !lo.is_finite() {
+            [0.0, 1.0]
+        } else if hi - lo < 1e-6 {
+            [lo - 1.0, hi + 1.0]
+        } else {
+            let margin = (hi - lo) * 0.1;
+            [lo - margin, hi + margin]
+        }
+    });
+    let span = (hi - lo).max(1e-6);
+    let place = |[t, v]: [f32; 2]| [(t / length).clamp(0.0, 1.0), 1.0 - (v - lo) / span];
+    for p in points.iter_mut() {
+        *p = place(*p);
+    }
+    for key in keys.iter_mut() {
+        key.at = place(key.at);
+    }
+    [lo, hi]
+}
+
+/// The curve the keys `picked` share, if they share one.
+pub(crate) fn shared_curve(anim: &AnimFile, picked: &[KeyAt]) -> Option<KeyCurve> {
+    let mut curves = anim.tracks.values().enumerate().flat_map(|(k, track)| {
+        track
+            .keys
+            .iter()
+            .enumerate()
+            .filter(move |&(j, _)| picked.contains(&(k, j)))
+            .map(|(_, key)| key.curve)
+    });
+    let first = curves.next()?;
+    curves.all(|c| c == first).then_some(first)
+}
+
+/// The keys `picked` given curve `curve` (how the clip goes from each to the next). How many
+/// changed.
+pub(crate) fn set_curves(anim: &mut AnimFile, picked: &[KeyAt], curve: KeyCurve) -> usize {
+    let mut changed = 0;
+    for (k, track) in anim.tracks.values_mut().enumerate() {
+        for (j, key) in track.keys.iter_mut().enumerate() {
+            if picked.contains(&(k, j)) && key.curve != curve {
+                key.curve = curve;
+                changed += 1;
+            }
+        }
+    }
+    changed
+}
+
 /// The picked keys that `anim` still has (after undo or another edit changed it).
 pub(crate) fn still_there(anim: &AnimFile, picked: &mut Vec<KeyAt>) {
     picked.retain(|&(k, j)| {
@@ -274,6 +404,78 @@ mod tests {
         let now = paste_keys(&mut other, &copied, 0.0);
         assert_eq!(other.tracks.len(), 2);
         assert_eq!(now, [(0, 0), (1, 0)]);
+    }
+
+    /// The Curves view: a lane per number of the shown tracks, a step flat to the next key
+    /// and up, a linear stretch straight, a smooth one through samples; the keys' points on
+    /// their lanes; the range the values' with a margin, or the one given.
+    #[test]
+    fn curves_follow_each_keys_curve_and_fit_the_values() {
+        let mut anim = door();
+        let rotation = anim.tracks.get_mut("Transform.rotation").unwrap();
+        rotation.keys[0].curve = KeyCurve::Step;
+        rotation.keys[1].curve = KeyCurve::Linear;
+        let curves: Vec<engine_app::TrackCurve> = anim
+            .tracks
+            .values()
+            .map(engine_app::TrackCurve::new)
+            .collect();
+        let (mut times, mut lanes, mut points, mut keys) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        // The turn alone (track 1): three lanes, its yaw from 0 to 90 degrees.
+        let range = curve_lines(
+            &anim,
+            &curves,
+            |k| k == 1,
+            400.0,
+            None,
+            &mut times,
+            &mut lanes,
+            &mut points,
+            &mut keys,
+        );
+        assert_eq!(lanes.len(), 3);
+        assert_eq!(range, [-9.0, 99.0], "0 to 90 and a tenth more each way");
+        let yaw = lanes[1];
+        let line = &points[yaw.points[0] as usize..yaw.points[1] as usize];
+        let value = |p: [f32; 2]| 99.0 - p[1] * 108.0;
+        // Flat at 0 until just before 0.5 s, then 45 there, straight to 90 at 1 s.
+        assert_eq!(line.len(), 4, "{line:?}");
+        assert!(value(line[1]).abs() < 1e-3 && line[1][0] < 0.5);
+        assert!((value(line[2]) - 45.0).abs() < 1e-3 && line[2][0] == 0.5);
+        assert!((value(line[3]) - 90.0).abs() < 1e-3 && line[3][0] == 1.0);
+        let yaw_keys: Vec<[f32; 2]> = keys.iter().filter(|k| k.lane == 1).map(|k| k.at).collect();
+        assert_eq!(yaw_keys.len(), 3);
+        assert!((value(yaw_keys[1]) - 45.0).abs() < 1e-3);
+        // A smooth stretch samples between its keys; a range given is kept.
+        anim.tracks.get_mut("Transform.rotation").unwrap().keys[0].curve = KeyCurve::Smooth;
+        let curves: Vec<engine_app::TrackCurve> = anim
+            .tracks
+            .values()
+            .map(engine_app::TrackCurve::new)
+            .collect();
+        let range = curve_lines(
+            &anim,
+            &curves,
+            |k| k == 1,
+            400.0,
+            Some([0.0, 180.0]),
+            &mut times,
+            &mut lanes,
+            &mut points,
+            &mut keys,
+        );
+        assert_eq!(range, [0.0, 180.0]);
+        let yaw = lanes[1];
+        assert!(
+            yaw.points[1] - yaw.points[0] > 4,
+            "samples between 0 and 0.5 s"
+        );
+        // The picked keys' curve: shared, or none when they differ.
+        assert_eq!(shared_curve(&anim, &[(1, 1)]), Some(KeyCurve::Linear));
+        assert_eq!(shared_curve(&anim, &[(1, 0), (1, 1)]), None);
+        assert_eq!(set_curves(&mut anim, &[(1, 0), (1, 1)], KeyCurve::Step), 2);
+        assert_eq!(shared_curve(&anim, &[(1, 0), (1, 1)]), Some(KeyCurve::Step));
     }
 
     #[test]

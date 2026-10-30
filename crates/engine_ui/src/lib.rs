@@ -137,6 +137,22 @@ pub struct Style {
     pub placed: Option<[f32; 2]>,
     /// A picture over the node's rectangle, above its fill (a thumbnail).
     pub image: Option<UiImage>,
+    /// A line through points over the node's rectangle, above its fill (a curve,
+    /// [`Ui::line`]).
+    pub line: Option<Line>,
+}
+
+/// A line the UI draws through points ([`Ui::line`]): where its points lie in the frame's
+/// list of them, each as fractions of its node's rectangle (0, 0 its top left corner, 1, 1
+/// its bottom right), so it is laid out with the node; its color and width (pixels).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Line {
+    /// The first point's place in the frame's points, and one past the last's.
+    pub points: [u32; 2],
+    /// Its color.
+    pub color: Color,
+    /// Its width.
+    pub width: f32,
 }
 
 /// A picture the UI draws: a region of a texture, by the texture's bindless index (what
@@ -168,6 +184,7 @@ impl Default for Style {
             floating: None,
             placed: None,
             image: None,
+            line: None,
         }
     }
 }
@@ -385,6 +402,17 @@ pub struct UiInput {
 /// A drawing command, in paint order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DrawCmd {
+    /// A straight piece of a line ([`Ui::line`]) from `a` to `b`.
+    Line {
+        /// From.
+        a: [f32; 2],
+        /// To.
+        b: [f32; 2],
+        /// Width.
+        width: f32,
+        /// Color.
+        color: Color,
+    },
     /// A filled and/or outlined rounded rectangle.
     Rect {
         /// Where.
@@ -487,6 +515,8 @@ pub struct Ui {
     theme: Theme,
     nodes: Vec<Node>,
     text: String,
+    /// The frame's lines' points ([`Ui::line`]).
+    line_points: Vec<[f32; 2]>,
     commands: Vec<DrawCmd>,
     stack: Vec<u32>,
     id_stack: Vec<u64>,
@@ -558,6 +588,7 @@ impl Ui {
             reveal: None,
             clips: Vec::new(),
             open_clips: Vec::new(),
+            line_points: Vec::new(),
             last: NONE,
         }
     }
@@ -594,6 +625,7 @@ impl Ui {
         }
         self.nodes.clear();
         self.text.clear();
+        self.line_points.clear();
         self.stack.clear();
         self.id_stack.clear();
         self.handle_keys();
@@ -720,6 +752,35 @@ impl Ui {
     pub fn end(&mut self) {
         self.id_stack.pop();
         self.close();
+    }
+
+    /// A node of `style` with a line drawn over it through `points`, each as fractions of
+    /// its rectangle (0, 0 its top left corner, 1, 1 its bottom right): a curve laid out
+    /// with the node, in `color` and `width` pixels wide. The points are kept for the frame
+    /// (nothing allocated once the frame's list has room).
+    pub fn line(
+        &mut self,
+        key: &str,
+        style: Style,
+        points: &[[f32; 2]],
+        color: Color,
+        width: f32,
+    ) -> u64 {
+        let from = self.line_points.len() as u32;
+        self.line_points.extend_from_slice(points);
+        let line = Line {
+            points: [from, self.line_points.len() as u32],
+            color,
+            width,
+        };
+        self.container(
+            key,
+            Style {
+                line: Some(line),
+                ..style
+            },
+            |_| {},
+        )
     }
 
     /// A container holding what `f` builds.
@@ -1204,6 +1265,23 @@ impl Ui {
             }
             if let Some(image) = style.image {
                 self.commands.push(DrawCmd::Image { rect, image });
+            }
+            if let Some(line) = style.line {
+                let [from, to] = line.points.map(|p| p as usize);
+                let at = |p: [f32; 2]| {
+                    [
+                        rect.pos[0] + p[0] * rect.size[0],
+                        rect.pos[1] + p[1] * rect.size[1],
+                    ]
+                };
+                for pair in self.line_points[from..to.min(self.line_points.len())].windows(2) {
+                    self.commands.push(DrawCmd::Line {
+                        a: at(pair[0]),
+                        b: at(pair[1]),
+                        width: line.width,
+                        color: line.color,
+                    });
+                }
             }
             if let Some(t) = &n.text {
                 let p = style.padding;

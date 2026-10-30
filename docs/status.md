@@ -879,6 +879,14 @@ Last updated: 2026-10-28.
     `Player::model_rig` lists the clips and `Player::pose_model` shows one at a moment
     (0 allocations posing every frame, both GPUs). Material slots make a skin a
     primitive. `engine_anim` is now a dependency of `engine_app`.
+  - **E12-4d, curves** (#PR, ADR 0124's as-built):
+    - The Animation tab's Curves view (switch or C) draws the picked keys' tracks as lines,
+      a color for each number, with the keys as points.
+    - A point is dragged in time (whole frames, Shift freely) and in value, with the range
+      held while it drags.
+    - Smooth, Linear and Step set the picked keys' curves, each one undo step.
+    - `engine_ui` draws lines through points (`Ui::line`); 0 allocations while the view
+      plays.
   - **E12-4c, the dope sheet's editing** (#472, ADR 0124's as-built):
     - Keys on a clip made in the editor's tracks are picked by their marks (Ctrl adds) or
       by a box, and dragged by whole frames (Shift: freely).
@@ -1182,8 +1190,7 @@ Last updated: 2026-10-28.
     2026-10-29, every question as recommended). E12-1 and E12-2 are done (layers, masks and the
     animator's other script calls come with the graphs, E12-5, and the clips' events, E12-3,
     as decision 1c has it; the root's path on the preview's floor with E12-3's trails); next
-    the rest of E12-4 (4d curves: the Curves view, a key's step, linear or smooth; 4e
-    joints in `.anim`) and E12-5 (graphs).
+    the rest of E12-4 (4e joints in `.anim`) and E12-5 (graphs).
   - **Settled (2026-10-29, team decisions, every recommendation):** ADR 0124's nine
     questions on animation: 1c (an `Animator` plays a clip, a cross-fade or a graph), 2a
     (decisions in ticks, poses every frame), 3c (cross-fade or inertialization per
