@@ -537,6 +537,53 @@ allocation with transitions and events every tick; the same events at the same t
   `state`, `on_animation_event`), sync by the cycle's fraction (question 4a, with the
   graphs), and a joined client's animators.
 
+## As built (E12-1b-3a, 2026-10-30): the preview's floor, In Place, the arrows
+
+- **The model preview's floor** (`ModelPreview::floor`, ADR 0124's E12-1b-3):
+  - The floor is the blockout's grid on a square of 8 × 8 cells, six times the framing's
+    reach. It is made once when first asked for (`Previews::make_floor`) and drawn as a
+    second item under the model.
+  - It sits at the posed box's lowest point and is centred on the model's origin, not on
+    the posed box, which sways with its limbs. It turns with the model.
+  - Its offset is wrapped by whole cells along its own axes, so a walk of any length never
+    leaves the square.
+  - With a floor, the preview's pose takes its clip's root motion out (`Look::in_place`).
+    The model stays on its spot and the floor goes by under it.
+  - The skinned instance's bounds follow its pose (`Skinning::update_bounds`), and the
+    preview frames them. Without a floor, a model carried along by its clip looks the same
+    in the preview; with one, the floor shows the motion.
+- **`Rig::scene_motion(clip, from, to)`:** a clip's root motion over a span of play in its
+  file's scene (+Y up, its units), as the preview stands it. The editor adds the step of
+  each frame it plays.
+- **The editor:**
+  - a picked model file's preview always has its floor;
+  - each frame its clip plays, the floor goes back by the step and turns back by its turn
+    (`floor_walked`);
+  - **In Place** (beside the speed) holds the floor still;
+  - choosing another clip puts the floor back.
+- **↓ and ↑ through the clips:** a press in the Clips gives them the arrows (`CLIPS_KEYS`,
+  a hover region as the tree and the dock have). "Clips: Next Clip" and "Previous Clip"
+  choose as a click on the row does, held at the ends. With Auto Play on, a picked file's
+  clip plays at once.
+- **Tests:**
+  - on both GPUs, a walker generated in the test:
+    - its floor covers 7,936 of 16,384 pixels (3,706 without);
+    - moving the floor 0.3 changes 271 pixels;
+    - half a second into `Turn`, with a floor it differs from its start by 0 pixels (its
+      turn taken out), and by 768 without one;
+    - `scene_motion` gives 0.5 along +z for half a second of `Walk` and a quarter turn's
+      half for `Turn`;
+  - the Fox picked in the dock:
+    - playing changes 2,045 pixels of the inspector with its floor, against about 870
+      before;
+    - a click on Walk's row, then ↓, ↑ and ↑, chooses Run, Walk and Survey through the
+      real key path;
+  - the floor's walk math, and the arrows held at the ends;
+  - 0 allocations with the floor drawn and moving every frame (the player's test) and
+    with a picked file's clip playing (the editor's), both builds.
+- **Left (E12-1b-3b):** two clips side by side (Ctrl+click), and the root's path and
+  facing drawn on the floor.
+
 ## As built (E12-2c, 2026-10-30): root motion
 
 - **`Animator::root_motion`** (saved, shown): `RootMotion::InPose` (the default), `Move`

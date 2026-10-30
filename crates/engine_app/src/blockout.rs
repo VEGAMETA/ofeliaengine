@@ -1022,8 +1022,8 @@ fn material(tint: [u32; 4], grid: Option<TextureId>) -> MaterialDesc {
 }
 
 /// The grid: a metre's cell, 256 texels wide, dark lines on its edges and lighter ones
-/// every 25 cm, with its smaller levels.
-fn grid_texture() -> TextureLevels {
+/// every 25 cm, with its smaller levels. The model preview's floor is drawn with it too.
+pub(crate) fn grid_texture() -> TextureLevels {
     const SIZE: usize = 256;
     let srgb = |linear: f32| (linear.powf(1.0 / 2.2) * 255.0).round() as u8;
     let mut level: Vec<f32> = vec![0.0; SIZE * SIZE];

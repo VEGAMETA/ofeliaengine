@@ -643,6 +643,8 @@ pub struct ClipsPanel<'a> {
     pub playing: bool,
     /// It plays looped.
     pub looping: bool,
+    /// Its model's floor stands still under it (E12-1b-3): its root motion seen in place.
+    pub in_place: bool,
     /// Its speed: "1×".
     pub speed: &'a str,
     /// The playhead, 0 to 1 along the chosen clip.
@@ -1166,6 +1168,10 @@ pub struct ShellResponse {
     pub clip_loop: bool,
     /// Their speed was clicked: the next one.
     pub clip_speed: bool,
+    /// Their In Place was toggled (E12-1b-3).
+    pub clip_in_place: bool,
+    /// The pointer is over them (E12-1b-3): a press there gives them the arrows.
+    pub clips_hovered: bool,
     /// Their bar was pressed, dragged along or let go.
     pub clip_scrub: Option<WaveUse>,
     /// Their model's preview was pressed, dragged or let go: it turns.
@@ -2804,7 +2810,7 @@ fn joints_panel(ui: &mut Ui, panel: &JointsPanel<'_>, p: &Palette, out: &mut She
 }
 
 fn clips_panel(ui: &mut Ui, panel: &ClipsPanel<'_>, p: &Palette, out: &mut ShellResponse) {
-    ui.column(
+    let clips = ui.column(
         "clips",
         Style {
             size: [Size::Grow(1.0), Size::Fit],
@@ -2957,6 +2963,31 @@ fn clips_panel(ui: &mut Ui, panel: &ClipsPanel<'_>, p: &Palette, out: &mut Shell
                     if ui.sense(speed, false).clicked {
                         out.clip_speed = true;
                     }
+                    // In Place (E12-1b-3): under a model's preview, its floor held still.
+                    if panel.preview {
+                        let hovered = ui.is_hovered(ui.id("in place"));
+                        let toggle = ui.container(
+                            "in place",
+                            Style {
+                                size: [Size::Fit, Size::Fixed(22.0)],
+                                padding: [6.0, 0.0, 6.0, 0.0],
+                                radius: 3.0,
+                                background: if panel.in_place {
+                                    Some(p.selection_dim)
+                                } else {
+                                    hovered.then_some(p.field_hover)
+                                },
+                                align_cross: Align::Center,
+                                ..Style::default()
+                            },
+                            |ui| {
+                                text(ui, "text", "In Place", SMALL, p.text);
+                            },
+                        );
+                        if ui.sense(toggle, false).clicked {
+                            out.clip_in_place = true;
+                        }
+                    }
                     ui.spacer("fill");
                     text(ui, "time", panel.time, SMALL, p.text_dim);
                 },
@@ -2995,6 +3026,9 @@ fn clips_panel(ui: &mut Ui, panel: &ClipsPanel<'_>, p: &Palette, out: &mut Shell
             }
         },
     );
+    // A hover region: a press anywhere in them gives them the arrows.
+    ui.mark_region(clips);
+    out.clips_hovered = ui.in_region(clips);
 }
 
 fn sound_panel(ui: &mut Ui, panel: &SoundPanel<'_>, p: &Palette, out: &mut ShellResponse) {

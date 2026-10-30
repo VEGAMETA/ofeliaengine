@@ -1382,7 +1382,10 @@ impl Player {
             &mut self.skinning,
             &mut self.geometry,
         );
-        self.assets.pose_preview(preview.and_then(|p| p.pose));
+        self.assets.pose_preview(
+            preview.and_then(|p| p.pose),
+            preview.is_some_and(|p| p.floor.is_some()),
+        );
         self.previews.set_live(preview);
     }
 
@@ -3426,6 +3429,14 @@ impl Player {
             &mut self.allocator,
             &mut self.textures,
             &mut self.materials,
+        );
+        // The model preview's floor, once one is asked for (ADR 0124's E12-1b-3).
+        self.previews.make_floor(
+            &self.device,
+            &mut self.allocator,
+            &mut self.textures,
+            &mut self.materials,
+            &mut self.geometry,
         );
         // The textures of glTF materials decoded by now (ADR 0108).
         self.assets.make_textures(

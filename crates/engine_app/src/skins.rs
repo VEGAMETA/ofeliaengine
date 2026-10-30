@@ -156,6 +156,20 @@ impl Rig {
         self.mesh_up
     }
 
+    /// Clip `k`'s root motion over `from..to` seconds of play (wrapping at its end, backwards
+    /// when `to < from`), in its file's scene (+Y up, the file's units), as the editor's
+    /// preview stands the model: how far its root crossed the ground, and its turn about +Y
+    /// in radians, counterclockwise seen from above (ADR 0124's E12-1b-3). None for a clip it
+    /// has not.
+    pub fn scene_motion(&self, k: usize, from: f32, to: f32) -> Option<(Vec3, f32)> {
+        let motion = self.clip_motion(k, from, to)?;
+        let frame = self.root.inverse() * self.motion_frame;
+        Some((
+            frame.transform_vector3(motion.translation),
+            motion.angle_about(self.motion_up),
+        ))
+    }
+
     /// The file's clips that move its skeleton, in the file's order.
     pub fn clips(&self) -> &[RigClip] {
         &self.clips

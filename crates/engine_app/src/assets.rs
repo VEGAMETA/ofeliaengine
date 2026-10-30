@@ -880,6 +880,8 @@ struct PreviewSkin {
     instance: Option<(SkinnedId, MeshId)>,
     rig: Option<Arc<crate::skins::Rig>>,
     pose: Option<(usize, f32)>,
+    /// Its clip's root motion taken out of the pose (a floor under it, E12-1b-3).
+    in_place: bool,
     posed: bool,
 }
 
@@ -2967,15 +2969,21 @@ impl Assets {
             instance: None,
             rig: None,
             pose: None,
+            in_place: false,
             posed: false,
         });
     }
 
     /// The live preview's model posed at a clip's moment, or in its rest pose: set by the
     /// next sync.
-    pub(crate) fn pose_preview(&mut self, pose: Option<(usize, f32)>) {
-        if let Some(p) = self.preview_skin.as_mut().filter(|p| p.pose != pose) {
+    pub(crate) fn pose_preview(&mut self, pose: Option<(usize, f32)>, in_place: bool) {
+        if let Some(p) = self
+            .preview_skin
+            .as_mut()
+            .filter(|p| p.pose != pose || p.in_place != in_place)
+        {
             p.pose = pose;
+            p.in_place = in_place;
             p.posed = false;
         }
     }
@@ -3043,7 +3051,11 @@ impl Assets {
         if !p.posed
             && let (Some((id, _)), Some(rig)) = (p.instance, p.rig.as_ref())
         {
-            skinning.set_palette(id, self.posing.palette(rig, Look::at(p.pose)));
+            let look = Look {
+                in_place: p.in_place,
+                ..Look::at(p.pose)
+            };
+            skinning.set_palette(id, self.posing.palette(rig, look));
             p.posed = true;
         }
     }

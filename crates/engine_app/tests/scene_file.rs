@@ -2241,6 +2241,141 @@ fn root_motion_moves_the_character_or_is_left_for_the_game() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR 0124's E12-1b-3: the model preview's floor. Asked with a floor, the preview draws the
+/// blockout's grid under the model and takes its clip's root motion out of its pose (it walks
+/// on its spot); the floor drawn where its walk took it, it goes by under it. The rig gives
+/// the walk in its file's scene. `ENGINE_FLOOR_PREVIEW_PNG=<dir>` writes the pictures.
+#[test]
+fn a_model_previews_floor_goes_by_under_its_walk() {
+    let dir = std::env::temp_dir().join(format!("ofelia-floor-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    write_walker(&dir.join("models"));
+    let id = AssetMeta::ensure(&dir.join("models/walker.gltf")).unwrap();
+    let mesh = AssetRef::part(id, "Walker");
+    let material = engine_app::builtin::MATERIAL;
+    let mut paths = AssetPaths::new();
+    paths.insert(mesh, "models/walker.gltf#Walker");
+    let settings = PlayerSettings {
+        title: String::from("floor preview test"),
+        window: Window::Offscreen {
+            width: 128,
+            height: 128,
+        },
+        project: Some(dir.clone()),
+        process_setup: false,
+        pipeline_cache: Some(None),
+        warm_up: false,
+        ..PlayerSettings::default()
+    };
+    let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+    let mut player = match Player::new(&settings) {
+        Ok(player) => player,
+        Err(e) if !required => {
+            println!("skipping (set ENGINE_REQUIRE_GPU=1 to make this an error): {e}");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        Err(e) => panic!("GPU required but unavailable: {e}"),
+    };
+    player.assets_mut().add_paths(&paths);
+    player.set_frame_time(Some(1.0 / 60.0));
+    let asked = |pose, floor| engine_app::ModelPreview {
+        mesh,
+        material,
+        turn: [0.6, 0.3],
+        pose,
+        floor,
+    };
+    let drawn = |player: &mut Player, preview: engine_app::ModelPreview| {
+        player.set_model_preview(Some(preview));
+        let mut pixels = Vec::new();
+        let started = Instant::now();
+        loop {
+            player.frame(&mut Still).unwrap();
+            if player.take_model_preview(&mut pixels) {
+                return pixels;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "no model preview: {:?}",
+                player.assets().problem(mesh)
+            );
+        }
+    };
+    let differ = |a: &[u8], b: &[u8]| {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .filter(|(p, q)| p.iter().zip(q.iter()).any(|(x, y)| x.abs_diff(*y) > 24))
+            .count()
+    };
+    let covered = |p: &[u8]| p.chunks_exact(4).filter(|c| c[3] > 128).count();
+    let bare = drawn(&mut player, asked(Some((0, 0.0)), None));
+    let rig = player.model_preview_rig().expect("the walker's rig");
+    let (moved, turned) = rig.scene_motion(0, 0.0, 0.5).unwrap();
+    assert!(
+        (moved - Vec3::new(0.0, 0.0, 0.5)).length() < 1e-3 && turned.abs() < 1e-4,
+        "half a second of Walk in its scene: {moved} {turned}"
+    );
+    let (_, quarter) = rig.scene_motion(1, 0.0, 0.5).unwrap();
+    assert!(
+        (quarter - core::f32::consts::FRAC_PI_4).abs() < 1e-3,
+        "half a second of Turn: {quarter}"
+    );
+    let floor = drawn(&mut player, asked(Some((0, 0.0)), Some([0.0; 3])));
+    let gone = drawn(&mut player, asked(Some((0, 0.0)), Some([0.0, -0.3, 0.0])));
+    // Half a second into Turn: with a floor it stays facing as at its start (its turn taken
+    // out of the pose); without one it turned an eighth. (A walk would not show: the preview
+    // frames the posed box, so a box carried along looks the same.)
+    let start = drawn(&mut player, asked(Some((1, 0.0)), Some([0.0; 3])));
+    let in_place = drawn(&mut player, asked(Some((1, 0.5)), Some([0.0; 3])));
+    let made_start = drawn(&mut player, asked(Some((1, 0.0)), None));
+    let as_made = drawn(&mut player, asked(Some((1, 0.5)), None));
+    let side = engine_app::PREVIEW_SIZE as usize;
+    println!(
+        "covered: bare {}, with its floor {} of {}; the floor gone by 0.3: {} pixels; \
+         turned in place {} pixels from its start, as made {}",
+        covered(&bare),
+        covered(&floor),
+        side * side,
+        differ(&floor, &gone),
+        differ(&start, &in_place),
+        differ(&made_start, &as_made)
+    );
+    if let Ok(out) = std::env::var("ENGINE_FLOOR_PREVIEW_PNG") {
+        for (name, pixels) in [("bare", &bare), ("floor", &floor), ("gone", &gone)] {
+            let png = engine_render::png::encode_png(
+                side as u32,
+                side as u32,
+                engine_render::png::PngFormat::Rgba,
+                pixels,
+            )
+            .unwrap();
+            std::fs::write(
+                std::path::Path::new(&out).join(format!("floor-{name}.png")),
+                png,
+            )
+            .unwrap();
+        }
+    }
+    assert!(
+        covered(&floor) > covered(&bare) + side * side / 10,
+        "the floor drawn under it"
+    );
+    assert!(
+        differ(&floor, &gone) > side * side / 100,
+        "the floor went by"
+    );
+    assert!(
+        differ(&start, &in_place) < side * side / 200,
+        "with a floor its turn is the floor's, not its pose's"
+    );
+    assert!(
+        differ(&made_start, &as_made) > side * side / 50,
+        "without one it turns as made"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ADR 0124's E12-1c: a socket under a character (`JointAttachment`) follows its joint:
 /// where the joint is in the pose held, through the animator's clip as it plays, and what
 /// hangs under the socket with it; standing still, it stands; a joint the skeleton lacks
@@ -2457,6 +2592,7 @@ fn a_model_preview_draws_a_skinned_model_posed_and_turned_alone() {
         material,
         turn,
         pose,
+        floor: None,
     };
     let mut pixels = Vec::new();
     let drawn = |player: &mut Player,

@@ -30,8 +30,11 @@ use engine_render::forward::{
     DirectionalLight, DrawItem, ForwardRenderer, NODE_PREVIEW_FORMAT, ViewFeatures,
 };
 use engine_render::graph::{Access, BufferState, FrameGraph, ImportedBuffer, LoadOp, TextureDesc};
-use engine_render::material::{MaterialFrame, MaterialTable, MaterialTypeId};
-use engine_render::mesh::{GeometryFrame, GeometryPool};
+use engine_render::material::{
+    MaterialDesc, MaterialFrame, MaterialId, MaterialTable, MaterialTypeId, TextureRef,
+};
+use engine_render::mesh::{GeometryFrame, GeometryPool, MeshId};
+use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_rhi::Device;
 use engine_rhi::ash::vk;
@@ -157,14 +160,25 @@ pub struct ModelPreview {
     pub turn: [f32; 2],
     /// The clip and the moment in it shown, or the rest pose.
     pub pose: Option<(usize, f32)>,
+    /// A floor under it (ADR 0124's E12-1b-3), where its walk has taken it: how far across
+    /// the ground (x and z) and how far turned about the vertical (radians), in its file's
+    /// scene's units. With a floor its clip's root motion is taken out of its pose, so it
+    /// walks on its spot while the floor goes by under it; none: no floor, the pose as made.
+    pub floor: Option<[f32; 3]>,
 }
 
-/// The live model preview a frame draws: its draw, its camera and its read back's slot.
+/// The live model preview a frame draws: its draws (the model, then its floor), its camera
+/// and its read back's slot.
 pub(crate) struct LiveDrawing {
-    draws: [DrawItem; 1],
+    draws: [DrawItem; 2],
+    count: usize,
     camera: ViewCamera,
     slot: usize,
 }
+
+/// The model preview's floor's cells across it (ADR 0124's E12-1b-3): the blockout's grid,
+/// a cell a repeat of its texture.
+const FLOOR_CELLS: f32 = 8.0;
 
 /// The preview a frame draws: its draws, its camera and its read back's slot (which holds
 /// its key).
@@ -200,6 +214,10 @@ pub(crate) struct Previews {
     live_new: bool,
     /// The newest frame whose live drawing was read back.
     live_frame: u64,
+    /// The live preview's floor (ADR 0124's E12-1b-3): its mesh and material once made, or
+    /// that making them failed.
+    floor: Option<(MeshId, MaterialId)>,
+    floor_failed: bool,
 }
 
 impl Previews {
@@ -222,6 +240,52 @@ impl Previews {
             live_pixels: Vec::new(),
             live_new: false,
             live_frame: 0,
+            floor: None,
+            floor_failed: false,
+        }
+    }
+
+    /// Makes the live preview's floor the first time one is asked for (ADR 0124's E12-1b-3):
+    /// a square of [`FLOOR_CELLS`]² cells of the blockout's grid. Run where the device and the
+    /// pools are at hand.
+    pub(crate) fn make_floor(
+        &mut self,
+        device: &Device,
+        allocator: &mut Allocator,
+        textures: &mut TexturePool,
+        materials: &mut MaterialTable,
+        geometry: &mut GeometryPool,
+    ) {
+        if self.floor.is_some() || self.floor_failed || self.live.is_none_or(|l| l.floor.is_none())
+        {
+            return;
+        }
+        let mut mesh = engine_render::mesh::plane();
+        for uv in &mut mesh.uvs {
+            uv[0] *= FLOOR_CELLS;
+            uv[1] *= FLOOR_CELLS;
+        }
+        let made = geometry
+            .add_mesh(&mesh.as_data())
+            .map_err(|e| format!("{e:?}"))
+            .and_then(|mesh| {
+                let grid = textures
+                    .add(device, allocator, crate::blockout::grid_texture())
+                    .map_err(|e| format!("{e:?}"))?;
+                let material = materials.add(MaterialDesc {
+                    base_color_texture: Some(TextureRef::new(grid)),
+                    roughness: 0.9,
+                    metallic: 0.0,
+                    ..MaterialDesc::default()
+                });
+                Ok((mesh, material))
+            });
+        match made {
+            Ok(floor) => self.floor = Some(floor),
+            Err(e) => {
+                log::warn!(target: "engine_app::previews", "the model preview's floor: {e}");
+                self.floor_failed = true;
+            }
         }
     }
 
@@ -293,14 +357,45 @@ impl Previews {
         let world =
             Affine3A::from_translation(middle) * turn * Affine3A::from_translation(-middle) * place;
         let reach = Vec3::new(across, half.y, across);
+        let model = DrawItem {
+            mesh,
+            material,
+            world_from_object: Mat4::from(world),
+        };
+        // The floor under its feet (the posed box's lowest point), turned with it and
+        // centred on its origin, not on the posed box, which sways with its limbs: where its
+        // walk has taken it, its offset wrapped by whole cells along its own axes (the grid
+        // looks the same a cell on).
+        let floor = match (live.floor, self.floor) {
+            (Some([x, z, yaw]), Some((floor_mesh, floor_material))) => {
+                let size = across * 6.0;
+                let cell = size / FLOOR_CELLS;
+                let along = Quat::from_rotation_y(-yaw) * Vec3::new(x, 0.0, z);
+                let wrapped = Vec3::new(along.x.rem_euclid(cell), 0.0, along.z.rem_euclid(cell));
+                let origin = place.transform_point3(Vec3::ZERO);
+                let placed = Affine3A::from_translation(Vec3::new(origin.x, lo.y, origin.z))
+                    * Affine3A::from_rotation_y(yaw)
+                    * Affine3A::from_translation(wrapped)
+                    * Affine3A::from_scale(Vec3::new(size, 1.0, size));
+                let turned =
+                    Affine3A::from_translation(middle) * turn * Affine3A::from_translation(-middle);
+                Some(DrawItem {
+                    mesh: floor_mesh,
+                    material: floor_material,
+                    world_from_object: Mat4::from(turned * placed),
+                })
+            }
+            _ => None,
+        };
+        // A floor asked for and not made yet: drawn once it is.
+        if live.floor.is_some() && floor.is_none() && !self.floor_failed {
+            return None;
+        }
         self.live_readbacks[slot].written = Some((frame, 0));
         self.live_drawn = Some(live);
         Some(LiveDrawing {
-            draws: [DrawItem {
-                mesh,
-                material,
-                world_from_object: Mat4::from(world),
-            }],
+            draws: [model, floor.unwrap_or(model)],
+            count: if floor.is_some() { 2 } else { 1 },
             camera: framing(middle - reach, middle + reach),
             slot,
         })
@@ -776,7 +871,7 @@ impl Previews {
                 view,
                 geometry,
                 materials,
-                &live.draws,
+                &live.draws[..live.count],
                 &live.camera,
                 readback,
                 [
